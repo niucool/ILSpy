@@ -53,14 +53,12 @@
 // with ModifyReturnTypeOfLambda/DecompiledLambdaResolveResult.
 //
 // The remaining render arms are the loud deferrals behind their real C# gate
-// conditions: HandleDelegateConstruction (the delegate-reference slice),
+// conditions: HandleDelegateConstruction (the delegate-reference slice) and
 // TupleTransform.MatchTupleConstruction's tuple-expression render (the
-// TupleExpression slice), and HandleConstructorCall (the constructor-call
-// slice). The accessor-call slice (IsUnambiguousAccess + HandleAccessorCall)
-// and the interpolation slice (HandleStringInterpolation +
-// TryGetStringInterpolationTokens + TokenizeFormatString) are ported.
-    // HandleRangeConstruction / HandleConstructorCall are loud deferrals
-    // behind their real C# gate
+// TupleExpression slice). The accessor-call slice (IsUnambiguousAccess +
+// HandleAccessorCall), the interpolation slice (HandleStringInterpolation +
+// TryGetStringInterpolationTokens + TokenizeFormatString), and the
+// constructor-call slice (HandleConstructorCall) are ported.
 
 #pragma once
 
@@ -386,11 +384,15 @@ public:
 
     // The C# `bool IsAppropriateCallTarget(...)` (lines 1816-1831): whether the
     // resolved member may replace the expected one -- the type-erased equality,
-    // or the CallVirt override chain over the base members. Made public for
-    // tests.
+    // or the CallVirt override chain over the base members. `actualTarget` is a
+    // POINTER (the C# can pass a null `foundMember` -- the no-candidate overload
+    // resolution answers null and `expectedTarget.Equals(null, ...)` answers
+    // false through reference equality); the CallVirt arm's own dereference is
+    // the C# NullReferenceException arm (unreachable through the call arms that
+    // never see a null with CallOpCode CallVirt). Made public for tests.
     bool IsAppropriateCallTarget(const ExpectedTargetDetails& expectedTargetDetails,
                                  const TS::IMember& expectedTarget,
-                                 const TS::IMember& actualTarget) const;
+                                 const TS::IMember* actualTarget) const;
 
     // The C# `bool IsUnambiguousAccess(ExpectedTargetDetails, ResolveResult? target,
     // IMethod method, IList<TranslatedExpression> arguments, string[]? argumentNames,
@@ -424,6 +426,21 @@ public:
         const TS::IMethod& method, TranslatedExpression target,
         std::vector<TranslatedExpression> arguments,
         std::optional<std::vector<std::string>> argumentNames);
+
+    // The C# `private ExpressionWithResolveResult HandleConstructorCall(
+    // ExpectedTargetDetails, ResolveResult? target, IMethod method, ArgumentList
+    // argumentList)` (CallBuilder.cs lines 1836-1900): the constructor-call
+    // render -- the anonymous-type arm over AnonymousTypeCreateExpression (the
+    // inferred or named-initializer shape) and the plain ObjectCreateExpression
+    // render with the IsUnambiguousCall fix loop (one transformation per failed
+    // attempt: AddNamesToPrimitiveValues -> FirstOptionalArgumentIndex ->
+    // CastArguments) and the NativeIntegersWithoutAttribute n(u)int
+    // returnTypeOverride. `argumentList` is the C# by-value parameter (the fix
+    // loop mutates the copy). Made public for tests.
+    ExpressionWithResolveResult HandleConstructorCall(
+        const ExpectedTargetDetails& expectedTargetDetails,
+        const Sem::ResolveResult* target, const TS::IMethod& method,
+        ArgumentList argumentList);
 
     // The C# `internal static bool IsSpanBasedStringConcat(IMethod method)`
     // (CallBuilder.cs lines 300-318): whether the method is a static
@@ -486,10 +503,10 @@ public:
     // InlineArray and GetValueOrDefault arms, the
     // GetRequiredTransformationsForCall fix ladder, and the final
     // RequireTarget/RequireTypeArguments invocation render.
-    // HandleRangeConstruction / HandleConstructorCall are loud deferrals
-    // behind their real C# gate conditions (the accessor-call slice and the
-    // two remaining render arms land with their own slices -- the accessor
-    // arm and the interpolation slice are ported now).
+    // HandleRangeConstruction is ported; HandleDelegateConstruction and the
+    // tuple-expression render are loud deferrals behind their real C# gate
+    // conditions (the accessor-call slice, the interpolation slice, and the
+    // constructor-call slice are ported now).
     ExpressionWithResolveResult Build(
         IL::OpCode callOpCode, const TS::IMethod& method,
         const std::vector<IL::ILInstruction*>& callArguments,

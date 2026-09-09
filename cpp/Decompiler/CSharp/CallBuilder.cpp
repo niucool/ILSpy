@@ -44,6 +44,8 @@
 #include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ArrayInitializerExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AnonymousTypeCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/NamedExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ThisReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
@@ -106,6 +108,19 @@ std::shared_ptr<Sem::ResolveResult> SharedResolveResultAnnotation(
             return std::static_pointer_cast<Sem::ResolveResult>(a);
     }
     return nullptr;
+}
+
+// The non-owning shared alias over a raw resolve-result pointer (the
+// KnownTypeCache convention (d) no-op-deleter alias): the C# GC roots the
+// caller's ResolveResult through its own graph, so the alias borrows it for
+// the CSharpInvocationResolveResult ctor that stores the shared handle.
+std::shared_ptr<Sem::ResolveResult> AliasResolveResult(
+    const Sem::ResolveResult* target)
+{
+    if (target == nullptr)
+        return nullptr;
+    return std::shared_ptr<Sem::ResolveResult>(
+        const_cast<Sem::ResolveResult*>(target), [](Sem::ResolveResult*) {});
 }
 
 // The C# `declaringType.TypeArguments` read over the IType interface: the
@@ -1391,7 +1406,7 @@ Resolver::OverloadResolutionErrors CallBuilder::IsUnambiguousCall(
     if (overloadResolution.IsAmbiguous())
         return Resolver::OverloadResolutionErrors::AmbiguousMatch;
     foundMember = overloadResolution.GetBestCandidateWithSubstitutedTypeArguments();
-    if (!IsAppropriateCallTarget(expectedTargetDetails, method, *foundMember))
+    if (!IsAppropriateCallTarget(expectedTargetDetails, method, foundMember))
         return Resolver::OverloadResolutionErrors::AmbiguousMatch;
     std::optional<std::vector<int>> map = overloadResolution.GetArgumentToParameterMap();
     for (std::size_t i = 0; i < arguments.size(); i++)
@@ -1415,26 +1430,28 @@ Resolver::OverloadResolutionErrors CallBuilder::IsUnambiguousCall(
 
 bool CallBuilder::IsAppropriateCallTarget(
     const ExpectedTargetDetails& expectedTargetDetails, const TS::IMember& expectedTarget,
-    const TS::IMember& actualTarget) const
+    const TS::IMember* actualTarget) const
 {
     // The C# `expectedTarget.Equals(actualTarget, ...)` is object identity plus the
     // type-erased structural comparison; the port normalizes both sides through
     // MemberDefinition() first (the canonical member view the two-IMember-subobject
-    // hierarchy needs -- the OverloadResolutionHelpers convention).
-    if (expectedTarget.MemberDefinition()->Equals(
-            actualTarget.MemberDefinition(), &TS::NormalizeTypeVisitor::TypeErasure()))
+    // hierarchy needs -- the OverloadResolutionHelpers convention). A null
+    // actualTarget answers false (the C# object-Equals reference-equality with null).
+    if (actualTarget != nullptr
+        && expectedTarget.MemberDefinition()->Equals(actualTarget->MemberDefinition(),
+            &TS::NormalizeTypeVisitor::TypeErasure()))
         return true;
 
     if (expectedTargetDetails.CallOpCode == IL::OpCode::CallVirt
-        && actualTarget.IsOverride())
+        && actualTarget->IsOverride())
     {
         if (expectedTargetDetails.NeedsBoxingConversion
-            && actualTarget.DeclaringType() != nullptr
-            && actualTarget.DeclaringType()->IsReferenceType()
+            && actualTarget->DeclaringType() != nullptr
+            && actualTarget->DeclaringType()->IsReferenceType()
                 != std::optional<bool>(true))
             return false;
         for (const TS::IMember* possibleTarget :
-             TS::InheritanceHelper::GetBaseMembers(actualTarget, false))
+             TS::InheritanceHelper::GetBaseMembers(*actualTarget, false))
         {
             if (expectedTarget.MemberDefinition()->Equals(
                     possibleTarget->MemberDefinition(),
@@ -1499,7 +1516,7 @@ bool CallBuilder::IsUnambiguousAccess(
     }
     return foundMember != nullptr
         && IsAppropriateCallTarget(expectedTargetDetails, *method.AccessorOwner(),
-                                   *foundMember);
+                                   foundMember);
 }
 
 ExpressionWithResolveResult CallBuilder::HandleAccessorCall(
@@ -1853,6 +1870,112 @@ ExpressionWithResolveResult CallBuilder::HandleImplicitConversion(
     return WithRR(*cast, std::make_shared<Sem::ConversionResolveResult>(
                              const_cast<TS::IType&>(targetType).shared_from_this(),
                              SharedResolveResultAnnotation(*argument.Expression()), conv));
+}
+
+// The C# `private ExpressionWithResolveResult HandleConstructorCall(
+// ExpectedTargetDetails expectedTargetDetails, ResolveResult? target, IMethod
+// method, ArgumentList argumentList)` (CallBuilder.cs lines 1836-1900).
+ExpressionWithResolveResult CallBuilder::HandleConstructorCall(
+    const ExpectedTargetDetails& expectedTargetDetails, const Sem::ResolveResult* target,
+    const TS::IMethod& method, ArgumentList argumentList)
+{
+    (void)expectedTargetDetails;
+    if (settings_->AnonymousTypes()
+        && IsAnonymousType(method.DeclaringType().get()))
+    {
+        // The C# Debug.Assert(argumentList.ArgumentToParameterMap == null &&
+        // argumentList.ArgumentNames == null &&
+        // argumentList.FirstOptionalArgumentIndex < 0) -- compiled out of the
+        // shipped release assembly, so the port does not assert either.
+        auto* atce = new Syntax::AnonymousTypeCreateExpression();
+        if (argumentList.CanInferAnonymousTypePropertyNamesFromArguments())
+        {
+            for (Syntax::Expression* arg : argumentList.GetArgumentExpressions())
+                atce->Initializers().Add(arg);
+        }
+        else
+        {
+            for (int i = 0; i < argumentList.Length(); i++)
+            {
+                atce->Initializers().Add(new Syntax::NamedExpression(
+                    argumentList.ExpectedParameters[i]->Name(),
+                    argumentList.Arguments[i]
+                        .ConvertTo(const_cast<TS::IType&>(
+                            argumentList.ExpectedParameters[i]->Type()),
+                            *expressionBuilder_)
+                        .Expression()));
+            }
+        }
+        return WithRR(
+            *atce,
+            std::make_shared<Resolver::CSharpInvocationResolveResult>(
+                target != nullptr ? AliasResolveResult(target) : nullptr,
+                &method, argumentList.GetArgumentResolveResults(),
+                Resolver::OverloadResolutionErrors::None, false,
+                argumentList.IsExpandedForm, false,
+                argumentList.ArgumentToParameterMap));
+    }
+    else
+    {
+        const TS::IParameterizedMember* foundMember;
+        bool bestCandidateIsExpandedForm;
+        while (IsUnambiguousCall(expectedTargetDetails, method, nullptr, {},
+                   argumentList.GetArgumentResolveResults(),
+                   argumentList.GetArgumentNames(),
+                   argumentList.FirstOptionalArgumentIndex, foundMember,
+                   bestCandidateIsExpandedForm)
+                != Resolver::OverloadResolutionErrors::None
+            || bestCandidateIsExpandedForm != argumentList.IsExpandedForm)
+        {
+            if (argumentList.AddNamesToPrimitiveValues)
+            {
+                argumentList.AddNamesToPrimitiveValues = false;
+                continue;
+            }
+            if (argumentList.FirstOptionalArgumentIndex >= 0)
+            {
+                argumentList.FirstOptionalArgumentIndex = -1;
+                continue;
+            }
+            CastArguments(argumentList.Arguments, argumentList.ExpectedParameters);
+            break; // make sure that we don't not end up in an infinite loop
+        }
+        TS::ITypePtr returnTypeOverride;
+        {
+            // The C# `typeSystem.MainModule.TypeSystemOptions.HasFlag(...)` -- the
+            // narrowed main-module options; the port reads the compilation-level
+            // accessor (the DecompilerTypeSystem.TypeSystemOptions override carries
+            // the same settings-derived value the narrowed MetadataModule does).
+            TS::TypeSystemOptions options = typeSystem_->TypeSystemOptions();
+            if ((options & TS::TypeSystemOptions::NativeIntegersWithoutAttribute)
+                == TS::TypeSystemOptions::NativeIntegersWithoutAttribute)
+            {
+                // For DeclaringType, we don't use nint/nuint (so that
+                // DeclaringType.GetConstructors etc. works), but in
+                // NativeIntegersWithoutAttribute mode we must use nint/nuint for
+                // expression types, so that the appropriate set of conversions is
+                // used for further overload resolution.
+                if (TS::IsKnownType(*method.DeclaringType(), TS::KnownTypeCode::IntPtr))
+                    returnTypeOverride = TS::NInt();
+                else if (TS::IsKnownType(*method.DeclaringType(), TS::KnownTypeCode::UIntPtr))
+                    returnTypeOverride = TS::NUInt();
+            }
+        }
+        auto* oce = new Syntax::ObjectCreateExpression(
+            expressionBuilder_->ConvertType(const_cast<TS::IType&>(
+                *method.DeclaringType())));
+        for (Syntax::Expression* arg : argumentList.GetArgumentExpressions())
+            oce->Arguments().Add(arg);
+        return WithRR(
+            *oce,
+            std::make_shared<Resolver::CSharpInvocationResolveResult>(
+                target != nullptr ? AliasResolveResult(target) : nullptr,
+                &method, argumentList.GetArgumentResolveResults(),
+                Resolver::OverloadResolutionErrors::None, false,
+                argumentList.IsExpandedForm, false,
+                argumentList.ArgumentToParameterMap, std::vector<std::shared_ptr<Sem::ResolveResult>>(),
+                returnTypeOverride));
+    }
 }
 
 // The C# `private static bool IsInterpolatedStringCreation(IMethod method,
@@ -2469,11 +2592,8 @@ ExpressionWithResolveResult CallBuilder::Build(
 
     if (callOpCode == IL::OpCode::NewObj)
     {
-        // The C# `return HandleConstructorCall(...)` -- the object-creation render
-        // (the anonymous-type arm plus the overload-resolution fix loop) is DEFERRED
-        // with its slice.
-        throw std::logic_error("HandleConstructorCall is deferred with the "
-                               "constructor-call slice (CallBuilder.cs line 446)");
+        return HandleConstructorCall(expectedTargetDetails, target.ResolveResult(),
+            *resolvedMethod, argumentList);
     }
 
     if (resolvedMethod->Name() == "Invoke"

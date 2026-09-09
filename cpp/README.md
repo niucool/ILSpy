@@ -2451,6 +2451,34 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   standing skips / zero failures, and all four CLI baselines unchanged (--csharp mscorlib 10106366
   bytes, --il whole-module byte-identical to the 41246545-byte real-ilspycmd gold, -l c 109438, the
   --json-alone usage check rc 64).
+- **`CallBuilder` slice 5 -- the constructor-call render** -- `CallBuilder.{hpp,cpp}` now carries
+  `HandleConstructorCall` (CallBuilder.cs lines 1836-1900), lifting the NewObj loud deferral in
+  `Build(OpCode)` (the constructor-call slice): the anonymous-type arm over
+  `AnonymousTypeCreateExpression` (the inferred-name shape rendering the plain argument
+  expressions and the fallback wrapping every argument in a `NamedExpression` over the
+  converted expression), the `IsUnambiguousCall` fix loop (one transformation per failed attempt:
+  the `AddNamesToPrimitiveValues` reset, the `FirstOptionalArgumentIndex` `-1` reset, then
+  `CastArguments` with the loop-breaking comment carried verbatim), the
+  `NativeIntegersWithoutAttribute` n(u)int return-type override (read through the port's
+  compilation-level `TypeSystemOptions` accessor -- the C# reads the narrowed main-module
+  options carrying the same settings-derived value), and the `ObjectCreateExpression` render
+  over a `CSharpInvocationResolveResult` (the null-target alias over the raw resolve-result
+  pointer -- the `KnownTypeCache` convention (d)). `IsAppropriateCallTarget` gained the
+  C#-faithful null-tolerant `actualTarget` pointer shape (the no-candidate overload resolution
+  answers a null `foundMember`; the C# `expectedTarget.Equals(null, ...)` answers false through
+  reference equality -- the first neuter round of the slice surfaced it as the AV the stale
+  reference signature crashed on). Verified by 5 new `HandleConstructorCallTest` tests (the
+  plain object-create shape incl. the null target and no-map invariants, both anonymous-type
+  initializer shapes over the real `IsAnonymousType` predicate fixture, the fix-loop cast
+  render, and the nint override over a compilation-options subclass) plus the rebuilt
+  `BuildEntryTest.DefersDelegateConstructionLoudly` (its declaring type is now the delegate-KIND
+  stub the match's final gate requires -- the old fixture's `KnownType(Delegate)` is Class-kind
+  over the minimal corlib, so the deferral it caught was really the NewObj one) and the
+  `IsAppropriateCallTarget` null-argument drive; neuter-proven (the anonymous-type gate and the
+  nint override failing exactly their 3 predicted tests); full suite 12234 passed + the 2
+  standing skips (+5, zero regressions), and all four CLI baselines hold (--csharp mscorlib
+  10106366 bytes, --il whole-module byte-identical to the 41246545-byte real-ilspycmd gold,
+  -l c 109438, the --json-alone usage check rc 64).
 - **`CallBuilder` slice 4 -- the string-interpolation render** -- `CallBuilder.{hpp,cpp}` now carries
   `HandleStringInterpolation` + `TryGetStringInterpolationTokens` + `TokenizeFormatString`
   (CallBuilder.cs lines 595-648 + 766-935), lifting the interpolation loud deferral in

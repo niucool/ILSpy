@@ -59,6 +59,9 @@
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AnonymousTypeCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/NamedExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
@@ -1583,8 +1586,11 @@ TEST(BuildArgumentListTest, IsAppropriateCallTargetRequiresTheIdentity)
     CS::CallBuilder builder = fixture.MakeCallBuilder();
     CS::ExpectedTargetDetails details;
     details.CallOpCode = IL::OpCode::Call;
-    EXPECT_TRUE(builder.IsAppropriateCallTarget(details, methodMember, methodMember));
-    EXPECT_FALSE(builder.IsAppropriateCallTarget(details, methodMember, otherMember));
+    // The no-candidate overload resolution answers a null foundMember; the C#
+    // object-Equals reference equality with null answers false.
+    EXPECT_FALSE(builder.IsAppropriateCallTarget(details, methodMember, nullptr));
+    EXPECT_TRUE(builder.IsAppropriateCallTarget(details, methodMember, &methodMember));
+    EXPECT_FALSE(builder.IsAppropriateCallTarget(details, methodMember, &otherMember));
 }
 
 
@@ -2850,12 +2856,26 @@ TEST(BuildEntryTest, DefersDelegateConstructionLoudly)
     MethodFixtures fixtures(fixture.holder);
 
     // newobj Delegate(target, ldftn) -- the MatchDelegateConstruction shape.
+    // The declaring type must be a Delegate-KIND type: the KnownType(Delegate)
+    // wrapper is Class-kind over the minimal corlib (the KnownTypeReference
+    // table declares Delegate as Class), so the match's final gate needs the
+    // delegate-kind stub (the delegate-equality tests' Action shape).
+    auto delegateDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        "Action", "System",
+        TS::FullTypeName(TS::TopLevelTypeName("System", "Action")),
+        TS::TypeKind::Delegate, TS::Accessibility::Public,
+        fixture.holder.compilation, &fixture.holder.compilation.MainModule());
     IL::Call call(".ctor");
     call.IsNewObj = true;
     call.Method = fixtures.spanConcat;
-    call.DeclaringType = fixture.holder.KnownType(TS::KnownTypeCode::Delegate);
+    call.DeclaringType = TS::ITypePtr(delegateDef.get(), [](TS::IType*) {});
     call.AddArg(std::make_unique<IL::LdNull>());
     call.AddArg(std::make_unique<IL::LdFtn>("Target"));
+
+    IL::DelegateConstructionMatch delegateMatch;
+    EXPECT_TRUE(IL::DelegateConstruction::MatchDelegateConstruction(&call,
+                                                                    delegateMatch,
+                                                                    false));
 
     CS::CallBuilder builder = fixture.MakeCallBuilder();
     EXPECT_THROW((void)builder.Build(call), std::logic_error);
@@ -3001,10 +3021,10 @@ TEST(BuildMainlineTest, AlwaysQualifyRendersTheMemberReference)
     EXPECT_EQ(target->MemberName(), "Foo");
 }
 
-TEST(BuildMainlineTest, NewObjDefersTheConstructorCallLoudly)
+TEST(BuildMainlineTest, NewObjRendersTheObjectCreate)
 {
     TransformFixture fixture(/*ctorShape=*/true);
-    fixture.settings.SetAlwaysQualifyMemberReferences(true);
+    fixture.holderDef->SetConstructors({fixture.foo.get()});
     {
         ParamFixture a(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "a");
         fixture.foo->SetParameters({a.parameter});
@@ -3017,9 +3037,28 @@ TEST(BuildMainlineTest, NewObjDefersTheConstructorCallLoudly)
     call.AddArg(std::make_unique<IL::LdcI4>(1));
 
     CS::CallBuilder builder = fixture.MakeCallBuilder();
-    EXPECT_THROW((void)builder.Build(IL::OpCode::NewObj, *fixture.foo,
-                                     CallChildPtrsForTest(call), std::nullopt, nullptr),
-                 std::logic_error);
+    CS::ExpressionWithResolveResult result = builder.Build(
+        IL::OpCode::NewObj, *fixture.foo, CallChildPtrsForTest(call), std::nullopt,
+        nullptr);
+    auto* oce = dynamic_cast<Syntax::ObjectCreateExpression*>(result.Expression());
+    ASSERT_NE(oce, nullptr);
+    ASSERT_EQ(oce->Arguments().Count(), 1);
+    auto* arg = dynamic_cast<const Syntax::PrimitiveExpression*>(oce->Arguments().At(0));
+    ASSERT_NE(arg, nullptr);
+    EXPECT_TRUE(std::holds_alternative<int>(arg->Value()));
+    auto* crr = dynamic_cast<const Resolver::CSharpInvocationResolveResult*>(
+        CS::GetResolveResult(*result.Expression()));
+    ASSERT_NE(crr, nullptr);
+    EXPECT_EQ(crr->Member(),
+              static_cast<const TS::IParameterizedMember*>(fixture.foo.get()));
+    EXPECT_FALSE(crr->IsExpandedForm());
+    EXPECT_EQ(crr->OverloadResolutionErrors(),
+              Resolver::OverloadResolutionErrors::None);
+    // The resolve result's type is the constructor's return type -- the
+    // declaring type itself (no returnTypeOverride without the
+    // NativeIntegersWithoutAttribute option).
+    EXPECT_TRUE(TS::IsKnownType(crr->Type(), TS::KnownTypeCode::Object)
+        || crr->Type().GetDefinition() == fixture.holderDef.get());
 }
 
 
@@ -4087,4 +4126,251 @@ TEST(IsInterpolatedStringCreationTest, ParamsOverloadRequiresTheArrayLiteral)
         (void)CS::CallBuilder::IsInterpolatedStringCreation(*noParams,
                                                             emptyParamsList),
         std::out_of_range);
+}
+
+// ---------------------------------------------------------------------------
+// HandleConstructorCall: the constructor-call render (CallBuilder.cs lines
+// 1836-1900, appended by the constructor-call slice).
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+// The anonymous-type fixture: a LookupTypeDefinition with the exact shape
+// NRExtensions::IsAnonymousType recognizes (empty namespace, a generated
+// name containing 'AnonType', the [CompilerGenerated] attribute, and
+// read-only properties only) plus the two-int-parameter constructor over it.
+struct AnonTypeFixture : BuildArgsFixture
+{
+    std::shared_ptr<TS::TestSupport::LookupTypeDefinition> anonDef;
+    std::shared_ptr<TS::Implementation::FakeMethod> ctor;
+
+    explicit AnonTypeFixture()
+    {
+        anonDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+            "<>f__AnonType0", "",
+            TS::FullTypeName(TS::TopLevelTypeName("", "<>f__AnonType0")),
+            TS::TypeKind::Class, TS::Accessibility::Public, holder.compilation,
+            &holder.compilation.MainModule());
+        anonDef->SetKnownAttributes({TS::KnownAttribute::CompilerGenerated});
+        ctor = std::make_shared<TS::Implementation::FakeMethod>(
+            holder.compilation, TS::SymbolKind::Constructor);
+        ctor->SetName(".ctor");
+        ctor->SetDeclaringType(TS::ITypePtr(anonDef.get(), [](TS::IType*) {}));
+        {
+            ParamFixture a(holder.KnownType(TS::KnownTypeCode::Int32), "a");
+            ParamFixture b(holder.KnownType(TS::KnownTypeCode::Int32), "b");
+            ctor->SetParameters({a.parameter, b.parameter});
+        }
+        anonDef->SetConstructors({ctor.get()});
+        SetCurrentTypeDefinition(anonDef.get());
+    }
+};
+
+// The compilation-level NativeIntegersWithoutAttribute variant (the port's
+// TypeSystemOptions accessor -- the C# reads the narrowed main-module
+// options carrying the same settings-derived value). The subclass uses the
+// protected default ctor and Init over the MinimalCorlib reference (the C#
+// subclass pattern).
+struct NativeIntCompilation : TS::SimpleCompilation
+{
+    NativeIntCompilation() : TS::SimpleCompilation()
+    {
+        Init(TS::Implementation::MinimalCorlib::Instance(), {});
+    }
+
+    TS::TypeSystemOptions TypeSystemOptions() const override
+    {
+        return TS::TypeSystemOptions::NativeIntegersWithoutAttribute;
+    }
+};
+
+struct NativeIntHolder
+{
+    NativeIntCompilation compilation;
+
+    TS::ITypePtr KnownType(TS::KnownTypeCode code)
+    {
+        const TS::IType& t = compilation.FindType(code);
+        return TS::ITypePtr(const_cast<TS::IType*>(&t), [](TS::IType*) {});
+    }
+};
+} // namespace
+
+TEST(HandleConstructorCallTest, PlainRenderShapesTheObjectCreate)
+{
+    TransformFixture fixture(/*ctorShape=*/true);
+    fixture.holderDef->SetConstructors({fixture.foo.get()});
+    {
+        ParamFixture a(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "a");
+        fixture.foo->SetParameters({a.parameter});
+    }
+
+    IL::LdcI4 arg1(1);
+    std::vector<IL::ILInstruction*> callArguments{&arg1};
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *fixture.foo, 0, callArguments,
+        std::nullopt);
+
+    CS::ExpressionWithResolveResult result = builder.HandleConstructorCall(
+        CS::ExpectedTargetDetails{}, nullptr, *fixture.foo, std::move(list));
+    auto* oce = dynamic_cast<Syntax::ObjectCreateExpression*>(result.Expression());
+    ASSERT_NE(oce, nullptr);
+    ASSERT_EQ(oce->Arguments().Count(), 1);
+    auto* crr = dynamic_cast<const Resolver::CSharpInvocationResolveResult*>(
+        CS::GetResolveResult(*result.Expression()));
+    ASSERT_NE(crr, nullptr);
+    EXPECT_EQ(crr->Member(),
+              static_cast<const TS::IParameterizedMember*>(fixture.foo.get()));
+    // The NewObj arm passes a null target resolve result.
+    EXPECT_EQ(crr->TargetResult(), nullptr);
+    EXPECT_FALSE(crr->IsExpandedForm());
+    EXPECT_FALSE(crr->GetArgumentToParameterMap().has_value());
+    EXPECT_EQ(crr->OverloadResolutionErrors(),
+              Resolver::OverloadResolutionErrors::None);
+}
+
+TEST(HandleConstructorCallTest, AnonymousTypeInferredNamesRenderTheInitializers)
+{
+    AnonTypeFixture fixture;
+    // Two named locals whose identifiers match the parameter names: the
+    // inference rule answers true and the initializers are the plain
+    // argument expressions.
+    auto varA = std::make_shared<IL::ILVariable>();
+    varA->Name = "a";
+    varA->Type = fixture.holder.KnownType(TS::KnownTypeCode::Int32);
+    auto varB = std::make_shared<IL::ILVariable>();
+    varB->Name = "b";
+    varB->Type = varA->Type;
+    IL::LdLoc ldA(varA);
+    IL::LdLoc ldB(varB);
+    std::vector<IL::ILInstruction*> callArguments{&ldA, &ldB};
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *fixture.ctor, 0, callArguments,
+        std::nullopt);
+    CS::ExpressionWithResolveResult result = builder.HandleConstructorCall(
+        CS::ExpectedTargetDetails{}, nullptr, *fixture.ctor, std::move(list));
+    auto* atce =
+        dynamic_cast<Syntax::AnonymousTypeCreateExpression*>(result.Expression());
+    ASSERT_NE(atce, nullptr);
+    ASSERT_EQ(atce->Initializers().Count(), 2);
+    auto* first = dynamic_cast<const Syntax::IdentifierExpression*>(
+        atce->Initializers().At(0));
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(first->Identifier(), "a");
+    auto* second = dynamic_cast<const Syntax::IdentifierExpression*>(
+        atce->Initializers().At(1));
+    ASSERT_NE(second, nullptr);
+    EXPECT_EQ(second->Identifier(), "b");
+    auto* crr = dynamic_cast<const Resolver::CSharpInvocationResolveResult*>(
+        CS::GetResolveResult(*result.Expression()));
+    ASSERT_NE(crr, nullptr);
+    EXPECT_EQ(crr->Member(),
+              static_cast<const TS::IParameterizedMember*>(fixture.ctor.get()));
+}
+
+TEST(HandleConstructorCallTest, AnonymousTypeNamedInitializersWrapInNamedExpression)
+{
+    AnonTypeFixture fixture;
+    // Two CONSTANT arguments: the identifiers do not match the parameter
+    // names, so the fallback wraps every argument in a NamedExpression over
+    // the converted expression.
+    IL::LdcI4 arg1(1);
+    IL::LdcI4 arg2(2);
+    std::vector<IL::ILInstruction*> callArguments{&arg1, &arg2};
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *fixture.ctor, 0, callArguments,
+        std::nullopt);
+    CS::ExpressionWithResolveResult result = builder.HandleConstructorCall(
+        CS::ExpectedTargetDetails{}, nullptr, *fixture.ctor, std::move(list));
+    auto* atce =
+        dynamic_cast<Syntax::AnonymousTypeCreateExpression*>(result.Expression());
+    ASSERT_NE(atce, nullptr);
+    ASSERT_EQ(atce->Initializers().Count(), 2);
+    auto* first =
+        dynamic_cast<const Syntax::NamedExpression*>(atce->Initializers().At(0));
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(first->Name(), "a");
+    auto* second =
+        dynamic_cast<const Syntax::NamedExpression*>(atce->Initializers().At(1));
+    ASSERT_NE(second, nullptr);
+    EXPECT_EQ(second->Name(), "b");
+}
+
+TEST(HandleConstructorCallTest, FixLoopCastsTheArgumentsWhenTheResolutionFails)
+{
+    TransformFixture fixture(/*ctorShape=*/true);
+    fixture.holderDef->SetConstructors({fixture.foo.get()});
+    // A String argument over an Int32 parameter: the overload resolution
+    // fails on both attempts, so the fix ladder applies CastArguments and
+    // breaks -- the render argument is an explicit cast to the parameter type.
+    {
+        ParamFixture a(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "a");
+        fixture.foo->SetParameters({a.parameter});
+    }
+
+    IL::LdStr strArg("hello");
+    std::vector<IL::ILInstruction*> callArguments{&strArg};
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *fixture.foo, 0, callArguments,
+        std::nullopt);
+    CS::ExpressionWithResolveResult result = builder.HandleConstructorCall(
+        CS::ExpectedTargetDetails{}, nullptr, *fixture.foo, std::move(list));
+    auto* oce = dynamic_cast<Syntax::ObjectCreateExpression*>(result.Expression());
+    ASSERT_NE(oce, nullptr);
+    ASSERT_EQ(oce->Arguments().Count(), 1);
+    // The CastArguments arm wrapped the argument: a CastExpression node.
+    auto* cast = dynamic_cast<const Syntax::CastExpression*>(oce->Arguments().At(0));
+    ASSERT_NE(cast, nullptr);
+}
+
+TEST(HandleConstructorCallTest, NativeIntegersWithoutAttributeOverridesTheReturnType)
+{
+    NativeIntHolder holder;
+    // A zero-argument constructor whose declaring type IS System.IntPtr: the
+    // NativeIntegersWithoutAttribute option forces the nint return-type
+    // override on the invocation resolve result.
+    auto intPtrType = holder.KnownType(TS::KnownTypeCode::IntPtr);
+    auto ctor = std::make_shared<TS::Implementation::FakeMethod>(
+        holder.compilation, TS::SymbolKind::Constructor);
+    ctor->SetName(".ctor");
+    ctor->SetDeclaringType(intPtrType);
+    std::shared_ptr<TS::TestSupport::LookupTypeDefinition> holderDef =
+        std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+            "IntPtrCtor", "H",
+            TS::FullTypeName(TS::TopLevelTypeName("H", "IntPtrCtor")),
+            TS::TypeKind::Class, TS::Accessibility::Public, holder.compilation,
+            &holder.compilation.MainModule());
+    DecompilerSettings settings;
+    auto scopeContext =
+        std::make_shared<CS::TypeSystem::CSharpTypeResolveContext>(
+            holder.compilation.MainModule());
+    auto usingScope = std::make_shared<CS::TypeSystem::UsingScope>(
+        scopeContext, holder.compilation.RootNamespace(),
+        std::vector<const TS::INamespace*>{});
+    DecompileRun run(&settings, usingScope);
+    IL::ILFunction function;
+    CS::TypeSystem::CSharpTypeResolveContext context(
+        holder.compilation.MainModule(), usingScope, holderDef.get(), nullptr);
+    CS::ExpressionBuilder builderProxy(nullptr, holder.compilation, context,
+                                       &function, &settings, &run);
+    CS::CallBuilder callBuilder(&builderProxy, holder.compilation, &settings);
+
+    CS::ArgumentList list;
+    list.FirstOptionalArgumentIndex = -2;
+
+    CS::ExpressionWithResolveResult result = callBuilder.HandleConstructorCall(
+        CS::ExpectedTargetDetails{}, nullptr, *ctor, std::move(list));
+    auto* oce = dynamic_cast<Syntax::ObjectCreateExpression*>(result.Expression());
+    ASSERT_NE(oce, nullptr);
+    auto* crr = dynamic_cast<const Resolver::CSharpInvocationResolveResult*>(
+        CS::GetResolveResult(*result.Expression()));
+    ASSERT_NE(crr, nullptr);
+    // The nint override lands on the resolve result's own type (the C#
+    // returnTypeOverride feeding the base ResolveResult type).
+    EXPECT_TRUE(crr->Type().Kind() == TS::TypeKind::NInt);
 }
