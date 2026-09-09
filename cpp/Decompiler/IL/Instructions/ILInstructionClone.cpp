@@ -158,12 +158,18 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         }
         case OpCode::LdFtn: {
             const auto& s = static_cast<const LdFtn&>(*this);
-            c = std::make_unique<LdFtn>(s.MethodName);
+            if (s.Method)
+                c = std::make_unique<LdFtn>(s.Method);
+            else
+                c = std::make_unique<LdFtn>(s.MethodName);
             break;
         }
         case OpCode::LdVirtFtn: {
             const auto& s = static_cast<const LdVirtFtn&>(*this);
-            c = std::make_unique<LdVirtFtn>(s.MethodName);
+            if (s.Method)
+                c = std::make_unique<LdVirtFtn>(s.Method);
+            else
+                c = std::make_unique<LdVirtFtn>(s.MethodName);
             break;
         }
         case OpCode::SizeOf: {
@@ -270,8 +276,12 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         }
         case OpCode::LdVirtDelegate: {
             const auto& s = static_cast<const LdVirtDelegate&>(*this);
-            c = std::make_unique<LdVirtDelegate>(s.Argument ? s.Argument->Clone() : nullptr,
-                s.Type, s.MethodName);
+            if (s.Method)
+                c = std::make_unique<LdVirtDelegate>(s.Argument ? s.Argument->Clone() : nullptr,
+                    s.Type, s.Method);
+            else
+                c = std::make_unique<LdVirtDelegate>(s.Argument ? s.Argument->Clone() : nullptr,
+                    s.Type, s.MethodName);
             break;
         }
 

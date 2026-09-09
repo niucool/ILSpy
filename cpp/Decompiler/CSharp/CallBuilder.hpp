@@ -39,7 +39,8 @@
 // CanInferTypeArgumentsFromArguments, and the anonymous-type helpers
 // PinTypesOfNullArguments / NewAnonymousTypeInstance over the NRExtensions
 // predicate family), and the call-build composition itself: the
-// Build(CallInstruction) entry (the delegate-construction and tuple arms DEFER
+// Build(CallInstruction) entry (the delegate-construction arm renders through
+// HandleDelegateConstruction; the tuple arm DEFERs
 // loudly, the span-based string-concat arm wired) and the mainline
 // Build(OpCode, ...) body -- the EII sealed-class rewrite, the local-function
 // target arm (with ExpressionBuilder.ResolveLocalFunction and ToMethodGroup),
@@ -52,13 +53,17 @@
 // StatementBuilder slice; the CastArguments lambda-return-type arm is deferred
 // with ModifyReturnTypeOfLambda/DecompiledLambdaResolveResult.
 //
-// The remaining render arms are the loud deferrals behind their real C# gate
-// conditions: HandleDelegateConstruction (the delegate-reference slice) and
-// TupleTransform.MatchTupleConstruction's tuple-expression render (the
-// TupleExpression slice). The accessor-call slice (IsUnambiguousAccess +
-// HandleAccessorCall), the interpolation slice (HandleStringInterpolation +
-// TryGetStringInterpolationTokens + TokenizeFormatString), and the
-// constructor-call slice (HandleConstructorCall) are ported.
+// The remaining render arm is one loud deferral behind its real C# gate
+// condition: TupleTransform.MatchTupleConstruction's tuple-expression render
+// (the TupleExpression slice). The delegate-reference family
+// (HandleDelegateConstruction + CanUseDelegateConstruction +
+// BuildDelegateReference/DisambiguateDelegateReference +
+// IsUnambiguousMethodReference + BuildMethodReference + Build(LdVirtDelegate))
+// is ported (with the LdFtn/LdVirtFtn/LdVirtDelegate nodes carrying the
+// resolved IMethod the entry reads), as are the accessor-call slice
+// (IsUnambiguousAccess + HandleAccessorCall), the interpolation slice
+// (HandleStringInterpolation + TryGetStringInterpolationTokens +
+// TokenizeFormatString), and the constructor-call slice (HandleConstructorCall).
 
 #pragma once
 
@@ -92,6 +97,7 @@ class ResolveResult;
 namespace ILSpy::Decompiler::IL {
 class Call;
 class ILInstruction;
+class LdVirtDelegate;
 }
 
 // The real type-system namespace alias (the ExpressionBuilder TS:: convention --
@@ -485,9 +491,9 @@ public:
 
     // The C# `public TranslatedExpression Build(CallInstruction inst, IType?
     // typeHint = null)` (lines 202-241): the call entry -- the
-    // delegate-construction arm (a newobj the IL match recognizes) and the
-    // tuple-construction arm are DEFERRED loudly (HandleDelegateConstruction
-    // needs the delegate-reference chain; TupleTransform is unported), the
+    // delegate-construction arm (a newobj the IL match recognizes) renders
+    // through HandleDelegateConstruction and the tuple-construction arm is
+    // the remaining loud deferral (TupleTransform is unported), the
     // span-based string-concat arm renders its fold, and everything else
     // routes through the mainline Build with the IL-instruction and tail
     // markers applied.
@@ -503,10 +509,10 @@ public:
     // InlineArray and GetValueOrDefault arms, the
     // GetRequiredTransformationsForCall fix ladder, and the final
     // RequireTarget/RequireTypeArguments invocation render.
-    // HandleRangeConstruction is ported; HandleDelegateConstruction and the
-    // tuple-expression render are loud deferrals behind their real C# gate
-    // conditions (the accessor-call slice, the interpolation slice, and the
-    // constructor-call slice are ported now).
+    // HandleRangeConstruction is ported; the tuple-expression render is the
+    // remaining loud deferral behind its real C# gate condition (the
+    // accessor-call slice, the interpolation slice, the constructor-call
+    // slice, and the delegate-reference family are ported now).
     ExpressionWithResolveResult Build(
         IL::OpCode callOpCode, const TS::IMethod& method,
         const std::vector<IL::ILInstruction*>& callArguments,
@@ -633,6 +639,80 @@ public:
     // over the method, and the method's type arguments.
     static std::shared_ptr<Resolver::MethodGroupResolveResult> ToMethodGroup(
         const TS::IMethod& method, const IL::ILFunction& localFunction);
+
+    // -- The delegate-reference family (CallBuilder.cs lines 1905-2212) ---------
+
+    // The C# `TranslatedExpression HandleDelegateConstruction(CallInstruction
+    // inst)` (lines 1905-1935): the delegate-construction entry -- the ldftn/
+    // ldvirtftn arm reading the resolved method, the CanUseDelegateConstruction
+    // gate, and the not-usable fallback routing through BuildArgumentList +
+    // HandleConstructorCall (a plain `new` over the delegate ctor). Made public
+    // for tests (the C# private member). The func node must carry a resolved
+    // IMethod (the seed reader's string stand-in drives the C#'s
+    // ArgumentException for an unknown opcode arm otherwise).
+    TranslatedExpression HandleDelegateConstruction(const IL::Call& inst);
+
+    // The C# `private bool CanUseDelegateConstruction(IMethod targetMethod,
+    // ILInstruction thisArg, IMethod invokeMethod)` (lines 1937-1967): the
+    // accessors-are-not-method-groups gate, the static arm's parameter-count
+    // dance (the invoke-method-known/unknown splits with the extension-method
+    // minus-one), and the instance arm's known-invoke gate. Made public for
+    // tests. `invokeMethod` is the C# nullable reference: the null maps to
+    // nullptr.
+    static bool CanUseDelegateConstruction(
+        const TS::IMethod& targetMethod, const IL::ILInstruction* thisArg,
+        const TS::IMethod* invokeMethod);
+
+    // The C# `private TranslatedExpression HandleDelegateConstruction(IType
+    // delegateType, IMethod method, ExpectedTargetDetails expectedTargetDetails,
+    // ILInstruction thisArg, ILInstruction inst)` (lines 2138-2152): the
+    // delegate-construction render -- BuildDelegateReference over the target
+    // method, the ObjectCreateExpression over the delegate type, and the
+    // MethodGroupConversion resolve result. Made public for tests.
+    TranslatedExpression HandleDelegateConstruction(
+        const TS::IType& delegateType, const TS::IMethod& method,
+        const ExpectedTargetDetails& expectedTargetDetails,
+        IL::ILInstruction* thisArg, IL::ILInstruction* inst);
+
+    // The C# `private ExpressionWithResolveResult BuildDelegateReference(IMethod
+    // method, IMethod? invokeMethod, ExpectedTargetDetails expectedTargetDetails,
+    // ILInstruction? thisArg)` (lines 2004-2026): the MemberReferenceExpression/
+    // IdentifierExpression render over DisambiguateDelegateReference with the
+    // type-argument inserts. Made public for tests.
+    ExpressionWithResolveResult BuildDelegateReference(
+        const TS::IMethod& method, const TS::IMethod* invokeMethod,
+        const ExpectedTargetDetails& expectedTargetDetails,
+        IL::ILInstruction* thisArg);
+
+    // The C# `private bool IsUnambiguousMethodReference(ExpectedTargetDetails
+    // expectedTargetDetails, IMethod method, ResolveResult? target,
+    // IReadOnlyList<IType> typeArguments, bool isExtensionMethodReference,
+    // out ResolveResult? result)` (lines 2154-2200): the disambiguation
+    // oracle -- the extension arm over ResolveMemberAccess +
+    // PerformOverloadResolution(allowExtensionMethods) and the general arm
+    // over a fresh OverloadResolution fed by ResolveSimpleName/MemberLookup.
+    // `target` null maps to nullptr; `result` is the C# out param (null on
+    // false). Made public for tests.
+    bool IsUnambiguousMethodReference(
+        const ExpectedTargetDetails& expectedTargetDetails, const TS::IMethod& method,
+        const Sem::ResolveResult* target,
+        const std::vector<TS::ITypePtr>& typeArguments,
+        bool isExtensionMethodReference,
+        std::shared_ptr<Sem::ResolveResult>& result);
+
+    // The C# `internal TranslatedExpression Build(LdVirtDelegate inst)` (lines
+    // 1969-1971): the virtual delegate construction render. Made public for
+    // tests. The node must carry a resolved IMethod (the seed's string
+    // stand-in falls to the C# shape only through the resolved ctor).
+    TranslatedExpression Build(const IL::LdVirtDelegate& inst);
+
+    // The C# `internal ExpressionWithResolveResult BuildMethodReference(IMethod
+    // method, bool isVirtual)` (lines 1973-1977): the `Callee` method-group
+    // identifier render -- BuildDelegateReference with a null thisArg and the
+    // resolve-result annotation replaced with a plain MemberResolveResult over
+    // a null target. Made public for tests.
+    ExpressionWithResolveResult BuildMethodReference(
+        const TS::IMethod& method, bool isVirtual);
 
 private:
     ExpressionBuilder* expressionBuilder_ = nullptr;

@@ -40,11 +40,19 @@
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
 namespace ILSpy::Decompiler::IL {
+
+// The C# `public bool MatchLdNull()` (Instructions.cs line 8659): the `ldnull`
+// node -- a bare `LdNull` with no operand.
+inline bool MatchLdNull(const ILInstruction* inst)
+{
+    return dynamic_cast<const LdNull*>(inst) != nullptr;
+}
 
 // The C# `public bool MatchLdThis()` (PatternMatching.cs line 114): the `ldloc`
 // of the synthetic `this` parameter -- a `LdLoc` whose variable is a parameter

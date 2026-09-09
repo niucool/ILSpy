@@ -719,6 +719,12 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitLocAlloc(inst, context);
         case IL::OpCode::LocAllocSpan:
             return VisitLocAllocSpan(inst, context);
+        case IL::OpCode::LdFtn:
+            return VisitLdFtn(inst, context);
+        case IL::OpCode::LdVirtFtn:
+            return VisitLdVirtFtn(inst, context);
+        case IL::OpCode::LdVirtDelegate:
+            return VisitLdVirtDelegate(inst, context);
         default:
             return Default(inst, context);
     }
@@ -3267,6 +3273,198 @@ TranslatedExpression ExpressionBuilder::VisitLocAllocSpan(IL::ILInstruction* ins
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// The function-pointer / virtual-delegate render arms (the VisitLdFtn family,
+// ExpressionBuilder.cs lines 4774-4841 + 497) -- the ldftn/ldvirtftn
+// function-pointer render and the LdVirtDelegate delegate-construction entry
+// (the CallBuilder.Build(LdVirtDelegate) delegation).
+
+// The C# `protected internal override TranslatedExpression VisitLdFtn(LdFtn
+// inst, TranslationContext context)` (lines 4774-4832).
+// The local NamespaceOf copy (the 'copied next to its second consumer'
+// convention -- the port's IType carries no Namespace virtual): the
+// IEntity/ParameterizedType/UnknownType dispatch the CallConv type's
+// namespace check reads through.
+namespace {
+std::string NamespaceOf(const TS::IType& type)
+{
+    if (const auto* entity = dynamic_cast<const TS::IEntity*>(&type))
+        return entity->Namespace();
+    if (const auto* pt =
+            dynamic_cast<const TS::ParameterizedType*>(&type))
+        return pt->GenericType() ? NamespaceOf(*pt->GenericType())
+                                 : std::string();
+    if (const auto* unknown = dynamic_cast<const class TS::UnknownType*>(&type))
+        return unknown->FullTypeName().GetTopLevelTypeName().Namespace();
+    return std::string();
+}
+
+// The InvocationExpression two-argument factory (the C#
+// `new InvocationExpression(target, arguments)` params ctor): the port's
+// generated ctor takes only the target, with the Arguments collection added
+// after (the ObjectCreateExpression precedent).
+Syntax::InvocationExpression* InvocationExpressionOf(
+    Syntax::Expression* target, std::vector<Syntax::Expression*> arguments)
+{
+    auto* invocation = new Syntax::InvocationExpression(target);
+    for (Syntax::Expression* arg : arguments)
+        invocation->Arguments().Add(arg);
+    return invocation;
+}
+
+// The non-owning shared alias over a raw resolve-result pointer (the
+// CallBuilder.cpp local copied beside its consumer -- the annotation channel
+// owns the handle the C# GC reference aliases).
+std::shared_ptr<Sem::ResolveResult> AliasResolveResult(const Sem::ResolveResult* target)
+{
+    if (target == nullptr)
+        return nullptr;
+    return std::shared_ptr<Sem::ResolveResult>(
+        const_cast<Sem::ResolveResult*>(target), [](Sem::ResolveResult*) {});
+}
+} // namespace
+
+TranslatedExpression ExpressionBuilder::VisitLdFtn(IL::ILInstruction* inst,
+                                                  TranslationContext context)
+{
+    auto* ldftn = static_cast<IL::LdFtn*>(inst);
+    assert(ldftn->Method != nullptr);
+    const TS::IMethod& method = *ldftn->Method;
+    CallBuilder delegateBuilder(this, *compilation, settings);
+    ExpressionWithResolveResult delegateRef =
+        delegateBuilder.BuildMethodReference(method, /*isVirtual*/ false);
+    if (!method.IsStatic())
+    {
+        // C# 9 function pointers don't support instance methods
+        return WithILInstruction(
+            WithRR(
+                *InvocationExpressionOf(
+                    new Syntax::IdentifierExpression("__ldftn"),
+                    {delegateRef.Expression()}),
+                std::make_shared<Sem::ResolveResult>(
+                    std::make_shared<TS::PointerType>(
+                        const_cast<TS::IType&>(
+                            compilation->FindType(TS::KnownTypeCode::Void))
+                            .shared_from_this()))),
+            inst);
+    }
+    // C# 9 function pointer
+    TS::SignatureCallingConvention callingConvention =
+        TS::SignatureCallingConvention::Default;
+    std::vector<TS::ITypePtr> customCallingConventions;
+    for (const TS::IAttribute* attr : method.GetAttributes())
+    {
+        if (attr != nullptr
+            && TS::IsKnownType(attr->AttributeType(),
+                               TS::KnownAttribute::UnmanagedCallersOnly))
+        {
+            callingConvention = TS::SignatureCallingConvention::Unmanaged;
+            customCallingConventions.clear();
+            for (const TS::CustomAttributeNamedArgument& namedArg :
+                 attr->NamedArguments())
+            {
+                if (namedArg.Name() != "CallConvs")
+                    continue;
+                // The C# `callingConventionsArgument.Value is
+                // ImmutableArray<CustomAttributeTypedArgument<IType>> array` --
+                // the boxed array of type arguments, decoded by the CallConvs
+                // convention table.
+                std::vector<TS::CustomAttributeTypedArgument> array;
+                if (namedArg.Value().has_value()
+                    && namedArg.Value().type()
+                        == typeid(std::vector<TS::CustomAttributeTypedArgument>))
+                {
+                    array = std::any_cast<std::vector<TS::CustomAttributeTypedArgument>>(
+                        namedArg.Value());
+                }
+                for (const TS::CustomAttributeTypedArgument& a : array)
+                {
+                    if (a.Type() == nullptr)
+                    {
+                        customCallingConventions.push_back(nullptr);
+                        continue;
+                    }
+                    const TS::IType& type = *a.Type();
+                    TS::SignatureCallingConvention found = TS::SignatureCallingConvention::Default;
+                    bool matched = false;
+                    if (NamespaceOf(type) == "System.Runtime.CompilerServices")
+                    {
+                        const std::string& name = type.Name();
+                        if (name == "CallConvCdecl") { found = TS::SignatureCallingConvention::CDecl; matched = true; }
+                        else if (name == "CallConvFastcall") { found = TS::SignatureCallingConvention::FastCall; matched = true; }
+                        else if (name == "CallConvStdcall") { found = TS::SignatureCallingConvention::StdCall; matched = true; }
+                        else if (name == "CallConvThiscall") { found = TS::SignatureCallingConvention::ThisCall; matched = true; }
+                    }
+                    if (matched && callingConvention == TS::SignatureCallingConvention::Unmanaged)
+                        callingConvention = found;
+                    else
+                        customCallingConventions.push_back(a.Type());
+                }
+            }
+            break;
+        }
+    }
+    std::vector<TS::ITypePtr> parameterTypes;
+    std::vector<TS::ReferenceKind> parameterReferenceKinds;
+    for (const TS::IParameter* p : method.Parameters())
+    {
+        parameterTypes.push_back(
+            const_cast<TS::IType&>(p->Type()).shared_from_this());
+        parameterReferenceKinds.push_back(p->ReferenceKind());
+    }
+    auto ftp = std::make_shared<TS::FunctionPointerType>(
+        callingConvention, customCallingConventions,
+        const_cast<TS::IType&>(method.ReturnType()).shared_from_this(),
+        method.ReturnTypeIsRefReadOnly(), parameterTypes,
+        parameterReferenceKinds);
+    auto* addressOfNode = new Syntax::UnaryOperatorExpression(
+        delegateRef.Expression(), Syntax::UnaryOperatorType::AddressOf);
+    const Sem::ResolveResult* addressOfRr =
+        WithRR(*addressOfNode, std::make_shared<Sem::ResolveResult>(TS::NoType()))
+            .ResolveResult();
+    auto conversion = Sem::Conversions::MethodGroupConversion(
+        &method, /*isVirtualMethodLookup*/ false,
+        /*delegateCapturesFirstArgument*/ false);
+    return WithoutILInstruction(
+        WithRR(*new Syntax::CastExpression(ConvertType(*ftp), addressOfNode),
+               std::make_shared<Sem::ConversionResolveResult>(
+                   std::static_pointer_cast<TS::IType>(ftp),
+                   AliasResolveResult(addressOfRr), std::move(conversion))));
+}
+
+// The C# `protected internal override TranslatedExpression
+// VisitLdVirtFtn(LdVirtFtn inst, TranslationContext context)` (lines 4834-4841).
+TranslatedExpression ExpressionBuilder::VisitLdVirtFtn(IL::ILInstruction* inst,
+                                                      TranslationContext context)
+{
+    auto* ldvirtftn = static_cast<IL::LdVirtFtn*>(inst);
+    assert(ldvirtftn->Method != nullptr);
+    CallBuilder delegateBuilder(this, *compilation, settings);
+    ExpressionWithResolveResult delegateRef =
+        delegateBuilder.BuildMethodReference(*ldvirtftn->Method, /*isVirtual*/ true);
+    // C# 9 function pointers don't support instance methods
+    return WithILInstruction(
+        WithRR(
+            *InvocationExpressionOf(
+                new Syntax::IdentifierExpression("__ldvirtftn"),
+                {delegateRef.Expression()}),
+            std::make_shared<Sem::ResolveResult>(std::make_shared<TS::PointerType>(
+                const_cast<TS::IType&>(
+                    compilation->FindType(TS::KnownTypeCode::Void))
+                    .shared_from_this()))),
+        inst);
+}
+
+// The C# `protected internal override TranslatedExpression
+// VisitLdVirtDelegate(LdVirtDelegate inst, TranslationContext context)` (line
+// 497-500).
+TranslatedExpression ExpressionBuilder::VisitLdVirtDelegate(IL::ILInstruction* inst,
+                                                           TranslationContext context)
+{
+    CallBuilder delegateBuilder(this, *compilation, settings);
+    return delegateBuilder.Build(*static_cast<IL::LdVirtDelegate*>(inst));
+}
+
 // The user-defined compound-assignment arm (the VisitUserDefinedCompoundAssign
 // slice) and the LdObj dereference helper it shares with the later LdObj arm
 

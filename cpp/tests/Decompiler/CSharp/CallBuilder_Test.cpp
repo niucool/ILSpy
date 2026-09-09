@@ -2850,37 +2850,6 @@ TEST(BuildEntryTest, RoutesTheSpanBasedStringConcat)
     EXPECT_EQ(result.ILInstructions().front(), static_cast<IL::ILInstruction*>(&call));
 }
 
-TEST(BuildEntryTest, DefersDelegateConstructionLoudly)
-{
-    BuilderFixture fixture;
-    MethodFixtures fixtures(fixture.holder);
-
-    // newobj Delegate(target, ldftn) -- the MatchDelegateConstruction shape.
-    // The declaring type must be a Delegate-KIND type: the KnownType(Delegate)
-    // wrapper is Class-kind over the minimal corlib (the KnownTypeReference
-    // table declares Delegate as Class), so the match's final gate needs the
-    // delegate-kind stub (the delegate-equality tests' Action shape).
-    auto delegateDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
-        "Action", "System",
-        TS::FullTypeName(TS::TopLevelTypeName("System", "Action")),
-        TS::TypeKind::Delegate, TS::Accessibility::Public,
-        fixture.holder.compilation, &fixture.holder.compilation.MainModule());
-    IL::Call call(".ctor");
-    call.IsNewObj = true;
-    call.Method = fixtures.spanConcat;
-    call.DeclaringType = TS::ITypePtr(delegateDef.get(), [](TS::IType*) {});
-    call.AddArg(std::make_unique<IL::LdNull>());
-    call.AddArg(std::make_unique<IL::LdFtn>("Target"));
-
-    IL::DelegateConstructionMatch delegateMatch;
-    EXPECT_TRUE(IL::DelegateConstruction::MatchDelegateConstruction(&call,
-                                                                    delegateMatch,
-                                                                    false));
-
-    CS::CallBuilder builder = fixture.MakeCallBuilder();
-    EXPECT_THROW((void)builder.Build(call), std::logic_error);
-}
-
 TEST(BuildEntryTest, DefersTupleConstructionLoudly)
 {
     BuilderFixture fixture;
@@ -4374,3 +4343,367 @@ TEST(HandleConstructorCallTest, NativeIntegersWithoutAttributeOverridesTheReturn
     // returnTypeOverride feeding the base ResolveResult type).
     EXPECT_TRUE(crr->Type().Kind() == TS::TypeKind::NInt);
 }
+
+// ---------------------------------------------------------------------------
+// The delegate-reference family (CallBuilder.cs lines 1905-2212).
+// ---------------------------------------------------------------------------
+
+// The delegate fixture: a TypeKind::Delegate definition stub with an `Invoke`
+// method (the GetDelegateInvokeMethod fixture shape the C# reads through the
+// TypeSystemExtensions), plus the host type and the static target method the
+// render arms disambiguate.
+struct DelegateFixture : BuildArgsFixture
+{
+    std::shared_ptr<TS::TestSupport::LookupTypeDefinition> delegateType;
+    std::shared_ptr<TS::TestSupport::LookupTypeDefinition> hostDef;
+    std::shared_ptr<TS::Implementation::FakeMethod> invoke;
+    std::shared_ptr<TS::Implementation::FakeMethod> foo;
+
+    explicit DelegateFixture(int invokeParamCount = 0, int fooParamCount = 0,
+                             bool fooStatic = true)
+    {
+        delegateType = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+            "MyDelegate", "H",
+            TS::FullTypeName(TS::TopLevelTypeName("H", "MyDelegate")),
+            TS::TypeKind::Delegate, TS::Accessibility::Public, holder.compilation,
+            &holder.compilation.MainModule());
+        invoke = std::make_shared<TS::Implementation::FakeMethod>(
+            holder.compilation, TS::SymbolKind::Method);
+        invoke->SetName("Invoke");
+        invoke->SetDeclaringType(
+            TS::ITypePtr(delegateType.get(), [](TS::IType*) {}));
+        std::vector<std::shared_ptr<const TS::IParameter>> invokeParams;
+        for (int i = 0; i < invokeParamCount; i++)
+            invokeParams.push_back(MakeParam(
+                "invokeArg" + std::to_string(i),
+                holder.KnownType(TS::KnownTypeCode::Int32)));
+        invoke->SetParameters(invokeParams);
+        delegateType->SetMethods({invoke.get()});
+
+        hostDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+            "Host", "H", TS::FullTypeName(TS::TopLevelTypeName("H", "Host")),
+            TS::TypeKind::Class, TS::Accessibility::Public, holder.compilation,
+            &holder.compilation.MainModule());
+        foo = std::make_shared<TS::Implementation::FakeMethod>(
+            holder.compilation, TS::SymbolKind::Method);
+        foo->SetName("Foo");
+        foo->SetIsStatic(fooStatic);
+        foo->SetDeclaringType(TS::ITypePtr(hostDef.get(), [](TS::IType*) {}));
+        std::vector<std::shared_ptr<const TS::IParameter>> fooParams;
+        for (int i = 0; i < fooParamCount; i++)
+            fooParams.push_back(MakeParam(
+                "fooArg" + std::to_string(i),
+                holder.KnownType(TS::KnownTypeCode::Int32)));
+        foo->SetParameters(fooParams);
+        hostDef->SetMethods({foo.get()});
+        // A current type definition distinct from the host: the static target
+        // is outside the current type, so requireTarget answers true (the
+        // fully-qualified `Host.Foo` method-group member reference).
+        SetCurrentTypeDefinition(delegateType.get());
+    }
+
+    // The delegate ctor FakeMethod (the Call node's Method).
+    // The delegate ctor: the two-argument (object target, method pointer)
+    // signature the runtime generates (the C# BuildArgumentList's
+    // argument-count assert needs it for the not-usable fallback route).
+    std::shared_ptr<TS::Implementation::FakeMethod> MakeDelegateCtor()
+    {
+        auto ctor = std::make_shared<TS::Implementation::FakeMethod>(
+            holder.compilation, TS::SymbolKind::Constructor);
+        ctor->SetName(".ctor");
+        ctor->SetDeclaringType(
+            TS::ITypePtr(delegateType.get(), [](TS::IType*) {}));
+        ctor->SetParameters({MakeParam("target", holder.KnownType(TS::KnownTypeCode::Object)),
+                             MakeParam("method", holder.KnownType(TS::KnownTypeCode::Object))});
+        return ctor;
+    }
+
+    // The delegate-construction Call: newobj over the delegate type with
+    // (thisArg, func) arguments (the MatchDelegateConstruction shape).
+    IL::Call MakeConstructionCall(IL::ILInstruction* thisArg, IL::LdFtn* func)
+    {
+        IL::Call call;
+        call.IsNewObj = true;
+        call.MethodName = ":: .ctor";
+        call.DeclaringType = TS::ITypePtr(delegateType.get(), [](TS::IType*) {});
+        call.Method = MakeDelegateCtor();
+        call.AddArg(thisArg->Clone());
+        call.AddArg(func->Clone());
+        return call;
+    }
+
+    // The resolved-method ldftn node.
+    IL::LdFtn MakeLdFtn() { return IL::LdFtn(std::shared_ptr<TS::IMethod>(foo)); }
+
+private:
+    std::shared_ptr<TS::Implementation::DefaultParameter> MakeParam(
+        const std::string& name, TS::ITypePtr type)
+    {
+        return std::make_shared<TS::Implementation::DefaultParameter>(
+            std::move(type), name, nullptr, std::vector<const TS::IAttribute*>(),
+            TS::ReferenceKind::None, false, false, std::any{});
+    }
+};
+
+TEST(CanUseDelegateConstructionTest, AccessorTargetIsRejected)
+{
+    BuildArgsFixture fixture;
+    auto accessor = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    accessor->SetName("get_Value");
+    accessor->SetAccessorOwner(static_cast<const TS::IMember*>(
+        static_cast<const TS::Implementation::FakeMember*>(accessor.get())));
+    IL::LdNull nullArg;
+    EXPECT_FALSE(fixture.MakeCallBuilder().CanUseDelegateConstruction(
+        *accessor, &nullArg, nullptr));
+}
+
+TEST(CanUseDelegateConstructionTest, StaticKnownInvokeMatchingCounts)
+{
+    DelegateFixture f(0, 0, /*fooStatic*/ true);
+    IL::LdNull nullArg;
+    auto variable = std::make_shared<IL::ILVariable>();
+    variable->Name = "x";
+    variable->Type = f.holder.KnownType(TS::KnownTypeCode::Object);
+    IL::LdLoc nonNullThis(std::move(variable));
+    auto* invoke = f.invoke.get();
+    auto* foo = f.foo.get();
+
+    // Matching counts + ldnull this: a static delegate.
+    EXPECT_TRUE(f.MakeCallBuilder().CanUseDelegateConstruction(*foo, &nullArg, invoke));
+    // Matching counts + non-null this: the first argument would bind -- not a
+    // static method group.
+    EXPECT_FALSE(
+        f.MakeCallBuilder().CanUseDelegateConstruction(*foo, &nonNullThis, invoke));
+}
+
+TEST(CanUseDelegateConstructionTest, StaticExtensionMinusOneArm)
+{
+    // A static extension method with one MORE parameter than the Invoke
+    // method: the receiver is the extension's first parameter -- usable.
+    DelegateFixture f(0, 1, /*fooStatic*/ true);
+    f.foo->SetIsExtensionMethod(true);
+    auto variable = std::make_shared<IL::ILVariable>();
+    IL::LdLoc nonNullThis(std::move(variable));
+    EXPECT_TRUE(f.MakeCallBuilder().CanUseDelegateConstruction(
+        *f.foo, &nonNullThis, f.invoke.get()));
+}
+
+TEST(CanUseDelegateConstructionTest, StaticKnownInvokeWrongCounts)
+{
+    // Neither matching nor minus-one: not usable.
+    DelegateFixture f(0, 2, /*fooStatic*/ true);
+    IL::LdNull nullArg;
+    EXPECT_FALSE(f.MakeCallBuilder().CanUseDelegateConstruction(
+        *f.foo, &nullArg, f.invoke.get()));
+}
+
+TEST(CanUseDelegateConstructionTest, StaticUnknownInvokeMatrix)
+{
+    DelegateFixture f(0, 0, /*fooStatic*/ true);
+    IL::LdNull nullArg;
+    auto variable = std::make_shared<IL::ILVariable>();
+    IL::LdLoc nonNullThis(std::move(variable));
+    // Delegate type unknown: ldnull -> true.
+    EXPECT_TRUE(f.MakeCallBuilder().CanUseDelegateConstruction(*f.foo, &nullArg, nullptr));
+    // Non-null this + not an extension method: false.
+    EXPECT_FALSE(
+        f.MakeCallBuilder().CanUseDelegateConstruction(*f.foo, &nonNullThis, nullptr));
+    // Non-null this + extension method: true.
+    f.foo->SetIsExtensionMethod(true);
+    EXPECT_TRUE(
+        f.MakeCallBuilder().CanUseDelegateConstruction(*f.foo, &nonNullThis, nullptr));
+}
+
+TEST(CanUseDelegateConstructionTest, InstanceMethodMatrix)
+{
+    DelegateFixture f(0, 0, /*fooStatic*/ false);
+    IL::LdNull anyArg;
+    auto variable = std::make_shared<IL::ILVariable>();
+    variable->Name = "x";
+    variable->Type = f.holder.KnownType(TS::KnownTypeCode::Object);
+    IL::LdLoc nonNullThis(std::move(variable));
+    // Instance target + no known invoke: usable (the receiver binds).
+    EXPECT_TRUE(f.MakeCallBuilder().CanUseDelegateConstruction(*f.foo, &anyArg, nullptr));
+    // Instance target + matching known invoke: usable.
+    EXPECT_TRUE(f.MakeCallBuilder().CanUseDelegateConstruction(
+        *f.foo, &nonNullThis, f.invoke.get()));
+}
+
+TEST(CanUseDelegateConstructionTest, InstanceMethodKnownInvokeWrongCount)
+{
+    DelegateFixture f(0, 1, /*fooStatic*/ false);
+    IL::LdNull anyArg;
+    EXPECT_FALSE(f.MakeCallBuilder().CanUseDelegateConstruction(
+        *f.foo, &anyArg, f.invoke.get()));
+}
+
+TEST(HandleDelegateConstructionTest, StaticLdFtnRender)
+{
+    DelegateFixture f(0, 0, true);
+    IL::LdNull thisArg;
+    IL::LdFtn func(std::shared_ptr<TS::IMethod>(f.foo));
+    IL::Call call = f.MakeConstructionCall(&thisArg, &func);
+
+    CS::CallBuilder builder = f.MakeCallBuilder();
+    CS::TranslatedExpression result = builder.Build(call);
+
+    // `new H.MyDelegate(H.Host.Foo)` over the resolved method group: the
+    // object create over the delegate type with the member-reference argument.
+    auto* oce = dynamic_cast<Syntax::ObjectCreateExpression*>(result.Expression());
+    ASSERT_NE(oce, nullptr);
+    ASSERT_EQ(oce->Arguments().Count(), 1);
+    auto* mre = dynamic_cast<Syntax::MemberReferenceExpression*>(oce->Arguments().At(0));
+    ASSERT_NE(mre, nullptr);
+    EXPECT_EQ(mre->MemberName(), "Foo");
+    // The target is the static type reference (requireTarget for a static
+    // method outside the current type).
+    auto* target = dynamic_cast<Syntax::TypeReferenceExpression*>(mre->Target());
+    ASSERT_NE(target, nullptr);
+    // The resolve result is the method-group ConversionResolveResult.
+    auto* crr = dynamic_cast<const Sem::ConversionResolveResult*>(
+        CS::GetResolveResult(*oce));
+    ASSERT_NE(crr, nullptr);
+    EXPECT_TRUE(crr->ConversionProperty()->IsMethodGroupConversion());
+    EXPECT_EQ(crr->Type().ReflectionName(), "H.MyDelegate");
+    // The object create carries the IL annotation over the construction call.
+    EXPECT_EQ(result.ILInstructions().size(), 1u);
+}
+
+TEST(HandleDelegateConstructionTest, VirtualFunctionPointerMarksTheLookup)
+{
+    DelegateFixture f(0, 0, true);
+    IL::LdNull thisArg;
+    IL::LdVirtFtn func(std::shared_ptr<TS::IMethod>(f.foo));
+    IL::Call call;
+    call.IsNewObj = true;
+    call.MethodName = ":: .ctor";
+    call.DeclaringType = TS::ITypePtr(f.delegateType.get(), [](TS::IType*) {});
+    call.Method = f.MakeDelegateCtor();
+    call.AddArg(thisArg.Clone());
+    call.AddArg(func.Clone());
+
+    CS::CallBuilder builder = f.MakeCallBuilder();
+    CS::TranslatedExpression result = builder.Build(call);
+    auto* oce = dynamic_cast<Syntax::ObjectCreateExpression*>(result.Expression());
+    ASSERT_NE(oce, nullptr);
+    auto* crr = dynamic_cast<const Sem::ConversionResolveResult*>(
+        CS::GetResolveResult(*oce));
+    ASSERT_NE(crr, nullptr);
+    // CallVirt -> isVirtualMethodLookup=true on the method-group conversion.
+    EXPECT_TRUE(crr->ConversionProperty()->IsVirtualMethodLookup());
+}
+
+TEST(HandleDelegateConstructionTest, UnknownFunctionPointerOpCodeThrows)
+{
+    DelegateFixture f(0, 0, true);
+    IL::LdNull thisArg;
+    IL::LdLoc bogus(std::make_shared<IL::ILVariable>());
+    IL::Call call;
+    call.IsNewObj = true;
+    call.AddArg(thisArg.Clone());
+    call.AddArg(bogus.Clone());
+
+    CS::CallBuilder builder = f.MakeCallBuilder();
+    EXPECT_THROW(
+        [&] {
+            auto r = builder.HandleDelegateConstruction(call);
+            (void)r;
+        }(),
+        std::invalid_argument);
+}
+
+TEST(BuildMethodReferenceTest, RendersTheIdentifierWithTheMemberResolveResult)
+{
+    DelegateFixture f(0, 0, true);
+    // A method whose declaring type IS the current type renders the bare
+    // identifier (requireTarget=false -> targetAdded=false -> the
+    // target.Expression == null arm).
+    f.SetCurrentTypeDefinition(f.hostDef.get());
+    CS::CallBuilder builder = f.MakeCallBuilder();
+    CS::ExpressionWithResolveResult expr = builder.BuildMethodReference(*f.foo, false);
+    auto* ide = dynamic_cast<Syntax::IdentifierExpression*>(expr.Expression());
+    ASSERT_NE(ide, nullptr);
+    EXPECT_EQ(ide->Identifier(), "Foo");
+    auto* mrr =
+        dynamic_cast<const Sem::MemberResolveResult*>(expr.ResolveResult());
+    ASSERT_NE(mrr, nullptr);
+    EXPECT_EQ(mrr->TargetResult(), nullptr);
+    EXPECT_EQ(mrr->Member()->MemberDefinition(), f.foo->MemberDefinition());
+}
+
+TEST(BuildLdVirtDelegateTest, RendersTheVirtualConstruction)
+{
+    DelegateFixture f(0, 0, true);
+    IL::LdNull thisArg;
+    IL::LdVirtDelegate ldv(thisArg.Clone(),
+                           TS::ITypePtr(f.delegateType.get(), [](TS::IType*) {}),
+                           std::shared_ptr<TS::IMethod>(f.foo));
+    CS::CallBuilder builder = f.MakeCallBuilder();
+    CS::TranslatedExpression result = builder.Build(ldv);
+    auto* oce = dynamic_cast<Syntax::ObjectCreateExpression*>(result.Expression());
+    ASSERT_NE(oce, nullptr);
+    ASSERT_EQ(oce->Arguments().Count(), 1);
+    // The resolve result is the method-group ConversionResolveResult over the
+    // delegate type.
+    auto* crr = dynamic_cast<const Sem::ConversionResolveResult*>(
+        CS::GetResolveResult(*oce));
+    ASSERT_NE(crr, nullptr);
+    EXPECT_TRUE(crr->ConversionProperty()->IsMethodGroupConversion());
+}
+
+TEST(BuildEntryTest, DelegateConstructionRenderIsNoLongerDeferred)
+{
+    // The gnhf-115 deferral: a delegate construction newobj now renders through
+    // HandleDelegateConstruction instead of the loud logic_error.
+    DelegateFixture f(0, 0, true);
+    IL::LdNull thisArg;
+    IL::LdFtn func(std::shared_ptr<TS::IMethod>(f.foo));
+    IL::Call call;
+    call.IsNewObj = true;
+    call.MethodName = ":: .ctor";
+    call.DeclaringType = TS::ITypePtr(f.delegateType.get(), [](TS::IType*) {});
+    call.Method = f.MakeDelegateCtor();
+    call.AddArg(thisArg.Clone());
+    call.AddArg(func.Clone());
+
+    CS::CallBuilder builder = f.MakeCallBuilder();
+    CS::TranslatedExpression result = builder.Build(call);
+    auto* oce = dynamic_cast<Syntax::ObjectCreateExpression*>(result.Expression());
+    ASSERT_NE(oce, nullptr);
+}
+
+TEST(BuildEntryTest, NotUsableConstructionFallsToTheDelegateConstructorCall)
+{
+    // The not-usable shape (a non-ldnull this on a matching-count static
+    // target) routes through BuildArgumentList + HandleConstructorCall: a
+    // plain `new MyDelegate(...)` over the DELEGATE CTOR.
+    DelegateFixture f(0, 0, true);
+    auto variable = std::make_shared<IL::ILVariable>();
+    variable->Name = "x";
+    variable->Type = f.holder.KnownType(TS::KnownTypeCode::Object);
+    IL::LdLoc nonNullThis(std::move(variable));
+    IL::LdFtn func(std::shared_ptr<TS::IMethod>(f.foo));
+    IL::Call call;
+    call.IsNewObj = true;
+    call.MethodName = ":: .ctor";
+    call.DeclaringType = TS::ITypePtr(f.delegateType.get(), [](TS::IType*) {});
+    std::shared_ptr<TS::Implementation::FakeMethod> ctor = f.MakeDelegateCtor();
+    call.Method = ctor;
+    call.AddArg(nonNullThis.Clone());
+    call.AddArg(func.Clone());
+
+    CS::CallBuilder builder = f.MakeCallBuilder();
+    CS::TranslatedExpression result = builder.Build(call);
+    auto* oce = dynamic_cast<Syntax::ObjectCreateExpression*>(result.Expression());
+    ASSERT_NE(oce, nullptr);
+    // The fallback resolves through the DELEGATE CONSTRUCTOR (the
+    // CSharpInvocationResolveResult arm), not a method-group conversion.
+    auto* inv =
+        dynamic_cast<const Resolver::CSharpInvocationResolveResult*>(CS::GetResolveResult(*oce));
+    ASSERT_NE(inv, nullptr);
+    // The two-IMember-subobject discipline: normalize both sides through the
+    // canonical MemberDefinition view (the CallBuilder convention).
+    EXPECT_EQ(inv->Member()->MemberDefinition(), ctor->MemberDefinition());
+}
+

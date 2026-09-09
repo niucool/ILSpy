@@ -2552,6 +2552,43 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   12111 passed / the 2 standing skips / zero failures, and all four CLI
   baselines unchanged (--csharp mscorlib 10106366 bytes, --il whole-module
   41246545 bytes, -l c 109438, --json-alone rc 64).
+- **`CallBuilder` slice 6 -- the delegate-reference family** -- `CallBuilder.{hpp,cpp}` now carries
+  the full CallBuilder.cs lines 1905-2212 delegate-reference chain, lifting the
+  delegate-construction loud deferral in `Build(CallInstruction)`: `CanUseDelegateConstruction`
+  (the accessors-are-not-method-groups gate, the static arm's parameter-count dance over the
+  known/unknown Invoke method with the extension minus-one, and the instance arm's
+  matching-count gate), the `HandleDelegateConstruction(CallInstruction)` entry (the ldftn ->
+  Call / ldvirtftn -> CallVirt switch with the exact .NET `ArgumentException` arm for an
+  unknown function-pointer opcode, and the not-usable fallback routing through BuildArgumentList
+  + HandleConstructorCall over the delegate ctor), the render
+  `HandleDelegateConstruction(IType, IMethod, ...)` (the ObjectCreateExpression over the
+  delegate type with the `ConversionResolveResult` over the `Conversion.MethodGroupConversion`
+  -- CallVirt selecting isVirtualMethodLookup), `BuildDelegateReference` +
+  `DisambiguateDelegateReference` (the local-function arm over ToMethodGroup, the extension arm
+  over ResolveMemberAccess + PerformOverloadResolution(allowExtensionMethods) with the
+  `box`-argument unwrap, and the general arm over TranslateTarget + the requireTarget gate with
+  the add-type-arguments / add-target / cast-target fix ladder and the `WithChosenMethod` re-wrap),
+  `IsUnambiguousMethodReference` (both arms over the ported OverloadResolution engine with the
+  `IsAppropriateCallTarget` oracle), `Build(LdVirtDelegate)`, and `BuildMethodReference` (the
+  resolve-result annotation REPLACED with the plain `MemberResolveResult(null, method)`).
+  Supporting upgrades: the `LdFtn`/`LdVirtFtn`/`LdVirtDelegate` IL nodes now carry the C#
+  `readonly IMethod Method` beside the seed display strings (the
+  CompoundAssignmentInstruction/UserDefinedCompoundAssign precedent -- a resolved ctor
+  populating the stand-in, the clone carrying the field, and the
+  `DelegateConstructionMatch.targetMethodRef` feeding the entry), and the `ExpressionBuilder`
+  gained the `VisitLdFtn` (the static function-pointer render over the UnmanagedCallersOnly
+  decode + `FunctionPointerType` address-of cast, the instance `__ldftn` fallback) /
+  `VisitLdVirtFtn` (`__ldvirtftn`) / `VisitLdVirtDelegate` arms the fallback route translates.
+  Verified by 16 new tests over the MinimalCorlib fixture (the 8-arm CanUse matrix, both
+  function-pointer shapes with the conversion's IsVirtualMethodLookup pin, the
+  unknown-opcode throw, the static render `new H.MyDelegate(H.Host.Foo)` over the resolved
+  method group, the identifier method-reference render with the member resolve result, the
+  virtual-delegate entry, and the not-usable fallback resolving through the DELEGATE
+  CONSTRUCTOR), proven with a 2-behavior neuter RED round (the accessor gate + the CallVirt
+  virtual-lookup mapping) then restored green; full suite 12249 ran / 12247 passed / the 2
+  standing skips / zero regressions, and all four CLI baselines unchanged (--csharp mscorlib
+  10106366 bytes, --il whole-module byte-identical to the 41246545-byte real-ilspycmd gold,
+  -l c 109438, the --json usage check rc 64).
 - **`ExpressionBuilder` TranslateTarget call-target arm + the IL match helpers**
   -- `ExpressionBuilder::TranslateTarget` (ExpressionBuilder.cs lines 2734-2844:
   the call/field target translation the `CallBuilder.Build` entry and the

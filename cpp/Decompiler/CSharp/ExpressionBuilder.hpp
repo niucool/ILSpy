@@ -272,6 +272,17 @@ public:
     // 523-528): the Span<T> stackalloc render -- TranslateLocAllocSpan's element type
     // over the span's own type as the resolve result.
     TranslatedExpression VisitLocAllocSpan(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitLdFtn(LdFtn
+    // inst, TranslationContext context)` (ExpressionBuilder.cs lines
+    // 4774-4832): the function-pointer render -- the CallBuilder method-group
+    // reference, the instance `__ldftn` intrinsic fallback, and the static
+    // FunctionPointerType address-of + cast over the method-group conversion.
+    TranslatedExpression VisitLdFtn(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `VisitLdVirtFtn` (lines 4834-4841): the `__ldvirtftn` intrinsic.
+    TranslatedExpression VisitLdVirtFtn(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `VisitLdVirtDelegate` (line 497-500): the CallBuilder.Build
+    // virtual-delegate delegation.
+    TranslatedExpression VisitLdVirtDelegate(IL::ILInstruction* inst, TranslationContext context);
     // The C# `StackAllocExpression TranslateLocAllocSpan(LocAllocSpan inst, IType
     // typeHint, out IType elementType)` (ExpressionBuilder.cs lines 530-539): the
     // span's element type, the count converted to int32, and the StackAllocExpression.

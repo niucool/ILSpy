@@ -55,6 +55,12 @@ bool DelegateConstruction::MatchDelegateConstruction(ILInstruction* inst,
 
         out.target = call->Arguments[0].get();
         out.delegateType = call->DeclaringType;
+        // The C# `((IInstructionWithMethodOperand)call.Arguments[1]).Method` --
+        // the resolved method handle the node carries; the display string
+        // derives from it (or keeps the seed reader's standalone string).
+        auto* ftn = static_cast<LdFtn*>(opArg);
+        auto* virtFtn = static_cast<LdVirtFtn*>(opArg);
+        out.targetMethodRef = (opArg->Op == OpCode::LdFtn) ? ftn->Method : virtFtn->Method;
         out.targetMethod = (opArg->Op == OpCode::LdFtn)
             ? static_cast<LdFtn*>(opArg)->MethodName
             : static_cast<LdVirtFtn*>(opArg)->MethodName;
@@ -68,6 +74,7 @@ bool DelegateConstruction::MatchDelegateConstruction(ILInstruction* inst,
         (void)allowTransformed;
         auto* ldv = static_cast<LdVirtDelegate*>(inst);
         out.target = ldv->Argument.get();
+        out.targetMethodRef = ldv->Method;
         out.targetMethod = ldv->MethodName;
         out.delegateType = ldv->Type;
     } else {

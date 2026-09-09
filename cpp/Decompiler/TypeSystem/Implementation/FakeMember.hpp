@@ -517,8 +517,13 @@ public:
     // The C# `IReadOnlyList<IType> IMethod.TypeArguments => TypeParameters` --
     // the shared-handle snapshot (the MetadataMethod convention (k)).
     std::vector<ITypePtr> TypeArguments() const override;
-    // The C# `bool IMethod.IsExtensionMethod => false`.
-    bool IsExtensionMethod() const override { return false; }
+    // The C# `bool IMethod.IsExtensionMethod => false`. A settable field so
+    // a test fixture can construct the extension-method shape the
+    // delegate-reference family's CanUseDelegateConstruction matrix drives
+    // (the real MetadataMethod reads the attribute; the default false
+    // preserves the prior hardcoded behavior, the additive-setter convention).
+    bool IsExtensionMethod() const override { return isExtensionMethod_; }
+    void SetIsExtensionMethod(bool value) { isExtensionMethod_ = value; }
     // The C# `bool IMethod.IsLocalFunction => false`.
     bool IsLocalFunction() const override { return false; }
     // The C# `bool IMethod.IsConstructor => symbolKind == SymbolKind.Constructor`.
@@ -548,6 +553,7 @@ private:
     std::vector<std::shared_ptr<const ITypeParameter>> typeParameters_;
     std::vector<std::shared_ptr<const IParameter>> parameters_;
     const IMember* accessorOwner_ = nullptr;
+    bool isExtensionMethod_ = false;
     ::ILSpy::Decompiler::TypeSystem::MethodSemanticsAttributes accessorKind_
         = ::ILSpy::Decompiler::TypeSystem::MethodSemanticsAttributes::None;
 
