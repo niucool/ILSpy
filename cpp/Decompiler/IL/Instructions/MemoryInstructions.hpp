@@ -221,4 +221,146 @@ public:
     }
 };
 
+// ckfinite: check that the top-of-stack float is neither NaN nor infinite.
+// UnaryInstruction with Void result; DirectFlags = base(None) | MayThrow. The C#
+// ILReader PEEKS the argument (the check runs in place -- the value stays on the
+// stack), so this port's seed reader models the opcode as a no-op wrapper
+// (ILReader.cpp); tests/transforms drive this node by hand the same way they
+// drive LocAlloc. Port of the C# `Ckfinite : UnaryInstruction` (Instructions.cs
+// line 2232).
+class Ckfinite : public UnaryInstruction {
+public:
+    explicit Ckfinite(std::unique_ptr<ILInstruction> argument)
+        : UnaryInstruction(OpCode::Ckfinite, std::move(argument)) {}
+    InstructionFlags DirectFlags() const override { return InstructionFlags::MayThrow; }
+    StackType ResultType() const override { return StackType::Void; }
+    void WriteTo(std::string& out) const override {
+        out += "ckfinite(";
+        if (Argument) Argument->WriteTo(out); else out += "(null)";
+        out += ')';
+    }
+};
+
+// The two prefix-carrying block memory instructions. The C# `WriteToCore` renders
+// the ISupportsVolatilePrefix `volatile.` and ISupportsUnalignedPrefix
+// `unaligned(<n>).` prefixes BEFORE the opcode (InstructionOutputExtensions' opcode
+// names are the lowercase IL mnemonics); the port's seed IL reader skips prefixes
+// (see ILReader.cpp), so tests set the fields directly.
+//
+// initblk: memset(address, value, size). Three inlineable children in slot order
+// Address(0)/Value(1)/Size(2); Void result; DirectFlags = MayThrow | SideEffect.
+// Port of the C# `Initblk : ILInstruction, ISupportsVolatilePrefix,
+// ISupportsUnalignedPrefix` (Instructions.cs line 3582).
+class Initblk : public ILInstruction {
+public:
+    std::unique_ptr<ILInstruction> Address;
+    std::unique_ptr<ILInstruction> Value;
+    std::unique_ptr<ILInstruction> Size;
+    // The C# `ISupportsUnalignedPrefix.UnalignedPrefix` operand (0 = no prefix) and
+    // `ISupportsVolatilePrefix.IsVolatile`.
+    std::uint8_t UnalignedPrefix = 0;
+    bool IsVolatile = false;
+    Initblk(std::unique_ptr<ILInstruction> address, std::unique_ptr<ILInstruction> value,
+            std::unique_ptr<ILInstruction> size)
+        : ILInstruction(OpCode::Initblk), Address(std::move(address)), Value(std::move(value)),
+          Size(std::move(size)) {
+        if (Address) { Address->Parent = this; Address->ChildIndex = 0; }
+        if (Value) { Value->Parent = this; Value->ChildIndex = 1; }
+        if (Size) { Size->Parent = this; Size->ChildIndex = 2; }
+    }
+    InstructionFlags DirectFlags() const override {
+        return InstructionFlags::MayThrow | InstructionFlags::SideEffect;
+    }
+    StackType ResultType() const override { return StackType::Void; }
+    int ChildCount() const override {
+        return (Address ? 1 : 0) + (Value ? 1 : 0) + (Size ? 1 : 0);
+    }
+    ILInstruction* GetChild(int i) const override {
+        if (i == 0) return Address.get();
+        if (i == 1) return Value.get();
+        if (i == 2) return Size.get();
+        return nullptr;
+    }
+    void WriteTo(std::string& out) const override {
+        if (IsVolatile) out += "volatile.";
+        if (UnalignedPrefix != 0) {
+            out += "unaligned(";
+            out += std::to_string(UnalignedPrefix);
+            out += ").";
+        }
+        out += "initblk(";
+        if (Address) Address->WriteTo(out); else out += "(null)";
+        out += ", ";
+        if (Value) Value->WriteTo(out); else out += "(null)";
+        out += ", ";
+        if (Size) Size->WriteTo(out); else out += "(null)";
+        out += ')';
+    }
+protected:
+    std::unique_ptr<ILInstruction> SetChildRaw(int i, std::unique_ptr<ILInstruction> n) override {
+        assert(i >= 0 && i <= 2);
+        auto& slot = i == 0 ? Address : (i == 1 ? Value : Size);
+        auto old = std::move(slot);
+        slot = std::move(n);
+        return old;
+    }
+};
+
+// cpblk: memcpy(destAddress, sourceAddress, size). Three inlineable children in
+// slot order DestAddress(0)/SourceAddress(1)/Size(2); Void result; the same
+// flags as Initblk. Port of the C# `Cpblk : ILInstruction, ISupportsVolatilePrefix,
+// ISupportsUnalignedPrefix` (Instructions.cs line 3431).
+class Cpblk : public ILInstruction {
+public:
+    std::unique_ptr<ILInstruction> DestAddress;
+    std::unique_ptr<ILInstruction> SourceAddress;
+    std::unique_ptr<ILInstruction> Size;
+    std::uint8_t UnalignedPrefix = 0;
+    bool IsVolatile = false;
+    Cpblk(std::unique_ptr<ILInstruction> destAddress,
+          std::unique_ptr<ILInstruction> sourceAddress, std::unique_ptr<ILInstruction> size)
+        : ILInstruction(OpCode::Cpblk), DestAddress(std::move(destAddress)),
+          SourceAddress(std::move(sourceAddress)), Size(std::move(size)) {
+        if (DestAddress) { DestAddress->Parent = this; DestAddress->ChildIndex = 0; }
+        if (SourceAddress) { SourceAddress->Parent = this; SourceAddress->ChildIndex = 1; }
+        if (Size) { Size->Parent = this; Size->ChildIndex = 2; }
+    }
+    InstructionFlags DirectFlags() const override {
+        return InstructionFlags::MayThrow | InstructionFlags::SideEffect;
+    }
+    StackType ResultType() const override { return StackType::Void; }
+    int ChildCount() const override {
+        return (DestAddress ? 1 : 0) + (SourceAddress ? 1 : 0) + (Size ? 1 : 0);
+    }
+    ILInstruction* GetChild(int i) const override {
+        if (i == 0) return DestAddress.get();
+        if (i == 1) return SourceAddress.get();
+        if (i == 2) return Size.get();
+        return nullptr;
+    }
+    void WriteTo(std::string& out) const override {
+        if (IsVolatile) out += "volatile.";
+        if (UnalignedPrefix != 0) {
+            out += "unaligned(";
+            out += std::to_string(UnalignedPrefix);
+            out += ").";
+        }
+        out += "cpblk(";
+        if (DestAddress) DestAddress->WriteTo(out); else out += "(null)";
+        out += ", ";
+        if (SourceAddress) SourceAddress->WriteTo(out); else out += "(null)";
+        out += ", ";
+        if (Size) Size->WriteTo(out); else out += "(null)";
+        out += ')';
+    }
+protected:
+    std::unique_ptr<ILInstruction> SetChildRaw(int i, std::unique_ptr<ILInstruction> n) override {
+        assert(i >= 0 && i <= 2);
+        auto& slot = i == 0 ? DestAddress : (i == 1 ? SourceAddress : Size);
+        auto old = std::move(slot);
+        slot = std::move(n);
+        return old;
+    }
+};
+
 } // namespace ILSpy::Decompiler::IL

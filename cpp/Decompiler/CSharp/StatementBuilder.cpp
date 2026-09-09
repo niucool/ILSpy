@@ -29,13 +29,21 @@
 #include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IsExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
+#include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/EmptyStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/GotoCaseStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/GotoDefaultStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/GotoStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ThrowStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
@@ -55,6 +63,7 @@
 #include "Decompiler/Semantics/ConversionFactories.hpp"
 #include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/Semantics/ResolveResult.hpp"
+#include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/NormalizeTypeVisitor.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
@@ -195,6 +204,12 @@ TranslatedStatement StatementBuilder::Visit(IL::ILInstruction* inst)
             return VisitRethrow(inst);
         case IL::OpCode::YieldReturn:
             return VisitYieldReturn(inst);
+        case IL::OpCode::Initblk:
+            return VisitInitblk(inst);
+        case IL::OpCode::Cpblk:
+            return VisitCpblk(inst);
+        case IL::OpCode::Ckfinite:
+            return VisitCkfinite(inst);
         default:
             return Default(inst);
     }
@@ -443,6 +458,78 @@ std::string StatementBuilder::EnsureUniqueLabel(IL::Block* block)
     dup->second++;
     labels.emplace(block, label);
     return label;
+}
+
+// The C# `protected internal override TranslatedStatement VisitInitblk(Initblk
+// inst)` (lines 1609-1623): the Unsafe.InitBlock / Unsafe.InitBlockUnaligned
+// intrinsic call over the (address, value, size) translations, with the
+// '// IL initblk instruction' comment as leading trivia.
+TranslatedStatement StatementBuilder::VisitInitblk(IL::ILInstruction* inst)
+{
+    auto* initblk = static_cast<IL::Initblk*>(inst);
+    // The translates are sequenced through named locals (the C# evaluates the
+    // argument array left to right; C++ argument evaluation order is
+    // unspecified -- the established porting convention).
+    Syntax::Expression* address = exprBuilder->Translate(initblk->Address.get()).Expression();
+    Syntax::Expression* value = exprBuilder->Translate(initblk->Value.get()).Expression();
+    Syntax::Expression* size = exprBuilder->Translate(initblk->Size.get()).Expression();
+    auto* stmt = new Syntax::ExpressionStatement(
+        exprBuilder->CallUnsafeIntrinsic(
+            initblk->UnalignedPrefix != 0 ? "InitBlockUnaligned" : "InitBlock",
+            {address, value, size},
+            exprBuilder->compilation->FindType(TS::KnownTypeCode::Void), inst)
+            .Expression());
+    stmt->AddLeadingTrivia(new Syntax::Comment(" IL initblk instruction"));
+    return WithILInstruction(*stmt, inst);
+}
+
+// The C# `protected internal override TranslatedStatement VisitCpblk(Cpblk inst)`
+// (lines 1627-1641): the Unsafe.CopyBlock / Unsafe.CopyBlockUnaligned sibling.
+TranslatedStatement StatementBuilder::VisitCpblk(IL::ILInstruction* inst)
+{
+    auto* cpblk = static_cast<IL::Cpblk*>(inst);
+    Syntax::Expression* destAddress =
+        exprBuilder->Translate(cpblk->DestAddress.get()).Expression();
+    Syntax::Expression* sourceAddress =
+        exprBuilder->Translate(cpblk->SourceAddress.get()).Expression();
+    Syntax::Expression* size = exprBuilder->Translate(cpblk->Size.get()).Expression();
+    auto* stmt = new Syntax::ExpressionStatement(
+        exprBuilder->CallUnsafeIntrinsic(
+            cpblk->UnalignedPrefix != 0 ? "CopyBlockUnaligned" : "CopyBlock",
+            {destAddress, sourceAddress, size},
+            exprBuilder->compilation->FindType(TS::KnownTypeCode::Void), inst)
+            .Expression());
+    stmt->AddLeadingTrivia(new Syntax::Comment(" IL cpblk instruction"));
+    return WithILInstruction(*stmt, inst);
+}
+
+// The C# `protected internal override TranslatedStatement VisitCkfinite(Ckfinite
+// inst)` (lines 1645-1669): the `if (!float.IsFinite(<arg>)) throw new
+// ArithmeticException();` guard.
+TranslatedStatement StatementBuilder::VisitCkfinite(IL::ILInstruction* inst)
+{
+    auto* ckfinite = static_cast<IL::Ckfinite*>(inst);
+    auto* isFiniteCall = new Syntax::InvocationExpression();
+    auto* target = new Syntax::MemberReferenceExpression();
+    target->Target(new Syntax::TypeReferenceExpression(new Syntax::PrimitiveType("float")));
+    target->MemberName("IsFinite");
+    isFiniteCall->Target(target);
+    isFiniteCall->Arguments().Add(
+        exprBuilder->Translate(ckfinite->Argument.get()).Expression());
+    // The C# `typeSystem.FindType(typeof(ArithmeticException))` -- the Type input
+    // resolves through the full name over the compilation's modules (the port's
+    // FindType(compilation, FullTypeName) form).
+    TS::ITypePtr arithmeticException =
+        TS::FindType(*typeSystem, TS::FullTypeName("System.ArithmeticException"));
+    auto* arithmeticExceptionSyntax = new Syntax::SimpleType("ArithmeticException");
+    arithmeticExceptionSyntax->AddAnnotation(
+        std::make_shared<Sem::TypeResolveResult>(arithmeticException));
+    return WithILInstruction(
+        *new Syntax::IfElseStatement(
+            new Syntax::UnaryOperatorExpression(isFiniteCall, Syntax::UnaryOperatorType::Not),
+            new Syntax::ThrowStatement(
+                new Syntax::ObjectCreateExpression(arithmeticExceptionSyntax))),
+        inst);
 }
 
 }  // namespace ILSpy::Decompiler::CSharp

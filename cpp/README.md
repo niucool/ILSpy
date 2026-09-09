@@ -2743,6 +2743,32 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   passed / the 2 standing skips / zero regressions, and all four CLI baselines unchanged
   (--csharp mscorlib 10106366 bytes, --il whole-module byte-identical to the 41246545-byte
   real-ilspycmd gold, -l c 109438, the --json usage check rc 64).
+- **`StatementBuilder` slice 3 -- the initblk/cpblk/ckfinite leaf arms** -- the three
+  small statement arms the C# keeps at the file end (`StatementBuilder.cs` lines
+  1609-1670): `VisitInitblk` (the `Unsafe.InitBlock` / `Unsafe.InitBlockUnaligned`
+  intrinsic call over the (address, value, size) translations -- the nonzero
+  `UnalignedPrefix` selects the *Unaligned spelling -- with the
+  `// IL initblk instruction` comment as leading trivia), its `VisitCpblk` sibling
+  (`CopyBlock`/`CopyBlockUnaligned`, the `// IL cpblk instruction` comment), and
+  `VisitCkfinite` (the `if (!float.IsFinite(<arg>)) throw new ArithmeticException();`
+  guard: the `UnaryOperatorExpression(Not)` condition over a
+  `TypeReferenceExpression(PrimitiveType("float"))`.`IsFinite` invocation, the
+  `ObjectCreateExpression` over a `SimpleType("ArithmeticException")` annotated with
+  the type-system `FindType(compilation, FullTypeName("System.ArithmeticException"))`
+  resolve result -- an UnknownType over the minimal corlib -- and no else arm).
+  Supporting IL-node surface: the new `Ckfinite` node (a Void-result
+  `UnaryInstruction` with `MayThrow`; the seed reader keeps its no-op placeholder,
+  tests drive the node by hand) and the `Initblk`/`Cpblk` block-memory nodes (three
+  inlineable children in Address/Value/Size resp. DestAddress/SourceAddress/Size
+  slot order, Void result, `MayThrow|SideEffect` direct flags, the
+  `volatile.`/`unaligned(<n>).` prefixes rendered before the lowercase opcode in the
+  dump, the clone cases carrying every scalar). Verified by 7 new `StatementBuilderTest`
+  tests (4 Visit drives + the node/dump/clone matrix), proven by a RED round where
+  exactly the 4 Visit tests failed before the switch cases were wired, then restored
+  green; full suite 12304 ran / 12302 passed / the 2 standing skips / zero
+  regressions, and all four CLI baselines unchanged (--csharp mscorlib 10106366
+  bytes, --il whole-module byte-identical to the 41246545-byte real-ilspycmd gold,
+  -l c 109438, the --json usage check rc 64).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

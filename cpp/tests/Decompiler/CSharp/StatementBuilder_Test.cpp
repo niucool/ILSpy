@@ -33,9 +33,16 @@
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ErrorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IsExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
+#include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
@@ -72,6 +79,7 @@
 #include "Decompiler/Semantics/ConstantResolveResult.hpp"
 #include "Decompiler/Semantics/ConversionFactories.hpp"
 #include "Decompiler/Semantics/ConversionResolveResult.hpp"
+#include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
@@ -883,6 +891,242 @@ TEST(StatementBuilderTest, ILFunctionKindClones)
     auto* topLevelCloneTyped = dynamic_cast<IL::ILFunction*>(topLevelClone.get());
     ASSERT_TRUE(topLevelCloneTyped != nullptr);
     EXPECT_EQ(topLevelCloneTyped->Kind, IL::ILFunctionKind::TopLevelFunction);
+}
+
+// ---------------------------------------------------------------------------
+// The small leaf statement arms: initblk/cpblk/ckfinite
+// ---------------------------------------------------------------------------
+
+// initblk renders the Unsafe.InitBlock intrinsic over the (address, value, size)
+// translations with the `// IL initblk instruction` leading-trivia comment.
+TEST(StatementBuilderTest, VisitInitblkRendersUnsafeInitBlock)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto pointer = fixture.MakeLocal(TS::KnownTypeCode::IntPtr, "ptr");
+    IL::Initblk initblk(std::make_unique<IL::LdLoca>(pointer),
+                        std::make_unique<IL::LdcI4>(0), std::make_unique<IL::LdcI4>(8));
+    auto* stmt = builder.Convert(&initblk);
+    auto* expressionStatement = dynamic_cast<Syntax::ExpressionStatement*>(stmt);
+    ASSERT_TRUE(expressionStatement != nullptr);
+    auto* invocation = dynamic_cast<Syntax::InvocationExpression*>(expressionStatement->Expression());
+    ASSERT_TRUE(invocation != nullptr);
+    auto* memberRef = dynamic_cast<Syntax::MemberReferenceExpression*>(invocation->Target());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "InitBlock");
+    EXPECT_TRUE(dynamic_cast<Syntax::TypeReferenceExpression*>(memberRef->Target()) != nullptr);
+    ASSERT_EQ(invocation->Arguments().Count(), std::size_t(3));
+    // The leading trivia carries the IL comment.
+    const auto trivia = stmt->LeadingTrivia();
+    ASSERT_EQ(trivia.size(), std::size_t(1));
+    auto* comment = dynamic_cast<Syntax::Comment*>(trivia[0]);
+    ASSERT_TRUE(comment != nullptr);
+    EXPECT_EQ(comment->Content(), " IL initblk instruction");
+    const auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(1));
+    EXPECT_EQ(instructions[0], &initblk);
+}
+
+// cpblk renders the Unsafe.CopyBlock intrinsic with the `// IL cpblk instruction`
+// comment.
+TEST(StatementBuilderTest, VisitCpblkRendersUnsafeCopyBlock)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto dest = fixture.MakeLocal(TS::KnownTypeCode::IntPtr, "dest");
+    auto source = fixture.MakeLocal(TS::KnownTypeCode::IntPtr, "src");
+    IL::Cpblk cpblk(std::make_unique<IL::LdLoca>(dest),
+                    std::make_unique<IL::LdLoca>(source), std::make_unique<IL::LdcI4>(16));
+    auto* stmt = builder.Convert(&cpblk);
+    auto* expressionStatement = dynamic_cast<Syntax::ExpressionStatement*>(stmt);
+    ASSERT_TRUE(expressionStatement != nullptr);
+    auto* invocation = dynamic_cast<Syntax::InvocationExpression*>(expressionStatement->Expression());
+    ASSERT_TRUE(invocation != nullptr);
+    auto* memberRef = dynamic_cast<Syntax::MemberReferenceExpression*>(invocation->Target());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "CopyBlock");
+    ASSERT_EQ(invocation->Arguments().Count(), std::size_t(3));
+    const auto trivia = stmt->LeadingTrivia();
+    ASSERT_EQ(trivia.size(), std::size_t(1));
+    auto* comment = dynamic_cast<Syntax::Comment*>(trivia[0]);
+    ASSERT_TRUE(comment != nullptr);
+    EXPECT_EQ(comment->Content(), " IL cpblk instruction");
+    const auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(1));
+    EXPECT_EQ(instructions[0], &cpblk);
+}
+
+// A nonzero UnalignedPrefix selects the *Unaligned intrinsic (and renders the
+// `unaligned(<n>).` prefix in the node's own dump).
+TEST(StatementBuilderTest, UnalignedPrefixSelectsUnalignedIntrinsic)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto pointer = fixture.MakeLocal(TS::KnownTypeCode::IntPtr, "ptr");
+    IL::Initblk initblk(std::make_unique<IL::LdLoca>(pointer),
+                        std::make_unique<IL::LdcI4>(0), std::make_unique<IL::LdcI4>(4));
+    initblk.UnalignedPrefix = 1;
+    auto* stmt = builder.Convert(&initblk);
+    auto* expressionStatement = dynamic_cast<Syntax::ExpressionStatement*>(stmt);
+    ASSERT_TRUE(expressionStatement != nullptr);
+    auto* invocation = dynamic_cast<Syntax::InvocationExpression*>(expressionStatement->Expression());
+    ASSERT_TRUE(invocation != nullptr);
+    auto* memberRef = dynamic_cast<Syntax::MemberReferenceExpression*>(invocation->Target());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "InitBlockUnaligned");
+    // The node's own dump carries the prefix before the opcode.
+    std::string dump;
+    initblk.WriteTo(dump);
+    EXPECT_NE(dump.find("unaligned(1).initblk("), std::string::npos);
+}
+
+// ckfinite renders the `if (!float.IsFinite(<arg>)) throw new
+// ArithmeticException();` guard; the exception type annotation is the
+// type-system FindType result.
+TEST(StatementBuilderTest, VisitCkfiniteRendersFloatIsFiniteGuard)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto value = fixture.MakeLocal(TS::KnownTypeCode::Single, "f");
+    IL::Ckfinite ckfinite(std::make_unique<IL::LdLoc>(value));
+    auto* stmt = builder.Convert(&ckfinite);
+    auto* ifElse = dynamic_cast<Syntax::IfElseStatement*>(stmt);
+    ASSERT_TRUE(ifElse != nullptr);
+    // The condition is `!float.IsFinite(arg)`.
+    auto* notExpr = dynamic_cast<Syntax::UnaryOperatorExpression*>(ifElse->Condition());
+    ASSERT_TRUE(notExpr != nullptr);
+    EXPECT_EQ(notExpr->Operator(), Syntax::UnaryOperatorType::Not);
+    auto* invocation = dynamic_cast<Syntax::InvocationExpression*>(notExpr->Expression());
+    ASSERT_TRUE(invocation != nullptr);
+    auto* memberRef = dynamic_cast<Syntax::MemberReferenceExpression*>(invocation->Target());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "IsFinite");
+    auto* typeRef = dynamic_cast<Syntax::TypeReferenceExpression*>(memberRef->Target());
+    ASSERT_TRUE(typeRef != nullptr);
+    auto* floatType = dynamic_cast<Syntax::PrimitiveType*>(typeRef->Type());
+    ASSERT_TRUE(floatType != nullptr);
+    EXPECT_EQ(floatType->Keyword(), "float");
+    ASSERT_EQ(invocation->Arguments().Count(), std::size_t(1));
+    auto* operand = dynamic_cast<Syntax::IdentifierExpression*>(invocation->Arguments().FirstOrNull());
+    ASSERT_TRUE(operand != nullptr);
+    EXPECT_EQ(operand->Identifier(), "f");
+    // The true arm throws a fresh ArithmeticException; the false arm is absent.
+    auto* throwStmt = dynamic_cast<Syntax::ThrowStatement*>(ifElse->TrueStatement());
+    ASSERT_TRUE(throwStmt != nullptr);
+    auto* create = dynamic_cast<Syntax::ObjectCreateExpression*>(throwStmt->Expression());
+    ASSERT_TRUE(create != nullptr);
+    auto* simpleType = dynamic_cast<Syntax::SimpleType*>(create->Type());
+    ASSERT_TRUE(simpleType != nullptr);
+    EXPECT_EQ(simpleType->Identifier(), "ArithmeticException");
+    // The type node carries the TypeResolveResult annotation (the type-system
+    // FindType result -- an UnknownType over the minimal corlib, which carries
+    // the full name).
+    const auto* typeRR = simpleType->Annotation<Sem::TypeResolveResult>();
+    ASSERT_TRUE(typeRR != nullptr);
+    EXPECT_EQ(typeRR->Type().ReflectionName(), "System.ArithmeticException");
+    EXPECT_TRUE(ifElse->FalseStatement() == nullptr);
+    const auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(1));
+    EXPECT_EQ(instructions[0], &ckfinite);
+}
+
+// The node shapes: ckfinite is a Void-result unary instruction, and the block
+// memory instructions are Void-result 3-child instructions with
+// MayThrow|SideEffect direct flags.
+TEST(StatementBuilderTest, BlockMemoryInstructionNodeShapes)
+{
+    IL::Ckfinite ckfinite(std::make_unique<IL::LdcI4>(1));
+    EXPECT_EQ(ckfinite.Op, IL::OpCode::Ckfinite);
+    EXPECT_EQ(ckfinite.ChildCount(), 1);
+    EXPECT_EQ(ckfinite.ResultType(), IL::StackType::Void);
+    EXPECT_EQ(ckfinite.DirectFlags(), IL::InstructionFlags::MayThrow);
+    std::string dump;
+    ckfinite.WriteTo(dump);
+    EXPECT_NE(dump.find("ckfinite(ldc.i4(1)"), std::string::npos) << dump;
+
+    IL::Initblk initblk(std::make_unique<IL::LdNull>(), std::make_unique<IL::LdcI4>(0),
+                        std::make_unique<IL::LdcI4>(8));
+    EXPECT_EQ(initblk.Op, IL::OpCode::Initblk);
+    EXPECT_EQ(initblk.ChildCount(), 3);
+    EXPECT_EQ(initblk.ResultType(), IL::StackType::Void);
+    EXPECT_EQ(initblk.DirectFlags(), IL::InstructionFlags::MayThrow | IL::InstructionFlags::SideEffect);
+    dump.clear();
+    initblk.WriteTo(dump);
+    EXPECT_NE(dump.find("initblk("), std::string::npos) << dump;
+    EXPECT_EQ(dump.find("volatile."), std::string::npos) << dump;
+    EXPECT_EQ(dump.find("unaligned"), std::string::npos) << dump;
+
+    IL::Cpblk cpblk(std::make_unique<IL::LdNull>(), std::make_unique<IL::LdNull>(),
+                    std::make_unique<IL::LdcI4>(4));
+    EXPECT_EQ(cpblk.Op, IL::OpCode::Cpblk);
+    EXPECT_EQ(cpblk.ChildCount(), 3);
+    EXPECT_EQ(cpblk.ResultType(), IL::StackType::Void);
+    EXPECT_EQ(cpblk.DirectFlags(), IL::InstructionFlags::MayThrow | IL::InstructionFlags::SideEffect);
+    dump.clear();
+    cpblk.WriteTo(dump);
+    EXPECT_NE(dump.find("cpblk("), std::string::npos) << dump;
+}
+
+// The volatile./unaligned(<n>). prefixes render before the opcode, matching the
+// C# WriteToCore shape.
+TEST(StatementBuilderTest, BlockMemoryInstructionsRenderPrefixes)
+{
+    IL::Initblk initblk(std::make_unique<IL::LdNull>(), std::make_unique<IL::LdcI4>(0),
+                        std::make_unique<IL::LdcI4>(8));
+    initblk.IsVolatile = true;
+    initblk.UnalignedPrefix = 2;
+    std::string dump;
+    initblk.WriteTo(dump);
+    EXPECT_NE(dump.find("volatile.unaligned(2).initblk("), std::string::npos) << dump;
+    // The child render follows in slot order: address, value, size.
+    EXPECT_NE(dump.find("ldnull, ldc.i4(0), ldc.i4(8)"), std::string::npos) << dump;
+
+    IL::Cpblk cpblk(std::make_unique<IL::LdNull>(), std::make_unique<IL::LdNull>(),
+                    std::make_unique<IL::LdcI4>(4));
+    cpblk.UnalignedPrefix = 1;
+    dump.clear();
+    cpblk.WriteTo(dump);
+    EXPECT_NE(dump.find("unaligned(1).cpblk("), std::string::npos) << dump;
+}
+
+// The clone cases carry every scalar field.
+TEST(StatementBuilderTest, BlockMemoryInstructionsClone)
+{
+    IL::Ckfinite ckfinite(std::make_unique<IL::LdcI4>(1));
+    auto ckClone = ckfinite.Clone();
+    auto* ckCloneTyped = dynamic_cast<IL::Ckfinite*>(ckClone.get());
+    ASSERT_TRUE(ckCloneTyped != nullptr);
+    ASSERT_TRUE(ckCloneTyped->Argument != nullptr);
+    EXPECT_EQ(ckCloneTyped->Argument->Op, IL::OpCode::LdcI4);
+    EXPECT_EQ(ckCloneTyped->Argument->Parent, ckCloneTyped);
+
+    IL::Initblk initblk(std::make_unique<IL::LdNull>(), std::make_unique<IL::LdcI4>(0),
+                        std::make_unique<IL::LdcI4>(8));
+    initblk.UnalignedPrefix = 3;
+    initblk.IsVolatile = true;
+    auto initClone = initblk.Clone();
+    auto* initCloneTyped = dynamic_cast<IL::Initblk*>(initClone.get());
+    ASSERT_TRUE(initCloneTyped != nullptr);
+    EXPECT_EQ(initCloneTyped->UnalignedPrefix, 3);
+    EXPECT_EQ(initCloneTyped->IsVolatile, true);
+    ASSERT_TRUE(initCloneTyped->Address != nullptr);
+    ASSERT_TRUE(initCloneTyped->Value != nullptr);
+    ASSERT_TRUE(initCloneTyped->Size != nullptr);
+    EXPECT_EQ(initCloneTyped->Address->Parent, initClone.get());
+    EXPECT_EQ(initCloneTyped->Value->Op, IL::OpCode::LdcI4);
+    EXPECT_EQ(initCloneTyped->Size->Parent, initClone.get());
+
+    IL::Cpblk cpblk(std::make_unique<IL::LdNull>(), std::make_unique<IL::LdNull>(),
+                    std::make_unique<IL::LdcI4>(4));
+    cpblk.UnalignedPrefix = 1;
+    cpblk.IsVolatile = true;
+    auto cpClone = cpblk.Clone();
+    auto* cpCloneTyped = dynamic_cast<IL::Cpblk*>(cpClone.get());
+    ASSERT_TRUE(cpCloneTyped != nullptr);
+    EXPECT_EQ(cpCloneTyped->UnalignedPrefix, 1);
+    EXPECT_EQ(cpCloneTyped->IsVolatile, true);
+    ASSERT_TRUE(cpCloneTyped->SourceAddress != nullptr);
+    EXPECT_EQ(cpCloneTyped->SourceAddress->Parent, cpClone.get());
 }
 
 } // namespace ILSpy::Tests

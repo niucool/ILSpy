@@ -47,7 +47,9 @@
 // port, the DecompileRun convention), and the heavier Visit arms (the switch /
 // try / lock / using / foreach / pinned-region / block-container arms) -- an
 // instruction whose C# Visit method has not been ported yet degrades to the
-// Default expression statement instead of crashing.
+// Default expression statement instead of crashing. The three small leaf arms
+// the C# keeps at the file end (initblk/cpblk/ckfinite, lines 1609-1670) have
+// landed beside the other leaf arms.
 //
 // The goto/leave state (StatementBuilder.cs lines 338-373 + 1576-1597) landed
 // with the leaf arms: the block->label maps (labels/duplicateLabels +
@@ -91,6 +93,9 @@ class Leave;
 class Throw;
 class Rethrow;
 class YieldReturn;
+class Ckfinite;
+class Cpblk;
+class Initblk;
 }  // namespace ILSpy::Decompiler::IL
 
 namespace ILSpy::Decompiler::CSharp {
@@ -262,6 +267,15 @@ private:
     // YieldReturn inst)` (lines 434-444): the yield return statement over the
     // element-typed value (the async return type, else the IEnumerable unwrap).
     TranslatedStatement VisitYieldReturn(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement VisitInitblk(Initblk
+    // inst)` (lines 1609-1623): the Unsafe.InitBlock/InitBlockUnaligned intrinsic
+    // call over the (address, value, size) translations with the IL comment trivia.
+    TranslatedStatement VisitInitblk(IL::ILInstruction* inst);
+    // The C# VisitCpblk sibling (lines 1627-1641): Unsafe.CopyBlock/CopyBlockUnaligned.
+    TranslatedStatement VisitCpblk(IL::ILInstruction* inst);
+    // The C# VisitCkfinite (lines 1645-1669): the `if (!float.IsFinite(<arg>)) throw
+    // new ArithmeticException();` guard.
+    TranslatedStatement VisitCkfinite(IL::ILInstruction* inst);
 };
 
 }  // namespace ILSpy::Decompiler::CSharp
