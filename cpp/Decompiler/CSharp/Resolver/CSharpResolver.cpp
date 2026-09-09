@@ -42,6 +42,7 @@
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
 #include "Decompiler/Semantics/AmbiguousResolveResult.hpp"
 #include "Decompiler/Semantics/ArrayAccessResolveResult.hpp"
+#include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
 #include "Decompiler/Semantics/ConstantResolveResult.hpp"
 #include "Decompiler/Semantics/ConversionFactories.hpp"
@@ -4114,6 +4115,113 @@ std::any CSharpResolver::GetDefaultValue(const ILSpy::Decompiler::TypeSystem::IT
         default:
             return std::any();
     }
+}
+
+// ---- ResolveArrayCreation region (CSharpResolver.cs lines 2880-2935) ----------------------
+
+// The C# `public ArrayCreateResolveResult ResolveArrayCreation(IType elementType, int[]
+// sizeArguments, ResolveResult[] initializerElements = null)` (line 2881) -- see
+// CSharpResolver.hpp for the port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ArrayCreateResolveResult>
+CSharpResolver::ResolveArrayCreation(
+    ILSpy::Decompiler::TypeSystem::ITypePtr elementType,
+    std::vector<int> sizeArguments,
+    std::optional<std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>>
+        initializerElements) const
+{
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+
+    // The C# `ResolveResult[] sizeArgResults = new ResolveResult[sizeArguments.Length]` --
+    // the synthesized size-argument list (an owning `shared_ptr` per slot).
+    std::vector<std::shared_ptr<ResolveResult>> sizeArgResults;
+    sizeArgResults.reserve(sizeArguments.size());
+    for (int sizeArgument : sizeArguments) {
+        if (sizeArgument < 0) {
+            // The C# `sizeArgResults[i] = ErrorResolveResult.UnknownError` -- the static
+            // singleton the non-overloadable arms return, ported as the NON-OWNING
+            // aliasing handle over the program-lifetime singleton (the ErrorResultSingleton
+            // helper's empty-owner aliasing constructor; no deleter ever runs).
+            sizeArgResults.push_back(ErrorResultSingleton());
+        } else {
+            // The C# `new ConstantResolveResult(compilation.FindType(KnownTypeCode.Int32),
+            // sizeArguments[i])` -- the registered Int32's owning handle recovered through
+            // `shared_from_this` (the D517 convention), the boxed int the `std::any` value.
+            sizeArgResults.push_back(std::make_shared<ILSpy::Decompiler::Semantics::ConstantResolveResult>(
+                std::const_pointer_cast<ILSpy::Decompiler::TypeSystem::IType>(
+                    compilation_.FindType(KnownTypeCode::Int32).shared_from_this()),
+                std::any(sizeArgument)));
+        }
+    }
+    return ResolveArrayCreation(std::move(elementType), std::move(sizeArgResults),
+                                std::move(initializerElements));
+}
+
+// The C# `public ArrayCreateResolveResult ResolveArrayCreation(IType elementType,
+// ResolveResult[] sizeArguments, ResolveResult[] initializerElements = null)` (line 2910)
+// -- see CSharpResolver.hpp for the port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ArrayCreateResolveResult>
+CSharpResolver::ResolveArrayCreation(
+    ILSpy::Decompiler::TypeSystem::ITypePtr elementType,
+    std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> sizeArguments,
+    std::optional<std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>>
+        initializerElements) const
+{
+    using ILSpy::Decompiler::CSharp::Resolver::TypeInferenceAlgorithm;
+    using ILSpy::Decompiler::Semantics::ArrayCreateResolveResult;
+    using ILSpy::Decompiler::TypeSystem::ArrayType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+
+    // The C# `int dimensions = sizeArguments.Length; if (dimensions == 0) throw new
+    // ArgumentException("sizeArguments.Length must not be 0")` -- the C#
+    // `ArgumentException` family (the `GetDelegateInvokeMethod` null-argument
+    // std::invalid_argument precedent is the ArgumentNullException arm; the
+    // ArgumentException analog the CSharpResolver conventions map to
+    // `std::invalid_argument` too, carrying the message).
+    int dimensions = static_cast<int>(sizeArguments.size());
+    if (dimensions == 0)
+        throw std::invalid_argument("sizeArguments.Length must not be 0");
+    if (!elementType) {
+        // The C# `TypeInference typeInference = new TypeInference(compilation, conversions);
+        // elementType = typeInference.GetBestCommonType(initializerElements, out _)` --
+        // the resolver's OWN conversions instance threads through (NOT the
+        // per-compilation cached pair), the algorithm at its CSharp4 default, and the C#
+        // discards the out `success` (`out _`). The C# `GetBestCommonType(null)` throws
+        // ArgumentNullException -- a no-initializer implicitly-typed creation has no
+        // inference input; the port's `std::invalid_argument` is that throw (the C#
+        // ArgumentNullException-to-std::invalid_argument convention).
+        if (!initializerElements.has_value())
+            throw std::invalid_argument("expressions");
+        bool success = false; // the C# discards the out `success` (`out _`)
+        elementType = ILSpy::Decompiler::CSharp::Resolver::Detail::GetBestCommonType(
+            compilation_, conversions_, *initializerElements, success,
+            TypeInferenceAlgorithm::CSharp4);
+    }
+    // The C# `IType arrayType = new ArrayType(compilation, elementType, dimensions)` --
+    // one dimension is the SZ-array shape, more are the multi-dimensional rank (the
+    // ExpressionBuilder `newArr` convention over the port's two ArrayType ctors).
+    ITypePtr arrayType = dimensions == 1
+                             ? std::make_shared<ArrayType>(elementType)
+                             : std::make_shared<ArrayType>(elementType, dimensions);
+
+    // The C# `AdjustArrayAccessArguments(sizeArguments)` -- the int32/uint32/int64/uint64
+    // chain re-binds the caller's elements in place.
+    AdjustArrayAccessArguments(sizeArguments);
+
+    if (initializerElements.has_value()) {
+        // The C# `initializerElements[i] = Convert(initializerElements[i], elementType)` --
+        // the element type may be the INFERRED one, so the re-bind reads the current local.
+        for (std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& initializerElement :
+             *initializerElements) {
+            initializerElement = Convert(std::move(initializerElement), *elementType);
+        }
+    }
+    // The C# `new ArrayCreateResolveResult(arrayType, sizeArguments, initializerElements)`
+    // -- the arrays the C# may have mutated in place are the RESULT's lists here (the
+    // caller sees the adjusted sizes and converted initializers through the result).
+    return std::make_shared<ArrayCreateResolveResult>(
+        std::move(arrayType), std::move(sizeArguments), std::move(initializerElements));
 }
 
 // The C# `public ResolveResult ResolveAssignment(AssignmentOperatorType op,

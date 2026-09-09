@@ -2610,6 +2610,33 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   proven with a 2-behavior neuter RED round (the typeHint names read + the
   NamedArgumentExpression arm) then restored green; full suite 12253 ran / 12251 passed /
   the 2 standing skips / zero regressions.
+- **`CSharpResolver` region 20 -- `ResolveArrayCreation` (the LAST CSharpResolver
+  region)** -- `CSharp.{hpp,cpp}` now carries the two public `ResolveArrayCreation`
+  overloads (CSharpResolver.cs lines 2880-2935), completing the 2986-line `CSharpResolver`
+  class's region set (every C# `Resolve*` / helper region of the mega-class is now ported):
+  the `int[]` size convenience (each non-negative size materializes as a
+  `ConstantResolveResult` over the REGISTERED `System.Int32`, a NEGATIVE size the
+  `ErrorResolveResult.UnknownError` singleton as the non-owning aliasing handle) delegating
+  to the core entry (zero size arguments is the C# `ArgumentException` analog
+  `std::invalid_argument`; a NULL element type infers the best common type of the
+  initializers through the `TypeInference` `GetBestCommonType` free function over the
+  resolver's OWN `conversions` instance with the CSharp4 default -- the no-initializer
+  shape is the C# `GetBestCommonType(null)` `ArgumentNullException` analog; the array type
+  is a fresh multi-dimensional `ArrayType` with rank == dimensions, a rank-1 creation the
+  port's SZ-array shape per the ExpressionBuilder `newArr` convention; the size arguments
+  are adjusted IN PLACE through `AdjustArrayAccessArguments`'s
+  int32/uint32/int64/uint64 chain with the non-convertible size the Convert-under-None wrap
+  over Int32; each initializer re-binds through `Convert`, an identity match returning the
+  SAME instance). Verified by 11 new tests over the fresh-`LookupCompilation` fixture with
+  the registered codes the conversion machinery resolves through FindType (the
+  CSharpResolverIndexer four-size-code set + Object + NullableOfT -- the unregistered-code
+  `bad_weak_ptr` trap reconfirmed through three `PROBE` bisect rounds), proven with a
+  2-behavior neuter RED round (the negative-size singleton arm + the initializer `Convert`
+  re-bind: exactly the 4 predicted failures) then restored green; full suite 12264 ran /
+  12262 passed / the 2 standing skips / zero regressions, and all four CLI baselines
+  unchanged (--csharp mscorlib 10106366 bytes byte-identical run-over-run, --il whole-module
+  byte-identical to the 41246545-byte real-ilspycmd gold, -l c 109438, the --json-without-
+  dump-table usage check rc 64).
 - **`ExpressionBuilder` TranslateTarget call-target arm + the IL match helpers**
   -- `ExpressionBuilder::TranslateTarget` (ExpressionBuilder.cs lines 2734-2844:
   the call/field target translation the `CallBuilder.Build` entry and the
