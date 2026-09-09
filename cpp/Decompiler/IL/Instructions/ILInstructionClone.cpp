@@ -64,6 +64,7 @@
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdObjIfRef.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/YieldReturn.hpp"
 #include "Decompiler/IL/Instructions/LockInstruction.hpp"
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
@@ -217,6 +218,11 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         case OpCode::Leave: {
             const auto& s = static_cast<const Leave&>(*this);
             c = std::make_unique<Leave>(s.TargetContainer, s.Value ? s.Value->Clone() : nullptr);
+            break;
+        }
+        case OpCode::YieldReturn: {
+            const auto& s = static_cast<const YieldReturn&>(*this);
+            c = std::make_unique<YieldReturn>(s.Value ? s.Value->Clone() : nullptr);
             break;
         }
 
@@ -550,6 +556,7 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             auto clone = std::make_unique<ILFunction>();
             clone->IsConstructor = s.IsConstructor;
             clone->IsStatic = s.IsStatic;
+            clone->Kind = s.Kind;
             clone->IsIterator = s.IsIterator;
             clone->AsyncReturnType = s.AsyncReturnType;
             clone->ReturnType = s.ReturnType;

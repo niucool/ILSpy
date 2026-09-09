@@ -34,6 +34,18 @@
 
 namespace ILSpy::Decompiler::IL {
 
+// The C# `public enum ILFunctionKind` (ILFunction.cs lines 466-486): which
+// producer created the function. TopLevelFunction is the default for a method,
+// accessor, constructor, destructor or operator; Delegate/ExpressionTree are
+// introduced by DelegateConstruction / TransformExpressionTrees; LocalFunction
+// by LocalFunctionDecompiler.
+enum class ILFunctionKind {
+    TopLevelFunction,
+    Delegate,
+    ExpressionTree,
+    LocalFunction,
+};
+
 class ILFunction : public ILInstruction {
 public:
     std::unique_ptr<BlockContainer> Body;
@@ -66,6 +78,13 @@ public:
     // by tests and later by the reader. Non-owning: the type system owns methods
     // (the C# GC reference).
     TypeSystem::IMethod* Method = nullptr;
+
+    // The C# `public ILFunctionKind Kind` (ILFunction.cs line 173): the function's
+    // kind. The C# `internal set` throws when re-kinding a TopLevelFunction or
+    // LocalFunction -- the port's field carries no such guard (the plain-field
+    // convention; the C# discipline is enforced by the pipeline order, not by a
+    // runtime check the port can see).
+    ILFunctionKind Kind = ILFunctionKind::TopLevelFunction;
 
     // The C# `public bool IsIterator` field (the YieldReturnDecompiler sets it):
     // whether this function is a compiler-generated iterator MoveNext. The

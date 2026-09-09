@@ -26,22 +26,87 @@
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/ExpressionBuilder.hpp"
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IsExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/EmptyStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/GotoCaseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/GotoDefaultStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/GotoStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ThrowStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/YieldReturnStatement.hpp"
+#include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
+#include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
+#include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/IL/Instructions/YieldReturn.hpp"
+#include "Decompiler/NRExtensions.hpp"
+#include "Decompiler/Semantics/Conversion.hpp"
+#include "Decompiler/Semantics/ConversionFactories.hpp"
+#include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/Semantics/ResolveResult.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/TypeSystem/NormalizeTypeVisitor.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
 #include <stdexcept>
 #include <utility>
 
 namespace ILSpy::Decompiler::CSharp {
+
+// The file-local annotation-bridge helper (the CallBuilder.cpp convention): the
+// shared_ptr owning the resolve-result annotation on an expression, for callers
+// that need to store it inside another resolve result.
+std::shared_ptr<Sem::ResolveResult> SharedResolveResultAnnotation(
+    const Syntax::Expression& expr)
+{
+    for (const auto& a : expr.SharedAnnotations())
+    {
+        if (dynamic_cast<Sem::ResolveResult*>(a.get()) != nullptr)
+            return std::static_pointer_cast<Sem::ResolveResult>(a);
+    }
+    return nullptr;
+}
+
+// The C# `static bool IsPossibleLossOfTypeInformation(IType givenType, IType
+// expectedType)` local function inside VisitLeave (StatementBuilder.cs lines
+// 404-419): whether the return-value conversion loses type information a cast can
+// preserve (tuple-vs-underlying identity, 'dynamic', the null literal's type).
+bool IsPossibleLossOfTypeInformation(const TS::IType& givenType,
+                                     const TS::IType& expectedType)
+{
+    if (::ILSpy::Decompiler::ContainsAnonymousType(expectedType))
+        return false;
+    // The C# `NormalizeTypeVisitor.IgnoreNullability.EquivalentTypes(givenType,
+    // expectedType)` -- non-const refs (the established const_cast convention).
+    if (TS::NormalizeTypeVisitor::IgnoreNullability().EquivalentTypes(
+            const_cast<TS::IType&>(givenType), const_cast<TS::IType&>(expectedType)))
+        return false;
+    // The C# `expectedType is TupleType { ElementNames.IsEmpty: false }`: any tuple
+    // with at least one element (the C# ctor fills the names with nulls when not
+    // provided, so IsEmpty tracks the element count, not real names).
+    if (const auto* tuple = dynamic_cast<const TS::TupleType*>(&expectedType);
+        tuple != nullptr && !tuple->ElementNames().empty())
+        return true;
+    // The C# `expectedType == SpecialType.Dynamic` / `givenType ==
+    // SpecialType.NullType` -- reference equality against the singletons; the
+    // port's Kind-based convention (the CSharpConversionsHelpers convention).
+    if (expectedType.Kind() == TS::TypeKind::Dynamic)
+        return true;
+    if (givenType.Kind() == TS::TypeKind::Null)
+        return true;
+    return false;
+}
 
 StatementBuilder::~StatementBuilder() = default;
 
@@ -120,6 +185,16 @@ TranslatedStatement StatementBuilder::Visit(IL::ILInstruction* inst)
             return VisitNop(inst);
         case IL::OpCode::IfInstruction:
             return VisitIfInstruction(inst);
+        case IL::OpCode::Branch:
+            return VisitBranch(inst);
+        case IL::OpCode::Leave:
+            return VisitLeave(inst);
+        case IL::OpCode::Throw:
+            return VisitThrow(inst);
+        case IL::OpCode::Rethrow:
+            return VisitRethrow(inst);
+        case IL::OpCode::YieldReturn:
+            return VisitYieldReturn(inst);
         default:
             return Default(inst);
     }
@@ -205,6 +280,169 @@ TranslatedStatement StatementBuilder::VisitIfInstruction(IL::ILInstruction* inst
         falseStatement = Convert(ifInst->FalseInst.get());
     return WithILInstruction(
         *new Syntax::IfElseStatement(condition, trueStatement, falseStatement), inst);
+}
+
+// The C# `protected internal override TranslatedStatement VisitBranch(Branch inst)`
+// (lines 347-362): a branch renders as the continue / goto-case / goto-label fix --
+// the continue-target arm first, the case-label mapping second, and the deduped
+// block-label goto last.
+TranslatedStatement StatementBuilder::VisitBranch(IL::ILInstruction* inst)
+{
+    auto* branch = static_cast<IL::Branch*>(inst);
+    if (branch->TargetBlock == continueTarget)
+    {
+        continueCount++;
+        return WithILInstruction(*new Syntax::ContinueStatement(), inst);
+    }
+    if (caseLabelMapping)
+    {
+        auto it = caseLabelMapping->find(branch->TargetBlock);
+        if (it != caseLabelMapping->end())
+        {
+            if (it->second == nullptr)
+                return WithILInstruction(*new Syntax::GotoDefaultStatement(), inst);
+            auto caseValue =
+                exprBuilder->ConvertConstantValue(it->second, /*allowImplicitConversion*/ true);
+            return WithILInstruction(*new Syntax::GotoCaseStatement(caseValue.Expression()),
+                                     inst);
+        }
+    }
+    return WithILInstruction(
+        *new Syntax::GotoStatement(EnsureUniqueLabel(branch->TargetBlock)), inst);
+}
+
+// The C# `protected internal override TranslatedStatement VisitLeave(Leave inst)`
+// (lines 377-423): the break / yield-break / return / goto-end fix. The port's
+// nullable Leave::Value maps the C#'s non-nullable Value-with-Nop normalization: a
+// null Value behaves as the C#'s `MatchNop() == true` (a value-less leave).
+TranslatedStatement StatementBuilder::VisitLeave(IL::ILInstruction* inst)
+{
+    auto* leave = static_cast<IL::Leave*>(inst);
+    if (leave->TargetContainer == breakTarget)
+        return WithILInstruction(*new Syntax::BreakStatement(), inst);
+    if (leave->TargetContainer == currentReturnContainer)
+    {
+        if (currentIsIterator)
+            return WithILInstruction(*new Syntax::YieldBreakStatement(), inst);
+        // A null Value is the port's shape of the C#'s Nop value (the value-less
+        // leave), so it counts as MatchNop() == true.
+        bool isNopValue =
+            leave->Value == nullptr || dynamic_cast<IL::Nop*>(leave->Value.get()) != nullptr;
+        if (!isNopValue)
+        {
+            // The C# `currentFunction.Kind is ILFunctionKind.ExpressionTree or
+            // ILFunctionKind.Delegate` -- the lambda/expr-tree cast arm's gate.
+            bool isLambdaOrExprTree = currentFunction->Kind == IL::ILFunctionKind::ExpressionTree
+                                   || currentFunction->Kind == IL::ILFunctionKind::Delegate;
+            assert(currentResultType != nullptr
+                   && "VisitLeave: currentResultType must be set for a value-returning leave");
+            TS::IType& resultType = const_cast<TS::IType&>(*currentResultType);
+            TranslatedExpression expr =
+                exprBuilder->Translate(leave->Value.get(), &resultType)
+                    .ConvertTo(resultType, *exprBuilder, /*checkForOverflow*/ false,
+                               /*allowImplicitConversion*/ true);
+            if (isLambdaOrExprTree && IsPossibleLossOfTypeInformation(expr.Type(), resultType))
+            {
+                expr = WithoutILInstruction(WithRR(
+                    *new Syntax::CastExpression(exprBuilder->ConvertType(resultType),
+                                                expr.Expression()),
+                    std::make_shared<Sem::ConversionResolveResult>(
+                        const_cast<TS::IType*>(currentResultType)->shared_from_this(),
+                        SharedResolveResultAnnotation(*expr.Expression()),
+                        Sem::Conversions::IdentityConversion())));
+            }
+            return WithILInstruction(*new Syntax::ReturnStatement(expr.Expression()), inst);
+        }
+        return WithILInstruction(*new Syntax::ReturnStatement(), inst);
+    }
+    std::string label;
+    auto it = endContainerLabels.find(leave->TargetContainer);
+    if (it == endContainerLabels.end())
+    {
+        label = "end_" + leave->TargetLabel();
+        auto dup = duplicateLabels.find(label);
+        if (dup == duplicateLabels.end())
+        {
+            duplicateLabels.emplace(label, 1);
+        }
+        else
+        {
+            // The C# `duplicateLabels[label]++; label += "_" + (count + 1);` -- the
+            // suffix uses the pre-increment count (read before the increment).
+            int count = dup->second;
+            dup->second++;
+            label += "_" + std::to_string(count + 1);
+        }
+        endContainerLabels.emplace(leave->TargetContainer, label);
+    }
+    else
+    {
+        label = it->second;
+    }
+    return WithILInstruction(*new Syntax::GotoStatement(label), inst);
+}
+
+// The C# `protected internal override TranslatedStatement VisitThrow(Throw inst)`
+// (lines 424-427): the throw statement over the translated argument.
+TranslatedStatement StatementBuilder::VisitThrow(IL::ILInstruction* inst)
+{
+    auto* throwInst = static_cast<IL::Throw*>(inst);
+    return WithILInstruction(
+        *new Syntax::ThrowStatement(exprBuilder->Translate(throwInst->Argument.get()).Expression()),
+        inst);
+}
+
+// The C# `protected internal override TranslatedStatement VisitRethrow(Rethrow
+// inst)` (lines 429-432): a bare throw statement (no expression).
+TranslatedStatement StatementBuilder::VisitRethrow(IL::ILInstruction* inst)
+{
+    return WithILInstruction(*new Syntax::ThrowStatement(), inst);
+}
+
+// The C# `protected internal override TranslatedStatement VisitYieldReturn(
+// YieldReturn inst)` (lines 434-444): the yield return statement over the value
+// converted to the element type -- the async return type when the function is an
+// async iterator, else the IEnumerable unwrap of the function's return type.
+TranslatedStatement StatementBuilder::VisitYieldReturn(IL::ILInstruction* inst)
+{
+    auto* yieldReturn = static_cast<IL::YieldReturn*>(inst);
+    TS::ITypePtr elementType = currentFunction->AsyncReturnType;
+    if (!elementType)
+    {
+        // The C# `currentFunction.ReturnType.GetElementTypeFromIEnumerable(typeSystem,
+        // true, out _)` -- the discarded isGeneric.
+        std::optional<bool> isGeneric;
+        assert(currentFunction->ReturnType != nullptr
+               && "VisitYieldReturn: ReturnType must be set for a non-async iterator");
+        elementType = TS::GetElementTypeFromIEnumerable(*currentFunction->ReturnType, *typeSystem,
+                                                        true, isGeneric);
+    }
+    TranslatedExpression expr =
+        exprBuilder->Translate(yieldReturn->Value.get(), elementType.get())
+            .ConvertTo(*elementType, *exprBuilder, /*checkForOverflow*/ false,
+                       /*allowImplicitConversion*/ true);
+    return WithILInstruction(*new Syntax::YieldReturnStatement(expr.Expression()), inst);
+}
+
+// The C# `string EnsureUniqueLabel(Block block)` (lines 1581-1597): the block's
+// own label when unencountered, the `IL_xxxx_N` suffix for a repeated name.
+std::string StatementBuilder::EnsureUniqueLabel(IL::Block* block)
+{
+    auto it = labels.find(block);
+    if (it != labels.end())
+        return it->second;
+    const std::string blockLabel = block->Label();
+    auto dup = duplicateLabels.find(blockLabel);
+    if (dup == duplicateLabels.end())
+    {
+        labels.emplace(block, blockLabel);
+        duplicateLabels.emplace(blockLabel, 1);
+        return blockLabel;
+    }
+    std::string label = blockLabel + "_" + std::to_string(dup->second + 1);
+    dup->second++;
+    labels.emplace(block, label);
+    return label;
 }
 
 }  // namespace ILSpy::Decompiler::CSharp

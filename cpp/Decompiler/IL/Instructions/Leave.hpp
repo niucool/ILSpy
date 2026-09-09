@@ -41,6 +41,16 @@ public:
         : ILInstruction(OpCode::Leave), TargetContainer(target), Value(std::move(value)) {
         if (Value) { Value->Parent = this; Value->ChildIndex = 0; }
     }
+
+    // The C# `public string TargetLabel` (Leave.cs line 82): the target container's
+    // entry-point label, or the empty string for a container-less leave (the C#
+    // `targetContainer?.EntryPoint != null ? ... : string.Empty`).
+    std::string TargetLabel() const {
+        if (TargetContainer == nullptr)
+            return std::string();
+        const Block* entryPoint = TargetContainer->EntryPoint();
+        return entryPoint != nullptr ? entryPoint->Label() : std::string();
+    }
     InstructionFlags DirectFlags() const override {
         return InstructionFlags::MayBranch | InstructionFlags::EndPointUnreachable;
     }

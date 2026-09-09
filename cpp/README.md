@@ -2707,6 +2707,42 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   gate, the iterator copy: exactly the 5 predicted failures) then restored green;
   full suite 12278 ran / 12276 passed / the 2 standing skips / zero regressions,
   and all four CLI baselines unchanged.
+- **`StatementBuilder` slice 2 -- the branch/leave/goto leaf arms** -- the leaf statement
+  family landed (`StatementBuilder.cs` lines 338-373 + 347-455 + 1578-1597):
+  `VisitBranch` (the continue / goto-case / goto-label fix, the continue-target arm first
+  so a continue-target branch never renders as a goto; `continueCount` increments), its
+  `VisitLeave` sibling (the break / yield-break / return / goto-end fix with the
+  lambda/expr-tree possible-loss cast -- `IsPossibleLossOfTypeInformation` over
+  `ContainsAnonymousType` / `NormalizeTypeVisitor::IgnoreNullability().EquivalentTypes` /
+  the named-tuple / `dynamic` / null-literal arms, and the `end_<label>` naming with the
+  `_<n>` duplicate suffix the shared `duplicateLabels` count produces; the port's nullable
+  `Leave::Value` maps the C#'s Nop value so a null value IS the value-less leave),
+  `VisitThrow` / `VisitRethrow` (the throw statement with and without the expression),
+  and `VisitYieldReturn` (the element type the `AsyncReturnType ?? GetElementTypeFromIEnumerable`
+  read supplies). Supporting state (the C# fields are private; the port's
+  no-visibility-level convention keeps them public for the tests): the
+  `labels`/`duplicateLabels` maps + `EnsureUniqueLabel`, the `breakTarget`/
+  `endContainerLabels` pair, the `continueTarget`/`continueCount` pair, and the
+  `caseLabelMapping` (an `optional<unordered_map<Block*, shared_ptr<ConstantResolveResult>>>`
+  -- nullopt is not-translating-a-switch, a mapped null value is 'goto default'). IL-node
+  surface: `Block::Label()` (the C# `Block.Label` -- `DisassemblerHelpers::OffsetToString`,
+  a new `Block.cpp` so the Disassembler include graph stays out of the IL headers),
+  `BlockContainer::EntryPoint()` (the statically-normalized first block the C# field
+  stores), `Leave::TargetLabel()` (the C# property -- the entry-point label or empty), and
+  the new `YieldReturn` node (one Value child, Void result, `MayBranch|SideEffect`, the
+  `yield.return` dump render, the clone case) beside the `ILFunctionKind` enum +
+  `ILFunction::Kind` field (TopLevelFunction default; the clone carries it) the
+  lambda/expr-tree gate reads. Verified by 19 new `StatementBuilderTest` tests (the goto /
+  continue / case-mapping branch matrix, the break / yield-break / bare-return /
+  value-return / loss-cast / top-level-skips-cast leave matrix, the end-label reuse +
+  duplicate-suffix + EnsureUniqueLabel matrix, throw/rethrow, both yield shapes incl. the
+  IEnumerable unwrap over a MinimalCorlib `IEnumerable<int>` parameterized type, the
+  accessor + clone pins), proven with a 5-behavior neuter RED round (the continue gate,
+  the case-mapping arm, the duplicate suffix, the loss-cast gate, the yield render:
+  exactly the 6 predicted failures) then restored green; full suite 12297 ran / 12295
+  passed / the 2 standing skips / zero regressions, and all four CLI baselines unchanged
+  (--csharp mscorlib 10106366 bytes, --il whole-module byte-identical to the 41246545-byte
+  real-ilspycmd gold, -l c 109438, the --json usage check rc 64).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

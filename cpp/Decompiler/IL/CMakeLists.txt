@@ -9,6 +9,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/ILTypeExtensions.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/PointerArithmeticOffset.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/InstructionOutputExtensions.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Instructions/Block.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Instructions/ILInstructionClone.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/StackTypeOf.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ILReader.cpp

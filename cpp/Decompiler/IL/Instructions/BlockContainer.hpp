@@ -62,6 +62,16 @@ public:
         Blocks.push_back(std::move(b));
     }
 
+    // The C# `public Block EntryPoint` (BlockContainer.cs line 66): the container's
+    // entry point -- the first block in the Blocks collection. The C# reads a private
+    // field assigned by the BlockBuilder's Normalize; the port's containers are
+    // statically normalized (the invariant `Blocks.Count > 0 && EntryPoint ==
+    // Blocks[0]` holds by construction), so the accessor computes it. Null for a
+    // degenerate block-less container (the C# HACK would deref `entryPoint!`).
+    Block* EntryPoint() const {
+        return Blocks.empty() ? nullptr : Blocks.front().get();
+    }
+
     void WriteTo(std::string& out) const override {
         out += "BlockContainer {\n";
         for (auto& b : Blocks) {

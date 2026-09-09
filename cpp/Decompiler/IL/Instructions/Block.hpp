@@ -57,6 +57,11 @@ public:
     InstructionFlags DirectFlags() const override { return InstructionFlags::None; }
     StackType ResultType() const override { return StackType::Void; }
 
+    // The C# `public string Label` (Block.cs line 257): the block's name --
+    // DisassemblerHelpers.OffsetToString(StartILOffset). Defined out-of-line in
+    // Block.cpp (the Disassembler include is not wanted in this header).
+    std::string Label() const;
+
     int ChildCount() const override {
         return static_cast<int>(Instructions.size()) + (FinalInstruction ? 1 : 0);
     }

@@ -29,6 +29,7 @@
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ErrorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
@@ -36,24 +37,41 @@
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/EmptyStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/GotoCaseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/GotoDefaultStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/GotoStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ThrowStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/YieldReturnStatement.hpp"
 #include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
 #include "Decompiler/DecompileRun.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
+#include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/IL/Instructions/YieldReturn.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
+#include "Decompiler/Semantics/ConstantResolveResult.hpp"
+#include "Decompiler/Semantics/ConversionFactories.hpp"
+#include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
@@ -474,6 +492,397 @@ TEST(StatementBuilderTest, VisitIfInstructionNopFalseArmIsNoElse)
     auto* ifElse = dynamic_cast<Syntax::IfElseStatement*>(stmt);
     ASSERT_TRUE(ifElse != nullptr);
     EXPECT_TRUE(ifElse->FalseStatement() == nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// The branch/leave/goto state (StatementBuilder.cs lines 338-373 + 1576-1597)
+// ---------------------------------------------------------------------------
+
+// A Branch to a non-continue, non-case block renders `goto IL_xxxx` over the
+// target block's label, with the IL annotation on the statement.
+TEST(StatementBuilderTest, VisitBranchRendersGotoStatement)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::Block targetBlock;
+    targetBlock.StartILOffset = 0x1234;
+    IL::Branch branch(&targetBlock);
+    auto* stmt = builder.Convert(&branch);
+    auto* gotoStmt = dynamic_cast<Syntax::GotoStatement*>(stmt);
+    ASSERT_TRUE(gotoStmt != nullptr);
+    ASSERT_TRUE(gotoStmt->Label().has_value());
+    EXPECT_EQ(*gotoStmt->Label(), "IL_1234");
+    const auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(1));
+    EXPECT_EQ(instructions[0], &branch);
+}
+
+// A branch whose target is the continue target renders `continue;` and counts.
+TEST(StatementBuilderTest, VisitBranchRendersContinueStatement)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::Block continueBlock;
+    continueBlock.StartILOffset = 0x0008;
+    builder.continueTarget = &continueBlock;
+    IL::Branch branch(&continueBlock);
+    auto* stmt = builder.Convert(&branch);
+    EXPECT_TRUE(dynamic_cast<Syntax::ContinueStatement*>(stmt) != nullptr);
+    // The second visit increments the count the VisitBlockContainer slice reads.
+    builder.Convert(&branch);
+    EXPECT_EQ(builder.continueCount, 2);
+    const auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(1));
+    EXPECT_EQ(instructions[0], &branch);
+}
+
+// A mapped block renders `goto case <value>` / `goto default;` -- the C# nullable
+// value distinguishes the two shapes.
+TEST(StatementBuilderTest, VisitBranchCaseMappingArms)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::Block caseBlock;
+    caseBlock.StartILOffset = 0x0010;
+    IL::Block defaultBlock;
+    defaultBlock.StartILOffset = 0x0020;
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    CSharp::StatementBuilder::CaseLabelMapping mapping;
+    mapping.emplace(&caseBlock, std::make_shared<Sem::ConstantResolveResult>(intType,
+                                                                            std::int32_t(42)));
+    mapping.emplace(&defaultBlock, nullptr);
+    builder.caseLabelMapping = std::move(mapping);
+
+    IL::Branch caseBranch(&caseBlock);
+    auto* caseStmt = builder.Convert(&caseBranch);
+    auto* gotoCase = dynamic_cast<Syntax::GotoCaseStatement*>(caseStmt);
+    ASSERT_TRUE(gotoCase != nullptr);
+    auto* caseLabel = dynamic_cast<Syntax::PrimitiveExpression*>(gotoCase->LabelExpression());
+    ASSERT_TRUE(caseLabel != nullptr);
+    const std::int32_t* caseValue = std::get_if<std::int32_t>(&caseLabel->Value());
+    ASSERT_TRUE(caseValue != nullptr);
+    EXPECT_EQ(*caseValue, 42);
+
+    IL::Branch defaultBranch(&defaultBlock);
+    auto* defaultStmt = builder.Convert(&defaultBranch);
+    EXPECT_TRUE(dynamic_cast<Syntax::GotoDefaultStatement*>(defaultStmt) != nullptr);
+}
+
+// A Leave whose target is the break target renders `break;`.
+TEST(StatementBuilderTest, VisitLeaveRendersBreakStatement)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    builder.breakTarget = fixture.function.Body.get();
+    IL::Leave leave(fixture.function.Body.get());
+    auto* stmt = builder.Convert(&leave);
+    auto* breakStmt = dynamic_cast<Syntax::BreakStatement*>(stmt);
+    ASSERT_TRUE(breakStmt != nullptr);
+    const auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(1));
+    EXPECT_EQ(instructions[0], &leave);
+}
+
+// An iterator's leave of the return container renders `yield break;`.
+TEST(StatementBuilderTest, VisitLeaveRendersYieldBreakStatement)
+{
+    StatementFixture fixture;
+    fixture.function.IsIterator = true;
+    auto builder = fixture.MakeBuilder();
+    ASSERT_TRUE(builder.currentIsIterator);
+    IL::Leave leave(fixture.function.Body.get());
+    auto* stmt = builder.Convert(&leave);
+    EXPECT_TRUE(dynamic_cast<Syntax::YieldBreakStatement*>(stmt) != nullptr);
+}
+
+// A value-less leave of the return container renders a bare `return;`.
+TEST(StatementBuilderTest, VisitLeaveRendersBareReturnStatement)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    // A null Value is the port's shape of the C#'s Nop value (the value-less leave).
+    IL::Leave leave(fixture.function.Body.get());
+    auto* stmt = builder.Convert(&leave);
+    auto* returnStmt = dynamic_cast<Syntax::ReturnStatement*>(stmt);
+    ASSERT_TRUE(returnStmt != nullptr);
+    EXPECT_TRUE(returnStmt->Expression() == nullptr);
+    const auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(1));
+    EXPECT_EQ(instructions[0], &leave);
+}
+
+// A value-returning leave renders `return <value>;` -- the identity conversion adds
+// no cast, and the statement carries the leave annotation.
+TEST(StatementBuilderTest, VisitLeaveRendersValueReturnStatement)
+{
+    StatementFixture fixture;
+    fixture.function.ReturnType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto builder = fixture.MakeBuilder();
+    ASSERT_TRUE(builder.currentResultType != nullptr);
+    IL::Leave leave(fixture.function.Body.get(), std::make_unique<IL::LdcI4>(42));
+    auto* stmt = builder.Convert(&leave);
+    auto* returnStmt = dynamic_cast<Syntax::ReturnStatement*>(stmt);
+    ASSERT_TRUE(returnStmt != nullptr);
+    // The identity conversion inserts no cast.
+    auto* primitive = dynamic_cast<Syntax::PrimitiveExpression*>(returnStmt->Expression());
+    ASSERT_TRUE(primitive != nullptr);
+    const std::int32_t* value = std::get_if<std::int32_t>(&primitive->Value());
+    ASSERT_TRUE(value != nullptr);
+    EXPECT_EQ(*value, 42);
+    const auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(1));
+    EXPECT_EQ(instructions[0], &leave);
+}
+
+// A delegate/lambda leave of a null literal into a reference-typed return gains the
+// possible-loss cast: the null literal keeps its NullType, which the C# counts as
+// possible loss of type information (`givenType == SpecialType.NullType`).
+TEST(StatementBuilderTest, VisitLeaveAddsCastForLambdaLossOfTypeInformation)
+{
+    StatementFixture fixture;
+    fixture.function.Kind = IL::ILFunctionKind::Delegate;
+    fixture.function.ReturnType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto builder = fixture.MakeBuilder();
+    IL::Leave leave(fixture.function.Body.get(), std::make_unique<IL::LdNull>());
+    auto* stmt = builder.Convert(&leave);
+    auto* returnStmt = dynamic_cast<Syntax::ReturnStatement*>(stmt);
+    ASSERT_TRUE(returnStmt != nullptr);
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(returnStmt->Expression());
+    ASSERT_TRUE(cast != nullptr);
+    // The cast's resolve result is the identity ConversionResolveResult over the
+    // function's return type.
+    const auto* rr = cast->Annotation<Sem::ConversionResolveResult>();
+    ASSERT_TRUE(rr != nullptr);
+    EXPECT_EQ(rr->Type().ReflectionName(), "System.Object");
+    ASSERT_TRUE(rr->ConversionProperty() != nullptr);
+    EXPECT_TRUE(rr->ConversionProperty()->IsIdentityConversion());
+    const auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(1));
+    EXPECT_EQ(instructions[0], &leave);
+}
+
+// A top-level function's identical shape does NOT gain the cast (the
+// lambda/expr-tree gate is false, so only the EquivalentTypes path runs).
+TEST(StatementBuilderTest, VisitLeaveTopLevelFunctionSkipsTheLossCast)
+{
+    StatementFixture fixture;
+    fixture.function.ReturnType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto builder = fixture.MakeBuilder();
+    EXPECT_EQ(builder.currentFunction->Kind, IL::ILFunctionKind::TopLevelFunction);
+    IL::Leave leave(fixture.function.Body.get(), std::make_unique<IL::LdNull>());
+    auto* stmt = builder.Convert(&leave);
+    auto* returnStmt = dynamic_cast<Syntax::ReturnStatement*>(stmt);
+    ASSERT_TRUE(returnStmt != nullptr);
+    auto* nullLiteral = dynamic_cast<Syntax::NullReferenceExpression*>(returnStmt->Expression());
+    ASSERT_TRUE(nullLiteral != nullptr);
+}
+
+// A leave of a foreign container renders `goto end_<label>`, and the second leave
+// of the same container reuses the stored label.
+TEST(StatementBuilderTest, VisitLeaveGotoEndContainerReusesTheLabel)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::BlockContainer otherContainer;
+    auto entryBlock = std::make_unique<IL::Block>();
+    entryBlock->StartILOffset = 0x1234;
+    otherContainer.AddBlock(std::move(entryBlock));
+    IL::Leave firstLeave(&otherContainer);
+    auto* firstStmt = builder.Convert(&firstLeave);
+    auto* firstGoto = dynamic_cast<Syntax::GotoStatement*>(firstStmt);
+    ASSERT_TRUE(firstGoto != nullptr);
+    ASSERT_TRUE(firstGoto->Label().has_value());
+    EXPECT_EQ(*firstGoto->Label(), "end_IL_1234");
+    IL::Leave secondLeave(&otherContainer);
+    auto* secondStmt = builder.Convert(&secondLeave);
+    auto* secondGoto = dynamic_cast<Syntax::GotoStatement*>(secondStmt);
+    ASSERT_TRUE(secondGoto != nullptr);
+    ASSERT_TRUE(secondGoto->Label().has_value());
+    EXPECT_EQ(*secondGoto->Label(), "end_IL_1234");
+}
+
+// Two different containers whose entry blocks share the same offset get distinct
+// end labels -- the C# suffixes the duplicate name through the shared
+// duplicateLabels count (`end_<label>_<occurrence + 1>`).
+TEST(StatementBuilderTest, VisitLeaveSuffixesDuplicateEndLabels)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::BlockContainer firstContainer;
+    auto firstBlock = std::make_unique<IL::Block>();
+    firstBlock->StartILOffset = 0x0042;
+    firstContainer.AddBlock(std::move(firstBlock));
+    IL::BlockContainer secondContainer;
+    auto secondBlock = std::make_unique<IL::Block>();
+    secondBlock->StartILOffset = 0x0042;
+    secondContainer.AddBlock(std::move(secondBlock));
+    IL::Leave firstLeave(&firstContainer);
+    auto* firstStmt = builder.Convert(&firstLeave);
+    auto* firstGoto = dynamic_cast<Syntax::GotoStatement*>(firstStmt);
+    ASSERT_TRUE(firstGoto != nullptr);
+    ASSERT_TRUE(firstGoto->Label().has_value());
+    EXPECT_EQ(*firstGoto->Label(), "end_IL_0042");
+    IL::Leave secondLeave(&secondContainer);
+    auto* secondStmt = builder.Convert(&secondLeave);
+    auto* secondGoto = dynamic_cast<Syntax::GotoStatement*>(secondStmt);
+    ASSERT_TRUE(secondGoto != nullptr);
+    ASSERT_TRUE(secondGoto->Label().has_value());
+    EXPECT_EQ(*secondGoto->Label(), "end_IL_0042_2");
+}
+
+// EnsureUniqueLabel deduplicates the block label the same way (the `_N` suffix over
+// the shared duplicateLabels count).
+TEST(StatementBuilderTest, EnsureUniqueLabelSuffixesDuplicates)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::Block first;
+    first.StartILOffset = 0x0042;
+    IL::Block second;
+    second.StartILOffset = 0x0042;
+    EXPECT_EQ(builder.EnsureUniqueLabel(&first), "IL_0042");
+    EXPECT_EQ(builder.EnsureUniqueLabel(&second), "IL_0042_2");
+    // The first block's label is memoized.
+    EXPECT_EQ(builder.EnsureUniqueLabel(&first), "IL_0042");
+}
+
+// `throw <expr>;` renders the throw statement over the translated argument.
+TEST(StatementBuilderTest, VisitThrowRendersThrowStatement)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = fixture.MakeLocal(TS::KnownTypeCode::Object, "obj");
+    IL::Throw throwInst(std::make_unique<IL::LdLoc>(variable));
+    auto* stmt = builder.Convert(&throwInst);
+    auto* throwStmt = dynamic_cast<Syntax::ThrowStatement*>(stmt);
+    ASSERT_TRUE(throwStmt != nullptr);
+    auto* identifier = dynamic_cast<Syntax::IdentifierExpression*>(throwStmt->Expression());
+    ASSERT_TRUE(identifier != nullptr);
+    EXPECT_EQ(identifier->Identifier(), "obj");
+    const auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(1));
+    EXPECT_EQ(instructions[0], &throwInst);
+}
+
+// A rethrow renders a bare `throw;` (no expression).
+TEST(StatementBuilderTest, VisitRethrowRendersBareThrowStatement)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::Rethrow rethrow;
+    auto* stmt = builder.Convert(&rethrow);
+    auto* throwStmt = dynamic_cast<Syntax::ThrowStatement*>(stmt);
+    ASSERT_TRUE(throwStmt != nullptr);
+    EXPECT_TRUE(throwStmt->Expression() == nullptr);
+    const auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(1));
+    EXPECT_EQ(instructions[0], &rethrow);
+}
+
+// `yield return <value>;` over an async iterator uses the async return type as the
+// element type.
+TEST(StatementBuilderTest, VisitYieldReturnUsesTheAsyncReturnType)
+{
+    StatementFixture fixture;
+    fixture.function.AsyncReturnType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto builder = fixture.MakeBuilder();
+    IL::YieldReturn yieldReturn(std::make_unique<IL::LdcI4>(42));
+    auto* stmt = builder.Convert(&yieldReturn);
+    auto* yieldStmt = dynamic_cast<Syntax::YieldReturnStatement*>(stmt);
+    ASSERT_TRUE(yieldStmt != nullptr);
+    auto* primitive = dynamic_cast<Syntax::PrimitiveExpression*>(yieldStmt->Expression());
+    ASSERT_TRUE(primitive != nullptr);
+    const std::int32_t* value = std::get_if<std::int32_t>(&primitive->Value());
+    ASSERT_TRUE(value != nullptr);
+    EXPECT_EQ(*value, 42);
+    const auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(1));
+    EXPECT_EQ(instructions[0], &yieldReturn);
+}
+
+// A non-async iterator's element type is the IEnumerable unwrap of the function's
+// return type (`ReturnType.GetElementTypeFromIEnumerable(typeSystem, true, out _)`).
+TEST(StatementBuilderTest, VisitYieldReturnUnwrapsTheIEnumerable)
+{
+    StatementFixture fixture;
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto enumerableType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::IEnumerableOfT).shared_from_this());
+    fixture.function.ReturnType = std::make_shared<TS::ParameterizedType>(
+        enumerableType, std::vector<TS::ITypePtr>{intType});
+    auto builder = fixture.MakeBuilder();
+    IL::YieldReturn yieldReturn(std::make_unique<IL::LdcI4>(7));
+    auto* stmt = builder.Convert(&yieldReturn);
+    auto* yieldStmt = dynamic_cast<Syntax::YieldReturnStatement*>(stmt);
+    ASSERT_TRUE(yieldStmt != nullptr);
+    auto* primitive = dynamic_cast<Syntax::PrimitiveExpression*>(yieldStmt->Expression());
+    ASSERT_TRUE(primitive != nullptr);
+    const std::int32_t* value = std::get_if<std::int32_t>(&primitive->Value());
+    ASSERT_TRUE(value != nullptr);
+    EXPECT_EQ(*value, 7);
+}
+
+// ---------------------------------------------------------------------------
+// The IL-node surface the arms read
+// ---------------------------------------------------------------------------
+
+// Block.Label() is the DisassemblerHelpers.OffsetToString of the start offset
+// (the C# Block.Label property), EntryPoint() is the first block, and
+// Leave.TargetLabel() chains them (the empty string for a container-less leave).
+TEST(StatementBuilderTest, BlockLabelAndLeaveTargetLabelAccessors)
+{
+    IL::Block block;
+    block.StartILOffset = 0x1234;
+    EXPECT_EQ(block.Label(), "IL_1234");
+    IL::BlockContainer container;
+    container.AddBlock(std::make_unique<IL::Block>());
+    container.Blocks.front()->StartILOffset = 0x1234;
+    EXPECT_EQ(container.EntryPoint(), container.Blocks.front().get());
+    IL::Leave leave(&container);
+    EXPECT_EQ(leave.TargetLabel(), "IL_1234");
+    IL::Leave containerless;
+    EXPECT_EQ(containerless.TargetLabel(), "");
+}
+
+// The YieldReturn node: the value child, the dump render, and the clone.
+TEST(StatementBuilderTest, YieldReturnNodeShapeAndClone)
+{
+    IL::YieldReturn yieldReturn(std::make_unique<IL::LdcI4>(5));
+    EXPECT_EQ(yieldReturn.Op, IL::OpCode::YieldReturn);
+    EXPECT_EQ(yieldReturn.ChildCount(), 1);
+    EXPECT_EQ(yieldReturn.ResultType(), IL::StackType::Void);
+    std::string dump;
+    yieldReturn.WriteTo(dump);
+    EXPECT_NE(dump.find("yield.return"), std::string::npos);
+    EXPECT_NE(dump.find("ldc.i4(5)"), std::string::npos);
+    auto clone = yieldReturn.Clone();
+    auto* cloneTyped = dynamic_cast<IL::YieldReturn*>(clone.get());
+    ASSERT_TRUE(cloneTyped != nullptr);
+    ASSERT_TRUE(cloneTyped->Value != nullptr);
+    EXPECT_EQ(cloneTyped->Value->Op, IL::OpCode::LdcI4);
+    EXPECT_EQ(cloneTyped->Value->Parent, cloneTyped);
+}
+
+// The ILFunctionKind field clones (the VisitLeave lambda/expr-tree gate reads it).
+TEST(StatementBuilderTest, ILFunctionKindClones)
+{
+    IL::ILFunction function;
+    function.Kind = IL::ILFunctionKind::Delegate;
+    auto clone = function.Clone();
+    auto* cloneTyped = dynamic_cast<IL::ILFunction*>(clone.get());
+    ASSERT_TRUE(cloneTyped != nullptr);
+    EXPECT_EQ(cloneTyped->Kind, IL::ILFunctionKind::Delegate);
+    IL::ILFunction topLevel;
+    auto topLevelClone = topLevel.Clone();
+    auto* topLevelCloneTyped = dynamic_cast<IL::ILFunction*>(topLevelClone.get());
+    ASSERT_TRUE(topLevelCloneTyped != nullptr);
+    EXPECT_EQ(topLevelCloneTyped->Kind, IL::ILFunctionKind::TopLevelFunction);
 }
 
 } // namespace ILSpy::Tests

@@ -45,9 +45,16 @@
 // Deferrals (each named at the member that needs it): the CancellationToken (the
 // cooperative-cancel ThrowIfCancellationRequested in Convert is a no-op in the
 // port, the DecompileRun convention), and the heavier Visit arms (the switch /
-// branch / leave / try / lock / using / foreach / pinned-region / block-container
-// arms) -- an instruction whose C# Visit method has not been ported yet degrades
-// to the Default expression statement instead of crashing.
+// try / lock / using / foreach / pinned-region / block-container arms) -- an
+// instruction whose C# Visit method has not been ported yet degrades to the
+// Default expression statement instead of crashing.
+//
+// The goto/leave state (StatementBuilder.cs lines 338-373 + 1576-1597) landed
+// with the leaf arms: the block->label maps (labels/duplicateLabels +
+// EnsureUniqueLabel), the breakTarget/endContainerLabels pair a Leave consults,
+// and the continueTarget/continueCount pair a Branch consults. They default to
+// the C#-idle shape (no mappings, null targets) until the VisitBlockContainer /
+// TranslateSwitch slices write them.
 
 #pragma once
 
@@ -61,10 +68,14 @@
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/Semantics/ConstantResolveResult.hpp"
 #include "Decompiler/TypeSystem/ICompilation.hpp"
 #include "Decompiler/TypeSystem/ITypeResolveContext.hpp"
 
 #include <memory>
+#include <optional>
+#include <string>
+#include <unordered_map>
 
 // The forward declarations at GLOBAL scope (the nested-namespace trap: a declaration
 // written inside namespace CSharp would create CSharp::IL and shadow the real
@@ -75,6 +86,11 @@ class StLoc;
 class StObj;
 class Nop;
 class IfInstruction;
+class Branch;
+class Leave;
+class Throw;
+class Rethrow;
+class YieldReturn;
 }  // namespace ILSpy::Decompiler::IL
 
 namespace ILSpy::Decompiler::CSharp {
@@ -155,6 +171,46 @@ public:
     // (the as-readonly emission) is the StatementBuilder slice that owns it.
     bool EmitAsRefReadOnly = false;
 
+    // -- The goto/leave state (StatementBuilder.cs lines 338-373 + 1576-1597) ------
+    // The C# fields are private; the port's no-visibility-level convention keeps
+    // them public for the tests (the VisitBlockContainer / TranslateSwitch slices
+    // write them; the Visit arms consume them). All default to the C#-idle shape.
+
+    // The C# `Dictionary<Block, ConstantResolveResult?>? caseLabelMapping` (line
+    // 338): the switch's block->case-label mapping. Null when not translating a
+    // switch; a mapped NULL value is the 'goto default' case (the C# nullable
+    // value), a mapped non-null value the 'goto case <value>' target.
+    using CaseLabelMapping = std::unordered_map<IL::Block*, std::shared_ptr<Sem::ConstantResolveResult>>;
+    std::optional<CaseLabelMapping> caseLabelMapping;
+
+    // The C# `Block? continueTarget` (line 341) + `int continueCount` (line 343):
+    // the block a 'continue;' statement would continue to and how many
+    // ContinueStatements were created for it (VisitBlockContainer seeds it).
+    IL::Block* continueTarget = nullptr;
+    int continueCount = 0;
+
+    // The C# `BlockContainer? breakTarget` (line 371): the container a 'break;'
+    // statement would break out of. Null when not inside a breakable construct.
+    IL::BlockContainer* breakTarget = nullptr;
+
+    // The C# `readonly Dictionary<BlockContainer, string> endContainerLabels` (line
+    // 372): the 'goto end_<label>' name per escaped container (VisitLeave invents
+    // the names; VisitBlockContainer emits the LabelStatements).
+    std::unordered_map<IL::BlockContainer*, std::string> endContainerLabels;
+
+    // The C# `readonly Dictionary<Block, string> labels` (line 1578) + `readonly
+    // Dictionary<string, int> duplicateLabels` (line 1579): the block->label map
+    // EnsureUniqueLabel fills and the label->occurrence-count map it shares with
+    // the end-container naming (the same duplicateLabels dictionary in the C#).
+    std::unordered_map<IL::Block*, std::string> labels;
+    std::unordered_map<std::string, int> duplicateLabels;
+
+    // The C# `string EnsureUniqueLabel(Block block)` (lines 1581-1597): the block's
+    // IL_xxxx label, deduplicated through the labels map with the `_N` suffix the
+    // shared duplicateLabels count produces. The C# is private; the port's
+    // no-visibility-level convention keeps it public for the tests.
+    std::string EnsureUniqueLabel(IL::Block* block);
+
 private:
     // The C# `readonly IDecompilerTypeSystem typeSystem` / `DecompilerSettings
     // settings` / `internal readonly DecompileRun decompileRun` fields.
@@ -187,6 +243,25 @@ private:
     // VisitIfInstruction(IfInstruction inst)`: the if/else statement over the
     // translated condition (a false arm that is a Nop is the C#'s no-else shape).
     TranslatedStatement VisitIfInstruction(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement VisitBranch(Branch
+    // inst)` (lines 347-362): the continue / goto-case / goto-label fix, with the
+    // continue arm first (the C# order) so a continue-target branch never renders
+    // as a goto.
+    TranslatedStatement VisitBranch(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement VisitLeave(Leave
+    // inst)` (lines 377-423): the break / yield-break / return / goto-end fix, with
+    // the possible-loss-of-type-information cast the lambda/expr-tree arm inserts.
+    TranslatedStatement VisitLeave(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement VisitThrow(Throw
+    // inst)` (lines 424-427): the throw statement over the translated argument.
+    TranslatedStatement VisitThrow(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement VisitRethrow(Rethrow
+    // inst)` (lines 429-432): a bare throw statement (no expression).
+    TranslatedStatement VisitRethrow(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement VisitYieldReturn(
+    // YieldReturn inst)` (lines 434-444): the yield return statement over the
+    // element-typed value (the async return type, else the IEnumerable unwrap).
+    TranslatedStatement VisitYieldReturn(IL::ILInstruction* inst);
 };
 
 }  // namespace ILSpy::Decompiler::CSharp
