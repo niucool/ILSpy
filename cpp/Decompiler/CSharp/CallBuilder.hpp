@@ -29,17 +29,23 @@
 // BuildStringConcat -- the `s1 + s2 + ...` fold the C# string-concat setting
 // lowers the span-based `string.Concat(ReadOnlySpan<char>, ...)` overload to).
 //
-// The Build/BuildArgumentList machinery and the remaining arms
-// (HandleDelegateConstruction, the tuple construction, TranslateTarget,
-// HandleConstructorCall/HandleAccessorCall, HandleRangeConstruction,
-// HandleStringInterpolation, IsDelegateEqualityComparison, ...) are DEFERRED
-// with the VisitNewObj/VisitCall slices they serve.
+// Landed additionally: the argument-list machinery (BuildArgumentList,
+// IsPrimitiveValueThatShouldBeNamedArgument, TransformParamsArgument,
+// IsOptionalArgument) with the overload-resolution composition it validates
+// through (IsUnambiguousCall + IsAppropriateCallTarget).
+//
+// The remaining arms (HandleDelegateConstruction, the tuple construction,
+// the mainline Build(OpCode, ...) body, HandleConstructorCall/
+// HandleAccessorCall, HandleRangeConstruction, HandleStringInterpolation,
+// IsDelegateEqualityComparison, ...) are DEFERRED with the VisitNewObj/
+// VisitCall slices they serve.
 
 #pragma once
 
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
 #include "Decompiler/CSharp/TranslatedExpression.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
+#include "Decompiler/CSharp/Resolver/OverloadResolution.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/IL/OpCode.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
@@ -51,6 +57,10 @@
 #include <optional>
 #include <string>
 #include <vector>
+
+namespace ILSpy::Decompiler::Semantics {
+class ResolveResult;
+}
 
 namespace ILSpy::Decompiler::IL {
 class Call;
@@ -183,6 +193,76 @@ public:
                 const TS::ICompilation& typeSystem,
                 const DecompilerSettings* settings);
 
+    // The C# `private ArgumentList BuildArgumentList(ExpectedTargetDetails
+    // expectedTargetDetails, ResolveResult? target, IMethod method, int
+    // firstParamIndex, IReadOnlyList<ILInstruction> callArguments,
+    // IReadOnlyList<int>? argumentToParameterMap)` (CallBuilder.cs lines
+    // 941-1043): translate every call argument against its expected parameter
+    // type, bookkeeping the optional-argument index, the primitive-value bits,
+    // the params expansion (TransformParamsArgument), the
+    // argument-name/argumentToParameterMap mapping, and the direction
+    // expressions. Made public for tests (the C# private member).
+    ArgumentList BuildArgumentList(
+        const ExpectedTargetDetails& expectedTargetDetails,
+        const Sem::ResolveResult* target, const TS::IMethod& method,
+        int firstParamIndex,
+        const std::vector<IL::ILInstruction*>& callArguments,
+        const std::optional<std::vector<int>>& argumentToParameterMap);
+
+    // The C# `private bool IsPrimitiveValueThatShouldBeNamedArgument(
+    // TranslatedExpression arg, IMethod method, IParameter p)` (lines
+    // 1046-1051): a compile-time-constant argument whose parameter type is
+    // Boolean over a non-Nullable`1 declaring type -- the value the
+    // argument-name fills may expose. Made public for tests.
+    static bool IsPrimitiveValueThatShouldBeNamedArgument(
+        const TranslatedExpression& arg, const TS::IMethod& method,
+        const TS::IParameter& p);
+
+    // The C# `private bool TransformParamsArgument(...)` (lines 1053-1142):
+    // the params-expansion arm -- the `new T[...]` / `Array.Empty<T>()` /
+    // `ReadOnlySpan<T>..ctor(ref readonly T)` argument shapes expand into
+    // per-element arguments + DefaultParameters, validated through
+    // IsUnambiguousCall's expanded-form resolution (the caller's already
+    // translated prefix is prepended). Made public for tests.
+    bool TransformParamsArgument(
+        const ExpectedTargetDetails& expectedTargetDetails,
+        const Sem::ResolveResult* targetResolveResult,
+        const TS::IMethod& method, const TS::IParameter& parameter,
+        const TranslatedExpression& paramsArgument,
+        std::vector<const TS::IParameter*>& expectedParameters,
+        std::vector<TranslatedExpression>& arguments);
+
+    // The C# `bool IsOptionalArgument(IParameter parameter, TranslatedExpression
+    // arg)` (lines 1144-1150): whether an optional parameter's argument is the
+    // optional parameter's own default value (removable from the call). The
+    // Caller*Attribute parameters are never removable. Made public for tests.
+    bool IsOptionalArgument(const TS::IParameter& parameter,
+                            const TranslatedExpression& arg);
+
+    // The C# `OverloadResolutionErrors IsUnambiguousCall(...)` (lines
+    // 1554-1650): the overload-resolution driver -- the NewObj arm over the
+    // declaring type's constructors, the operator arm over the operand-type
+    // candidates, and the target/simple-name arms over MemberLookup /
+    // ResolveSimpleName, each answering the resolved member and the expanded
+    // form. Made public for tests.
+    Resolver::OverloadResolutionErrors IsUnambiguousCall(
+        const ExpectedTargetDetails& expectedTargetDetails,
+        const TS::IMethod& method, const Sem::ResolveResult* target,
+        const std::vector<TS::ITypePtr>& typeArguments,
+        std::vector<std::shared_ptr<Sem::ResolveResult>> arguments,
+        std::optional<std::vector<std::string>> argumentNames,
+        int firstOptionalArgumentIndex,
+        const TS::IParameterizedMember*& foundMember,
+        bool& bestCandidateIsExpandedForm) const;
+
+    // The C# `bool IsAppropriateCallTarget(...)` (lines 1816-1831): whether the
+    // resolved member may replace the expected one -- the type-erased equality,
+    // or the CallVirt override chain over the base members. Made public for
+    // tests.
+    bool IsAppropriateCallTarget(const ExpectedTargetDetails& expectedTargetDetails,
+                                 const TS::IMember& expectedTarget,
+                                 const TS::IMember& actualTarget) const;
+
     // The C# `internal static bool IsSpanBasedStringConcat(IMethod method)`
     // (CallBuilder.cs lines 300-318): whether the method is a static
     // `string.Concat` whose every parameter is `ReadOnlySpan<char>` -- the
@@ -227,6 +307,12 @@ private:
     std::shared_ptr<const Resolver::CSharpResolver> resolver_;
     const DecompilerSettings* settings_ = nullptr;
     const TS::ICompilation* typeSystem_ = nullptr;
+
+    // The expanded-params DefaultParameter keep-alive registry (the C# GC roots
+    // the freshly allocated parameters through the ArgumentList's
+    // ExpectedParameters array; the port's non-owning pointers need the owning
+    // registry -- the uncached-entity-cache convention).
+    std::vector<std::shared_ptr<const TS::IParameter>> ownedParameters_;
 };
 
 } // namespace ILSpy::Decompiler::CSharp

@@ -27,11 +27,20 @@
 
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
 
+#include <string>
+
 namespace ILSpy::Decompiler::IL {
 
 class AssignVariableNames : public IILTransform {
 public:
     void Run(ILFunction& function, ILTransformContext& context) override;
+
+    // The C# `internal static bool IsValidName(string varName)`
+    // (AssignVariableNames.cs line 677): whether a name is a legal C#
+    // identifier (letter or '_' first, letters/digits/ '_' after, no
+    // whitespace) -- the assignment-eligibility check the transform's rename
+    // and the CallBuilder argument-name mapping both consume.
+    static bool IsValidName(const std::string& varName);
 };
 
 } // namespace ILSpy::Decompiler::IL

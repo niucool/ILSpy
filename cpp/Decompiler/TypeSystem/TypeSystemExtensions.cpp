@@ -186,6 +186,15 @@ bool IsAnyPointer(TypeKind typeKind)
     }
 }
 
+const IType& UnwrapByRef(const IType& type)
+{
+    // C# `if (type is ByReferenceType byRef) type = byRef.ElementType; return type;` --
+    // one wrapper strip (no recursion); any other type is returned unchanged.
+    if (const ByReferenceType* byRef = dynamic_cast<const ByReferenceType*>(&type))
+        return *byRef->Element();
+    return type;
+}
+
 const IType* SkipModifiers(const IType& type)
 {
     // C# `while (ty is ModifiedType mt) ty = mt.ElementType; return ty;` -- the `ModifiedType` (a

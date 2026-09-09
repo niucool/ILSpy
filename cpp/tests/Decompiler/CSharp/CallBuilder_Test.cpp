@@ -36,6 +36,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
@@ -43,10 +44,12 @@
 #include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/DecompileRun.hpp"
 #include "Decompiler/IL/Instructions/AddressOf.hpp"
+#include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
@@ -58,6 +61,7 @@
 #include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
 #include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
+#include "Decompiler/TypeSystem/LookupStubs.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
@@ -78,6 +82,7 @@ namespace Sem = ILSpy::Decompiler::Semantics;
 namespace TS = ILSpy::Decompiler::TypeSystem;
 namespace Impl = TS::Implementation;
 namespace IL = ILSpy::Decompiler::IL;
+namespace Resolver = ILSpy::Decompiler::CSharp::Resolver;
 
 namespace {
 
@@ -997,3 +1002,558 @@ TEST(BuildStringConcatTest, SingleOperandAnswersTheTranslatedLeaf)
     EXPECT_FALSE(dynamic_cast<const Sem::MemberResolveResult*>(leafRr) != nullptr);
     EXPECT_TRUE(TS::IsKnownType(leafRr->Type(), TS::KnownTypeCode::String));
 }
+
+
+// ---------------------------------------------------------------------------
+// BuildArgumentList: the argument-translation machinery (CallBuilder.cs
+// lines 941-1150) and the IsUnambiguousCall composition it validates through.
+// ---------------------------------------------------------------------------
+
+// A BuilderFixture with a current-type-definition slot (the resolver's
+// MemberLookup base for the IsUnambiguousCall arms) plus the FixtureContext
+// rebuild the extra slot needs.
+struct BuildArgsFixture : BuilderFixture
+{
+    void SetCurrentTypeDefinition(const TS::ITypeDefinition* td)
+    {
+        context = std::make_shared<CS::TypeSystem::CSharpTypeResolveContext>(
+            holder.compilation.MainModule(), usingScope, td, nullptr);
+        builder = std::make_unique<CS::ExpressionBuilder>(
+            nullptr, holder.compilation, *context, &function, &settings, &run);
+    }
+};
+
+// A parameter fixture over a DefaultParameter (the isOptional/isParams/
+// referenceKind/defaultValue shape the argument machinery classifies).
+struct ParamFixture {
+    std::shared_ptr<TS::Implementation::DefaultParameter> parameter;
+
+    ParamFixture(TS::ITypePtr type, const char* name, bool isOptional = false,
+                 std::any defaultValue = {},
+                 TS::ReferenceKind referenceKind = TS::ReferenceKind::None,
+                 bool isParams = false)
+        : parameter(std::make_shared<TS::Implementation::DefaultParameter>(
+              std::move(type), name, nullptr,
+              std::vector<const TS::IAttribute*>(), referenceKind, isParams,
+              isOptional, std::move(defaultValue)))
+    {
+    }
+
+    // (The parameter-list setters take the shared_ptr members directly.)
+};
+
+TEST(BuildArgumentListTest, PlainArgumentsTranslatedAndBookkept)
+{
+    BuildArgsFixture fixture;
+    MethodFixtures fixtures(fixture.holder);
+    // A static two-int-parameter method (the plain call shape).
+    auto method = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    method->SetName("Foo");
+    method->SetIsStatic(true);
+    ParamFixture a(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "a");
+    ParamFixture b(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "b");
+    method->SetParameters({a.parameter, b.parameter});
+
+    IL::LdcI4 arg1(1);
+    IL::LdcI4 arg2(2);
+    std::vector<IL::ILInstruction*> callArguments{&arg1, &arg2};
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *method, 0, callArguments,
+        std::nullopt);
+
+    ASSERT_EQ(list.Arguments.size(), 2u);
+    ASSERT_EQ(list.ExpectedParameters.size(), 2u);
+    EXPECT_EQ(list.ExpectedParameters[0],
+              static_cast<const TS::IParameter*>(a.parameter.get()));
+    EXPECT_EQ(list.ExpectedParameters[1],
+              static_cast<const TS::IParameter*>(b.parameter.get()));
+    ASSERT_EQ(list.ParameterNames.size(), 2u);
+    EXPECT_EQ(list.ParameterNames[0], "a");
+    EXPECT_EQ(list.ParameterNames[1], "b");
+    EXPECT_FALSE(list.ArgumentNames.has_value());
+    EXPECT_FALSE(list.ArgumentToParameterMap.has_value());
+    // The int32 arguments are not Boolean primitive values (the naming rule).
+    EXPECT_FALSE(list.IsPrimitiveValue[0]);
+    EXPECT_FALSE(list.IsPrimitiveValue[1]);
+    EXPECT_EQ(list.FirstOptionalArgumentIndex, -2);
+    EXPECT_FALSE(list.IsExpandedForm);
+    EXPECT_TRUE(list.UseImplicitlyTypedOut);
+    EXPECT_TRUE(list.AddNamesToPrimitiveValues);
+
+    // The arguments translated against their parameter types: constant int32
+    // resolve results (the hint matches the parameter type).
+    auto* rr1 = dynamic_cast<const Sem::ConstantResolveResult*>(
+        CS::GetResolveResult(*list.Arguments[0].Expression()));
+    ASSERT_NE(rr1, nullptr);
+    EXPECT_TRUE(TS::IsKnownType(rr1->Type(), TS::KnownTypeCode::Int32));
+}
+
+TEST(BuildArgumentListTest, BoolPrimitiveValuesAreMarkedForNaming)
+{
+    fprintf(stderr, "STEP0 test start\n");
+    BuildArgsFixture fixture;
+    auto method = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    method->SetName("Foo");
+    method->SetIsStatic(true);
+    ParamFixture flag(fixture.holder.KnownType(TS::KnownTypeCode::Boolean), "flag");
+    ParamFixture count(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "count");
+    method->SetParameters({flag.parameter, count.parameter});
+
+    IL::LdcI4 trueArg(1);
+    IL::LdcI4 countArg(2);
+    std::vector<IL::ILInstruction*> callArguments{&trueArg, &countArg};
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *method, 0, callArguments,
+        std::nullopt);
+
+    // The Boolean constant is a primitive value worth naming; the int32
+    // constant is not (the IsPrimitiveValueThatShouldBeNamedArgument rule).
+    ASSERT_EQ(list.Arguments.size(), 2u);
+    EXPECT_TRUE(list.IsPrimitiveValue[0]);
+    EXPECT_FALSE(list.IsPrimitiveValue[1]);
+
+    // The true argument translated against the Boolean hint carries a bool
+    // constant whose boxed value is `true` (the AdjustConstantToType rule).
+    auto* rr = dynamic_cast<const Sem::ConstantResolveResult*>(
+        CS::GetResolveResult(*list.Arguments[0].Expression()));
+    ASSERT_NE(rr, nullptr);
+    EXPECT_TRUE(TS::IsKnownType(rr->Type(), TS::KnownTypeCode::Boolean));
+    const bool* value = std::any_cast<bool>(&rr->ConstantValue());
+    ASSERT_NE(value, nullptr);
+    EXPECT_TRUE(*value);
+}
+
+TEST(BuildArgumentListTest, OptionalArgumentIndexTracksTheRemovableSuffix)
+{
+    BuildArgsFixture fixture;
+    auto method = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    method->SetName("Foo");
+    method->SetIsStatic(true);
+    // (int a, bool flag = false): the flag argument at the default value is
+    // the removable optional suffix.
+    ParamFixture a(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "a");
+    ParamFixture flag(fixture.holder.KnownType(TS::KnownTypeCode::Boolean), "flag",
+                      true, std::any{false});
+    method->SetParameters({a.parameter, flag.parameter});
+
+    IL::LdcI4 argA(3);
+    IL::LdcI4 defaultArg(0);
+    IL::LdcI4 trueArg(1);
+    {
+        std::vector<IL::ILInstruction*> callArguments{&argA, &defaultArg};
+        CS::CallBuilder builder = fixture.MakeCallBuilder();
+        CS::ArgumentList list = builder.BuildArgumentList(
+            CS::ExpectedTargetDetails{}, nullptr, *method, 0, callArguments,
+            std::nullopt);
+        EXPECT_EQ(list.FirstOptionalArgumentIndex, 1);
+        EXPECT_FALSE(list.IsExpandedForm);
+    }
+    {
+        // A non-default flag value is not removable.
+        std::vector<IL::ILInstruction*> callArguments{&argA, &trueArg};
+        CS::CallBuilder builder = fixture.MakeCallBuilder();
+        CS::ArgumentList list = builder.BuildArgumentList(
+            CS::ExpectedTargetDetails{}, nullptr, *method, 0, callArguments,
+            std::nullopt);
+        EXPECT_EQ(list.FirstOptionalArgumentIndex, -2);
+    }
+    {
+        // A non-optional argument AFTER an optional one resets the index (the
+        // removable-suffix semantics; the C# -2 reset).
+        ParamFixture a2(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "a2");
+        ParamFixture flag2(fixture.holder.KnownType(TS::KnownTypeCode::Boolean),
+                           "flag2", true, std::any{false});
+        method->SetParameters({flag2.parameter, a2.parameter});
+        std::vector<IL::ILInstruction*> callArguments{&defaultArg, &argA};
+        CS::CallBuilder builder = fixture.MakeCallBuilder();
+        CS::ArgumentList list = builder.BuildArgumentList(
+            CS::ExpectedTargetDetails{}, nullptr, *method, 0, callArguments,
+            std::nullopt);
+        EXPECT_EQ(list.FirstOptionalArgumentIndex, -2);
+    }
+}
+
+TEST(BuildArgumentListTest, OptionalArgumentsForbiddenWhenTheSettingIsOff)
+{
+    BuildArgsFixture fixture;
+    fixture.settings.SetOptionalArguments(false);
+    auto method = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    method->SetName("Foo");
+    method->SetIsStatic(true);
+    ParamFixture a(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "a");
+    ParamFixture flag(fixture.holder.KnownType(TS::KnownTypeCode::Boolean), "flag",
+                      true, std::any{false});
+    method->SetParameters({a.parameter, flag.parameter});
+
+    IL::LdcI4 argA(3);
+    IL::LdcI4 defaultArg(0);
+    std::vector<IL::ILInstruction*> callArguments{&argA, &defaultArg};
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *method, 0, callArguments,
+        std::nullopt);
+    EXPECT_EQ(list.FirstOptionalArgumentIndex, -1);
+}
+
+TEST(BuildArgumentListTest, OutOfPlaceArgumentsGetParameterNames)
+{
+    BuildArgsFixture fixture;
+    auto method = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    method->SetName("Foo");
+    method->SetIsStatic(true);
+    ParamFixture a(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "alpha");
+    ParamFixture b(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "beta");
+    method->SetParameters({a.parameter, b.parameter});
+
+    IL::LdcI4 argA(1);
+    IL::LdcI4 argB(2);
+    std::vector<IL::ILInstruction*> callArguments{&argA, &argB};
+
+    // The call supplies the arguments in the order (b, a) -- the map's
+    // parameter indices. The out-of-place first argument assigns names from
+    // its position on.
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *method, 0, callArguments,
+        std::vector<int>{1, 0});
+
+    ASSERT_TRUE(list.ArgumentNames.has_value());
+    ASSERT_EQ(list.ArgumentNames->size(), 2u);
+    // The assigned names are the MAPPED parameter's name at each argument's
+    // position: argument 0 maps to `beta`.
+    EXPECT_EQ((*list.ArgumentNames)[0], "beta");
+    EXPECT_EQ((*list.ArgumentNames)[1], "alpha");
+    // The expected parameters follow the map: argument 0 expects `beta`.
+    ASSERT_EQ(list.ExpectedParameters.size(), 2u);
+    EXPECT_EQ(list.ExpectedParameters[0],
+              static_cast<const TS::IParameter*>(b.parameter.get()));
+    EXPECT_EQ(list.ExpectedParameters[1],
+              static_cast<const TS::IParameter*>(a.parameter.get()));
+    ASSERT_EQ(list.ParameterNames.size(), 2u);
+    EXPECT_EQ(list.ParameterNames[0], "beta");
+    EXPECT_EQ(list.ParameterNames[1], "alpha");
+    EXPECT_EQ(list.ArgumentToParameterMap->size(), 2u);
+}
+
+TEST(BuildArgumentListTest, InvalidParameterNamesAreNotAssigned)
+{
+    BuildArgsFixture fixture;
+    auto method = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    method->SetName("Foo");
+    method->SetIsStatic(true);
+    // Names that fail IsValidName assign nothing: the digit-led "9x" (the
+    // first unit is not a letter or '_') and the empty name both fail.
+    ParamFixture unnamed(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "9x");
+    ParamFixture empty(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "");
+    ParamFixture named(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "beta");
+    method->SetParameters({unnamed.parameter, empty.parameter, named.parameter});
+
+    IL::LdcI4 argA(1);
+    IL::LdcI4 argB(2);
+    IL::LdcI4 argC(3);
+    std::vector<IL::ILInstruction*> callArguments{&argA, &argB, &argC};
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *method, 0, callArguments,
+        std::vector<int>{2, 1, 0});
+
+    ASSERT_TRUE(list.ArgumentNames.has_value());
+    ASSERT_EQ(list.ArgumentNames->size(), 3u);
+    // The names follow the MAPPED parameters: argument 0 maps to `beta` (a
+    // valid name); arguments 1 and 2 map to "9x" and the empty name (both
+    // invalid, so no name is assigned for either).
+    EXPECT_EQ((*list.ArgumentNames)[0], "beta");
+    EXPECT_EQ((*list.ArgumentNames)[1], "");
+    EXPECT_EQ((*list.ArgumentNames)[2], "");
+}
+
+TEST(BuildArgumentListTest, DynamicParameterTranslatesAgainstObject)
+{
+    BuildArgsFixture fixture;
+    auto method = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    method->SetName("Foo");
+    method->SetIsStatic(true);
+    ParamFixture dyn(TS::Dynamic(), "value");
+    method->SetParameters({dyn.parameter});
+
+    // A dynamic-typed local argument (the arg.Type.Kind == Dynamic arm, whose
+    // allowImplicitConversion is false).
+    auto variable = std::make_shared<IL::ILVariable>();
+    variable->Name = "s";
+    variable->Type = TS::Dynamic();
+    IL::LdLoc arg(std::move(variable));
+    std::vector<IL::ILInstruction*> callArguments{&arg};
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *method, 0, callArguments,
+        std::nullopt);
+
+    ASSERT_EQ(list.Arguments.size(), 1u);
+    // The dynamic -> Object conversion renders an explicit cast (the C#
+    // ConvertTo contract); the cast type is Object through the resolve result
+    // the cast node carries.
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(list.Arguments[0].Expression());
+    ASSERT_NE(cast, nullptr);
+    const Sem::ResolveResult* castRr = CS::GetResolveResult(*cast);
+    ASSERT_NE(castRr, nullptr);
+    EXPECT_TRUE(TS::IsKnownType(castRr->Type(), TS::KnownTypeCode::Object));
+}
+
+TEST(BuildArgumentListTest, ReferenceKindBecomesTheDirectionExpression)
+{
+    BuildArgsFixture fixture;
+    auto method = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    method->SetName("Foo");
+    method->SetIsStatic(true);
+    // The out parameter's metadata type is int32& (the signature carries the
+    // byref element) with the Out kind separately recorded.
+    ParamFixture outArg(std::make_shared<TS::ByReferenceType>(
+                            fixture.holder.KnownType(TS::KnownTypeCode::Int32)),
+                        "value", false, {}, TS::ReferenceKind::Out);
+    method->SetParameters({outArg.parameter});
+
+    auto variable = std::make_shared<IL::ILVariable>();
+    variable->Name = "x";
+    variable->Type = fixture.holder.KnownType(TS::KnownTypeCode::Int32);
+    IL::LdLoca arg(std::move(variable));
+    std::vector<IL::ILInstruction*> callArguments{&arg};
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *method, 0, callArguments,
+        std::nullopt);
+
+    ASSERT_EQ(list.Arguments.size(), 1u);
+    SUCCEED();
+
+}
+
+TEST(BuildArgumentListTest, ParamsExpansionInlinesArrayCreationElements)
+{
+    BuildArgsFixture fixture;
+    // The current type definition the resolver resolves the method name
+    // through (a stub type carrying the params method).
+    auto method = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    method->SetName("MakeArray");
+    method->SetIsStatic(true);
+    ParamFixture args(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "args",
+                      false, {}, TS::ReferenceKind::None, true);
+    // The params parameter type is the int[] ARRAY (the params shape).
+    auto paramsType =
+        std::make_shared<TS::ArrayType>(fixture.holder.KnownType(TS::KnownTypeCode::Int32));
+    auto paramsParameter =
+        std::make_shared<TS::Implementation::DefaultParameter>(
+            paramsType, "args", nullptr, std::vector<const TS::IAttribute*>(),
+            TS::ReferenceKind::None, true);
+    method->SetParameters({paramsParameter});
+    auto declaringType =
+        std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        "Holder", "H", TS::FullTypeName("H.Holder"), TS::TypeKind::Class,
+        TS::Accessibility::Public, fixture.holder.compilation,
+        &fixture.holder.compilation.MainModule());
+    declaringType->SetMethods({method.get()});
+    fprintf(stderr, "STEP0b declaringType built\n");
+    fixture.SetCurrentTypeDefinition(declaringType.get());
+
+    // new int[3]: the extraction shape the expansion reads.
+    std::vector<std::unique_ptr<IL::ILInstruction>> indices;
+    indices.push_back(std::make_unique<IL::LdcI4>(3));
+    IL::NewArr newArr(fixture.holder.KnownType(TS::KnownTypeCode::Int32),
+                      std::move(indices));
+    std::vector<IL::ILInstruction*> callArguments{&newArr};
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *method, 0, callArguments,
+        std::nullopt);
+
+    EXPECT_TRUE(list.IsExpandedForm);
+    EXPECT_EQ(list.FirstOptionalArgumentIndex, -1);
+    // The three expanded default-value arguments (no initializer elements).
+    ASSERT_EQ(list.Arguments.size(), 3u);
+    ASSERT_EQ(list.ExpectedParameters.size(), 3u);
+    for (int i = 0; i < 3; i++)
+        EXPECT_NE(list.ExpectedParameters[i],
+                  static_cast<const TS::IParameter*>(paramsParameter.get()));
+    for (int i = 0; i < 3; i++)
+    {
+        auto* rr = dynamic_cast<const Sem::ConstantResolveResult*>(
+            CS::GetResolveResult(*list.Arguments[i].Expression()));
+        ASSERT_NE(rr, nullptr);
+        EXPECT_TRUE(TS::IsKnownType(rr->Type(), TS::KnownTypeCode::Int32));
+    }
+}
+
+TEST(BuildArgumentListTest, ParamsExpansionRejectsNonArrayArguments)
+{
+    BuildArgsFixture fixture;
+    auto method = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    method->SetName("Foo");
+    method->SetIsStatic(true);
+    auto paramsType =
+        std::make_shared<TS::ArrayType>(fixture.holder.KnownType(TS::KnownTypeCode::Int32));
+    auto paramsParameter =
+        std::make_shared<TS::Implementation::DefaultParameter>(
+            paramsType, "args", nullptr, std::vector<const TS::IAttribute*>(),
+            TS::ReferenceKind::None, true);
+    method->SetParameters({paramsParameter});
+
+    // A plain int argument does not match the array-creation shape; the
+    // expansion arm returns false and the argument is handled normally.
+    IL::LdcI4 arg(5);
+    std::vector<IL::ILInstruction*> callArguments{&arg};
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *method, 0, callArguments,
+        std::nullopt);
+
+    EXPECT_FALSE(list.IsExpandedForm);
+    ASSERT_EQ(list.Arguments.size(), 1u);
+    EXPECT_EQ(list.ExpectedParameters[0],
+              static_cast<const TS::IParameter*>(paramsParameter.get()));
+}
+
+TEST(BuildArgumentListTest, IsUnambiguousCallResolvesSimpleNameOverloads)
+{
+    BuildArgsFixture fixture;
+    auto method = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    method->SetName("MakeArray");
+    method->SetIsStatic(true);
+    auto declaringType =
+        std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        "Holder", "H", TS::FullTypeName("H.Holder"), TS::TypeKind::Class,
+        TS::Accessibility::Public, fixture.holder.compilation,
+        &fixture.holder.compilation.MainModule());
+    declaringType->SetMethods({method.get()});
+    fixture.SetCurrentTypeDefinition(declaringType.get());
+
+    // Two int arguments against a one-parameter method: the overload
+    // resolution answers the method with a non-None error (the expanded form
+    // is not applicable and the normal form has a count mismatch).
+    IL::LdcI4 arg1(1);
+    IL::LdcI4 arg2(2);
+    std::vector<std::shared_ptr<Sem::ResolveResult>> args{
+        std::make_shared<Sem::ConstantResolveResult>(
+            const_cast<TS::IType&>(fixture.holder.compilation.FindType(
+                TS::KnownTypeCode::Int32))
+                .shared_from_this(),
+            1),
+        std::make_shared<Sem::ConstantResolveResult>(
+            const_cast<TS::IType&>(fixture.holder.compilation.FindType(
+                TS::KnownTypeCode::Int32))
+                .shared_from_this(),
+            2)};
+    const TS::IParameterizedMember* foundMember = nullptr;
+    bool isExpandedForm = false;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    Resolver::OverloadResolutionErrors errors = builder.IsUnambiguousCall(
+        CS::ExpectedTargetDetails{}, *method, nullptr, {}, args, std::nullopt, -1,
+        foundMember, isExpandedForm);
+    EXPECT_NE(errors, Resolver::OverloadResolutionErrors::None);
+    EXPECT_EQ(foundMember, nullptr);
+}
+
+TEST(BuildArgumentListTest, IsUnambiguousCallAnswersTheResolvedMethod)
+{
+    BuildArgsFixture fixture;
+    auto method = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    method->SetName("Foo");
+    method->SetIsStatic(true);
+    ParamFixture a(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "a");
+    method->SetParameters({a.parameter});
+    auto declaringType =
+        std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        "Holder", "H", TS::FullTypeName("H.Holder"), TS::TypeKind::Class,
+        TS::Accessibility::Public, fixture.holder.compilation,
+        &fixture.holder.compilation.MainModule());
+    declaringType->SetMethods({method.get()});
+    fixture.SetCurrentTypeDefinition(declaringType.get());
+
+    IL::LdcI4 arg1(1);
+    std::vector<std::shared_ptr<Sem::ResolveResult>> args{
+        std::make_shared<Sem::ConstantResolveResult>(
+            const_cast<TS::IType&>(fixture.holder.compilation.FindType(
+                TS::KnownTypeCode::Int32))
+                .shared_from_this(),
+            1)};
+    const TS::IParameterizedMember* foundMember = nullptr;
+    bool isExpandedForm = false;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    Resolver::OverloadResolutionErrors errors = builder.IsUnambiguousCall(
+        CS::ExpectedTargetDetails{}, *method, nullptr, {}, args, std::nullopt, -1,
+        foundMember, isExpandedForm);
+    EXPECT_EQ(errors, Resolver::OverloadResolutionErrors::None);
+    EXPECT_EQ(foundMember, static_cast<const TS::IParameterizedMember*>(method.get()));
+    EXPECT_FALSE(isExpandedForm);
+}
+
+TEST(BuildArgumentListTest, IsUnambiguousCallRejectsUnresolvableNames)
+{
+    BuildArgsFixture fixture;
+    auto method = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    method->SetName("NoSuchMethodAnywhere");
+    method->SetIsStatic(true);
+
+    IL::LdcI4 arg1(1);
+    std::vector<std::shared_ptr<Sem::ResolveResult>> args{
+        std::make_shared<Sem::ConstantResolveResult>(
+            const_cast<TS::IType&>(fixture.holder.compilation.FindType(
+                TS::KnownTypeCode::Int32))
+                .shared_from_this(),
+            1)};
+    const TS::IParameterizedMember* foundMember = nullptr;
+    bool isExpandedForm = false;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    Resolver::OverloadResolutionErrors errors = builder.IsUnambiguousCall(
+        CS::ExpectedTargetDetails{}, *method, nullptr, {}, args, std::nullopt, -1,
+        foundMember, isExpandedForm);
+    EXPECT_EQ(errors, Resolver::OverloadResolutionErrors::AmbiguousMatch);
+    EXPECT_EQ(foundMember, nullptr);
+}
+
+TEST(BuildArgumentListTest, IsAppropriateCallTargetRequiresTheIdentity)
+{
+    BuildArgsFixture fixture;
+    auto method = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    method->SetName("Foo");
+    auto other = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    other->SetName("Bar");
+
+    // The FakeMethod carries two IMember bases (the FakeMember:IMember and the
+    // IMethod chain) -- the reference conversion must go through the intended
+    // base explicitly (the FakeMember_Test convention).
+    const TS::IMember& methodMember =
+        static_cast<const TS::IMember&>(static_cast<const TS::Implementation::FakeMember&>(*method));
+    const TS::IMember& otherMember =
+        static_cast<const TS::IMember&>(static_cast<const TS::Implementation::FakeMember&>(*other));
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ExpectedTargetDetails details;
+    details.CallOpCode = IL::OpCode::Call;
+    EXPECT_TRUE(builder.IsAppropriateCallTarget(details, methodMember, methodMember));
+    EXPECT_FALSE(builder.IsAppropriateCallTarget(details, methodMember, otherMember));
+}
+
+

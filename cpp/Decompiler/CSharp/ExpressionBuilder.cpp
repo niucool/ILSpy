@@ -3845,14 +3845,20 @@ TranslatedExpression ExpressionBuilder::ChangeDirectionExpressionTo(TranslatedEx
         default:
             throw std::runtime_error("Unsupported reference kind: " + std::to_string(static_cast<int>(kind)));
     }
+    // The C# `brrr` local keeps the ByReferenceResolveResult alive while the
+    // annotations are replaced (the GC reference); the port must capture the
+    // owning handle BEFORE the RemoveAnnotations destroys the annotation that
+    // owns the result -- reading `brrr` after the remove is use-after-free.
+    std::shared_ptr<Sem::ResolveResult> elementResultShared =
+        brrr->ElementResult() != nullptr ? brrr->ElementResultShared() : nullptr;
     dirExpr->RemoveAnnotations<Sem::ByReferenceResolveResult>();
     std::shared_ptr<Sem::ResolveResult> newBrrr;
-    if (brrr->ElementResult() == nullptr)
+    if (elementResultShared == nullptr)
         newBrrr = std::make_shared<Sem::ByReferenceResolveResult>(
             const_cast<TS::IType&>(brrr->ElementType()).shared_from_this(), kind);
     else
-        newBrrr = std::make_shared<Sem::ByReferenceResolveResult>(brrr->ElementResultShared(),
-                                                                  kind);
+        newBrrr = std::make_shared<Sem::ByReferenceResolveResult>(
+            std::move(elementResultShared), kind);
     dirExpr->AddAnnotation(newBrrr);
     return TranslatedExpression(dirExpr);
 }

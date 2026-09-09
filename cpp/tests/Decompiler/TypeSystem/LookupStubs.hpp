@@ -477,6 +477,32 @@ public:
         return result;
     }
 
+    // The `IType::GetMethods` member-enumeration virtual over the stub's own
+    // filtered list + the `GetMembersHelper` base-type walk when
+    // `IgnoreInheritedMembers` is absent (the `GetProperties` override shape).
+    // First consumer: the CallBuilder IsUnambiguousCall fixture (the resolver's
+    // simple-name lookup reads the current type's methods). The default
+    // (inherited empty) preserves the prior behavior for the tests that do not
+    // call SetMethods (the additive-setter convention).
+    std::vector<const IMethod*> GetMethods(
+        std::function<bool(const IMethod*)> filter = nullptr,
+        GetMemberOptions options = GetMemberOptions::None) const override
+    {
+        std::vector<const IMethod*> result;
+        for (const IMethod* m : methods_)
+            if (!filter || filter(m))
+                result.push_back(m);
+        if ((options & GetMemberOptions::IgnoreInheritedMembers) == GetMemberOptions::None)
+        {
+            const GetMemberOptions declared = options | GetMemberOptions::IgnoreInheritedMembers
+                | GetMemberOptions::ReturnMemberDefinitions;
+            for (const ITypePtr& base : directBaseTypes_)
+                for (const IMethod* m : base->GetMethods(filter, declared))
+                    result.push_back(m);
+        }
+        return result;
+    }
+
     // The `IType::GetFields` member-enumeration virtual over the stub's own
     // filtered list + the `GetMembersHelper` base-type walk when
     // `IgnoreInheritedMembers` is absent (the `GetProperties` override shape).

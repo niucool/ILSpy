@@ -295,6 +295,15 @@ bool IsAnyPointer(TypeKind typeKind);
 // `as ParameterizedType` test).
 const IType* SkipModifiers(const IType& type);
 
+// The C# `public static IType UnwrapByRef(this IType type)`
+// (TypeSystemExtensions.cs line 434): strip one `ByReferenceType` wrapper,
+// answering the element type; any other type (including other wrappers) is
+// returned unchanged. First consumer: IsUnambiguousCall's out-var
+// type-mismatch check (the out parameter's unwrapped type).
+const IType& UnwrapByRef(const IType& type);
+
+const IType* SkipModifiers(const IType& type);
+
 // The C# `public static IType WithoutNullability(this IType type)` (TypeSystemExtensions.cs
 // line 799) -- `type.ChangeNullability(Nullability.Oblivious)`: the same type with the
 // nullability annotation erased (the pre-C#-8 default annotation). The C# extension's
