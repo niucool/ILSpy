@@ -2677,6 +2677,36 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   unwrap, the static-arm constrainedTo preference: exactly the 7 predicted
   failures) then restored green; full suite 12137 ran / 12135 passed / the
   2 standing skips / zero failures, and all four CLI baselines unchanged.
+- **`StatementBuilder` skeleton** -- `cpp/Decompiler/CSharp/StatementBuilder.{hpp,cpp}`
+  now carries the C# `sealed class StatementBuilder : ILVisitor<TranslatedStatement>`
+  skeleton (StatementBuilder.cs lines 53-153): the ctor (the ExpressionBuilder built
+  over `this` -- the mutual reference the C# GC roots through the field; the
+  `currentReturnContainer` body cast the port's statically-typed `ILFunction::Body`
+  makes unreachable in its cast form; `currentIsIterator`; the `currentResultType`
+  `IsAsync ? AsyncReturnType! : ReturnType` source; the invalid_argument guards for
+  the pointer parameters -- the D424 convention), the `Convert` / `ConvertAsBlock`
+  entry family (the re-attached IL-instruction annotation with the C#
+  `AddAnnotation`-does-not-dedupe duplicate the entry produces over an already-
+  annotated arm -- pinned by the test), the REAL C# `Default` fallback (an
+  `ExpressionStatement` over `exprBuilder.Translate(inst)` -- unlike the
+  ExpressionBuilder's error-expression fallback, this one is the C#'s own behavior),
+  and the first five Visit arms: `VisitIsInst` (the unused-result `expr is T` over
+  the boxing-unwrapped argument with the boolean `ResolveResult` -- both the inner
+  and the outer IL-instruction annotation the C# statement carries), `VisitStLoc`
+  / its `VisitStObj` sibling (the assignment statement with the top-level ref strip
+  on ref re-assignment), `VisitNop` (the empty statement with the nop's comment as
+  trailing trivia), and `VisitIfInstruction` (the if/else over the translated
+  condition, the Nop false arm the C#'s no-else shape). Supporting IL-node surface:
+  the port's `Nop` gained the C# partial's `NopKind` (Normal/Pop) + `Comment`
+  (nullable) fields with the faithful `.pop` / ` // comment` dump render, and the
+  `ILFunction` gained the C# `IsIterator` / `AsyncReturnType` / `ReturnType` fields
+  with the derived `IsAsync()` property. Verified by the 14-test
+  `StatementBuilderTest` suite over the MinimalCorlib fixture with an ILFunction
+  whose Body is a BlockContainer, proven with a 5-behavior neuter RED round (the
+  ref strip, the comment trivia, the isinst resolve result, the Nop-false-arm
+  gate, the iterator copy: exactly the 5 predicted failures) then restored green;
+  full suite 12278 ran / 12276 passed / the 2 standing skips / zero regressions,
+  and all four CLI baselines unchanged.
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

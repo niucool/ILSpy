@@ -23,18 +23,44 @@
 #include "Decompiler/IL/ILInstruction.hpp"
 
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace ILSpy::Decompiler::IL {
 
+// The C# `public enum NopKind` (the SimpleInstruction.cs partial): the no-op
+// variants. The IL reader emits Kind.Pop for the raw `pop` opcode's committed
+// no-op form.
+enum class NopKind {
+    Normal,
+    Pop
+};
+
 class Nop : public ILInstruction {
 public:
+    // The C# `public NopKind Kind` field: the pop variant renders as 'nop.pop'.
+    NopKind Kind = NopKind::Normal;
+
+    // The C# `public string? Comment` field: a decompiler annotation rendered as
+    // the trailing ' // comment' in the IL dump; the StatementBuilder's VisitNop
+    // attaches it to the decompiled EmptyStatement as a Comment trivia. The null
+    // state is observable (the C# `inst.Comment != null` gate), so the port models
+    // it as an optional.
+    std::optional<std::string> Comment;
+
     Nop() : ILInstruction(OpCode::Nop) {}
     InstructionFlags DirectFlags() const override { return InstructionFlags::None; }
     StackType ResultType() const override { return StackType::Void; }
     int ChildCount() const override { return 0; }
     ILInstruction* GetChild(int) const override { return nullptr; }
-    void WriteTo(std::string& out) const override { out += "nop"; }
+    void WriteTo(std::string& out) const override {
+        out += "nop";
+        if (Kind != NopKind::Normal) out += ".pop";
+        if (Comment && !Comment->empty()) {
+            out += " // ";
+            out += *Comment;
+        }
+    }
 protected:
     std::unique_ptr<ILInstruction> SetChildRaw(int, std::unique_ptr<ILInstruction> n) override { return n; }
 };

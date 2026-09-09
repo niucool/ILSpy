@@ -67,6 +67,26 @@ public:
     // (the C# GC reference).
     TypeSystem::IMethod* Method = nullptr;
 
+    // The C# `public bool IsIterator` field (the YieldReturnDecompiler sets it):
+    // whether this function is a compiler-generated iterator MoveNext. The
+    // StatementBuilder's ctor copies it into its own currentIsIterator state.
+    bool IsIterator = false;
+
+    // The C# `public IType? AsyncReturnType` field: the async return element type
+    // (T of Task<T>), or null when this function is not async. The C# `IsAsync`
+    // property is derived from its null state. Owning shared_ptr like every other
+    // IL-node type field (the IsInst.Type convention).
+    TypeSystem::ITypePtr AsyncReturnType;
+
+    // The C# `public readonly IType ReturnType` field: the function's return type
+    // (the C# ctor assigns method.ReturnType; the port's seed reader cannot, so
+    // it stays null until the type-system plumbing wires it). The StatementBuilder
+    // ctor reads it as the non-async currentResultType source.
+    TypeSystem::ITypePtr ReturnType;
+
+    // The C# `public bool IsAsync => AsyncReturnType != null` property.
+    bool IsAsync() const { return AsyncReturnType != nullptr; }
+
     // The IL offset of the first chained `: base(...)`/`: this(...)` constructor
     // call in this function's body, or -1 when this is not an instance
     // constructor or no chained call was found. Lazy and cached (the C#

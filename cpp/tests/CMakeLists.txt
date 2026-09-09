@@ -476,6 +476,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/ExpressionBuilderUserDefinedCompoundAssign_Test.cpp
     Decompiler/CSharp/ExpressionBuilderNumericCompoundAssign_Test.cpp
     Decompiler/CSharp/ExpressionBuilderTranslateTargetTest.cpp
+    Decompiler/CSharp/StatementBuilder_Test.cpp
     Decompiler/CSharp/CallBuilder_Test.cpp
     Decompiler/CSharp/Syntax/InterpolatedString_Test.cpp
     Decompiler/CSharp/Syntax/QueryExpression_Test.cpp

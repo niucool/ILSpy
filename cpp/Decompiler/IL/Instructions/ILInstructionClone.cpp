@@ -110,7 +110,14 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
     std::unique_ptr<ILInstruction> c;
     switch (Op) {
         // ---- leaf nodes (no children) ----
-        case OpCode::Nop: c = std::make_unique<Nop>(); break;
+        case OpCode::Nop: {
+            const auto& s = static_cast<const Nop&>(*this);
+            auto clone = std::make_unique<Nop>();
+            clone->Kind = s.Kind;
+            clone->Comment = s.Comment;
+            c = std::move(clone);
+            break;
+        }
         case OpCode::LdNull: c = std::make_unique<LdNull>(); break;
         case OpCode::Rethrow: c = std::make_unique<Rethrow>(); break;
         case OpCode::LdcI4: {
@@ -543,6 +550,9 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             auto clone = std::make_unique<ILFunction>();
             clone->IsConstructor = s.IsConstructor;
             clone->IsStatic = s.IsStatic;
+            clone->IsIterator = s.IsIterator;
+            clone->AsyncReturnType = s.AsyncReturnType;
+            clone->ReturnType = s.ReturnType;
             clone->Variables = s.Variables;  // shared ILVariablePtr copies
             clone->Body.reset(static_cast<BlockContainer*>(
                 s.Body ? s.Body->Clone().release() : nullptr));
