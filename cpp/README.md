@@ -2769,6 +2769,36 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   regressions, and all four CLI baselines unchanged (--csharp mscorlib 10106366
   bytes, --il whole-module byte-identical to the 41246545-byte real-ilspycmd gold,
   -l c 109438, the --json usage check rc 64).
+- **`StatementBuilder` slice 4 -- the try-construction region + the lock arm** -- the C#
+  try region (`StatementBuilder.cs` lines 445-532): the `MakeTryCatch` helper (converts the
+  try block once; a nested try-catch statement whose finally block is absent IS the result --
+  the extend-existing path -- and everything else wraps in a fresh `TryCatchStatement` whose
+  try block is the converted `BlockStatement` or a new block holding it), `VisitTryCatch`
+  (one `CatchClause` per handler, the handler instruction riding the clause as the bare-IL
+  annotation plus the `ILVariableResolveResult`; a variable with a store besides its use is
+  named and typed, a single-stored non-`object` variable is typed only, the `object`-typed
+  bare catch renders neither; a filter that is not the ldc.i4 1 constant translates to the
+  `when` condition over `TranslateCondition`), `VisitTryFinally` (the finally block over the
+  reused-or-wrapped try statement -- the C# `try { try { } catch { } } finally { }` flattens
+  to one statement carrying both IL annotations, the C# `AddAnnotation` non-dedup),
+  `VisitTryFault` (the fault block becomes a catch-clause body carrying the 'try-fault'
+  empty statement inserted before the block's first statement -- `FirstOrDefault()` == null
+  inserts at the head of an empty block -- plus the appended bare throw), and
+  `VisitLockInstruction` (the lock statement over the translated monitor expression and the
+  converted body block). The shared `IL::MatchLdcI4(int)` extension landed in
+  `cpp/Decompiler/IL/PatternMatching.hpp` (the C# `PatternMatching.cs` home; the
+  ExpressionBuilder file-local anonymous-namespace copy was deleted so the unqualified call
+  sites resolve through ADL -- the iteration-51 scaffold-deletion precedent, since the lib
+  function next to the local shadow is ambiguous otherwise). Verified by 9 new
+  `StatementBuilderTest` tests (the bare-catch shape with the annotation channels, the named
+  and typed variable matrix, the `when`-filter translate, the finally render, the
+  nested-try-catch extend with the double IL annotation, the try-fault statement layout,
+  and the lock render), proven by a clean RED round (all 9 failed through the `Default`
+  fallback before the switch cases were wired) then green; full suite 12313 ran / 12311
+  passed / the 2 standing skips / zero regressions, and all four CLI baselines unchanged
+  (--csharp mscorlib 10106366 bytes, --il whole-module byte-identical to the 41246545-byte
+  real-ilspycmd gold, -l c 109438, the --json usage check rc 64);
+  re-verified at landing against the refreshed 4.8.9345.0 golds, the following entry).
 - **Machine gold refresh -- the 2026-09 Windows Update .NET Framework servicing
   build** -- Windows Update replaced the machine fixtures between iterations 137
   and 138: the .NET Framework 4.8 mscorlib.dll went 4.8.9337.0 -> 4.8.9345.0

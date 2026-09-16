@@ -189,14 +189,6 @@ const IL::ILInstruction* UnwrapConv(const IL::ILInstruction* inst,
     return inst;
 }
 
-// The C# `ILInstruction.MatchLdcI4(int)` (IL/Instructions/PatternMatching.cs line
-// 27): an LdcI4 constant with the given value. The "copied next to its consumer"
-// convention (the UnwrapConv precedent above).
-bool MatchLdcI4(const IL::ILInstruction* inst, std::int32_t val)
-{
-    return inst != nullptr && inst->Op == IL::OpCode::LdcI4
-           && static_cast<const IL::LdcI4*>(inst)->Value == val;
-}
 
 // The C# `ILInstruction.MatchLdcI(long)` (PatternMatching.cs line 73): the out-
 // parameter form over LdcI8/LdcI4 with the conv unwrapping (a sign-extend conv

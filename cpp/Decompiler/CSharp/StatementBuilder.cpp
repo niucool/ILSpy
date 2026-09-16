@@ -45,19 +45,24 @@
 #include "Decompiler/CSharp/Syntax/Statements/GotoStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/LockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ThrowStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldReturnStatement.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/LockInstruction.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/IL/Instructions/YieldReturn.hpp"
+#include "Decompiler/IL/PatternMatching.hpp"
 #include "Decompiler/NRExtensions.hpp"
 #include "Decompiler/Semantics/Conversion.hpp"
 #include "Decompiler/Semantics/ConversionFactories.hpp"
@@ -204,6 +209,14 @@ TranslatedStatement StatementBuilder::Visit(IL::ILInstruction* inst)
             return VisitRethrow(inst);
         case IL::OpCode::YieldReturn:
             return VisitYieldReturn(inst);
+        case IL::OpCode::TryCatch:
+            return VisitTryCatch(inst);
+        case IL::OpCode::TryFinally:
+            return VisitTryFinally(inst);
+        case IL::OpCode::TryFault:
+            return VisitTryFault(inst);
+        case IL::OpCode::LockInstruction:
+            return VisitLockInstruction(inst);
         case IL::OpCode::Initblk:
             return VisitInitblk(inst);
         case IL::OpCode::Cpblk:
@@ -437,6 +450,126 @@ TranslatedStatement StatementBuilder::VisitYieldReturn(IL::ILInstruction* inst)
             .ConvertTo(*elementType, *exprBuilder, /*checkForOverflow*/ false,
                        /*allowImplicitConversion*/ true);
     return WithILInstruction(*new Syntax::YieldReturnStatement(expr.Expression()), inst);
+}
+
+// The C# `TryCatchStatement MakeTryCatch(ILInstruction tryBlock)` (lines
+// 445-454): converts the try block once; a nested try-catch statement whose
+// finally block is absent IS the result (the extend-existing path -- the C#
+// comment '// extend existing try-catch'), and everything else wraps in a
+// fresh TryCatchStatement whose try block is the converted BlockStatement or
+// a new block holding it (the C# `as BlockStatement ?? new BlockStatement {
+// tryBlockConverted }` collection initializer).
+Syntax::TryCatchStatement* StatementBuilder::MakeTryCatch(IL::ILInstruction* tryBlock)
+{
+    Syntax::Statement* tryBlockConverted = Convert(tryBlock);
+    if (auto* tryCatch = dynamic_cast<Syntax::TryCatchStatement*>(tryBlockConverted))
+    {
+        if (tryCatch->FinallyBlock() == nullptr)
+            return tryCatch;  // extend existing try-catch
+    }
+    auto* tryCatch = new Syntax::TryCatchStatement();
+    if (auto* block = dynamic_cast<Syntax::BlockStatement*>(tryBlockConverted))
+    {
+        tryCatch->TryBlock(block);
+    }
+    else
+    {
+        auto* blockStatement = new Syntax::BlockStatement();
+        blockStatement->Statements().Add(tryBlockConverted);
+        tryCatch->TryBlock(blockStatement);
+    }
+    return tryCatch;
+}
+
+// The C# `protected internal override TranslatedStatement VisitTryCatch(
+// TryCatch inst)` (lines 456-485): the try/catch statement over the converted
+// try block and one CatchClause per handler. The caught variable is annotated
+// first (the handler instruction annotation, then the variable resolve
+// result); it is NAMED and its type rendered only when it has a store besides
+// its use (or is read/addressed), and the type alone when it is not the
+// `object`-typed bare catch (`catch (T)` vs `catch`). A filter that is not
+// the ldc.i4 1 constant translates to the `when` condition.
+TranslatedStatement StatementBuilder::VisitTryCatch(IL::ILInstruction* inst)
+{
+    auto* tryCatchInst = static_cast<IL::TryCatch*>(inst);
+    auto* tryCatch = new Syntax::TryCatchStatement();
+    tryCatch->TryBlock(ConvertAsBlock(tryCatchInst->TryBlock.get()));
+    for (const auto& handler : tryCatchInst->Handlers)
+    {
+        auto* catchClause = new Syntax::CatchClause();
+        // The handler instruction rides the clause as the bare-IL
+        // annotation (the ILInstructionAnnotation holder channel).
+        catchClause->AddAnnotation(std::make_shared<ILInstructionAnnotation>(handler.get()));
+        const IL::ILVariablePtr& v = handler->Variable;
+        if (v != nullptr)
+        {
+            catchClause->AddAnnotation(
+                std::make_shared<ILVariableResolveResult>(v, v->Type));
+            if (v->StoreCount > 1 || v->LoadCount > 0 || v->AddressCount > 0)
+            {
+                catchClause->VariableName(v->Name);
+                catchClause->Type(exprBuilder->ConvertType(*v->Type));
+            }
+            else if (!TS::IsKnownType(*v->Type, TS::KnownTypeCode::Object))
+            {
+                catchClause->Type(exprBuilder->ConvertType(*v->Type));
+            }
+        }
+        if (!IL::MatchLdcI4(handler->Filter.get(), 1))
+            catchClause->Condition(
+                exprBuilder->TranslateCondition(handler->Filter.get()).Expression());
+        catchClause->Body(ConvertAsBlock(handler->Body.get()));
+        tryCatch->CatchClauses().Add(catchClause);
+    }
+    return WithILInstruction(*tryCatch, inst);
+}
+
+// The C# `protected internal override TranslatedStatement VisitTryFinally(
+// TryFinally inst)` (lines 486-492): the finally block over the
+// MakeTryCatch-reused (or freshly wrapped) try statement.
+TranslatedStatement StatementBuilder::VisitTryFinally(IL::ILInstruction* inst)
+{
+    auto* tryFinallyInst = static_cast<IL::TryFinally*>(inst);
+    Syntax::TryCatchStatement* tryCatch =
+        MakeTryCatch(tryFinallyInst->TryBlock.get());
+    tryCatch->FinallyBlock(ConvertAsBlock(tryFinallyInst->FinallyBlock.get()));
+    return WithILInstruction(*tryCatch, inst);
+}
+
+// The C# `protected internal override TranslatedStatement VisitTryFault(
+// TryFault inst)` (lines 493-505): the fault block becomes a catch clause
+// body -- the empty 'try-fault' statement inserted before the block's first
+// statement (FirstOrDefault() == null inserts at the head of an empty block)
+// and a bare throw appended.
+TranslatedStatement StatementBuilder::VisitTryFault(IL::ILInstruction* inst)
+{
+    auto* tryFaultInst = static_cast<IL::TryFault*>(inst);
+    auto* tryCatch = new Syntax::TryCatchStatement();
+    tryCatch->TryBlock(ConvertAsBlock(tryFaultInst->TryBlock.get()));
+    Syntax::BlockStatement* faultBlock =
+        ConvertAsBlock(tryFaultInst->FaultBlock.get());
+    auto* tryFaultStatement = new Syntax::EmptyStatement();
+    tryFaultStatement->AddTrailingTrivia(new Syntax::Comment("try-fault"));
+    faultBlock->Statements().InsertBefore(faultBlock->Statements().FirstOrNull(),
+                                          tryFaultStatement);
+    faultBlock->Statements().Add(new Syntax::ThrowStatement());
+    auto* catchClause = new Syntax::CatchClause();
+    catchClause->Body(faultBlock);
+    tryCatch->CatchClauses().Add(catchClause);
+    return WithILInstruction(*tryCatch, inst);
+}
+
+// The C# `protected internal override TranslatedStatement
+// VisitLockInstruction(LockInstruction inst)` (lines 506-510): the lock
+// statement over the translated monitor expression and the converted body.
+TranslatedStatement StatementBuilder::VisitLockInstruction(IL::ILInstruction* inst)
+{
+    auto* lockInst = static_cast<IL::LockInstruction*>(inst);
+    auto* lockStatement = new Syntax::LockStatement();
+    lockStatement->Expression(
+        exprBuilder->Translate(lockInst->OnExpression.get()).Expression());
+    lockStatement->EmbeddedStatement(ConvertAsBlock(lockInst->Body.get()));
+    return WithILInstruction(*lockStatement, inst);
 }
 
 // The C# `string EnsureUniqueLabel(Block block)` (lines 1581-1597): the block's

@@ -27,6 +27,7 @@
 #include "Decompiler/CSharp/StatementBuilder.hpp"
 
 #include "Decompiler/CSharp/Annotations.hpp"
+#include "Decompiler/CSharp/Syntax/CatchClause.hpp"
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
@@ -45,6 +46,8 @@
 #include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/LockStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/EmptyStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
@@ -74,6 +77,8 @@
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/IL/Instructions/TryInstructions.hpp"
+#include "Decompiler/IL/Instructions/LockInstruction.hpp"
 #include "Decompiler/IL/Instructions/YieldReturn.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
 #include "Decompiler/Semantics/ConstantResolveResult.hpp"
@@ -1127,6 +1132,244 @@ TEST(StatementBuilderTest, BlockMemoryInstructionsClone)
     EXPECT_EQ(cpCloneTyped->IsVolatile, true);
     ASSERT_TRUE(cpCloneTyped->SourceAddress != nullptr);
     EXPECT_EQ(cpCloneTyped->SourceAddress->Parent, cpClone.get());
+}
+
+// ---------------------------------------------------------------------------
+// The try-construction region (StatementBuilder.cs lines 445-532)
+// ---------------------------------------------------------------------------
+
+// VisitTryCatch renders the TryCatchStatement with the converted try block and
+// one CatchClause per handler; a bare catch with no variable carries no name,
+// no type, and no condition (the filter is the ldc.i4 1 constant).
+TEST(StatementBuilderTest, VisitTryCatchRendersTryCatchStatement)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::TryCatch tryCatchInst(std::make_unique<IL::LdNull>());
+    tryCatchInst.AddHandler(std::make_unique<IL::TryCatchHandler>(
+        std::make_unique<IL::LdcI4>(1), std::make_unique<IL::LdNull>(), nullptr));
+    auto* stmt = builder.Convert(&tryCatchInst);
+    auto* tryCatch = dynamic_cast<Syntax::TryCatchStatement*>(stmt);
+    ASSERT_TRUE(tryCatch != nullptr);
+    // The try block converts to a BlockStatement (the LdNull statement wrapped).
+    ASSERT_TRUE(tryCatch->TryBlock() != nullptr);
+    ASSERT_EQ(tryCatch->TryBlock()->Statements().Count(), std::size_t(1));
+    EXPECT_TRUE(tryCatch->FinallyBlock() == nullptr);
+    // One catch clause with the handler's body; no variable, no filter condition.
+    ASSERT_EQ(tryCatch->CatchClauses().Count(), std::size_t(1));
+    auto* catchClause = tryCatch->CatchClauses()[0];
+    ASSERT_TRUE(catchClause != nullptr);
+    ASSERT_TRUE(catchClause->Body() != nullptr);
+    ASSERT_EQ(catchClause->Body()->Statements().Count(), std::size_t(1));
+    EXPECT_FALSE(catchClause->VariableName().has_value());
+    EXPECT_TRUE(catchClause->Type() == nullptr);
+    EXPECT_TRUE(catchClause->Condition() == nullptr);
+    // The IL annotations: the try statement carries the TryCatch instruction;
+    // the catch clause carries its handler.
+    const auto tryInstructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(tryInstructions.size(), std::size_t(1));
+    EXPECT_EQ(tryInstructions[0], &tryCatchInst);
+    const auto handlerInstructions = CSharp::GetILInstructions(*catchClause);
+    ASSERT_EQ(handlerInstructions.size(), std::size_t(1));
+    EXPECT_EQ(handlerInstructions[0], tryCatchInst.Handlers[0].get());
+}
+
+// A variable with a store besides its use is named and its caught type is
+// rendered (`catch (int ex)`); the resolve result rides the clause.
+TEST(StatementBuilderTest, VisitTryCatchNamesAndTypesTheCatchVariable)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = fixture.MakeLocal(TS::KnownTypeCode::Int32, "ex");
+    variable->StoreCount = 2;
+    IL::TryCatch tryCatchInst(std::make_unique<IL::LdNull>());
+    tryCatchInst.AddHandler(std::make_unique<IL::TryCatchHandler>(
+        std::make_unique<IL::LdcI4>(1), std::make_unique<IL::LdNull>(), variable));
+    auto* stmt = builder.Convert(&tryCatchInst);
+    auto* tryCatch = dynamic_cast<Syntax::TryCatchStatement*>(stmt);
+    ASSERT_TRUE(tryCatch != nullptr);
+    auto* catchClause = tryCatch->CatchClauses()[0];
+    ASSERT_TRUE(catchClause != nullptr);
+    ASSERT_TRUE(catchClause->VariableName().has_value());
+    EXPECT_EQ(*catchClause->VariableName(), "ex");
+    auto* primitiveType = dynamic_cast<Syntax::PrimitiveType*>(catchClause->Type());
+    ASSERT_TRUE(primitiveType != nullptr);
+    EXPECT_EQ(primitiveType->Keyword(), "int");
+    EXPECT_TRUE(catchClause->Annotation<CSharp::ILVariableResolveResult>() != nullptr);
+}
+
+// A variable that is only stored once and typed `object` renders neither name
+// nor type (`catch` over `catch (object)`); the resolve result still rides the
+// clause (the C# annotates it before the name/type gates).
+TEST(StatementBuilderTest, VisitTryCatchOmitsObjectTypedVariable)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = fixture.MakeLocal(TS::KnownTypeCode::Object, "unused");
+    variable->StoreCount = 1;
+    IL::TryCatch tryCatchInst(std::make_unique<IL::LdNull>());
+    tryCatchInst.AddHandler(std::make_unique<IL::TryCatchHandler>(
+        std::make_unique<IL::LdcI4>(1), std::make_unique<IL::LdNull>(), variable));
+    auto* stmt = builder.Convert(&tryCatchInst);
+    auto* tryCatch = dynamic_cast<Syntax::TryCatchStatement*>(stmt);
+    ASSERT_TRUE(tryCatch != nullptr);
+    auto* catchClause = tryCatch->CatchClauses()[0];
+    ASSERT_TRUE(catchClause != nullptr);
+    EXPECT_FALSE(catchClause->VariableName().has_value());
+    EXPECT_TRUE(catchClause->Type() == nullptr);
+    EXPECT_TRUE(catchClause->Annotation<CSharp::ILVariableResolveResult>() != nullptr);
+}
+
+// A single-stored non-object variable is typed but not named
+// (`catch (int)` -- the variable is never read).
+TEST(StatementBuilderTest, VisitTryCatchTypesUnnamedVariable)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = fixture.MakeLocal(TS::KnownTypeCode::Int32, "unused");
+    variable->StoreCount = 1;
+    IL::TryCatch tryCatchInst(std::make_unique<IL::LdNull>());
+    tryCatchInst.AddHandler(std::make_unique<IL::TryCatchHandler>(
+        std::make_unique<IL::LdcI4>(1), std::make_unique<IL::LdNull>(), variable));
+    auto* stmt = builder.Convert(&tryCatchInst);
+    auto* tryCatch = dynamic_cast<Syntax::TryCatchStatement*>(stmt);
+    ASSERT_TRUE(tryCatch != nullptr);
+    auto* catchClause = tryCatch->CatchClauses()[0];
+    ASSERT_TRUE(catchClause != nullptr);
+    EXPECT_FALSE(catchClause->VariableName().has_value());
+    EXPECT_TRUE(catchClause->Type() != nullptr);
+}
+
+// A filter that is not the ldc.i4 1 constant translates to the `when`
+// condition (an I4-typed local render); the ldc.i4 1 filter is the bare catch.
+TEST(StatementBuilderTest, VisitTryCatchTranslatesTheWhenFilter)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto flag = fixture.MakeLocal(TS::KnownTypeCode::Boolean, "flag");
+    IL::TryCatch tryCatchInst(std::make_unique<IL::LdNull>());
+    tryCatchInst.AddHandler(std::make_unique<IL::TryCatchHandler>(
+        std::make_unique<IL::LdLoc>(flag), std::make_unique<IL::LdNull>(), nullptr));
+    auto* stmt = builder.Convert(&tryCatchInst);
+    auto* tryCatch = dynamic_cast<Syntax::TryCatchStatement*>(stmt);
+    ASSERT_TRUE(tryCatch != nullptr);
+    auto* catchClause = tryCatch->CatchClauses()[0];
+    ASSERT_TRUE(catchClause != nullptr);
+    auto* identifier = dynamic_cast<Syntax::IdentifierExpression*>(catchClause->Condition());
+    ASSERT_TRUE(identifier != nullptr);
+    EXPECT_EQ(CSharp::GetILVariable(*identifier), flag.get());
+}
+
+// VisitTryFinally renders the finally block over the wrapped try block
+// (MakeTryCatch wraps a non-block converted statement in a fresh block).
+TEST(StatementBuilderTest, VisitTryFinallyRendersFinallyBlock)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::TryFinally tryFinallyInst(std::make_unique<IL::LdNull>(),
+                                  std::make_unique<IL::LdNull>());
+    auto* stmt = builder.Convert(&tryFinallyInst);
+    auto* tryCatch = dynamic_cast<Syntax::TryCatchStatement*>(stmt);
+    ASSERT_TRUE(tryCatch != nullptr);
+    ASSERT_TRUE(tryCatch->TryBlock() != nullptr);
+    ASSERT_EQ(tryCatch->TryBlock()->Statements().Count(), std::size_t(1));
+    ASSERT_TRUE(tryCatch->FinallyBlock() != nullptr);
+    ASSERT_EQ(tryCatch->FinallyBlock()->Statements().Count(), std::size_t(1));
+    EXPECT_EQ(tryCatch->CatchClauses().Count(), std::size_t(0));
+    const auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(1));
+    EXPECT_EQ(instructions[0], &tryFinallyInst);
+}
+
+// MakeTryCatch's extend-existing path: an inner try-catch (FinallyBlock null)
+// is REUSED and the finally block attached to it -- the C#
+// `try { try { } catch { } } finally { }` flattens to one statement.
+TEST(StatementBuilderTest, VisitTryFinallyExtendsNestedTryCatch)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto inner = std::make_unique<IL::TryCatch>(std::make_unique<IL::LdNull>());
+    IL::TryCatch* innerPtr = inner.get();
+    inner->AddHandler(std::make_unique<IL::TryCatchHandler>(
+        std::make_unique<IL::LdcI4>(1), std::make_unique<IL::LdNull>(), nullptr));
+    IL::TryFinally tryFinallyInst(std::move(inner),
+                                  std::make_unique<IL::LdNull>());
+    auto* stmt = builder.Convert(&tryFinallyInst);
+    auto* tryCatch = dynamic_cast<Syntax::TryCatchStatement*>(stmt);
+    ASSERT_TRUE(tryCatch != nullptr);
+    // The reused inner try block, its own catch clause, and the finally block
+    // all live on the SAME statement.
+    ASSERT_TRUE(tryCatch->TryBlock() != nullptr);
+    ASSERT_EQ(tryCatch->CatchClauses().Count(), std::size_t(1));
+    ASSERT_TRUE(tryCatch->FinallyBlock() != nullptr);
+    ASSERT_TRUE(tryCatch->FinallyBlock()->Statements().Count() == std::size_t(1));
+    // The inner TryCatch instruction converts on the try block path, so the
+    // reused statement carries BOTH the inner and the outer IL annotations
+    // (the C# AddAnnotation does not dedupe).
+    const auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(2));
+    EXPECT_EQ(instructions[0], innerPtr);
+    EXPECT_EQ(instructions[1], &tryFinallyInst);
+}
+
+// VisitTryFault renders the fault block as a catch clause body carrying the
+// 'try-fault' empty statement (as leading content) and a bare throw.
+TEST(StatementBuilderTest, VisitTryFaultRendersTryFaultStatement)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::TryFault tryFaultInst(std::make_unique<IL::LdNull>(),
+                              std::make_unique<IL::LdNull>());
+    auto* stmt = builder.Convert(&tryFaultInst);
+    auto* tryCatch = dynamic_cast<Syntax::TryCatchStatement*>(stmt);
+    ASSERT_TRUE(tryCatch != nullptr);
+    ASSERT_TRUE(tryCatch->TryBlock() != nullptr);
+    EXPECT_TRUE(tryCatch->FinallyBlock() == nullptr);
+    ASSERT_EQ(tryCatch->CatchClauses().Count(), std::size_t(1));
+    auto* catchClause = tryCatch->CatchClauses()[0];
+    ASSERT_TRUE(catchClause != nullptr);
+    auto* faultBlock = catchClause->Body();
+    ASSERT_TRUE(faultBlock != nullptr);
+    // Three statements: the 'try-fault' empty statement inserted at the head,
+    // the converted fault body statement, and the appended bare throw.
+    ASSERT_EQ(faultBlock->Statements().Count(), std::size_t(3));
+    auto* emptyStatement = dynamic_cast<Syntax::EmptyStatement*>(faultBlock->Statements()[0]);
+    ASSERT_TRUE(emptyStatement != nullptr);
+    // The 'try-fault' comment rides the empty statement as trailing trivia.
+    const auto trailing = emptyStatement->TrailingTrivia();
+    ASSERT_EQ(trailing.size(), std::size_t(1));
+    auto* comment = dynamic_cast<Syntax::Comment*>(trailing[0]);
+    ASSERT_TRUE(comment != nullptr);
+    EXPECT_EQ(comment->Content(), "try-fault");
+    EXPECT_TRUE(dynamic_cast<Syntax::ExpressionStatement*>(faultBlock->Statements()[1]) != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::ThrowStatement*>(faultBlock->Statements()[2]) != nullptr);
+    const auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(1));
+    EXPECT_EQ(instructions[0], &tryFaultInst);
+}
+
+// VisitLockInstruction renders the lock statement over the translated monitor
+// expression and the converted body block.
+TEST(StatementBuilderTest, VisitLockInstructionRendersLockStatement)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto monitor = fixture.MakeLocal(TS::KnownTypeCode::Object, "lockObj");
+    IL::LockInstruction lockInst(std::make_unique<IL::LdLoc>(monitor),
+                                 std::make_unique<IL::LdNull>());
+    auto* stmt = builder.Convert(&lockInst);
+    auto* lockStatement = dynamic_cast<Syntax::LockStatement*>(stmt);
+    ASSERT_TRUE(lockStatement != nullptr);
+    auto* identifier = dynamic_cast<Syntax::IdentifierExpression*>(lockStatement->Expression());
+    ASSERT_TRUE(identifier != nullptr);
+    EXPECT_EQ(CSharp::GetILVariable(*identifier), monitor.get());
+    ASSERT_TRUE(lockStatement->EmbeddedStatement() != nullptr);
+    auto* embeddedBlock = dynamic_cast<Syntax::BlockStatement*>(lockStatement->EmbeddedStatement());
+    ASSERT_TRUE(embeddedBlock != nullptr);
+    ASSERT_EQ(embeddedBlock->Statements().Count(), std::size_t(1));
+    const auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(1));
+    EXPECT_EQ(instructions[0], &lockInst);
 }
 
 } // namespace ILSpy::Tests

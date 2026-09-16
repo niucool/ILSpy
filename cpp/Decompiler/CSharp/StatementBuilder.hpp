@@ -45,11 +45,12 @@
 // Deferrals (each named at the member that needs it): the CancellationToken (the
 // cooperative-cancel ThrowIfCancellationRequested in Convert is a no-op in the
 // port, the DecompileRun convention), and the heavier Visit arms (the switch /
-// try / lock / using / foreach / pinned-region / block-container arms) -- an
-// instruction whose C# Visit method has not been ported yet degrades to the
-// Default expression statement instead of crashing. The three small leaf arms
-// the C# keeps at the file end (initblk/cpblk/ckfinite, lines 1609-1670) have
-// landed beside the other leaf arms.
+// using / foreach / pinned-region / block-container arms) -- an instruction whose
+// C# Visit method has not been ported yet degrades to the Default expression
+// statement instead of crashing. The try-construction region (the C#
+// MakeTryCatch helper + VisitTryCatch/VisitTryFinally/VisitTryFault, lines
+// 445-505) and the VisitLockInstruction sibling (lines 506-510) have landed
+// beside the leaf arms.
 //
 // The goto/leave state (StatementBuilder.cs lines 338-373 + 1576-1597) landed
 // with the leaf arms: the block->label maps (labels/duplicateLabels +
@@ -63,7 +64,9 @@
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/LockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/Statement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/TranslatedStatement.hpp"
 #include "Decompiler/DecompileRun.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
@@ -267,6 +270,28 @@ private:
     // YieldReturn inst)` (lines 434-444): the yield return statement over the
     // element-typed value (the async return type, else the IEnumerable unwrap).
     TranslatedStatement VisitYieldReturn(IL::ILInstruction* inst);
+    // The C# `TryCatchStatement MakeTryCatch(ILInstruction tryBlock)` (lines
+    // 445-454): reuses a converted nested try-catch statement without a finally
+    // block (the extend-existing path) or wraps the converted statement in a
+    // fresh TryCatchStatement.
+    Syntax::TryCatchStatement* MakeTryCatch(IL::ILInstruction* tryBlock);
+    // The C# `protected internal override TranslatedStatement VisitTryCatch(
+    // TryCatch inst)` (lines 456-485): the try/catch statement over the
+    // converted try block and one CatchClause per handler (the caught variable's
+    // name/type from its store counts, the `when` filter over every non-ldc.i4.1
+    // filter).
+    TranslatedStatement VisitTryCatch(IL::ILInstruction* inst);
+    // The C# VisitTryFinally sibling (lines 486-492): the finally block over
+    // MakeTryCatch's reused-or-wrapped try statement.
+    TranslatedStatement VisitTryFinally(IL::ILInstruction* inst);
+    // The C# VisitTryFault sibling (lines 493-505): the fault block becomes a
+    // catch clause body carrying the 'try-fault' empty statement and a bare
+    // throw.
+    TranslatedStatement VisitTryFault(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement
+    // VisitLockInstruction(LockInstruction inst)` (lines 506-510): the lock
+    // statement over the translated monitor expression and the converted body.
+    TranslatedStatement VisitLockInstruction(IL::ILInstruction* inst);
     // The C# `protected internal override TranslatedStatement VisitInitblk(Initblk
     // inst)` (lines 1609-1623): the Unsafe.InitBlock/InitBlockUnaligned intrinsic
     // call over the (address, value, size) translations with the IL comment trivia.

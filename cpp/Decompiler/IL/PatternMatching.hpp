@@ -39,6 +39,7 @@
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
+#include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
@@ -97,6 +98,17 @@ inline bool MatchLdObj(const ILInstruction* inst, ILInstruction*& target,
     target = nullptr;
     type = nullptr;
     return false;
+}
+
+// The C# `public bool MatchLdcI4(int val)` (PatternMatching.cs line 27): an
+// LdcI4 constant with the given value. The ExpressionBuilder/transforms files
+// carry same-named anonymous-namespace copies (the "copied next to its
+// consumer" convention) that shadow this one inside those TUs; new consumers
+// use this shared home.
+inline bool MatchLdcI4(const ILInstruction* inst, std::int32_t val)
+{
+    const auto* ldc = dynamic_cast<const LdcI4*>(inst);
+    return ldc != nullptr && ldc->Value == val;
 }
 
 } // namespace ILSpy::Decompiler::IL
