@@ -2871,6 +2871,54 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   passed / the 2 standing skips / zero regressions, and all four CLI baselines
   unchanged (--csharp mscorlib 10106366 bytes, --il whole-module byte-identical to
   the 41246545-byte real-ilspycmd gold, -l c 109438, the --json usage check rc 64).
+- **`StatementBuilder` slice 6 -- the block-container region (the statement
+  finale)** -- the C# control-flow container translation (StatementBuilder.cs
+  lines 1280-1608): `VisitBlock` (the ControlFlow block as a BlockStatement over
+  its instructions plus the non-Nop final instruction; a non-ControlFlow kind
+  degrades to the Default fallback -- the foreach arm inside the loop is the
+  documented TransformToForeach deferral), `VisitBlockContainer` (the dispatch:
+  a non-Normal container whose entry point has multiple incoming edges converts
+  through ConvertLoop with the continue/break state saved and restored around it
+  and the container annotated directly alongside the WithILInstruction wrap;
+  an entry point holding a single SwitchInstruction drives TranslateSwitch with
+  the container; everything else converts through ConvertBlockContainer),
+  `ConvertLoop` (the four loop kinds: the while-true Loop shape with the
+  entry-point-label removal when every jump became a continue and the trailing
+  continue strip, the While condition-block shape with the reachability break,
+  the Skip/Except block walk and the not-continue entry label, the DoWhile
+  last-block condition shape with the two-jump entry-label removal and the
+  not-continue condition label, and the For shape with the increment-block
+  iterators and the increment label), `ConvertBlockContainer` (the wrapper with
+  the ref-readonly `ILSpyHelper_AsRefReadOnly` helper emission over
+  MethodDeclaration/TypeParameterDeclaration/ParameterDeclaration/ComposedType
+  for the EmitAsRefReadOnly gate -- the DeclareLocalFunctions call is the
+  documented TypeSystemAstBuilder.ConvertEntity deferral) and the worker (the
+  per-block labels for multi-edge or non-entry blocks, the final-leave skip with
+  the ImplicitReturnAnnotation, the nested BlockStatement flattening, the non-Nop
+  final instruction, and the end-container label with the loop's continue/break
+  pair), plus the static `IsFinalLeave` helper (the value-less leave that is the
+  container's last block's last instruction -- the function's implicit return).
+  The IL-side surface landed with it: the shared `MatchBranch` (both forms) /
+  `MatchLeave` (both forms) / `MatchIfInstruction` / `MatchNop` pattern matchers
+  in `PatternMatching.hpp` (the target forms take const pointers -- the
+  ReduceNestingTransform precedent: a plain pointer parameter is ambiguous with
+  the out-reference form for rvalue call sites under MSVC's rvalue-to-lvalue-ref
+  binding extension), `BlockContainer::MatchConditionBlock` /
+  `MatchIncrementBlock` (defined out-of-line in Block.cpp -- the matcher include
+  chain reaches BlockContainer.hpp through Branch.hpp, so in-class bodies would
+  recurse the include guards), and `AstNodeCollectionT::LastOrNull` (the
+  documented land-with-consumer collection member the trailing-continue removals
+  consume). Verified by 11 new `StatementBuilderTest` tests (the pattern-matcher
+  arms, the condition/increment block shapes, the VisitBlock render with the
+  non-ControlFlow degrade, the Normal container's labels + the skipped final
+  leave + the ImplicitReturnAnnotation, the switch entry point driving
+  TranslateSwitch, the four loop kinds end-to-end through Convert's dispatch,
+  and the end-container label), proven by a clean RED round (exactly the 9
+  Visit-driven tests failed through the Default fallback while the 2 pure
+  matcher tests passed) then green; full suite 12338 ran / 12336 passed / the 2
+  standing skips / zero regressions, and all four CLI baselines unchanged
+  (--csharp mscorlib 10106366 bytes, --il whole-module byte-identical to the
+  41246545-byte real-ilspycmd gold, -l c 109438, the --json usage check rc 64).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

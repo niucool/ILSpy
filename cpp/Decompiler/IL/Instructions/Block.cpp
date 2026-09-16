@@ -18,16 +18,45 @@
 
 // Block.cpp -- the out-of-line Block members that would otherwise drag the
 // Disassembler include graph into every IL TU (Label is the DisassemblerHelpers
-// OffsetToString of the block's own start offset).
+// OffsetToString of the block's own start offset), plus the out-of-line
+// BlockContainer loop-shape matchers (MatchConditionBlock / MatchIncrementBlock
+// -- their bodies call the shared PatternMatching.hpp matchers, whose include
+// chain reaches BlockContainer.hpp through Branch.hpp, so in-class definitions
+// would recurse the include guards).
 
 #include "Decompiler/IL/Instructions/Block.hpp"
 
 #include "Decompiler/Disassembler/DisassemblerHelpers.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/PatternMatching.hpp"
 
 namespace ILSpy::Decompiler::IL {
 
 std::string Block::Label() const {
     return Disassembler::OffsetToString(static_cast<int>(StartILOffset));
+}
+
+bool BlockContainer::MatchConditionBlock(Block* block, ILInstruction*& condition,
+                                          Block*& bodyStartBlock) {
+    condition = nullptr;
+    bodyStartBlock = nullptr;
+    if (block->Instructions.size() != 1)
+        return false;
+    ILInstruction* cond = nullptr;
+    ILInstruction* trueInst = nullptr;
+    ILInstruction* falseInst = nullptr;
+    if (!MatchIfInstruction(block->Instructions[0].get(), cond, trueInst, falseInst))
+        return false;
+    condition = cond;
+    return MatchLeave(falseInst, this) && MatchBranch(trueInst, bodyStartBlock);
+}
+
+bool BlockContainer::MatchIncrementBlock(Block* block) {
+    if (block->Instructions.empty())
+        return false;
+    if (!MatchBranch(block->Instructions.back().get(), EntryPoint()))
+        return false;
+    return true;
 }
 
 }  // namespace ILSpy::Decompiler::IL

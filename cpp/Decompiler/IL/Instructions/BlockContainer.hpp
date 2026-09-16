@@ -87,6 +87,21 @@ public:
         return nullptr;
     }
 
+    // The C# `public bool MatchConditionBlock(Block block, out ILInstruction?
+    // condition, out Block? bodyStartBlock)` (BlockContainer.cs line 356): a
+    // single-instruction block whose one instruction is an IfInstruction whose
+    // false arm leaves THIS container and whose true arm branches to the loop
+    // body start (the loop-condition block shape the Loop/While/For loop
+    // matches consume). Defined out-of-line in Block.cpp (the shared pattern
+    // matchers it calls pull the include chain).
+    bool MatchConditionBlock(Block* block, ILInstruction*& condition, Block*& bodyStartBlock);
+
+    // The C# `public bool MatchIncrementBlock(Block block)` (BlockContainer.cs
+    // line 367): the block whose last instruction branches to the container's
+    // entry point (the for-loop increment-block shape). Out-of-line in
+    // Block.cpp.
+    bool MatchIncrementBlock(Block* block);
+
     void WriteTo(std::string& out) const override {
         out += "BlockContainer {\n";
         for (auto& b : Blocks) {

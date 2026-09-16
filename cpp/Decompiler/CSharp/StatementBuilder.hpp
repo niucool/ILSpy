@@ -44,17 +44,24 @@
 //
 // Deferrals (each named at the member that needs it): the CancellationToken (the
 // cooperative-cancel ThrowIfCancellationRequested in Convert is a no-op in the
-// port, the DecompileRun convention), and the heavier Visit arms (the using /
-// foreach / pinned-region / block-container arms) -- an instruction whose C#
-// Visit method has not been ported yet degrades to the Default expression
+// port, the DecompileRun convention), the using / foreach / pinned-region Visit
+// arms (the foreach machinery they ride -- TransformToForeach and friends --
+// lands with the UsingInstruction slice), and, inside the block-container
+// region, the DeclareLocalFunctions local-function declarations (the
+// TypeSystemAstBuilder.ConvertEntity long pole; the port's seed pipeline
+// produces no local functions, so the no-op is unobservable today) and the
+// TransformToForeachWithoutDispose arm of the block instruction loop (a null
+// return -- statements convert through the normal path). An instruction whose
+// C# Visit method has not been ported yet degrades to the Default expression
 // statement instead of crashing. The try-construction region (the C#
 // MakeTryCatch helper + VisitTryCatch/VisitTryFinally/VisitTryFault, lines
 // 445-505) and the VisitLockInstruction sibling (lines 506-510) have landed
-// beside the leaf arms, and the switch region (CreateTypedCaseLabel +
+// beside the leaf arms, the switch region (CreateTypedCaseLabel +
 // TranslateSwitch + VisitSwitchInstruction, lines 156-346) has landed with the
 // StringToInt node and the ExpressionBuilder TranslateSwitchValue entry it
-// rides (the container-driven switch shape waits for the VisitBlockContainer
-// arm).
+// rides, and the block-container region (VisitBlock + VisitBlockContainer +
+// ConvertLoop + ConvertBlockContainer, lines 1280-1608) completes the
+// statement-level dispatch over the ILAst control flow.
 //
 // The goto/leave state (StatementBuilder.cs lines 338-373 + 1576-1597) landed
 // with the leaf arms: the block->label maps (labels/duplicateLabels +
@@ -338,12 +345,55 @@ private:
     // statement over TranslateSwitch (the null-container shape -- the container
     // driven shape comes through the VisitBlockContainer arm, still deferred).
     TranslatedStatement VisitSwitchInstruction(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement VisitBlock(Block
+    // block)` (line 1280): the ControlFlow block as a BlockStatement over its
+    // instructions plus the non-Nop final instruction (the foreach conversion
+    // arm inside the loop is deferred with the TransformToForeach machinery).
+    TranslatedStatement VisitBlock(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement
+    // VisitBlockContainer(BlockContainer container)` (line 1300): the loop /
+    // switch-entry / plain-block dispatch over the container kind and the
+    // entry point's incoming-edge count.
+    TranslatedStatement VisitBlockContainer(IL::ILInstruction* inst);
 
     // The C# `private void ConvertSwitchSectionBody(Syntax.SwitchSection
     // astSection, ILInstruction bodyInst)` (lines 321-346): the converted body
     // plus the EndPointUnreachable-gated break insertion (into the body block
     // when the body converted to one, else as a trailing section statement).
     void ConvertSwitchSectionBody(Syntax::SwitchSection* astSection, IL::ILInstruction* bodyInst);
+
+    // -- The block-container region (StatementBuilder.cs lines 1280-1608) -----------------------
+
+    // The C# `Statement ConvertLoop(BlockContainer container)` (lines 1321-1430):
+    // the four loop kinds -- Loop (the while-true shape with the entry-point
+    // label removal), While (the condition-block shape with the reachability
+    // break and the not-continue entry label), DoWhile (the last-block condition
+    // shape), and For (the increment-block iterators). Declared private like the
+    // C#; the tests drive through Convert's dispatch.
+    Syntax::Statement* ConvertLoop(IL::BlockContainer* container);
+
+    // The C# `BlockStatement ConvertBlockContainer(BlockContainer container,
+    // bool isLoop)` (lines 1432-1465): the wrapper over the worker -- the
+    // local-function declarations (the DeclareLocalFunctions deferral below) and
+    // the ref-readonly helper emission for the function body container.
+    Syntax::BlockStatement* ConvertBlockContainer(IL::BlockContainer* container, bool isLoop);
+
+    // The C# `BlockStatement ConvertBlockContainer(BlockStatement blockStatement,
+    // BlockContainer container, IEnumerable<Block> blocks, bool isLoop)` (lines
+    // 1529-1608): the worker -- the per-block labels (any block with an incoming
+    // multi-edge or a non-entry position), the instruction conversion with the
+    // final-leave skip (the ImplicitReturnAnnotation) and the nested-block
+    // flattening, the non-Nop final instruction, and the end-container label
+    // (with the loop's continue/break pair).
+    Syntax::BlockStatement* ConvertBlockContainer(Syntax::BlockStatement* blockStatement,
+                                                   IL::BlockContainer* container,
+                                                   const std::vector<IL::Block*>& blocks,
+                                                   bool isLoop);
+
+    // The C# `static bool IsFinalLeave(Leave leave)` (lines 1599-1608): the
+    // value-less leave that is the very last instruction of the container's
+    // last block targeting that container -- the function's implicit return.
+    static bool IsFinalLeave(IL::Leave* leave);
 };
 
 }  // namespace ILSpy::Decompiler::CSharp

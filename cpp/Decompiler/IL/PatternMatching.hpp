@@ -39,9 +39,12 @@
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
+#include "Decompiler/IL/Instructions/Branch.hpp"
+#include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
+#include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
@@ -109,6 +112,90 @@ inline bool MatchLdcI4(const ILInstruction* inst, std::int32_t val)
 {
     const auto* ldc = dynamic_cast<const LdcI4*>(inst);
     return ldc != nullptr && ldc->Value == val;
+}
+
+// The C# `public bool MatchNop()` (Instructions.cs -- the generated
+// instruction-extension region): a Nop node. The port's nullable Leave value
+// (a null Value is the C#'s Nop-normalized value) reads as the Nop shape at
+// the Leave call sites through MatchLeave below, not through this strict
+// node form.
+inline bool MatchNop(const ILInstruction* inst)
+{
+    return inst != nullptr && inst->Op == OpCode::Nop;
+}
+
+// The C# `public bool MatchBranch(out Block? targetBlock)` (PatternMatching.cs
+// line 171): a Branch with its target block.
+inline bool MatchBranch(ILInstruction* inst, Block*& targetBlock)
+{
+    auto* br = dynamic_cast<Branch*>(inst);
+    if (br != nullptr)
+    {
+        targetBlock = br->TargetBlock;
+        return true;
+    }
+    targetBlock = nullptr;
+    return false;
+}
+
+// The C# `public bool MatchBranch(Block? targetBlock)` (line 183): a Branch
+// targeting the given block. The parameter is CONST (the
+// ReduceNestingTransform precedent): a plain `Block*` parameter is ambiguous
+// with the out-form below for rvalue call sites under MSVC's rvalue-to-
+// lvalue-reference binding extension (both rank identity), while the `const
+// Block*` qualification conversion outranks it deterministically.
+inline bool MatchBranch(ILInstruction* inst, const Block* targetBlock)
+{
+    auto* br = dynamic_cast<Branch*>(inst);
+    return br != nullptr && br->TargetBlock == targetBlock;
+}
+
+// The C# `public bool MatchLeave(out BlockContainer? targetContainer, out
+// ILInstruction? value)` (line 189): a Leave with its container and value.
+inline bool MatchLeave(ILInstruction* inst, BlockContainer*& targetContainer,
+                       ILInstruction*& value)
+{
+    auto* leave = dynamic_cast<Leave*>(inst);
+    if (leave != nullptr)
+    {
+        targetContainer = leave->TargetContainer;
+        value = leave->Value.get();
+        return true;
+    }
+    targetContainer = nullptr;
+    value = nullptr;
+    return false;
+}
+
+// The C# `public bool MatchLeave(BlockContainer? targetContainer)` (line 227):
+// a value-less Leave (a Nop value -- the port's null Value is the Nop shape)
+// targeting the given container. The parameter is CONST (the MatchBranch
+// precedent above).
+inline bool MatchLeave(ILInstruction* inst, const BlockContainer* targetContainer)
+{
+    auto* leave = dynamic_cast<Leave*>(inst);
+    return leave != nullptr && leave->TargetContainer == targetContainer
+           && (leave->Value == nullptr || MatchNop(leave->Value.get()));
+}
+
+// The C# `public bool MatchIfInstruction(out ILInstruction? condition, out
+// ILInstruction? trueInst, out ILInstruction? falseInst)` (line 233): an
+// IfInstruction with its three children.
+inline bool MatchIfInstruction(ILInstruction* inst, ILInstruction*& condition,
+                               ILInstruction*& trueInst, ILInstruction*& falseInst)
+{
+    auto* ifInst = dynamic_cast<IfInstruction*>(inst);
+    if (ifInst != nullptr)
+    {
+        condition = ifInst->Condition.get();
+        trueInst = ifInst->TrueInst.get();
+        falseInst = ifInst->FalseInst.get();
+        return true;
+    }
+    condition = nullptr;
+    trueInst = nullptr;
+    falseInst = nullptr;
+    return false;
 }
 
 } // namespace ILSpy::Decompiler::IL

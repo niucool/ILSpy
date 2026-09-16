@@ -61,6 +61,10 @@
 #include "Decompiler/CSharp/Syntax/Statements/LabelStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/SwitchStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/DoWhileStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
+#include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ThrowStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldReturnStatement.hpp"
@@ -78,6 +82,7 @@
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/StringToInt.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
+#include "Decompiler/IL/PatternMatching.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
@@ -1757,10 +1762,14 @@ TEST(StatementBuilderTest, TranslateSwitchInlinesSectionsAndMapsCaseLabels)
     // shape, a separate test below).
     ASSERT_EQ(switchStatement->SwitchSections().Count(), std::size_t(3));
     // The inlined branch-target block: the section statements hold the block's
-    // converted statement (not a goto).
+    // converted statement -- the block converts through VisitBlock into a nested
+    // BlockStatement carrying the converted stloc.
     auto* caseSection = switchStatement->SwitchSections()[0];
     ASSERT_GE(caseSection->Statements().Count(), std::size_t(1));
-    EXPECT_TRUE(dynamic_cast<Syntax::ExpressionStatement*>(caseSection->Statements()[0])
+    auto* caseBody = dynamic_cast<Syntax::BlockStatement*>(caseSection->Statements()[0]);
+    ASSERT_TRUE(caseBody != nullptr);
+    ASSERT_GE(caseBody->Statements().Count(), std::size_t(1));
+    EXPECT_TRUE(dynamic_cast<Syntax::ExpressionStatement*>(caseBody->Statements()[0])
                 != nullptr);
     // The Leave-body section converts its body through the break target; as the
     // LAST section it also receives the remaining-blocks trailing content (the
@@ -1829,6 +1838,471 @@ TEST(StatementBuilderTest, TranslateSwitchRemovesDefaultOnlyLeaveSection)
     auto* survivor = switchStatement->SwitchSections()[0];
     ASSERT_EQ(survivor->CaseLabels().Count(), std::size_t(1));
     EXPECT_TRUE(survivor->CaseLabels()[0]->Expression() != nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// The block-container region (the IL pattern matchers, MatchConditionBlock /
+// MatchIncrementBlock, VisitBlock, and the VisitBlockContainer / ConvertLoop /
+// ConvertBlockContainer finale)
+// ---------------------------------------------------------------------------
+
+// The shared Branch/Leave/IfInstruction pattern matchers (PatternMatching.cs
+// lines 171-260).
+TEST(StatementBuilderTest, MatchBranchLeaveIfInstructionPatternArms)
+{
+    IL::BlockContainer container;
+    IL::Block targetBlock;
+    IL::Branch branch(&targetBlock);
+    IL::Block* matchedTarget = nullptr;
+    ASSERT_TRUE(IL::MatchBranch(&branch, matchedTarget));
+    EXPECT_EQ(matchedTarget, &targetBlock);
+    EXPECT_TRUE(IL::MatchBranch(&branch, &targetBlock));
+    EXPECT_FALSE(IL::MatchBranch(&branch, nullptr));
+    IL::Nop notABranch;
+    EXPECT_FALSE(IL::MatchBranch(&notABranch, matchedTarget));
+
+    IL::Leave leave(&container);
+    IL::BlockContainer* matchedContainer = nullptr;
+    IL::ILInstruction* leaveValue = nullptr;
+    ASSERT_TRUE(IL::MatchLeave(&leave, matchedContainer, leaveValue));
+    EXPECT_EQ(matchedContainer, &container);
+    // The value-less leave (the port's null Value is the Nop shape) matches the
+    // MatchNop-gated form.
+    EXPECT_TRUE(IL::MatchLeave(&leave, &container));
+    EXPECT_FALSE(IL::MatchLeave(&leave, nullptr));
+    // A leave carrying a value fails the MatchNop gate.
+    IL::Leave valuedLeave(&container, std::make_unique<IL::LdcI4>(1));
+    EXPECT_FALSE(IL::MatchLeave(&valuedLeave, &container));
+    EXPECT_FALSE(IL::MatchLeave(&notABranch, matchedContainer));
+
+    IL::IfInstruction ifInst(std::make_unique<IL::LdcI4>(1),
+                             std::make_unique<IL::Nop>(),
+                             std::make_unique<IL::Nop>());
+    IL::ILInstruction* condition = nullptr;
+    IL::ILInstruction* trueInst = nullptr;
+    IL::ILInstruction* falseInst = nullptr;
+    ASSERT_TRUE(IL::MatchIfInstruction(&ifInst, condition, trueInst, falseInst));
+    EXPECT_EQ(condition, ifInst.Condition.get());
+    EXPECT_EQ(trueInst, ifInst.TrueInst.get());
+    EXPECT_EQ(falseInst, ifInst.FalseInst.get());
+    EXPECT_FALSE(IL::MatchIfInstruction(&branch, condition, trueInst, falseInst));
+}
+
+// MatchConditionBlock: a single-instruction block whose if's false arm leaves
+// the container and whose true arm branches to the body.
+TEST(StatementBuilderTest, MatchConditionBlockMatchesSingleIfShape)
+{
+    IL::BlockContainer container;
+    IL::Block bodyBlock;
+    auto condBlock = std::make_unique<IL::Block>();
+    condBlock->Add(std::make_unique<IL::IfInstruction>(
+        std::make_unique<IL::LdcI4>(1),
+        std::make_unique<IL::Branch>(&bodyBlock),
+        std::make_unique<IL::Leave>(&container)));
+    condBlock->FinalInstruction = std::make_unique<IL::Nop>();
+    IL::Block* condPtr = condBlock.get();
+    container.AddBlock(std::move(condBlock));
+    IL::ILInstruction* condition = nullptr;
+    IL::Block* bodyStart = nullptr;
+    ASSERT_TRUE(container.MatchConditionBlock(condPtr, condition, bodyStart));
+    EXPECT_EQ(condition, static_cast<IL::IfInstruction*>(condPtr->Instructions[0].get())
+                             ->Condition.get());
+    EXPECT_EQ(bodyStart, &bodyBlock);
+    // A block with more than one instruction does not match.
+    IL::Block twoInstrBlock;
+    twoInstrBlock.Add(std::make_unique<IL::Nop>());
+    twoInstrBlock.Add(std::make_unique<IL::Nop>());
+    EXPECT_FALSE(container.MatchConditionBlock(&twoInstrBlock, condition, bodyStart));
+}
+
+// MatchIncrementBlock: the block's last instruction branches to the entry point.
+TEST(StatementBuilderTest, MatchIncrementBlockMatchesBranchToEntryPoint)
+{
+    IL::BlockContainer container;
+    auto entry = std::make_unique<IL::Block>();
+    IL::Block* entryPtr = entry.get();
+    container.AddBlock(std::move(entry));
+    auto incr = std::make_unique<IL::Block>();
+    incr->Add(std::make_unique<IL::StLoc>(nullptr, std::make_unique<IL::LdcI4>(1)));
+    incr->Add(std::make_unique<IL::Branch>(entryPtr));
+    IL::Block* incrPtr = incr.get();
+    container.AddBlock(std::move(incr));
+    EXPECT_TRUE(container.MatchIncrementBlock(incrPtr));
+    // A block whose last instruction does not branch to the entry point fails
+    // (incrPtr, not the moved-from unique_ptr).
+    incrPtr->Instructions.pop_back();
+    EXPECT_FALSE(container.MatchIncrementBlock(incrPtr));
+    // An empty block fails.
+    IL::Block empty;
+    EXPECT_FALSE(container.MatchIncrementBlock(&empty));
+}
+
+// VisitBlock: the ControlFlow block converts to a BlockStatement over its
+// instructions plus the non-Nop final instruction; a non-ControlFlow kind
+// degrades to the Default fallback.
+TEST(StatementBuilderTest, VisitBlockRendersBlockStatement)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = fixture.MakeLocal(TS::KnownTypeCode::Int32, "num");
+    IL::Block block;
+    block.Add(std::make_unique<IL::StLoc>(variable, std::make_unique<IL::LdcI4>(1)));
+    block.Add(std::make_unique<IL::StLoc>(variable, std::make_unique<IL::LdcI4>(2)));
+    block.FinalInstruction = std::make_unique<IL::Leave>(fixture.function.Body.get());
+    auto* stmt = builder.Convert(&block);
+    auto* blockStatement = dynamic_cast<Syntax::BlockStatement*>(stmt);
+    ASSERT_TRUE(blockStatement != nullptr);
+    // Two converted instructions plus the converted final leave (the bare
+    // value-less return).
+    ASSERT_EQ(blockStatement->Statements().Count(), std::size_t(3));
+    EXPECT_TRUE(dynamic_cast<Syntax::ExpressionStatement*>(blockStatement->Statements()[0])
+                != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::ExpressionStatement*>(blockStatement->Statements()[1])
+                != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::ReturnStatement*>(blockStatement->Statements()[2])
+                != nullptr);
+    const auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(1));
+    EXPECT_EQ(instructions[0], &block);
+
+    // A non-ControlFlow block degrades to the Default fallback.
+    IL::Block otherKind;
+    otherKind.Kind = IL::BlockKind::InterpolatedString;
+    otherKind.Add(std::make_unique<IL::StLoc>(variable, std::make_unique<IL::LdcI4>(1)));
+    auto* degraded = builder.Convert(&otherKind);
+    EXPECT_TRUE(dynamic_cast<Syntax::BlockStatement*>(degraded) == nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::ExpressionStatement*>(degraded) != nullptr);
+}
+
+// VisitBlockContainer's else arm: a Normal container converts through
+// ConvertBlockContainer -- the entry point (single incoming edge) gets no
+// label, later blocks get labels, and the container-leaving final leave is
+// skipped with the ImplicitReturnAnnotation.
+TEST(StatementBuilderTest, VisitBlockContainerNormalConvertsBlocks)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = fixture.MakeLocal(TS::KnownTypeCode::Int32, "num");
+    IL::BlockContainer container;
+    auto entry = std::make_unique<IL::Block>();
+    entry->StartILOffset = 0x0000;
+    entry->IncomingEdgeCount = 1;
+    entry->Add(std::make_unique<IL::StLoc>(variable, std::make_unique<IL::LdcI4>(1)));
+    container.AddBlock(std::move(entry));
+    auto tail = std::make_unique<IL::Block>();
+    tail->StartILOffset = 0x0010;
+    tail->IncomingEdgeCount = 1;
+    IL::Block* tailPtr = tail.get();
+    auto finalLeave = std::make_unique<IL::Leave>(&container);
+    IL::Leave* finalLeavePtr = finalLeave.get();
+    tail->Add(std::move(finalLeave));
+    tail->FinalInstruction = std::make_unique<IL::Nop>();
+    container.AddBlock(std::move(tail));
+
+    auto* stmt = builder.Convert(&container);
+    auto* blockStatement = dynamic_cast<Syntax::BlockStatement*>(stmt);
+    ASSERT_TRUE(blockStatement != nullptr);
+    // The entry's statement, the tail's label, and NO converted leave (the final
+    // leave is skipped and falls out of the block statement).
+    ASSERT_EQ(blockStatement->Statements().Count(), std::size_t(2));
+    EXPECT_TRUE(dynamic_cast<Syntax::ExpressionStatement*>(blockStatement->Statements()[0])
+                != nullptr);
+    auto* label = dynamic_cast<Syntax::LabelStatement*>(blockStatement->Statements()[1]);
+    ASSERT_TRUE(label != nullptr);
+    EXPECT_EQ(label->Label(), "IL_0010");
+    // The skipped leave rides the block statement as the implicit return.
+    auto* implicitReturn =
+        blockStatement->Annotation<CSharp::ImplicitReturnAnnotation>();
+    ASSERT_TRUE(implicitReturn != nullptr);
+    EXPECT_EQ(implicitReturn->Leave, finalLeavePtr);
+    const auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(1));
+    EXPECT_EQ(instructions[0], &container);
+    (void)tailPtr;
+}
+
+// VisitBlockContainer's single-switch entry arm: the entry block's only
+// instruction is a SwitchInstruction, so the container drives TranslateSwitch.
+TEST(StatementBuilderTest, VisitBlockContainerSwitchEntryPointDrivesTranslateSwitch)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = fixture.MakeLocal(TS::KnownTypeCode::Int32, "num");
+    IL::BlockContainer container;
+    container.Kind = IL::ContainerKind::Switch;
+    auto entry = std::make_unique<IL::Block>();
+    entry->StartILOffset = 0x0000;
+    entry->IncomingEdgeCount = 1;
+    IL::Block* entryPtr = entry.get();
+    container.AddBlock(std::move(entry));
+    auto caseBlock = std::make_unique<IL::Block>();
+    caseBlock->StartILOffset = 0x0010;
+    IL::Block* casePtr = caseBlock.get();
+    caseBlock->Add(std::make_unique<IL::StLoc>(variable, std::make_unique<IL::LdcI4>(1)));
+    container.AddBlock(std::move(caseBlock));
+
+    IL::SwitchInstruction* entrySwitch = nullptr;
+    {
+        auto fresh = std::make_unique<IL::SwitchInstruction>(std::make_unique<IL::LdLoc>(variable));
+        auto freshCase = std::make_unique<IL::SwitchSection>(Util::LongSet(1LL));
+        freshCase->SetBody(std::make_unique<IL::Branch>(casePtr));
+        auto freshDefault = std::make_unique<IL::SwitchSection>(Util::LongSet(
+            std::vector<Util::LongInterval>{Util::LongInterval::Inclusive(2, 100)}));
+        freshDefault->SetBody(std::make_unique<IL::Branch>(casePtr));
+        fresh->AddSection(std::move(freshCase));
+        fresh->AddSection(std::move(freshDefault));
+        entrySwitch = fresh.get();
+        entryPtr->Add(std::move(fresh));
+    }
+    entryPtr->FinalInstruction = std::make_unique<IL::Nop>();
+
+    auto* stmt = builder.Convert(&container);
+    auto* switchStatement = dynamic_cast<Syntax::SwitchStatement*>(stmt);
+    ASSERT_TRUE(switchStatement != nullptr);
+    ASSERT_EQ(switchStatement->SwitchSections().Count(), std::size_t(2));
+    // The inlined branch-target block: the section statements hold the block's
+    // converted statement -- a nested BlockStatement over the converted stloc.
+    auto* caseSection = switchStatement->SwitchSections()[0];
+    ASSERT_GE(caseSection->Statements().Count(), std::size_t(1));
+    auto* caseBody = dynamic_cast<Syntax::BlockStatement*>(caseSection->Statements()[0]);
+    ASSERT_TRUE(caseBody != nullptr);
+    ASSERT_GE(caseBody->Statements().Count(), std::size_t(1));
+    EXPECT_TRUE(dynamic_cast<Syntax::ExpressionStatement*>(caseBody->Statements()[0])
+                != nullptr);
+    const auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(1));
+    EXPECT_EQ(instructions[0], &container);
+    (void)entrySwitch;
+}
+
+// ConvertLoop's Loop kind: while (true) over the container blocks, with the
+// entry-point label removed when every jump to it became a continue.
+TEST(StatementBuilderTest, ConvertLoopLoopKindRendersWhileTrue)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = fixture.MakeLocal(TS::KnownTypeCode::Int32, "num");
+    IL::BlockContainer container;
+    container.Kind = IL::ContainerKind::Loop;
+    auto entry = std::make_unique<IL::Block>();
+    entry->StartILOffset = 0x0000;
+    entry->IncomingEdgeCount = 2;  // the outer entry + the continue
+    entry->Add(std::make_unique<IL::StLoc>(variable, std::make_unique<IL::LdcI4>(1)));
+    IL::Block* entryPtr = entry.get();
+    container.AddBlock(std::move(entry));
+    auto body = std::make_unique<IL::Block>();
+    body->StartILOffset = 0x0010;
+    body->IncomingEdgeCount = 1;
+    body->Add(std::make_unique<IL::Branch>(entryPtr));  // the continue
+    body->FinalInstruction = std::make_unique<IL::Nop>();
+    container.AddBlock(std::move(body));
+
+    auto* stmt = builder.Convert(&container);
+    auto* whileStatement = dynamic_cast<Syntax::WhileStatement*>(stmt);
+    ASSERT_TRUE(whileStatement != nullptr);
+    // The condition is the literal true.
+    auto* condition = dynamic_cast<Syntax::PrimitiveExpression*>(whileStatement->Condition());
+    ASSERT_TRUE(condition != nullptr);
+    const bool* trueValue = std::get_if<bool>(&condition->Value());
+    ASSERT_TRUE(trueValue != nullptr);
+    EXPECT_TRUE(*trueValue);
+    auto* loopBody = dynamic_cast<Syntax::BlockStatement*>(whileStatement->EmbeddedStatement());
+    ASSERT_TRUE(loopBody != nullptr);
+    // The entry's statement, the body's label, and the trailing continue removed
+    // (the entry-point label was removed too: all jumps became continues).
+    ASSERT_EQ(loopBody->Statements().Count(), std::size_t(2));
+    EXPECT_TRUE(dynamic_cast<Syntax::ExpressionStatement*>(loopBody->Statements()[0])
+                != nullptr);
+    auto* label = dynamic_cast<Syntax::LabelStatement*>(loopBody->Statements()[1]);
+    ASSERT_TRUE(label != nullptr);
+    EXPECT_EQ(label->Label(), "IL_0010");
+    // The container rides the statement twice: the explicit AddAnnotation plus
+    // the WithILInstruction wrap (the C# does not dedupe).
+    const auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(2));
+    EXPECT_EQ(instructions[0], &container);
+    EXPECT_EQ(instructions[1], &container);
+}
+
+// ConvertLoop's While kind: while (condition) over the condition-block shape,
+// with the body's trailing break and the entry-point label for the jumps that
+// were not represented as continues.
+TEST(StatementBuilderTest, ConvertLoopWhileKindRendersCondition)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = fixture.MakeLocal(TS::KnownTypeCode::Int32, "num");
+    IL::BlockContainer container;
+    container.Kind = IL::ContainerKind::While;
+    auto bodyBlock = std::make_unique<IL::Block>();
+    bodyBlock->StartILOffset = 0x0010;
+    bodyBlock->IncomingEdgeCount = 1;
+    bodyBlock->Add(std::make_unique<IL::StLoc>(variable, std::make_unique<IL::LdcI4>(1)));
+    bodyBlock->FinalInstruction = std::make_unique<IL::Nop>();
+    IL::Block* bodyPtr = bodyBlock.get();
+    auto entry = std::make_unique<IL::Block>();
+    entry->StartILOffset = 0x0000;
+    entry->IncomingEdgeCount = 2;
+    entry->Add(std::make_unique<IL::IfInstruction>(
+        std::make_unique<IL::LdcI4>(1),
+        std::make_unique<IL::Branch>(bodyPtr),
+        std::make_unique<IL::Leave>(&container)));
+    entry->FinalInstruction = std::make_unique<IL::Nop>();
+    container.AddBlock(std::move(entry));
+    container.AddBlock(std::move(bodyBlock));
+
+    auto* stmt = builder.Convert(&container);
+    auto* whileStatement = dynamic_cast<Syntax::WhileStatement*>(stmt);
+    ASSERT_TRUE(whileStatement != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::PrimitiveExpression*>(whileStatement->Condition())
+                != nullptr);
+    auto* loopBody = dynamic_cast<Syntax::BlockStatement*>(whileStatement->EmbeddedStatement());
+    ASSERT_TRUE(loopBody != nullptr);
+    // The body's statement, the reachability break, and the entry-point label
+    // (the second incoming edge was not a continue).
+    ASSERT_EQ(loopBody->Statements().Count(), std::size_t(3));
+    EXPECT_TRUE(dynamic_cast<Syntax::ExpressionStatement*>(loopBody->Statements()[0])
+                != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::BreakStatement*>(loopBody->Statements()[1]) != nullptr);
+    auto* label = dynamic_cast<Syntax::LabelStatement*>(loopBody->Statements()[2]);
+    ASSERT_TRUE(label != nullptr);
+    EXPECT_EQ(label->Label(), "IL_0000");
+}
+
+// ConvertLoop's DoWhile kind: do { ... } while (condition), with the
+// condition-block label for the jumps that were not continues.
+TEST(StatementBuilderTest, ConvertLoopDoWhileKindRendersDoWhile)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = fixture.MakeLocal(TS::KnownTypeCode::Int32, "num");
+    IL::BlockContainer container;
+    container.Kind = IL::ContainerKind::DoWhile;
+    auto entry = std::make_unique<IL::Block>();
+    entry->StartILOffset = 0x0000;
+    entry->IncomingEdgeCount = 2;
+    entry->Add(std::make_unique<IL::StLoc>(variable, std::make_unique<IL::LdcI4>(1)));
+    IL::Block* entryPtr = entry.get();
+    container.AddBlock(std::move(entry));
+    auto condBlock = std::make_unique<IL::Block>();
+    condBlock->StartILOffset = 0x0010;
+    condBlock->IncomingEdgeCount = 1;
+    condBlock->Add(std::make_unique<IL::IfInstruction>(
+        std::make_unique<IL::LdcI4>(1),
+        std::make_unique<IL::Branch>(entryPtr),
+        std::make_unique<IL::Leave>(&container)));
+    condBlock->FinalInstruction = std::make_unique<IL::Nop>();
+    container.AddBlock(std::move(condBlock));
+
+    auto* stmt = builder.Convert(&container);
+    auto* doWhile = dynamic_cast<Syntax::DoWhileStatement*>(stmt);
+    ASSERT_TRUE(doWhile != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::PrimitiveExpression*>(doWhile->Condition()) != nullptr);
+    auto* loopBody = dynamic_cast<Syntax::BlockStatement*>(doWhile->EmbeddedStatement());
+    ASSERT_TRUE(loopBody != nullptr);
+    // The entry's statement and the condition-block label (the entry-point label
+    // was removed: only two jumps to the entry point).
+    ASSERT_EQ(loopBody->Statements().Count(), std::size_t(2));
+    EXPECT_TRUE(dynamic_cast<Syntax::ExpressionStatement*>(loopBody->Statements()[0])
+                != nullptr);
+    auto* label = dynamic_cast<Syntax::LabelStatement*>(loopBody->Statements()[1]);
+    ASSERT_TRUE(label != nullptr);
+    EXPECT_EQ(label->Label(), "IL_0010");
+}
+
+// ConvertLoop's For kind: for (; condition; increment) over the condition and
+// increment blocks.
+TEST(StatementBuilderTest, ConvertLoopForKindRendersFor)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = fixture.MakeLocal(TS::KnownTypeCode::Int32, "num");
+    IL::BlockContainer container;
+    container.Kind = IL::ContainerKind::For;
+    auto bodyBlock = std::make_unique<IL::Block>();
+    bodyBlock->StartILOffset = 0x0010;
+    bodyBlock->IncomingEdgeCount = 1;
+    bodyBlock->Add(std::make_unique<IL::StLoc>(variable, std::make_unique<IL::LdcI4>(1)));
+    bodyBlock->FinalInstruction = std::make_unique<IL::Nop>();
+    IL::Block* bodyPtr = bodyBlock.get();
+    auto entry = std::make_unique<IL::Block>();
+    entry->StartILOffset = 0x0000;
+    entry->IncomingEdgeCount = 2;
+    entry->Add(std::make_unique<IL::IfInstruction>(
+        std::make_unique<IL::LdcI4>(1),
+        std::make_unique<IL::Branch>(bodyPtr),
+        std::make_unique<IL::Leave>(&container)));
+    entry->FinalInstruction = std::make_unique<IL::Nop>();
+    container.AddBlock(std::move(entry));
+    container.AddBlock(std::move(bodyBlock));
+    auto incrBlock = std::make_unique<IL::Block>();
+    incrBlock->StartILOffset = 0x0020;
+    incrBlock->IncomingEdgeCount = 1;
+    incrBlock->Add(std::make_unique<IL::StLoc>(variable, std::make_unique<IL::LdcI4>(2)));
+    incrBlock->Add(std::make_unique<IL::Branch>(container.EntryPoint()));
+    incrBlock->FinalInstruction = std::make_unique<IL::Nop>();
+    container.AddBlock(std::move(incrBlock));
+
+    auto* stmt = builder.Convert(&container);
+    auto* forStatement = dynamic_cast<Syntax::ForStatement*>(stmt);
+    ASSERT_TRUE(forStatement != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::PrimitiveExpression*>(forStatement->Condition())
+                != nullptr);
+    // The increment block's instructions except the final branch become the
+    // for-loop iterators.
+    ASSERT_EQ(forStatement->Iterators().Count(), std::size_t(1));
+    EXPECT_TRUE(dynamic_cast<Syntax::ExpressionStatement*>(forStatement->Iterators()[0])
+                != nullptr);
+    auto* loopBody = dynamic_cast<Syntax::BlockStatement*>(forStatement->EmbeddedStatement());
+    ASSERT_TRUE(loopBody != nullptr);
+    // The body's statement, the reachability break, and the increment-block
+    // label (the increment block's incoming edge was not a continue).
+    ASSERT_EQ(loopBody->Statements().Count(), std::size_t(3));
+    EXPECT_TRUE(dynamic_cast<Syntax::ExpressionStatement*>(loopBody->Statements()[0])
+                != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::BreakStatement*>(loopBody->Statements()[1]) != nullptr);
+    auto* label = dynamic_cast<Syntax::LabelStatement*>(loopBody->Statements()[2]);
+    ASSERT_TRUE(label != nullptr);
+    EXPECT_EQ(label->Label(), "IL_0020");
+}
+
+// ConvertBlockContainer's end-container label: a container an escaped Leave
+// named rides gets the trailing label (and the continue/break pair inside a
+// loop).
+TEST(StatementBuilderTest, ConvertBlockContainerEndContainerLabels)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = fixture.MakeLocal(TS::KnownTypeCode::Int32, "num");
+    IL::BlockContainer container;
+    auto entry = std::make_unique<IL::Block>();
+    entry->StartILOffset = 0x0000;
+    entry->IncomingEdgeCount = 1;
+    entry->Add(std::make_unique<IL::StLoc>(variable, std::make_unique<IL::LdcI4>(1)));
+    container.AddBlock(std::move(entry));
+    auto tail = std::make_unique<IL::Block>();
+    tail->StartILOffset = 0x0010;
+    tail->IncomingEdgeCount = 1;
+    tail->Add(std::make_unique<IL::StLoc>(variable, std::make_unique<IL::LdcI4>(2)));
+    tail->FinalInstruction = std::make_unique<IL::Nop>();
+    container.AddBlock(std::move(tail));
+    builder.endContainerLabels.emplace(&container, "end_IL_0000");
+
+    // A Normal container (isLoop = false): just the trailing label.
+    auto* stmt = builder.Convert(&container);
+    auto* blockStatement = dynamic_cast<Syntax::BlockStatement*>(stmt);
+    ASSERT_TRUE(blockStatement != nullptr);
+    ASSERT_EQ(blockStatement->Statements().Count(), std::size_t(4));
+    EXPECT_TRUE(dynamic_cast<Syntax::ExpressionStatement*>(blockStatement->Statements()[0])
+                != nullptr);
+    auto* tailLabel = dynamic_cast<Syntax::LabelStatement*>(blockStatement->Statements()[1]);
+    ASSERT_TRUE(tailLabel != nullptr);
+    EXPECT_EQ(tailLabel->Label(), "IL_0010");
+    EXPECT_TRUE(dynamic_cast<Syntax::ExpressionStatement*>(blockStatement->Statements()[2])
+                != nullptr);
+    auto* endLabel = dynamic_cast<Syntax::LabelStatement*>(blockStatement->Statements()[3]);
+    ASSERT_TRUE(endLabel != nullptr);
+    EXPECT_EQ(endLabel->Label(), "end_IL_0000");
 }
 
 } // namespace ILSpy::Tests

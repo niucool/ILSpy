@@ -48,6 +48,14 @@
 #include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/LockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/SwitchStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/DoWhileStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
+#include "Decompiler/CSharp/Syntax/MethodDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/TypeParameterDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/LocalFunctionDeclarationStatement.hpp"
+#include "Decompiler/CSharp/Syntax/ParameterDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/ComposedType.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ThrowStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
@@ -56,6 +64,7 @@
 #include "Decompiler/CSharp/Syntax/CaseLabel.hpp"
 #include "Decompiler/CSharp/Syntax/SwitchSection.hpp"
 #include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
+#include "Decompiler/CSharp/TranslatedExpression.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
@@ -237,6 +246,10 @@ TranslatedStatement StatementBuilder::Visit(IL::ILInstruction* inst)
             return VisitCkfinite(inst);
         case IL::OpCode::SwitchInstruction:
             return VisitSwitchInstruction(inst);
+        case IL::OpCode::Block:
+            return VisitBlock(inst);
+        case IL::OpCode::BlockContainer:
+            return VisitBlockContainer(inst);
         default:
             return Default(inst);
     }
@@ -931,6 +944,360 @@ TranslatedStatement StatementBuilder::VisitSwitchInstruction(IL::ILInstruction* 
 {
     return WithILInstruction(
         *TranslateSwitch(nullptr, *static_cast<IL::SwitchInstruction*>(inst)), inst);
+}
+
+// The C# `protected internal override TranslatedStatement VisitBlock(Block block)`
+// (line 1280): see the header comment for the contract. The
+// TransformToForeachWithoutDispose arm is the documented deferral (a null
+// return -- every statement converts through the normal path).
+TranslatedStatement StatementBuilder::VisitBlock(IL::ILInstruction* inst)
+{
+    auto* block = static_cast<IL::Block*>(inst);
+    if (block->Kind != IL::BlockKind::ControlFlow)
+        return Default(block);
+    // Block without container
+    auto* blockStatement = new Syntax::BlockStatement();
+    for (std::size_t i = 0; i < block->Instructions.size(); i++)
+    {
+        // The C# `if (TransformToForeachWithoutDispose(block, ref i) is Statement
+        // foreachStmt)` -- the foreach machinery deferral: no statement converts
+        // through the foreach shape yet.
+        blockStatement->Statements().Add(Convert(block->Instructions[i].get()));
+    }
+    // The port's nullable FinalInstruction: null is the C#'s Nop shape.
+    if (block->FinalInstruction != nullptr
+        && block->FinalInstruction->Op != IL::OpCode::Nop)
+        blockStatement->Statements().Add(Convert(block->FinalInstruction.get()));
+    return WithILInstruction(*blockStatement, block);
+}
+
+// The C# `static bool IsFinalLeave(Leave leave)` (lines 1599-1608): the
+// value-less leave that is the very last instruction of the container's last
+// block targeting that container.
+bool StatementBuilder::IsFinalLeave(IL::Leave* leave)
+{
+    // The C# `!leave.Value.MatchNop()` -- the port's null Value is the Nop shape.
+    if (!(leave->Value == nullptr || leave->Value->Op == IL::OpCode::Nop))
+        return false;
+    auto* block = static_cast<IL::Block*>(leave->Parent);
+    if (leave->ChildIndex != static_cast<int>(block->Instructions.size()) - 1
+        || !(block->FinalInstruction == nullptr
+             || block->FinalInstruction->Op == IL::OpCode::Nop))
+        return false;
+    auto* container = static_cast<IL::BlockContainer*>(block->Parent);
+    return block->ChildIndex == static_cast<int>(container->Blocks.size()) - 1
+           && container == leave->TargetContainer;
+}
+
+// The C# `protected internal override TranslatedStatement
+// VisitBlockContainer(BlockContainer container)` (lines 1300-1320): the loop /
+// switch-entry / plain-block dispatch.
+TranslatedStatement StatementBuilder::VisitBlockContainer(IL::ILInstruction* inst)
+{
+    auto* container = static_cast<IL::BlockContainer*>(inst);
+    if (container->Kind != IL::ContainerKind::Normal
+        && container->EntryPoint()->IncomingEdgeCount > 1)
+    {
+        IL::Block* oldContinueTarget = continueTarget;
+        int oldContinueCount = continueCount;
+        IL::BlockContainer* oldBreakTarget = breakTarget;
+        Syntax::Statement* loop = ConvertLoop(container);
+        // The C# `loop.AddAnnotation(container)` -- the container is annotated
+        // DIRECTLY (the ILInstructionAnnotation channel); the WithILInstruction
+        // wrap below adds it a second time (the C# AddAnnotation does not
+        // dedupe).
+        loop->AddAnnotation(std::make_shared<ILInstructionAnnotation>(container));
+        continueTarget = oldContinueTarget;
+        continueCount = oldContinueCount;
+        breakTarget = oldBreakTarget;
+        return WithILInstruction(*loop, container);
+    }
+    else if (container->EntryPoint()->Instructions.size() == 1
+             && container->EntryPoint()->Instructions[0]->Op == IL::OpCode::SwitchInstruction)
+    {
+        return WithILInstruction(
+            *TranslateSwitch(
+                container,
+                *static_cast<IL::SwitchInstruction*>(
+                    container->EntryPoint()->Instructions[0].get())),
+            container);
+    }
+    else
+    {
+        return WithILInstruction(*ConvertBlockContainer(container, false), container);
+    }
+}
+
+// The C# `Statement ConvertLoop(BlockContainer container)` (lines 1321-1430):
+// see the header comment for the per-kind contract. The DeclareLocalFunctions
+// calls are the documented deferral (a no-op -- the seed pipeline produces no
+// local functions).
+Syntax::Statement* StatementBuilder::ConvertLoop(IL::BlockContainer* container)
+{
+    IL::ILInstruction* condition = nullptr;
+    IL::Block* loopBody = nullptr;
+    Syntax::BlockStatement* blockStatement = nullptr;
+    continueCount = 0;
+    breakTarget = container;
+    switch (container->Kind)
+    {
+        case IL::ContainerKind::Loop:
+        {
+            continueTarget = container->EntryPoint();
+            blockStatement = ConvertBlockContainer(container, true);
+            assert(continueCount < container->EntryPoint()->IncomingEdgeCount);
+            if (container->EntryPoint()->IncomingEdgeCount == continueCount + 1)
+            {
+                // Remove the entrypoint label if all jumps to the label were replaced with
+                // 'continue;' statements
+                blockStatement->Statements().Remove(blockStatement->Statements().FirstOrNull());
+            }
+            if (auto* continueStmt =
+                    dynamic_cast<Syntax::ContinueStatement*>(
+                        blockStatement->Statements().LastOrNull()))
+                continueStmt->Remove();
+            return new Syntax::WhileStatement(new Syntax::PrimitiveExpression(true),
+                                              blockStatement);
+        }
+        case IL::ContainerKind::While:
+        {
+            continueTarget = container->EntryPoint();
+            if (!container->MatchConditionBlock(continueTarget, condition, loopBody))
+                throw std::invalid_argument("Invalid condition block in while loop.");
+            blockStatement = ConvertAsBlock(loopBody);
+            if ((loopBody->Flags() & IL::InstructionFlags::EndPointUnreachable)
+                != IL::InstructionFlags::EndPointUnreachable)
+                blockStatement->Statements().Add(new Syntax::BreakStatement());
+            // The C# `container.Blocks.Skip(1).Except(new[] { loopBody })`.
+            std::vector<IL::Block*> rest;
+            for (std::size_t i = 1; i < container->Blocks.size(); i++)
+                if (container->Blocks[i].get() != loopBody)
+                    rest.push_back(container->Blocks[i].get());
+            blockStatement = ConvertBlockContainer(blockStatement, container, rest, true);
+            assert(continueCount < container->EntryPoint()->IncomingEdgeCount);
+            if (continueCount + 1 < container->EntryPoint()->IncomingEdgeCount)
+            {
+                // There's an incoming edge to the entry point (=while condition) that wasn't
+                // represented as "continue;" -> emit a real label.
+                // We'll also remove any "continue;" in front of the label, as it's redundant.
+                if (dynamic_cast<Syntax::ContinueStatement*>(
+                        blockStatement->Statements().LastOrNull())
+                    != nullptr)
+                    blockStatement->Statements().Remove(
+                        blockStatement->Statements().LastOrNull());
+                blockStatement->Statements().Add(
+                    new Syntax::LabelStatement(EnsureUniqueLabel(container->EntryPoint())));
+            }
+            if (auto* continueStmt =
+                    dynamic_cast<Syntax::ContinueStatement*>(
+                        blockStatement->Statements().LastOrNull()))
+                continueStmt->Remove();
+            return new Syntax::WhileStatement(
+                exprBuilder->TranslateCondition(condition).Expression(), blockStatement);
+        }
+        case IL::ContainerKind::DoWhile:
+        {
+            continueTarget = container->Blocks.back().get();
+            if (!container->MatchConditionBlock(continueTarget, condition, loopBody))
+                throw std::invalid_argument("Invalid condition block in do-while loop.");
+            // The C# `container.Blocks.SkipLast(1)`.
+            std::vector<IL::Block*> rest;
+            for (std::size_t i = 0; i + 1 < container->Blocks.size(); i++)
+                rest.push_back(container->Blocks[i].get());
+            blockStatement = ConvertBlockContainer(new Syntax::BlockStatement(), container, rest,
+                                                   true);
+            if (container->EntryPoint()->IncomingEdgeCount == 2)
+            {
+                // Remove the entry-point label, if there are only two jumps to the entry-point:
+                // from outside the loop and from the condition-block.
+                blockStatement->Statements().Remove(blockStatement->Statements().FirstOrNull());
+            }
+            if (auto* continueStmt =
+                    dynamic_cast<Syntax::ContinueStatement*>(
+                        blockStatement->Statements().LastOrNull()))
+                continueStmt->Remove();
+            if (continueTarget->IncomingEdgeCount > continueCount)
+            {
+                // if there are branches to the condition block, that were not converted
+                // to continue statements, we have to introduce an extra label.
+                blockStatement->Statements().Add(
+                    new Syntax::LabelStatement(EnsureUniqueLabel(continueTarget)));
+            }
+            if (blockStatement->Statements().Count() == 0)
+            {
+                auto* whileStatement = new Syntax::WhileStatement(
+                    exprBuilder->TranslateCondition(condition).Expression(), blockStatement);
+                return whileStatement;
+            }
+            auto* doWhile = new Syntax::DoWhileStatement();
+            doWhile->EmbeddedStatement(blockStatement);
+            doWhile->Condition(exprBuilder->TranslateCondition(condition).Expression());
+            return doWhile;
+        }
+        case IL::ContainerKind::For:
+        {
+            continueTarget = container->Blocks.back().get();
+            if (!container->MatchConditionBlock(container->EntryPoint(), condition, loopBody))
+                throw std::invalid_argument("Invalid condition block in for loop.");
+            blockStatement = ConvertAsBlock(loopBody);
+            if ((loopBody->Flags() & IL::InstructionFlags::EndPointUnreachable)
+                != IL::InstructionFlags::EndPointUnreachable)
+                blockStatement->Statements().Add(new Syntax::BreakStatement());
+            if (!container->MatchIncrementBlock(continueTarget))
+                throw std::invalid_argument("Invalid increment block in for loop.");
+            // The C# `container.Blocks.SkipLast(1).Skip(1).Except(new[] { loopBody })`.
+            std::vector<IL::Block*> rest;
+            for (std::size_t i = 1; i + 1 < container->Blocks.size(); i++)
+                if (container->Blocks[i].get() != loopBody)
+                    rest.push_back(container->Blocks[i].get());
+            blockStatement = ConvertBlockContainer(blockStatement, container, rest, true);
+            auto* forStatement = new Syntax::ForStatement();
+            forStatement->Condition(exprBuilder->TranslateCondition(condition).Expression());
+            forStatement->EmbeddedStatement(blockStatement);
+            if (auto* continueStmt =
+                    dynamic_cast<Syntax::ContinueStatement*>(
+                        blockStatement->Statements().LastOrNull()))
+                continueStmt->Remove();
+            for (std::size_t i = 0; i + 1 < continueTarget->Instructions.size(); i++)
+            {
+                forStatement->Iterators().Add(Convert(continueTarget->Instructions[i].get()));
+            }
+            if (continueTarget->IncomingEdgeCount > continueCount)
+                blockStatement->Statements().Add(
+                    new Syntax::LabelStatement(EnsureUniqueLabel(continueTarget)));
+            return forStatement;
+        }
+        default:
+            // The C# `throw new ArgumentOutOfRangeException()`.
+            throw std::out_of_range("container->Kind");
+    }
+}
+
+// The C# `BlockStatement ConvertBlockContainer(BlockContainer container, bool
+// isLoop)` (lines 1432-1465): the wrapper. The DeclareLocalFunctions call is
+// the documented deferral (the TypeSystemAstBuilder.ConvertEntity long pole);
+// the EmitAsRefReadOnly helper emission keeps its C# gate (the CallBuilder
+// EnforceExplicitIn write is the only setter).
+Syntax::BlockStatement* StatementBuilder::ConvertBlockContainer(IL::BlockContainer* container,
+                                                                 bool isLoop)
+{
+    // The C# worker call over `container.Blocks` (a copy of the block pointers).
+    std::vector<IL::Block*> allBlocks;
+    for (auto& b : container->Blocks)
+        allBlocks.push_back(b.get());
+    auto* blockStatement = ConvertBlockContainer(new Syntax::BlockStatement(), container,
+                                                  allBlocks, isLoop);
+    // DeclareLocalFunctions(currentFunction, container, blockStatement) -- the
+    // documented local-function deferral (a no-op until the
+    // TypeSystemAstBuilder.ConvertEntity machinery lands).
+    if (currentFunction->Body.get() == container)
+    {
+        if (EmitAsRefReadOnly)
+        {
+            auto* methodDecl = new Syntax::MethodDeclaration();
+            if (settings->StaticLocalFunctions())
+            {
+                methodDecl->Modifiers(Syntax::Modifiers::Static);
+            }
+
+            auto* returnType = new Syntax::ComposedType();
+            returnType->HasReadOnlySpecifier(true);
+            returnType->HasRefSpecifier(true);
+            returnType->BaseType(new Syntax::SimpleType("T"));
+            methodDecl->ReturnType(returnType);
+            methodDecl->Name("ILSpyHelper_AsRefReadOnly");
+            methodDecl->TypeParameters().Add(new Syntax::TypeParameterDeclaration("T"));
+            auto* paramDecl = new Syntax::ParameterDeclaration();
+            paramDecl->ParameterModifier(TS::ReferenceKind::In);
+            paramDecl->Type(new Syntax::SimpleType("T"));
+            paramDecl->Name("temp");
+            methodDecl->Parameters().Add(paramDecl);
+
+            auto* body = new Syntax::BlockStatement();
+            methodDecl->Body(body);
+            auto* commentStatement = new Syntax::EmptyStatement();
+            commentStatement->AddTrailingTrivia(new Syntax::Comment(
+                "ILSpy generated this function to help ensure overload resolution can pick the"
+                " overload using 'in'"));
+            body->Statements().Add(commentStatement);
+            body->Statements().Add(new Syntax::ReturnStatement(new Syntax::DirectionExpression(
+                Syntax::FieldDirection::Ref, new Syntax::IdentifierExpression("temp"))));
+
+            blockStatement->Statements().Add(
+                new Syntax::LocalFunctionDeclarationStatement(methodDecl));
+        }
+    }
+    return blockStatement;
+}
+
+// The C# `BlockStatement ConvertBlockContainer(BlockStatement blockStatement,
+// BlockContainer container, IEnumerable<Block> blocks, bool isLoop)` (lines
+// 1529-1593): the worker. The TransformToForeachWithoutDispose arm is the
+// documented deferral (a null return).
+Syntax::BlockStatement* StatementBuilder::ConvertBlockContainer(
+    Syntax::BlockStatement* blockStatement, IL::BlockContainer* container,
+    const std::vector<IL::Block*>& blocks, bool isLoop)
+{
+    for (IL::Block* block : blocks)
+    {
+        if (block->IncomingEdgeCount > 1 || block != container->EntryPoint())
+        {
+            // If there are any incoming branches to this block, add a label:
+            blockStatement->Statements().Add(
+                new Syntax::LabelStatement(EnsureUniqueLabel(block)));
+        }
+        for (std::size_t i = 0; i < block->Instructions.size(); i++)
+        {
+            IL::ILInstruction* inst = block->Instructions[i].get();
+            if (!isLoop)
+            {
+                // The C# `inst is Leave leave && IsFinalLeave(leave)` -- the cast
+                // guards the helper call.
+                auto* leave = dynamic_cast<IL::Leave*>(inst);
+                if (leave != nullptr && IsFinalLeave(leave))
+                {
+                    // skip the final 'leave' instruction and just fall out of the BlockStatement
+                    blockStatement->AddAnnotation(
+                        std::make_shared<ImplicitReturnAnnotation>(leave));
+                    continue;
+                }
+            }
+            // The C# `TransformToForeachWithoutDispose(block, ref i) ?? Convert(inst)`
+            // -- the foreach machinery deferral keeps the plain conversion.
+            Syntax::Statement* stmt = Convert(inst);
+            if (auto* b = dynamic_cast<Syntax::BlockStatement*>(stmt))
+            {
+                for (std::size_t s = 0; s < b->Statements().Count(); ++s)
+                    blockStatement->Statements().Add(Syntax::Detach(b->Statements()[s]));
+            }
+            else
+            {
+                blockStatement->Statements().Add(Syntax::Detach(stmt));
+            }
+        }
+        // The port's nullable FinalInstruction: null is the C#'s Nop shape.
+        if (block->FinalInstruction != nullptr
+            && block->FinalInstruction->Op != IL::OpCode::Nop)
+        {
+            blockStatement->Statements().Add(Convert(block->FinalInstruction.get()));
+        }
+    }
+    if (auto it = endContainerLabels.find(container); it != endContainerLabels.end())
+    {
+        if (isLoop
+            && dynamic_cast<Syntax::ContinueStatement*>(
+                   blockStatement->Statements().LastOrNull())
+                   == nullptr)
+        {
+            blockStatement->Statements().Add(new Syntax::ContinueStatement());
+        }
+        blockStatement->Statements().Add(new Syntax::LabelStatement(it->second));
+        if (isLoop)
+        {
+            blockStatement->Statements().Add(new Syntax::BreakStatement());
+        }
+    }
+    return blockStatement;
 }
 
 }  // namespace ILSpy::Decompiler::CSharp
