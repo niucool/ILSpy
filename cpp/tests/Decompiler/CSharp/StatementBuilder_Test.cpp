@@ -25,6 +25,7 @@
 // currentReturnContainer).
 
 #include "Decompiler/CSharp/StatementBuilder.hpp"
+#include "Decompiler/CSharp/ExpressionBuilder.hpp"
 
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/Syntax/CatchClause.hpp"
@@ -48,6 +49,8 @@
 #include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/LockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
+#include "Decompiler/CSharp/Syntax/CaseLabel.hpp"
+#include "Decompiler/CSharp/Syntax/SwitchSection.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/EmptyStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
@@ -55,7 +58,9 @@
 #include "Decompiler/CSharp/Syntax/Statements/GotoDefaultStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/GotoStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/LabelStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/SwitchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ThrowStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldReturnStatement.hpp"
@@ -65,9 +70,14 @@
 #include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdcConstants.hpp"
+#include "Decompiler/IL/Instructions/LdStr.hpp"
+#include "Decompiler/IL/Instructions/StringToInt.hpp"
+#include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
@@ -87,6 +97,7 @@
 #include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/TypeSystem/LookupStubs.hpp"  // hmm - check the actual path
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
@@ -98,6 +109,7 @@
 namespace ILSpy::Tests {
 
 namespace Impl = ::ILSpy::Decompiler::TypeSystem::Implementation;
+namespace TestSupport = ::ILSpy::Decompiler::TypeSystem::TestSupport;
 
 namespace {
 
@@ -1370,6 +1382,453 @@ TEST(StatementBuilderTest, VisitLockInstructionRendersLockStatement)
     const auto instructions = StatementILInstructions(*stmt);
     ASSERT_EQ(instructions.size(), std::size_t(1));
     EXPECT_EQ(instructions[0], &lockInst);
+}
+
+// ---------------------------------------------------------------------------
+// The switch region (the StringToInt node, GetDefaultSection, the computed
+// Branch::TargetContainer, FindClosestSwitchContainer, CreateTypedCaseLabel,
+// TranslateSwitchValue, and the TranslateSwitch / VisitSwitchInstruction arm)
+// ---------------------------------------------------------------------------
+
+// The StringToInt node: one inlineable Argument child, the I4 result type, the
+// Map/ExpectedType payload, the dump render, and the clone.
+TEST(StatementBuilderTest, StringToIntNodeRendersAndClones)
+{
+    StatementFixture fixture;
+    auto stringType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    IL::StringToInt strToInt(
+        std::make_unique<IL::LdStr>("hello"),
+        std::vector<std::pair<std::optional<std::string>, int>>{
+            {std::nullopt, 0}, {std::string("world"), 1}},
+        stringType);
+    EXPECT_EQ(strToInt.ResultType(), IL::StackType::I4);
+    ASSERT_EQ(strToInt.ChildCount(), 1);
+    EXPECT_EQ(strToInt.GetChild(0), strToInt.Argument.get());
+    ASSERT_EQ(strToInt.Map.size(), std::size_t(2));
+    EXPECT_EQ(strToInt.Map[0].first, std::nullopt);
+    EXPECT_EQ(strToInt.Map[0].second, 0);
+    EXPECT_EQ(strToInt.Map[1].first, std::string("world"));
+    EXPECT_EQ(strToInt.Map[1].second, 1);
+    EXPECT_EQ(strToInt.ExpectedType.get(), stringType.get());
+    std::string dump;
+    strToInt.WriteTo(dump);
+    EXPECT_EQ(dump, "string.to.int System.String(ldstr \"hello\", { [null] = 0, [\"world\"] = 1 })");
+    auto clone = strToInt.Clone();
+    auto* cloned = dynamic_cast<IL::StringToInt*>(clone.get());
+    ASSERT_TRUE(cloned != nullptr);
+    ASSERT_EQ(cloned->Map.size(), std::size_t(2));
+    EXPECT_EQ(cloned->Map[1].first, std::string("world"));
+    EXPECT_EQ(cloned->ExpectedType.get(), stringType.get());
+    ASSERT_TRUE(cloned->Argument != nullptr);
+    auto* clonedLdStr = dynamic_cast<IL::LdStr*>(cloned->Argument.get());
+    ASSERT_TRUE(clonedLdStr != nullptr);
+    EXPECT_EQ(clonedLdStr->Value, "hello");
+}
+
+// GetDefaultSection picks the section with the most labels.
+TEST(StatementBuilderTest, GetDefaultSectionPicksMostLabels)
+{
+    IL::SwitchInstruction sw(std::make_unique<IL::LdcI4>(0));
+    auto secSmall = std::make_unique<IL::SwitchSection>(Util::LongSet(5LL));
+    auto secBig = std::make_unique<IL::SwitchSection>(Util::LongSet(
+        std::vector<Util::LongInterval>{Util::LongInterval::Inclusive(1, 4)}));
+    IL::SwitchSection* secBigPtr = secBig.get();
+    auto secMid = std::make_unique<IL::SwitchSection>(Util::LongSet(
+        std::vector<Util::LongInterval>{Util::LongInterval::Inclusive(10, 11)}));
+    sw.AddSection(std::move(secSmall));
+    sw.AddSection(std::move(secBig));
+    sw.AddSection(std::move(secMid));
+    EXPECT_EQ(sw.GetDefaultSection(), secBigPtr);
+}
+
+// Branch::TargetContainer computes from the target block's parent container
+// (the C# computed property, Branch.cs line 69).
+TEST(StatementBuilderTest, BranchTargetContainerComputesFromParent)
+{
+    IL::BlockContainer container;
+    auto block = std::make_unique<IL::Block>();
+    IL::Block* blockPtr = block.get();
+    container.AddBlock(std::move(block));
+    IL::Branch branch(blockPtr);
+    EXPECT_EQ(branch.TargetContainer(), &container);
+    IL::Branch untargeted(0x1234u);
+    EXPECT_EQ(untargeted.TargetContainer(), nullptr);
+}
+
+// FindClosestSwitchContainer walks the parent chain for the closest Switch
+// container (BlockContainer.cs line 345).
+TEST(StatementBuilderTest, FindClosestSwitchContainerWalksParentChain)
+{
+    IL::BlockContainer outer;
+    outer.Kind = IL::ContainerKind::Switch;
+    auto block = std::make_unique<IL::Block>();
+    IL::Block* blockPtr = block.get();
+    // A nested Normal container rides the block's final-instruction slot (the
+    // parent chain walks block -> middle container -> block -> outer).
+    auto middle = std::make_unique<IL::BlockContainer>();
+    IL::BlockContainer* middlePtr = middle.get();
+    auto innerBlock = std::make_unique<IL::Block>();
+    IL::Block* innerBlockPtr = innerBlock.get();
+    middle->AddBlock(std::move(innerBlock));
+    middle->Parent = blockPtr;
+    block->FinalInstruction = std::move(middle);
+    outer.AddBlock(std::move(block));
+    EXPECT_EQ(IL::BlockContainer::FindClosestSwitchContainer(innerBlockPtr), &outer);
+    EXPECT_EQ(IL::BlockContainer::FindClosestSwitchContainer(middlePtr), &outer);
+    IL::BlockContainer plain;
+    auto plainBlock = std::make_unique<IL::Block>();
+    IL::Block* plainBlockPtr = plainBlock.get();
+    plain.AddBlock(std::move(plainBlock));
+    EXPECT_EQ(IL::BlockContainer::FindClosestSwitchContainer(plainBlockPtr), nullptr);
+    EXPECT_EQ(IL::BlockContainer::FindClosestSwitchContainer(nullptr), nullptr);
+}
+
+// CreateTypedCaseLabel's boolean arm: the case value re-boxes as true/false.
+TEST(StatementBuilderTest, CreateTypedCaseLabelBooleanArm)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto boolType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Boolean).shared_from_this());
+    auto labels = builder.CreateTypedCaseLabel(1, *boolType);
+    ASSERT_EQ(labels.size(), std::size_t(1));
+    EXPECT_EQ(labels[0]->Type().ReflectionName(), boolType->ReflectionName());
+    std::any valueBox = labels[0]->ConstantValue();
+    const bool* value = std::any_cast<bool>(&valueBox);
+    ASSERT_TRUE(value != nullptr);
+    EXPECT_TRUE(*value);
+    auto zeroLabels = builder.CreateTypedCaseLabel(0, *boolType);
+    std::any zeroValueBox = zeroLabels[0]->ConstantValue();
+    const bool* zeroValue = std::any_cast<bool>(&zeroValueBox);
+    ASSERT_TRUE(zeroValue != nullptr);
+    EXPECT_FALSE(*zeroValue);
+}
+
+// CreateTypedCaseLabel's string-map arm: one label per key mapping to i.
+TEST(StatementBuilderTest, CreateTypedCaseLabelStringMapArm)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto stringType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    std::vector<std::pair<std::optional<std::string>, int>> map{
+        {std::string("alpha"), 0}, {std::string("beta"), 1}, {std::string("gamma"), 0}};
+    auto labels = builder.CreateTypedCaseLabel(0, *stringType, &map);
+    ASSERT_EQ(labels.size(), std::size_t(2));
+    std::any firstBox = labels[0]->ConstantValue();
+    std::any secondBox = labels[1]->ConstantValue();
+    const std::string* first = std::any_cast<std::string>(&firstBox);
+    const std::string* second = std::any_cast<std::string>(&secondBox);
+    ASSERT_TRUE(first != nullptr);
+    ASSERT_TRUE(second != nullptr);
+    EXPECT_EQ(*first, "alpha");
+    EXPECT_EQ(*second, "gamma");
+    EXPECT_EQ(labels[0]->Type().ReflectionName(), stringType->ReflectionName());
+}
+
+// CreateTypedCaseLabel's enum arm: the value re-boxes through the enum's
+// underlying type code while the label keeps the enum type.
+TEST(StatementBuilderTest, CreateTypedCaseLabelEnumArm)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto enumDef = std::make_shared<TestSupport::LookupTypeDefinition>(
+        "E", "Ns", TS::FullTypeName(TS::TopLevelTypeName("Ns", "E")),
+        TS::TypeKind::Enum, TS::Accessibility::Public, fixture.compilation,
+        &fixture.compilation.MainModule());
+    enumDef->SetEnumUnderlyingType(intType);
+    auto labels = builder.CreateTypedCaseLabel(5, *enumDef);
+    ASSERT_EQ(labels.size(), std::size_t(1));
+    EXPECT_EQ(labels[0]->Type().ReflectionName(), "Ns.E");
+    std::any enumValueBox = labels[0]->ConstantValue();
+    const std::int32_t* value = std::any_cast<std::int32_t>(&enumValueBox);
+    ASSERT_TRUE(value != nullptr);
+    EXPECT_EQ(*value, 5);
+}
+
+// CreateTypedCaseLabel's plain arms: the primitive TypeCode cast, and the raw
+// long fallback for a type without a TypeCode (a class type).
+TEST(StatementBuilderTest, CreateTypedCaseLabelPrimitiveArms)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto int32Type = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto int64Type = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int64).shared_from_this());
+    auto int32Labels = builder.CreateTypedCaseLabel(42, *int32Type);
+    ASSERT_EQ(int32Labels.size(), std::size_t(1));
+    std::any int32ValueBox = int32Labels[0]->ConstantValue();
+    const std::int32_t* castValue = std::any_cast<std::int32_t>(&int32ValueBox);
+    ASSERT_TRUE(castValue != nullptr);
+    EXPECT_EQ(*castValue, 42);
+    // A type with no TypeCode: the raw long survives.
+    auto classDef = std::make_shared<TestSupport::LookupTypeDefinition>(
+        "C", "Ns", TS::FullTypeName(TS::TopLevelTypeName("Ns", "C")),
+        TS::TypeKind::Class, TS::Accessibility::Public, fixture.compilation,
+        &fixture.compilation.MainModule());
+    auto classLabels = builder.CreateTypedCaseLabel(7, *classDef);
+    ASSERT_EQ(classLabels.size(), std::size_t(1));
+    std::any rawValueBox = classLabels[0]->ConstantValue();
+    const long long* rawValue = std::any_cast<long long>(&rawValueBox);
+    ASSERT_TRUE(rawValue != nullptr);
+    EXPECT_EQ(*rawValue, 7);
+    // The Int64 arm keeps the int64 box.
+    auto int64Labels = builder.CreateTypedCaseLabel(9, *int64Type);
+    std::any wideValueBox = int64Labels[0]->ConstantValue();
+    const std::int64_t* wideValue = std::any_cast<std::int64_t>(&wideValueBox);
+    ASSERT_TRUE(wideValue != nullptr);
+    EXPECT_EQ(*wideValue, 9);
+}
+
+// TranslateSwitchValue's StringToInt arm: the governing type is the StringToInt's
+// ExpectedType (the string fallback), the case type is string, and the strToInt
+// rides back for the label map.
+TEST(StatementBuilderTest, TranslateSwitchValueStringToIntArm)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto stringType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    IL::SwitchInstruction sw(std::make_unique<IL::LdStr>("hello"));
+    sw.Value = std::make_unique<IL::StringToInt>(
+        std::make_unique<IL::LdStr>("hello"),
+        std::vector<std::pair<std::optional<std::string>, int>>{{std::string("a"), 0}},
+        stringType);
+    auto result = builder.exprBuilder->TranslateSwitchValue(sw, false);
+    EXPECT_EQ(result.CaseType->ReflectionName(), "System.String");
+    ASSERT_TRUE(result.StringToInt != nullptr);
+    EXPECT_EQ(result.StringToInt->ExpectedType.get(), stringType.get());
+    // The translated value is the StringToInt's argument.
+    auto* ldstr = dynamic_cast<Syntax::PrimitiveExpression*>(result.Value.Expression());
+    ASSERT_TRUE(ldstr != nullptr);
+    const std::string* text = std::get_if<std::string>(&ldstr->Value());
+    ASSERT_TRUE(text != nullptr);
+    EXPECT_EQ(*text, "hello");
+}
+
+// TranslateSwitchValue's governing-type validation: an I8 value over a non-I8
+// governing type re-finds the Int64 stack type.
+TEST(StatementBuilderTest, TranslateSwitchValueValidatesGoverningType)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto int32Type = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto int64Type = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int64).shared_from_this());
+    IL::SwitchInstruction sw(std::make_unique<IL::LdcI8>(42LL));
+    // A governing type whose stack type is I4 while the value is I8.
+    sw.Type = int32Type;
+    auto result = builder.exprBuilder->TranslateSwitchValue(sw, false);
+    EXPECT_EQ(result.CaseType->ReflectionName(), "System.Int64");
+}
+
+// TranslateSwitchValue's small-integer bail: case values outside the small
+// governing type's range widen the governing type to Int32.
+TEST(StatementBuilderTest, TranslateSwitchValueSmallIntegerBail)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto byteType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Byte).shared_from_this());
+    IL::SwitchInstruction sw(std::make_unique<IL::LdcI4>(0));
+    auto bigSection = std::make_unique<IL::SwitchSection>(Util::LongSet(
+        std::vector<Util::LongInterval>{Util::LongInterval::Inclusive(0, 1000)}));
+    sw.AddSection(std::move(bigSection));
+    // A larger section so the out-of-range section is NOT the default (the
+    // range check skips the default section -- its labels never constrain the
+    // governing type).
+    auto biggerSection = std::make_unique<IL::SwitchSection>(Util::LongSet(
+        std::vector<Util::LongInterval>{Util::LongInterval::Inclusive(2000, 4000)}));
+    sw.AddSection(std::move(biggerSection));
+    sw.Type = byteType;
+    auto result = builder.exprBuilder->TranslateSwitchValue(sw, false);
+    EXPECT_EQ(result.CaseType->ReflectionName(), "System.Int32");
+}
+
+// VisitSwitchInstruction renders the SwitchStatement (the null-container
+// shape): the governing expression, the per-section case labels, the default
+// label, and the branch bodies converted through the goto-label arm.
+TEST(StatementBuilderTest, VisitSwitchInstructionRendersSwitchStatement)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = fixture.MakeLocal(TS::KnownTypeCode::Int32, "num");
+    IL::Block caseBlock;
+    caseBlock.StartILOffset = 0x0010;
+    IL::SwitchInstruction sw(std::make_unique<IL::LdLoc>(variable));
+    auto secCase = std::make_unique<IL::SwitchSection>(Util::LongSet(1LL));
+    secCase->SetBody(std::make_unique<IL::Branch>(&caseBlock));
+    auto secDefault = std::make_unique<IL::SwitchSection>(Util::LongSet(
+        std::vector<Util::LongInterval>{Util::LongInterval::Inclusive(2, 100)}));
+    auto* defaultSection = secDefault.get();
+    secDefault->SetBody(std::make_unique<IL::Branch>(&caseBlock));
+    sw.AddSection(std::move(secCase));
+    sw.AddSection(std::move(secDefault));
+    auto* stmt = builder.Convert(&sw);
+    auto* switchStatement = dynamic_cast<Syntax::SwitchStatement*>(stmt);
+    ASSERT_TRUE(switchStatement != nullptr);
+    // The governing expression is the translated switch value.
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(switchStatement->Expression())
+                != nullptr);
+    ASSERT_EQ(switchStatement->SwitchSections().Count(), std::size_t(2));
+    auto* first = switchStatement->SwitchSections()[0];
+    ASSERT_EQ(first->CaseLabels().Count(), std::size_t(1));
+    auto* caseLabel = first->CaseLabels()[0];
+    ASSERT_TRUE(caseLabel->Expression() != nullptr);
+    auto* caseValue = dynamic_cast<Syntax::PrimitiveExpression*>(caseLabel->Expression());
+    ASSERT_TRUE(caseValue != nullptr);
+    const std::int32_t* one = std::get_if<std::int32_t>(&caseValue->Value());
+    ASSERT_TRUE(one != nullptr);
+    EXPECT_EQ(*one, 1);
+    // The default section (most labels) renders the bare `default:` label.
+    auto* second = switchStatement->SwitchSections()[1];
+    ASSERT_EQ(second->CaseLabels().Count(), std::size_t(1));
+    EXPECT_TRUE(second->CaseLabels()[0]->Expression() == nullptr);
+    // With no switch container, the section bodies convert through the
+    // goto-label arm (a Branch is EndPointUnreachable, so no break is appended).
+    ASSERT_EQ(second->Statements().Count(), std::size_t(1));
+    EXPECT_TRUE(dynamic_cast<Syntax::GotoStatement*>(second->Statements()[0]) != nullptr);
+    const auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(1));
+    EXPECT_EQ(instructions[0], &sw);
+    (void)defaultSection;
+}
+
+// TranslateSwitch with a switch container: the branch-target blocks are inlined
+// into the sections, the case-label mapping drives goto case/goto default (the
+// default section's block maps to null), a Leave-body section renders break
+// through the break target, and unmapped blocks get trailing labels.
+TEST(StatementBuilderTest, TranslateSwitchInlinesSectionsAndMapsCaseLabels)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = fixture.MakeLocal(TS::KnownTypeCode::Int32, "num");
+    IL::BlockContainer switchContainer;
+    switchContainer.Kind = IL::ContainerKind::Switch;
+    auto entryBlock = std::make_unique<IL::Block>();
+    entryBlock->StartILOffset = 0x0000;
+    IL::Block* entryPtr = entryBlock.get();
+    switchContainer.AddBlock(std::move(entryBlock));
+    auto caseBlock = std::make_unique<IL::Block>();
+    caseBlock->StartILOffset = 0x0010;
+    IL::Block* casePtr = caseBlock.get();
+    caseBlock->Add(std::make_unique<IL::StLoc>(variable, std::make_unique<IL::LdcI4>(1)));
+    switchContainer.AddBlock(std::move(caseBlock));
+    auto defaultBlock = std::make_unique<IL::Block>();
+    defaultBlock->StartILOffset = 0x0020;
+    IL::Block* defaultPtr = defaultBlock.get();
+    defaultBlock->Add(std::make_unique<IL::StLoc>(variable, std::make_unique<IL::LdcI4>(2)));
+    switchContainer.AddBlock(std::move(defaultBlock));
+    auto leftoverBlock = std::make_unique<IL::Block>();
+    leftoverBlock->StartILOffset = 0x0030;
+    // The leftover block branches to the case block: converting it during the
+    // remaining-blocks loop goes through VisitBranch with the live case-label
+    // mapping (the producer->consumer wiring -- a goto case, not a goto label).
+    leftoverBlock->Add(std::make_unique<IL::Branch>(casePtr));
+    switchContainer.AddBlock(std::move(leftoverBlock));
+
+    IL::SwitchInstruction sw(std::make_unique<IL::LdLoc>(variable));
+    auto secCase = std::make_unique<IL::SwitchSection>(Util::LongSet(1LL));
+    secCase->SetBody(std::make_unique<IL::Branch>(casePtr));
+    // The most-labels section IS the default (the bare `default:` label, the
+    // null mapping value for its branch target).
+    auto secDefault = std::make_unique<IL::SwitchSection>(Util::LongSet(
+        std::vector<Util::LongInterval>{Util::LongInterval::Inclusive(2, 300)}));
+    secDefault->SetBody(std::make_unique<IL::Branch>(defaultPtr));
+    // A Leave-body case section: the leave targets the switch container, which
+    // is the break target during the translation, so the body renders break.
+    auto secLeave = std::make_unique<IL::SwitchSection>(Util::LongSet(
+        std::vector<Util::LongInterval>{Util::LongInterval::Inclusive(400, 401)}));
+    secLeave->SetBody(std::make_unique<IL::Leave>(&switchContainer));
+    sw.AddSection(std::move(secCase));
+    sw.AddSection(std::move(secDefault));
+    sw.AddSection(std::move(secLeave));
+    entryPtr->FinalInstruction = std::make_unique<IL::Nop>();
+
+    builder.breakTarget = nullptr;
+    auto* switchStatement = builder.TranslateSwitch(&switchContainer, sw);
+    ASSERT_TRUE(switchStatement != nullptr);
+    // All three sections survive (the removal arm is the default-only-Leave
+    // shape, a separate test below).
+    ASSERT_EQ(switchStatement->SwitchSections().Count(), std::size_t(3));
+    // The inlined branch-target block: the section statements hold the block's
+    // converted statement (not a goto).
+    auto* caseSection = switchStatement->SwitchSections()[0];
+    ASSERT_GE(caseSection->Statements().Count(), std::size_t(1));
+    EXPECT_TRUE(dynamic_cast<Syntax::ExpressionStatement*>(caseSection->Statements()[0])
+                != nullptr);
+    // The Leave-body section converts its body through the break target; as the
+    // LAST section it also receives the remaining-blocks trailing content (the
+    // leftover block's label + its converted branch appended after the break).
+    auto* leaveSection = switchStatement->SwitchSections()[2];
+    ASSERT_EQ(leaveSection->Statements().Count(), std::size_t(3));
+    EXPECT_TRUE(dynamic_cast<Syntax::BreakStatement*>(leaveSection->Statements()[0])
+                != nullptr);
+    {
+        auto* label = dynamic_cast<Syntax::LabelStatement*>(leaveSection->Statements()[1]);
+        ASSERT_TRUE(label != nullptr);
+        EXPECT_EQ(label->Label(), "IL_0030");
+    }
+    {
+        // The leftover block's branch to the case block renders `goto case 1;`
+        // through the live mapping (the case-label mapping arm of VisitBranch).
+        auto* gotoCase =
+            dynamic_cast<Syntax::GotoCaseStatement*>(leaveSection->Statements()[2]);
+        ASSERT_TRUE(gotoCase != nullptr);
+        auto* caseLabel = dynamic_cast<Syntax::PrimitiveExpression*>(gotoCase->LabelExpression());
+        ASSERT_TRUE(caseLabel != nullptr);
+        const std::int32_t* caseValue = std::get_if<std::int32_t>(&caseLabel->Value());
+        ASSERT_TRUE(caseValue != nullptr);
+        EXPECT_EQ(*caseValue, 1);
+    }
+    // The case-label mapping restores to the pre-switch state after the
+    // translation (the C# save/restore pair).
+    EXPECT_FALSE(builder.caseLabelMapping.has_value());
+    // The break target restores to the pre-switch value (null here).
+    EXPECT_EQ(builder.breakTarget, nullptr);
+}
+
+// TranslateSwitch's default-only-Leave removal: the default section whose body
+// is a Leave to the switch container disappears from the switch statement
+// (falling through the switch).
+TEST(StatementBuilderTest, TranslateSwitchRemovesDefaultOnlyLeaveSection)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = fixture.MakeLocal(TS::KnownTypeCode::Int32, "num");
+    IL::BlockContainer switchContainer;
+    switchContainer.Kind = IL::ContainerKind::Switch;
+    auto entryBlock = std::make_unique<IL::Block>();
+    entryBlock->StartILOffset = 0x0000;
+    switchContainer.AddBlock(std::move(entryBlock));
+    auto caseBlock = std::make_unique<IL::Block>();
+    caseBlock->StartILOffset = 0x0010;
+    IL::Block* casePtr = caseBlock.get();
+    switchContainer.AddBlock(std::move(caseBlock));
+
+    IL::SwitchInstruction sw(std::make_unique<IL::LdLoc>(variable));
+    auto secCase = std::make_unique<IL::SwitchSection>(Util::LongSet(1LL));
+    secCase->SetBody(std::make_unique<IL::Branch>(casePtr));
+    // The default section (most labels) leaving the switch container is removed.
+    auto secLeave = std::make_unique<IL::SwitchSection>(Util::LongSet(
+        std::vector<Util::LongInterval>{Util::LongInterval::Inclusive(2, 300)}));
+    secLeave->SetBody(std::make_unique<IL::Leave>(&switchContainer));
+    sw.AddSection(std::move(secCase));
+    sw.AddSection(std::move(secLeave));
+
+    auto* switchStatement = builder.TranslateSwitch(&switchContainer, sw);
+    ASSERT_TRUE(switchStatement != nullptr);
+    ASSERT_EQ(switchStatement->SwitchSections().Count(), std::size_t(1));
+    // The surviving section is the case section (its label is a case constant,
+    // not the bare default).
+    auto* survivor = switchStatement->SwitchSections()[0];
+    ASSERT_EQ(survivor->CaseLabels().Count(), std::size_t(1));
+    EXPECT_TRUE(survivor->CaseLabels()[0]->Expression() != nullptr);
 }
 
 } // namespace ILSpy::Tests

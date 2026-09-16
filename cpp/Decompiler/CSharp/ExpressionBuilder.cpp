@@ -85,6 +85,8 @@
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
+#include "Decompiler/IL/Instructions/StringToInt.hpp"
+#include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/IL/OpCodeName.hpp"
 #include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
@@ -3556,6 +3558,157 @@ ExpressionWithResolveResult ExpressionBuilder::LdObj(IL::ILInstruction* address,
                                              Syntax::UnaryOperatorType::Dereference),
         std::make_shared<Sem::ResolveResult>(TS::ITypePtr(
             const_cast<TS::IType&>(loadType).shared_from_this())));
+}
+
+// The C# `static bool IsCompatibleWithSwitch(IType type)` (the local function
+// inside GetCSharpSwitchGoverningType, ExpressionBuilder.cs lines 4131-4146): the
+// primitive set a C# switch statement/expression can govern on, after the nullable
+// unwrap.
+static bool IsCompatibleWithSwitch(const TS::IType& type)
+{
+    const TS::IType& underlying = TS::GetUnderlyingType(type);
+    return TS::IsKnownType(underlying, TS::KnownTypeCode::Boolean)
+        || TS::IsKnownType(underlying, TS::KnownTypeCode::SByte)
+        || TS::IsKnownType(underlying, TS::KnownTypeCode::Byte)
+        || TS::IsKnownType(underlying, TS::KnownTypeCode::Int16)
+        || TS::IsKnownType(underlying, TS::KnownTypeCode::UInt16)
+        || TS::IsKnownType(underlying, TS::KnownTypeCode::Int32)
+        || TS::IsKnownType(underlying, TS::KnownTypeCode::UInt32)
+        || TS::IsKnownType(underlying, TS::KnownTypeCode::Int64)
+        || TS::IsKnownType(underlying, TS::KnownTypeCode::UInt64)
+        || TS::IsKnownType(underlying, TS::KnownTypeCode::Char)
+        || TS::IsKnownType(underlying, TS::KnownTypeCode::String);
+}
+
+// The C# `static bool IsImplicitConversionOperator(IMethod operatorMethod)` (the
+// local function inside GetCSharpSwitchGoverningType): the single-parameter
+// op_Implicit operator filter for the GetMethods call.
+static bool IsImplicitConversionOperator(const TS::IMethod* operatorMethod)
+{
+    if (operatorMethod == nullptr || !operatorMethod->IsOperator())
+        return false;
+    if (operatorMethod->Name() != "op_Implicit")
+        return false;
+    return operatorMethod->Parameters().size() == 1;
+}
+
+// The C# `static IType GetCSharpSwitchGoverningType(IType type)` (the static
+// helper inside TranslateSwitchValue, ExpressionBuilder.cs lines 4107-4130): see
+// the header comment for the contract.
+const TS::IType* ExpressionBuilder::GetCSharpSwitchGoverningType(const TS::IType& type) const
+{
+    if (IsCompatibleWithSwitch(type))
+        return &type;
+    // The C# `type.GetMethods(IsImplicitConversionOperator).Where(m =>
+    // IsCompatibleWithSwitch(m.ReturnType)).ToArray()`.
+    std::vector<const TS::IMethod*> applicableImplicitConversionOperators;
+    for (const TS::IMethod* m : type.GetMethods(&IsImplicitConversionOperator))
+    {
+        if (IsCompatibleWithSwitch(m->ReturnType()))
+            applicableImplicitConversionOperators.push_back(m);
+    }
+    if (applicableImplicitConversionOperators.size() != 1)
+        return &type;
+    return &applicableImplicitConversionOperators[0]->ReturnType();
+}
+
+// The C# `internal (TranslatedExpression, IType, StringToInt?)
+// TranslateSwitchValue(SwitchInstruction inst, bool isExpressionContext)`
+// (ExpressionBuilder.cs lines 4059-4106): see the header comment for the contract.
+ExpressionBuilder::SwitchValueTranslation ExpressionBuilder::TranslateSwitchValue(
+    IL::SwitchInstruction& inst, bool isExpressionContext)
+{
+    TranslatedExpression value;
+    const TS::IType* governingType = nullptr;
+    IL::StringToInt* strToInt = dynamic_cast<IL::StringToInt*>(inst.Value.get());
+    if (strToInt != nullptr)
+    {
+        value = Translate(strToInt->Argument.get());
+        governingType = strToInt->ExpectedType
+                            ? strToInt->ExpectedType.get()
+                            : &compilation->FindType(TS::KnownTypeCode::String);
+    }
+    else
+    {
+        value = Translate(inst.Value.get());
+        governingType = inst.Type ? inst.Type.get() : &value.Type();
+
+        // validate the governing type
+        if (inst.Value->ResultType() == IL::StackType::I8)
+        {
+            if (TS::GetStackType(*governingType) != IL::StackType::I8)
+            {
+                auto reFound = FindType(IL::StackType::I8, TS::GetSign(governingType));
+                governingType = reFound.get();
+            }
+        }
+        else if (inst.Value->ResultType() == IL::StackType::I4)
+        {
+            if (TS::GetStackType(*governingType) != IL::StackType::I4)
+            {
+                auto reFound = FindType(IL::StackType::I4, TS::GetSign(governingType));
+                governingType = reFound.get();
+            }
+            if (TS::IsSmallIntegerType(governingType))
+            {
+                IL::SwitchSection* defaultSection = inst.GetDefaultSection();
+                int bits = 8 * TS::GetSize(governingType);
+                int minValue = TS::GetSign(governingType) == TS::Sign::Unsigned
+                                  ? 0
+                                  : -(1 << (bits - 1));
+                int maxValue = TS::GetSign(governingType) == TS::Sign::Unsigned
+                                  ? (1 << bits) - 1
+                                  : (1 << (bits - 1)) - 1;
+                for (auto& section : inst.Sections)
+                {
+                    if (section.get() == defaultSection)
+                        continue;
+                    Util::LongInterval interval = section->Labels.ContainingInterval();
+                    if (interval.Start < minValue || interval.InclusiveEnd() > maxValue)
+                    {
+                        // governing type is too small to hold all case values
+                        auto reFound = FindType(IL::StackType::I4, TS::Sign::Signed);
+                        governingType = reFound.get();
+                        break;
+                    }
+                }
+            }
+        }
+        else
+        {
+            // The C# Debug.Asserts (an O-valued switch is lifted with a matching
+            // Type); the port keeps the C# behavior of falling through with the
+            // governing type as-is.
+        }
+    }
+
+    if (isExpressionContext)
+    {
+        // switch-expression does not support implicit conversions
+        value = value.ConvertTo(const_cast<TS::IType&>(*governingType), *this,
+                                /*checkForOverflow*/ false,
+                                /*allowImplicitConversion*/ false);
+    }
+    else
+    {
+        value = value.ConvertTo(const_cast<TS::IType&>(*governingType), *this,
+                                /*checkForOverflow*/ false,
+                                /*allowImplicitConversion*/ true);
+
+        const TS::IType* csharpGoverningType = GetCSharpSwitchGoverningType(value.Type());
+        if (!csharpGoverningType->Equals(*governingType))
+        {
+            value = value.ConvertTo(const_cast<TS::IType&>(*governingType), *this,
+                                    /*checkForOverflow*/ false,
+                                    /*allowImplicitConversion*/ false);
+        }
+    }
+
+    const TS::IType* caseType =
+        strToInt != nullptr ? &compilation->FindType(TS::KnownTypeCode::String)
+                            : governingType;
+
+    return SwitchValueTranslation{std::move(value), caseType, strToInt};
 }
 
 // The C# `protected internal override TranslatedExpression

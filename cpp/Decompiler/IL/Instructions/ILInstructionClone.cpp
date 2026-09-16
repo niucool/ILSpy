@@ -76,6 +76,7 @@
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/SimpleInstruction.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/StringToInt.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
@@ -411,6 +412,13 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             const auto& s = static_cast<const StObj&>(*this);
             c = std::make_unique<StObj>(s.Target ? s.Target->Clone() : nullptr,
                 s.Value ? s.Value->Clone() : nullptr, s.Type);
+            break;
+        }
+        case OpCode::StringToInt: {
+            const auto& s = static_cast<const StringToInt&>(*this);
+            auto clone = std::make_unique<StringToInt>(
+                s.Argument ? s.Argument->Clone() : nullptr, s.Map, s.ExpectedType);
+            c = std::move(clone);
             break;
         }
 

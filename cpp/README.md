@@ -2827,6 +2827,50 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   is green again at 12304 ran / 12302 passed / the 2 standing skips (zero
   regressions). Landed ahead of the completed try/lock StatementBuilder slice
   (the next entry) so each commit's HEAD verifies green.
+- **`StatementBuilder` slice 5 -- the switch region** -- the C# switch construction
+  (StatementBuilder.cs lines 156-346): the `CreateTypedCaseLabel` helper (the typed
+  case-label constant per switch value -- the boolean re-box, the string-map
+  one-label-per-key where a null key boxes as the null literal, the enum underlying-
+  type cast, the primitive TypeCode cast, the raw-long fallback), `TranslateSwitch`
+  (the full switch-statement render: TranslateSwitchValue's governing expression, the
+  per-section case labels with the default section's bare label and the
+  `case null:` label, the branch-body inlining gate -- all branches to the target
+  block must sit in this switch container, FindClosestSwitchContainer checked per
+  branch -- the caseLabelMapping writes the VisitBranch goto-case arm consumes, the
+  default-only Leave-section removal, the remaining-blocks trailing labels with the
+  nested BlockStatement flattening, and the end-container label + break pair; the
+  breakTarget and caseLabelMapping save/restore wrap the whole translation), and
+  `ConvertSwitchSectionBody` (the converted body plus the EndPointUnreachable-gated
+  break insertion -- into the body block when the body converted to one, else as a
+  trailing section statement). The `VisitSwitchInstruction` arm dispatches over
+  TranslateSwitch with no switch container (the container-driven shape comes with
+  the VisitBlockContainer arm, still deferred). The IL-side surface landed with it:
+  the `StringToInt` node (the string-switch desugaring: the single Argument child,
+  the Map key->label list with the null-key `case null:` arm, the ExpectedType
+  governing type, the `string.to.int` dump render, the clone case),
+  `SwitchInstruction::GetDefaultSection` (the most-labels section IS the default),
+  `Branch::TargetContainer` (the computed container-owning-target-block property),
+  and `BlockContainer::FindClosestSwitchContainer` (the parent-chain walk for the
+  closest Switch-kind container). The shared expression-side entry landed beside
+  them: `ExpressionBuilder::TranslateSwitchValue` (the StringToInt arm with the
+  ExpectedType-or-string governing type, the I8/I4 governing-type validation over
+  the value's stack type, the small-integer range bail -- case values outside the
+  small governing type widen it to Int32 -- the context-aware ConvertTo, and the
+  C# governing-type compatibility double conversion through
+  `GetCSharpSwitchGoverningType`, the op_Implicit single-conversion lookup) over
+  the SwitchValueTranslation struct the C# tuple ports to. Verified by 14 new
+  `StatementBuilderTest` tests (the StringToInt node/clone/dump matrix,
+  GetDefaultSection, the computed TargetContainer, FindClosestSwitchContainer's
+  parent-chain walk, the four CreateTypedCaseLabel arms, the three
+  TranslateSwitchValue arms -- the StringToInt governing type, the I8 re-find, the
+  small-integer bail -- the null-container Visit render, and the two container
+  shapes: the section inlining + live-mapping goto case through a leftover block's
+  branch + the default-only-Leave removal), proven by a clean RED round (exactly the
+  Visit test failed through the Default fallback before the switch case was wired
+  while the 13 structural tests passed) then green; full suite 12327 ran / 12325
+  passed / the 2 standing skips / zero regressions, and all four CLI baselines
+  unchanged (--csharp mscorlib 10106366 bytes, --il whole-module byte-identical to
+  the 41246545-byte real-ilspycmd gold, -l c 109438, the --json usage check rc 64).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

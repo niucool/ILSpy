@@ -72,6 +72,21 @@ public:
         return Blocks.empty() ? nullptr : Blocks.front().get();
     }
 
+    // The C# `public static BlockContainer? FindClosestSwitchContainer(
+    // ILInstruction? inst)` (BlockContainer.cs line 345): walks the parent chain
+    // for the closest enclosing Switch-kind container (null when none). The
+    // port's containers are complete here, so the dynamic_cast on each parent
+    // is well-formed.
+    static BlockContainer* FindClosestSwitchContainer(ILInstruction* inst) {
+        while (inst != nullptr) {
+            if (auto* bc = dynamic_cast<BlockContainer*>(inst);
+                bc != nullptr && bc->Kind == ContainerKind::Switch)
+                return bc;
+            inst = inst->Parent;
+        }
+        return nullptr;
+    }
+
     void WriteTo(std::string& out) const override {
         out += "BlockContainer {\n";
         for (auto& b : Blocks) {

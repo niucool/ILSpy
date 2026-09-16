@@ -117,6 +117,20 @@ public:
         Sections.push_back(std::move(s));
     }
 
+    // The C# `public SwitchSection GetDefaultSection()` (SwitchInstruction.cs
+    // line 177): picks the section with the most labels as the default
+    // section (the C# re-purposes the largest section rather than tracking a
+    // real default marker).
+    SwitchSection* GetDefaultSection() {
+        SwitchSection* defaultSection = Sections.empty() ? nullptr : Sections.front().get();
+        for (auto& section : Sections) {
+            if (section->Labels.Count() > defaultSection->Labels.Count()) {
+                defaultSection = section.get();
+            }
+        }
+        return defaultSection;
+    }
+
     void WriteTo(std::string& out) const override {
         out += "switch ";
         if (Value) Value->WriteTo(out); else out += "(null)";

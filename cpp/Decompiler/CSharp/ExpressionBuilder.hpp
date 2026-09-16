@@ -89,6 +89,8 @@ class LocAlloc;
 class LocAllocSpan;
 class Comp;
 class BinaryNumericInstruction;
+class StringToInt;
+class SwitchInstruction;
 enum class ComparisonKind : std::uint8_t;
 }
 
@@ -696,6 +698,31 @@ public:
     // pointer arm with the Unsafe.Read<T> intrinsic for a managed load type).
     // Declared private in the C#; the port's no-visibility-level convention.
     ExpressionWithResolveResult LdObj(IL::ILInstruction* address, const TS::IType& loadType);
+
+    // -- The switch-value translation (the switch arms' shared entry) ------------------
+
+    // The C# `internal (TranslatedExpression, IType, StringToInt?)
+    // TranslateSwitchValue(SwitchInstruction inst, bool isExpressionContext)`
+    // (ExpressionBuilder.cs line 4059): the switch governing value -- the
+    // StringToInt arm (a string switch), the governing-type validation over the
+    // value's stack type (I8/I4 re-finding, the small-integer range bail), the
+    // context-aware ConvertTo, and the C# governing-type compatibility double
+    // conversion. The C# tuple ports to the struct below (the StringToInt member
+    // name shadows the IL class name after its declaration -- the CaseLabel
+    // `Expression()` crux convention; no later use of the type in the struct).
+    struct SwitchValueTranslation {
+        TranslatedExpression Value;
+        const TS::IType* CaseType = nullptr;
+        IL::StringToInt* StringToInt = nullptr;
+    };
+    SwitchValueTranslation TranslateSwitchValue(IL::SwitchInstruction& inst,
+                                                bool isExpressionContext);
+
+    // The C# `static IType GetCSharpSwitchGoverningType(IType type)` (inside
+    // TranslateSwitchValue): the governing type C# switch allows (the compatible
+    // primitive set), else the single op_Implicit conversion's return type when
+    // exactly one is switch-compatible, else the type unchanged.
+    const TS::IType* GetCSharpSwitchGoverningType(const TS::IType& type) const;
 
     // -- The field surface (the C# `internal readonly` fields) ------------------------
 

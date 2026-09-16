@@ -44,12 +44,18 @@
 #include "Decompiler/CSharp/Syntax/Statements/GotoDefaultStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/GotoStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/LabelStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/LockStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/SwitchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ThrowStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldReturnStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/CaseLabel.hpp"
+#include "Decompiler/CSharp/Syntax/SwitchSection.hpp"
+#include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
@@ -59,6 +65,8 @@
 #include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/StringToInt.hpp"
+#include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/IL/Instructions/YieldReturn.hpp"
@@ -71,8 +79,12 @@
 #include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/NormalizeTypeVisitor.hpp"
+#include "Decompiler/TypeSystem/NullableType.hpp"
+#include "Decompiler/TypeSystem/ReflectionHelper.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
+#include "Decompiler/Util/CSharpPrimitiveCast.hpp"
 
+#include <functional>
 #include <stdexcept>
 #include <utility>
 
@@ -223,6 +235,8 @@ TranslatedStatement StatementBuilder::Visit(IL::ILInstruction* inst)
             return VisitCpblk(inst);
         case IL::OpCode::Ckfinite:
             return VisitCkfinite(inst);
+        case IL::OpCode::SwitchInstruction:
+            return VisitSwitchInstruction(inst);
         default:
             return Default(inst);
     }
@@ -663,6 +677,260 @@ TranslatedStatement StatementBuilder::VisitCkfinite(IL::ILInstruction* inst)
             new Syntax::ThrowStatement(
                 new Syntax::ObjectCreateExpression(arithmeticExceptionSyntax))),
         inst);
+}
+
+// The C# `internal IEnumerable<ConstantResolveResult> CreateTypedCaseLabel(
+// long i, IType type, List<(string? Key, int Value)>? map = null)` (lines
+// 156-202): see the header comment for the arm contract.
+std::vector<std::shared_ptr<Sem::ConstantResolveResult>>
+StatementBuilder::CreateTypedCaseLabel(
+    long long i, TS::IType& type,
+    const std::vector<std::pair<std::optional<std::string>, int>>* map)
+{
+    std::vector<std::shared_ptr<Sem::ConstantResolveResult>> labels;
+    // unpack nullable type, if necessary: we need to do this in all cases,
+    // because there are nullable bools and enum types as well.
+    TS::IType& unwrapped = TS::GetUnderlyingType(type);
+    std::any value;
+    if (TS::IsKnownType(unwrapped, TS::KnownTypeCode::Boolean))
+    {
+        value = i != 0;
+    }
+    else if (map != nullptr)
+    {
+        // The C# Debug.Assert(type.IsKnownType(KnownTypeCode.String)).
+        // One label per key mapping to i (the C# Where/Select over the map). A
+        // null key boxes as the C# null literal (an empty any -- the null box is
+        // the C#'s null reference, not a null-holding container).
+        for (const auto& entry : *map)
+        {
+            if (entry.second == i)
+                labels.push_back(std::make_shared<Sem::ConstantResolveResult>(
+                    TS::ITypePtr(const_cast<TS::IType&>(unwrapped).shared_from_this()),
+                    entry.first.has_value() ? std::any(*entry.first) : std::any()));
+        }
+        return labels;
+    }
+    else if (unwrapped.Kind() == TS::TypeKind::Enum)
+    {
+        // The C# `type.GetDefinition()!.EnumUnderlyingType` -- the definition's
+        // underlying primitive (a null underlying type keeps the raw long).
+        TS::ITypePtr enumType;
+        if (const TS::ITypeDefinition* definition = unwrapped.GetDefinition())
+            enumType = definition->EnumUnderlyingType();
+        TS::TypeCode typeCode =
+            enumType ? TS::GetTypeCode(*enumType) : TS::TypeCode::Empty;
+        if (typeCode != TS::TypeCode::Empty)
+            value = Util::Cast(typeCode, std::any(i), /*checkForOverflow*/ false);
+        else
+            value = i;
+    }
+    else
+    {
+        TS::TypeCode typeCode = TS::GetTypeCode(unwrapped);
+        if (typeCode != TS::TypeCode::Empty)
+            value = Util::Cast(typeCode, std::any(i), /*checkForOverflow*/ false);
+        else
+            value = i;
+    }
+    labels.push_back(std::make_shared<Sem::ConstantResolveResult>(
+        TS::ITypePtr(const_cast<TS::IType&>(unwrapped).shared_from_this()), value));
+    return labels;
+}
+
+// The C# `private void ConvertSwitchSectionBody(Syntax.SwitchSection astSection,
+// ILInstruction bodyInst)` (lines 321-346): the converted body plus the
+// EndPointUnreachable-gated break insertion.
+void StatementBuilder::ConvertSwitchSectionBody(Syntax::SwitchSection* astSection,
+                                                  IL::ILInstruction* bodyInst)
+{
+    Syntax::Statement* body = Convert(bodyInst);
+    astSection->Statements().Add(body);
+    if ((bodyInst->Flags() & IL::InstructionFlags::EndPointUnreachable)
+        != IL::InstructionFlags::EndPointUnreachable)
+    {
+        // we need to insert 'break;'
+        if (auto* block = dynamic_cast<Syntax::BlockStatement*>(body))
+        {
+            block->Statements().Add(new Syntax::BreakStatement());
+        }
+        else
+        {
+            astSection->Statements().Add(new Syntax::BreakStatement());
+        }
+    }
+}
+
+// The C# `SwitchStatement TranslateSwitch(BlockContainer? switchContainer,
+// SwitchInstruction inst)` (lines 208-320): see the header comment for the
+// contract. The C# `container.Descendants.OfType<Branch>()` enumerations port to
+// the recursive walker (the SwitchDetection WalkContainers precedent).
+Syntax::SwitchStatement* StatementBuilder::TranslateSwitch(IL::BlockContainer* switchContainer,
+                                                            IL::SwitchInstruction& inst)
+{
+    IL::BlockContainer* oldBreakTarget = breakTarget;
+    breakTarget = switchContainer;  // 'break' within a switch would only leave the switch
+    std::optional<CaseLabelMapping> oldCaseLabelMapping = std::move(caseLabelMapping);
+    caseLabelMapping = CaseLabelMapping{};
+
+    auto [value, type, strToInt] =
+        exprBuilder->TranslateSwitchValue(inst, /*isExpressionContext*/ false);
+
+    IL::SwitchSection* defaultSection = inst.GetDefaultSection();
+
+    auto* stmt = new Syntax::SwitchStatement(value.Expression());
+    std::unordered_map<IL::SwitchSection*, Syntax::SwitchSection*> translationDictionary;
+    // The `switchContainer.Descendants.OfType<Branch>().Where(b => b.TargetBlock ==
+    // br.TargetBlock).All(...)` inline gate (the C# computes it twice): all
+    // branches to the section's target block must live in THIS switch container
+    // (no branch from a nested switch container may share the block).
+    auto sectionInlinable = [&](IL::Branch* br) {
+        if (br->TargetContainer() != switchContainer || switchContainer == nullptr)
+            return false;
+        bool all = true;
+        std::function<void(IL::ILInstruction*)> walk = [&](IL::ILInstruction* node) {
+            if (!all || node == nullptr) return;
+            if (auto* b = dynamic_cast<IL::Branch*>(node))
+            {
+                if (b->TargetBlock == br->TargetBlock
+                    && IL::BlockContainer::FindClosestSwitchContainer(b) != switchContainer)
+                    all = false;
+            }
+            for (int c = 0; c < node->ChildCount(); ++c) walk(node->GetChild(c));
+        };
+        walk(switchContainer);
+        return all;
+    };
+    // initialize C# switch sections.
+    for (auto& section : inst.Sections)
+    {
+        // This is used in the block-label mapping.
+        std::shared_ptr<Sem::ConstantResolveResult> firstValueResolveResult;
+        auto* astSection = new Syntax::SwitchSection();
+        // Create case labels:
+        if (section.get() == defaultSection)
+        {
+            astSection->CaseLabels().Add(new Syntax::CaseLabel());
+            firstValueResolveResult = nullptr;
+        }
+        else
+        {
+            const std::vector<std::pair<std::optional<std::string>, int>>* strMap =
+                strToInt != nullptr ? &strToInt->Map : nullptr;
+            std::vector<std::shared_ptr<Sem::ConstantResolveResult>> values;
+            for (long long labelValue : section->Labels.Values())
+            {
+                for (auto& typed : CreateTypedCaseLabel(labelValue,
+                                                        const_cast<TS::IType&>(*type),
+                                                        strMap))
+                    values.push_back(std::move(typed));
+            }
+            if (section->HasNullLabel)
+            {
+                astSection->CaseLabels().Add(
+                    new Syntax::CaseLabel(new Syntax::NullReferenceExpression()));
+                firstValueResolveResult = std::make_shared<Sem::ConstantResolveResult>(
+                    TS::NullType(), nullptr);
+            }
+            else
+            {
+                firstValueResolveResult = values.empty() ? nullptr : values.front();
+            }
+            for (auto& label : values)
+            {
+                astSection->CaseLabels().Add(new Syntax::CaseLabel(
+                    exprBuilder
+                        ->ConvertConstantValue(label, /*allowImplicitConversion*/ true)
+                        .Expression()));
+            }
+        }
+        if (auto* br = dynamic_cast<IL::Branch*>(section->Body.get()))
+        {
+            // we can only inline the block, if all branches are in the switchContainer.
+            if (sectionInlinable(br))
+                caseLabelMapping->emplace(br->TargetBlock,
+                                           std::move(firstValueResolveResult));
+        }
+        translationDictionary.emplace(section.get(), astSection);
+        stmt->SwitchSections().Add(astSection);
+    }
+    for (auto& section : inst.Sections)
+    {
+        Syntax::SwitchSection* astSection = translationDictionary[section.get()];
+        if (auto* br = dynamic_cast<IL::Branch*>(section->Body.get()))
+        {
+            // we can only inline the block, if all branches are in the switchContainer.
+            if (sectionInlinable(br))
+                ConvertSwitchSectionBody(astSection, br->TargetBlock);
+            else
+                ConvertSwitchSectionBody(astSection, section->Body.get());
+        }
+        else if (auto* leave = dynamic_cast<IL::Leave*>(section->Body.get()))
+        {
+            if (astSection->CaseLabels().Count() == 1
+                && astSection->CaseLabels()[0]->Expression() == nullptr
+                && leave->TargetContainer == switchContainer)
+            {
+                stmt->SwitchSections().Remove(astSection);
+                continue;
+            }
+            ConvertSwitchSectionBody(astSection, section->Body.get());
+        }
+        else
+        {
+            ConvertSwitchSectionBody(astSection, section->Body.get());
+        }
+    }
+    if (switchContainer != nullptr && stmt->SwitchSections().Count() > 0)
+    {
+        // Translate any remaining blocks:
+        auto& lastSectionStatements =
+            stmt->SwitchSections()[stmt->SwitchSections().Count() - 1]->Statements();
+        for (std::size_t blockIndex = 1; blockIndex < switchContainer->Blocks.size();
+             ++blockIndex)
+        {
+            IL::Block* block = switchContainer->Blocks[blockIndex].get();
+            if (caseLabelMapping->find(block) != caseLabelMapping->end())
+                continue;
+            lastSectionStatements.Add(
+                new Syntax::LabelStatement(EnsureUniqueLabel(block)));
+            for (auto& nestedInst : block->Instructions)
+            {
+                Syntax::Statement* nestedStmt = Convert(nestedInst.get());
+                if (auto* b = dynamic_cast<Syntax::BlockStatement*>(nestedStmt))
+                {
+                    for (std::size_t s = 0; s < b->Statements().Count(); ++s)
+                        lastSectionStatements.Add(Syntax::Detach(b->Statements()[s]));
+                }
+                else
+                {
+                    lastSectionStatements.Add(nestedStmt);
+                }
+            }
+            // The C# Debug.Assert(block.FinalInstruction.OpCode == OpCode.Nop);
+            // the port's nullable FinalInstruction treats a null as the Nop
+            // shape (the VisitLeave convention).
+        }
+        if (auto it = endContainerLabels.find(switchContainer); it != endContainerLabels.end())
+        {
+            lastSectionStatements.Add(new Syntax::LabelStatement(it->second));
+            lastSectionStatements.Add(new Syntax::BreakStatement());
+        }
+    }
+
+    breakTarget = oldBreakTarget;
+    caseLabelMapping = std::move(oldCaseLabelMapping);
+    return stmt;
+}
+
+// The C# `protected internal override TranslatedStatement
+// VisitSwitchInstruction(SwitchInstruction inst)` (line 203): the switch
+// statement over TranslateSwitch with no switch container (the container-driven
+// shape comes through the VisitBlockContainer arm).
+TranslatedStatement StatementBuilder::VisitSwitchInstruction(IL::ILInstruction* inst)
+{
+    return WithILInstruction(
+        *TranslateSwitch(nullptr, *static_cast<IL::SwitchInstruction*>(inst)), inst);
 }
 
 }  // namespace ILSpy::Decompiler::CSharp

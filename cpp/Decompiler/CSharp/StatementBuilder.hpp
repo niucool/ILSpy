@@ -44,13 +44,17 @@
 //
 // Deferrals (each named at the member that needs it): the CancellationToken (the
 // cooperative-cancel ThrowIfCancellationRequested in Convert is a no-op in the
-// port, the DecompileRun convention), and the heavier Visit arms (the switch /
-// using / foreach / pinned-region / block-container arms) -- an instruction whose
-// C# Visit method has not been ported yet degrades to the Default expression
+// port, the DecompileRun convention), and the heavier Visit arms (the using /
+// foreach / pinned-region / block-container arms) -- an instruction whose C#
+// Visit method has not been ported yet degrades to the Default expression
 // statement instead of crashing. The try-construction region (the C#
 // MakeTryCatch helper + VisitTryCatch/VisitTryFinally/VisitTryFault, lines
 // 445-505) and the VisitLockInstruction sibling (lines 506-510) have landed
-// beside the leaf arms.
+// beside the leaf arms, and the switch region (CreateTypedCaseLabel +
+// TranslateSwitch + VisitSwitchInstruction, lines 156-346) has landed with the
+// StringToInt node and the ExpressionBuilder TranslateSwitchValue entry it
+// rides (the container-driven switch shape waits for the VisitBlockContainer
+// arm).
 //
 // The goto/leave state (StatementBuilder.cs lines 338-373 + 1576-1597) landed
 // with the leaf arms: the block->label maps (labels/duplicateLabels +
@@ -66,6 +70,7 @@
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/LockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/Statement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/SwitchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/TranslatedStatement.hpp"
 #include "Decompiler/DecompileRun.hpp"
@@ -99,6 +104,7 @@ class YieldReturn;
 class Ckfinite;
 class Cpblk;
 class Initblk;
+class SwitchInstruction;
 }  // namespace ILSpy::Decompiler::IL
 
 namespace ILSpy::Decompiler::CSharp {
@@ -219,6 +225,32 @@ public:
     // no-visibility-level convention keeps it public for the tests.
     std::string EnsureUniqueLabel(IL::Block* block);
 
+    // -- The switch-construction region (StatementBuilder.cs lines 156-346) -------------
+
+    // The C# `internal IEnumerable<ConstantResolveResult> CreateTypedCaseLabel(
+    // long i, IType type, List<(string? Key, int Value)>? map = null)` (lines
+    // 156-202): the typed case-label constant for a switch over the type -- the
+    // boolean re-box, the string-map one-label-per-key, the enum underlying-type
+    // cast, the primitive TypeCode cast, and the raw-long fallback. The C#
+    // nullable-key tuple list ports to the optional-string pair vector. The C# is
+    // internal; the port's no-visibility-level convention keeps it public.
+    std::vector<std::shared_ptr<Sem::ConstantResolveResult>> CreateTypedCaseLabel(
+        long long i, TS::IType& type,
+        const std::vector<std::pair<std::optional<std::string>, int>>* map = nullptr);
+
+    // The C# `SwitchStatement TranslateSwitch(BlockContainer? switchContainer,
+    // SwitchInstruction inst)` (lines 208-320): the switch-statement render over
+    // TranslateSwitchValue -- the per-section case labels (the default section's
+    // bare label, the null label, the typed constants), the branch-body inlining
+    // gate, the case-label mapping the VisitBranch goto-case arm consumes, the
+    // default-only Leave-section removal, the remaining-blocks trailing labels,
+    // and the end-container break. The C# is private; the port's
+    // no-visibility-level-for-tests convention keeps it public (the
+    // EnsureUniqueLabel precedent -- the VisitBlockContainer arm is still
+    // deferred, so the container-driven shape is reachable only directly).
+    Syntax::SwitchStatement* TranslateSwitch(IL::BlockContainer* switchContainer,
+                                             IL::SwitchInstruction& inst);
+
 private:
     // The C# `readonly IDecompilerTypeSystem typeSystem` / `DecompilerSettings
     // settings` / `internal readonly DecompileRun decompileRun` fields.
@@ -301,6 +333,17 @@ private:
     // The C# VisitCkfinite (lines 1645-1669): the `if (!float.IsFinite(<arg>)) throw
     // new ArithmeticException();` guard.
     TranslatedStatement VisitCkfinite(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement
+    // VisitSwitchInstruction(SwitchInstruction inst)` (line 203): the switch
+    // statement over TranslateSwitch (the null-container shape -- the container
+    // driven shape comes through the VisitBlockContainer arm, still deferred).
+    TranslatedStatement VisitSwitchInstruction(IL::ILInstruction* inst);
+
+    // The C# `private void ConvertSwitchSectionBody(Syntax.SwitchSection
+    // astSection, ILInstruction bodyInst)` (lines 321-346): the converted body
+    // plus the EndPointUnreachable-gated break insertion (into the body block
+    // when the body converted to one, else as a trailing section statement).
+    void ConvertSwitchSectionBody(Syntax::SwitchSection* astSection, IL::ILInstruction* bodyInst);
 };
 
 }  // namespace ILSpy::Decompiler::CSharp

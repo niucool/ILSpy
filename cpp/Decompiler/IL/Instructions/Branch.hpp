@@ -24,6 +24,7 @@
 
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
 
 #include <cstdio>
 #include <cstdint>
@@ -54,6 +55,17 @@ public:
 
     InstructionFlags DirectFlags() const override {
         return InstructionFlags::MayBranch | InstructionFlags::EndPointUnreachable;
+    }
+
+    // The C# `public BlockContainer TargetContainer` computed property
+    // (Branch.cs line 69): the container owning the target block (null when the
+    // target block has no container parent -- e.g. an unresolved offset
+    // branch or a target outside any container). The dynamic_cast needs the
+    // complete BlockContainer type, hence the include below.
+    BlockContainer* TargetContainer() const {
+        return TargetBlock != nullptr
+                   ? dynamic_cast<BlockContainer*>(TargetBlock->Parent)
+                   : nullptr;
     }
     StackType ResultType() const override { return StackType::Void; }
     int ChildCount() const override { return 0; }
