@@ -86,9 +86,9 @@ AA15:F0:type=<System.String>:val=str:"Microsoft\u00ae .NET Framework"
 AA16:type=<System.Reflection.AssemblyCopyrightAttribute>:ctor=<System.Reflection.AssemblyCopyrightAttribute..ctor>:err=False:F=1:N=0
 AA16:F0:type=<System.String>:val=str:"\u00a9 Microsoft Corporation.  All rights reserved."
 AA17:type=<System.Reflection.AssemblyFileVersionAttribute>:ctor=<System.Reflection.AssemblyFileVersionAttribute..ctor>:err=False:F=1:N=0
-AA17:F0:type=<System.String>:val=str:"4.8.9337.0"
+AA17:F0:type=<System.String>:val=str:"4.8.9345.0"
 AA18:type=<System.Reflection.AssemblyInformationalVersionAttribute>:ctor=<System.Reflection.AssemblyInformationalVersionAttribute..ctor>:err=False:F=1:N=0
-AA18:F0:type=<System.String>:val=str:"4.8.9337.0"
+AA18:F0:type=<System.String>:val=str:"4.8.9345.0"
 AA19:type=<System.Resources.SatelliteContractVersionAttribute>:ctor=<System.Resources.SatelliteContractVersionAttribute..ctor>:err=False:F=1:N=0
 AA19:F0:type=<System.String>:val=str:"4.0.0.0"
 AA20:type=<System.Resources.NeutralResourcesLanguageAttribute>:ctor=<System.Resources.NeutralResourcesLanguageAttribute..ctor>:err=False:F=1:N=0

@@ -2769,6 +2769,34 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   regressions, and all four CLI baselines unchanged (--csharp mscorlib 10106366
   bytes, --il whole-module byte-identical to the 41246545-byte real-ilspycmd gold,
   -l c 109438, the --json usage check rc 64).
+- **Machine gold refresh -- the 2026-09 Windows Update .NET Framework servicing
+  build** -- Windows Update replaced the machine fixtures between iterations 137
+  and 138: the .NET Framework 4.8 mscorlib.dll went 4.8.9337.0 -> 4.8.9345.0
+  (debug-directory stamp 0x69F01F2E -> 0x6A67F1AF, the 2026-04-28 -> 2026-07-28
+  PDB build date; MVID cfbe3cd1-8651-4c71-ae57-6a8663cf2300 ->
+  f16ad90e-81d0-45df-a341-0e50bb08ed27; CodeView PDB GUID ->
+  e4ebde6c-54f2-4fb0-b3b7-8c75ebb4ae72) and System.dll went to 4.8.9340.0; the
+  GAC System.Runtime facade and the .NET 10 CoreLib are UNCHANGED. The update is
+  a version-resource-only servicing delta -- the regenerated real ilspycmd 11.0
+  whole-module gold differs from the previous one in exactly one line pair (the
+  InformationalVersion literal "4.8.9337.0" -> "4.8.9345.0"); every code body,
+  the field corpora, and the type surface are identical. All nine real-fixture
+  gold pins were re-read from the new files (the mscorlib debug-directory stamp
+  + CodeView GUID, the Module-table MVID bytes and both the module-header and
+  dump-table MVID renders, the AttributeGold AA17/AA18 file-version literals, the
+  MetadataField whole-corpus FNV mscorlib digest E5326509C430BB40 ->
+  3C86A462A41B4387 -- System.dll's field corpus is untouched -- and the
+  CustomAttributeDecoder partition digests: that FNV is a running hash across
+  the mscorlib/System/facade/CoreLib sections, so all four shifted even though
+  only the first two files changed), and the real ilspycmd 11.0 gold was
+  regenerated over the new mscorlib (C:/temp-probe/cp_65001_full_9345.il,
+  byte-compared as before under the UTF-8 console). Every CLI baseline NUMBER is
+  unchanged over the new fixture (--csharp mscorlib 10106366 bytes, --il
+  whole-module byte-identical to the 41246545-byte gold, -l c 109438, the --json
+  usage check rc 64 -- the changed strings are all equal-length); the full suite
+  is green again at 12304 ran / 12302 passed / the 2 standing skips (zero
+  regressions). Landed ahead of the completed try/lock StatementBuilder slice
+  (the next entry) so each commit's HEAD verifies green.
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

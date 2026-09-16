@@ -267,13 +267,13 @@ inline const std::vector<std::string> kCadCuratedRealRows = {
 };
 inline const std::vector<std::string> kCadPartitions = {
     "msc:total=20891:ok=19774:ex=1117:EnumUnderlyingTypeResolveException=1117",
-    "msc:digest=FE073D1D031E99AF",
+    "msc:digest=97C60B6F6682B5E3",
     "sys:total=4992:ok=4512:ex=480:EnumUnderlyingTypeResolveException=480",
-    "sys:digest=238A7AF78C47A380",
+    "sys:digest=F1CBC7CE18CAD1AC",
     "fcd:total=9:ok=9:ex=0",
-    "fcd:digest=E7B1D4A4BA5B874E",
+    "fcd:digest=5513EE96DCD030A2",
     "cor:total=27718:ok=25727:ex=1991:EnumUnderlyingTypeResolveException=1991",
-    "cor:digest=7C09438418A015F3",
+    "cor:digest=A564C741C160A2F7",
 };
 inline const std::vector<std::string> kCadSynthGold = {
     "syn:row=1:ctorKind=MethodDefinition:ok:F=4:N=0",

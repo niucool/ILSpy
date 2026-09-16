@@ -3434,8 +3434,8 @@ TEST(ReflectionDisassemblerTest, ModuleHeaderMetadataReads)
     auto moduleDef = mscorlib.GetModuleDefinition();
     ASSERT_TRUE(moduleDef.has_value());
     EXPECT_EQ(moduleDef->Name, "CommonLanguageRuntimeLibrary");
-    const std::uint8_t expectedMvid[] = {0xD1, 0x3C, 0xBE, 0xCF, 0x51, 0x86,
-        0x71, 0x4C, 0xAE, 0x57, 0x6A, 0x86, 0x63, 0xCF, 0x23, 0x00};
+    const std::uint8_t expectedMvid[] = {0x0E, 0xD9, 0x6A, 0xF1, 0xD0, 0x81,
+        0xDF, 0x45, 0xA3, 0x41, 0x0E, 0x50, 0xBB, 0x08, 0xED, 0x27};
     EXPECT_EQ(std::vector<std::uint8_t>(moduleDef->Mvid.begin(),
                   moduleDef->Mvid.end()),
         std::vector<std::uint8_t>(std::begin(expectedMvid),
@@ -3564,7 +3564,7 @@ TEST(ReflectionDisassemblerTest, WriteModuleHeaderMscorlibExact)
         [&](DA::ReflectionDisassembler& rd) { rd.WriteModuleHeader(f); });
     std::string expected =
         ".module CommonLanguageRuntimeLibrary\r\n"
-        "// MVID: {CFBE3CD1-8651-4C71-AE57-6A8663CF2300}\r\n"
+        "// MVID: {F16AD90E-81D0-45DF-A341-0E50BB08ED27}\r\n"
         ".imagebase 0x64478000000\r\n"
         ".file alignment 0x00000200\r\n"
         ".stackreserve 0x00400000\r\n"

@@ -134,10 +134,10 @@ TEST(MetadataTableDumperTest, CorTableRowSurface) {
     auto mvid = file.CorTryGuid(file.CorTableColumnValue(CorTableIndex::Module, 0, 2));
     ASSERT_TRUE(mvid);
     // The raw #GUID bytes (the canonical little-endian binary form) of
-    // mscorlib's MVID cfbe3cd1-8651-4c71-ae57-6a8663cf2300.
+    // mscorlib's MVID f16ad90e-81d0-45df-a341-0e50bb08ed27.
     const std::array<std::uint8_t, 16> expectedMvid = {
-        0xD1, 0x3C, 0xBE, 0xCF, 0x51, 0x86, 0x71, 0x4C,
-        0xAE, 0x57, 0x6A, 0x86, 0x63, 0xCF, 0x23, 0x00,
+        0x0E, 0xD9, 0x6A, 0xF1, 0xD0, 0x81, 0xDF, 0x45,
+        0xA3, 0x41, 0x0E, 0x50, 0xBB, 0x08, 0xED, 0x27,
     };
     EXPECT_EQ(*mvid, expectedMvid);
     // The nil #GUID/`#Strings` indexes.
@@ -229,7 +229,7 @@ TEST(MetadataTableDumperTest, ConsoleTableMscorlibTables) {
     std::string module = Dump(mscorlib, CorTableIndex::Module, false);
     EXPECT_NE(module.find(
         "1    0x00000001  0           CommonLanguageRuntimeLibrary  "
-        "cfbe3cd1-8651-4c71-ae57-6a8663cf2300  nil           nil"),
+        "f16ad90e-81d0-45df-a341-0e50bb08ed27  nil           nil"),
         std::string::npos);
     // The Assembly row: the Sha1 hash algorithm spelling (the .NET member
     // name, not the IL spelling), the 4.0.0.0 version, the PublicKey flag,
