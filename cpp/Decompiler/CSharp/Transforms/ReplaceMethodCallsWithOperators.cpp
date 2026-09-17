@@ -28,6 +28,7 @@
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/NullableType.hpp"
 #include "Decompiler/TypeSystem/IParameter.hpp"
+#include "Decompiler/TypeSystem/ITypeParameter.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Transforms {
@@ -201,6 +202,85 @@ Syntax::Expression* ReplaceMethodCallsWithOperators::RemoveRedundantToStringInCo
     // All checks succeeded, we can eliminate the ToString() call.
     // The C# compiler will generate an equivalent call if the code is recompiled.
     return m.target;
+}
+
+// The C# `static BinaryOperatorType? GetBinaryOperatorTypeFromMetadataName(string
+// name, out bool isChecked, DecompilerSettings settings)` (lines 433-487).
+std::optional<Syntax::BinaryOperatorType>
+ReplaceMethodCallsWithOperators::GetBinaryOperatorTypeFromMetadataName(
+    const std::string& name, bool& isChecked, const DecompilerSettings& settings) {
+    isChecked = false;
+    if (name == "op_Addition") return Syntax::BinaryOperatorType::Add;
+    if (name == "op_Subtraction") return Syntax::BinaryOperatorType::Subtract;
+    if (name == "op_Multiply") return Syntax::BinaryOperatorType::Multiply;
+    if (name == "op_Division") return Syntax::BinaryOperatorType::Divide;
+    if (name == "op_CheckedAddition" && settings.CheckedOperators()) {
+        isChecked = true;
+        return Syntax::BinaryOperatorType::Add;
+    }
+    if (name == "op_CheckedSubtraction" && settings.CheckedOperators()) {
+        isChecked = true;
+        return Syntax::BinaryOperatorType::Subtract;
+    }
+    if (name == "op_CheckedMultiply" && settings.CheckedOperators()) {
+        isChecked = true;
+        return Syntax::BinaryOperatorType::Multiply;
+    }
+    if (name == "op_CheckedDivision" && settings.CheckedOperators()) {
+        isChecked = true;
+        return Syntax::BinaryOperatorType::Divide;
+    }
+    if (name == "op_Modulus") return Syntax::BinaryOperatorType::Modulus;
+    if (name == "op_BitwiseAnd") return Syntax::BinaryOperatorType::BitwiseAnd;
+    if (name == "op_BitwiseOr") return Syntax::BinaryOperatorType::BitwiseOr;
+    if (name == "op_ExclusiveOr") return Syntax::BinaryOperatorType::ExclusiveOr;
+    if (name == "op_LeftShift") return Syntax::BinaryOperatorType::ShiftLeft;
+    if (name == "op_RightShift") return Syntax::BinaryOperatorType::ShiftRight;
+    if (name == "op_UnsignedRightShift" && settings.UnsignedRightShift())
+        return Syntax::BinaryOperatorType::UnsignedShiftRight;
+    if (name == "op_Equality") return Syntax::BinaryOperatorType::Equality;
+    if (name == "op_Inequality") return Syntax::BinaryOperatorType::InEquality;
+    if (name == "op_LessThan") return Syntax::BinaryOperatorType::LessThan;
+    if (name == "op_LessThanOrEqual") return Syntax::BinaryOperatorType::LessThanOrEqual;
+    if (name == "op_GreaterThan") return Syntax::BinaryOperatorType::GreaterThan;
+    if (name == "op_GreaterThanOrEqual")
+        return Syntax::BinaryOperatorType::GreaterThanOrEqual;
+    return std::nullopt;
+}
+
+// The C# `static UnaryOperatorType? GetUnaryOperatorTypeFromMetadataName(string
+// name, out bool isChecked, DecompilerSettings settings)` (lines 489-517).
+std::optional<Syntax::UnaryOperatorType>
+ReplaceMethodCallsWithOperators::GetUnaryOperatorTypeFromMetadataName(
+    const std::string& name, bool& isChecked, const DecompilerSettings& settings) {
+    isChecked = false;
+    if (name == "op_LogicalNot") return Syntax::UnaryOperatorType::Not;
+    if (name == "op_OnesComplement") return Syntax::UnaryOperatorType::BitNot;
+    if (name == "op_UnaryNegation") return Syntax::UnaryOperatorType::Minus;
+    if (name == "op_CheckedUnaryNegation" && settings.CheckedOperators()) {
+        isChecked = true;
+        return Syntax::UnaryOperatorType::Minus;
+    }
+    if (name == "op_UnaryPlus") return Syntax::UnaryOperatorType::Plus;
+    if (name == "op_Increment") return Syntax::UnaryOperatorType::Increment;
+    if (name == "op_Decrement") return Syntax::UnaryOperatorType::Decrement;
+    if (name == "op_CheckedIncrement" && settings.CheckedOperators()) {
+        isChecked = true;
+        return Syntax::UnaryOperatorType::Increment;
+    }
+    if (name == "op_CheckedDecrement" && settings.CheckedOperators()) {
+        isChecked = true;
+        return Syntax::UnaryOperatorType::Decrement;
+    }
+    return std::nullopt;
+}
+
+// The C# `bool IsInstantiableTypeParameter(IType type)` (lines 272-275).
+bool ReplaceMethodCallsWithOperators::IsInstantiableTypeParameter(
+    const TS::IType& type) {
+    const auto* typeParameter = dynamic_cast<const TS::ITypeParameter*>(&type);
+    return typeParameter != nullptr
+        && typeParameter->HasDefaultConstructorConstraint();
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Transforms

@@ -5203,6 +5203,30 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   12662 passed / the 2 standing skips / zero failures, and the transform is not referenced
   from the seed paths (`grep` finds no use outside its own translation unit and test), so
   the CLI baselines are unchanged.
+- **`ReplaceMethodCallsWithOperators` operator-name maps + `UnwrapInDirectionExpression`** --
+  the next resolver-free prerequisites of the `CSharpDecompiler.GetAstTransforms()` entry
+  `ReplaceMethodCallsWithOperators` (the second transform in the list, after
+  `PatternStatementTransform`; only its statics are ported so far). This slice lands the two
+  name-mapping tables the instance `ProcessInvocationExpression` consumes
+  (`GetBinaryOperatorTypeFromMetadataName`: `op_Addition` &c. to `BinaryOperatorType`, with
+  the four `op_Checked...` names and `op_UnsignedRightShift` gated by the
+  `CheckedOperators`/`UnsignedRightShift` settings flags; and
+  `GetUnaryOperatorTypeFromMetadataName`: `op_LogicalNot` &c. to `UnaryOperatorType`, with
+  the checked negation/increment/decrement gated the same way), and
+  `IsInstantiableTypeParameter` (a type parameter carrying the `new()` constraint, the
+  `Activator.CreateInstance<T>()` to `new T()` gate). The shared `SyntaxExtensions
+  .UnwrapInDirectionExpression` also lands (the `in`-direction wrapper is stripped and its
+  operand detached, leaving `ref`/`out` wrappers alone), which the instance machinery uses
+  to unwrap operator-method arguments. Verified by 8 tests
+  (`ReplaceMethodCallsWithOperators_Test.cpp`: the complete binary and unary name tables, the
+  unknown-name nullopt shapes, the checked-binary / checked-unary / `UnsignedRightShift`
+  settings gates, `IsInstantiableTypeParameter` over a constrained type parameter, an
+  unconstrained one and a real `Int32`, and the `UnwrapInDirectionExpression` in/ref/out/
+  plain matrix) proven with a binary/unary-map neuter RED round (exactly the 5 mapping tests
+  failed, the unknown-name and type-parameter tests staying green, then all 8 green after
+  restore). The `DecompilerSettings` `checkedOperators_`/`unsignedRightShift_` defaults are
+  BOTH true, so a "settings off" test must call `SetCheckedOperators(false)` /
+  `SetUnsignedRightShift(false)` explicitly (the first test run failed on exactly this).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

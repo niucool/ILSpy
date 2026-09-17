@@ -34,16 +34,22 @@
 //     AddCheckedBlocks transform's block-range walk (the first statement whose
 //     `NextSibling` is a `Statement`, used to iterate a `BlockStatement`'s statements
 //     while insertion is planned).
+//   - UnwrapInDirectionExpression(Expression*) (SyntaxExtensions.cs line 81) -- consumed
+//     by ReplaceMethodCallsWithOperators.ProcessInvocationExpression, which strips an
+//     `in`-direction wrapper from an operator-method argument before building the
+//     operator expression.
 //
 // The remaining methods are DEFERRED until their consumers port: `IsBitwise`
 // (BinaryOperatorType -- the unported CSharpResolver/OutputVisitor binary-operator
-// tiebreaks), `IsArgList` / `AddNamedArgument` / `UnwrapInDirectionExpression`
-// (the unported CSharpResolver/TypeSystemAstBuilder stages).
+// tiebreaks), `IsArgList` / `AddNamedArgument` (the unported CSharpResolver/
+// TypeSystemAstBuilder stages).
 
 #pragma once
 
 #include "Decompiler/CSharp/Syntax/AstNode.hpp"
 #include "Decompiler/CSharp/Syntax/OperatorDeclaration.hpp"  // OperatorType (the enum)
+#include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"  // + the FieldDirection enum
+#include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/Statement.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
@@ -87,6 +93,21 @@ inline Statement* GetNextStatement(Statement* statement) {
     while (next != nullptr && dynamic_cast<Statement*>(next) == nullptr)
         next = next->NextSibling();
     return static_cast<Statement*>(next);
+}
+
+// The C# `public static Expression UnwrapInDirectionExpression(this Expression expr)`
+// (SyntaxExtensions.cs line 81) -- when the expression is an `in`-direction wrapper
+// (`in` argument passed to a call), return the wrapped expression detached from the
+// wrapper; any other expression (including a `ref`/`out` direction wrapper) is returned
+// unchanged. The C# `expr is DirectionExpression dir && dir.FieldDirection ==
+// FieldDirection.In` ports to a dynamic cast plus the enum check. First consumed by
+// ReplaceMethodCallsWithOperators.ProcessInvocationExpression, which unwraps
+// operator-method arguments before building the operator expression.
+inline Expression* UnwrapInDirectionExpression(Expression* expr) {
+    auto* dir = dynamic_cast<DirectionExpression*>(expr);
+    if (dir == nullptr || dir->FieldDirection() != FieldDirection::In)
+        return expr;
+    return Detach(dir->Expression());
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

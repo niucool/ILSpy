@@ -22,22 +22,26 @@
 // -- the AST transform that replaces operator-method calls with the operator
 // expressions.
 //
-// This file is the FIRST SLICE: the statics the ExpressionBuilder's
+// This file carries the resolver-free half: the statics the ExpressionBuilder's
 // VisitUserDefinedCompoundAssign arm consumes -- `HasCheckedEquivalent(IMethod)`
 // (the checked-operator twin detection) and `RemoveRedundantToStringInConcat`
 // (the string.Concat argument `ToString()` elimination with its
-// ToStringIsKnownEffectFree support table). The instance VisitInvocationExpression
-// machinery (the ProcessInvocationExpression rewrite, CheckArgumentsForStringConcat,
-// GetBinaryOperatorTypeFromMetadataName and the other method-call rewrites) is
+// ToStringIsKnownEffectFree support table) -- plus the operator-name mapping
+// tables and `IsInstantiableTypeParameter` the instance machinery consumes. The
+// instance VisitInvocationExpression machinery (the ProcessInvocationExpression
+// rewrite, CheckArgumentsForStringConcat and the other method-call rewrites) is
 // DEFERRED with the IAstTransform slice it serves.
 
 #pragma once
 
+#include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
 // The real type-system namespace alias (the ExpressionBuilder TS:: convention --
 // the CSharp/TypeSystem sub-namespace shadows the plain `TypeSystem::` lookup).
 namespace TS = ::ILSpy::Decompiler::TypeSystem;
@@ -102,6 +106,41 @@ public:
     // over the NullConditional receiver. Returns the match shape; a failed
     // match leaves `call` null.
     static ToStringCallMatch MatchToStringCallPattern(Syntax::Expression* expr);
+
+    // The C# `static BinaryOperatorType? GetBinaryOperatorTypeFromMetadataName(
+    // string name, out bool isChecked, DecompilerSettings settings)` (lines
+    // 433-487): the metadata method name of a binary operator (`op_Addition` &c.)
+    // mapped to its `BinaryOperatorType`, or `std::nullopt` when the name is not
+    // a binary operator. The four `op_Checked...` names are recognized only when
+    // `settings.CheckedOperators` is on (the C# switch `when` guards) and set
+    // `isChecked`; every other name leaves it false. The C# `out bool isChecked`
+    // ports to a `bool&` out-parameter (the CallBuilder/CSharpResolver precedent).
+    // Implemented out-of-line in the .cpp.
+    static std::optional<Syntax::BinaryOperatorType>
+    GetBinaryOperatorTypeFromMetadataName(const std::string& name,
+                                          bool& isChecked,
+                                          const DecompilerSettings& settings);
+
+    // The C# `static UnaryOperatorType? GetUnaryOperatorTypeFromMetadataName(
+    // string name, out bool isChecked, DecompilerSettings settings)` (lines
+    // 489-517): the metadata method name of a unary operator (`op_LogicalNot`
+    // &c.) mapped to its `UnaryOperatorType`, or `std::nullopt` when the name is
+    // not a unary operator. The three `op_Checked...` names are recognized only
+    // when `settings.CheckedOperators` is on and set `isChecked`; every other
+    // name leaves it false. Implemented out-of-line in the .cpp.
+    static std::optional<Syntax::UnaryOperatorType>
+    GetUnaryOperatorTypeFromMetadataName(const std::string& name,
+                                         bool& isChecked,
+                                         const DecompilerSettings& settings);
+
+    // The C# `bool IsInstantiableTypeParameter(IType type)` (lines 272-275):
+    // whether the type is a type parameter with the `new()` constraint (a type
+    // argument `Activator.CreateInstance<T>()` may become `new T()`). The C#
+    // `type is ITypeParameter tp && tp.HasDefaultConstructorConstraint` ports to
+    // a dynamic cast plus the interface predicate. Needs no instance state, so
+    // the port carries it as a static member. Implemented out-of-line in the
+    // .cpp.
+    static bool IsInstantiableTypeParameter(const TS::IType& type);
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Transforms
