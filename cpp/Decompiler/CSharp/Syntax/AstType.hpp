@@ -33,10 +33,12 @@
 // class wrapping a `Pattern`) because `hasPatternPlaceholder` is true, and the hand-written
 // part adds a typed `Clone` plus several convenience builders/queries (`IsVar`,
 // `GetNameLookupMode`, `MakePointerType`/`MakeArrayType`/`MakeNullableType`/`MakeRefType`,
-// `MemberType`, `Create`). The pattern placeholder lands when the concrete pattern nodes
-// (`AnyNode`/`NamedNode`/...) and `VisitPatternPlaceholder` on `IAstVisitor` are ported (the
-// D219 deferral), so it is deferred here -- the abstract base and the concrete type nodes do
-// not depend on it.
+// `MemberType`, `Create`). The pattern placeholder lands when the generated placeholder
+// machinery (`VisitPatternPlaceholder` on `IAstVisitor` plus the per-base `implicit
+// operator`/nested `PatternPlaceholder`) is ported (the D219 deferral); the concrete pattern
+// nodes (`AnyNode`/`NamedNode`/...) now live in `PatternMatching/PatternNodes.hpp`, so that
+// machinery is the remaining piece. It is deferred here -- the abstract base and the concrete
+// type nodes do not depend on it.
 //
 // The typed `Clone` ports as a covariant pure-virtual override: `AstNode::Clone()` returns
 // `AstNode*` (its base body throws, since C++ has no `MemberwiseClone`); `AstType`

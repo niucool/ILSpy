@@ -5056,6 +5056,27 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   all 16 green after restore); the full Debug suite is now 12559 ran / 12557 passed / the 2
   standing skips / zero failures. The transform is not wired into the seed paths, so the
   CLI baselines are unchanged.
+- **Concrete pattern-matching nodes** -- the `PatternNodes.hpp` home for the `Pattern`
+  subclasses the C# `PatternMatching` namespace is built from: `AnyNode`, `AnyNodeOrNull`,
+  `NamedNode`, `OptionalNode`, `Repeat`, `Backreference`, `IdentifierExpressionBackreference`,
+  and `Choice`, plus the `PatternExtensions` `Match`/`IsMatch` entry points from `INode.cs`.
+  The matching engine (`Pattern`/`Match`/`BacktrackingInfo`) and the AST nodes' generated
+  `DoMatch` were already ported, but the nodes a pattern tree is built from had not been
+  (the earlier engine tests used local `TestAnyNode`/`TestOptionalNode` stubs), so this is
+  the unblocking step for the pattern-based AST transforms (the next in-order
+  `CSharpDecompiler.GetAstTransforms()` entry, `PatternStatementTransform`, is built almost
+  entirely from these nodes). The port holds non-owning `INode*` children (C# patterns are
+  `static readonly`, i.e. process-lifetime, exactly what a non-owning pointer needs); the
+  two convenience ctors that allocate a `NamedNode` on the caller's behalf (`OptionalNode
+  (string, INode)` and `Choice.Add(string, INode)`) own the node they create. The
+  `ToType`/`ToExpression`/`ToStatement`/`WithName` shims of `PatternExtensions` remain
+  deferred with the not-yet-ported generated pattern-placeholder machinery. Verified by 30
+  tests (`PatternNodes_Test.cpp`: each node's `DoMatch`/`DoMatchCollection`, the `Repeat`
+  greedy-count and `MinCount`/`MaxCount` arms over real AST candidates, the `Choice`
+  checkpoint restore, the two backreferences against real `IdentifierExpression`s including
+  the type-argument rejection, and `PatternExtensions::Match`/`IsMatch`); the full Debug
+  suite is 12589 ran / 12587 passed / the 2 standing skips / zero failures, and the CLI
+  baselines are unchanged (the nodes are not reachable from the seed paths).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.
