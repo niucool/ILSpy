@@ -4962,6 +4962,26 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   after restore), and the full Debug suite is unchanged apart from the 12 new tests; the
   `--csharp` CLI baseline is unaffected (the transform is not wired into the seed `--csharp`
   path).
+- **`FixNameCollisions` AST transform** -- the seventh concrete `IAstTransform` over
+  the iteration-160 `TransformContext` foundation, ported per `PORT_PLAN.md`'s Phase 5 from the
+  `CSharpDecompiler.GetAstTransforms()` order (the transform directly after
+  `RenameVisualBasicAnonymousTypes`). The transform (`Transforms/FixNameCollisions.{hpp,cpp}`)
+  renames a private field whose name collides with a single-named member of the same type
+  (the motivating case is a compiler-generated event that was not detected as a pattern, so
+  its backing field and the event share a name). It walks every `TypeDeclaration`, builds the
+  type's member-name set (keying an explicit-interface member by its `I.Name` form so a bare
+  field name does not collide with it), and renames each single-variable private field whose
+  name is in the set to `m_` + name or the first free name+number. A second walk retargets
+  every `IdentifierExpression` / `MemberReferenceExpression` whose symbol is a renamed field.
+  The rename dictionary keys on the `ISymbol*` identity the resolve-result annotation carries
+  (the C# dictionary's reference comparer). Verified by 12 tests (the member-collision rename,
+  the prefixed and two numbered fallbacks, the IdentifierExpression and MemberReferenceExpression
+  reference retargets, the no-collision / non-private / multi-variable keeps, the unrenamed and
+  symbol-less reference keeps, the explicit-interface no-collision, and the nested-type
+  descent) proven with a Run-neuter RED round (exactly the 6 positive rename tests failed with
+  the transform disabled, then all 12 green after restore), and the full Debug suite is now
+  12522 ran / 12520 passed / the 2 standing skips / zero failures; the `--csharp` CLI baseline
+  is unaffected (the transform is not wired into the seed `--csharp` path).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.
