@@ -51,6 +51,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ThrowExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UndocumentedExpression.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/CSharp/Transforms/AddCheckedBlocks.hpp"
@@ -96,6 +97,7 @@
 #include "Decompiler/IL/Instructions/NullableInstructions.hpp"
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/AddressOf.hpp"
+#include "Decompiler/IL/Instructions/RefAnyType.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/OpCodeName.hpp"
 #include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
@@ -752,6 +754,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitNullCoalescingInstruction(inst, context);
         case IL::OpCode::AddressOf:
             return VisitAddressOf(inst, context);
+        case IL::OpCode::RefAnyType:
+            return VisitRefAnyType(inst, context);
         case IL::OpCode::Call:
         case IL::OpCode::CallVirt:
         case IL::OpCode::NewObj:
@@ -1716,6 +1720,32 @@ TranslatedExpression ExpressionBuilder::VisitAddressOf(IL::ILInstruction* inst,
         std::make_shared<Sem::ByReferenceResolveResult>(
             SharedResolveResultAnnotation(*value.Expression()),
             TS::ReferenceKind::Ref));
+}
+
+// The C# `protected internal override TranslatedExpression VisitRefAnyType(
+// RefAnyType inst, TranslationContext context)` (ExpressionBuilder.cs lines
+// 3386-3394): the `__reftype(typedReference).TypeHandle` render -- the
+// RefType UndocumentedExpression over the translated argument, wrapped in a
+// `TypeHandle` member reference whose resolve result is a TypeResolveResult for
+// System.RuntimeTypeHandle.
+TranslatedExpression ExpressionBuilder::VisitRefAnyType(IL::ILInstruction* inst,
+                                                        TranslationContext context)
+{
+    (void)context;
+    auto* refAnyType = static_cast<IL::RefAnyType*>(inst);
+    auto* doc = new Syntax::UndocumentedExpression();
+    doc->UndocumentedExpressionType(Syntax::UndocumentedExpressionType::RefType);
+    doc->Arguments().Add(Translate(refAnyType->Argument.get()).Expression());
+    auto* memberRef = new Syntax::MemberReferenceExpression(doc, "TypeHandle");
+    // The C# `compilation.FindType(new TopLevelTypeName("System",
+    // "RuntimeTypeHandle"))` -- the modules-scan extension over the full type
+    // name (the VisitLdTypeToken precedent).
+    TS::ITypePtr runtimeTypeHandleType =
+        TS::FindType(*compilation,
+                     TS::FullTypeName(TS::TopLevelTypeName("System", "RuntimeTypeHandle")));
+    return WithRR(WithILInstruction(*memberRef, inst),
+                  std::make_shared<Sem::TypeResolveResult>(
+                      std::move(runtimeTypeHandleType)));
 }
 
 

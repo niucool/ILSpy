@@ -49,6 +49,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/TypeOfExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UndocumentedExpression.hpp"
 #include "Decompiler/CSharp/Syntax/ComposedType.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/TranslatedExpression.hpp"
@@ -68,6 +69,7 @@
 #include "Decompiler/IL/Instructions/NullableInstructions.hpp"
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/AddressOf.hpp"
+#include "Decompiler/IL/Instructions/RefAnyType.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/Instructions/BitNot.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
@@ -99,6 +101,7 @@
 #include "Decompiler/Semantics/SizeOfResolveResult.hpp"
 #include "Decompiler/Semantics/TypeIsResolveResult.hpp"
 #include "Decompiler/Semantics/TypeOfResolveResult.hpp"
+#include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
@@ -1504,6 +1507,38 @@ TEST(ExpressionBuilderAddressOfTest, LdObjParentSkipsCast)
     auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
     ASSERT_TRUE(direction != nullptr);
     EXPECT_EQ(dynamic_cast<Syntax::CastExpression*>(direction->Expression()), nullptr);
+}
+
+// The RefAnyType arm (VisitRefAnyType, the C# lines 3386-3394): the
+// `__reftype(typedReference).TypeHandle` render -- the RefType
+// UndocumentedExpression over the translated argument, the `TypeHandle` member
+// reference, and the System.RuntimeTypeHandle resolve result.
+
+TEST(ExpressionBuilderRefAnyTypeTest, RendersRefTypeTypeHandleWithRuntimeTypeHandleResolveResult)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto v = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    v->Name = "v";
+    IL::RefAnyType refAnyType(std::make_unique<IL::LdLoc>(v));
+    auto expr = builder.Translate(&refAnyType);
+    auto* memberRef = dynamic_cast<Syntax::MemberReferenceExpression*>(expr.Expression());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "TypeHandle");
+    auto* doc = dynamic_cast<Syntax::UndocumentedExpression*>(memberRef->Target());
+    ASSERT_TRUE(doc != nullptr);
+    EXPECT_EQ(doc->UndocumentedExpressionType(), Syntax::UndocumentedExpressionType::RefType);
+    ASSERT_EQ(doc->Arguments().Count(), 1);
+    // The translated argument (the local load) is the UndocumentedExpression argument.
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(doc->Arguments().At(0)) != nullptr);
+    // The IL annotation sits on the member reference (the C# WithILInstruction).
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*memberRef);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], &refAnyType);
+    // The resolve result is the RuntimeTypeHandle type resolve result.
+    ASSERT_TRUE(dynamic_cast<const Sem::TypeResolveResult*>(expr.ResolveResult()) != nullptr);
 }
 
 // The ILInlining.ClassifyExpression / IsReadonlyReference helpers (the C#

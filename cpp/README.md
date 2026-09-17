@@ -3160,6 +3160,23 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   byte-identical to the 41246545-byte gold, `-l c` 109438, `--json` with input rc
   64). The `IsReadonlyReference` default arm (a field's ref-readonly return type
   via `MatchLdFld`) stays deferred with the port's `IField` surface.
+- **`ExpressionBuilder` ref-any-type arm (`VisitRefAnyType`)** -- the C#
+  `VisitRefAnyType` (`ExpressionBuilder.cs` lines 3386-3394) landed and is
+  routed from the `Visit` OpCode switch (the `refanytype` opcode, which the IL
+  reader decodes into the pre-existing `RefAnyType` node). The render is
+  `__reftype(typedReference).TypeHandle`: the translated argument becomes the
+  sole argument of a `RefType` `UndocumentedExpression`, wrapped in a
+  `MemberReferenceExpression` whose resolve result is a `TypeResolveResult` for
+  `System.RuntimeTypeHandle` (resolved through the modules-scan `FindType`
+  extension, the `VisitLdTypeToken` precedent); the IL annotation sits on the
+  member reference. Verified by 1 new `ExpressionBuilderRefAnyTypeTest` test
+  (the `TypeHandle` member over the `RefType` undocumented expression with the
+  translated local argument, the `refanytype` IL annotation, and the
+  `TypeResolveResult`), proven with a dispatch-removal RED round; full Debug
+  suite 12390 ran / 12388 passed / the 2 standing skips / zero failures. The
+  sibling `__makeref`/`__refvalue` arms stay deferred because the IL reader
+  models `mkrefany` as a degenerate `LdTypeToken` (no `MakeRefAny` node) and no
+  `RefAnyValue` node exists.
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

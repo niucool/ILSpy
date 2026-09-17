@@ -304,6 +304,12 @@ public:
     // copies; the render is a ref DirectionExpression carrying a
     // ByReferenceResolveResult.
     TranslatedExpression VisitAddressOf(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitRefAnyType(
+    // RefAnyType inst, TranslationContext context)` (ExpressionBuilder.cs lines
+    // 3386-3394): the `__reftype(typedReference).TypeHandle` render -- the RefType
+    // UndocumentedExpression over the translated argument, wrapped in a `TypeHandle`
+    // member reference with a TypeResolveResult for System.RuntimeTypeHandle.
+    TranslatedExpression VisitRefAnyType(IL::ILInstruction* inst, TranslationContext context);
     // The C# `private TranslatedExpression StObjViaHelperCall(StObj inst)`
     // (ExpressionBuilder.cs lines 3087-3125): the `Unsafe.Write` /
     // `Unsafe.WriteUnaligned` intrinsic rewrite for a store that cannot be a
