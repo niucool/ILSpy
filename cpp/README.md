@@ -4828,6 +4828,33 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   by the port's minimal reader/BlockBuilder (which keep their documented graceful
   degradations), so the CLI baselines are unchanged: `--il` is byte-identical to
   the 41246545-byte gold and `--csharp` mscorlib is still 10106360 bytes.
+- **AST-transform layer foundation (`IAstTransform` + `TransformContext`) and the
+  `EscapeInvalidIdentifiers` transform** -- the C# AST-transform contract and its
+  per-pass state bag landed, the named deferral the two earlier transforms
+  (`AddCheckedBlocks`/`ReplaceMethodCallsWithOperators`) documented. `IAstTransform`
+  (`Transforms/IAstTransform.hpp`) is the C# `void Run(AstNode, TransformContext)`
+  contract over the port's `Syntax::AstNode&` / `TransformContext&`.
+  `TransformContext` (`Transforms/TransformContext.hpp`) carries the C# read
+  surface: the type system (the port's narrower `ICompilation&` -- the C#
+  `IDecompilerTypeSystem` has no ported counterpart and every consumer only reads
+  `FindType`/`MainModule`/`RootNamespace`), the shared `TypeSystemAstBuilder`, the
+  `DecompileRun` (`Settings` plus the `RequiredNamespacesSuperset` copy), the
+  position accessors (`CurrentMember`/`CurrentTypeDefinition`/`CurrentModule`
+  delegating to the `ITypeResolveContext`), and the `[Conditional("STEP")]`
+  debug-step methods as no-ops (they compile out of a normal C# build). The first
+  concrete pass, `EscapeInvalidIdentifiers` (`Transforms/EscapeInvalidIdentifiers.*`),
+  walks every `Identifier` descendant and rewrites names whose UTF-16 units are not
+  letters/digits/underscore, escaping each invalid unit as its uppercase-hex
+  `_XXXX` and prefixing `_` on a leading non-letter (the `Util::IsLetterOrDigit`
+  probe table over `Util::Utf8ToUtf16`). Verified by 5 tests (the context's
+  compilation/run/position read surface, the `RequiredNamespacesSuperset`
+  empty-to-populated transition, the `IsValid`/`ReplaceInvalid` escape matrix incl.
+  the leading-digit guard and the non-ASCII `_00A9` arm, and an in-place tree
+  rewrite), and the full Debug suite is 12445 ran / 12442 passed / the 2 standing
+  skips / the one pre-existing flaky `SyntheticWpfModuleTest` failure (passes in
+  isolation). The CLI baselines are unchanged (the new transform is not wired into
+  the seed `--csharp` path): `-l c` is 109438 and `--il`/`--csharp` mscorlib are
+  unaffected.
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.
