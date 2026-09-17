@@ -68,8 +68,8 @@ namespace PM = Syntax::PatternMatching;
 // The C# `CSharpDecompiler.IsTransparentIdentifier(string)` predicate. The Roslyn compiler
 // names the carriers of its query range variables `<>h__TransparentIdentifier0` (older
 // compilers `<>TranspIdent0`); the VB compiler names its carriers `$VB$It`, `$VB$It1`, ... .
-// Shared with the not-yet-ported `IntroduceQueryExpressions` (move it to a shared home when
-// that transform lands).
+// Shared with the IL-stage `AssignVariableNames` transform (not with
+// `IntroduceQueryExpressions`); move it to a shared home when that transform lands.
 bool IsTransparentIdentifier(const std::string& identifier) {
     if (identifier.rfind("<>", 0) == 0) {
         return identifier.find("TransparentIdentifier") != std::string::npos

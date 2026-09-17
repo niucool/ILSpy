@@ -101,6 +101,12 @@ public:
     // mutable handle; the port returns the shared_ptr's raw pointer).
     IL::ILVariable* Variable() const { return variable_.get(); }
 
+    // The owning handle behind `Variable` -- the `shared_ptr` a caller needs to build a
+    // new `ILVariableResolveResult` over the same variable (the C# `new
+    // ILVariableResolveResult(v)` carries the same GC reference; the port shares the
+    // handle).
+    const IL::ILVariablePtr& VariableHandle() const { return variable_; }
+
 protected:
     std::string ClassName() const override { return "ILVariableResolveResult"; }
 

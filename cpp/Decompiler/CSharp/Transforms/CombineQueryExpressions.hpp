@@ -31,8 +31,8 @@
 // The port is resolver-free (the only symbol read is the `ILVariableResolveResult`
 // annotation the `DeclareVariables` analysis would attach, and a missing annotation is
 // tolerated). `CSharpDecompiler.IsTransparentIdentifier` has no ported home yet, so it is a
-// file-local predicate in the .cpp (it is shared with the not-yet-ported
-// `IntroduceQueryExpressions`, which is where it can move when that transform lands).
+// file-local predicate in the .cpp (its other C# consumer is the IL-stage
+// `AssignVariableNames` transform, not `IntroduceQueryExpressions`).
 
 #pragma once
 

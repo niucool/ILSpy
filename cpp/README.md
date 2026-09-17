@@ -5301,7 +5301,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   reference is replaced by the underlying member (moving type arguments and copying
   annotations). The `expr.Cast<T>()`-in-a-from shape moves the cast's type argument into
   the from clause. `CSharpDecompiler.IsTransparentIdentifier` has no ported home yet, so it
-  is a file-local predicate (shared with the not-yet-ported `IntroduceQueryExpressions`).
+  is a file-local predicate (its other C# consumer is the IL-stage `AssignVariableNames`
+  transform, not `IntroduceQueryExpressions`).
   Verified by 11 tests (the cast move, the continuation and its three guards, the
   transparent-identifier removal with the let clauses and the reference replacement, the
   type-argument move and resolve-result propagation, and the settings-off no-op), proven
@@ -5310,6 +5311,27 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   12717 passed / the 2 standing skips / zero failures, and the transform is not wired into
   the seed paths, so the CLI baselines are unchanged (`--csharp` 10106360, `--il`
   41246545, `-l c` 109438 bytes).
+- **`IntroduceQueryExpressions`** -- the LINQ method-chain to query-expression rewriter lands
+  in `Transforms/IntroduceQueryExpressions.{hpp,cpp}`: `DecompileQueries` walks the tree and
+  turns the compiler's `Select`/`Where`/`GroupBy`/`SelectMany`/`OrderBy`/`ThenBy`/`Join`/
+  `GroupJoin` calls back into `from`/`where`/`group`/`orderby`/`join` clauses (the C# 4.0
+  spec 7.16.2 query translation), wrapping a query in an expression-statement position in
+  `_ = query` when `Discards` is on; after the rewrite `Run` walks every `QueryExpression`
+  to add the missing degenerate `select` and to combine a nested degenerate inner query into
+  its consumer (hoisting the inner clauses and rebinding the inner range variable through the
+  `ILVariableResolveResult` annotation). The `ApplyAnnotationVisitor` nested class in the C#
+  source is dead code (declared but never instantiated) and is deliberately not ported. The
+  port is resolver-free (it reads only the `ILVariableResolveResult` annotation the
+  `DeclareVariables` analysis attaches and the `ILFunction` annotations on query group/join
+  clauses); it added the `ILVariableResolveResult::VariableHandle()` owning-handle accessor
+  the range-variable rebinding needs. Verified by 18 tests (the degenerate-select insertion,
+  the non-degenerate keep, the eight method-chain rewrites including the parenthesized
+  range-variable select body and the single-query consumption of an `OrderBy`/`ThenBy` chain,
+  the range-variable rebinding, the discard wrap, and the argument-count / bare-query /
+  null-conditional-source / non-query-method guards), proven with a `DecompileQuery`-neuter
+  RED round (exactly the 10 query-building tests failed, the 8 keep/guard/combine tests
+  staying green, then all 18 green after restore). The transform has no call site in the seed
+  pipeline, so the CLI baselines are unchanged.
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.
