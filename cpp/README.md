@@ -5135,10 +5135,10 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `VisitChildren` replace-and-revisit loop that keeps visiting a child while the visit
   returns a different node) plus the two sub-transforms that need no pattern tree: the
   conditional-logic reassociation (`a && (b && c)` -> `(a && b) && c`, the same for `||`)
-  and the negated-equality rewrite (`!(a == b)` -> `a != b`). The pattern-based
-  sub-transforms (`for`/`foreach`/automatic property/automatic event/destructor/
-  try-catch-finally/cascading `if`/using/fixed) and the `DeclareVariables` analysis they
-  compose stay deferred, each named at the visit that would call it. Verified by 11 tests
+  and the negated-equality rewrite (`!(a == b)` -> `a != b`). The remaining pattern-based
+  sub-transforms (`for`/`foreach`/automatic property/automatic event/using/fixed) and the
+  `DeclareVariables` analysis they compose stay deferred -- the destructor, try-catch-finally
+  merge, and cascading `if` sub-transforms landed in the next slice (below). Verified by 11 tests
   (`PatternStatementTransform_Test.cpp`: both reassociation operators, the mixed and
   non-conditional keeps, the negated-equality rewrite and its inequality/relational/plain
   keeps, the nested rewrite, the fully-left-associative flattening the revisit loop
@@ -5149,6 +5149,28 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   pointer-identity assertions (it compared rebuilt pointers against the cache instances the
   invalidation frees) were replaced with a content check, since the allocator may reuse the
   freed addresses -- this surfaced when the added translation units shifted the heap layout.
+- **`PatternStatementTransform` pattern-based sub-transforms** -- the second slice of the
+  `PatternStatementTransform` pass lands the pattern-based sub-transforms that need no
+  `DeclareVariables` analysis and no resolver: the destructor rewrite (`Finalize` method to
+  `DestructorDeclaration`, and the `try { ... } finally { base.Finalize(); }` body shape to
+  the hoisted try body), the nested `try { try {} catch {} } finally {}` merge, and the
+  cascading `if`/`else { if }` simplification (`else if`). Each is built from the C#
+  `static readonly` pattern trees; the C# pattern nodes hold non-owning child references and
+  its patterns are process-lifetime, so the port builds an equivalent tree per call into a
+  small `PatternTree` owner (nodes owned through `INode`, which both `Pattern` and `AstNode`
+  derive from; a pattern wrapped in a `PatternPlaceholderNode` is owned by the placeholder
+  instead) and keeps it alive for the match. The new visitor overrides
+  `VisitIfElseStatement`/`VisitTryCatchStatement`/`VisitMethodDeclaration`/
+  `VisitDestructorDeclaration` delegate to those helpers and fall through to the
+  `ContextTrackingVisitor` walk. Verified by 10 new tests (total 21;
+  `PatternStatementTransform_Test.cpp`: the cascading `if` rewrite and its
+  non-`if`/two-statement keeps, the nested try-catch-finally merge and its no-finally and
+  non-nested-body keeps, and the `Finalize`-method-to-destructor rewrite, the not-matching
+  body/name keeps, and the destructor-body simplification) proven with a neuter RED round
+  (exactly the 4 positive tests failed with the four helpers disabled, the 6 negative tests
+  staying green, then all 21 green after restore); the full Debug suite is now 12635 ran /
+  12633 passed / the 2 standing skips / zero failures, and the transform is not wired into
+  the seed paths, so the CLI baselines are unchanged.
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.
