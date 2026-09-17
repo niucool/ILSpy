@@ -50,6 +50,7 @@
 #include "Decompiler/DecompileRun.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/Semantics/InvocationResolveResult.hpp"
+#include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
 #include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
@@ -407,6 +408,14 @@ Syntax::InvocationExpression* Invoke(const char* name,
     return invocation;
 }
 
+// Attaches a `TypeResolveResult` to an expression (the argument/`ToString`-target
+// resolve-result fixture).
+Syntax::Expression* WithType(Syntax::Expression* expression, TS::ITypePtr type) {
+    expression->AddAnnotation(
+        std::make_shared<Sem::TypeResolveResult>(std::move(type)));
+    return expression;
+}
+
 } // namespace
 
 // `System.Type.GetTypeFromHandle(typeof(T).TypeHandle)` becomes `typeof(T)`.
@@ -712,4 +721,212 @@ TEST(ReplaceMethodCallsWithOperatorsInstanceTest, UnresolvedInvocationKept)
     Syntax::Expression* result = RunOnExpression(fixture, invocation);
 
     EXPECT_EQ(result, invocation);
+}
+
+// ---------------------------------------------------------------------------
+// The `String.Concat(a, b)` -> `a + b` reduction (`CheckArgumentsForStringConcat`
+// plus the argument/`ToString` reductions it drives).
+// ---------------------------------------------------------------------------
+
+// `String.Concat(a, b)` with two string arguments becomes `a + b`.
+TEST(ReplaceMethodCallsWithOperatorsInstanceTest, StringConcatBecomesAddition)
+{
+    InstanceFixture fixture;
+    auto stringType = fixture.FindType(TS::KnownTypeCode::String);
+    auto method = MakeOperatorMethod(fixture, "Concat", stringType,
+                                     {stringType, stringType}, stringType);
+    auto* a = WithType(new Syntax::IdentifierExpression("a"), stringType);
+    auto* b = WithType(new Syntax::IdentifierExpression("b"), stringType);
+    auto* invocation = Invoke("Concat", {a, b});
+    ResolveInvocation(invocation, method.get());
+
+    Syntax::Expression* result = RunOnExpression(fixture, invocation);
+
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(result);
+    ASSERT_NE(binary, nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::Add);
+    EXPECT_EQ(binary->Left(), a);
+    EXPECT_EQ(binary->Right(), b);
+}
+
+// With `StringConcat` off the `String.Concat` call is kept.
+TEST(ReplaceMethodCallsWithOperatorsInstanceTest, StringConcatSettingOffKept)
+{
+    InstanceFixture fixture;
+    fixture.settings.SetStringConcat(false);
+    auto stringType = fixture.FindType(TS::KnownTypeCode::String);
+    auto method = MakeOperatorMethod(fixture, "Concat", stringType,
+                                     {stringType, stringType}, stringType);
+    auto* invocation = Invoke(
+        "Concat",
+        {WithType(new Syntax::IdentifierExpression("a"), stringType),
+         WithType(new Syntax::IdentifierExpression("b"), stringType)});
+    ResolveInvocation(invocation, method.get());
+
+    Syntax::Expression* result = RunOnExpression(fixture, invocation);
+
+    EXPECT_EQ(result, invocation);
+}
+
+// A named argument anywhere in the call keeps the `String.Concat` call.
+TEST(ReplaceMethodCallsWithOperatorsInstanceTest, StringConcatNamedArgumentKept)
+{
+    InstanceFixture fixture;
+    auto stringType = fixture.FindType(TS::KnownTypeCode::String);
+    auto method = MakeOperatorMethod(fixture, "Concat", stringType,
+                                     {stringType, stringType}, stringType);
+    auto* named = new Syntax::NamedArgumentExpression(
+        "arg", WithType(new Syntax::IdentifierExpression("b"), stringType));
+    named->AddAnnotation(
+        std::make_shared<Sem::TypeResolveResult>(stringType));
+    auto* invocation = Invoke(
+        "Concat", {WithType(new Syntax::IdentifierExpression("a"), stringType),
+                   named});
+    ResolveInvocation(invocation, method.get());
+
+    Syntax::Expression* result = RunOnExpression(fixture, invocation);
+
+    EXPECT_EQ(result, invocation);
+}
+
+// A call whose first two arguments are not string-typed keeps the `String.Concat`
+// call (the `+` operator would not resolve to a string concatenation).
+TEST(ReplaceMethodCallsWithOperatorsInstanceTest, StringConcatNonStringFirstTwoKept)
+{
+    InstanceFixture fixture;
+    auto stringType = fixture.FindType(TS::KnownTypeCode::String);
+    auto intType = fixture.FindType(TS::KnownTypeCode::Int32);
+    auto method = MakeOperatorMethod(fixture, "Concat", stringType,
+                                     {intType, intType}, stringType);
+    auto* invocation = Invoke(
+        "Concat",
+        {WithType(new Syntax::IdentifierExpression("a"), intType),
+         WithType(new Syntax::IdentifierExpression("b"), intType)});
+    ResolveInvocation(invocation, method.get());
+
+    Syntax::Expression* result = RunOnExpression(fixture, invocation);
+
+    EXPECT_EQ(result, invocation);
+}
+
+// A non-last argument whose type is not known to have an effect-free ToString()
+// keeps the `String.Concat` call (the evaluation order would change).
+TEST(ReplaceMethodCallsWithOperatorsInstanceTest, StringConcatSideEffectingArgumentKept)
+{
+    InstanceFixture fixture;
+    auto stringType = fixture.FindType(TS::KnownTypeCode::String);
+    auto objectType = fixture.FindType(TS::KnownTypeCode::Object);
+    auto method = MakeOperatorMethod(fixture, "Concat", stringType,
+                                     {objectType, stringType}, stringType);
+    auto* invocation = Invoke(
+        "Concat",
+        {WithType(new Syntax::IdentifierExpression("a"), objectType),
+         WithType(new Syntax::IdentifierExpression("b"), stringType)});
+    ResolveInvocation(invocation, method.get());
+
+    Syntax::Expression* result = RunOnExpression(fixture, invocation);
+
+    EXPECT_EQ(result, invocation);
+}
+
+// A by-ref-like argument cannot be converted to object for use with `+`, so the
+// `String.Concat` call is kept.
+TEST(ReplaceMethodCallsWithOperatorsInstanceTest, StringConcatByRefLikeArgumentKept)
+{
+    InstanceFixture fixture;
+    auto stringType = fixture.FindType(TS::KnownTypeCode::String);
+    auto byRefType = std::make_shared<TS::ByReferenceType>(stringType);
+    auto method = MakeOperatorMethod(fixture, "Concat", stringType,
+                                     {stringType, byRefType}, stringType);
+    auto* invocation = Invoke(
+        "Concat", {WithType(new Syntax::IdentifierExpression("a"), stringType),
+                   WithType(new Syntax::IdentifierExpression("b"), byRefType)});
+    ResolveInvocation(invocation, method.get());
+
+    Syntax::Expression* result = RunOnExpression(fixture, invocation);
+
+    EXPECT_EQ(result, invocation);
+}
+
+// A nested `String.Concat` argument keeps the outer call (the compiler would
+// wrongly flatten the nested call's evaluation order).
+TEST(ReplaceMethodCallsWithOperatorsInstanceTest, StringConcatNestedConcatKept)
+{
+    InstanceFixture fixture;
+    auto stringType = fixture.FindType(TS::KnownTypeCode::String);
+    auto method = MakeOperatorMethod(fixture, "Concat", stringType,
+                                     {stringType, stringType}, stringType);
+    auto inner = MakeOperatorMethod(fixture, "Concat", stringType,
+                                    {stringType, stringType}, stringType);
+    auto* nested = new Syntax::IdentifierExpression("nested");
+    nested->AddAnnotation(
+        std::make_shared<Sem::InvocationResolveResult>(nullptr, inner.get()));
+    auto* invocation = Invoke(
+        "Concat", {WithType(new Syntax::IdentifierExpression("a"), stringType),
+                   nested});
+    ResolveInvocation(invocation, method.get());
+
+    Syntax::Expression* result = RunOnExpression(fixture, invocation);
+
+    EXPECT_EQ(result, invocation);
+}
+
+// A single `params`-array argument expands into its elements before the reduction,
+// so `String.Concat(new[] { a, b })` becomes `a + b`.
+TEST(ReplaceMethodCallsWithOperatorsInstanceTest, StringConcatParamsArrayExpanded)
+{
+    InstanceFixture fixture;
+    auto stringType = fixture.FindType(TS::KnownTypeCode::String);
+    auto arrayType = std::make_shared<TS::ArrayType>(stringType);
+    auto method = std::make_shared<Impl::FakeMethod>(
+        fixture.compilation, TS::SymbolKind::Method);
+    method->SetName("Concat");
+    method->SetIsStatic(true);
+    method->SetDeclaringType(stringType);
+    method->SetReturnType(stringType);
+    std::vector<std::shared_ptr<const TS::IParameter>> parameters;
+    parameters.push_back(std::make_shared<Impl::DefaultParameter>(
+        arrayType, std::string("values"), nullptr,
+        std::vector<const TS::IAttribute*>{}, TS::ReferenceKind::None, true));
+    method->SetParameters(std::move(parameters));
+    auto* a = WithType(new Syntax::IdentifierExpression("a"), stringType);
+    auto* b = WithType(new Syntax::IdentifierExpression("b"), stringType);
+    auto* initializer = new Syntax::ArrayInitializerExpression();
+    initializer->Elements().Add(a);
+    initializer->Elements().Add(b);
+    auto* arrayCreate = new Syntax::ArrayCreateExpression();
+    arrayCreate->Initializer(initializer);
+    auto* invocation = Invoke("Concat", {arrayCreate});
+    ResolveInvocation(invocation, method.get());
+
+    Syntax::Expression* result = RunOnExpression(fixture, invocation);
+
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(result);
+    ASSERT_NE(binary, nullptr);
+    EXPECT_EQ(binary->Left(), a);
+    EXPECT_EQ(binary->Right(), b);
+}
+
+// A redundant `int.ToString()` on the last argument is removed by the reduction
+// (`String.Concat(s, n.ToString())` becomes `s + n`).
+TEST(ReplaceMethodCallsWithOperatorsInstanceTest, StringConcatRemovesRedundantToString)
+{
+    InstanceFixture fixture;
+    auto stringType = fixture.FindType(TS::KnownTypeCode::String);
+    auto intType = fixture.FindType(TS::KnownTypeCode::Int32);
+    auto method = MakeOperatorMethod(fixture, "Concat", stringType,
+                                     {stringType, stringType}, stringType);
+    auto* s = WithType(new Syntax::IdentifierExpression("s"), stringType);
+    auto* target = WithType(new Syntax::IdentifierExpression("n"), intType);
+    auto* toStringCall = new Syntax::InvocationExpression(
+        new Syntax::MemberReferenceExpression(target, "ToString"));
+    WithType(toStringCall, stringType);
+    auto* invocation = Invoke("Concat", {s, toStringCall});
+    ResolveInvocation(invocation, method.get());
+
+    Syntax::Expression* result = RunOnExpression(fixture, invocation);
+
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(result);
+    ASSERT_NE(binary, nullptr);
+    EXPECT_EQ(binary->Right(), target);
 }

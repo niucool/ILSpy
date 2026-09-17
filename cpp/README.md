@@ -5247,6 +5247,31 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   the unresolved-invocation keep) proven with a `ProcessInvocationExpression`-neuter RED
   round (exactly the 9 positive tests failed, the 7 keep-tests staying green, then all 16
   green after restore).
+- **`ReplaceMethodCallsWithOperators` `String.Concat` reduction** -- the remaining
+  resolver-backed piece of the transform: `IsStringConcat` (a `Concat` method on
+  `System.String`) and `CheckArgumentsForStringConcat` (the reduction pre-conditions --
+  two or more arguments, no named arguments, every non-last argument of a known
+  effect-free type, no nested `String.Concat` argument whose evaluation order would be
+  corrupted by the compiler's flattening, no by-ref-like argument, and a string-typed
+  first or second argument), driving the `String.Concat(a, b)` -> `a + b` rewrite in
+  `ProcessInvocationExpression`. The rewrite also lands the `params`-array single-argument
+  expansion (`arguments is [ArrayCreateExpression { Initializer: ... }]` with a single
+  array-typed parameter), the expression-tree guard (`Ancestors`-walked `LambdaExpression`
+  with an `ILFunctionKind.ExpressionTree` annotation suppresses the `ToString`
+  elimination), and the `RemoveRedundantToStringInConcat` calls (ported in the previous
+  slice, now exercised) that strip compiler-generated `ToString()` calls where the type is
+  effect-free. Faithfulness fix along the way: `IsStringParameter` now unwraps a `params`
+  array parameter's element type (the port's `IParameter` does carry `IsParams`). Only the
+  `VisitCastExpression` methodof rewrite (needing the unported generated
+  `TypePattern`/`LdTokenPattern` nodes) remains deferred. Verified by 9 new tests
+  (`ReplaceMethodCallsWithOperatorsInstanceTest`, total 25: the two-argument reduction,
+  the settings-off keep, and the named-argument / non-string-first-two /
+  side-effecting-argument / by-ref-like-argument / nested-`Concat` keeps, plus the
+  `params` expansion and the redundant-`ToString` elimination) proven with an
+  `IsStringConcat`-neuter RED round (exactly the 3 positive tests failed, the 6 keep-tests
+  staying green, then all 25 green after restore). The full Debug suite is now 12697 ran /
+  12695 passed / the 2 standing skips / zero failures, and the transform is not wired into
+  the seed paths, so the CLI baselines are unchanged.
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

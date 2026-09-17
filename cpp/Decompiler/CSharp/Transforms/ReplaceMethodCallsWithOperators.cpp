@@ -21,10 +21,14 @@
 #include "Decompiler/CSharp/Transforms/ReplaceMethodCallsWithOperators.hpp"
 
 #include "Decompiler/CSharp/Annotations.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ArrayInitializerExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/LambdaExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/TypeOfExpression.hpp"
@@ -34,7 +38,9 @@
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/CSharp/Transforms/AddCheckedBlocks.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
+#include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
+#include "Decompiler/Semantics/InvocationResolveResult.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/NullableType.hpp"
 #include "Decompiler/TypeSystem/IParameter.hpp"
@@ -48,13 +54,15 @@ namespace {
 // The C# `bool IsStringParameter(IParameter p)` local function (lines
 // 396-402): a `params` array parameter's element type is unwrapped before the
 // known-type check (`if (p.IsParams && ty.Kind == TypeKind.Array) ty = ((ArrayType)
-// ty).ElementType`). The port's IParameter carries no IsParams flag (the C#
-// `bool IParameter.IsParams` lives on the resolved interface the minimal port
-// does not model), so the array-unwrap arm reads false -- only a directly
-// string-typed parameter matches (the conservative direction; the params form
-// is deferred with the IParameter.IsParams surface).
+// ty).ElementType`).
 bool IsStringParameter(const TS::IParameter& p) {
-    return TS::IsKnownType(p.Type(), TS::KnownTypeCode::String);
+    const TS::IType& type = p.Type();
+    if (p.IsParams() && type.Kind() == TS::TypeKind::Array) {
+        const auto* arrayType = dynamic_cast<const TS::ArrayType*>(&type);
+        if (arrayType != nullptr && arrayType->Element() != nullptr)
+            return TS::IsKnownType(*arrayType->Element(), TS::KnownTypeCode::String);
+    }
+    return TS::IsKnownType(type, TS::KnownTypeCode::String);
 }
 
 // The port's `typeHandleOnTypeOfPattern.IsMatch` stand-in (the C# `static readonly
@@ -142,6 +150,63 @@ ReplaceMethodCallsWithOperators::MatchToStringCallPattern(Syntax::Expression* ex
         }
     }
     return match;
+}
+
+// The C# `bool IsStringConcat(IParameterizedMember member)` (lines 344-351).
+bool ReplaceMethodCallsWithOperators::IsStringConcat(
+    const TS::IParameterizedMember& member) {
+    if (member.Name() != "Concat")
+        return false;
+    TS::ITypePtr declaringType = member.DeclaringType();
+    return declaringType != nullptr
+        && TS::IsKnownType(*declaringType, TS::KnownTypeCode::String);
+}
+
+// The C# `bool CheckArgumentsForStringConcat(Expression[] arguments)` (lines
+// 282-330).
+bool ReplaceMethodCallsWithOperators::CheckArgumentsForStringConcat(
+    const std::vector<Syntax::Expression*>& arguments) {
+    if (arguments.size() < 2)
+        return false;
+
+    for (Syntax::Expression* arg : arguments) {
+        if (dynamic_cast<Syntax::NamedArgumentExpression*>(arg) != nullptr)
+            return false;
+    }
+
+    // The evaluation order when the object.ToString() calls happen is a mess; no
+    // matter which compiler recompiles the output, every implicit ToString()
+    // except for the last must be free of side effects. The C# `arguments
+    // .SkipLast(1)` walks every argument but the last.
+    for (size_t i = 0; i + 1 < arguments.size(); i++) {
+        const Semantics::ResolveResult* rr =
+            CSharp::GetResolveResult(*arguments[i]);
+        if (!ToStringIsKnownEffectFree(rr->Type()))
+            return false;
+    }
+    for (Syntax::Expression* arg : arguments) {
+        const Semantics::ResolveResult* rr = CSharp::GetResolveResult(*arg);
+        const auto* invocationRR =
+            dynamic_cast<const Semantics::InvocationResolveResult*>(rr);
+        if (invocationRR != nullptr && IsStringConcat(*invocationRR->Member())) {
+            // Roslyn + mcs also flatten nested string.Concat() invocations within
+            // an operator+ use, which causes it to use the incorrect evaluation
+            // order despite the code using an explicit string.Concat() call. This
+            // problem is avoided if the outer call remains string.Concat() as well.
+            return false;
+        }
+        if (rr->Type().IsByRefLike()) {
+            // ref structs cannot be converted to object for use with +
+            return false;
+        }
+    }
+
+    // One of the first two arguments must be string, otherwise the + operator
+    // won't resolve to a string concatenation.
+    const Semantics::ResolveResult* rr0 = CSharp::GetResolveResult(*arguments[0]);
+    const Semantics::ResolveResult* rr1 = CSharp::GetResolveResult(*arguments[1]);
+    return TS::IsKnownType(rr0->Type(), TS::KnownTypeCode::String)
+        || TS::IsKnownType(rr1->Type(), TS::KnownTypeCode::String);
 }
 
 // The C# `static bool ToStringIsKnownEffectFree(IType type)` (lines 406-427).
@@ -337,9 +402,10 @@ void ReplaceMethodCallsWithOperators::VisitInvocationExpression(
 }
 
 // The C# `void ProcessInvocationExpression(InvocationExpression
-// invocationExpression)` (lines 66-259): the method-level rewrites. The
-// `String.Concat(a, b)` -> `a + b` reduction is deferred with its
-// `IsStringConcat`/`CheckArgumentsForStringConcat` helpers (see the header note).
+// invocationExpression)` (lines 66-259): the method-level rewrites -- the
+// `String.Concat(a, b)` -> `a + b` reduction, the three special methods, the
+// binary/unary operator methods, the explicit conversion operator, and the
+// `op_True` condition removal.
 void ReplaceMethodCallsWithOperators::ProcessInvocationExpression(
     Syntax::InvocationExpression* invocationExpression) {
     const TS::ISymbol* symbol = CSharp::GetSymbol(*invocationExpression);
@@ -350,6 +416,76 @@ void ReplaceMethodCallsWithOperators::ProcessInvocationExpression(
     std::vector<Syntax::Expression*> arguments;
     for (int i = 0; i < invocationExpression->Arguments().Count(); i++)
         arguments.push_back(invocationExpression->Arguments()[i]);
+
+    // Reduce "String.Concat(a, b)" to "a + b".
+    if (IsStringConcat(*method) && context_->Settings().StringConcat()) {
+        // The C# list pattern `arguments is [ArrayCreateExpression { Initializer: { }
+        // aceInitializer }] && method.Parameters is [{ Type: ArrayType }]`: a single
+        // params-array argument expands into its initializer elements.
+        if (arguments.size() == 1) {
+            auto* arrayCreate =
+                dynamic_cast<Syntax::ArrayCreateExpression*>(arguments[0]);
+            if (arrayCreate != nullptr && arrayCreate->Initializer() != nullptr
+                && method->Parameters().size() == 1
+                && method->Parameters()[0] != nullptr
+                && method->Parameters()[0]->Type().Kind() == TS::TypeKind::Array) {
+                arguments.clear();
+                Syntax::AstNodeCollectionT<Syntax::Expression>& elements =
+                    arrayCreate->Initializer()->Elements();
+                for (int i = 0; i < elements.Count(); i++)
+                    arguments.push_back(elements[i]);
+            }
+        }
+
+        if (!CheckArgumentsForStringConcat(arguments)) {
+            return;
+        }
+
+        // The C# `invocationExpression.Ancestors.OfType<LambdaExpression>().Any(
+        // lambda => lambda.Annotation<IL.ILFunction>()?.Kind ==
+        // IL.ILFunctionKind.ExpressionTree)`.
+        bool isInExpressionTree = false;
+        for (Syntax::AstNode* ancestor : invocationExpression->Ancestors()) {
+            auto* lambda = dynamic_cast<Syntax::LambdaExpression*>(ancestor);
+            if (lambda == nullptr)
+                continue;
+            IL::ILFunction* function = CSharp::GetILFunction(*lambda);
+            if (function != nullptr
+                && function->Kind == IL::ILFunctionKind::ExpressionTree) {
+                isInExpressionTree = true;
+                break;
+            }
+        }
+
+        context_->Step("Replace String.Concat with +", invocationExpression);
+        Syntax::Expression* arg0 = Syntax::Detach(arguments[0]);
+        Syntax::Expression* arg1 = Syntax::Detach(arguments[1]);
+        if (!isInExpressionTree) {
+            arg1 = Syntax::Detach(RemoveRedundantToStringInConcat(
+                arg1, *method, arguments.size() == 2));
+            const Semantics::ResolveResult* arg1RR =
+                CSharp::GetResolveResult(*arg1);
+            if (TS::IsKnownType(arg1RR->Type(), TS::KnownTypeCode::String)) {
+                arg0 = Syntax::Detach(
+                    RemoveRedundantToStringInConcat(arg0, *method, false));
+            }
+        }
+        auto* expr = new Syntax::BinaryOperatorExpression(
+            arg0, Syntax::BinaryOperatorType::Add, arg1);
+        for (size_t i = 2; i < arguments.size(); i++) {
+            Syntax::Expression* arg = Syntax::Detach(arguments[i]);
+            if (!isInExpressionTree) {
+                arg = Syntax::Detach(RemoveRedundantToStringInConcat(
+                    arg, *method, i == arguments.size() - 1));
+            }
+            expr = new Syntax::BinaryOperatorExpression(
+                expr, Syntax::BinaryOperatorType::Add, arg);
+        }
+        CSharp::CopyAnnotationsFrom(expr, *invocationExpression);
+        invocationExpression->ReplaceWith(expr);
+        context_->EndStep(expr);
+        return;
+    }
 
     const std::string fullName = method->FullName();
     if (fullName == "System.Type.GetTypeFromHandle") {

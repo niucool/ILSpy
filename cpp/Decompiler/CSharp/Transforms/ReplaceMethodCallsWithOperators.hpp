@@ -35,10 +35,11 @@
 // condition removal with the checked/unchecked annotations).
 //
 // The string.Concat reduction (`IsStringConcat` / `CheckArgumentsForStringConcat`
-// and the `String.Concat(a, b)` -> `a + b` rewrite) and the `VisitCastExpression`
-// methodof rewrite (the `getMethodOrConstructorFromHandlePattern`, which needs the
-// unported generated `TypePattern`/`LdTokenPattern` nodes) are DEFERRED, each named
-// at its would-be call site.
+// and the `String.Concat(a, b)` -> `a + b` rewrite) is landed with the instance
+// transform. The `VisitCastExpression` methodof rewrite (the
+// `getMethodOrConstructorFromHandlePattern`, which needs the unported generated
+// `TypePattern`/`LdTokenPattern` nodes) remains DEFERRED, named at its would-be call
+// site.
 
 #pragma once
 
@@ -49,6 +50,8 @@
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Transforms/IAstTransform.hpp"
+
+#include <vector>
 #include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
@@ -113,6 +116,23 @@ public:
     // -- the nullable-unwrap followed by the 16-primitive + String known-type
     // switch. Implemented out-of-line in the .cpp.
     static bool ToStringIsKnownEffectFree(const TS::IType& type);
+
+    // The C# `bool IsStringConcat(IParameterizedMember member)` (lines 344-351):
+    // whether the member is a `System.String.Concat` overload. The C# declares it
+    // with no modifier (private); the port keeps it private static. Implemented
+    // out-of-line in the .cpp.
+    static bool IsStringConcat(const TS::IParameterizedMember& member);
+
+    // The C# `bool CheckArgumentsForStringConcat(Expression[] arguments)` (lines
+    // 282-330): the pre-conditions under which a `String.Concat(...)` call may be
+    // reduced to the `+` operator -- at least two arguments, no named arguments,
+    // every non-last argument (whose implicit ToString() runs at a reordered point)
+    // of a known-effect-free type, no nested `String.Concat` argument (Roslyn/mcs
+    // flattening), no by-ref-like argument, and a string-typed first or second
+    // argument. Private static (the C# no-modifier declaration). Implemented
+    // out-of-line in the .cpp.
+    static bool CheckArgumentsForStringConcat(
+        const std::vector<Syntax::Expression*>& arguments);
 
     // The C# `static readonly Pattern ToStringCallPattern` match result (the
     // port hand-writes the two structural shapes the C# declarative pattern
