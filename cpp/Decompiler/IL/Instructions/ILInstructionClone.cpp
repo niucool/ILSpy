@@ -343,8 +343,10 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         }
         case OpCode::UserDefinedLogicOperator: {
             const auto& s = static_cast<const UserDefinedLogicOperator&>(*this);
-            c = std::make_unique<UserDefinedLogicOperator>(s.MethodName, s.MethodDeclaringType,
+            auto clone = std::make_unique<UserDefinedLogicOperator>(s.MethodName, s.MethodDeclaringType,
                 s.Left ? s.Left->Clone() : nullptr, s.Right ? s.Right->Clone() : nullptr);
+            clone->Method = s.Method;
+            c = std::move(clone);
             break;
         }
 

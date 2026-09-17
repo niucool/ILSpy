@@ -28,6 +28,7 @@
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/UserDefinedLogicOperator.hpp"
 #include "Decompiler/IL/OpCode.hpp"
 #include "Decompiler/TypeSystem/ICompilation.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
@@ -178,9 +179,14 @@ TypeSystem::ITypePtr InferType(const ILInstruction& inst,
         case OpCode::DefaultValue:
             return static_cast<const DefaultValue*>(&inst)->Type;
         case OpCode::UserDefinedLogicOperator:
-            // The C# `logicOp.Method.ReturnType`; the port's node carries the
-            // method name + declaring type but not the return type (see the
-            // header note), so the arm falls through to the UnknownType.
+            // The C# `logicOp.Method.ReturnType`; the seed stand-in form carries
+            // no resolved method, so that form falls through to the UnknownType.
+            if (auto* logicOp = static_cast<const UserDefinedLogicOperator*>(&inst))
+            {
+                if (logicOp->Method)
+                    return std::const_pointer_cast<TypeSystem::IType>(
+                        logicOp->Method->ReturnType().shared_from_this());
+            }
             break;
         default:
             break;

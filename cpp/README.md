@@ -4731,6 +4731,26 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   mscorlib baseline dropped from 10106366 to 10106348 bytes because the three
   real `arglist` sites now render `__arglist` (9 chars) instead of
   `typeof(arglist)` (15).
+- **`ExpressionBuilder` user-defined-logic arm
+  (`VisitUserDefinedLogicOperator`)** -- the C# `VisitUserDefinedLogicOperator`
+  (`ExpressionBuilder.cs` lines 1233-1257) landed and is routed from the `Visit`
+  OpCode switch. Both operands are translated with the operator method's parameter
+  types as hints and converted to those types, the `&&`/`||` operator is derived
+  from the method name (`op_BitwiseAnd`/`op_BitwiseOr`), and the render is a
+  `BinaryOperatorExpression` carrying an `InvocationResolveResult` over the
+  method. The `UserDefinedLogicOperator` node gained the C# `public readonly
+  IMethod Method` operand (the `UserDefinedCompoundAssign` precedent), populated
+  by the already-ported `UserDefinedLogicTransform` from the folded call's method
+  and carried through the clone case; the seed string-stand-in construction form
+  stays for nodes without a resolved method, and `InferType` now returns
+  `Method.ReturnType` for a resolved node. Verified by 4
+  `ExpressionBuilderUserDefinedLogicOperatorTest` tests (the op_BitwiseAnd
+  `&&`/op_BitwiseOr `||` renders with the InvocationResolveResult and IL-annotation
+  pins, the invalid-method-name `invalid_argument`, and the no-method
+  `logic_error`); full Debug suite 12420 ran / 12418 passed / the 2 standing
+  skips / zero failures, and all four CLI baselines unchanged (`--csharp` mscorlib
+  10106348 bytes, `--il` whole-module byte-identical to the 41246545-byte gold,
+  `-l c` 109438, the `--json`-alone usage check rc 64).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

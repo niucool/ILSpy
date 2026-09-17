@@ -68,6 +68,7 @@
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/BitNot.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
+#include "Decompiler/IL/Instructions/UserDefinedLogicOperator.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
@@ -114,6 +115,7 @@
 #include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/Semantics/ErrorResolveResult.hpp"
 #include "Decompiler/Semantics/OperatorResolveResult.hpp"
+#include "Decompiler/Semantics/InvocationResolveResult.hpp"
 #include "Decompiler/Semantics/SizeOfResolveResult.hpp"
 #include "Decompiler/Semantics/ThisResolveResult.hpp"
 #include "Decompiler/Semantics/ThrowResolveResult.hpp"
@@ -816,6 +818,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitThreeValuedBoolAnd(inst, context);
         case IL::OpCode::ThreeValuedBoolOr:
             return VisitThreeValuedBoolOr(inst, context);
+        case IL::OpCode::UserDefinedLogicOperator:
+            return VisitUserDefinedLogicOperator(inst, context);
         case IL::OpCode::IsInst:
             return VisitIsInst(inst, context);
         case IL::OpCode::StLoc:
@@ -1133,6 +1137,59 @@ TranslatedExpression ExpressionBuilder::VisitThreeValuedBoolOr(IL::ILInstruction
 {
     return HandleThreeValuedLogic(static_cast<IL::BinaryInstruction&>(*inst),
                                   Syntax::BinaryOperatorType::BitwiseOr, TS::ExpressionType::Or);
+}
+
+// The C# `protected internal override TranslatedExpression
+// VisitUserDefinedLogicOperator(UserDefinedLogicOperator inst, TranslationContext
+// context)` (ExpressionBuilder.cs lines 1233-1257): the user-defined
+// short-circuiting `&&`/`||` render -- translate both operands with the operator
+// method's parameter types as hints and convert them to those types, derive the
+// operator from the method name (op_BitwiseAnd -> `&&`, op_BitwiseOr -> `||`), and
+// emit a BinaryOperatorExpression carrying an InvocationResolveResult.
+TranslatedExpression ExpressionBuilder::VisitUserDefinedLogicOperator(
+    IL::ILInstruction* inst, TranslationContext context)
+{
+    auto* logicOp = static_cast<IL::UserDefinedLogicOperator*>(inst);
+    if (!logicOp->Method)
+    {
+        // The C# node's `readonly IMethod Method` is never null; the port's seed
+        // string-stand-in construction form carries no resolved method, and the
+        // C# Visit consumes the method's parameters/name unconditionally -- a
+        // loud deferral is the only faithful behavior for the stand-in.
+        throw std::logic_error(
+            "VisitUserDefinedLogicOperator: the seed string stand-in node has "
+            "no resolved IMethod; the resolved-method construction form is "
+            "required for the C# back end");
+    }
+    const TS::IMethod& method = *logicOp->Method;
+    const auto& parameters = method.Parameters();
+    if (parameters.size() < 2 || parameters[0] == nullptr || parameters[1] == nullptr)
+        throw std::out_of_range("VisitUserDefinedLogicOperator: the operator "
+                                "method has fewer than two parameters");
+    const TS::IType& leftParam = parameters[0]->Type();
+    const TS::IType& rightParam = parameters[1]->Type();
+    TranslatedExpression left =
+        Translate(logicOp->Left.get(), &leftParam)
+            .ConvertTo(const_cast<TS::IType&>(leftParam), *this);
+    TranslatedExpression right =
+        Translate(logicOp->Right.get(), &rightParam)
+            .ConvertTo(const_cast<TS::IType&>(rightParam), *this);
+    Syntax::BinaryOperatorType op;
+    if (method.Name() == "op_BitwiseAnd")
+        op = Syntax::BinaryOperatorType::ConditionalAnd;
+    else if (method.Name() == "op_BitwiseOr")
+        op = Syntax::BinaryOperatorType::ConditionalOr;
+    else
+        throw std::invalid_argument(
+            "VisitUserDefinedLogicOperator: invalid method name");
+    auto* binop = new Syntax::BinaryOperatorExpression(left.Expression(), op,
+                                                       right.Expression());
+    std::vector<std::shared_ptr<Sem::ResolveResult>> arguments{
+        SharedResolveResultAnnotation(*left.Expression()),
+        SharedResolveResultAnnotation(*right.Expression())};
+    auto rr = std::make_shared<Sem::InvocationResolveResult>(nullptr, &method,
+                                                             std::move(arguments));
+    return WithILInstruction(WithRR(*binop, rr), inst);
 }
 
 // The C# `TranslatedExpression IsType(IsInst inst)` helper (ExpressionBuilder.cs lines

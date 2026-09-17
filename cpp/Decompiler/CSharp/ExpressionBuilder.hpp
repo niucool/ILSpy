@@ -251,6 +251,15 @@ public:
     TranslatedExpression VisitThrow(IL::ILInstruction* inst, TranslationContext context);
     TranslatedExpression VisitThreeValuedBoolAnd(IL::ILInstruction* inst, TranslationContext context);
     TranslatedExpression VisitThreeValuedBoolOr(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitUserDefinedLogicOperator(UserDefinedLogicOperator inst, TranslationContext
+    // context)` (ExpressionBuilder.cs lines 1233-1257): the user-defined
+    // short-circuiting `&&`/`||` render -- convert both operands to the operator
+    // method's parameter types, derive the `&&`/`||` operator from the method name
+    // (op_BitwiseAnd/op_BitwiseOr), and emit a BinaryOperatorExpression carrying an
+    // InvocationResolveResult.
+    TranslatedExpression VisitUserDefinedLogicOperator(IL::ILInstruction* inst,
+                                                       TranslationContext context);
     // The type-operand family (the C# lines 434-483 and 712-744): the `isinst`-
     // shaped `is`/`as` expression, `sizeof T`, and `typeof(T).TypeHandle`.
     TranslatedExpression VisitIsInst(IL::ILInstruction* inst, TranslationContext context);

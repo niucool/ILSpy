@@ -78,6 +78,7 @@
 #include "Decompiler/IL/Instructions/BitNot.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
+#include "Decompiler/IL/Instructions/UserDefinedLogicOperator.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
 #include "Decompiler/IL/Instructions/Unbox.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
@@ -104,11 +105,14 @@
 #include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
 #include "Decompiler/Semantics/OperatorResolveResult.hpp"
+#include "Decompiler/Semantics/InvocationResolveResult.hpp"
 #include "Decompiler/Semantics/SizeOfResolveResult.hpp"
 #include "Decompiler/Semantics/TypeIsResolveResult.hpp"
 #include "Decompiler/Semantics/TypeOfResolveResult.hpp"
 #include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
+#include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
+#include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/TypeSystem/NullableType.hpp"
@@ -1986,6 +1990,113 @@ TEST(ExpressionBuilderArglistTest, RendersArgListAccessWithRuntimeArgumentHandle
     EXPECT_EQ(il[0], &arglist);
     // The C# `new TypeResolveResult(...)` over System.RuntimeArgumentHandle.
     ASSERT_TRUE(dynamic_cast<const Sem::TypeResolveResult*>(expr.ResolveResult()) != nullptr);
+}
+
+// The UserDefinedLogicOperator arm (VisitUserDefinedLogicOperator, the C# lines
+// 1233-1257): the user-defined short-circuiting `&&`/`||` render -- both operands
+// translated/converted to the operator method's parameter types, the operator
+// derived from the method name, and an InvocationResolveResult over the method.
+
+// Build an op_-named FakeMethod over a shared operand type. String is used because
+// its GetStackType is O, matching the node's ResultType (a value-type operand would
+// need the full struct type-system machinery).
+std::shared_ptr<Impl::FakeMethod> MakeLogicOperatorMethod(
+    const TS::ICompilation& compilation, const char* name, TS::ITypePtr operandType)
+{
+    auto method = std::make_shared<Impl::FakeMethod>(compilation, TS::SymbolKind::Operator);
+    method->SetName(name);
+    method->SetIsStatic(true);
+    method->SetDeclaringType(operandType);
+    std::vector<std::shared_ptr<const TS::IParameter>> parameters;
+    parameters.push_back(
+        std::make_shared<Impl::DefaultParameter>(operandType, std::string("left")));
+    parameters.push_back(
+        std::make_shared<Impl::DefaultParameter>(operandType, std::string("right")));
+    method->SetParameters(parameters);
+    method->SetReturnType(operandType);
+    return method;
+}
+
+TEST(ExpressionBuilderUserDefinedLogicOperatorTest, BitwiseAndRendersConditionalAnd)
+{
+    BuilderFixture fixture;
+    auto operandType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    auto method = MakeLogicOperatorMethod(fixture.compilation, "op_BitwiseAnd", operandType);
+    auto left = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, operandType);
+    left->Name = "left";
+    auto right = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, operandType);
+    right->Name = "right";
+    IL::UserDefinedLogicOperator node("ns::T::op_BitwiseAnd", operandType,
+                                      std::make_unique<IL::LdLoc>(left),
+                                      std::make_unique<IL::LdLoc>(right));
+    node.Method = method;
+
+    auto expr = fixture.Translate(&node);
+    auto* binop = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binop != nullptr);
+    EXPECT_EQ(binop->Operator(), Syntax::BinaryOperatorType::ConditionalAnd);
+    // The C# `.WithRR(new InvocationResolveResult(null, inst.Method, ...))`.
+    ASSERT_TRUE(
+        dynamic_cast<const Sem::InvocationResolveResult*>(expr.ResolveResult()) != nullptr);
+    // The C# `.WithILInstruction(inst)`.
+    ASSERT_EQ(CSharp::GetILInstructions(*binop).size(), 1u);
+    EXPECT_EQ(CSharp::GetILInstructions(*binop)[0], &node);
+}
+
+TEST(ExpressionBuilderUserDefinedLogicOperatorTest, BitwiseOrRendersConditionalOr)
+{
+    BuilderFixture fixture;
+    auto operandType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    auto method = MakeLogicOperatorMethod(fixture.compilation, "op_BitwiseOr", operandType);
+    auto left = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, operandType);
+    left->Name = "left";
+    auto right = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, operandType);
+    right->Name = "right";
+    IL::UserDefinedLogicOperator node("ns::T::op_BitwiseOr", operandType,
+                                      std::make_unique<IL::LdLoc>(left),
+                                      std::make_unique<IL::LdLoc>(right));
+    node.Method = method;
+
+    auto expr = fixture.Translate(&node);
+    auto* binop = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binop != nullptr);
+    EXPECT_EQ(binop->Operator(), Syntax::BinaryOperatorType::ConditionalOr);
+}
+
+TEST(ExpressionBuilderUserDefinedLogicOperatorTest, InvalidMethodNameThrows)
+{
+    BuilderFixture fixture;
+    auto operandType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    auto method = MakeLogicOperatorMethod(fixture.compilation, "op_Addition", operandType);
+    auto left = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, operandType);
+    left->Name = "left";
+    auto right = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, operandType);
+    right->Name = "right";
+    IL::UserDefinedLogicOperator node("ns::T::op_Addition", operandType,
+                                      std::make_unique<IL::LdLoc>(left),
+                                      std::make_unique<IL::LdLoc>(right));
+    node.Method = method;
+
+    EXPECT_THROW(fixture.Translate(&node), std::invalid_argument);
+}
+
+TEST(ExpressionBuilderUserDefinedLogicOperatorTest, SeedStandInWithoutMethodThrows)
+{
+    BuilderFixture fixture;
+    auto operandType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    auto left = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, operandType);
+    left->Name = "left";
+    auto right = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, operandType);
+    right->Name = "right";
+    IL::UserDefinedLogicOperator node("ns::T::op_BitwiseAnd", operandType,
+                                      std::make_unique<IL::LdLoc>(left),
+                                      std::make_unique<IL::LdLoc>(right));
+
+    EXPECT_THROW(fixture.Translate(&node), std::logic_error);
 }
 
 // The ILInlining.ClassifyExpression / IsReadonlyReference helpers (the C#
