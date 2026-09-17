@@ -45,10 +45,10 @@
 // Deferrals (each named at the member that needs it): the full `ConvertTo`
 // cast-insertion machinery on TranslatedExpression (the ~350-line C# body -- the
 // loud std::logic_error marks the unported arms and its consumers), the heavy
-// Visit arms that have not landed yet (the LdObj/StObj/LdFlda/LdLen/CastClass/
-// Box/Unbox memory arms, the If/Switch expression arms, the dynamic/deconstruct
-// arms), and the CancellationToken (the cooperative-cancel throw is a no-op in
-// the port, the DecompileRun convention).
+// Visit arms that have not landed yet (the LdFlda/LdsFlda/LdLen/LdElema memory
+// arms, the If/Switch expression arms, the dynamic/deconstruct arms), and the
+// CancellationToken (the cooperative-cancel throw is a no-op in the port, the
+// DecompileRun convention).
 
 #pragma once
 
@@ -242,6 +242,21 @@ public:
     TranslatedExpression VisitUnboxAny(IL::ILInstruction* inst, TranslationContext context);
     TranslatedExpression VisitBox(IL::ILInstruction* inst, TranslationContext context);
     TranslatedExpression VisitCastClass(IL::ILInstruction* inst, TranslationContext context);
+    // The memory-access load/store family (the C# lines 2857-3086): the typed
+    // managed/raw load (`ldobj`) and store (`stobj`). VisitLdObj prefers the
+    // type hint (except for a pointer hint in the unaligned/ref-address shape),
+    // renders the `unaligned.` prefix as `Unsafe.ReadUnaligned<T>` and otherwise
+    // dereferences through the LdObj helper. VisitStObj dispatches to the
+    // Unsafe.Write/WriteUnaligned helper for a `unaligned.` prefix or a
+    // non-ref non-unmanaged target, else dereferences the pointer and renders
+    // the assignment (with the `ref (a = ref b)` re-assignment shape).
+    TranslatedExpression VisitLdObj(IL::ILInstruction* inst, TranslationContext context);
+    TranslatedExpression VisitStObj(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `private TranslatedExpression StObjViaHelperCall(StObj inst)`
+    // (ExpressionBuilder.cs lines 3087-3125): the `Unsafe.Write` /
+    // `Unsafe.WriteUnaligned` intrinsic rewrite for a store that cannot be a
+    // plain dereference assignment.
+    TranslatedExpression StObjViaHelperCall(IL::ILInstruction* inst);
     // The C# `protected internal override TranslatedExpression VisitStLoc(StLoc inst,
     // TranslationContext context)` (ExpressionBuilder.cs lines 809-870): the
     // assignment arm -- the stack-slot type refinement, the by-ref re-assignment

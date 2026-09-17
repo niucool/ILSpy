@@ -110,6 +110,10 @@ class LdObj : public ILInstruction {
 public:
     std::unique_ptr<ILInstruction> Target;
     TypeSystem::ITypePtr Type;
+    // The C# `LdObj : ILInstruction, ISupportsVolatilePrefix, ISupportsUnalignedPrefix`
+    // operands; rendered BEFORE the opcode (the Initblk/Cpblk convention).
+    bool IsVolatile = false;
+    std::uint8_t UnalignedPrefix = 0;
     LdObj(std::unique_ptr<ILInstruction> target, TypeSystem::ITypePtr type)
         : ILInstruction(OpCode::LdObj), Target(std::move(target)), Type(std::move(type)) {
         if (Target) { Target->Parent = this; Target->ChildIndex = 0; }
@@ -121,6 +125,12 @@ public:
     int ChildCount() const override { return Target ? 1 : 0; }
     ILInstruction* GetChild(int i) const override { return i == 0 ? Target.get() : nullptr; }
     void WriteTo(std::string& out) const override {
+        if (IsVolatile) out += "volatile.";
+        if (UnalignedPrefix != 0) {
+            out += "unaligned(";
+            out += std::to_string(UnalignedPrefix);
+            out += ").";
+        }
         out += "ldobj(";
         out += Type ? Type->ReflectionName() : std::string("?");
         out += ", ";
@@ -143,6 +153,10 @@ public:
     std::unique_ptr<ILInstruction> Target;
     std::unique_ptr<ILInstruction> Value;
     TypeSystem::ITypePtr Type;
+    // The C# `StObj : ILInstruction, ISupportsVolatilePrefix, ISupportsUnalignedPrefix`
+    // operands; rendered BEFORE the opcode (the Initblk/Cpblk convention).
+    bool IsVolatile = false;
+    std::uint8_t UnalignedPrefix = 0;
     StObj(std::unique_ptr<ILInstruction> target, std::unique_ptr<ILInstruction> value,
          TypeSystem::ITypePtr type)
         : ILInstruction(OpCode::StObj), Target(std::move(target)), Value(std::move(value)),
@@ -161,6 +175,12 @@ public:
         return nullptr;
     }
     void WriteTo(std::string& out) const override {
+        if (IsVolatile) out += "volatile.";
+        if (UnalignedPrefix != 0) {
+            out += "unaligned(";
+            out += std::to_string(UnalignedPrefix);
+            out += ").";
+        }
         out += "stobj(";
         out += Type ? Type->ReflectionName() : std::string("?");
         out += ", ";

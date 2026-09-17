@@ -3025,6 +3025,34 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   Debug suite 12354 ran / 12352 passed / the 2 standing skips / zero failures,
   and the CLI baselines are structurally unchanged (the Phase-5 back end is
   not yet wired into the `--csharp` CLI path).
+- **`ExpressionBuilder` memory-access load/store arms** -- the C# `VisitLdObj`
+  / `VisitStObj` + the `StObjViaHelperCall` helper (`ExpressionBuilder.cs`
+  lines 2857-3125) landed and are routed from the `Visit` OpCode switch
+  (`ldobj` / `stobj`). `VisitLdObj` prefers the type hint when it is
+  compatible for the memory access (skipping the hint for a pointer hint when
+  the load type is used in the generic unaligned/ref-address shape), renders
+  an `unaligned.` prefix as `Unsafe.ReadUnaligned<T>(void*)` (or `(ref byte)`
+  when the address is a `DirectionExpression`), and otherwise dereferences
+  through the already-ported `LdObj` helper (which had no dispatch arm until
+  now). `VisitStObj` routes a `unaligned.` prefix or a non-ref target of a
+  managed type through `StObjViaHelperCall` (`Unsafe.WriteUnaligned<T>` /
+  `Unsafe.Write<T>`), else casts the pointer to the memory type, dereferences
+  it (stripping a `ref` or `&`), and renders the assignment -- including the
+  `ref (a = ref b)` re-assignment shape over a `ByReferenceResolveResult`. The
+  `LdObj` / `StObj` IL nodes gained the `ISupportsVolatilePrefix.IsVolatile` +
+  `ISupportsUnalignedPrefix.UnalignedPrefix` operands (rendered before the
+  opcode, the `Initblk`/`Cpblk` convention) with their clone cases. The
+  `LdFlda` / `LdsFlda` / `LdLen` / `LdElema` siblings stay deferred (they need
+  `ConvertField`, `GetProperties`, and the indexer machinery). Verified by 10
+  new `ExpressionBuilderMemoryTest` tests (the pointer/ref load renders, the
+  unaligned `ReadUnaligned` with the type argument, the type-hint preference,
+  the pointer/ref store assignments, the `WriteUnaligned`/`Write` helper
+  routes, and the node prefix dump/clone), proven by a dispatch neuter RED
+  round (the two opcode cases removed: exactly the 8 visit tests failed while
+  the 2 dump/clone tests stayed green) then restored green; full Debug suite
+  12364 ran / 12362 passed / the 2 standing skips / zero failures, and the CLI
+  baselines are structurally unchanged (the Phase-5 back end is not yet wired
+  into the `--csharp` CLI path).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

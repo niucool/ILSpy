@@ -368,7 +368,10 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         }
         case OpCode::LdObj: {
             const auto& s = static_cast<const LdObj&>(*this);
-            c = std::make_unique<LdObj>(s.Target ? s.Target->Clone() : nullptr, s.Type);
+            auto clone = std::make_unique<LdObj>(s.Target ? s.Target->Clone() : nullptr, s.Type);
+            clone->IsVolatile = s.IsVolatile;
+            clone->UnalignedPrefix = s.UnalignedPrefix;
+            c = std::move(clone);
             break;
         }
         case OpCode::LocAlloc: {
@@ -411,8 +414,11 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         }
         case OpCode::StObj: {
             const auto& s = static_cast<const StObj&>(*this);
-            c = std::make_unique<StObj>(s.Target ? s.Target->Clone() : nullptr,
+            auto clone = std::make_unique<StObj>(s.Target ? s.Target->Clone() : nullptr,
                 s.Value ? s.Value->Clone() : nullptr, s.Type);
+            clone->IsVolatile = s.IsVolatile;
+            clone->UnalignedPrefix = s.UnalignedPrefix;
+            c = std::move(clone);
             break;
         }
         case OpCode::StringToInt: {

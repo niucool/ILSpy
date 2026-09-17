@@ -728,6 +728,10 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitBox(inst, context);
         case IL::OpCode::CastClass:
             return VisitCastClass(inst, context);
+        case IL::OpCode::LdObj:
+            return VisitLdObj(inst, context);
+        case IL::OpCode::StObj:
+            return VisitStObj(inst, context);
         case IL::OpCode::Call:
         case IL::OpCode::CallVirt:
         case IL::OpCode::NewObj:
@@ -1199,6 +1203,209 @@ TranslatedExpression ExpressionBuilder::VisitCastClass(IL::ILInstruction* inst,
     (void)context;
     auto* castClass = static_cast<IL::CastClass*>(inst);
     return Translate(castClass->Argument.get()).ConvertTo(*castClass->Type, *this);
+}
+
+// The C# `protected internal override TranslatedExpression VisitLdObj(LdObj inst,
+// TranslationContext context)` (ExpressionBuilder.cs lines 2857-2892): the typed
+// managed/raw load -- the type-hint preference (skipped for a pointer hint when
+// the load type is used in the generic unaligned/ref-address shape), the
+// `Unsafe.ReadUnaligned<T>` arm for an `unaligned.` prefix, and the dereference
+// render through the LdObj helper.
+TranslatedExpression ExpressionBuilder::VisitLdObj(IL::ILInstruction* inst,
+                                                    TranslationContext context)
+{
+    auto* ldObj = static_cast<IL::LdObj*>(inst);
+    TS::ITypePtr loadType = ldObj->Type;
+    bool loadTypeUsedInGeneric = ldObj->UnalignedPrefix != 0
+        || ldObj->Target->ResultType() == IL::StackType::Ref;
+    if (context.TypeHint != nullptr && context.TypeHint->Kind() != TS::TypeKind::Unknown
+        && TS::IsCompatibleTypeForMemoryAccess(
+               const_cast<TS::IType&>(*context.TypeHint), const_cast<TS::IType&>(*loadType))
+        && !(loadTypeUsedInGeneric && IsAnyPointer(context.TypeHint->Kind())))
+    {
+        loadType = const_cast<TS::IType&>(*context.TypeHint).shared_from_this();
+    }
+    if (ldObj->UnalignedPrefix != 0)
+    {
+        // Use one of: Unsafe.ReadUnaligned<T>(void*)
+        //         or: Unsafe.ReadUnaligned<T>(ref byte)
+        TranslatedExpression pointer = Translate(ldObj->Target.get());
+        if (dynamic_cast<Syntax::DirectionExpression*>(pointer.Expression()) != nullptr)
+        {
+            pointer = pointer.ConvertTo(
+                *std::make_shared<TS::ByReferenceType>(
+                    const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Byte))
+                        .shared_from_this()),
+                *this);
+        }
+        else
+        {
+            pointer = pointer.ConvertTo(
+                *std::make_shared<TS::PointerType>(
+                    const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Void))
+                        .shared_from_this()),
+                *this, /*checkForOverflow=*/false, /*allowImplicitConversion=*/true);
+        }
+        return CallUnsafeIntrinsic("ReadUnaligned", {pointer.Expression()}, *loadType, ldObj,
+                                   std::vector<TS::ITypePtr>{loadType});
+    }
+    ExpressionWithResolveResult result = LdObj(ldObj->Target.get(), *loadType);
+    return WithILInstruction(result, ldObj);
+}
+
+// The C# `protected internal override TranslatedExpression VisitStObj(StObj inst,
+// TranslationContext context)` (ExpressionBuilder.cs lines 2968-3036): the typed
+// store -- the helper-call arm for an `unaligned.` prefix or a non-ref target of a
+// managed type, else the pointer dereference and assignment render (with the
+// `ref (a = ref b)` re-assignment shape).
+TranslatedExpression ExpressionBuilder::VisitStObj(IL::ILInstruction* inst,
+                                                    TranslationContext context)
+{
+    (void)context;
+    auto* stObj = static_cast<IL::StObj*>(inst);
+    if (stObj->UnalignedPrefix != 0
+        || (stObj->Target->ResultType() != IL::StackType::Ref
+            && !TS::IsUnmanagedType(*stObj->Type, settings->IntroduceUnmanagedConstraint())))
+    {
+        return StObjViaHelperCall(stObj);
+    }
+
+    TS::ITypePtr pointerTypeHint = stObj->Target->ResultType() == IL::StackType::Ref
+        ? TS::ITypePtr(std::make_shared<TS::ByReferenceType>(stObj->Type))
+        : TS::ITypePtr(std::make_shared<TS::PointerType>(stObj->Type));
+    TranslatedExpression pointer = Translate(stObj->Target.get(), pointerTypeHint.get());
+    TranslatedExpression target;
+    TranslatedExpression value;
+    TS::ITypePtr memoryType;
+    // Check if we need to cast to pointer type:
+    if (TS::IsCompatiblePointerTypeForMemoryAccess(
+            const_cast<TS::IType&>(pointer.Type()), const_cast<TS::IType&>(*stObj->Type)))
+    {
+        // cast not necessary, we can use the existing type
+        if (auto* ptr = dynamic_cast<const TS::PointerType*>(&pointer.Type()))
+            memoryType = ptr->Element();
+        else
+            memoryType = static_cast<const TS::ByReferenceType&>(pointer.Type()).Element();
+    }
+    else
+    {
+        // We need to introduce a pointer cast
+        value = Translate(stObj->Value.get(), stObj->Type.get());
+        if (TS::IsCompatibleTypeForMemoryAccess(const_cast<TS::IType&>(value.Type()),
+                                                const_cast<TS::IType&>(*stObj->Type)))
+        {
+            memoryType = const_cast<TS::IType&>(value.Type()).shared_from_this();
+        }
+        else
+        {
+            memoryType = stObj->Type;
+        }
+        if (dynamic_cast<Syntax::DirectionExpression*>(pointer.Expression()) != nullptr)
+        {
+            pointer = pointer.ConvertTo(*std::make_shared<TS::ByReferenceType>(memoryType), *this);
+        }
+        else
+        {
+            pointer = pointer.ConvertTo(*std::make_shared<TS::PointerType>(memoryType), *this);
+        }
+    }
+
+    if (auto* dirExpr = dynamic_cast<Syntax::DirectionExpression*>(pointer.Expression()))
+    {
+        // we can deference the managed reference by stripping away the 'ref'
+        target = pointer.UnwrapChild(dirExpr->Expression());
+    }
+    else
+    {
+        if (auto* uoe = dynamic_cast<Syntax::UnaryOperatorExpression*>(pointer.Expression());
+            uoe != nullptr && uoe->Operator() == Syntax::UnaryOperatorType::AddressOf)
+        {
+            // *&ptr -> ptr
+            target = pointer.UnwrapChild(uoe->Expression());
+        }
+        else
+        {
+            target = WithRR(
+                WithoutILInstruction(*new Syntax::UnaryOperatorExpression(
+                    pointer.Expression(), Syntax::UnaryOperatorType::Dereference)),
+                std::make_shared<Sem::ResolveResult>(memoryType));
+        }
+    }
+    if (value.Expression() == nullptr)
+    {
+        value = Translate(stObj->Value.get(), &target.Type());
+    }
+    if (auto* dirExpr = dynamic_cast<Syntax::DirectionExpression*>(target.Expression()))
+    {
+        auto* lhsRefRR = dynamic_cast<const Sem::ByReferenceResolveResult*>(target.ResolveResult());
+        if (lhsRefRR != nullptr)
+        {
+            // ref (re-)assignment, emit "ref (a = ref b)".
+            std::shared_ptr<Sem::ResolveResult> lhsRRHandle =
+                SharedResolveResultAnnotation(*target.Expression());
+            target = target.UnwrapChild(dirExpr->Expression());
+            value = value.ConvertTo(const_cast<TS::IType&>(lhsRefRR->Type()), *this,
+                                    /*checkForOverflow=*/false,
+                                    /*allowImplicitConversion=*/true);
+            auto* assign = new Syntax::AssignmentExpression(target.Expression(),
+                                                            value.Expression());
+            WithRR(*assign,
+                   std::make_shared<Sem::OperatorResolveResult>(
+                       const_cast<TS::IType&>(target.Type()).shared_from_this(),
+                       TS::ExpressionType::Assign,
+                       std::vector<std::shared_ptr<Sem::ResolveResult>>{
+                           lhsRRHandle, SharedResolveResultAnnotation(*value.Expression())}));
+            return WithRR(
+                WithoutILInstruction(*new Syntax::DirectionExpression(
+                    Syntax::FieldDirection::Ref, assign)),
+                lhsRRHandle);
+        }
+    }
+    return WithILInstruction(Assignment(target, value), stObj);
+}
+
+// The C# `private TranslatedExpression StObjViaHelperCall(StObj inst)`
+// (ExpressionBuilder.cs lines 3087-3125): `"unaligned.1; stobj"` becomes
+// `Unsafe.WriteUnaligned<T>(void*, T)` (or `(ref byte, T)`) and `"stobj ManagedType"`
+// becomes `Unsafe.Write<T>(void*, T)`.
+TranslatedExpression ExpressionBuilder::StObjViaHelperCall(IL::ILInstruction* inst)
+{
+    auto* stObj = static_cast<IL::StObj*>(inst);
+    TranslatedExpression pointer = Translate(stObj->Target.get());
+    TranslatedExpression value = Translate(stObj->Value.get(), stObj->Type.get());
+    if (dynamic_cast<Syntax::DirectionExpression*>(pointer.Expression()) != nullptr
+        && stObj->UnalignedPrefix != 0)
+    {
+        pointer = pointer.ConvertTo(
+            *std::make_shared<TS::ByReferenceType>(
+                const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Byte))
+                    .shared_from_this()),
+            *this);
+    }
+    else
+    {
+        pointer = pointer.ConvertTo(
+            *std::make_shared<TS::PointerType>(
+                const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Void))
+                    .shared_from_this()),
+            *this, /*checkForOverflow=*/false, /*allowImplicitConversion=*/true);
+    }
+    if (!TS::IsCompatibleTypeForMemoryAccess(const_cast<TS::IType&>(value.Type()),
+                                             const_cast<TS::IType&>(*stObj->Type)))
+    {
+        value = value.ConvertTo(const_cast<TS::IType&>(*stObj->Type), *this);
+    }
+    if (stObj->UnalignedPrefix != 0)
+    {
+        return CallUnsafeIntrinsic(
+            "WriteUnaligned", {pointer.Expression(), value.Expression()},
+            compilation->FindType(KnownTypeCode::Void), stObj);
+    }
+    else
+    {
+        return CallUnsafeIntrinsic("Write", {pointer.Expression(), value.Expression()},
+                                   *stObj->Type, stObj);
+    }
 }
 
 

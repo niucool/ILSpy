@@ -832,6 +832,205 @@ TEST(ExpressionBuilderCastTest, CastClassStringRendersExplicitCast)
     EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()), TS::KnownTypeCode::String));
 }
 
+// ---------------------------------------------------------------------------
+// The memory-access load/store arms (VisitLdObj / VisitStObj): the typed
+// managed/raw load and store, the `unaligned.` Unsafe intrinsic rewrites, and
+// the node prefix fields (ISupportsVolatilePrefix / ISupportsUnalignedPrefix).
+// Expectations derived from the C# bodies (ExpressionBuilder.cs lines 2857-3125)
+// over the MinimalCorlib fixture.
+
+// A local whose type is a raw pointer to `elementType` (the LdObj/StObj address).
+std::shared_ptr<IL::ILVariable> PointerLocal(const BuilderFixture& fixture,
+                                             const TS::ITypePtr& elementType)
+{
+    (void)fixture;
+    auto variable = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local, std::make_shared<TS::PointerType>(elementType), 0);
+    variable->Name = "p";
+    return variable;
+}
+
+TEST(ExpressionBuilderMemoryTest, LdObjOverPointerRendersDereference)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto pointerVar = PointerLocal(fixture, intType);
+    // ldobj int32(*p): the pointer is incompatible as a value, so the LdObj helper
+    // renders the `*p` dereference.
+    IL::LdObj ldObj(std::make_unique<IL::LdLoc>(pointerVar), intType);
+    auto expr = builder.Translate(&ldObj);
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    EXPECT_EQ(unary->Operator(), Syntax::UnaryOperatorType::Dereference);
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()), TS::KnownTypeCode::Int32));
+}
+
+TEST(ExpressionBuilderMemoryTest, LdObjOverRefStripsTheRef)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto intVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    intVar->Name = "x";
+    // ldobj int32(ref x): the byref target is compatible, so the managed reference
+    // is dereferenced by stripping the `ref` and keeping the identifier.
+    IL::LdObj ldObj(std::make_unique<IL::LdLoca>(intVar), intType);
+    auto expr = builder.Translate(&ldObj);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(expr.Expression()) != nullptr);
+}
+
+TEST(ExpressionBuilderMemoryTest, LdObjUnalignedRendersReadUnaligned)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto pointerVar = PointerLocal(fixture, intType);
+    IL::LdObj ldObj(std::make_unique<IL::LdLoc>(pointerVar), intType);
+    ldObj.UnalignedPrefix = 1;
+    auto expr = builder.Translate(&ldObj);
+    auto* invocation = dynamic_cast<Syntax::InvocationExpression*>(expr.Expression());
+    ASSERT_TRUE(invocation != nullptr);
+    auto* target = dynamic_cast<Syntax::MemberReferenceExpression*>(invocation->Target());
+    ASSERT_TRUE(target != nullptr);
+    EXPECT_EQ(target->MemberName(), "ReadUnaligned");
+    EXPECT_EQ(target->TypeArguments().Count(), 1);
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()), TS::KnownTypeCode::Int32));
+}
+
+TEST(ExpressionBuilderMemoryTest, LdObjTypeHintPrefersCompatibleHint)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto uintType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::UInt32).shared_from_this());
+    TS::ITypePtr objectType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object);
+    auto pointerVar = PointerLocal(fixture, objectType);
+    // ldobj int32(*p) with an uint32 hint: the type hint is compatible (equal size
+    // integer) so the load type is replaced by the hint.
+    IL::LdObj ldObj(std::make_unique<IL::LdLoc>(pointerVar), intType);
+    auto expr = builder.Translate(&ldObj, uintType.get());
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()), TS::KnownTypeCode::UInt32));
+}
+
+TEST(ExpressionBuilderMemoryTest, StObjOverPointerRendersAssignment)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto pointerVar = PointerLocal(fixture, intType);
+    // stobj int32(*p, 5): a raw-pointer store to an unmanaged type is a plain
+    // dereference assignment.
+    IL::StObj stObj(std::make_unique<IL::LdLoc>(pointerVar),
+                    std::make_unique<IL::LdcI4>(5), intType);
+    auto expr = builder.Translate(&stObj);
+    auto* assign = dynamic_cast<Syntax::AssignmentExpression*>(expr.Expression());
+    ASSERT_TRUE(assign != nullptr);
+    auto* left = dynamic_cast<Syntax::UnaryOperatorExpression*>(assign->Left());
+    ASSERT_TRUE(left != nullptr);
+    EXPECT_EQ(left->Operator(), Syntax::UnaryOperatorType::Dereference);
+}
+
+TEST(ExpressionBuilderMemoryTest, StObjOverRefRendersPlainAssignment)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto intVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    intVar->Name = "x";
+    // stobj int32(ref x, 5): the byref target dereferences to the identifier.
+    IL::StObj stObj(std::make_unique<IL::LdLoca>(intVar),
+                    std::make_unique<IL::LdcI4>(5), intType);
+    auto expr = builder.Translate(&stObj);
+    auto* assign = dynamic_cast<Syntax::AssignmentExpression*>(expr.Expression());
+    ASSERT_TRUE(assign != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(assign->Left()) != nullptr);
+}
+
+TEST(ExpressionBuilderMemoryTest, StObjUnalignedRendersWriteUnaligned)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto pointerVar = PointerLocal(fixture, intType);
+    IL::StObj stObj(std::make_unique<IL::LdLoc>(pointerVar),
+                    std::make_unique<IL::LdcI4>(5), intType);
+    stObj.UnalignedPrefix = 4;
+    auto expr = builder.Translate(&stObj);
+    auto* invocation = dynamic_cast<Syntax::InvocationExpression*>(expr.Expression());
+    ASSERT_TRUE(invocation != nullptr);
+    auto* target = dynamic_cast<Syntax::MemberReferenceExpression*>(invocation->Target());
+    ASSERT_TRUE(target != nullptr);
+    EXPECT_EQ(target->MemberName(), "WriteUnaligned");
+    EXPECT_EQ(invocation->Arguments().Count(), 2);
+}
+
+TEST(ExpressionBuilderMemoryTest, StObjManagedTypeRendersWrite)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto stringType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    auto pointerVar = PointerLocal(fixture, stringType);
+    // stobj string(*p, "x"): a managed-typed store to a raw pointer routes through
+    // Unsafe.Write<T>.
+    IL::StObj stObj(std::make_unique<IL::LdLoc>(pointerVar),
+                    std::make_unique<IL::LdStr>("x"), stringType);
+    auto expr = builder.Translate(&stObj);
+    auto* invocation = dynamic_cast<Syntax::InvocationExpression*>(expr.Expression());
+    ASSERT_TRUE(invocation != nullptr);
+    auto* target = dynamic_cast<Syntax::MemberReferenceExpression*>(invocation->Target());
+    ASSERT_TRUE(target != nullptr);
+    EXPECT_EQ(target->MemberName(), "Write");
+}
+
+TEST(ExpressionBuilderMemoryTest, LdObjAndStObjDumpRendersPrefixes)
+{
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    IL::LdObj ldObj(std::make_unique<IL::LdNull>(), intType);
+    ldObj.IsVolatile = true;
+    ldObj.UnalignedPrefix = 2;
+    std::string dump;
+    ldObj.WriteTo(dump);
+    EXPECT_EQ(dump, "volatile.unaligned(2).ldobj(System.Int32, ldnull)");
+
+    IL::StObj stObj(std::make_unique<IL::LdNull>(), std::make_unique<IL::LdcI4>(1), intType);
+    stObj.UnalignedPrefix = 1;
+    std::string stDump;
+    stObj.WriteTo(stDump);
+    EXPECT_EQ(stDump, "unaligned(1).stobj(System.Int32, ldnull, ldc.i4(1))");
+}
+
+TEST(ExpressionBuilderMemoryTest, LdObjAndStObjCloneCarriesPrefixes)
+{
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    IL::LdObj ldObj(std::make_unique<IL::LdNull>(), intType);
+    ldObj.IsVolatile = true;
+    ldObj.UnalignedPrefix = 3;
+    auto ldClone = ldObj.Clone();
+    auto* ldCloneTyped = dynamic_cast<IL::LdObj*>(ldClone.get());
+    ASSERT_TRUE(ldCloneTyped != nullptr);
+    EXPECT_TRUE(ldCloneTyped->IsVolatile);
+    EXPECT_EQ(ldCloneTyped->UnalignedPrefix, 3);
+
+    IL::StObj stObj(std::make_unique<IL::LdNull>(), std::make_unique<IL::LdcI4>(1), intType);
+    stObj.IsVolatile = true;
+    stObj.UnalignedPrefix = 4;
+    auto stClone = stObj.Clone();
+    auto* stCloneTyped = dynamic_cast<IL::StObj*>(stClone.get());
+    ASSERT_TRUE(stCloneTyped != nullptr);
+    EXPECT_TRUE(stCloneTyped->IsVolatile);
+    EXPECT_EQ(stCloneTyped->UnalignedPrefix, 4);
+}
+
 
 // ---------------------------------------------------------------------------
 // The operator-expression arms (VisitBitNot / VisitThrow / the three-valued
