@@ -19,6 +19,7 @@
 #include "Decompiler/IL/BlockBuilder.hpp"
 #include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/IL/Instructions/Arglist.hpp"
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
@@ -1181,9 +1182,11 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             break;
         }
 
-        // ---- arglist: push the argument list handle (vararg methods) ----
+        // ---- arglist: push the RuntimeArgumentHandle of a vararg method ----
+        // The C# ILReader pushes a dedicated Arglist node (ILReader.cs line 821),
+        // not a type-token load -- the handle is retrieved, not loaded by token.
         case ILOpCode::Arglist: {
-            if (!s.Push(std::make_unique<LdTypeToken>("arglist"))) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<Arglist>())) return DecodeOutcome::Bail;
             break;
         }
 

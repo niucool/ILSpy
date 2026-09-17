@@ -34,6 +34,7 @@
 #include "Decompiler/IL/Instructions/IsInst.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLen.hpp"
+#include "Decompiler/IL/Instructions/Arglist.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
@@ -76,6 +77,15 @@ TEST(ILAstInstructions, SimpleInstructions) {
     EXPECT_EQ(n.Op, OpCode::LdNull);
     EXPECT_EQ(n.ResultType(), StackType::O);
     EXPECT_EQ(n.ToString(), "ldnull");
+
+    // Arglist: the vararg RuntimeArgumentHandle retrieval (SimpleInstruction,
+    // result O, no children, no direct flags).
+    Arglist a;
+    EXPECT_EQ(a.Op, OpCode::Arglist);
+    EXPECT_EQ(a.ResultType(), StackType::O);
+    EXPECT_EQ(a.ChildCount(), 0);
+    EXPECT_EQ(a.DirectFlags(), InstructionFlags::None);
+    EXPECT_EQ(a.ToString(), "arglist");
 }
 
 TEST(ILAstInstructions, UnaryInstructionsFlagsAndResult) {

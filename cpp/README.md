@@ -4707,6 +4707,30 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   (a stale-pointer comparison that fails ~1 in 5 in isolation on the unmodified
   test), and the CLI baselines are unchanged (the Phase-5 back end is not yet
   wired into the `--csharp` CLI path).
+- **`ExpressionBuilder` arglist arm (`VisitArglist`) + the dedicated `IL::Arglist`
+  node** -- the C# `VisitArglist` (`ExpressionBuilder.cs` lines 3274-3280) landed
+  and is routed from the `Visit` OpCode switch (`arglist`). The arm renders the
+  `ArgListAccess` `UndocumentedExpression` (`__arglist`) with a `TypeResolveResult`
+  over `System.RuntimeArgumentHandle` (the `VisitRefAnyType` / `VisitLdTypeToken`
+  modules-scan `FindType` precedent). The dedicated node (`Arglist`, a
+  `SimpleInstruction`: no children, result `StackType.O`, `DirectFlags` None) is
+  faithful to the C# generated `Arglist` in `Instructions.cs`; the IL reader's
+  `ILOpCode::Arglist` arm no longer collapses the opcode onto a degenerate
+  `LdTypeToken("arglist")` and pushes the real node instead (`ILReader.cs` line
+  821). The clone case and the seed `ILAstToCSharp` render (`__arglist`, replacing
+  the bogus `typeof(arglist)`) are wired. Verified by 3 tests -- the node
+  dump/result/flag assertions in `ILAstInstructions.SimpleInstructions`, the
+  reader split (`ReadIL.ArglistDecodesToDedicatedNode` over mscorlib's vararg
+  `String::Concat`, the only `arglist` site), and the render
+  (`ExpressionBuilderArglistTest`, the UndocumentedExpression kind, the empty
+  argument list, the IL annotation, the `TypeResolveResult`) -- with a
+  dispatch-neuter RED round where only the render test failed through `Default`
+  and the reader/node tests stayed green; full Debug suite 12416 ran / 12414
+  passed / the 2 standing skips / zero failures, `--il` byte-identical to the
+  41246545-byte gold, `-l c` 109438, `--json`-alone rc 64, and the `--csharp`
+  mscorlib baseline dropped from 10106366 to 10106348 bytes because the three
+  real `arglist` sites now render `__arglist` (9 chars) instead of
+  `typeof(arglist)` (15).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

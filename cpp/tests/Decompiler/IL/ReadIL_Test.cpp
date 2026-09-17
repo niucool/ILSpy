@@ -23,6 +23,7 @@
 // that the straight-line reader rejects.
 
 #include "Decompiler/IL/ILReader.hpp"
+#include "Decompiler/IL/Instructions/Arglist.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
@@ -279,6 +280,34 @@ TEST(ReadIL, UnboxDecodesToDedicatedNode) {
         walk(fn.get());
     }
     EXPECT_TRUE(found) << "no `unbox` opcode decoded in fixture";
+}
+
+TEST(ReadIL, ArglistDecodesToDedicatedNode) {
+    // The CIL `arglist` opcode (0xFE00) retrieves the vararg
+    // RuntimeArgumentHandle. The reader must produce the dedicated Arglist node,
+    // not the type-token load it previously collapsed onto. mscorlib's vararg
+    // String::Concat(object, object, object, object) overload begins with
+    // `ldloca.s 2` / `arglist` / `call ArgIterator::.ctor`, so its decoded body
+    // must carry an Arglist node.
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringToken = FindType(f, "System", "String");
+    ASSERT_NE(stringToken, 0u);
+    bool found = false;
+    for (const auto& m : f.GetMethods(stringToken)) {
+        if (m.RVA == 0 || found) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        std::function<void(ILInstruction*)> walk = [&](ILInstruction* i) {
+            if (!i) return;
+            if (dynamic_cast<Arglist*>(i) != nullptr) found = true;
+            for (int k = 0; k < i->ChildCount(); ++k) walk(i->GetChild(k));
+        };
+        walk(fn.get());
+    }
+    EXPECT_TRUE(found) << "no `arglist` opcode decoded in String::Concat";
 }
 
 TEST(ReadIL, StfldUsesTargetThenValueStackOrder) {

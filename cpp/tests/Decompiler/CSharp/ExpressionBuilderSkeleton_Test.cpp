@@ -69,6 +69,7 @@
 #include "Decompiler/IL/Instructions/NullableInstructions.hpp"
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/AddressOf.hpp"
+#include "Decompiler/IL/Instructions/Arglist.hpp"
 #include "Decompiler/IL/Instructions/RefAnyType.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
@@ -1962,6 +1963,28 @@ TEST(ExpressionBuilderRefAnyTypeTest, RendersRefTypeTypeHandleWithRuntimeTypeHan
     ASSERT_EQ(il.size(), 1u);
     EXPECT_EQ(il[0], &refAnyType);
     // The resolve result is the RuntimeTypeHandle type resolve result.
+    ASSERT_TRUE(dynamic_cast<const Sem::TypeResolveResult*>(expr.ResolveResult()) != nullptr);
+}
+
+// The Arglist arm (VisitArglist, the C# lines 3274-3280): the `__arglist`
+// render -- the ArgListAccess UndocumentedExpression with no arguments and a
+// System.RuntimeArgumentHandle resolve result, annotated with the IL node.
+
+TEST(ExpressionBuilderArglistTest, RendersArgListAccessWithRuntimeArgumentHandleResolveResult)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::Arglist arglist;
+    auto expr = builder.Translate(&arglist);
+    auto* doc = dynamic_cast<Syntax::UndocumentedExpression*>(expr.Expression());
+    ASSERT_TRUE(doc != nullptr);
+    EXPECT_EQ(doc->UndocumentedExpressionType(), Syntax::UndocumentedExpressionType::ArgListAccess);
+    EXPECT_EQ(doc->Arguments().Count(), 0);
+    // The IL annotation sits on the UndocumentedExpression (the C# WithILInstruction).
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*doc);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], &arglist);
+    // The C# `new TypeResolveResult(...)` over System.RuntimeArgumentHandle.
     ASSERT_TRUE(dynamic_cast<const Sem::TypeResolveResult*>(expr.ResolveResult()) != nullptr);
 }
 

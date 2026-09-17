@@ -2410,6 +2410,10 @@ private:
                 return "sizeof(" + static_cast<const SizeOf&>(inst).TypeName + ")";
             case OpCode::LdTypeToken:
                 return "typeof(" + FlattenMetadataName(static_cast<const LdTypeToken&>(inst).TokenName) + ")";
+            case OpCode::Arglist:
+                // The real back end's VisitArglist renders the ArgListAccess
+                // UndocumentedExpression as the `__arglist` keyword.
+                return "__arglist";
             case OpCode::DefaultValue: {
                 const auto& dv = static_cast<const DefaultValue&>(inst);
                 return "default(" + CSharpTypeName(dv.Type) + ")";

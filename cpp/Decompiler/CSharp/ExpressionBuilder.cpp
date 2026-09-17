@@ -102,6 +102,7 @@
 #include "Decompiler/IL/Instructions/NullableInstructions.hpp"
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/AddressOf.hpp"
+#include "Decompiler/IL/Instructions/Arglist.hpp"
 #include "Decompiler/IL/Instructions/RefAnyType.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/Transforms/TupleTransform.hpp"
@@ -875,6 +876,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitAddressOf(inst, context);
         case IL::OpCode::RefAnyType:
             return VisitRefAnyType(inst, context);
+        case IL::OpCode::Arglist:
+            return VisitArglist(inst, context);
         case IL::OpCode::IfInstruction:
             return VisitIfInstruction(inst, context);
         case IL::OpCode::SwitchInstruction:
@@ -2062,6 +2065,27 @@ TranslatedExpression ExpressionBuilder::VisitRefAnyType(IL::ILInstruction* inst,
     return WithRR(WithILInstruction(*memberRef, inst),
                   std::make_shared<Sem::TypeResolveResult>(
                       std::move(runtimeTypeHandleType)));
+}
+
+// The C# `protected internal override TranslatedExpression VisitArglist(Arglist
+// inst, TranslationContext context)` (ExpressionBuilder.cs lines 3274-3280): the
+// `__arglist` render -- the ArgListAccess UndocumentedExpression carrying a
+// TypeResolveResult for System.RuntimeArgumentHandle.
+TranslatedExpression ExpressionBuilder::VisitArglist(IL::ILInstruction* inst,
+                                                     TranslationContext context)
+{
+    (void)context;
+    auto* doc = new Syntax::UndocumentedExpression();
+    doc->UndocumentedExpressionType(Syntax::UndocumentedExpressionType::ArgListAccess);
+    // The C# `compilation.FindType(new TopLevelTypeName("System",
+    // "RuntimeArgumentHandle"))` -- the modules-scan extension over the full
+    // type name (the VisitRefAnyType / VisitLdTypeToken precedent).
+    TS::ITypePtr runtimeArgumentHandleType =
+        TS::FindType(*compilation,
+                     TS::FullTypeName(TS::TopLevelTypeName("System", "RuntimeArgumentHandle")));
+    return WithRR(WithILInstruction(*doc, inst),
+                  std::make_shared<Sem::TypeResolveResult>(
+                      std::move(runtimeArgumentHandleType)));
 }
 
 // The C# `protected internal override TranslatedExpression

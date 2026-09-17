@@ -346,6 +346,11 @@ public:
     // UndocumentedExpression over the translated argument, wrapped in a `TypeHandle`
     // member reference with a TypeResolveResult for System.RuntimeTypeHandle.
     TranslatedExpression VisitRefAnyType(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitArglist(Arglist
+    // inst, TranslationContext context)` (ExpressionBuilder.cs lines 3274-3280):
+    // the `__arglist` render -- the ArgListAccess UndocumentedExpression carrying
+    // a TypeResolveResult for System.RuntimeArgumentHandle.
+    TranslatedExpression VisitArglist(IL::ILInstruction* inst, TranslationContext context);
     // The C# `protected internal override TranslatedExpression
     // VisitIfInstruction(IfInstruction inst, TranslationContext context)`
     // (ExpressionBuilder.cs lines 3956-4049): the if-as-expression render -- the
