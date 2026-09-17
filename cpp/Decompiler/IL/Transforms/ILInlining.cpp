@@ -30,6 +30,9 @@
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/AddressOf.hpp"
 
 #include <algorithm>
 #include <functional>
@@ -154,6 +157,78 @@ bool IsReadOnlySpanCharCtor(const TypeSystem::IMethod* method) {
         return false;
     return TypeSystem::IsKnownType(*byRef->Element(),
                                        TypeSystem::KnownTypeCode::Char);
+}
+
+ExpressionClassification ClassifyExpression(ILInstruction* inst) {
+    switch (inst->Op) {
+        case OpCode::LdLoc:
+        case OpCode::StLoc: {
+            const ILVariablePtr& v = (inst->Op == OpCode::LdLoc)
+                                         ? static_cast<LdLoc*>(inst)->Variable
+                                         : static_cast<StLoc*>(inst)->Variable;
+            if (!v)
+                return ExpressionClassification::MutableLValue;
+            if (v->IsRefReadOnly
+                || v->Kind == VariableKind::ForeachLocal
+                || v->Kind == VariableKind::UsingLocal) {
+                return ExpressionClassification::ReadonlyLValue;
+            }
+            return ExpressionClassification::MutableLValue;
+        }
+        case OpCode::LdObj:
+            // ldobj typically refers to a storage location,
+            // but readonly fields are an exception.
+            return IsReadonlyReference(static_cast<LdObj*>(inst)->Target.get())
+                       ? ExpressionClassification::ReadonlyLValue
+                       : ExpressionClassification::MutableLValue;
+        case OpCode::StObj:
+            // stobj is the same as ldobj.
+            return IsReadonlyReference(static_cast<StObj*>(inst)->Target.get())
+                       ? ExpressionClassification::ReadonlyLValue
+                       : ExpressionClassification::MutableLValue;
+        case OpCode::Call:
+        case OpCode::CallVirt: {
+            const auto* call = static_cast<Call*>(inst);
+            // multi-dimensional array getters are lvalues,
+            // everything else is an rvalue.
+            if (call->DeclaringType
+                && call->DeclaringType->Kind() == TypeSystem::TypeKind::Array) {
+                return ExpressionClassification::MutableLValue;
+            }
+            return ExpressionClassification::RValue;
+        }
+        default:
+            return ExpressionClassification::RValue; // most instructions result in an rvalue
+    }
+}
+
+bool IsReadonlyReference(ILInstruction* addr) {
+    if (addr == nullptr)
+        return false;
+    switch (addr->Op) {
+        case OpCode::LdFlda:
+            return static_cast<LdFlda*>(addr)->FieldIsReadOnly;
+        case OpCode::LdsFlda:
+            return static_cast<LdsFlda*>(addr)->FieldIsReadOnly;
+        case OpCode::LdLoc:
+            return static_cast<LdLoc*>(addr)->Variable
+                   && static_cast<LdLoc*>(addr)->Variable->IsRefReadOnly;
+        case OpCode::Call:
+        case OpCode::CallVirt: {
+            const auto* call = static_cast<Call*>(addr);
+            return call->Method != nullptr && call->Method->ReturnTypeIsRefReadOnly();
+        }
+        case OpCode::AddressOf:
+            // C# doesn't allow mutation of value-type temporaries
+            return true;
+        default:
+            // The C# default arm matches `addr.MatchLdFld(out _, out var field)`
+            // and returns `field.ReturnTypeIsRefReadOnly`; the port's LdFlda/LdsFlda
+            // carry no ref-readonly return type, so the arm stays false (the
+            // conservative direction -- an unmatched address is treated as
+            // mutable rather than readonly).
+            return false;
+    }
 }
 
 // True when `inst` sits in the constructor initializer (before the chained

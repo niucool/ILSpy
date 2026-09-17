@@ -32,8 +32,9 @@
 // The IStatementTransform Run loops InlineOneIfPossible at the given position
 // until no change (the C# per-statement overload); the AllowInliningOfLdloca
 // option (the ldloca-into-addressof path the C# second pass enables, which needs
-// an AddressOf node + IsGeneratedTemporaryForAddressOf + ClassifyExpression) is
-// deferred to a later iteration.
+// an AddressOf node + IsGeneratedTemporaryForAddressOf + ClassifyExpression;
+// ClassifyExpression/IsReadonlyReference have since landed) is deferred to a
+// later iteration.
 
 #pragma once
 
@@ -131,6 +132,33 @@ bool MethodRequiresCopyForReadonlyLValue(const TypeSystem::IMethod* method,
 // ByReferenceType over Char). The CallBuilder's span-based string-concat
 // detection walks it over the `newobj ReadOnlySpan<char>(&c)` operand shapes.
 bool IsReadOnlySpanCharCtor(const TypeSystem::IMethod* method);
+
+// The C# `internal enum ExpressionClassification` (ILInlining.cs line 987): how a
+// translated C# expression may be used as an lvalue -- an rvalue, a mutable lvalue,
+// or a readonly lvalue.
+enum class ExpressionClassification {
+    RValue,
+    MutableLValue,
+    ReadonlyLValue,
+};
+
+// The C# `internal static ExpressionClassification ClassifyExpression(ILInstruction
+// inst)` (ILInlining.cs line 557): classifies the expression `inst` will turn into.
+// A local that is ref-readonly / a foreach / a using local is a readonly lvalue;
+// every other local is a mutable lvalue; an ldobj/stobj is a mutable lvalue unless
+// its address is a readonly reference; a call returning a multi-dimensional array
+// element is a mutable lvalue; everything else is an rvalue. Exposed so the
+// ExpressionBuilder's AddressOf arm can decide whether a cast is needed to force a
+// copy.
+ExpressionClassification ClassifyExpression(ILInstruction* inst);
+
+// The C# `internal static bool IsReadonlyReference(ILInstruction addr)` (ILInlining.cs
+// line 613): whether the address `addr` denotes a location the C# compiler considers
+// readonly. The port's LdFlda/LdsFlda carry the resolved FieldAttributes.InitOnly bit
+// (FieldIsReadOnly); the field's ref-readonly return type checks and the
+// MatchLdFld default arm (a field's ref-readonly return type) stay deferred with the
+// port's IField surface.
+bool IsReadonlyReference(ILInstruction* addr);
 
 class ILInlining : public IILTransform, public IStatementTransform {
 public:

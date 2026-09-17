@@ -57,6 +57,10 @@ public:
     // the MetadataFile without re-parsing the name.
     std::uint32_t FieldToken = 0;
     bool IsCompilerGeneratedField = false;
+    // The C# `IField.IsReadOnly` (the FieldAttributes.InitOnly bit, resolved at
+    // read time): a store through a readonly field's address is not a mutable
+    // lvalue, so ILInlining.ClassifyExpression reports ReadonlyLValue for it.
+    bool FieldIsReadOnly = false;
     bool DelayExceptions = false;
     LdFlda(std::unique_ptr<ILInstruction> target, std::string field)
         : ILInstruction(OpCode::LdFlda), Target(std::move(target)), FieldName(std::move(field)) {
@@ -97,6 +101,7 @@ public:
     std::string FieldName;
     std::uint32_t FieldToken = 0;  // see LdFlda::FieldToken
     bool IsCompilerGeneratedField = false;
+    bool FieldIsReadOnly = false;  // see LdFlda::FieldIsReadOnly
     explicit LdsFlda(std::string field) : SimpleInstruction(OpCode::LdsFlda), FieldName(std::move(field)) {}
     StackType ResultType() const override { return StackType::Ref; }
     void WriteTo(std::string& out) const override {

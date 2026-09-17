@@ -95,6 +95,8 @@
 #include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/Instructions/NullableInstructions.hpp"
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
+#include "Decompiler/IL/Instructions/AddressOf.hpp"
+#include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/OpCodeName.hpp"
 #include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
@@ -748,6 +750,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitNullableUnwrap(inst, context);
         case IL::OpCode::NullCoalescingInstruction:
             return VisitNullCoalescingInstruction(inst, context);
+        case IL::OpCode::AddressOf:
+            return VisitAddressOf(inst, context);
         case IL::OpCode::Call:
         case IL::OpCode::CallVirt:
         case IL::OpCode::NewObj:
@@ -1662,6 +1666,56 @@ TranslatedExpression ExpressionBuilder::VisitNullCoalescingInstruction(
         value.Expression(), Syntax::BinaryOperatorType::NullCoalescing,
         fallback.Expression());
     return WithRR(WithILInstruction(*binary, inst), rr);
+}
+
+// The C# `protected internal override TranslatedExpression VisitAddressOf(AddressOf
+// inst, TranslationContext context)` (ExpressionBuilder.cs lines 4231-4266): the
+// `&value` render. The wrapped value is classified (ILInlining.ClassifyExpression)
+// and, when it is a mutable lvalue whose address would let a C# method call mutate
+// the original rather than a copy, a redundant cast is inserted so the C# compiler
+// also creates the copy -- unless the immediate chain sits under an ldobj, which is
+// a pure read where the copy is not observable. The render is a ref
+// DirectionExpression carrying a ByReferenceResolveResult over the (possibly cast)
+// value's resolve result.
+TranslatedExpression ExpressionBuilder::VisitAddressOf(IL::ILInstruction* inst,
+                                                       TranslationContext context)
+{
+    (void)context;
+    auto* addressOf = static_cast<IL::AddressOf*>(inst);
+    IL::ExpressionClassification classification =
+        IL::ClassifyExpression(addressOf->Argument.get());
+    TranslatedExpression value = Translate(addressOf->Argument.get(), addressOf->Type.get());
+    value = value.ConvertTo(*addressOf->Type, *this);
+    // The C# local function CanIgnoreCopy(): walk up the ldflda chain; when the
+    // chain's parent is an ldobj the address feeds a load, so no cast is needed.
+    bool canIgnoreCopy = false;
+    {
+        IL::ILInstruction* loadAddress = inst;
+        while (auto* parent = dynamic_cast<IL::LdFlda*>(loadAddress->Parent))
+            loadAddress = parent;
+        if (dynamic_cast<IL::LdObj*>(loadAddress->Parent) != nullptr)
+            canIgnoreCopy = true;
+    }
+    if (classification == IL::ExpressionClassification::MutableLValue
+        && !canIgnoreCopy
+        && dynamic_cast<Syntax::CastExpression*>(value.Expression()) == nullptr)
+    {
+        auto* cast = new Syntax::CastExpression(ConvertType(*addressOf->Type),
+                                                value.Expression());
+        value = WithRR(
+            WithoutILInstruction(*cast),
+            std::make_shared<Sem::ConversionResolveResult>(
+                addressOf->Type,
+                SharedResolveResultAnnotation(*value.Expression()),
+                Sem::Conversions::IdentityConversion()));
+    }
+    auto* direction = new Syntax::DirectionExpression(Syntax::FieldDirection::Ref,
+                                                      value.Expression());
+    return WithRR(
+        WithILInstruction(*direction, inst),
+        std::make_shared<Sem::ByReferenceResolveResult>(
+            SharedResolveResultAnnotation(*value.Expression()),
+            TS::ReferenceKind::Ref));
 }
 
 

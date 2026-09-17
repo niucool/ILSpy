@@ -3132,6 +3132,34 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   passed / the 2 standing skips / zero failures, and the CLI baselines are
   structurally unchanged (the Phase-5 back end is not yet wired into the
   `--csharp` CLI path).
+- **`ExpressionBuilder` address-of arm (`VisitAddressOf`) + the
+  `ILInlining.ClassifyExpression` helper** -- the C# `VisitAddressOf`
+  (`ExpressionBuilder.cs` lines 4231-4266) landed and is routed from the `Visit`
+  OpCode switch, enabled by porting the `ILInlining.ClassifyExpression` /
+  `IsReadonlyReference` helpers (`ILInlining.cs` lines 557-645) it consults. The
+  wrapped value is classified, translated with the address's type as hint, and
+  converted to the address type; when the classification is a mutable lvalue
+  whose ldflda chain does not end under an `ldobj` (the C# local `CanIgnoreCopy`)
+  and the value is not already a cast, a redundant `CastExpression` with an
+  identity `ConversionResolveResult` is inserted so the C# compiler also copies
+  the value. The render is a `ref` `DirectionExpression` carrying a
+  `ByReferenceResolveResult` over the value's resolve result. Alongside,
+  `ILVariable` gained the C# `IsRefReadOnly` field (the ref-readonly local
+  classification), `LdFlda`/`LdsFlda` gained `FieldIsReadOnly` (populated by the
+  IL reader from the field's `FieldAttributes.InitOnly` bit; the clone cases carry
+  it), and `ExpressionClassification` (RValue/MutableLValue/ReadonlyLValue) landed
+  with `ClassifyExpression`. Verified by 9 new tests -- 4
+  `ExpressionBuilderAddressOfTest` (the mutable-local cast + ref direction + IL
+  annotation, the readonly-local no-cast, the constant-rvalue no-cast, and the
+  `ldobj`-parent `CanIgnoreCopy` no-cast) and 5
+  `ILInliningClassifyExpressionTest` (the local-kind matrix, the
+  readonly/mutable field load/store matrix, the array-call mutable vs plain-call
+  rvalue, the default rvalue, and the `IsReadonlyReference` arms); full Debug suite
+  12389 ran / 12387 passed / the 2 standing skips / zero failures, and all four
+  CLI baselines unchanged (`--csharp` mscorlib 10106366 bytes, `--il` whole-module
+  byte-identical to the 41246545-byte gold, `-l c` 109438, `--json` with input rc
+  64). The `IsReadonlyReference` default arm (a field's ref-readonly return type
+  via `MatchLdFld`) stays deferred with the port's `IField` surface.
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

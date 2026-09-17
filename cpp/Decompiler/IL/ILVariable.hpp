@@ -54,6 +54,12 @@ public:
     // RemoveDeadStores setting is off (ILVariable.RemoveIfRedundant in the C#).
     bool RemoveIfRedundant = false;
 
+    // The C# `public bool IsRefReadOnly { get; internal set; }` -- whether the
+    // variable holds a `ref readonly` reference (set by the ref-read-only
+    // modifier analysis). Read by ILInlining.ClassifyExpression / the Expression
+    // builder to classify a load as a readonly lvalue; defaults false.
+    bool IsRefReadOnly = false;
+
     // True if the variable's name is compiler-generated (e.g. the exception
     // stack slot's "E_<offset>" name), false for a name taken from a source
     // symbol. Copied by TransformCatchVariable when a catch-local is promoted to

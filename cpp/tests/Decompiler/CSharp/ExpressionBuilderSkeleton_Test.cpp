@@ -67,6 +67,8 @@
 #include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/Instructions/NullableInstructions.hpp"
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
+#include "Decompiler/IL/Instructions/AddressOf.hpp"
+#include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/Instructions/BitNot.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
@@ -1422,6 +1424,173 @@ TEST(ExpressionBuilderNullCoalescingTest, ThrowFallbackOverNoTypeUsesValueUnderl
     // underlying type (int), not the nullable itself.
     EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()),
                                 TS::KnownTypeCode::Int32));
+}
+
+// The AddressOf arm (VisitAddressOf, the C# lines 4231-4266): classify the
+// wrapped value, translate + convert it to the address type, insert a redundant
+// cast for a mutable lvalue whose parent chain is not an ldobj (so a mutating C#
+// call cannot modify the original), and render a ref DirectionExpression
+// carrying a ByReferenceResolveResult. Expectations derived from the C# body over
+// the MinimalCorlib fixture.
+
+TEST(ExpressionBuilderAddressOfTest, MutableLocalInsertsCastAndRendersRefDirection)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto v = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    v->Name = "v";
+    IL::AddressOf addressOf(std::make_unique<IL::LdLoc>(v), intType);
+    auto expr = builder.Translate(&addressOf);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    EXPECT_EQ(direction->FieldDirection(), Syntax::FieldDirection::Ref);
+    // The mutable lvalue gets the redundant cast (the C# copy-forcing shape).
+    ASSERT_TRUE(dynamic_cast<Syntax::CastExpression*>(direction->Expression()) != nullptr);
+    // The outer direction carries the AddressOf IL annotation.
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*direction);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], &addressOf);
+    ASSERT_TRUE(dynamic_cast<const Sem::ByReferenceResolveResult*>(expr.ResolveResult())
+                != nullptr);
+}
+
+TEST(ExpressionBuilderAddressOfTest, ReadonlyLocalSkipsCast)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto v = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    v->Name = "v";
+    v->IsRefReadOnly = true;
+    IL::AddressOf addressOf(std::make_unique<IL::LdLoc>(v), intType);
+    auto expr = builder.Translate(&addressOf);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    // A readonly lvalue is not a MutableLValue, so no copy-forcing cast is inserted.
+    EXPECT_EQ(dynamic_cast<Syntax::CastExpression*>(direction->Expression()), nullptr);
+}
+
+TEST(ExpressionBuilderAddressOfTest, ConstantRValueSkipsCast)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    IL::AddressOf addressOf(std::make_unique<IL::LdcI4>(5), intType);
+    auto expr = builder.Translate(&addressOf);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    // An rvalue is never cast.
+    EXPECT_EQ(dynamic_cast<Syntax::CastExpression*>(direction->Expression()), nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::PrimitiveExpression*>(direction->Expression()) != nullptr);
+}
+
+TEST(ExpressionBuilderAddressOfTest, LdObjParentSkipsCast)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto v = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    v->Name = "v";
+    auto addressOf = std::make_unique<IL::AddressOf>(std::make_unique<IL::LdLoc>(v), intType);
+    auto* addressOfPtr = addressOf.get();
+    // The parent ldobj makes the address a pure load (CanIgnoreCopy), so no cast.
+    IL::LdObj ldObj(std::move(addressOf), intType);
+    auto expr = builder.Translate(addressOfPtr);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    EXPECT_EQ(dynamic_cast<Syntax::CastExpression*>(direction->Expression()), nullptr);
+}
+
+// The ILInlining.ClassifyExpression / IsReadonlyReference helpers (the C#
+// ILInlining.cs lines 557-645) the AddressOf arm composes.
+
+TEST(ILInliningClassifyExpressionTest, LocalKindsClassify)
+{
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto local = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    IL::LdLoc localLoad(local);
+    EXPECT_EQ(IL::ClassifyExpression(&localLoad), IL::ExpressionClassification::MutableLValue);
+
+    auto foreachVar = std::make_shared<IL::ILVariable>(IL::VariableKind::ForeachLocal, intType, 1);
+    IL::LdLoc foreachLoad(foreachVar);
+    EXPECT_EQ(IL::ClassifyExpression(&foreachLoad),
+              IL::ExpressionClassification::ReadonlyLValue);
+
+    auto usingVar = std::make_shared<IL::ILVariable>(IL::VariableKind::UsingLocal, intType, 2);
+    IL::LdLoc usingLoad(usingVar);
+    EXPECT_EQ(IL::ClassifyExpression(&usingLoad), IL::ExpressionClassification::ReadonlyLValue);
+
+    local->IsRefReadOnly = true;
+    EXPECT_EQ(IL::ClassifyExpression(&localLoad), IL::ExpressionClassification::ReadonlyLValue);
+}
+
+TEST(ILInliningClassifyExpressionTest, LdObjStObjOverReadonlyFieldClassifyReadonly)
+{
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto target = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    auto readonlyField = std::make_unique<IL::LdFlda>(std::make_unique<IL::LdLoc>(target),
+                                                      "ns::T::F");
+    readonlyField->FieldIsReadOnly = true;
+    IL::LdObj load(std::move(readonlyField), intType);
+    EXPECT_EQ(IL::ClassifyExpression(&load), IL::ExpressionClassification::ReadonlyLValue);
+
+    auto mutableField = std::make_unique<IL::LdFlda>(std::make_unique<IL::LdLoc>(target),
+                                                     "ns::T::G");
+    IL::LdObj mutableLoad(std::move(mutableField), intType);
+    EXPECT_EQ(IL::ClassifyExpression(&mutableLoad),
+              IL::ExpressionClassification::MutableLValue);
+
+    auto storeField = std::make_unique<IL::LdFlda>(std::make_unique<IL::LdLoc>(target),
+                                                   "ns::T::F");
+    storeField->FieldIsReadOnly = true;
+    IL::StObj store(std::move(storeField), std::make_unique<IL::LdcI4>(1), intType);
+    EXPECT_EQ(IL::ClassifyExpression(&store), IL::ExpressionClassification::ReadonlyLValue);
+}
+
+TEST(ILInliningClassifyExpressionTest, CallOverArrayClassifiesMutable)
+{
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    IL::Call arrayCall("ns::T::Get");
+    arrayCall.DeclaringType = std::make_shared<TS::ArrayType>(intType);
+    EXPECT_EQ(IL::ClassifyExpression(&arrayCall),
+              IL::ExpressionClassification::MutableLValue);
+
+    IL::Call plainCall("ns::T::M");
+    plainCall.DeclaringType = intType;
+    EXPECT_EQ(IL::ClassifyExpression(&plainCall), IL::ExpressionClassification::RValue);
+}
+
+TEST(ILInliningClassifyExpressionTest, DefaultAndConstantClassifyRValue)
+{
+    IL::LdcI4 constant(1);
+    EXPECT_EQ(IL::ClassifyExpression(&constant), IL::ExpressionClassification::RValue);
+}
+
+TEST(ILInliningClassifyExpressionTest, IsReadonlyReferenceArms)
+{
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto local = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    IL::LdLoc localLoad(local);
+    EXPECT_FALSE(IL::IsReadonlyReference(&localLoad));
+    local->IsRefReadOnly = true;
+    EXPECT_TRUE(IL::IsReadonlyReference(&localLoad));
+
+    IL::AddressOf addressOf(std::make_unique<IL::LdLoc>(local), intType);
+    EXPECT_TRUE(IL::IsReadonlyReference(&addressOf));
+
+    IL::LdsFlda staticReadonly("ns::T::F");
+    staticReadonly.FieldIsReadOnly = true;
+    EXPECT_TRUE(IL::IsReadonlyReference(&staticReadonly));
+    IL::LdsFlda staticMutable("ns::T::G");
+    EXPECT_FALSE(IL::IsReadonlyReference(&staticMutable));
+
+    IL::Call call("ns::T::M");
+    EXPECT_FALSE(IL::IsReadonlyReference(&call));
 }
 
 

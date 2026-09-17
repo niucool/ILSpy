@@ -921,6 +921,8 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
             auto fieldType = file.GetFieldSignature(tok);
             std::string fieldName = file.ResolveTokenToString(tok, s.ownerMethodToken);
+            // FieldAttributes.InitOnly (0x20) is the C# `IField.IsReadOnly` bit.
+            const bool fieldIsReadOnly = (file.GetFieldAttributes(tok) & 0x20) != 0;
             if (op == ILOpCode::Ldfld || op == ILOpCode::Ldflda || op == ILOpCode::Stfld) {
                 // stfld pops value (top) then target; the loads pop only target.
                 std::unique_ptr<ILInstruction> storeValue;
@@ -934,6 +936,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
                 addr->DelayExceptions = (op != ILOpCode::Ldflda);
                 addr->FieldToken = tok;
                 addr->IsCompilerGeneratedField = file.IsFieldCompilerGeneratedOrInCompilerGeneratedClass(tok);
+                addr->FieldIsReadOnly = fieldIsReadOnly;
                 if (op == ILOpCode::Ldflda) {
                     if (!s.Push(std::move(addr))) return DecodeOutcome::Bail;
                 } else if (op == ILOpCode::Ldfld) {
@@ -945,6 +948,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
                 auto addr = std::make_unique<LdsFlda>(fieldName);
                 addr->FieldToken = tok;
                 addr->IsCompilerGeneratedField = file.IsFieldCompilerGeneratedOrInCompilerGeneratedClass(tok);
+                addr->FieldIsReadOnly = fieldIsReadOnly;
                 if (op == ILOpCode::Ldsflda) {
                     if (!s.Push(std::move(addr))) return DecodeOutcome::Bail;
                 } else if (op == ILOpCode::Ldsfld) {

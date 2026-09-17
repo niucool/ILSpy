@@ -42,14 +42,12 @@
 // ExpressionBuilder passing `this`); the port forward-declares it and takes a
 // non-owning pointer (the C# GC reference convention).
 //
-// Deferrals (each named at the member that needs it): the full `ConvertTo`
-// cast-insertion machinery on TranslatedExpression (the ~350-line C# body -- the
-// loud std::logic_error marks the unported arms and its consumers), the heavy
-// Visit arms that have not landed yet (the LdFlda/LdsFlda memory arms and the
-// LdFlda/LdsFlda field-address pointer arms, the If/Switch expression arms,
-// the dynamic/deconstruct arms), and the
-// CancellationToken (the cooperative-cancel throw is a no-op in the port, the
-// DecompileRun convention).
+// Deferrals (each named at the member that needs it): the heavy Visit arms that
+// have not landed yet (the LdFlda/LdsFlda field-address arms, which need the
+// ConvertField / TupleTransform.MatchTupleFieldAccess machinery, the If/Switch
+// expression arms, the dynamic/deconstruct arms, and Await, which needs the
+// awaiter/GetResultMethod pipeline surfaces), and the CancellationToken (the
+// cooperative-cancel throw is a no-op in the port, the DecompileRun convention).
 
 #pragma once
 
@@ -297,6 +295,15 @@ public:
     // render is a BinaryOperatorExpression with the NullCoalescing operator.
     TranslatedExpression VisitNullCoalescingInstruction(IL::ILInstruction* inst,
                                                         TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitAddressOf(AddressOf
+    // inst, TranslationContext context)` (ExpressionBuilder.cs lines 4231-4266): the
+    // `&value` render -- classify the wrapped value (an ILInlining.ClassifyExpression
+    // call), translate and convert it to the address's type, and when the value is a
+    // mutable lvalue whose address would let a mutating call modify the original
+    // (unless the parent is an ldobj) insert a redundant cast so the C# compiler
+    // copies; the render is a ref DirectionExpression carrying a
+    // ByReferenceResolveResult.
+    TranslatedExpression VisitAddressOf(IL::ILInstruction* inst, TranslationContext context);
     // The C# `private TranslatedExpression StObjViaHelperCall(StObj inst)`
     // (ExpressionBuilder.cs lines 3087-3125): the `Unsafe.Write` /
     // `Unsafe.WriteUnaligned` intrinsic rewrite for a store that cannot be a
