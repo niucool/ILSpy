@@ -44,9 +44,9 @@
 //
 // Deferrals (each named at the member that needs it): the CancellationToken (the
 // cooperative-cancel ThrowIfCancellationRequested in Convert is a no-op in the
-// port, the DecompileRun convention), the using / foreach / pinned-region Visit
-// arms (the foreach machinery they ride -- TransformToForeach and friends --
-// lands with the UsingInstruction slice), and, inside the block-container
+// port, the DecompileRun convention), the using / foreach Visit arms (the foreach
+// machinery they ride -- TransformToForeach and friends -- lands with the
+// UsingInstruction slice), and, inside the block-container
 // region, the DeclareLocalFunctions local-function declarations (the
 // TypeSystemAstBuilder.ConvertEntity long pole; the port's seed pipeline
 // produces no local functions, so the no-op is unobservable today) and the
@@ -59,9 +59,12 @@
 // beside the leaf arms, the switch region (CreateTypedCaseLabel +
 // TranslateSwitch + VisitSwitchInstruction, lines 156-346) has landed with the
 // StringToInt node and the ExpressionBuilder TranslateSwitchValue entry it
-// rides, and the block-container region (VisitBlock + VisitBlockContainer +
+// rides, the block-container region (VisitBlock + VisitBlockContainer +
 // ConvertLoop + ConvertBlockContainer, lines 1280-1608) completes the
-// statement-level dispatch over the ILAst control flow.
+// statement-level dispatch over the ILAst control flow, and the pinned-region
+// arm (VisitPinnedRegion + the IsAddressOfMoveableVar/IsFixedSizeBuffer
+// helpers, lines 1201-1278) has landed with the IL::GetPinnableReference node
+// the deferred array/string pinned-region post-passes will populate.
 //
 // The goto/leave state (StatementBuilder.cs lines 338-373 + 1576-1597) landed
 // with the leaf arms: the block->label maps (labels/duplicateLabels +
@@ -355,6 +358,28 @@ private:
     // switch-entry / plain-block dispatch over the container kind and the
     // entry point's incoming-edge count.
     TranslatedStatement VisitBlockContainer(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement
+    // VisitPinnedRegion(PinnedRegion inst)` (lines 1201-1278): the `fixed`
+    // statement over the pinned variable and its init expression -- the
+    // GetPinnableReference unwrap, the pointer-to-ref retype, the
+    // DirectionExpression address-of surgery, and the Unsafe.AsRef fallback for
+    // an already-unmanaged pointer.
+    TranslatedStatement VisitPinnedRegion(IL::ILInstruction* inst);
+
+public:
+    // The C# `private static bool IsAddressOfMoveableVar(Expression initExpr)`
+    // (lines 1262-1271): whether an `&expr` init takes the address of a moveable
+    // variable (the PointerArithmeticOffset.IsFixedVariable gate). The C# is
+    // private; the port's no-visibility-level-for-tests convention keeps it public.
+    static bool IsAddressOfMoveableVar(Syntax::Expression* initExpr);
+
+    // The C# `private static bool IsFixedSizeBuffer(Expression initExpr)` (lines
+    // 1273-1277): whether the init resolves to a fixed-size buffer field (the
+    // CSharpDecompiler.IsFixedField predicate). The C# is private; the port's
+    // no-visibility-level-for-tests convention keeps it public.
+    static bool IsFixedSizeBuffer(Syntax::Expression* initExpr);
+
+private:
 
     // The C# `private void ConvertSwitchSectionBody(Syntax.SwitchSection
     // astSection, ILInstruction bodyInst)` (lines 321-346): the converted body

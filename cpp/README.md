@@ -2919,6 +2919,36 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   standing skips / zero regressions, and all four CLI baselines unchanged
   (--csharp mscorlib 10106366 bytes, --il whole-module byte-identical to the
   41246545-byte real-ilspycmd gold, -l c 109438, the --json usage check rc 64).
+- **`StatementBuilder` slice 7 -- the pinned-region arm (`fixed` statements)** --
+  the C# `VisitPinnedRegion` (`StatementBuilder.cs` lines 1201-1278) and its two
+  private static helpers landed: the `fixed` statement over the pinned variable
+  and its init expression -- the `GetPinnableReference` unwrap (the pinning
+  method's expected type for a static method, the declaring type for an instance
+  method, the bare trimmed argument when the method operand is null), the plain
+  init translated at the ref type (a pointer pinned variable retypes to a
+  by-reference), the `DirectionExpression` address-of surgery (`&*ptr` collapses
+  to `ptr`; otherwise the operand is re-wrapped in `&` with the pinned variable's
+  resolve result), and the `Unsafe.AsRef<T>` fallback for an init that is already
+  an unmanaged pointer (C# cannot pin one), plus `IsAddressOfMoveableVar` (the
+  `PointerArithmeticOffset.IsFixedVariable` gate over the address-of operand's IL
+  annotation) and `IsFixedSizeBuffer` (the `CSharpDecompiler.IsFixedField`
+  predicate over the init's member resolve result: the `FixedBufferAttribute`'s
+  `(type, length)` fixed arguments). The IL-side node `IL::GetPinnableReference`
+  landed with it (`cpp/Decompiler/IL/Instructions/GetPinnableReference.hpp`): the
+  `UnaryInstruction` over the pinning argument (ResultType `Ref`, no direct flags
+  -- the port's bottom-up `Flags()` already composes the argument's), the
+  optional resolved-method operand beside its display string (the `LdFtn`
+  precedent), the `get.pinnable.reference(<arg>)` dump with the optional method,
+  and the clone case. Verified by 4 new `StatementBuilderTest` tests (the node
+  shape/dump/clone, the `GetPinnableReference` `fixed` render with the variable
+  annotation and the converted body, the plain-ref address-of render, and the
+  helper rejections) -- the plain-ref test caught the `else`-nesting bug (the
+  C#'s `else` belongs to the `dirExpr.Expression is UnaryOperatorExpression`
+  test, not to the outer `is DirectionExpression` one) at runtime, then green;
+  full suite 12342 ran / 12340 passed / the 2 standing skips / zero regressions,
+  and all four CLI baselines unchanged (--csharp mscorlib 10106366 bytes, --il
+  whole-module byte-identical to the 41246545-byte real-ilspycmd gold, -l c
+  109438, the --json usage check rc 64).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

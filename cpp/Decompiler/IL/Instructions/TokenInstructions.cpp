@@ -21,6 +21,7 @@
 // the display string the C# WriteToCore prints through the ambience).
 
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
+#include "Decompiler/IL/Instructions/GetPinnableReference.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
 
 namespace ILSpy::Decompiler::IL {
@@ -58,6 +59,16 @@ LdVirtDelegate::LdVirtDelegate(std::unique_ptr<ILInstruction> argument,
                                std::shared_ptr<TypeSystem::IMethod> method)
     : UnaryInstruction(OpCode::LdVirtDelegate, std::move(argument)),
       Type(std::move(type)), Method(std::move(method))
+{
+    if (Method)
+        MethodName = MethodDisplayString(*Method);
+}
+
+GetPinnableReference::GetPinnableReference(
+    std::unique_ptr<ILInstruction> argument,
+    std::shared_ptr<TypeSystem::IMethod> method)
+    : UnaryInstruction(OpCode::GetPinnableReference, std::move(argument)),
+      Method(std::move(method))
 {
     if (Method)
         MethodName = MethodDisplayString(*Method);

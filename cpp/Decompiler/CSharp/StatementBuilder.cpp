@@ -57,6 +57,8 @@
 #include "Decompiler/CSharp/Syntax/ParameterDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/ComposedType.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ThrowStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/FixedStatement.hpp"
+#include "Decompiler/CSharp/Syntax/VariableInitializer.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldReturnStatement.hpp"
@@ -66,12 +68,14 @@
 #include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
 #include "Decompiler/CSharp/TranslatedExpression.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
+#include "Decompiler/IL/Instructions/GetPinnableReference.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/LockInstruction.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
+#include "Decompiler/IL/Instructions/PinnedRegion.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/StringToInt.hpp"
@@ -80,12 +84,19 @@
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/IL/Instructions/YieldReturn.hpp"
 #include "Decompiler/IL/PatternMatching.hpp"
+#include "Decompiler/IL/PointerArithmeticOffset.hpp"
 #include "Decompiler/NRExtensions.hpp"
 #include "Decompiler/Semantics/Conversion.hpp"
 #include "Decompiler/Semantics/ConversionFactories.hpp"
 #include "Decompiler/Semantics/ConversionResolveResult.hpp"
+#include "Decompiler/Semantics/MemberResolveResult.hpp"
 #include "Decompiler/Semantics/ResolveResult.hpp"
 #include "Decompiler/Semantics/TypeResolveResult.hpp"
+#include "Decompiler/TypeSystem/IAttribute.hpp"
+#include "Decompiler/TypeSystem/IField.hpp"
+#include "Decompiler/TypeSystem/IMethod.hpp"
+#include "Decompiler/TypeSystem/IParameter.hpp"
+#include "Decompiler/TypeSystem/KnownAttribute.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/NormalizeTypeVisitor.hpp"
 #include "Decompiler/TypeSystem/NullableType.hpp"
@@ -93,6 +104,8 @@
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/Util/CSharpPrimitiveCast.hpp"
 
+#include <any>
+#include <cstdint>
 #include <functional>
 #include <stdexcept>
 #include <utility>
@@ -250,6 +263,8 @@ TranslatedStatement StatementBuilder::Visit(IL::ILInstruction* inst)
             return VisitBlock(inst);
         case IL::OpCode::BlockContainer:
             return VisitBlockContainer(inst);
+        case IL::OpCode::PinnedRegion:
+            return VisitPinnedRegion(inst);
         default:
             return Default(inst);
     }
@@ -1298,6 +1313,132 @@ Syntax::BlockStatement* StatementBuilder::ConvertBlockContainer(
         }
     }
     return blockStatement;
+}
+
+// The C# `protected internal override TranslatedStatement
+// VisitPinnedRegion(PinnedRegion inst)` (lines 1201-1278): the `fixed` statement
+// over the pinned variable and its init expression. The init goes through three
+// shapes: a GetPinnableReference unwrap (the pinning method's expected type for
+// a static method, the declaring type for an instance method); the plain init
+// translated at the ref type (a pointer pinned variable retypes to a by-ref), with
+// the DirectionExpression address-of surgery; and the Unsafe.AsRef fallback for an
+// init that is already an unmanaged pointer (C# cannot pin one).
+TranslatedStatement StatementBuilder::VisitPinnedRegion(IL::ILInstruction* inst)
+{
+    auto* pinned = static_cast<IL::PinnedRegion*>(inst);
+    auto* fixedStmt = new Syntax::FixedStatement();
+    fixedStmt->Type(exprBuilder->ConvertType(*pinned->Variable->Type));
+    Syntax::Expression* initExpr = nullptr;
+    if (auto* gpr = dynamic_cast<IL::GetPinnableReference*>(pinned->Init.get()))
+    {
+        if (gpr->Method != nullptr)
+        {
+            // The C# `gpr.Method.Parameters[0].Type` for a static pinning method,
+            // the method's declaring type for an instance one.
+            TS::ITypePtr expectedType = gpr->Method->IsStatic()
+                ? std::const_pointer_cast<TS::IType>(
+                      gpr->Method->Parameters().front()->Type().shared_from_this())
+                : gpr->Method->DeclaringType();
+            initExpr = exprBuilder->Translate(gpr->Argument.get(), expectedType.get())
+                           .ConvertTo(*expectedType, *exprBuilder)
+                           .Expression();
+        }
+        else
+        {
+            initExpr = exprBuilder->Translate(gpr->Argument.get()).Expression();
+        }
+    }
+    else
+    {
+        TS::ITypePtr refType = pinned->Variable->Type;
+        if (auto* pointerType = dynamic_cast<TS::PointerType*>(refType.get()))
+        {
+            refType = std::make_shared<TS::ByReferenceType>(pointerType->Element());
+        }
+        initExpr = exprBuilder->Translate(pinned->Init.get(), refType.get())
+                       .ConvertTo(*refType, *exprBuilder)
+                       .Expression();
+        if (auto* dirExpr = dynamic_cast<Syntax::DirectionExpression*>(initExpr))
+        {
+            auto* uoe = dynamic_cast<Syntax::UnaryOperatorExpression*>(dirExpr->Expression());
+            if (uoe != nullptr
+                && uoe->Operator() == Syntax::UnaryOperatorType::Dereference)
+            {
+                // The C# `initExpr = uoe.Expression.Detach()` -- `&*ptr`
+                // collapses to `ptr`.
+                initExpr = Syntax::Detach(uoe->Expression());
+            }
+            else
+            {
+                auto* addressOf = new Syntax::UnaryOperatorExpression(
+                    Syntax::Detach(dirExpr->Expression()),
+                    Syntax::UnaryOperatorType::AddressOf);
+                initExpr = WithRR(*addressOf,
+                                  std::make_shared<Sem::ResolveResult>(
+                                      pinned->Variable->Type))
+                               .Expression();
+            }
+        }
+        if (GetResolveResult(*initExpr)->Type().Kind() == TS::TypeKind::Pointer
+            && !IsAddressOfMoveableVar(initExpr)
+            && !IsFixedSizeBuffer(initExpr)
+            && refType->Kind() == TS::TypeKind::ByReference)
+        {
+            // C# does not allow pinning an already-unmanaged pointer; render
+            // `fixed (T* p = &Unsafe.AsRef<T>(existing))` instead.
+            const auto& brt = static_cast<const TS::ByReferenceType&>(*refType);
+            TS::ITypePtr element = brt.Element();
+            TranslatedExpression asRefCall = exprBuilder->CallUnsafeIntrinsic(
+                "AsRef", { initExpr }, *element, nullptr,
+                std::vector<TS::ITypePtr>{ element });
+            auto* addressOf = new Syntax::UnaryOperatorExpression(
+                asRefCall.Expression(), Syntax::UnaryOperatorType::AddressOf);
+            initExpr = WithRR(*addressOf,
+                              std::make_shared<Sem::ResolveResult>(
+                                  pinned->Variable->Type))
+                           .Expression();
+        }
+    }
+    auto* initializer = new Syntax::VariableInitializer(pinned->Variable->Name, initExpr);
+    WithILVariable(*initializer, pinned->Variable);
+    fixedStmt->Variables().Add(initializer);
+    fixedStmt->EmbeddedStatement(Convert(pinned->Body.get()));
+    return WithILInstruction(*fixedStmt, inst);
+}
+
+// The C# `private static bool IsAddressOfMoveableVar(Expression initExpr)` (lines
+// 1262-1271): an `&expr` whose operand's IL annotation is not a fixed variable
+// takes the address of a moveable variable.
+bool StatementBuilder::IsAddressOfMoveableVar(Syntax::Expression* initExpr)
+{
+    auto* uoe = dynamic_cast<Syntax::UnaryOperatorExpression*>(initExpr);
+    if (uoe == nullptr || uoe->Operator() != Syntax::UnaryOperatorType::AddressOf)
+        return false;
+    const std::vector<IL::ILInstruction*> annotations =
+        GetILInstructions(*uoe->Expression());
+    IL::ILInstruction* annotation =
+        annotations.empty() ? nullptr : annotations.front();
+    return !(annotation != nullptr
+             && IL::PointerArithmeticOffset::IsFixedVariable(annotation));
+}
+
+// The C# `private static bool IsFixedSizeBuffer(Expression initExpr)` (lines
+// 1273-1277): the init's member resolve result is a fixed-size buffer field (the
+// CSharpDecompiler.IsFixedField predicate -- the FixedBufferAttribute with its
+// (type, length) fixed arguments).
+bool StatementBuilder::IsFixedSizeBuffer(Syntax::Expression* initExpr)
+{
+    auto* mrr = dynamic_cast<const Sem::MemberResolveResult*>(GetResolveResult(*initExpr));
+    auto* field = mrr != nullptr ? dynamic_cast<const TS::IField*>(mrr->Member()) : nullptr;
+    if (field == nullptr)
+        return false;
+    const TS::IAttribute* attr = field->GetAttribute(TS::KnownAttribute::FixedBuffer);
+    if (attr == nullptr || attr->FixedArguments().size() != 2)
+        return false;
+    std::any typeValue = attr->FixedArguments()[0].Value();
+    std::any lengthValue = attr->FixedArguments()[1].Value();
+    return std::any_cast<TS::ITypePtr>(&typeValue) != nullptr
+        && std::any_cast<std::int32_t>(&lengthValue) != nullptr;
 }
 
 }  // namespace ILSpy::Decompiler::CSharp

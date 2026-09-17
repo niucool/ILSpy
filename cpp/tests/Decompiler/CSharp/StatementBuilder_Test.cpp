@@ -66,6 +66,8 @@
 #include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ThrowStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/FixedStatement.hpp"
+#include "Decompiler/CSharp/Syntax/VariableInitializer.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldReturnStatement.hpp"
 #include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
@@ -89,6 +91,8 @@
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
+#include "Decompiler/IL/Instructions/GetPinnableReference.hpp"
+#include "Decompiler/IL/Instructions/PinnedRegion.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
@@ -2303,6 +2307,116 @@ TEST(StatementBuilderTest, ConvertBlockContainerEndContainerLabels)
     auto* endLabel = dynamic_cast<Syntax::LabelStatement*>(blockStatement->Statements()[3]);
     ASSERT_TRUE(endLabel != nullptr);
     EXPECT_EQ(endLabel->Label(), "end_IL_0000");
+}
+
+// ---------------------------------------------------------------------------
+// The pinned-region arm (StatementBuilder.cs lines 1201-1278)
+// ---------------------------------------------------------------------------
+
+// The get.pinnable.reference node shape: one argument child, ResultType Ref, no
+// direct flags (the inherited Flags() composes the argument's), a dump with the
+// optional method, and a clone carrying the operand.
+TEST(StatementBuilderTest, GetPinnableReferenceNodeShapeAndClone)
+{
+    StatementFixture fixture;
+    auto variable = fixture.MakeLocal(TS::KnownTypeCode::Int32, "v");
+    IL::GetPinnableReference gpr(std::make_unique<IL::LdLoc>(variable));
+    EXPECT_EQ(gpr.ResultType(), IL::StackType::Ref);
+    EXPECT_EQ(gpr.ChildCount(), 1);
+    EXPECT_EQ(gpr.DirectFlags(), IL::InstructionFlags::None);
+    // The C# ComputeFlags returns argument.Flags -- the port composes it
+    // bottom-up (LdLoc reads a local).
+    EXPECT_EQ(gpr.Flags(), IL::InstructionFlags::MayReadLocals);
+    EXPECT_EQ(gpr.Method, nullptr);
+    std::string dump;
+    gpr.WriteTo(dump);
+    EXPECT_EQ(dump, "get.pinnable.reference(ldloc(v))");
+    auto clone = gpr.Clone();
+    auto* typed = dynamic_cast<IL::GetPinnableReference*>(clone.get());
+    ASSERT_TRUE(typed != nullptr);
+    EXPECT_EQ(typed->Method, nullptr);
+    EXPECT_EQ(typed->ChildCount(), 1);
+    EXPECT_EQ(typed->Argument->Op, IL::OpCode::LdLoc);
+}
+
+// The GetPinnableReference init unwraps to the translated argument (the null
+// method arm): the fixed statement carries the pinned variable and the body
+// container's converted block, with the PinnedRegion annotation.
+TEST(StatementBuilderTest, VisitPinnedRegionGetPinnableReferenceRendersFixedStatement)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto& intType = fixture.compilation.FindType(TS::KnownTypeCode::Int32);
+    auto pinnedVar = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::PinnedLocal,
+        std::make_shared<TS::PointerType>(
+            std::const_pointer_cast<TS::IType>(intType.shared_from_this())));
+    pinnedVar->Name = "p";
+    auto source = fixture.MakeLocal(TS::KnownTypeCode::Object, "mem");
+    auto body = std::make_unique<IL::BlockContainer>();
+    auto block = std::make_unique<IL::Block>();
+    block->IncomingEdgeCount = 1;
+    body->AddBlock(std::move(block));
+    IL::PinnedRegion region(
+        pinnedVar,
+        std::make_unique<IL::GetPinnableReference>(std::make_unique<IL::LdLoc>(source)),
+        std::move(body));
+    auto* stmt = builder.Convert(&region);
+    auto* fixedStmt = dynamic_cast<Syntax::FixedStatement*>(stmt);
+    ASSERT_TRUE(fixedStmt != nullptr);
+    EXPECT_NE(fixedStmt->Type(), nullptr);
+    ASSERT_EQ(fixedStmt->Variables().Count(), std::size_t(1));
+    auto* initializer = fixedStmt->Variables().At(0);
+    ASSERT_TRUE(initializer != nullptr);
+    EXPECT_EQ(initializer->Name(), "p");
+    EXPECT_EQ(CSharp::GetILVariable(*initializer), pinnedVar.get());
+    auto* init = dynamic_cast<Syntax::IdentifierExpression*>(initializer->Initializer());
+    ASSERT_TRUE(init != nullptr);
+    EXPECT_EQ(init->Identifier(), "mem");
+    EXPECT_TRUE(dynamic_cast<Syntax::BlockStatement*>(fixedStmt->EmbeddedStatement())
+                != nullptr);
+    auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(1));
+    EXPECT_EQ(instructions[0], &region);
+}
+
+// The plain-init ref path: a by-ref pinned variable keeps the DirectionExpression
+// and the address-of surgery wraps its operand in `&`.
+TEST(StatementBuilderTest, VisitPinnedRegionPlainRefWrapsAddressOf)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto& intType = fixture.compilation.FindType(TS::KnownTypeCode::Int32);
+    auto pinnedVar = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::PinnedLocal,
+        std::make_shared<TS::ByReferenceType>(
+            std::const_pointer_cast<TS::IType>(intType.shared_from_this())));
+    pinnedVar->Name = "p";
+    auto local = fixture.MakeLocal(TS::KnownTypeCode::Int32, "num");
+    auto body = std::make_unique<IL::BlockContainer>();
+    auto block = std::make_unique<IL::Block>();
+    block->IncomingEdgeCount = 1;
+    body->AddBlock(std::move(block));
+    IL::PinnedRegion region(pinnedVar, std::make_unique<IL::LdLoca>(local),
+                            std::move(body));
+    auto* stmt = builder.Convert(&region);
+    auto* fixedStmt = dynamic_cast<Syntax::FixedStatement*>(stmt);
+    ASSERT_TRUE(fixedStmt != nullptr);
+    ASSERT_EQ(fixedStmt->Variables().Count(), std::size_t(1));
+    auto* initExpr = fixedStmt->Variables().At(0)->Initializer();
+    auto* uoe = dynamic_cast<Syntax::UnaryOperatorExpression*>(initExpr);
+    ASSERT_TRUE(uoe != nullptr);
+    EXPECT_EQ(uoe->Operator(), Syntax::UnaryOperatorType::AddressOf);
+}
+
+// The pinned-region helpers: a non-address-of expression is never a moveable-var
+// address, and an expression with no member resolve result is never a fixed-size
+// buffer.
+TEST(StatementBuilderTest, PinnedRegionHelpersRejectThePlainExpression)
+{
+    auto* expression = new Syntax::IdentifierExpression("x");
+    EXPECT_FALSE(CSharp::StatementBuilder::IsAddressOfMoveableVar(expression));
+    EXPECT_FALSE(CSharp::StatementBuilder::IsFixedSizeBuffer(expression));
 }
 
 } // namespace ILSpy::Tests

@@ -64,6 +64,7 @@
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdObjIfRef.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/GetPinnableReference.hpp"
 #include "Decompiler/IL/Instructions/YieldReturn.hpp"
 #include "Decompiler/IL/Instructions/LockInstruction.hpp"
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
@@ -497,6 +498,14 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             const auto& s = static_cast<const PinnedRegion&>(*this);
             c = std::make_unique<PinnedRegion>(s.Variable,
                 s.Init ? s.Init->Clone() : nullptr, s.Body ? s.Body->Clone() : nullptr);
+            break;
+        }
+        case OpCode::GetPinnableReference: {
+            const auto& s = static_cast<const GetPinnableReference&>(*this);
+            auto clone = std::make_unique<GetPinnableReference>(
+                s.Argument ? s.Argument->Clone() : nullptr, s.Method);
+            clone->MethodName = s.MethodName;
+            c = std::move(clone);
             break;
         }
         case OpCode::LockInstruction: {
