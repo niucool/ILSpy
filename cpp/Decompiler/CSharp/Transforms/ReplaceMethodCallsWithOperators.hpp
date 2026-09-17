@@ -37,9 +37,9 @@
 // The string.Concat reduction (`IsStringConcat` / `CheckArgumentsForStringConcat`
 // and the `String.Concat(a, b)` -> `a + b` rewrite) is landed with the instance
 // transform. The `VisitCastExpression` methodof rewrite (the
-// `getMethodOrConstructorFromHandlePattern`, which needs the unported generated
-// `TypePattern`/`LdTokenPattern` nodes) remains DEFERRED, named at its would-be call
-// site.
+// `getMethodOrConstructorFromHandlePattern`, built from the
+// `TypePattern`/`LdTokenPattern` custom patterns in CustomPatterns.hpp) is landed
+// here.
 
 #pragma once
 
@@ -84,6 +84,13 @@ public:
     // The C# `public override void VisitInvocationExpression(...)`: walks the
     // children first, then processes the invocation (the method-call rewrites).
     void VisitInvocationExpression(Syntax::InvocationExpression* invocationExpression) override;
+
+    // The C# `public override void VisitCastExpression(CastExpression castExpression)`
+    // (lines 529-549): walks the children first, then matches the methodof shape
+    // (`(MethodInfo)/(ConstructorInfo)MethodBase.GetMethodFromHandle(ldtoken(x).MethodHandle,
+    // typeof(T).TypeHandle)`) and rewrites the declaration cast to the
+    // `ldtoken(declaring.Method(parameters)).MethodHandle` form.
+    void VisitCastExpression(Syntax::CastExpression* castExpression) override;
 
     // The C# `internal static bool HasCheckedEquivalent(IMethod method)`
     // (ReplaceMethodCallsWithOperators.cs lines 264-271): whether the declaring

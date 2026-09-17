@@ -5261,17 +5261,35 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   elimination), and the `RemoveRedundantToStringInConcat` calls (ported in the previous
   slice, now exercised) that strip compiler-generated `ToString()` calls where the type is
   effect-free. Faithfulness fix along the way: `IsStringParameter` now unwraps a `params`
-  array parameter's element type (the port's `IParameter` does carry `IsParams`). Only the
-  `VisitCastExpression` methodof rewrite (needing the unported generated
-  `TypePattern`/`LdTokenPattern` nodes) remains deferred. Verified by 9 new tests
-  (`ReplaceMethodCallsWithOperatorsInstanceTest`, total 25: the two-argument reduction,
-  the settings-off keep, and the named-argument / non-string-first-two /
+  array parameter's element type (the port's `IParameter` does carry `IsParams`). Verified
+  by 9 new tests (`ReplaceMethodCallsWithOperatorsInstanceTest`, total 25: the two-argument
+  reduction, the settings-off keep, and the named-argument / non-string-first-two /
   side-effecting-argument / by-ref-like-argument / nested-`Concat` keeps, plus the
   `params` expansion and the redundant-`ToString` elimination) proven with an
   `IsStringConcat`-neuter RED round (exactly the 3 positive tests failed, the 6 keep-tests
-  staying green, then all 25 green after restore). The full Debug suite is now 12697 ran /
-  12695 passed / the 2 standing skips / zero failures, and the transform is not wired into
-  the seed paths, so the CLI baselines are unchanged.
+  staying green, then all 25 green after restore). The full Debug suite was then 12697 ran /
+  12695 passed / the 2 standing skips / zero failures.
+- **`CustomPatterns` + the `ReplaceMethodCallsWithOperators` methodof rewrite** -- the three
+  hand-written patterns from `CustomPatterns.cs` (`TypePattern`, `LdTokenPattern`,
+  `TypeOfPattern`) land in `Transforms/CustomPatterns.{hpp,cpp}`, and `VisitCastExpression`
+  now matches the methodof shape
+  `(MethodInfo | ConstructorInfo)MethodBase.GetMethodFromHandle(ldtoken(method).MethodHandle,
+  typeof(declaringType).TypeHandle)` and rewrites it to the
+  `ldtoken(declaringType.Method(parameters)).MethodHandle` form, completing the
+  `ReplaceMethodCallsWithOperators` instance transform. `TypePattern` checks the
+  resolve-result type's namespace (the `IType.Namespace` accessor the port flattens off
+  `IType`, resolved by a helper mirroring `TypeSystemAstBuilder`'s) and short name, with
+  the modifier-less-`ComposedType` `BaseType` fallback; `LdTokenPattern` gates on the
+  `LdTokenAnnotation` marker and a single argument; `TypeOfPattern` builds the expanded
+  `typeof` tree. The methodof pattern tree is rebuilt per call into a local owner (the C#
+  `static readonly` lifetime). Verified by 8 `CustomPatternsTest` and 3 methodof tests (the
+  declaring-type rewrite with the `TypeReferenceExpression` parameter references, the
+  no-declaring-type cast-only replacement, and the non-reflection-type keep), proven with
+  a `TypePattern`-neuter RED round (exactly the 5 positive tests failed, the 6 keep-tests
+  staying green, then all 11 green after restore). The full Debug suite is now 12708 ran /
+  12706 passed / the 2 standing skips / zero failures, and the transform is not wired into
+  the seed paths, so the CLI baselines are unchanged (`--csharp` 10106360, `--il`
+  41246545, `-l c` 109438 bytes).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

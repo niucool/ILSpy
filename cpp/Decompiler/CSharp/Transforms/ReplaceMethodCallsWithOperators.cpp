@@ -32,11 +32,15 @@
 #include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/TypeOfExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UndocumentedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/PatternMatching/PatternNodes.hpp"
+#include "Decompiler/CSharp/Syntax/PatternPlaceholder.hpp"
 #include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/CSharp/Transforms/AddCheckedBlocks.hpp"
+#include "Decompiler/CSharp/Transforms/CustomPatterns.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
@@ -82,6 +86,76 @@ bool IsTypeHandleOnTypeOf(Syntax::Expression* expr) {
         && undocumented->UndocumentedExpressionType()
                == Syntax::UndocumentedExpressionType::RefType
         && undocumented->Arguments().Count() == 1;
+}
+
+namespace PM = Syntax::PatternMatching;
+
+// Owns the nodes of the `getMethodOrConstructorFromHandlePattern` rebuilt for one
+// `VisitCastExpression` call. The C# pattern is `static readonly` (process
+// lifetime); the port rebuilds an equivalent tree per call and keeps every node in
+// this holder, so the non-owning child pointers the pattern nodes carry stay valid
+// for the whole match (the PatternStatementTransform PatternTree precedent). AST
+// nodes do not own their children in the port, so every node created here is kept.
+class CustomPatternTree {
+public:
+    template <class T, class... Args>
+    T* Make(Args&&... args) {
+        auto node = std::make_unique<T>(std::forward<Args>(args)...);
+        T* result = node.get();
+        nodes_.push_back(std::move(node));
+        return result;
+    }
+
+    // The generated `implicit operator <TNode>(Pattern)`: wrap a pattern in a
+    // placeholder so it can occupy an AST slot while still matching.
+    template <class TNode>
+    TNode* Wrap(std::shared_ptr<PM::Pattern> pattern) {
+        return Make<Syntax::PatternPlaceholderNode<TNode>>(std::move(pattern));
+    }
+
+private:
+    std::vector<std::unique_ptr<PM::INode>> nodes_;
+};
+
+// The C# `static readonly Expression getMethodOrConstructorFromHandlePattern`
+// (lines 520-527): the methodof shape
+// `(MethodInfo | ConstructorInfo)MethodBase.GetMethodFromHandle(
+//      ldtoken(method).MethodHandle, typeof(declaringType).TypeHandle)`.
+// Built into `tree` each call.
+Syntax::CastExpression* BuildGetMethodOrConstructorFromHandlePattern(
+    CustomPatternTree& tree) {
+    // The cast's type: a `Choice` of the two method-reflection types, wrapped as an
+    // `AstType` placeholder (the C# `new Choice { TypePattern, TypePattern }.ToType()`).
+    auto choice = std::make_shared<PM::Choice>();
+    choice->Add(tree.Make<TypePattern>("System.Reflection", "MethodInfo"));
+    choice->Add(tree.Make<TypePattern>("System.Reflection", "ConstructorInfo"));
+
+    // `TypeReferenceExpression(TypePattern(MethodBase)).GetMethodFromHandle`.
+    auto* typeReference = tree.Make<Syntax::TypeReferenceExpression>(
+        tree.Wrap<Syntax::AstType>(
+            std::make_shared<TypePattern>("System.Reflection", "MethodBase")));
+    auto* getMethodFromHandle = tree.Make<Syntax::MemberReferenceExpression>(
+        typeReference, std::string("GetMethodFromHandle"));
+    auto* invocation = tree.Make<Syntax::InvocationExpression>(getMethodFromHandle);
+
+    // `ldtoken(method).MethodHandle`, capturing the token argument under "method"
+    // and the whole member reference under "ldtokenNode".
+    auto* methodHandle = tree.Make<Syntax::MemberReferenceExpression>(
+        tree.Wrap<Syntax::Expression>(std::make_shared<LdTokenPattern>("method")),
+        std::string("MethodHandle"));
+    invocation->Arguments().Add(tree.Wrap<Syntax::Expression>(
+        std::make_shared<PM::NamedNode>("ldtokenNode", methodHandle)));
+
+    // The optional second argument `typeof(declaringType).TypeHandle`.
+    auto* declaringTypeOf = tree.Make<Syntax::TypeOfExpression>(
+        tree.Wrap<Syntax::AstType>(std::make_shared<PM::AnyNode>("declaringType")));
+    auto* declaringTypeHandle = tree.Make<Syntax::MemberReferenceExpression>(
+        declaringTypeOf, std::string("TypeHandle"));
+    invocation->Arguments().Add(tree.Wrap<Syntax::Expression>(
+        std::make_shared<PM::OptionalNode>(declaringTypeHandle)));
+
+    return tree.Make<Syntax::CastExpression>(
+        tree.Wrap<Syntax::AstType>(std::move(choice)), invocation);
 }
 
 } // namespace
@@ -399,6 +473,51 @@ void ReplaceMethodCallsWithOperators::VisitInvocationExpression(
     Syntax::InvocationExpression* invocationExpression) {
     Syntax::DepthFirstAstVisitor::VisitInvocationExpression(invocationExpression);
     ProcessInvocationExpression(invocationExpression);
+}
+
+// The C# `public override void VisitCastExpression(CastExpression castExpression)`
+// (lines 529-549): walk the children first, then rewrite the methodof declaration
+// cast `(MethodInfo)MethodBase.GetMethodFromHandle(ldtoken(x).MethodHandle)` to
+// `ldtoken(declaring.Method(parameters)).MethodHandle` when the declaring type is
+// present and the token resolves to a method.
+void ReplaceMethodCallsWithOperators::VisitCastExpression(
+    Syntax::CastExpression* castExpression) {
+    Syntax::DepthFirstAstVisitor::VisitCastExpression(castExpression);
+    // Handle methodof.
+    CustomPatternTree tree;
+    Syntax::CastExpression* pattern = BuildGetMethodOrConstructorFromHandlePattern(tree);
+    PM::Match match = PM::PatternExtensions::Match(*pattern, castExpression);
+    if (!match.Success())
+        return;
+    std::vector<Syntax::AstNode*> methodNodes = match.Get<Syntax::AstNode>("method");
+    if (methodNodes.empty() || methodNodes.front() == nullptr)
+        return;
+    const TS::ISymbol* symbol = CSharp::GetSymbol(*methodNodes.front());
+    const TS::IMethod* method =
+        symbol != nullptr ? dynamic_cast<const TS::IMethod*>(symbol) : nullptr;
+    if (match.Has("declaringType") && method != nullptr) {
+        std::vector<Syntax::AstType*> declaringTypes =
+            match.Get<Syntax::AstType>("declaringType");
+        Syntax::AstType* declaringType =
+            declaringTypes.empty() ? nullptr : declaringTypes.front();
+        if (declaringType != nullptr) {
+            auto* newNode = new Syntax::MemberReferenceExpression(
+                new Syntax::TypeReferenceExpression(Syntax::Detach(declaringType)),
+                method->Name());
+            auto* invocation = new Syntax::InvocationExpression(newNode);
+            for (const TS::IParameter* parameter : method->Parameters()) {
+                invocation->Arguments().Add(new Syntax::TypeReferenceExpression(
+                    context_->TypeSystemAstBuilder().ConvertType(
+                        const_cast<TS::IType&>(parameter->Type()))));
+            }
+            methodNodes.front()->ReplaceWith(invocation);
+        }
+    }
+    std::vector<Syntax::AstNode*> ldtokenNodes = match.Get<Syntax::AstNode>("ldtokenNode");
+    if (!ldtokenNodes.empty() && ldtokenNodes.front() != nullptr) {
+        castExpression->ReplaceWith(
+            CSharp::CopyAnnotationsFrom(ldtokenNodes.front(), *castExpression));
+    }
 }
 
 // The C# `void ProcessInvocationExpression(InvocationExpression

@@ -27,6 +27,7 @@
 
 #include "Decompiler/CSharp/Transforms/ReplaceMethodCallsWithOperators.hpp"
 
+#include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
@@ -37,6 +38,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/TypeOfExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
@@ -54,6 +56,7 @@
 #include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
 #include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/LookupStubs.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
 
@@ -929,4 +932,138 @@ TEST(ReplaceMethodCallsWithOperatorsInstanceTest, StringConcatRemovesRedundantTo
     auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(result);
     ASSERT_NE(binary, nullptr);
     EXPECT_EQ(binary->Right(), target);
+}
+
+// ---------------------------------------------------------------------------
+// The methodof rewrite (`VisitCastExpression` over the
+// `getMethodOrConstructorFromHandlePattern` built from the custom
+// `TypePattern`/`LdTokenPattern` nodes). The token argument carries the method
+// symbol through an `InvocationResolveResult` annotation, and the cast's type /
+// `MethodBase` targets carry `TypeResolveResult`s for the pattern's type lookup.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+namespace CS = ::ILSpy::Decompiler::CSharp;
+
+TS::ITypePtr NamedReflectionType(const std::string& namespaceName,
+                                 const std::string& name) {
+    return std::shared_ptr<class TS::UnknownType>(
+        new class TS::UnknownType(namespaceName, name, 0));
+}
+
+// A `SimpleType` whose resolve-result annotation is a `TypeResolveResult` for the
+// given (namespace, name).
+Syntax::SimpleType* ResolvedType(const std::string& namespaceName,
+                                 const std::string& name) {
+    auto* type = new Syntax::SimpleType(name);
+    type->AddAnnotation(
+        std::make_shared<Sem::TypeResolveResult>(NamedReflectionType(namespaceName, name)));
+    return type;
+}
+
+// Builds the input methodof cast
+// `(castTypeName)MethodBase.GetMethodFromHandle(ldtoken(token).MethodHandle
+//      [, typeof(declaring).TypeHandle])`.
+Syntax::CastExpression* BuildMethodofCast(const char* castTypeName,
+                                          Syntax::Expression* tokenArgument,
+                                          bool withDeclaringType) {
+    auto* ldtoken = new Syntax::InvocationExpression(
+        new Syntax::IdentifierExpression("ldtoken"));
+    ldtoken->AddAnnotation(std::make_shared<CS::LdTokenAnnotation>());
+    ldtoken->Arguments().Add(tokenArgument);
+    auto* ldtokenMember = new Syntax::MemberReferenceExpression(
+        ldtoken, std::string("MethodHandle"));
+    auto* target = new Syntax::MemberReferenceExpression(
+        new Syntax::TypeReferenceExpression(
+            ResolvedType("System.Reflection", "MethodBase")),
+        std::string("GetMethodFromHandle"));
+    auto* invocation = new Syntax::InvocationExpression(target);
+    invocation->Arguments().Add(ldtokenMember);
+    if (withDeclaringType) {
+        invocation->Arguments().Add(new Syntax::MemberReferenceExpression(
+            new Syntax::TypeOfExpression(ResolvedType("Some", "Declaring")),
+            std::string("TypeHandle")));
+    }
+    return new Syntax::CastExpression(
+        ResolvedType("System.Reflection", castTypeName), invocation);
+}
+
+// Locates the `ldtoken(token).MethodHandle` member reference inside a methodof cast.
+Syntax::MemberReferenceExpression* MethodofTokenMember(Syntax::CastExpression* cast) {
+    auto* invocation = dynamic_cast<Syntax::InvocationExpression*>(cast->Expression());
+    if (invocation == nullptr)
+        return nullptr;
+    return dynamic_cast<Syntax::MemberReferenceExpression*>(invocation->Arguments()[0]);
+}
+
+} // namespace
+
+// With a `typeof(declaringType).TypeHandle` argument the token argument is replaced
+// by a `declaringType.Method(parameters)` invocation, and the cast by the
+// `ldtoken(...).MethodHandle` member reference.
+TEST(ReplaceMethodCallsWithOperatorsInstanceTest, MethodofWithDeclaringTypeRewrites)
+{
+    InstanceFixture fixture;
+    auto method = std::make_shared<Impl::FakeMethod>(
+        fixture.compilation, TS::SymbolKind::Method);
+    method->SetName("Target");
+    std::vector<std::shared_ptr<const TS::IParameter>> parameters;
+    parameters.push_back(std::make_shared<Impl::DefaultParameter>(
+        fixture.FindType(TS::KnownTypeCode::Int32), std::string("x")));
+    method->SetParameters(std::move(parameters));
+    auto* tokenArgument = new Syntax::IdentifierExpression("Token");
+    tokenArgument->AddAnnotation(
+        std::make_shared<Sem::InvocationResolveResult>(nullptr, method.get()));
+    auto* cast = BuildMethodofCast("MethodInfo", tokenArgument, true);
+    Syntax::MemberReferenceExpression* ldtokenMember = MethodofTokenMember(cast);
+
+    Syntax::Expression* result = RunOnExpression(fixture, cast);
+
+    EXPECT_EQ(result, ldtokenMember);
+    auto* ldtoken = dynamic_cast<Syntax::InvocationExpression*>(ldtokenMember->Target());
+    ASSERT_NE(ldtoken, nullptr);
+    ASSERT_EQ(ldtoken->Arguments().Count(), 1);
+    auto* newNode = dynamic_cast<Syntax::InvocationExpression*>(ldtoken->Arguments()[0]);
+    ASSERT_NE(newNode, nullptr);
+    auto* newMember = dynamic_cast<Syntax::MemberReferenceExpression*>(newNode->Target());
+    ASSERT_NE(newMember, nullptr);
+    EXPECT_EQ(newMember->MemberName(), "Target");
+    EXPECT_NE(dynamic_cast<Syntax::TypeReferenceExpression*>(newMember->Target()), nullptr);
+    ASSERT_EQ(newNode->Arguments().Count(), 1);
+    auto* parameterReference =
+        dynamic_cast<Syntax::TypeReferenceExpression*>(newNode->Arguments()[0]);
+    ASSERT_NE(parameterReference, nullptr);
+    EXPECT_NE(parameterReference->Type(), nullptr);
+}
+
+// Without the declaring-type argument only the cast is replaced; the token argument
+// (which need not resolve to a method) stays in place.
+TEST(ReplaceMethodCallsWithOperatorsInstanceTest, MethodofWithoutDeclaringTypeReplacesCastOnly)
+{
+    InstanceFixture fixture;
+    auto* tokenArgument = new Syntax::IdentifierExpression("Token");
+    auto* cast = BuildMethodofCast("ConstructorInfo", tokenArgument, false);
+    Syntax::MemberReferenceExpression* ldtokenMember = MethodofTokenMember(cast);
+
+    Syntax::Expression* result = RunOnExpression(fixture, cast);
+
+    EXPECT_EQ(result, ldtokenMember);
+    auto* ldtoken = dynamic_cast<Syntax::InvocationExpression*>(ldtokenMember->Target());
+    ASSERT_NE(ldtoken, nullptr);
+    ASSERT_EQ(ldtoken->Arguments().Count(), 1);
+    EXPECT_EQ(ldtoken->Arguments()[0], tokenArgument);
+}
+
+// A cast whose type is neither `MethodInfo` nor `ConstructorInfo` does not match the
+// methodof pattern and is kept.
+TEST(ReplaceMethodCallsWithOperatorsInstanceTest, MethodofNonReflectionTypeKept)
+{
+    InstanceFixture fixture;
+    auto* tokenArgument = new Syntax::IdentifierExpression("Token");
+    auto* cast = BuildMethodofCast("Int32", tokenArgument, false);
+
+    Syntax::Expression* result = RunOnExpression(fixture, cast);
+
+    EXPECT_EQ(result, cast);
 }
