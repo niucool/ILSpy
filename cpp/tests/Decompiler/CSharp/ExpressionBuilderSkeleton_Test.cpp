@@ -65,6 +65,7 @@
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/LdLen.hpp"
+#include "Decompiler/IL/Instructions/NullableInstructions.hpp"
 #include "Decompiler/IL/Instructions/BitNot.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
@@ -1210,6 +1211,113 @@ TEST(ExpressionBuilderLdElemaTest, NodeCloneCarriesWithSystemIndex)
     auto clone = ldElema.Clone();
     auto* cloneTyped = static_cast<IL::LdElema*>(clone.get());
     EXPECT_TRUE(cloneTyped->WithSystemIndex);
+}
+
+
+// The null-conditional arms (VisitNullableRewrap / VisitNullableUnwrap, the C#
+// lines 4298-4321): the `?.` join point lifts a non-nullable value-type operand
+// into `Nullable<T>` and renders a NullConditionalRewrap; the `?.` dereference
+// strips a ref DirectionExpression for a RefInput argument and renders a
+// NullConditional over the underlying type. Expectations derived from the C#
+// bodies over the MinimalCorlib fixture.
+
+TEST(ExpressionBuilderNullableTest, RewrapLiftsNonNullableValueTypeToNullable)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto var = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    var->Name = "x";
+    IL::NullableRewrap rewrap(std::make_unique<IL::LdLoc>(var));
+    auto expr = builder.Translate(&rewrap);
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    EXPECT_EQ(unary->Operator(), Syntax::UnaryOperatorType::NullConditionalRewrap);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(unary->Expression()) != nullptr);
+    // The int operand is a non-nullable value type, so the result is Nullable<int>.
+    EXPECT_TRUE(TS::IsNullable(expr.Type()));
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*unary);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], &rewrap);
+}
+
+TEST(ExpressionBuilderNullableTest, RewrapKeepsReferenceTypeUnlifted)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    const TS::IType& stringType = fixture.compilation.FindType(TS::KnownTypeCode::String);
+    auto stringPtr = std::const_pointer_cast<TS::IType>(stringType.shared_from_this());
+    auto var = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, stringPtr, 0);
+    var->Name = "s";
+    IL::NullableRewrap rewrap(std::make_unique<IL::LdLoc>(var));
+    auto expr = builder.Translate(&rewrap);
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    EXPECT_EQ(unary->Operator(), Syntax::UnaryOperatorType::NullConditionalRewrap);
+    // A reference type is not lifted: the result stays the reference type itself.
+    EXPECT_FALSE(TS::IsNullable(expr.Type()));
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()), TS::KnownTypeCode::String));
+}
+
+TEST(ExpressionBuilderNullableTest, UnwrapRendersNullConditionalOverUnderlyingType)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    TS::ITypePtr nullableInt = TS::Create(fixture.compilation, *intType);
+    auto var = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, nullableInt, 0);
+    var->Name = "n";
+    IL::NullableUnwrap unwrap(IL::StackType::I4, std::make_unique<IL::LdLoc>(var));
+    auto expr = builder.Translate(&unwrap);
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    EXPECT_EQ(unary->Operator(), Syntax::UnaryOperatorType::NullConditional);
+    // GetUnderlyingType(Nullable<int>) is int (not the nullable itself).
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()), TS::KnownTypeCode::Int32));
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*unary);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], &unwrap);
+}
+
+TEST(ExpressionBuilderNullableTest, UnwrapRefInputStripsDirectionExpression)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto var = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    var->Name = "x";
+    // LdLoca translates to a ref DirectionExpression; the RefInput arm strips it.
+    IL::NullableUnwrap unwrap(IL::StackType::I4, std::make_unique<IL::LdLoca>(var),
+                              /*refInput=*/true);
+    auto expr = builder.Translate(&unwrap);
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    EXPECT_EQ(unary->Operator(), Syntax::UnaryOperatorType::NullConditional);
+    EXPECT_TRUE(dynamic_cast<Syntax::DirectionExpression*>(unary->Expression()) == nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(unary->Expression()) != nullptr);
+}
+
+TEST(ExpressionBuilderNullableTest, NodeDumpsAndClones)
+{
+    IL::NullableRewrap rewrap(std::make_unique<IL::LdcI4>(1));
+    std::string dump;
+    rewrap.WriteTo(dump);
+    EXPECT_EQ(dump.rfind("nullable.rewrap(", 0), 0u);
+    auto rewrapClone = rewrap.Clone();
+    EXPECT_EQ(rewrapClone->Op, IL::OpCode::NullableRewrap);
+
+    IL::NullableUnwrap unwrap(IL::StackType::I4, std::make_unique<IL::LdcI4>(1),
+                              /*refInput=*/true);
+    std::string dump2;
+    unwrap.WriteTo(dump2);
+    EXPECT_EQ(dump2.rfind("nullable.unwrap.refinput.I4(", 0), 0u);
+    auto unwrapClone = unwrap.Clone();
+    auto* cloneTyped = static_cast<IL::NullableUnwrap*>(unwrapClone.get());
+    EXPECT_TRUE(cloneTyped->RefInput);
+    EXPECT_EQ(cloneTyped->ResultTypeField, IL::StackType::I4);
 }
 
 

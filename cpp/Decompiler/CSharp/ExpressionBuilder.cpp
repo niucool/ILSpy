@@ -93,6 +93,7 @@
 #include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/CastClass.hpp"
 #include "Decompiler/IL/Instructions/LdLen.hpp"
+#include "Decompiler/IL/Instructions/NullableInstructions.hpp"
 #include "Decompiler/IL/OpCodeName.hpp"
 #include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
@@ -740,6 +741,10 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitLdLen(inst, context);
         case IL::OpCode::LdElema:
             return VisitLdElema(inst, context);
+        case IL::OpCode::NullableRewrap:
+            return VisitNullableRewrap(inst, context);
+        case IL::OpCode::NullableUnwrap:
+            return VisitNullableUnwrap(inst, context);
         case IL::OpCode::Call:
         case IL::OpCode::CallVirt:
         case IL::OpCode::NewObj:
@@ -1526,6 +1531,61 @@ TranslatedExpression ExpressionBuilder::VisitLdElema(IL::ILInstruction* inst,
             Syntax::FieldDirection::Ref, expr.Expression())),
         std::make_shared<Sem::ByReferenceResolveResult>(
             SharedResolveResultAnnotation(*expr.Expression()), TS::ReferenceKind::Ref));
+}
+
+// The C# `protected internal override TranslatedExpression
+// VisitNullableRewrap(NullableRewrap inst, TranslationContext context)`
+// (ExpressionBuilder.cs lines 4298-4309): the null-conditional join point. A
+// non-nullable value-type Argument is lifted into `Nullable<T>` (the C#
+// `NullableType.Create(compilation, type)`), a reference type is kept as-is; the
+// render is a NullConditionalRewrap UnaryOperatorExpression whose resolve result is
+// a plain ResolveResult of the (possibly lifted) type.
+TranslatedExpression ExpressionBuilder::VisitNullableRewrap(IL::ILInstruction* inst,
+                                                           TranslationContext context)
+{
+    (void)context;
+    auto* rewrap = static_cast<IL::NullableRewrap*>(inst);
+    TranslatedExpression arg = Translate(rewrap->Argument.get());
+    TS::ITypePtr type = const_cast<TS::IType&>(arg.Type()).shared_from_this();
+    if (TS::IsNonNullableValueType(arg.Type()))
+    {
+        type = TS::Create(*compilation, arg.Type());
+    }
+    auto* unary = new Syntax::UnaryOperatorExpression(
+        arg.Expression(), Syntax::UnaryOperatorType::NullConditionalRewrap);
+    return WithRR(WithILInstruction(*unary, inst),
+                  std::make_shared<Sem::ResolveResult>(type));
+}
+
+// The C# `protected internal override TranslatedExpression
+// VisitNullableUnwrap(NullableUnwrap inst, TranslationContext context)`
+// (ExpressionBuilder.cs lines 4311-4321): the `?.` dereference. When the node has a
+// RefInput (but not a ref-typed output) and the Argument rendered as a ref
+// DirectionExpression, the `ref` is stripped -- the managed reference is
+// dereferenced by removing the direction. The render is a NullConditional
+// UnaryOperatorExpression whose resolve result is a plain ResolveResult of the
+// underlying type (NullableType.GetUnderlyingType, the identity for a
+// non-nullable input).
+TranslatedExpression ExpressionBuilder::VisitNullableUnwrap(IL::ILInstruction* inst,
+                                                           TranslationContext context)
+{
+    (void)context;
+    auto* unwrap = static_cast<IL::NullableUnwrap*>(inst);
+    TranslatedExpression arg = Translate(unwrap->Argument.get());
+    if (unwrap->RefInput && !unwrap->RefOutput())
+    {
+        if (auto* dir = dynamic_cast<Syntax::DirectionExpression*>(arg.Expression()))
+        {
+            arg = arg.UnwrapChild(dir->Expression());
+        }
+    }
+    const TS::IType& underlying = TS::GetUnderlyingType(arg.Type());
+    auto* unary = new Syntax::UnaryOperatorExpression(
+        arg.Expression(), Syntax::UnaryOperatorType::NullConditional);
+    return WithRR(
+        WithILInstruction(*unary, inst),
+        std::make_shared<Sem::ResolveResult>(
+            const_cast<TS::IType&>(underlying).shared_from_this()));
 }
 
 

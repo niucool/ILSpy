@@ -269,6 +269,23 @@ public:
     // conversion when `withsystemindex` is set) and wrap in a `ref` DirectionExpression
     // carrying a ByReferenceResolveResult over the element type.
     TranslatedExpression VisitLdElema(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitNullableRewrap(NullableRewrap inst, TranslationContext context)`
+    // (ExpressionBuilder.cs lines 4298-4309): the null-conditional join point --
+    // translate the Argument and, when its type is a non-nullable value type, lift
+    // it into `Nullable<T>` (NullableType.Create); the render is a
+    // NullConditionalRewrap UnaryOperatorExpression carrying a plain ResolveResult of
+    // that type.
+    TranslatedExpression VisitNullableRewrap(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitNullableUnwrap(NullableUnwrap inst, TranslationContext context)`
+    // (ExpressionBuilder.cs lines 4311-4321): the `?.` dereference -- translate the
+    // Argument; for a RefInput (and non-RefOutput) argument whose render is a ref
+    // DirectionExpression, strip the direction (the managed reference is dereferenced
+    // by removing the `ref`); the render is a NullConditional UnaryOperatorExpression
+    // carrying a plain ResolveResult of the underlying type
+    // (NullableType.GetUnderlyingType).
+    TranslatedExpression VisitNullableUnwrap(IL::ILInstruction* inst, TranslationContext context);
     // The C# `private TranslatedExpression StObjViaHelperCall(StObj inst)`
     // (ExpressionBuilder.cs lines 3087-3125): the `Unsafe.Write` /
     // `Unsafe.WriteUnaligned` intrinsic rewrite for a store that cannot be a

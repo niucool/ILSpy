@@ -3087,6 +3087,28 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `withsystemindex` `System.Index` conversion, and the node dump/clone), proven
   by a dispatch neuter RED round (exactly the 3 Visit tests failed through the
   `Default` fallback while the node test passed) then restored green.
+- **`ExpressionBuilder` null-conditional arms (`VisitNullableRewrap` /
+  `VisitNullableUnwrap`)** -- the C# `VisitNullableRewrap` / `VisitNullableUnwrap`
+  (`ExpressionBuilder.cs` lines 4298-4321) landed and are routed from the `Visit`
+  OpCode switch (`nullable.rewrap` / `nullable.unwrap`). `VisitNullableRewrap`
+  translates the Argument and, when its type is a non-nullable value type, lifts
+  it into `Nullable<T>` via `NullableType.Create`, rendering a
+  `NullConditionalRewrap` `UnaryOperatorExpression` with a plain `ResolveResult`
+  of that type (a reference-type operand stays unlifted). `VisitNullableUnwrap`
+  translates the Argument and, for a `RefInput` (`!RefOutput`) argument rendered
+  as a ref `DirectionExpression`, strips the direction (the managed reference is
+  dereferenced by removing the `ref`), rendering a `NullConditional`
+  `UnaryOperatorExpression` whose resolve result is a plain `ResolveResult` of
+  `NullableType.GetUnderlyingType(arg.Type)`. The `NullableRewrap` /
+  `NullableUnwrap` IL nodes already existed (tested-but-not-wired); no node changes
+  were needed. Verified by 5 new `ExpressionBuilderNullableTest` tests (the
+  `Nullable<int>` lift, the unlifted reference type, the `Nullable<int>` unwrap
+  over the underlying `Int32`, the `RefInput` direction strip, and the node
+  dump/clone), proven by a clean RED round (exactly the 4 Visit tests failed
+  through the `Default` fallback while the node test passed) then restored green;
+  full Debug suite 12376 ran / 12374 passed / the 2 standing skips / zero failures,
+  and the CLI baselines are structurally unchanged (the Phase-5 back end is not yet
+  wired into the `--csharp` CLI path).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
