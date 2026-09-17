@@ -4915,6 +4915,34 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   then all 8 green after restore), and the full Debug suite is 12475 ran / 12473 passed /
   the 2 standing skips / zero failures; the `-l c` CLI baseline is unchanged at 109438 (the
   transform is not wired into the seed `--csharp` path).
+- **`NormalizeBlockStatements` AST transform** -- the fifth concrete `IAstTransform` over the
+  iteration-160 `TransformContext` foundation, ported per `PORT_PLAN.md`'s Phase 5 from the
+  `CSharpDecompiler.GetAstTransforms()` order (the transform directly before
+  `FlattenSwitchBlocks`). The transform (`Transforms/NormalizeBlockStatements.{hpp,cpp}`) is a
+  `DepthFirstAstVisitor` that normalizes embedded-statement braces: an `if`/`using` arm goes
+  through `DoTransform` (with `AlwaysUseBraces` on, every non-`else` arm is wrapped in a
+  block; otherwise a single-statement block is unwrapped when its inner statement is legal as
+  an embedded statement, and an illegal arm is wrapped), while the loop/`fixed`/`lock` bodies
+  are always wrapped via `InsertBlock` (an existing block is kept). `IsAllowedAsEmbeddedStatement`
+  rejects a variable declaration and every loop/switch/lock/fixed kind, permits an `else`-if
+  and a non-enhanced `using` in the matching parent position, and otherwise rejects a
+  statement whose parent is itself an `if` arm (the dangling-else guard). A childless `;` body
+  is dropped and the new block stays empty. The transform also marks the first-seen single
+  namespace file-scoped when `FileScopedNamespaces` is on and rewrites a calculated
+  getter-only property/indexer to an expression body when
+  `UseExpressionBodyForCalculatedGetterOnlyProperties` is on. Divergence: the C# matches the
+  getter with the generated `CalculatedGetterOnlyPropertyPattern`/`...IndexerPattern`, but the
+  concrete pattern nodes (`AnyNode`/`Repeat`/`AnyNodeOrNull`) are not ported yet, so the port
+  recognizes the same shape with direct structural checks (a present getter whose body is a
+  single `return <expr>;` block, no accessor modifier beyond `readonly`). Verified by 23 tests
+  (the legal-bare keep, the redundant-block unwrap, the loop/`do`/`lock` wraps, the empty-body
+  drop, the variable-declaration and nested-if wraps, the dangling-else else-arm wrap, the
+  `AlwaysUseBraces` true/else matrix, the `using` unwrap/keep pair, the file-scoped
+  single/off/multiple matrix, and the property/indexer simplify/keep matrix) proven with a
+  Run-neuter RED round (14 of the 23 failed with the visitor disabled, then all 23 green after
+  restore), and the full Debug suite is 12498 ran / 12496 passed / the 2 standing skips / zero
+  failures; the `--csharp` CLI baseline is unchanged at 10106360 bytes (the transform is not
+  wired into the seed `--csharp` path).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.
