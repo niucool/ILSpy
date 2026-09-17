@@ -5103,6 +5103,30 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   a placeholder over every other `hasPatternPlaceholder` base); the full Debug suite is 12603 ran /
   12599 passed / the 2 standing skips / zero failures, and the CLI baselines are unchanged (the
   machinery is not reachable from the seed paths).
+- **Result-returning visitor infrastructure + `ContextTrackingVisitor`** -- the
+  `<AstNode>` instantiation of the C# generic visitor (`IAstVisitor<out S>` with
+  `S = AstNode`), needed by the pattern-based transforms (`PatternStatementTransform`
+  derives from `ContextTrackingVisitor<AstNode>` and uses each visit's returned node to
+  keep iterating a replaced node). `IAstVisitorAstNode.hpp` is the result-returning
+  counterpart of `IAstVisitorBool.hpp`, `DepthFirstAstVisitorAstNode.hpp` the
+  `DepthFirstAstVisitor<AstNode>` default walk (its `VisitChildren` returns null -- the C#
+  `default(T)` -- and recurses through `AstNode::AcceptVisitorAstNode`), and
+  `ContextTrackingVisitor.hpp` is the `ContextTrackingVisitor<TResult>` port (instantiated
+  `TResult = AstNode`) whose six per-declaration visits set
+  `currentTypeDefinition`/`currentMethod` from the node's resolved symbol for the child
+  walk and restore it afterwards (a small RAII guard stands in for the C# `finally`).
+  Rather than add a second per-node virtual to every concrete node, the `<AstNode>`
+  dispatch reuses the already-virtualized `bool` dispatch: `AstNode::AcceptVisitorAstNode`
+  runs `AcceptVisitorBool` through a private adapter (AstNodeVisitorAstNode.cpp) that
+  forwards each per-node call to `IAstVisitorAstNode::Visit<NodeName>` and captures the
+  result. Verified by 11 tests (`ContextTrackingVisitor_Test.cpp`: the dispatch result
+  propagation, the null default, the recursive walk, the placeholder arm, and the
+  context slots across a method, a nested type, a constructor, and an accessor, plus
+  `Initialize`/`Uninitialize`) proven with an `AcceptVisitorAstNode`-neuter RED round
+  (7/11 failed, then all 11 green after restore); the full Debug suite is 12614 ran /
+  12612 passed / the 2 standing skips / zero failures, and the `--csharp` (10106360),
+  `--il` (41246545), and `-l c` (109438) CLI baselines are unchanged (the machinery is
+  not wired into the seed paths).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

@@ -144,6 +144,14 @@ class IAstVisitor;
 // virtual; the sole engine consumer is `GenericGrammarAmbiguityVisitor`, the
 // `DepthFirstAstVisitor<bool>`-derived ambiguity resolver).
 class IAstVisitorBool;
+// Forward declaration: the `IAstVisitor<out S>` generic-variant interface instantiated
+// `S = AstNode` (IAstVisitorAstNode.hpp) -- `AcceptVisitorAstNode` takes it by reference, so a
+// forward declaration suffices here (no include needed). This is the C++-realization of the
+// C# generic `abstract T AcceptVisitor<T>(IAstVisitor<T>)` dispatch for the `AstNode`
+// instantiation (the base of the pattern-based transforms, which need the node a visit
+// returned); the node routes through `AcceptVisitorBool` via a private adapter, so no second
+// per-node virtual is added to the concrete node classes.
+class IAstVisitorAstNode;
 
 // The common base of every C# AST node. Abstract: a concrete node overrides at least
 // `DoMatch` and the slot-storage virtuals for the slots it declares.
@@ -518,6 +526,18 @@ public:
     // reference parameter needs only a forward declaration), so this header does not include
     // `IAstVisitorBool.hpp`.
     virtual bool AcceptVisitorBool(IAstVisitorBool& visitor) = 0;
+
+    // The C# `public abstract T AcceptVisitor<T>(IAstVisitor<T> visitor)` instantiated `T =
+    // AstNode` -- the `<AstNode>`-variant dispatch entry of the visitor pattern. NON-virtual
+    // (unlike the two above): the per-node dispatch is already virtualized for the `bool`
+    // instantiation (`AcceptVisitorBool`), so this runs `AcceptVisitorBool` through a private
+    // adapter that forwards each per-node call to the matching `IAstVisitorAstNode::
+    // Visit<NodeName>` and returns the captured `AstNode*` result (the implementation lives in
+    // AstNodeVisitorAstNode.cpp, which includes the adapter's interface). A `DepthFirstAst
+    // Visitor<AstNode>` walk calls `node->AcceptVisitorAstNode(visitor)` and the node routes
+    // back to the right `Visit` overload. `IAstVisitorAstNode` is forward-declared (a
+    // reference parameter needs only a forward declaration).
+    AstNode* AcceptVisitorAstNode(IAstVisitorAstNode& visitor);
 
     // ---- Formatted output ---------------------------------------------------------------
     // The C# `public virtual string ToString(CSharpFormattingOptions? formattingOptions)`
