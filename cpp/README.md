@@ -3062,15 +3062,31 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   -> `LongLength`/`Int64`). The property is looked up on `System.Array` and the
   member access carries the `MemberResolveResult` (or a plain `Int32`/`Int64`
   result when the type exposes no such property -- the MinimalCorlib fixture).
-  The `LdFlda` / `LdsFlda` / `LdElema` siblings stay deferred (they need
-  `ConvertField`, the inline-array/`WithSystemIndex` indexer machinery, and the
-  `TupleTransform.MatchTupleFieldAccess` helper). Verified by 3 new
+  The `LdFlda` / `LdsFlda` siblings stay deferred (they need `ConvertField`
+  and the `TupleTransform.MatchTupleFieldAccess` helper). Verified by 3 new
   `ExpressionBuilderLdLenTest` tests (the `I4` `Length` render, the `I8`
   `LongLength` render, and the raw-`I` `LongLength` fallback), proven by a
   dispatch neuter RED round (exactly those 3 tests failed through the `Default`
   fallback) then restored green; full Debug suite 12367 ran / 12365 passed /
   the 2 standing skips / zero failures, and the CLI baselines are structurally
   unchanged (the Phase-5 back end is not yet wired into the `--csharp` CLI path).
+- **`ExpressionBuilder` array-element-address arm (`VisitLdElema`)** -- the C#
+  `VisitLdElema` (`ExpressionBuilder.cs` lines 3203-3229) landed and is routed
+  from the `Visit` OpCode switch (`ldelema`). The array operand is translated and,
+  when its type is not an array of the access type (`inst.Type`), converted to a
+  fresh `ArrayType` of the access type and the index count (the one-dimension
+  SZArray shape vs the multi-dimensional rank, the `VisitNewArr` convention).
+  Each index then goes through `TranslateArrayIndex`, or -- when the node's
+  `withsystemindex` prefix is set -- through a `System.Index`-hinted translate and
+  convert. The result is an `IndexerExpression` wrapped in a `ref`
+  `DirectionExpression` whose resolve result is a `ByReferenceResolveResult` over
+  the element type. The `LdElema` IL node gained the `WithSystemIndex` operand
+  (with the `withsystemindex.` dump prefix and the clone carry). Verified by 4
+  new `ExpressionBuilderLdElemaTest` tests (the plain ref-indexer render with the
+  element-type and annotation pins, the mismatched-element-type conversion, the
+  `withsystemindex` `System.Index` conversion, and the node dump/clone), proven
+  by a dispatch neuter RED round (exactly the 3 Visit tests failed through the
+  `Default` fallback while the node test passed) then restored green.
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

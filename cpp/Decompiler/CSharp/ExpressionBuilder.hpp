@@ -45,8 +45,8 @@
 // Deferrals (each named at the member that needs it): the full `ConvertTo`
 // cast-insertion machinery on TranslatedExpression (the ~350-line C# body -- the
 // loud std::logic_error marks the unported arms and its consumers), the heavy
-// Visit arms that have not landed yet (the LdFlda/LdsFlda/LdLen/LdElema memory
-// arms, the LdFlda/LdsFlda/LdElema pointer arms, the If/Switch expression arms,
+// Visit arms that have not landed yet (the LdFlda/LdsFlda memory arms and the
+// LdFlda/LdsFlda field-address pointer arms, the If/Switch expression arms,
 // the dynamic/deconstruct arms), and the
 // CancellationToken (the cooperative-cancel throw is a no-op in the port, the
 // DecompileRun convention).
@@ -261,6 +261,14 @@ public:
     // up on System.Array, and render `array.Member` with the member resolve result (or a
     // plain Int32/Int64 resolve result when System.Array exposes no such property).
     TranslatedExpression VisitLdLen(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitLdElema(LdElema
+    // inst, TranslationContext context)` (ExpressionBuilder.cs lines 3203-3229): the
+    // array-element-address render -- translate the array (converting a non-array or
+    // element-type-mismatched expression to a fresh array of `inst.Type` and the
+    // index count), then index through TranslateArrayIndex (or the System.Index
+    // conversion when `withsystemindex` is set) and wrap in a `ref` DirectionExpression
+    // carrying a ByReferenceResolveResult over the element type.
+    TranslatedExpression VisitLdElema(IL::ILInstruction* inst, TranslationContext context);
     // The C# `private TranslatedExpression StObjViaHelperCall(StObj inst)`
     // (ExpressionBuilder.cs lines 3087-3125): the `Unsafe.Write` /
     // `Unsafe.WriteUnaligned` intrinsic rewrite for a store that cannot be a

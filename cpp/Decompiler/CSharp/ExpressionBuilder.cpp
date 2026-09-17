@@ -37,6 +37,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ErrorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IsExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
@@ -737,6 +738,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitStObj(inst, context);
         case IL::OpCode::LdLen:
             return VisitLdLen(inst, context);
+        case IL::OpCode::LdElema:
+            return VisitLdElema(inst, context);
         case IL::OpCode::Call:
         case IL::OpCode::CallVirt:
         case IL::OpCode::NewObj:
@@ -1463,6 +1466,66 @@ TranslatedExpression ExpressionBuilder::VisitLdLen(IL::ILInstruction* inst,
                   SharedResolveResultAnnotation(*arrayExpr.Expression()), member);
     auto* memberRef = new Syntax::MemberReferenceExpression(arrayExpr.Expression(), memberName);
     return WithRR(WithILInstruction(*memberRef, inst), rr);
+}
+
+// The C# `protected internal override TranslatedExpression VisitLdElema(LdElema
+// inst, TranslationContext context)` (ExpressionBuilder.cs lines 3203-3229): the
+// `ldelema` array-element-address render. The array is translated; when the
+// translated type is not an array of the element type (a non-array expression or a
+// mismatched element type), the array is converted to a fresh array of
+// `inst.Type` and `inst.Indices.Count` dimensions. Each index goes through
+// TranslateArrayIndex, or -- when the `withsystemindex` prefix is set -- is
+// translated and converted against the System.Index hint. The result is the
+// indexer expression wrapped in a `ref` DirectionExpression whose resolve result is
+// a ByReferenceResolveResult over the element type's ResolveResult.
+TranslatedExpression ExpressionBuilder::VisitLdElema(IL::ILInstruction* inst,
+                                                    TranslationContext context)
+{
+    (void)context;
+    auto* ldElema = static_cast<IL::LdElema*>(inst);
+    TranslatedExpression arrayExpr = Translate(ldElema->Array.get());
+    auto* arrayType = dynamic_cast<TS::ArrayType*>(&const_cast<TS::IType&>(arrayExpr.Type()));
+    TS::ITypePtr ownedArrayType;
+    if (arrayType == nullptr
+        || !TS::IsCompatibleTypeForMemoryAccess(
+               const_cast<TS::IType&>(*arrayType->Element()),
+               const_cast<TS::IType&>(*ldElema->Type)))
+    {
+        // The C# `new ArrayType(compilation, inst.Type, inst.Indices.Count)`: one
+        // dimension is the SZArray shape, more are the multi-dimensional rank (the
+        // port's ArrayType splits the two forms over its two ctors).
+        ownedArrayType = ldElema->Indices.size() == 1
+                             ? std::make_shared<TS::ArrayType>(ldElema->Type)
+                             : std::make_shared<TS::ArrayType>(
+                                   ldElema->Type,
+                                   static_cast<int>(ldElema->Indices.size()));
+        arrayType = static_cast<TS::ArrayType*>(ownedArrayType.get());
+        arrayExpr = arrayExpr.ConvertTo(*arrayType, *this);
+    }
+    auto* indexerExpr = new Syntax::IndexerExpression(arrayExpr.Expression());
+    if (ldElema->WithSystemIndex)
+    {
+        const TS::IType& systemIndex = compilation->FindType(TS::KnownTypeCode::Index);
+        for (const auto& index : ldElema->Indices)
+        {
+            TranslatedExpression translated = Translate(index.get(), &systemIndex);
+            translated = translated.ConvertTo(const_cast<TS::IType&>(systemIndex), *this);
+            indexerExpr->Arguments().Add(translated.Expression());
+        }
+    }
+    else
+    {
+        for (const auto& index : ldElema->Indices)
+            indexerExpr->Arguments().Add(TranslateArrayIndex(index.get()).Expression());
+    }
+    TranslatedExpression expr = WithRR(
+        WithILInstruction(*indexerExpr, inst),
+        std::make_shared<Sem::ResolveResult>(arrayType->Element()));
+    return WithRR(
+        WithoutILInstruction(*new Syntax::DirectionExpression(
+            Syntax::FieldDirection::Ref, expr.Expression())),
+        std::make_shared<Sem::ByReferenceResolveResult>(
+            SharedResolveResultAnnotation(*expr.Expression()), TS::ReferenceKind::Ref));
 }
 
 

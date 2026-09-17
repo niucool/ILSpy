@@ -37,6 +37,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ErrorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IsExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
@@ -1094,6 +1095,121 @@ TEST(ExpressionBuilderLdLenTest, LdLenRawIRendersLongLength)
     ASSERT_TRUE(memberRef != nullptr);
     EXPECT_EQ(memberRef->MemberName(), "LongLength");
     EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()), TS::KnownTypeCode::Int64));
+}
+
+// The array-element-address arm (VisitLdElema): the `ldelema <T>(array, index)`
+// render -- the array indexer wrapped in a `ref` DirectionExpression carrying a
+// ByReferenceResolveResult over the element type (the C# VisitLdElema,
+// ExpressionBuilder.cs lines 3203-3229). The `withsystemindex` prefix drives the
+// System.Index conversion for the index, and a mismatched element type converts the
+// array expression to a fresh array of the access type.
+
+TEST(ExpressionBuilderLdElemaTest, LdElemaOverArrayRendersRefIndexer)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto arrayType = std::make_shared<TS::ArrayType>(intType);
+    auto arrayVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, arrayType, 0);
+    arrayVar->Name = "a";
+    auto idxVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 1);
+    idxVar->Name = "i";
+    std::vector<std::unique_ptr<IL::ILInstruction>> indices;
+    indices.push_back(std::make_unique<IL::LdLoc>(idxVar));
+    IL::LdElema ldElema(intType, std::make_unique<IL::LdLoc>(arrayVar), std::move(indices));
+    auto expr = builder.Translate(&ldElema);
+    auto* dir = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(dir != nullptr);
+    EXPECT_EQ(dir->FieldDirection(), Syntax::FieldDirection::Ref);
+    auto* indexer = dynamic_cast<Syntax::IndexerExpression*>(dir->Expression());
+    ASSERT_TRUE(indexer != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(indexer->Target()) != nullptr);
+    ASSERT_EQ(indexer->Arguments().Count(), 1);
+    auto* brrr = dynamic_cast<const Sem::ByReferenceResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(brrr != nullptr);
+    EXPECT_EQ(expr.Type().Kind(), TS::TypeKind::ByReference);
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(brrr->ElementType()), TS::KnownTypeCode::Int32));
+    // The outer DirectionExpression carries no IL annotation (the C#
+    // WithoutILInstruction), but the inner indexer keeps it.
+    EXPECT_TRUE(expr.ILInstructions().empty());
+    std::vector<IL::ILInstruction*> indexerIL = CSharp::GetILInstructions(*indexer);
+    ASSERT_EQ(indexerIL.size(), std::size_t(1));
+    EXPECT_EQ(indexerIL[0], &ldElema);
+}
+
+TEST(ExpressionBuilderLdElemaTest, MismatchedElementTypeConvertsArray)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto longType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int64).shared_from_this());
+    // A scalar int local indexed as if it were an int[]: the translated type is not
+    // an array, so the arm builds a fresh array of the access type and converts.
+    auto valueVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    valueVar->Name = "v";
+    auto idxVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 1);
+    idxVar->Name = "i";
+    std::vector<std::unique_ptr<IL::ILInstruction>> indices;
+    indices.push_back(std::make_unique<IL::LdLoc>(idxVar));
+    IL::LdElema ldElema(longType, std::make_unique<IL::LdLoc>(valueVar), std::move(indices));
+    auto expr = builder.Translate(&ldElema);
+    auto* dir = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(dir != nullptr);
+    auto* indexer = dynamic_cast<Syntax::IndexerExpression*>(dir->Expression());
+    ASSERT_TRUE(indexer != nullptr);
+    // The array operand was converted to the fresh array type (an explicit cast).
+    EXPECT_TRUE(dynamic_cast<Syntax::CastExpression*>(indexer->Target()) != nullptr);
+    auto* brrr = dynamic_cast<const Sem::ByReferenceResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(brrr != nullptr);
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(brrr->ElementType()), TS::KnownTypeCode::Int64));
+}
+
+TEST(ExpressionBuilderLdElemaTest, WithSystemIndexConvertsIndexToSystemIndex)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto arrayType = std::make_shared<TS::ArrayType>(intType);
+    auto arrayVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, arrayType, 0);
+    arrayVar->Name = "a";
+    auto idxVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 1);
+    idxVar->Name = "i";
+    std::vector<std::unique_ptr<IL::ILInstruction>> indices;
+    indices.push_back(std::make_unique<IL::LdLoc>(idxVar));
+    IL::LdElema ldElema(intType, std::make_unique<IL::LdLoc>(arrayVar), std::move(indices));
+    ldElema.WithSystemIndex = true;
+    auto expr = builder.Translate(&ldElema);
+    auto* dir = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(dir != nullptr);
+    auto* indexer = dynamic_cast<Syntax::IndexerExpression*>(dir->Expression());
+    ASSERT_TRUE(indexer != nullptr);
+    ASSERT_EQ(indexer->Arguments().Count(), 1);
+    const Sem::ResolveResult* argRR = indexer->Arguments().At(0)->Annotation<Sem::ResolveResult>();
+    ASSERT_TRUE(argRR != nullptr);
+    const TS::IType& systemIndex = fixture.compilation.FindType(TS::KnownTypeCode::Index);
+    EXPECT_TRUE(TS::NormalizeTypeVisitor::IgnoreNullabilityAndTuples().EquivalentTypes(
+        const_cast<TS::IType&>(argRR->Type()), const_cast<TS::IType&>(systemIndex)));
+}
+
+TEST(ExpressionBuilderLdElemaTest, NodeCloneCarriesWithSystemIndex)
+{
+    TS::SimpleCompilation compilation(Impl::MinimalCorlib::Instance(), {});
+    auto intType = std::const_pointer_cast<TS::IType>(
+        compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    std::vector<std::unique_ptr<IL::ILInstruction>> indices;
+    indices.push_back(std::make_unique<IL::LdcI4>(0));
+    IL::LdElema ldElema(intType, std::make_unique<IL::LdcI4>(0), std::move(indices));
+    ldElema.WithSystemIndex = true;
+    std::string dump;
+    ldElema.WriteTo(dump);
+    EXPECT_EQ(dump.rfind("withsystemindex.ldelema(", 0), 0u);
+    auto clone = ldElema.Clone();
+    auto* cloneTyped = static_cast<IL::LdElema*>(clone.get());
+    EXPECT_TRUE(cloneTyped->WithSystemIndex);
 }
 
 

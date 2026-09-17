@@ -437,8 +437,10 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         }
         case OpCode::LdElema: {
             const auto& s = static_cast<const LdElema&>(*this);
-            c = std::make_unique<LdElema>(s.Type, s.Array ? s.Array->Clone() : nullptr,
+            auto clone = std::make_unique<LdElema>(s.Type, s.Array ? s.Array->Clone() : nullptr,
                 CloneChildren(s.Indices));
+            clone->WithSystemIndex = s.WithSystemIndex;
+            c = std::move(clone);
             break;
         }
 
