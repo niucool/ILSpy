@@ -165,6 +165,7 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             clone->FieldToken = s.FieldToken;
             clone->IsCompilerGeneratedField = s.IsCompilerGeneratedField;
             clone->FieldIsReadOnly = s.FieldIsReadOnly;
+            clone->Field = s.Field;
             c = std::move(clone);
             break;
         }
@@ -370,6 +371,7 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             clone->FieldToken = s.FieldToken;
             clone->IsCompilerGeneratedField = s.IsCompilerGeneratedField;
             clone->FieldIsReadOnly = s.FieldIsReadOnly;
+            clone->Field = s.Field;
             clone->DelayExceptions = s.DelayExceptions;
             c = std::move(clone);
             break;

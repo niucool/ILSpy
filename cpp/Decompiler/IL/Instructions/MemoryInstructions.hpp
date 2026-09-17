@@ -28,6 +28,7 @@
 #include "Decompiler/IL/Instructions/SimpleInstruction.hpp"
 #include "Decompiler/IL/Instructions/UnaryInstruction.hpp"
 #include "Decompiler/IL/StackTypeOf.hpp"
+#include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
 #include <cassert>
@@ -61,6 +62,12 @@ public:
     // read time): a store through a readonly field's address is not a mutable
     // lvalue, so ILInlining.ClassifyExpression reports ReadonlyLValue for it.
     bool FieldIsReadOnly = false;
+    // The C# `public readonly IField Field` -- the resolved field identity the
+    // field-reference arms read. Populated by tests/transforms (the `Call::Method`
+    // convention: the port's IL reader only records the raw token/name/deferred
+    // metadata, so the fully resolved IField is set outside the reader). Null when
+    // unresolved, in which case no visit arm consumes it.
+    std::shared_ptr<TypeSystem::IField> Field;
     bool DelayExceptions = false;
     LdFlda(std::unique_ptr<ILInstruction> target, std::string field)
         : ILInstruction(OpCode::LdFlda), Target(std::move(target)), FieldName(std::move(field)) {
@@ -102,6 +109,7 @@ public:
     std::uint32_t FieldToken = 0;  // see LdFlda::FieldToken
     bool IsCompilerGeneratedField = false;
     bool FieldIsReadOnly = false;  // see LdFlda::FieldIsReadOnly
+    std::shared_ptr<TypeSystem::IField> Field;  // see LdFlda::Field
     explicit LdsFlda(std::string field) : SimpleInstruction(OpCode::LdsFlda), FieldName(std::move(field)) {}
     StackType ResultType() const override { return StackType::Ref; }
     void WriteTo(std::string& out) const override {

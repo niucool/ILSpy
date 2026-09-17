@@ -4646,6 +4646,36 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   jumps (needs DetectExitPoints + HighLevelLoopTransform), full type names
   (no `using` directives), and overload-resolved casts -- these land as the
   Phase 5 C# AST + resolver back end (above) is wired in to replace the seed.
+- **`ExpressionBuilder` static field-address arm (`VisitLdsFlda` + `ConvertField` /
+  `RequiresQualifier`)** -- the C# `VisitLdsFlda` (`ExpressionBuilder.cs` lines
+  3196-3201) landed and is routed from the `Visit` OpCode switch (`ldsflda`),
+  enabled by the C# `ConvertField` (lines 302-398) and its `RequiresQualifier`
+  helper (lines 293-301). `ConvertField` translates the target (the static
+  type-reference arm for `ldsflda`), decides whether the member reference needs
+  an explicit qualifier (the `AlwaysQualifyMemberReferences` / variable-shadowing
+  gates, the static-member current-or-containing-type check, and the
+  instance-member this/base receiver check), runs the ambiguous-access retry loop
+  (the `ResolveSimpleName` or `MemberLookup::Lookup` probe, the `requireTarget`
+  flip, and the declaring-type cast), builds the `MemberResolveResult` over the
+  target, renders a `MemberReferenceExpression` or `IdentifierExpression`, and
+  wraps a by-reference-typed field in a `ref` `DirectionExpression`. The
+  `LdsFlda` / `LdFlda` IL nodes gained the C# `public readonly IField Field`
+  shared handle (populated by tests/transforms under the `Call::Method`
+  convention -- the port's IL reader only records the raw token/name/deferred
+  metadata, so `VisitLdsFlda` degrades an unresolved field to the `Default`
+  error expression rather than dereferencing null, preserving the previous
+  behaviour); the clone cases carry it. The `ConvertField` automatic-event and
+  automatic-property backing-field special cases and the `LdFlda` arm with its
+  `TupleTransform.MatchTupleFieldAccess` / `CSharpDecompiler.IsFixedField`
+  branches stay deferred. Verified by 5 new `ExpressionBuilderFieldTest` tests
+  (the static member-reference render with the `MemberResolveResult` pin, the
+  by-reference field's ref-direction wrap, the routed `ldsflda` render with the
+  inner-expression IL-annotation pin, the unresolved-field `Default` error, and
+  the clone field carry), proven with a `ConvertField`-neuter RED round (exactly
+  the 3 `ConvertField`-dependent tests failed while the other 2 stayed green)
+  then restored green; full Debug suite 12409 ran / 12407 passed / the 2 standing
+  skips / zero failures, and the CLI baselines are structurally unchanged (the
+  Phase-5 back end is not yet wired into the `--csharp` CLI path).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

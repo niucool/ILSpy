@@ -25,6 +25,7 @@
 #include "Decompiler/CSharp/StatementBuilder.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"
+#include "Decompiler/CSharp/Resolver/MemberLookup.hpp"
 #include "Decompiler/CSharp/Syntax/AstType.hpp"
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
 #include "Decompiler/CSharp/Syntax/ComposedType.hpp"
@@ -674,6 +675,112 @@ TranslatedExpression ExpressionBuilder::EnsureTargetNotNullable(TranslatedExpres
     return expr;
 }
 
+// The C# `bool RequiresQualifier(IMember member, TranslatedExpression target)`
+// (ExpressionBuilder.cs lines 293-301): an explicit qualifier is required when
+// member references always carry one, when the simple name is shadowed by a
+// variable, for a static member not declared on the current (or a containing)
+// type, and for an instance member whose receiver is neither `this` nor `base`.
+bool ExpressionBuilder::RequiresQualifier(const TS::IMember& member,
+                                          const TranslatedExpression& target) const
+{
+    if (settings->AlwaysQualifyMemberReferences() || HidesVariableWithName(member.Name()))
+        return true;
+    if (member.IsStatic())
+        return !IsCurrentOrContainingType(member.DeclaringTypeDefinition());
+    return dynamic_cast<Syntax::ThisReferenceExpression*>(target.Expression()) == nullptr
+        && dynamic_cast<Syntax::BaseReferenceExpression*>(target.Expression()) == nullptr;
+}
+
+// The C# `ExpressionWithResolveResult ConvertField(IField field, ILInstruction?
+// targetInstruction = null)` (ExpressionBuilder.cs lines 302-398): the field
+// reference render. The two automatic backing-field special cases at the top of
+// the C# method are deferred: the automatic-event arm needs the AutoEventDecompiler
+// plus the MetadataFile PropertyAndEventBackingFieldLookup (not ported), and the
+// automatic-property requires-qualifier special case needs
+// PatternStatementTransform.IsBackingFieldOfAutomaticProperty (not ported). Both
+// only change the render for a compiler-generated backing field, so the general
+// path below is the faithful render for every ordinary field.
+ExpressionWithResolveResult ExpressionBuilder::ConvertField(const TS::IField& field,
+                                                            IL::ILInstruction* targetInstruction)
+{
+    TranslatedExpression target = TranslateTarget(targetInstruction,
+                                                  /*nonVirtualInvocation:*/ true,
+                                                  field.IsStatic(), *field.DeclaringType());
+    bool requireTarget = RequiresQualifier(field, target);
+    bool targetCasted = false;
+    // The C# keeps a `targetResolveResult` local only as the "is a target resolve
+    // result available" flag (it is null exactly while `requireTarget` is false);
+    // the lookup below always reads `target.ResolveResult` directly.
+    bool targetResolveResultPresent = requireTarget;
+
+    // The C# local function IsAmbiguousAccess: look the field name up as a simple
+    // name (no target) or on the target's type, and report whether the resolution
+    // is missing, erroneous, or a different member than the field being rendered.
+    auto isAmbiguousAccess = [&](std::shared_ptr<Sem::MemberResolveResult>& result) -> bool {
+        if (!targetResolveResultPresent)
+        {
+            std::shared_ptr<Sem::ResolveResult> rr = resolver->ResolveSimpleName(
+                field.Name(), {}, /*isInvocationTarget:*/ false);
+            result = std::dynamic_pointer_cast<Sem::MemberResolveResult>(rr);
+        }
+        else
+        {
+            const TS::ITypeDefinition* currentTypeDefinition = resolver->CurrentTypeDefinition();
+            Resolver::MemberLookup lookup(currentTypeDefinition,
+                                          currentTypeDefinition->ParentModule());
+            std::shared_ptr<Sem::ResolveResult> rr =
+                lookup.Lookup(*target.ResolveResult(), field.Name(), {}, /*isInvocation:*/ false);
+            result = std::dynamic_pointer_cast<Sem::MemberResolveResult>(rr);
+        }
+        return result == nullptr || result->IsError()
+            || !result->Member()->Equals(&field, &TS::NormalizeTypeVisitor::TypeErasure());
+    };
+
+    std::shared_ptr<Sem::MemberResolveResult> mrr;
+    while (isAmbiguousAccess(mrr))
+    {
+        if (!requireTarget)
+        {
+            requireTarget = true;
+            targetResolveResultPresent = true;
+        }
+        else if (!targetCasted)
+        {
+            targetCasted = true;
+            target = target.ConvertTo(*field.DeclaringType(), *this);
+            targetResolveResultPresent = true;
+        }
+        else
+        {
+            // The field reference is still ambiguous; fall through to the direct
+            // member resolve result (the C# `mrr = null; break;`).
+            mrr = nullptr;
+            break;
+        }
+    }
+
+    if (mrr == nullptr)
+    {
+        mrr = std::make_shared<Sem::MemberResolveResult>(
+            SharedResolveResultAnnotation(*target.Expression()), &field);
+    }
+
+    Syntax::Expression* expr = requireTarget
+        ? static_cast<Syntax::Expression*>(
+              new Syntax::MemberReferenceExpression(target.Expression(), field.Name()))
+        : static_cast<Syntax::Expression*>(new Syntax::IdentifierExpression(field.Name()));
+    ExpressionWithResolveResult result = WithRR(*expr, mrr);
+
+    if (field.Type().Kind() == TS::TypeKind::ByReference)
+    {
+        result = WithRR(
+            *new Syntax::DirectionExpression(Syntax::FieldDirection::Ref, result.Expression()),
+            std::make_shared<Sem::ByReferenceResolveResult>(
+                mrr, TS::ReferenceKind::Ref));
+    }
+    return result;
+}
+
 TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, TranslationContext context)
 {
     switch (inst->Op)
@@ -752,6 +859,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitLdLen(inst, context);
         case IL::OpCode::LdElema:
             return VisitLdElema(inst, context);
+        case IL::OpCode::LdsFlda:
+            return VisitLdsFlda(inst, context);
         case IL::OpCode::NullableRewrap:
             return VisitNullableRewrap(inst, context);
         case IL::OpCode::NullableUnwrap:
@@ -1573,6 +1682,28 @@ TranslatedExpression ExpressionBuilder::VisitLdElema(IL::ILInstruction* inst,
     TranslatedExpression expr = WithRR(
         WithILInstruction(*indexerExpr, inst),
         std::make_shared<Sem::ResolveResult>(arrayType->Element()));
+    return WithRR(
+        WithoutILInstruction(*new Syntax::DirectionExpression(
+            Syntax::FieldDirection::Ref, expr.Expression())),
+        std::make_shared<Sem::ByReferenceResolveResult>(
+            SharedResolveResultAnnotation(*expr.Expression()), TS::ReferenceKind::Ref));
+}
+
+// The C# `protected internal override TranslatedExpression VisitLdsFlda(LdsFlda
+// inst, TranslationContext context)` (ExpressionBuilder.cs lines 3196-3201): the
+// `&field` render for a static field -- the field reference through ConvertField,
+// wrapped in a `ref` DirectionExpression carrying a ByReferenceResolveResult over
+// the field's resolve result. The port's IL reader leaves the node's resolved
+// `Field` unset (the `Call::Method` convention), so an unresolved node degrades to
+// the Default error expression rather than dereferencing a null field.
+TranslatedExpression ExpressionBuilder::VisitLdsFlda(IL::ILInstruction* inst,
+                                                    TranslationContext context)
+{
+    auto* ldsFlda = static_cast<IL::LdsFlda*>(inst);
+    if (!ldsFlda->Field)
+        return Default(inst, context);
+    ExpressionWithResolveResult fieldAccess = ConvertField(*ldsFlda->Field);
+    TranslatedExpression expr = WithILInstruction(fieldAccess, inst);
     return WithRR(
         WithoutILInstruction(*new Syntax::DirectionExpression(
             Syntax::FieldDirection::Ref, expr.Expression())),

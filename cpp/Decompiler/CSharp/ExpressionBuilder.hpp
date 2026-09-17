@@ -43,11 +43,15 @@
 // non-owning pointer (the C# GC reference convention).
 //
 // Deferrals (each named at the member that needs it): the heavy Visit arms that
-// have not landed yet (the LdFlda/LdsFlda field-address arms, which need the
-// ConvertField / TupleTransform.MatchTupleFieldAccess machinery, the
-// dynamic/deconstruct arms, and Await, which needs the
-// awaiter/GetResultMethod pipeline surfaces), and the CancellationToken (the
-// cooperative-cancel throw is a no-op in the port, the DecompileRun convention).
+// have not landed yet (the LdFlda field-address arm, which needs the
+// TupleTransform.MatchTupleFieldAccess machinery and CSharpDecompiler.IsFixedField,
+// the dynamic/deconstruct arms, and Await, which needs the
+// awaiter/GetResultMethod pipeline surfaces), the ConvertField automatic
+// backing-field special cases (the automatic event needs AutoEventDecompiler /
+// PropertyAndEventBackingFieldLookup, the automatic property needs
+// PatternStatementTransform.IsBackingFieldOfAutomaticProperty), and the
+// CancellationToken (the cooperative-cancel throw is a no-op in the port, the
+// DecompileRun convention).
 
 #pragma once
 
@@ -203,6 +207,26 @@ public:
     TranslatedExpression EnsureTargetNotNullable(TranslatedExpression expr,
                                                  IL::ILInstruction* inst);
 
+    // The C# `bool RequiresQualifier(IMember member, TranslatedExpression target)`
+    // (ExpressionBuilder.cs lines 293-301): whether a member reference needs an
+    // explicit qualifier (the `AlwaysQualifyMemberReferences` / variable-shadowing
+    // gates, the static-member current-or-containing-type check, and the
+    // instance-member this/base receiver check). `member` is a non-null reference
+    // (the C# parameter has no null check).
+    bool RequiresQualifier(const TS::IMember& member, const TranslatedExpression& target) const;
+
+    // The C# `ExpressionWithResolveResult ConvertField(IField field, ILInstruction?
+    // targetInstruction = null)` (ExpressionBuilder.cs lines 302-398): the field
+    // reference render -- the target translation, the requires-qualifier decision,
+    // the ambiguous-access retry loop (the simple-name lookup, the member lookup, and
+    // the declaring-type cast), and the member/identifier access with the by-reference
+    // wrap for a ref-typed field. The two automatic backing-field special cases (the
+    // automatic event and the automatic property) are documented deferrals: the first
+    // needs the AutoEventDecompiler / PropertyAndEventBackingFieldLookup machinery, the
+    // second needs PatternStatementTransform.IsBackingFieldOfAutomaticProperty.
+    ExpressionWithResolveResult ConvertField(const TS::IField& field,
+                                             IL::ILInstruction* targetInstruction = nullptr);
+
     // -- The visitor-dispatch surface (the C# ILVisitor base) -------------------------
 
     // The C# double-dispatch: the OpCode switch calling the per-instruction
@@ -268,6 +292,11 @@ public:
     // conversion when `withsystemindex` is set) and wrap in a `ref` DirectionExpression
     // carrying a ByReferenceResolveResult over the element type.
     TranslatedExpression VisitLdElema(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitLdsFlda(LdsFlda
+    // inst, TranslationContext context)` (ExpressionBuilder.cs lines 3196-3201): the
+    // static field-address render -- resolve the field reference through ConvertField
+    // and wrap it in a `ref` DirectionExpression carrying a ByReferenceResolveResult.
+    TranslatedExpression VisitLdsFlda(IL::ILInstruction* inst, TranslationContext context);
     // The C# `protected internal override TranslatedExpression
     // VisitNullableRewrap(NullableRewrap inst, TranslationContext context)`
     // (ExpressionBuilder.cs lines 4298-4309): the null-conditional join point --

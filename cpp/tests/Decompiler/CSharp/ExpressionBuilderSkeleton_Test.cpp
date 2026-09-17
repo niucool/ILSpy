@@ -96,6 +96,7 @@
 #include "Decompiler/Semantics/ThrowResolveResult.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
+#include "Decompiler/Semantics/MemberResolveResult.hpp"
 #include "Decompiler/Semantics/ConstantResolveResult.hpp"
 #include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
@@ -192,8 +193,21 @@ struct BuilderFixture {
                                  &run);
     }
 
+    // A builder whose decompilation context carries the given current type
+    // definition (the field-address arms build a MemberLookup / resolve simple
+    // names against it). The typed context is owned by the fixture and outlives
+    // the returned builder (the ExpressionBuilder stores it by pointer).
+    ExpressionBuilder MakeBuilderForType(const TS::ITypeDefinition* currentTypeDefinition)
+    {
+        typedContext_ = std::make_shared<CSharp::TypeSystem::CSharpTypeResolveContext>(
+            compilation.MainModule(), usingScope, currentTypeDefinition, nullptr);
+        return ExpressionBuilder(nullptr, compilation, *typedContext_, &function_, &settings,
+                                 &run);
+    }
+
 private:
     IL::ILFunction function_;
+    std::shared_ptr<CSharp::TypeSystem::CSharpTypeResolveContext> typedContext_;
     // The decompilation context over the compilation (a CSharpTypeResolveContext --
     // the C# `decompilationContext` is a CSharpTypeResolveContext in practice).
     std::shared_ptr<CSharp::TypeSystem::CSharpTypeResolveContext> context_;
@@ -1244,6 +1258,181 @@ TEST(ExpressionBuilderLdElemaTest, NodeCloneCarriesWithSystemIndex)
     auto clone = ldElema.Clone();
     auto* cloneTyped = static_cast<IL::LdElema*>(clone.get());
     EXPECT_TRUE(cloneTyped->WithSystemIndex);
+}
+
+// The field-address arms (ConvertField + VisitLdsFlda, the C# lines 302-398 and
+// 3196-3201): the field reference through the requires-qualifier / ambiguous-access
+// machinery and the `ref` DirectionExpression wrap of the static field address. The
+// fixture's IField stub fills the C# IField surface the arms read; the port's IL
+// reader leaves the nodes' resolved `Field` unset, so it is wired by hand here.
+
+class FieldStub : public TS::IField {
+public:
+    FieldStub(std::string name, TS::ITypePtr fieldType, const TS::ICompilation& compilation)
+        : name_(std::move(name)), fieldType_(std::move(fieldType)), compilation_(&compilation) {}
+
+    ::ILSpy::Decompiler::TypeSystem::SymbolKind SymbolKind() const override {
+        return ::ILSpy::Decompiler::TypeSystem::SymbolKind::Field;
+    }
+    std::string Name() const override { return name_; }
+    std::string FullName() const override { return name_; }
+    std::string ReflectionName() const override { return name_; }
+    std::string Namespace() const override { return {}; }
+    const TS::ICompilation& Compilation() const override { return *compilation_; }
+    std::uint32_t MetadataToken() const override { return 0; }
+    const TS::ITypeDefinition* DeclaringTypeDefinition() const override {
+        return declaringTypeDefinition_;
+    }
+    TS::ITypePtr DeclaringType() const override { return declaringType_; }
+    const TS::IModule* ParentModule() const override { return nullptr; }
+    std::vector<const TS::IAttribute*> GetAttributes() const override { return {}; }
+    bool HasAttribute(TS::KnownAttribute) const override { return false; }
+    const TS::IAttribute* GetAttribute(TS::KnownAttribute) const override { return nullptr; }
+    TS::Accessibility Accessibility() const override { return TS::Accessibility::Public; }
+    bool IsStatic() const override { return isStatic_; }
+    bool IsAbstract() const override { return false; }
+    bool IsSealed() const override { return false; }
+    const TS::IMember* MemberDefinition() const override { return this; }
+    const TS::IType& ReturnType() const override { return *fieldType_; }
+    std::vector<const TS::IMember*> ExplicitlyImplementedInterfaceMembers() const override {
+        return {};
+    }
+    bool IsExplicitInterfaceImplementation() const override { return false; }
+    bool IsVirtual() const override { return false; }
+    bool IsOverride() const override { return false; }
+    bool IsOverridable() const override { return false; }
+    const TS::TypeParameterSubstitution* Substitution() const override { return nullptr; }
+    const TS::IMember* Specialize(const TS::TypeParameterSubstitution*) const override {
+        return this;
+    }
+    bool Equals(const TS::IMember* obj, const TS::TypeVisitor*) const override {
+        return obj == this;
+    }
+    const TS::IType& Type() const override { return *fieldType_; }
+    bool IsConst() const override { return false; }
+    std::any GetConstantValue(bool = false) const override { return {}; }
+    bool IsReadOnly() const override { return false; }
+    bool ReturnTypeIsRefReadOnly() const override { return false; }
+    bool IsVolatile() const override { return false; }
+
+    void SetStatic(bool value) { isStatic_ = value; }
+    void SetDeclaringType(TS::ITypePtr value) { declaringType_ = std::move(value); }
+    void SetDeclaringTypeDefinition(const TS::ITypeDefinition* value) {
+        declaringTypeDefinition_ = value;
+    }
+
+private:
+    std::string name_;
+    TS::ITypePtr fieldType_;
+    const TS::ICompilation* compilation_;
+    TS::ITypePtr declaringType_;
+    const TS::ITypeDefinition* declaringTypeDefinition_ = nullptr;
+    bool isStatic_ = false;
+};
+
+TEST(ExpressionBuilderFieldTest, ConvertFieldStaticFieldRendersMemberReference)
+{
+    BuilderFixture fixture;
+    auto objectType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    const TS::ITypeDefinition* objectDef =
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).GetDefinition();
+    auto builder = fixture.MakeBuilderForType(objectDef);
+
+    auto field = std::make_shared<FieldStub>("Value", objectType, fixture.compilation);
+    field->SetStatic(true);
+    field->SetDeclaringType(objectType);
+    field->SetDeclaringTypeDefinition(objectDef);
+
+    auto result = builder.ConvertField(*field);
+    auto* memberRef = dynamic_cast<Syntax::MemberReferenceExpression*>(result.Expression());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "Value");
+    EXPECT_TRUE(dynamic_cast<Syntax::TypeReferenceExpression*>(memberRef->Target()) != nullptr);
+    const auto* mrr = dynamic_cast<const Sem::MemberResolveResult*>(result.ResolveResult());
+    ASSERT_TRUE(mrr != nullptr);
+    EXPECT_EQ(mrr->Member(), field.get());
+}
+
+TEST(ExpressionBuilderFieldTest, ConvertFieldByReferenceTypeWrapsInRefDirection)
+{
+    BuilderFixture fixture;
+    auto objectType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    const TS::ITypeDefinition* objectDef =
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).GetDefinition();
+    auto builder = fixture.MakeBuilderForType(objectDef);
+
+    auto byRefInt = std::make_shared<TS::ByReferenceType>(intType);
+    auto field = std::make_shared<FieldStub>("RefField", byRefInt, fixture.compilation);
+    field->SetStatic(true);
+    field->SetDeclaringType(objectType);
+    field->SetDeclaringTypeDefinition(objectDef);
+
+    auto result = builder.ConvertField(*field);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(result.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    EXPECT_EQ(direction->FieldDirection(), Syntax::FieldDirection::Ref);
+    auto* byRef = dynamic_cast<const Sem::ByReferenceResolveResult*>(result.ResolveResult());
+    ASSERT_TRUE(byRef != nullptr);
+    EXPECT_EQ(byRef->ReferenceKind(), TS::ReferenceKind::Ref);
+}
+
+TEST(ExpressionBuilderFieldTest, LdsFldaRendersRefDirectionOverFieldReference)
+{
+    BuilderFixture fixture;
+    auto objectType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    const TS::ITypeDefinition* objectDef =
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).GetDefinition();
+    auto builder = fixture.MakeBuilderForType(objectDef);
+
+    auto field = std::make_shared<FieldStub>("Value", objectType, fixture.compilation);
+    field->SetStatic(true);
+    field->SetDeclaringType(objectType);
+    field->SetDeclaringTypeDefinition(objectDef);
+
+    IL::LdsFlda ldsFlda("System.Object::Value");
+    ldsFlda.Field = field;
+    auto expr = builder.Translate(&ldsFlda);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    EXPECT_EQ(direction->FieldDirection(), Syntax::FieldDirection::Ref);
+    auto* memberRef = dynamic_cast<Syntax::MemberReferenceExpression*>(direction->Expression());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "Value");
+    auto* byRef = dynamic_cast<const Sem::ByReferenceResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(byRef != nullptr);
+    EXPECT_EQ(byRef->ReferenceKind(), TS::ReferenceKind::Ref);
+    // The outer DirectionExpression carries no IL-instruction annotation (the C#
+    // `.WithoutILInstruction()`); the inner field access keeps the single one.
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*memberRef);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], &ldsFlda);
+}
+
+TEST(ExpressionBuilderFieldTest, LdsFldaUnresolvedFieldRendersDefaultError)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::LdsFlda ldsFlda("System.Object::Missing");
+    auto expr = builder.Translate(&ldsFlda);
+    EXPECT_TRUE(dynamic_cast<Syntax::ErrorExpression*>(expr.Expression()) != nullptr);
+}
+
+TEST(ExpressionBuilderFieldTest, LdsFldaCloneCarriesResolvedField)
+{
+    TS::SimpleCompilation compilation(Impl::MinimalCorlib::Instance(), {});
+    auto objectType = std::const_pointer_cast<TS::IType>(
+        compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    IL::LdsFlda ldsFlda("System.Object::Value");
+    ldsFlda.Field = std::make_shared<FieldStub>("Value", objectType, compilation);
+    auto clone = ldsFlda.Clone();
+    auto* cloneTyped = static_cast<IL::LdsFlda*>(clone.get());
+    ASSERT_TRUE(cloneTyped->Field != nullptr);
+    EXPECT_EQ(cloneTyped->Field.get(), ldsFlda.Field.get());
 }
 
 
