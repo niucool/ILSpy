@@ -3014,9 +3014,10 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `VisitBox` prefers the `nint` / `nuint` target under `NativeIntegers`, then
   casts the converted argument to object with the `BoxingConversion`.
   `VisitCastClass` translates the argument and `ConvertTo`s the target type
-  (the resolver-driven explicit cast). The `Unbox` / `ExpressionTreeCast` /
-  `Arglist` / `MakeRefAny` / `RefAnyValue` siblings stay deferred: the reader
-  folds `unbox` into `UnboxAny` and creates no nodes for the rest. Verified by
+  (the resolver-driven explicit cast). The `Unbox` sibling landed next (see
+  the managed-pointer unboxing slice below); the `ExpressionTreeCast` /
+  `Arglist` / `MakeRefAny` / `RefAnyValue` siblings stay deferred, and the
+  reader creates no nodes for them. Verified by
   4 new `ExpressionBuilderCastTest` tests (the unboxing cast, the
   isinst-to-`as` shortcut with the `TryCast` pin, the boxing cast over a
   constant with the object result, and the `castclass` explicit cast), proven
@@ -3025,6 +3026,27 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   Debug suite 12354 ran / 12352 passed / the 2 standing skips / zero failures,
   and the CLI baselines are structurally unchanged (the Phase-5 back end is
   not yet wired into the `--csharp` CLI path).
+- **`ExpressionBuilder` managed-pointer unboxing arm + the dedicated `Unbox`
+  node** -- the C# `VisitUnbox` (`ExpressionBuilder.cs` lines 3322-3330) landed
+  and is routed from the `Visit` OpCode switch, and the reader no longer folds
+  the CIL `unbox T` opcode onto `UnboxAny`: a new `IL::Unbox` node
+  (`cpp/Decompiler/IL/Instructions/Unbox.hpp`) carries the C# Unbox shape --
+  `ResultType` is `StackType.Ref` (the managed pointer to the boxed data) and
+  `DirectFlags` is only `MayThrow` (unlike `UnboxAny`'s `SideEffect | MayThrow`),
+  with the `unbox(Type, arg)` dump spelling. The reader maps
+  `ILOpCode::Unbox` to `Unbox` and `ILOpCode::Unbox_any` to `UnboxAny` (the C#
+  `ILReader.cs` lines 1270-1273 split), and the clone case is wired. `VisitUnbox`
+  renders `ref (T)arg` -- a `DirectionExpression` over a `CastExpression` of the
+  boxed argument with the `UnboxingConversion`, whose resolve result is a
+  `ByReferenceResolveResult` (`ReferenceKind.Ref`). The seed `ILAstToCSharp`
+  renders `Unbox` like its `UnboxAny` sibling, so the `--csharp` output over
+  mscorlib is byte-identical at 10106366 bytes; the `--il` whole-module dump is
+  byte-identical to the 41246545-byte real-ilspycmd gold; `--ilast-all` now
+  shows the dedicated `unbox(System.IntPtr, ...)` node at the real `unbox`
+  sites. Verified by 2 new tests (the ref/cast/ByReference render shape and the
+  reader mapping producing an `Unbox` node) plus extended node-invariant
+  assertions; full Debug suite 12404 ran / 12402 passed / the 2 standing skips /
+  zero failures.
 - **`ExpressionBuilder` memory-access load/store arms** -- the C# `VisitLdObj`
   / `VisitStObj` + the `StObjViaHelperCall` helper (`ExpressionBuilder.cs`
   lines 2857-3125) landed and are routed from the `Visit` OpCode switch

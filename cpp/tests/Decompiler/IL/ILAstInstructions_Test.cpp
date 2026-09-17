@@ -39,6 +39,7 @@
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/IL/Instructions/Unbox.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
@@ -98,6 +99,15 @@ TEST(ILAstInstructions, UnaryInstructionsFlagsAndResult) {
     EXPECT_TRUE(HasFlag(u.DirectFlags(), InstructionFlags::SideEffect));
     EXPECT_TRUE(HasFlag(u.DirectFlags(), InstructionFlags::MayThrow));
     EXPECT_EQ(u.ResultType(), StackType::I4);
+
+    // `unbox` is the managed-pointer twin of `unbox.any`: a Ref result, and only
+    // MayThrow (no SideEffect). The dump keeps the two spellings apart.
+    Unbox ub(Int32(), std::make_unique<LdcI4>(0));
+    EXPECT_FALSE(HasFlag(ub.DirectFlags(), InstructionFlags::SideEffect));
+    EXPECT_TRUE(HasFlag(ub.DirectFlags(), InstructionFlags::MayThrow));
+    EXPECT_EQ(ub.ResultType(), StackType::Ref);
+    EXPECT_NE(ub.ToString().find("unbox(System.Int32, ldc.i4(0))"), std::string::npos)
+        << ub.ToString();
 
     Throw th(std::make_unique<LdNull>());
     EXPECT_TRUE(HasFlag(th.DirectFlags(), InstructionFlags::MayThrow));

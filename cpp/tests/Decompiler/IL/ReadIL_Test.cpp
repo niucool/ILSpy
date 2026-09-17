@@ -33,6 +33,7 @@
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/IL/Instructions/Unbox.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 
 #include <gtest/gtest.h>
@@ -250,6 +251,34 @@ TEST(ReadIL, RefAnyTypeDecodes) {
         break;
     }
     EXPECT_TRUE(found) << "no refanytype method found in fixture";
+}
+
+TEST(ReadIL, UnboxDecodesToDedicatedNode) {
+    // The CIL `unbox T` opcode (0x79) is distinct from `unbox.any T` (0xA5):
+    // it yields a managed pointer (ref T). The reader must produce the dedicated
+    // Unbox node, not collapse it onto UnboxAny. System.IntPtr's equality helpers
+    // use `unbox System.IntPtr` followed by `ldfld m_value`, so at least one
+    // decoded body must carry an Unbox node.
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+    bool found = false;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0 || found) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        std::function<void(ILInstruction*)> walk = [&](ILInstruction* i) {
+            if (!i) return;
+            if (auto* unbox = dynamic_cast<Unbox*>(i)) {
+                ASSERT_NE(unbox->Type, nullptr);
+                found = true;
+            }
+            for (int k = 0; k < i->ChildCount(); ++k) walk(i->GetChild(k));
+        };
+        walk(fn.get());
+    }
+    EXPECT_TRUE(found) << "no `unbox` opcode decoded in fixture";
 }
 
 TEST(ReadIL, StfldUsesTargetThenValueStackOrder) {

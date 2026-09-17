@@ -64,6 +64,7 @@
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
 #include "Decompiler/IL/Instructions/UserDefinedLogicOperator.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
+#include "Decompiler/IL/Instructions/Unbox.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
@@ -2323,6 +2324,11 @@ private:
                 const auto& cast = static_cast<const CastClass&>(inst);
                 return "(" + TypeDisplayName(cast.Type) + ")(" +
                        (cast.Argument ? Expr(*cast.Argument) : "(default)") + ")";
+            }
+            case OpCode::Unbox: {
+                const auto& unbox = static_cast<const Unbox&>(inst);
+                return "(" + TypeDisplayName(unbox.Type) + ")(" +
+                       (unbox.Argument ? Expr(*unbox.Argument) : "(default)") + ")";
             }
             case OpCode::UnboxAny: {
                 const auto& unbox = static_cast<const UnboxAny&>(inst);

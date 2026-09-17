@@ -48,6 +48,7 @@
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
+#include "Decompiler/IL/Instructions/Unbox.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/IL/StackTypeOf.hpp"
 #include "Decompiler/Metadata/ILOpCodes.hpp"
@@ -83,6 +84,7 @@ ITypePtr TypeOfValue(const ILInstruction* inst) {
         return std::make_shared<TypeSystem::ArrayType>(na->Type);
     if (auto* cc = dynamic_cast<const CastClass*>(inst)) return cc->Type;
     if (auto* ii = dynamic_cast<const IsInst*>(inst)) return ii->Type;
+    if (auto* u = dynamic_cast<const Unbox*>(inst)) return u->Type;
     if (auto* ua = dynamic_cast<const UnboxAny*>(inst)) return ua->Type;
     if (auto* ls = dynamic_cast<const LdStr*>(inst))
         return std::make_shared<KnownType>(KnownTypeCode::String);
@@ -791,7 +793,14 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
             auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
             auto v = s.Pop(); if (!v) return DecodeOutcome::Bail;
-            if (!s.Push(std::make_unique<UnboxAny>(type, std::move(v)))) return DecodeOutcome::Bail;
+            // `unbox` yields a managed pointer (ref T) and only throws, while
+            // `unbox.any` has a side effect and yields T -- the C# reader maps
+            // them to distinct nodes (ILReader.cs lines 1270-1273).
+            if (op == ILOpCode::Unbox) {
+                if (!s.Push(std::make_unique<Unbox>(type, std::move(v)))) return DecodeOutcome::Bail;
+            } else {
+                if (!s.Push(std::make_unique<UnboxAny>(type, std::move(v)))) return DecodeOutcome::Bail;
+            }
             break;
         }
 

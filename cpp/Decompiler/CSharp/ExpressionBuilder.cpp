@@ -93,6 +93,7 @@
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/StringToInt.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
+#include "Decompiler/IL/Instructions/Unbox.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/CastClass.hpp"
@@ -735,6 +736,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitLdVirtFtn(inst, context);
         case IL::OpCode::LdVirtDelegate:
             return VisitLdVirtDelegate(inst, context);
+        case IL::OpCode::Unbox:
+            return VisitUnbox(inst, context);
         case IL::OpCode::UnboxAny:
             return VisitUnboxAny(inst, context);
         case IL::OpCode::Box:
@@ -1133,6 +1136,32 @@ TranslatedExpression ExpressionBuilder::VisitLdTypeToken(IL::ILInstruction* inst
         std::make_shared<Sem::TypeOfResolveResult>(
             std::move(runtimeTypeHandleType),
             token->Type));
+}
+
+// The C# `protected internal override TranslatedExpression VisitUnbox(Unbox inst,
+// TranslationContext context)` (ExpressionBuilder.cs lines 3322-3330): the
+// managed-pointer unboxing -- a `ref (T)arg` DirectionExpression over a cast of the
+// boxed argument to T with the UnboxingConversion, whose resolve result is a
+// ByReferenceResolveResult over the cast's resolve result (ReferenceKind.Ref).
+TranslatedExpression ExpressionBuilder::VisitUnbox(IL::ILInstruction* inst,
+                                                   TranslationContext context)
+{
+    (void)context;
+    auto* unbox = static_cast<IL::Unbox*>(inst);
+    TranslatedExpression arg = Translate(unbox->Argument.get());
+    auto* castExpr = new Syntax::CastExpression(ConvertType(*unbox->Type), arg.Expression());
+    ExpressionWithResolveResult cast = WithRR(
+        *castExpr,
+        std::make_shared<Sem::ConversionResolveResult>(
+            unbox->Type, SharedResolveResultAnnotation(*arg.Expression()),
+            Sem::Conversions::UnboxingConversion()));
+    return WithRR(
+        WithILInstruction(
+            *new Syntax::DirectionExpression(Syntax::FieldDirection::Ref,
+                                             cast.Expression()),
+            inst),
+        std::make_shared<Sem::ByReferenceResolveResult>(
+            SharedResolveResultAnnotation(*cast.Expression()), TS::ReferenceKind::Ref));
 }
 
 // The C# `protected internal override TranslatedExpression VisitUnboxAny(UnboxAny

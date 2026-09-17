@@ -84,6 +84,7 @@
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/IL/Instructions/UnaryInstruction.hpp"
+#include "Decompiler/IL/Instructions/Unbox.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/IL/Instructions/UserDefinedLogicOperator.hpp"
 #include "Decompiler/IL/Instructions/UsingInstruction.hpp"
@@ -249,6 +250,11 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         case OpCode::IsInst: {
             const auto& s = static_cast<const IsInst&>(*this);
             c = std::make_unique<IsInst>(s.Type, s.Argument ? s.Argument->Clone() : nullptr);
+            break;
+        }
+        case OpCode::Unbox: {
+            const auto& s = static_cast<const Unbox&>(*this);
+            c = std::make_unique<Unbox>(s.Type, s.Argument ? s.Argument->Clone() : nullptr);
             break;
         }
         case OpCode::UnboxAny: {

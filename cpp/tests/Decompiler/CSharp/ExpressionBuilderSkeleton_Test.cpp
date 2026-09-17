@@ -76,6 +76,7 @@
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
+#include "Decompiler/IL/Instructions/Unbox.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/CastClass.hpp"
@@ -810,6 +811,31 @@ TEST(ExpressionBuilderCastTest, UnboxAnyWithIsInstRendersAsExpression)
     const auto* crr = dynamic_cast<const Sem::ConversionResolveResult*>(expr.ResolveResult());
     ASSERT_TRUE(crr != nullptr);
     EXPECT_TRUE(crr->ConversionProperty()->IsTryCast());
+}
+
+TEST(ExpressionBuilderCastTest, UnboxInt32RendersRefCastDirection)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto objectVar = ObjectLocal(fixture);
+    // `unbox int32(object)` yields a managed pointer: `ref (int32)object` with
+    // the UnboxingConversion on the cast and a ByReferenceResolveResult on the
+    // ref direction (unlike unbox.any, which yields the value directly).
+    IL::Unbox unbox(intType, std::make_unique<IL::LdLoc>(objectVar));
+    auto expr = builder.Translate(&unbox);
+    auto* dir = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(dir != nullptr);
+    EXPECT_EQ(dir->FieldDirection(), Syntax::FieldDirection::Ref);
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(dir->Expression());
+    ASSERT_TRUE(cast != nullptr);
+    const auto* crr = dynamic_cast<const Sem::ConversionResolveResult*>(
+        CSharp::GetResolveResult(*cast));
+    ASSERT_TRUE(crr != nullptr);
+    EXPECT_TRUE(crr->ConversionProperty()->IsUnboxingConversion());
+    const auto* brr = dynamic_cast<const Sem::ByReferenceResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(brr != nullptr);
 }
 
 TEST(ExpressionBuilderCastTest, BoxInt32RendersBoxingCast)

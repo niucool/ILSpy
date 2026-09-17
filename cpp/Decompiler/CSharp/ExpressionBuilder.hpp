@@ -236,8 +236,9 @@ public:
     TranslatedExpression VisitLdTypeToken(IL::ILInstruction* inst, TranslationContext context);
     // The boxing/cast conversion family (the C# lines 3285-3358): the unboxing
     // conversion (`unbox.any`, with the isinst-to-`as` shortcut over nullable
-    // value types and reference types), the boxing conversion (`box`), and the
-    // explicit cast (`castclass`).
+    // value types and reference types), the managed-pointer unboxing (`unbox`),
+    // the boxing conversion (`box`), and the explicit cast (`castclass`).
+    TranslatedExpression VisitUnbox(IL::ILInstruction* inst, TranslationContext context);
     TranslatedExpression VisitUnboxAny(IL::ILInstruction* inst, TranslationContext context);
     TranslatedExpression VisitBox(IL::ILInstruction* inst, TranslationContext context);
     TranslatedExpression VisitCastClass(IL::ILInstruction* inst, TranslationContext context);
