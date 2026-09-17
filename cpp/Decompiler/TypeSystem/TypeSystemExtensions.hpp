@@ -103,6 +103,15 @@ inline std::vector<const IType*> GetNonInterfaceBaseTypes(const IType& type)
     return GetNonInterfaceBaseTypes(&type);
 }
 
+// The C# `INamespace? GetNamespaceByFullName(this ICompilation compilation, string?
+// name)` (TypeSystemExtensions.cs line 877): walks the root namespace down the
+// dot-separated parts of `name`; an empty/null name yields the root namespace and a
+// missing child yields null. The C# `string.Split('.')` with no options gives one
+// empty part for an empty string, which would look up an empty-named child; the port
+// short-circuits on the empty name first (the `string.IsNullOrEmpty` guard), matching
+// the C# which returns the root before visiting any part.
+const INamespace* GetNamespaceByFullName(const ICompilation& compilation, const std::string& name);
+
 // The C# `IEnumerable<ITypeDefinition> GetAllBaseTypeDefinitions(this IType type)`:
 //
 // "Gets all base type definitions. The output is ordered so that base types

@@ -5335,7 +5335,7 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
 - **`IntroduceExtensionMethods`** -- the static-extension-call to extension-syntax rewriter
   lands in `Transforms/IntroduceExtensionMethods.{hpp,cpp}`: `Run` builds a per-run
   `CSharpResolver` from the syntax-tree root's `UsingScope` annotation (attached by
-  `IntroduceUsingDeclarations`, not ported yet -- the caller/tests attach it through the new
+  `IntroduceUsingDeclarations`, now landed -- the caller/tests attach it through the
   `UsingScopeAnnotation` holder) and the current type definition's namespace, then walks the
   tree; `VisitNamespaceDeclaration` descends the resolver's using scope by the declaration's
   dotted name (the previously deferred `NamespaceDeclaration.Identifiers` computed read,
@@ -5359,6 +5359,28 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   round (exactly the 5 positive rewrite tests failed, the 14 predicate/keep tests staying
   green), the full Debug suite at 12756 ran / 12754 passed / the 2 standing skips, and the
   unchanged CLI baselines (`--csharp` 10106360, `--il` 41246545, `-l c` 109438 bytes).
+- **`IntroduceUsingDeclarations`** -- the required-import collector and `using`-declaration
+  writer lands in `Transforms/IntroduceUsingDeclarations.{hpp,cpp}` (header free of the
+  `CSharp::TypeSystem` namespace; both nested visitors live in the .cpp). `Run` walks the
+  tree with `FindRequiredImports` (the namespaces an annotated `SimpleType` resolves to,
+  plus an extension-method `foreach` enumerator or collection-initializer `Add`
+  declaring type; namespaces that are a parent of the current type's namespace are
+  excluded), inserts the `using` declarations in the C# order (non-`System` first,
+  culture-linguistically descending, each inserted at the list head so the final order
+  is ascending with the `System` imports first), attaches the root `UsingScope`
+  annotation, then runs `FullyQualifyAmbiguousTypeNamesVisitor` to re-render every still
+  annotated `SimpleType` through the `TypeSystemAstBuilder` at the resolver position
+  where it sits. Landed the prerequisites `AstType.IsVar` / `AstType.GetNameLookupMode`
+  (the deferred hand-written reads) and `TypeSystemExtensions.GetNamespaceByFullName`.
+  Deferred at named call sites: the `MatchInstruction.Method` arms of
+  `FindRequiredImports` (the port's `MatchInstruction` carries no resolved method yet)
+  and the `DefaultVariable` arm of `CreateAstBuilder`. Verified by 16 tests (the `IsVar`
+  and `GetNameLookupMode` matrices, the namespace walk, the `System`-first insertion
+  order, the settings-off no-op, the scope annotation, and the full-qualify
+  replacement), proven with a `GetNameLookupMode`/insertion-neuter RED round (exactly
+  the 4 positive tests failed, the 12 negative/utility tests staying green), and wired
+  into both CMakeLists; it has no call site in the seed pipeline, so the CLI baselines
+  are unchanged.
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

@@ -50,15 +50,16 @@
 // `MakePointerType`/`MakeArrayType`/`MakeNullableType`/`MakeRefType` (AstType.cs lines 75-105)
 // construct `ComposedType` wrappers, so their bodies are out-of-line in `AstType.cpp` (a
 // `ComposedType.hpp` include from this header would be circular: `ComposedType` derives
-// `AstType`). `IsVar`/`GetNameLookupMode` remain deferred (they reference not-yet-ported
-// nodes -- `UsingDeclaration`/`UsingAliasDeclaration`/`TypeDeclaration`/`Constraint` -- and
-// the `NameLookupMode`-consuming name-lookup stage), as does `MemberType` (the
-// type-argument-collection convenience ctor, an `AddRange` consumer) and the pattern
-// placeholder.
+// `AstType`). The hand-written `IsVar`/`GetNameLookupMode` reads are also landed (their bodies
+// are out-of-line in `AstType.cpp`, which can include `SimpleType`/`UsingDeclaration`/
+// `UsingAliasDeclaration`/`TypeDeclaration`/`Constraint` -- all deriving `AstType`); only
+// `MemberType` (the type-argument-collection convenience ctor, an `AddRange` consumer) and the
+// pattern placeholder remain deferred here.
 
 #ifndef ILSPY_DECOMPILER_CSHARP_SYNTAX_ASTTYPE_HPP
 #define ILSPY_DECOMPILER_CSHARP_SYNTAX_ASTTYPE_HPP
 
+#include "Decompiler/CSharp/Resolver/NameLookupMode.hpp"
 #include "Decompiler/CSharp/Syntax/AstNode.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
@@ -139,6 +140,19 @@ public:
     // true`. On a `ComposedType` receiver the override sets the flag IN PLACE and
     // returns the same node.
     virtual AstType* MakeRefType();
+
+    // The C# `public bool IsVar()` (AstType.cs line 40): true when this is a `SimpleType`
+    // named `var` with no type arguments. Defined out-of-line (needs `SimpleType`, which
+    // derives `AstType`).
+    bool IsVar() const;
+
+    // The C# `public NameLookupMode GetNameLookupMode()` (AstType.cs line 51): the lookup
+    // mode implied by where this type sits -- a `using` declaration/alias import is
+    // `TypeInUsingDeclaration`, a base type of a `TypeDeclaration` (or of a `Constraint`
+    // directly under a `TypeDeclaration`) is `BaseTypeReference`, everything else
+    // `Type`. Defined out-of-line (needs the `UsingDeclaration`/`UsingAliasDeclaration`/
+    // `TypeDeclaration`/`Constraint` node types).
+    Resolver::NameLookupMode GetNameLookupMode();
 
     // The C# `public static AstType Create(string dottedName)` (AstType.cs line 131): creates
     // a simple `AstType` from a dotted name -- a `SimpleType` head with each further part

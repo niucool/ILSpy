@@ -33,6 +33,7 @@
 #include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
 #include "Decompiler/TypeSystem/IModule.hpp"
+#include "Decompiler/TypeSystem/INamespace.hpp"
 #include "Decompiler/TypeSystem/IParameter.hpp"
 #include "Decompiler/TypeSystem/IParameterizedMember.hpp"
 #include "Decompiler/TypeSystem/IProperty.hpp"
@@ -72,6 +73,28 @@ std::vector<const IType*> GetNonInterfaceBaseTypes(const IType* type)
     collector.SkipImplementedInterfaces = true;
     collector.CollectBaseTypes(*type);
     return collector.Types();
+}
+
+const INamespace* GetNamespaceByFullName(const ICompilation& compilation, const std::string& name)
+{
+    if (name.empty())
+        return &compilation.RootNamespace();
+    const INamespace* ns = &compilation.RootNamespace();
+    std::string part;
+    for (std::size_t i = 0; i <= name.size(); i++) {
+        if (i == name.size() || name[i] == '.') {
+            // A null result stops the walk: a later part could never match a child of a
+            // missing namespace (the C# `if (child == null) return null;` early exit).
+            const INamespace* child = ns->GetChildNamespace(part);
+            if (child == nullptr)
+                return nullptr;
+            ns = child;
+            part.clear();
+        } else {
+            part.push_back(name[i]);
+        }
+    }
+    return ns;
 }
 
 std::vector<const ITypeDefinition*> GetAllBaseTypeDefinitions(const IType* type)
