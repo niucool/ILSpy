@@ -4855,6 +4855,24 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   isolation). The CLI baselines are unchanged (the new transform is not wired into
   the seed `--csharp` path): `-l c` is 109438 and `--il`/`--csharp` mscorlib are
   unaffected.
+- **`RemoveCLSCompliantAttribute` project-export transform** -- the second concrete
+  `IAstTransform`, ported per `PORT_PLAN.md`'s Phase 5 and following
+  `EscapeInvalidIdentifiers` in the `WholeProjectDecompiler` project-export order. The
+  transform (`Transforms/RemoveCLSCompliantAttribute.{hpp,cpp}`) walks the DIRECT
+  `AttributeSection` children of the tree root, skips the `assembly`-targeted sections
+  (the assembly identity is emitted by the project file, not `AssemblyInfo.cs`), removes
+  every attribute whose `Type` node's `TypeResolveResult` annotation resolves to
+  `System.CLSCompliantAttribute`, and drops a section left empty. The resolved type's
+  full name is read through the definition's `FullName` (the port's `IType` does not yet
+  carry the `AbstractType.FullName` property) with `ReflectionName()` as the fallback for
+  an unresolved type; the two coincide for the top-level, non-generic attribute types the
+  transform matches. Removals happen during the walk through the mutation-tolerant
+  `ChildEnumerator`, so the empty-section cleanup and the `assembly` skip compose in one
+  pass. Verified by 6 tests (the attribute-and-empty-section removal, the assembly-target
+  skip, the mixed-section partial removal, the unannotated-type keep, the module-target
+  removal, and a same-simple-name-different-namespace keep), and the full Debug suite is
+  12451 ran / 12449 passed / the 2 standing skips / zero failures. The CLI baselines are
+  unchanged (the transform is not wired into the seed `--csharp` path).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.
