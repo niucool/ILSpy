@@ -5004,6 +5004,34 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   the transform disabled, then all 12 green after restore); the full Debug suite is now
   12534 ran / 12532 passed / the 2 standing skips / zero failures, and the `--csharp` CLI
   baseline is unaffected (the transform is not wired into the seed `--csharp` path).
+- **`AddCheckedBlocks` AST transform** -- the ninth concrete `IAstTransform` over the
+  iteration-160 foundation and the next ported transform in the `CSharpDecompiler
+  .GetAstTransforms()` order (the second entry, after `ReplaceMethodCallsWithOperators`;
+  the earlier tail was ported first, and this one needs only the already-ported annotation
+  half). The transform (`Transforms/AddCheckedBlocks.{hpp,cpp}`) runs the cost-based
+  dynamic program from the C# to place `checked(...)`/`unchecked(...)` expressions and
+  `checked { ... }`/`unchecked { ... }` blocks: `Cost` (blocks + expressions, with the
+  expression-nesting penalty and the `<`/`<=` tie-breaks that prefer expressions and
+  open/close blocks as late as possible), the lazily composed `InsertedNode` list
+  (`InsertedExpression`, `InsertedBlock`, `InsertedNodeList`), and the four-state
+  `GetResultFromBlock`/`GetResult` walking every child (a nested block runs its own
+  program, and an enclosing block can subsume the inner one's need). An explicit
+  `unchecked` annotation always forces an unchecked expression; labels and local function
+  declarations block statement movement, so their block starts after them. The C#
+  `expr.Slot?.ChildType is Type ct && ct.IsAssignableFrom(typeof(Expression))` ports to a
+  slot's `IsInstanceOfType` predicate tested against a representative `Expression`
+  (`CheckedExpression`), so a slot that cannot hold the wrapper (a `Statement`, a
+  `PrimitiveExpression` collection element) is skipped. The slice also landed
+  `SyntaxExtensions::GetNextStatement` (the next `Statement` sibling, skipping non-statement
+  siblings). Verified by 9 tests (the checked/unchecked-expression wraps in the opposite
+  context, the matching-annotation no-ops, the explicit-unchecked force, the multi-statement
+  block grouping, the label and local-function block starts, the nested-block subsumption,
+  and the matching top-level no-op) proven with a Run-neuter RED round (exactly the 7
+  positive tests failed with the transform disabled, the 2 no-op tests staying green, then
+  all 9 green after restore); the full Debug suite is now 12543 ran / 12541 passed / the 2
+  standing skips / zero failures, and the `--csharp` (10106360), `--il` (41246545), and
+  `-l c` (109438) CLI baselines are all unchanged (the transform is not wired into the seed
+  paths).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

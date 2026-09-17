@@ -30,16 +30,21 @@
 //   - Detach<T>(T*) (SyntaxExtensions.cs line 75) -- consumed by the ambience's
 //     parameter-list rendering (`CSharpAmbience.ConvertSymbol` strips a parameter's
 //     default expression when `ShowParameterDefaultValues` is off).
+//   - GetNextStatement(Statement*) (SyntaxExtensions.cs line 56) -- consumed by the
+//     AddCheckedBlocks transform's block-range walk (the first statement whose
+//     `NextSibling` is a `Statement`, used to iterate a `BlockStatement`'s statements
+//     while insertion is planned).
 //
 // The remaining methods are DEFERRED until their consumers port: `IsBitwise`
 // (BinaryOperatorType -- the unported CSharpResolver/OutputVisitor binary-operator
-// tiebreaks), `GetNextStatement` (Statement -- the unported statement-flow stages),
-// `IsArgList` / `AddNamedArgument` / `UnwrapInDirectionExpression`
+// tiebreaks), `IsArgList` / `AddNamedArgument` / `UnwrapInDirectionExpression`
 // (the unported CSharpResolver/TypeSystemAstBuilder stages).
 
 #pragma once
 
+#include "Decompiler/CSharp/Syntax/AstNode.hpp"
 #include "Decompiler/CSharp/Syntax/OperatorDeclaration.hpp"  // OperatorType (the enum)
+#include "Decompiler/CSharp/Syntax/Statements/Statement.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -69,6 +74,19 @@ template <class T>
 T* Detach(T* node) {
     node->Remove();
     return node;
+}
+
+// The C# `public static Statement? GetNextStatement(this Statement statement)`
+// (SyntaxExtensions.cs line 56) -- the next sibling that is a `Statement`, skipping any
+// intervening non-`Statement` siblings (`while (next != null && !(next is Statement))`),
+// or null at the end. A `BlockStatement`'s statements are all `Statement`s, so the loop
+// is a single step there; the walk matters for a statement embedded in a node whose slot
+// can hold a non-statement sibling. The nullable return ports as a nullable pointer.
+inline Statement* GetNextStatement(Statement* statement) {
+    AstNode* next = statement->NextSibling();
+    while (next != nullptr && dynamic_cast<Statement*>(next) == nullptr)
+        next = next->NextSibling();
+    return static_cast<Statement*>(next);
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
