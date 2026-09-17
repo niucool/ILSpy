@@ -4809,6 +4809,25 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   assembly still returns rc 64; `--csharp` mscorlib is now 10106360 bytes, +12 over
   the prior 10106348 because the four decoded `mkrefany` sites render the correct
   `__makeref(...)` instead of the old token stand-in `typeof(0x1B0000F9)`.
+- **`ExpressionBuilder` invalid-IL arms (`VisitInvalidBranch` +
+  `VisitInvalidExpression` + the `InvalidBranch`/`InvalidExpression` IL nodes)** --
+  the last two `ExpressionBuilder.cs` Visit overrides (lines 5121-5146) landed and
+  are routed from the `Visit` OpCode switch. A new `InvalidInstructions.hpp`
+  carries the two `SimpleInstruction` leaves: `InvalidBranch` (Message,
+  `ExpectedResultType` default `Void`, `DirectFlags = MayThrow | SideEffect |
+  EndPointUnreachable`) and `InvalidExpression` (Severity default `"Error"`,
+  Message, `ExpectedResultType` default `Unknown`, `DirectFlags = MayThrow |
+  SideEffect`), each with its dump (`InvalidBranch`/`InvalidBranch("msg")`), its
+  `ILInstructionClone` case, and the `OpCodeName` entries already in place.
+  `VisitInvalidBranch` renders the `ErrorExpression` text `Error[ near IL_xxxx][:
+  message]`; `VisitInvalidExpression` is identical with the node's Severity as the
+  prefix. Verified by 6 tests (the node flags/dump matrix, the clone scalar
+  carry, and four exact error-text renders incl. the lowercase-hex non-zero offset
+  and the Severity prefix), and the full Debug suite is green at 12440 ran / 12438
+  passed / the 2 standing skips / zero failures. The nodes are not yet synthesized
+  by the port's minimal reader/BlockBuilder (which keep their documented graceful
+  degradations), so the CLI baselines are unchanged: `--il` is byte-identical to
+  the 41246545-byte gold and `--csharp` mscorlib is still 10106360 bytes.
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

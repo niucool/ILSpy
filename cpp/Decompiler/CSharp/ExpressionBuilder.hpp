@@ -408,6 +408,15 @@ public:
     // corresponding arms cannot arise.
     TranslatedExpression TranslatePattern(IL::ILInstruction* pattern,
                                           const TS::IType* leftHandType);
+    // The C# `protected internal override TranslatedExpression VisitInvalidBranch(
+    // InvalidBranch inst, TranslationContext context)` (ExpressionBuilder.cs lines
+    // 5121-5133): the ErrorExpression with the "Error" prefix, an optional
+    // ' near IL_xxxx' suffix (non-zero StartILOffset), and an optional ': message'.
+    TranslatedExpression VisitInvalidBranch(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitInvalidExpression(
+    // InvalidExpression inst, TranslationContext context)` (ExpressionBuilder.cs lines
+    // 5135-5146): the same error text with the node's Severity as the prefix.
+    TranslatedExpression VisitInvalidExpression(IL::ILInstruction* inst, TranslationContext context);
     // The C# `private TranslatedExpression StObjViaHelperCall(StObj inst)`
     // (ExpressionBuilder.cs lines 3087-3125): the `Unsafe.Write` /
     // `Unsafe.WriteUnaligned` intrinsic rewrite for a store that cannot be a

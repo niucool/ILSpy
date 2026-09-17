@@ -77,6 +77,7 @@
 #include "Decompiler/IL/Instructions/RefAnyType.hpp"
 #include "Decompiler/IL/Instructions/TypedReferenceInstructions.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
+#include "Decompiler/IL/Instructions/InvalidInstructions.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/Transforms/TupleTransform.hpp"
 #include "Decompiler/CSharp/CSharpDecompiler.hpp"
@@ -774,6 +775,73 @@ TEST(ExpressionBuilderDefaultTest, DefaultRendersOpCodeNotSupported)
     ASSERT_TRUE(errorExpr != nullptr);
     // The C# Default message: "OpCode not supported: Nop".
     EXPECT_TRUE(error.ResolveResult()->IsError());
+}
+
+// The C# `VisitInvalidBranch` arm (ExpressionBuilder.cs lines 5121-5133): the
+// error text is "Error[ near IL_xxxx][: message]". The offset/message tests pin
+// both formatting rules and prove the dispatch routes to the arm (a Default
+// fallback would say "OpCode not supported").
+TEST(ExpressionBuilderInvalidTest, InvalidBranchRendersErrorWithOffsetAndMessage)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::InvalidBranch inst;
+    inst.SetILRange(0x123, 0x124);
+    inst.Message = "no block for target";
+    auto expr = builder.Translate(&inst);
+    auto* error = dynamic_cast<Syntax::ErrorExpression*>(expr.Expression());
+    ASSERT_TRUE(error != nullptr);
+    ASSERT_EQ(error->TrailingTrivia().size(), std::size_t{1});
+    auto* comment = dynamic_cast<Syntax::Comment*>(error->TrailingTrivia()[0]);
+    ASSERT_TRUE(comment != nullptr);
+    EXPECT_EQ(comment->Content(), "Error near IL_0123: no block for target");
+    EXPECT_TRUE(expr.ResolveResult()->IsError());
+}
+
+TEST(ExpressionBuilderInvalidTest, InvalidBranchWithoutOffsetOrMessageIsBareError)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::InvalidBranch inst;
+    auto expr = builder.Translate(&inst);
+    auto* error = dynamic_cast<Syntax::ErrorExpression*>(expr.Expression());
+    ASSERT_TRUE(error != nullptr);
+    ASSERT_EQ(error->TrailingTrivia().size(), std::size_t{1});
+    auto* comment = dynamic_cast<Syntax::Comment*>(error->TrailingTrivia()[0]);
+    ASSERT_TRUE(comment != nullptr);
+    EXPECT_EQ(comment->Content(), "Error");
+}
+
+// The C# `VisitInvalidExpression` arm (lines 5135-5146): the prefix is the
+// node's Severity (default "Error") instead of the literal "Error".
+TEST(ExpressionBuilderInvalidTest, InvalidExpressionUsesSeverityPrefix)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::InvalidExpression inst(std::string("goto from catch to try"));
+    inst.Severity = "Note";
+    inst.SetILRange(42, 43);
+    auto expr = builder.Translate(&inst);
+    auto* error = dynamic_cast<Syntax::ErrorExpression*>(expr.Expression());
+    ASSERT_TRUE(error != nullptr);
+    ASSERT_EQ(error->TrailingTrivia().size(), std::size_t{1});
+    auto* comment = dynamic_cast<Syntax::Comment*>(error->TrailingTrivia()[0]);
+    ASSERT_TRUE(comment != nullptr);
+    EXPECT_EQ(comment->Content(), "Note near IL_002a: goto from catch to try");
+}
+
+TEST(ExpressionBuilderInvalidTest, InvalidExpressionDefaultSeverityIsError)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::InvalidExpression inst(std::string("bad value"));
+    auto expr = builder.Translate(&inst);
+    auto* error = dynamic_cast<Syntax::ErrorExpression*>(expr.Expression());
+    ASSERT_TRUE(error != nullptr);
+    ASSERT_EQ(error->TrailingTrivia().size(), std::size_t{1});
+    auto* comment = dynamic_cast<Syntax::Comment*>(error->TrailingTrivia()[0]);
+    ASSERT_TRUE(comment != nullptr);
+    EXPECT_EQ(comment->Content(), "Error: bad value");
 }
 
 // ---------------------------------------------------------------------------

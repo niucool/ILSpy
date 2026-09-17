@@ -40,6 +40,7 @@
 #include "Decompiler/IL/Instructions/CompoundAssignmentInstruction.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/IL/Instructions/InvalidInstructions.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
@@ -156,6 +157,30 @@ TEST(ILInstructionClone, LdcI4ClonesScalar) {
     auto clone = AssertCloneInvariants(ldc);
     ASSERT_TRUE(clone);
     EXPECT_EQ(static_cast<LdcI4*>(clone.get())->Value, 42);
+}
+
+// The invalid-IL leaves carry scalar fields (Message/Severity/ExpectedResultType)
+// that the clone must copy.
+TEST(ILInstructionClone, InvalidLeavesCloneScalars) {
+    InvalidBranch ib(std::string("no block"));
+    ib.ExpectedResultType = StackType::I4;
+    auto ibClone = AssertCloneInvariants(ib);
+    ASSERT_TRUE(ibClone);
+    auto* ibc = static_cast<InvalidBranch*>(ibClone.get());
+    ASSERT_TRUE(ibc->Message.has_value());
+    EXPECT_EQ(*ibc->Message, "no block");
+    EXPECT_EQ(ibc->ExpectedResultType, StackType::I4);
+
+    InvalidExpression ie(std::string("goto emulation"));
+    ie.Severity = "Note";
+    ie.ExpectedResultType = StackType::O;
+    auto ieClone = AssertCloneInvariants(ie);
+    ASSERT_TRUE(ieClone);
+    auto* iec = static_cast<InvalidExpression*>(ieClone.get());
+    EXPECT_EQ(iec->Severity, "Note");
+    ASSERT_TRUE(iec->Message.has_value());
+    EXPECT_EQ(*iec->Message, "goto emulation");
+    EXPECT_EQ(iec->ExpectedResultType, StackType::O);
 }
 
 // A one-value-slot node: the Value child is deep-cloned and reparented; mutating

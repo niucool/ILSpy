@@ -75,6 +75,7 @@
 #include "Decompiler/IL/Instructions/UserDefinedLogicOperator.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
+#include "Decompiler/IL/Instructions/InvalidInstructions.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
 #include "Decompiler/IL/Instructions/UsingInstruction.hpp"
@@ -897,6 +898,10 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitSwitchInstruction(inst, context);
         case IL::OpCode::MatchInstruction:
             return VisitMatchInstruction(inst, context);
+        case IL::OpCode::InvalidBranch:
+            return VisitInvalidBranch(inst, context);
+        case IL::OpCode::InvalidExpression:
+            return VisitInvalidExpression(inst, context);
         case IL::OpCode::Call:
         case IL::OpCode::CallVirt:
         case IL::OpCode::NewObj:
@@ -2602,6 +2607,39 @@ TranslatedExpression ExpressionBuilder::TranslatePattern(IL::ILInstruction* patt
             return Translate(call->Arguments[1].get());
     }
     throw std::logic_error("TranslatePattern: unsupported pattern");
+}
+
+
+// The C# `protected internal override TranslatedExpression VisitInvalidBranch(
+// InvalidBranch inst, TranslationContext context)` (ExpressionBuilder.cs lines
+// 5121-5133): render the "Error" prefix, the optional ' near IL_xxxx' suffix for a
+// non-zero start offset, and the optional ': message' tail as an ErrorExpression.
+TranslatedExpression ExpressionBuilder::VisitInvalidBranch(IL::ILInstruction* inst,
+                                                          TranslationContext)
+{
+    auto* invalidBranch = static_cast<IL::InvalidBranch*>(inst);
+    std::string message = "Error";
+    if (invalidBranch->StartILOffset != 0)
+        message += " near IL_" + ILOffsetHex(invalidBranch->StartILOffset);
+    if (invalidBranch->Message && !invalidBranch->Message->empty())
+        message += ": " + *invalidBranch->Message;
+    return ErrorExpression(message);
+}
+
+// The C# `protected internal override TranslatedExpression VisitInvalidExpression(
+// InvalidExpression inst, TranslationContext context)` (ExpressionBuilder.cs lines
+// 5135-5146): identical to VisitInvalidBranch except that the prefix is the node's
+// Severity (default "Error") instead of the literal "Error".
+TranslatedExpression ExpressionBuilder::VisitInvalidExpression(IL::ILInstruction* inst,
+                                                              TranslationContext)
+{
+    auto* invalidExpression = static_cast<IL::InvalidExpression*>(inst);
+    std::string message = invalidExpression->Severity;
+    if (invalidExpression->StartILOffset != 0)
+        message += " near IL_" + ILOffsetHex(invalidExpression->StartILOffset);
+    if (invalidExpression->Message && !invalidExpression->Message->empty())
+        message += ": " + *invalidExpression->Message;
+    return ErrorExpression(message);
 }
 
 

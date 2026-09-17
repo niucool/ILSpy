@@ -32,6 +32,7 @@
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
+#include "Decompiler/IL/Instructions/InvalidInstructions.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/Instructions/Arglist.hpp"
@@ -87,6 +88,34 @@ TEST(ILAstInstructions, SimpleInstructions) {
     EXPECT_EQ(a.ChildCount(), 0);
     EXPECT_EQ(a.DirectFlags(), InstructionFlags::None);
     EXPECT_EQ(a.ToString(), "arglist");
+
+    // InvalidBranch: the invalid-IL terminator (SimpleInstruction, MayThrow |
+    // SideEffect | EndPointUnreachable, result Void by default, no children).
+    // The dump appends the parenthesized message only when one is present.
+    InvalidBranch ib;
+    EXPECT_EQ(ib.Op, OpCode::InvalidBranch);
+    EXPECT_EQ(ib.ResultType(), StackType::Void);
+    EXPECT_EQ(ib.ChildCount(), 0);
+    EXPECT_TRUE(HasFlag(ib.DirectFlags(), InstructionFlags::MayThrow));
+    EXPECT_TRUE(HasFlag(ib.DirectFlags(), InstructionFlags::SideEffect));
+    EXPECT_TRUE(HasFlag(ib.DirectFlags(), InstructionFlags::EndPointUnreachable));
+    EXPECT_EQ(ib.ToString(), "InvalidBranch");
+    InvalidBranch ibMsg(std::string("boom"));
+    EXPECT_EQ(ibMsg.ToString(), "InvalidBranch(\"boom\")");
+
+    // InvalidExpression: the invalid-IL value (MayThrow | SideEffect, result
+    // Unknown by default, no children).
+    InvalidExpression ie;
+    EXPECT_EQ(ie.Op, OpCode::InvalidExpression);
+    EXPECT_EQ(ie.ResultType(), StackType::Unknown);
+    EXPECT_EQ(ie.ChildCount(), 0);
+    EXPECT_FALSE(HasFlag(ie.DirectFlags(), InstructionFlags::EndPointUnreachable));
+    EXPECT_TRUE(HasFlag(ie.DirectFlags(), InstructionFlags::MayThrow));
+    EXPECT_TRUE(HasFlag(ie.DirectFlags(), InstructionFlags::SideEffect));
+    EXPECT_EQ(ie.Severity, "Error");
+    EXPECT_EQ(ie.ToString(), "InvalidExpression");
+    InvalidExpression ieMsg(std::string("bad value"));
+    EXPECT_EQ(ieMsg.ToString(), "InvalidExpression(\"bad value\")");
 }
 
 TEST(ILAstInstructions, UnaryInstructionsFlagsAndResult) {

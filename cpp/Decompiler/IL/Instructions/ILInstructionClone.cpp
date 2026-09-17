@@ -54,6 +54,7 @@
 #include "Decompiler/IL/Instructions/DefaultValue.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/IL/Instructions/InvalidInstructions.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
 #include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
@@ -127,6 +128,23 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         case OpCode::LdNull: c = std::make_unique<LdNull>(); break;
         case OpCode::Arglist: c = std::make_unique<Arglist>(); break;
         case OpCode::Rethrow: c = std::make_unique<Rethrow>(); break;
+        case OpCode::InvalidBranch: {
+            const auto& s = static_cast<const InvalidBranch&>(*this);
+            auto clone = std::make_unique<InvalidBranch>();
+            clone->Message = s.Message;
+            clone->ExpectedResultType = s.ExpectedResultType;
+            c = std::move(clone);
+            break;
+        }
+        case OpCode::InvalidExpression: {
+            const auto& s = static_cast<const InvalidExpression&>(*this);
+            auto clone = std::make_unique<InvalidExpression>();
+            clone->Severity = s.Severity;
+            clone->Message = s.Message;
+            clone->ExpectedResultType = s.ExpectedResultType;
+            c = std::move(clone);
+            break;
+        }
         case OpCode::LdcI4: {
             const auto& s = static_cast<const LdcI4&>(*this);
             c = std::make_unique<LdcI4>(s.Value);
