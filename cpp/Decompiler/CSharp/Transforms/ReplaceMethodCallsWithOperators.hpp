@@ -22,26 +22,42 @@
 // -- the AST transform that replaces operator-method calls with the operator
 // expressions.
 //
-// This file carries the resolver-free half: the statics the ExpressionBuilder's
-// VisitUserDefinedCompoundAssign arm consumes -- `HasCheckedEquivalent(IMethod)`
-// (the checked-operator twin detection) and `RemoveRedundantToStringInConcat`
-// (the string.Concat argument `ToString()` elimination with its
-// ToStringIsKnownEffectFree support table) -- plus the operator-name mapping
-// tables and `IsInstantiableTypeParameter` the instance machinery consumes. The
-// instance VisitInvocationExpression machinery (the ProcessInvocationExpression
-// rewrite, CheckArgumentsForStringConcat and the other method-call rewrites) is
-// DEFERRED with the IAstTransform slice it serves.
+// This file carries the statics the ExpressionBuilder's VisitUserDefinedCompoundAssign
+// arm consumes -- `HasCheckedEquivalent(IMethod)` (the checked-operator twin
+// detection) and `RemoveRedundantToStringInConcat` (the string.Concat argument
+// `ToString()` elimination with its ToStringIsKnownEffectFree support table) -- plus
+// the operator-name mapping tables and `IsInstantiableTypeParameter`. The instance
+// transform (`IAstTransform.Run`, `VisitInvocationExpression`,
+// `ProcessInvocationExpression`) is also landed: the special-method rewrites
+// (`System.Type.GetTypeFromHandle` -> `typeof`, `System.Activator.CreateInstance` ->
+// `new T()`, `System.Runtime.CompilerServices.RuntimeHelpers.GetSubArray` -> range
+// indexer) and the operator-method rewrites (binary / unary / cast / `op_True`
+// condition removal with the checked/unchecked annotations).
+//
+// The string.Concat reduction (`IsStringConcat` / `CheckArgumentsForStringConcat`
+// and the `String.Concat(a, b)` -> `a + b` rewrite) and the `VisitCastExpression`
+// methodof rewrite (the `getMethodOrConstructorFromHandlePattern`, which needs the
+// unported generated `TypePattern`/`LdTokenPattern` nodes) are DEFERRED, each named
+// at its would-be call site.
 
 #pragma once
 
+#include "Decompiler/CSharp/Syntax/DepthFirstAstVisitor.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Transforms/IAstTransform.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+
+// Forward declarations of the node/context types the instance transform references
+// (the full definitions are pulled into the .cpp).
+namespace ILSpy::Decompiler::CSharp::Transforms {
+class TransformContext;
+}
 // The real type-system namespace alias (the ExpressionBuilder TS:: convention --
 // the CSharp/TypeSystem sub-namespace shadows the plain `TypeSystem::` lookup).
 namespace TS = ::ILSpy::Decompiler::TypeSystem;
@@ -49,12 +65,22 @@ namespace TS = ::ILSpy::Decompiler::TypeSystem;
 namespace ILSpy::Decompiler::CSharp::Transforms {
 
 // The C# `public class ReplaceMethodCallsWithOperators : DepthFirstAstVisitor,
-// IAstTransform` -- the port carries the static half first (the
-// VisitUserDefinedCompoundAssign prerequisite); the instance AST-transform
-// machinery lands with that slice.
-class ReplaceMethodCallsWithOperators {
+// IAstTransform`. The port derives from the void-visiting `DepthFirstAstVisitor`
+// (the C# base's `Visit` methods return `void`) and implements `Run`.
+class ReplaceMethodCallsWithOperators final : public Syntax::DepthFirstAstVisitor,
+                                              public IAstTransform {
 public:
-    virtual ~ReplaceMethodCallsWithOperators() = default;
+    ~ReplaceMethodCallsWithOperators() override = default;
+
+    // The C# `void IAstTransform.Run(AstNode rootNode, TransformContext context)`:
+    // stores the context, walks the tree (the depth-first visitor dispatch), and
+    // clears the context afterwards. Reentrancy is rejected by the C# through the
+    // `Run`-once transform contract; the port keeps the context pointer private.
+    void Run(Syntax::AstNode& rootNode, TransformContext& context) override;
+
+    // The C# `public override void VisitInvocationExpression(...)`: walks the
+    // children first, then processes the invocation (the method-call rewrites).
+    void VisitInvocationExpression(Syntax::InvocationExpression* invocationExpression) override;
 
     // The C# `internal static bool HasCheckedEquivalent(IMethod method)`
     // (ReplaceMethodCallsWithOperators.cs lines 264-271): whether the declaring
@@ -141,6 +167,18 @@ public:
     // the port carries it as a static member. Implemented out-of-line in the
     // .cpp.
     static bool IsInstantiableTypeParameter(const TS::IType& type);
+
+private:
+    // The C# `void ProcessInvocationExpression(InvocationExpression
+    // invocationExpression)`: the method-level rewrite dispatch -- the three special
+    // methods, then the binary/unary operator methods, the explicit conversion
+    // operator, and the `op_True` condition removal. The string.Concat reduction is
+    // deferred (see the header note).
+    void ProcessInvocationExpression(Syntax::InvocationExpression* invocationExpression);
+
+    // The C# `[AllowNull] TransformContext context` -- the run state (non-null only
+    // during `Run`).
+    TransformContext* context_ = nullptr;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Transforms

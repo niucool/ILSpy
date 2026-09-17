@@ -5227,6 +5227,26 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   restore). The `DecompilerSettings` `checkedOperators_`/`unsignedRightShift_` defaults are
   BOTH true, so a "settings off" test must call `SetCheckedOperators(false)` /
   `SetUnsignedRightShift(false)` explicitly (the first test run failed on exactly this).
+- **`ReplaceMethodCallsWithOperators` instance transform** -- the `Run` /
+  `VisitInvocationExpression` / `ProcessInvocationExpression` machinery of the transform
+  (its operator-name maps landed in the previous slice). A resolved invocation whose
+  method symbol reaches one of the recognized shapes is rewritten: the three special
+  methods (`System.Type.GetTypeFromHandle(typeof(T).TypeHandle)` to `typeof(T)`, the
+  `new()`-constrained `System.Activator.CreateInstance<T>()` to `new T()` under
+  `UseObjectCreationOfGenericTypeParameter`, and
+  `RuntimeHelpers.GetSubArray(array, range)` to `array[range]` under `Ranges`), the binary
+  operator methods (with the checked/unchecked annotation from the checked name or the
+  `HasCheckedEquivalent` twin), the unary operator methods (the increment/decrement decimal
+  reversal to `a + 1m` / `a - 1m`; other increments keep the call), the explicit conversion
+  operators to a cast, and `op_True(x)` in a `Condition` slot to `x`. The `String.Concat`
+  reduction (with `IsStringConcat`/`CheckArgumentsForStringConcat`) and the
+  `VisitCastExpression` methodof rewrite (needing the unported generated
+  `TypePattern`/`LdTokenPattern` nodes) are DEFERRED, each named at its would-be call site.
+  Verified by 16 tests (`ReplaceMethodCallsWithOperatorsInstanceTest`: each rewrite plus
+  the settings-off and non-matching-shape keeps, the checked/unchecked annotations, and
+  the unresolved-invocation keep) proven with a `ProcessInvocationExpression`-neuter RED
+  round (exactly the 9 positive tests failed, the 7 keep-tests staying green, then all 16
+  green after restore).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

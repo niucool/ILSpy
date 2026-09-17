@@ -21,9 +21,19 @@
 #include "Decompiler/CSharp/Transforms/ReplaceMethodCallsWithOperators.hpp"
 
 #include "Decompiler/CSharp/Annotations.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TypeOfExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UndocumentedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
+#include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
+#include "Decompiler/CSharp/Transforms/AddCheckedBlocks.hpp"
+#include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/NullableType.hpp"
@@ -45,6 +55,25 @@ namespace {
 // is deferred with the IParameter.IsParams surface).
 bool IsStringParameter(const TS::IParameter& p) {
     return TS::IsKnownType(p.Type(), TS::KnownTypeCode::String);
+}
+
+// The port's `typeHandleOnTypeOfPattern.IsMatch` stand-in (the C# `static readonly
+// MemberReferenceExpression typeHandleOnTypeOfPattern`, lines 48-56): a
+// MemberReferenceExpression named "TypeHandle" whose target is either `typeof(...)`
+// (a TypeOfExpression) or `__reftype(...)` (the RefType UndocumentedExpression with
+// exactly one argument).
+bool IsTypeHandleOnTypeOf(Syntax::Expression* expr) {
+    auto* memberRef = dynamic_cast<Syntax::MemberReferenceExpression*>(expr);
+    if (memberRef == nullptr || memberRef->MemberName() != "TypeHandle")
+        return false;
+    Syntax::Expression* target = memberRef->Target();
+    if (dynamic_cast<Syntax::TypeOfExpression*>(target) != nullptr)
+        return true;
+    auto* undocumented = dynamic_cast<Syntax::UndocumentedExpression*>(target);
+    return undocumented != nullptr
+        && undocumented->UndocumentedExpressionType()
+               == Syntax::UndocumentedExpressionType::RefType
+        && undocumented->Arguments().Count() == 1;
 }
 
 } // namespace
@@ -123,7 +152,7 @@ bool ReplaceMethodCallsWithOperators::ToStringIsKnownEffectFree(
     const TS::ITypeDefinition* definition = unwrapped.GetDefinition();
     if (definition == nullptr)
         return false;
-    using TypeSystem::KnownTypeCode;
+    using TS::KnownTypeCode;
     switch (definition->KnownTypeCode()) {
         case KnownTypeCode::Boolean:
         case KnownTypeCode::Char:
@@ -157,7 +186,7 @@ Syntax::Expression* ReplaceMethodCallsWithOperators::RemoveRedundantToStringInCo
         return expr;
 
     // The C# `if (!concatMethod.Parameters.All(IsStringParameter))`.
-    for (const TypeSystem::IParameter* p : concatMethod.Parameters()) {
+    for (const TS::IParameter* p : concatMethod.Parameters()) {
         if (p == nullptr || !IsStringParameter(*p))
             return expr;
     }
@@ -281,6 +310,164 @@ bool ReplaceMethodCallsWithOperators::IsInstantiableTypeParameter(
     const auto* typeParameter = dynamic_cast<const TS::ITypeParameter*>(&type);
     return typeParameter != nullptr
         && typeParameter->HasDefaultConstructorConstraint();
+}
+
+// The C# `void IAstTransform.Run(AstNode rootNode, TransformContext context)`
+// (lines 531-543): store the context, walk the tree, and clear the context
+// afterwards (the C# `try/finally`).
+void ReplaceMethodCallsWithOperators::Run(Syntax::AstNode& rootNode,
+                                          TransformContext& context) {
+    context_ = &context;
+    try {
+        rootNode.AcceptVisitor(*this);
+    } catch (...) {
+        context_ = nullptr;
+        throw;
+    }
+    context_ = nullptr;
+}
+
+// The C# `public override void VisitInvocationExpression(InvocationExpression
+// invocationExpression)` (lines 60-64): walk the children first, then rewrite the
+// invocation.
+void ReplaceMethodCallsWithOperators::VisitInvocationExpression(
+    Syntax::InvocationExpression* invocationExpression) {
+    Syntax::DepthFirstAstVisitor::VisitInvocationExpression(invocationExpression);
+    ProcessInvocationExpression(invocationExpression);
+}
+
+// The C# `void ProcessInvocationExpression(InvocationExpression
+// invocationExpression)` (lines 66-259): the method-level rewrites. The
+// `String.Concat(a, b)` -> `a + b` reduction is deferred with its
+// `IsStringConcat`/`CheckArgumentsForStringConcat` helpers (see the header note).
+void ReplaceMethodCallsWithOperators::ProcessInvocationExpression(
+    Syntax::InvocationExpression* invocationExpression) {
+    const TS::ISymbol* symbol = CSharp::GetSymbol(*invocationExpression);
+    const TS::IMethod* method =
+        symbol != nullptr ? dynamic_cast<const TS::IMethod*>(symbol) : nullptr;
+    if (method == nullptr)
+        return;
+    std::vector<Syntax::Expression*> arguments;
+    for (int i = 0; i < invocationExpression->Arguments().Count(); i++)
+        arguments.push_back(invocationExpression->Arguments()[i]);
+
+    const std::string fullName = method->FullName();
+    if (fullName == "System.Type.GetTypeFromHandle") {
+        if (arguments.size() == 1) {
+            if (IsTypeHandleOnTypeOf(arguments[0])) {
+                Syntax::Expression* target =
+                    static_cast<Syntax::MemberReferenceExpression*>(arguments[0])
+                        ->Target();
+                CSharp::CopyInstructionsFrom(target, *invocationExpression);
+                invocationExpression->ReplaceWith(target);
+                return;
+            }
+        }
+    } else if (fullName == "System.Activator.CreateInstance") {
+        std::vector<TS::ITypePtr> typeArguments = method->TypeArguments();
+        if (context_->Settings().UseObjectCreationOfGenericTypeParameter()
+            && arguments.empty() && typeArguments.size() == 1
+            && IsInstantiableTypeParameter(*typeArguments[0])) {
+            auto* objectCreate = new Syntax::ObjectCreateExpression(
+                context_->TypeSystemAstBuilder().ConvertType(*typeArguments[0]));
+            invocationExpression->ReplaceWith(objectCreate);
+        }
+    } else if (fullName
+               == "System.Runtime.CompilerServices.RuntimeHelpers.GetSubArray") {
+        if (arguments.size() == 2 && context_->Settings().Ranges()) {
+            auto* slicing =
+                new Syntax::IndexerExpression(Syntax::Detach(arguments[0]));
+            slicing->Arguments().Add(Syntax::Detach(arguments[1]));
+            CSharp::CopyAnnotationsFrom(slicing, *invocationExpression);
+            invocationExpression->ReplaceWith(slicing);
+            return;
+        }
+    }
+
+    // The binary operator methods (`op_Addition` &c.).
+    bool isChecked = false;
+    std::optional<Syntax::BinaryOperatorType> bop =
+        GetBinaryOperatorTypeFromMetadataName(method->Name(), isChecked,
+                                              context_->Settings());
+    if (bop.has_value() && arguments.size() == 2) {
+        invocationExpression->Arguments().Clear();
+        if (isChecked)
+            invocationExpression->AddAnnotation(CheckedAnnotationHandle());
+        else if (HasCheckedEquivalent(*method))
+            invocationExpression->AddAnnotation(UncheckedAnnotationHandle());
+        auto* binaryOperator = new Syntax::BinaryOperatorExpression(
+            Syntax::UnwrapInDirectionExpression(arguments[0]), *bop,
+            Syntax::UnwrapInDirectionExpression(arguments[1]));
+        CSharp::CopyAnnotationsFrom(binaryOperator, *invocationExpression);
+        invocationExpression->ReplaceWith(binaryOperator);
+        return;
+    }
+
+    // The unary operator methods (`op_LogicalNot` &c.).
+    std::optional<Syntax::UnaryOperatorType> uop =
+        GetUnaryOperatorTypeFromMetadataName(method->Name(), isChecked,
+                                             context_->Settings());
+    if (uop.has_value() && arguments.size() == 1) {
+        if (isChecked)
+            invocationExpression->AddAnnotation(CheckedAnnotationHandle());
+        else if (HasCheckedEquivalent(*method))
+            invocationExpression->AddAnnotation(UncheckedAnnotationHandle());
+        if (*uop == Syntax::UnaryOperatorType::Increment
+            || *uop == Syntax::UnaryOperatorType::Decrement) {
+            // `op_Increment(a)` is not equivalent to `++a`, because it does not
+            // assign the incremented value to `a`; only the decimal shape (a
+            // legacy csc optimization) is reversed to `a + 1m` / `a - 1m`.
+            TS::ITypePtr declaringType = method->DeclaringType();
+            if (declaringType != nullptr
+                && TS::IsKnownType(*declaringType, TS::KnownTypeCode::Decimal)) {
+                auto* arithmetic = new Syntax::BinaryOperatorExpression(
+                    Syntax::Detach(
+                        Syntax::UnwrapInDirectionExpression(arguments[0])),
+                    *uop == Syntax::UnaryOperatorType::Increment
+                        ? Syntax::BinaryOperatorType::Add
+                        : Syntax::BinaryOperatorType::Subtract,
+                    new Syntax::PrimitiveExpression(
+                        Syntax::DecimalValue::FromInt32(1)));
+                CSharp::CopyAnnotationsFrom(arithmetic, *invocationExpression);
+                invocationExpression->ReplaceWith(arithmetic);
+            }
+        } else {
+            arguments[0]->Remove();
+            auto* unaryOperator = new Syntax::UnaryOperatorExpression(
+                Syntax::UnwrapInDirectionExpression(arguments[0]), *uop);
+            CSharp::CopyAnnotationsFrom(unaryOperator, *invocationExpression);
+            invocationExpression->ReplaceWith(unaryOperator);
+        }
+        return;
+    }
+
+    // The explicit conversion operator methods (`op_Explicit` / `op_CheckedExplicit`).
+    if ((method->Name() == "op_Explicit" || method->Name() == "op_CheckedExplicit")
+        && arguments.size() == 1) {
+        arguments[0]->Remove();
+        if (method->Name() == "op_CheckedExplicit")
+            invocationExpression->AddAnnotation(CheckedAnnotationHandle());
+        else if (HasCheckedEquivalent(*method))
+            invocationExpression->AddAnnotation(UncheckedAnnotationHandle());
+        auto* cast = new Syntax::CastExpression(
+            context_->TypeSystemAstBuilder().ConvertType(
+                const_cast<TS::IType&>(method->ReturnType())),
+            Syntax::UnwrapInDirectionExpression(arguments[0]));
+        CSharp::CopyAnnotationsFrom(cast, *invocationExpression);
+        invocationExpression->ReplaceWith(cast);
+        return;
+    }
+
+    // `op_True(x)` in a condition slot is just `x` (the C# compiler inserts the
+    // call for the implicit bool conversion).
+    if (method->Name() == "op_True" && arguments.size() == 1
+        && invocationExpression->Slot() != nullptr
+        && invocationExpression->Slot()->Kind() == &Syntax::Slots::Condition) {
+        Syntax::Expression* condition =
+            Syntax::UnwrapInDirectionExpression(arguments[0]);
+        invocationExpression->ReplaceWith(condition);
+        return;
+    }
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Transforms
