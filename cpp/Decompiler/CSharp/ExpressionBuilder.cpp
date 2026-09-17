@@ -94,6 +94,7 @@
 #include "Decompiler/IL/Instructions/CastClass.hpp"
 #include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/Instructions/NullableInstructions.hpp"
+#include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/OpCodeName.hpp"
 #include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
@@ -745,6 +746,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitNullableRewrap(inst, context);
         case IL::OpCode::NullableUnwrap:
             return VisitNullableUnwrap(inst, context);
+        case IL::OpCode::NullCoalescingInstruction:
+            return VisitNullCoalescingInstruction(inst, context);
         case IL::OpCode::Call:
         case IL::OpCode::CallVirt:
         case IL::OpCode::NewObj:
@@ -1586,6 +1589,79 @@ TranslatedExpression ExpressionBuilder::VisitNullableUnwrap(IL::ILInstruction* i
         WithILInstruction(*unary, inst),
         std::make_shared<Sem::ResolveResult>(
             const_cast<TS::IType&>(underlying).shared_from_this()));
+}
+
+// The C# `protected internal override TranslatedExpression
+// VisitNullCoalescingInstruction(NullCoalescingInstruction inst,
+// TranslationContext context)` (ExpressionBuilder.cs lines 3912-3953): the `a ?? b`
+// render. Both operands are translated and the fallback is constant-adjusted to the
+// value's type; the resolver's null-coalescing resolution becomes the resolve result
+// when it succeeds. On an error the target type is recovered -- a throw fallback over
+// NoType uses the value's underlying type (NullableType.GetUnderlyingType), two
+// differing non-null-literal types fall back to `inst.UnderlyingResultType`, else the
+// non-null operand's type -- and the operands are converted (a Nullable<T> wrap for
+// the non-ref kinds, plus a second nullable wrap of the value for the Nullable kind)
+// before a fresh ResolveResult replaces the error. The render is a
+// BinaryOperatorExpression with the NullCoalescing operator.
+TranslatedExpression ExpressionBuilder::VisitNullCoalescingInstruction(
+    IL::ILInstruction* inst, TranslationContext context)
+{
+    (void)context;
+    auto* coalescing = static_cast<IL::NullCoalescingInstruction*>(inst);
+    TranslatedExpression value = Translate(coalescing->ValueInst.get());
+    TranslatedExpression fallback = Translate(coalescing->FallbackInst.get());
+    fallback = AdjustConstantExpressionToType(
+        std::move(fallback), const_cast<TS::IType&>(value.Type()));
+    std::shared_ptr<Sem::ResolveResult> rr = resolver->ResolveBinaryOperator(
+        Syntax::BinaryOperatorType::NullCoalescing,
+        SharedResolveResultAnnotation(*value.Expression()),
+        SharedResolveResultAnnotation(*fallback.Expression()));
+    if (rr->IsError())
+    {
+        TS::ITypePtr targetType;
+        if (dynamic_cast<Syntax::ThrowExpression*>(fallback.Expression()) != nullptr
+            && fallback.Type().Equals(*TS::NoType()))
+        {
+            targetType = const_cast<TS::IType&>(TS::GetUnderlyingType(value.Type()))
+                             .shared_from_this();
+        }
+        else if (!value.Type().Equals(*TS::NullType())
+                 && !fallback.Type().Equals(*TS::NullType())
+                 && !value.Type().Equals(fallback.Type()))
+        {
+            targetType =
+                const_cast<TS::IType&>(TS::FindType(*compilation,
+                                                    coalescing->UnderlyingResultType))
+                    .shared_from_this();
+        }
+        else
+        {
+            targetType = value.Type().Equals(*TS::NullType())
+                             ? const_cast<TS::IType&>(fallback.Type()).shared_from_this()
+                             : const_cast<TS::IType&>(value.Type()).shared_from_this();
+        }
+        if (coalescing->Kind != IL::NullCoalescingKind::Ref)
+        {
+            value = value.ConvertTo(*TS::Create(*compilation, *targetType), *this);
+        }
+        else
+        {
+            value = value.ConvertTo(*targetType, *this);
+        }
+        if (coalescing->Kind == IL::NullCoalescingKind::Nullable)
+        {
+            value = value.ConvertTo(*TS::Create(*compilation, *targetType), *this);
+        }
+        else
+        {
+            fallback = fallback.ConvertTo(*targetType, *this);
+        }
+        rr = std::make_shared<Sem::ResolveResult>(targetType);
+    }
+    auto* binary = new Syntax::BinaryOperatorExpression(
+        value.Expression(), Syntax::BinaryOperatorType::NullCoalescing,
+        fallback.Expression());
+    return WithRR(WithILInstruction(*binary, inst), rr);
 }
 
 

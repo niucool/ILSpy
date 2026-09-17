@@ -3109,6 +3109,29 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   full Debug suite 12376 ran / 12374 passed / the 2 standing skips / zero failures,
   and the CLI baselines are structurally unchanged (the Phase-5 back end is not yet
   wired into the `--csharp` CLI path).
+- **`ExpressionBuilder` null-coalescing arm
+  (`VisitNullCoalescingInstruction`)** -- the C#
+  `VisitNullCoalescingInstruction` (`ExpressionBuilder.cs` lines 3912-3953) landed
+  and is routed from the `Visit` OpCode switch. Both operands are translated and
+  the fallback is constant-adjusted to the value's type; the resolver's
+  `ResolveBinaryOperator(NullCoalescing, ...)` result becomes the resolve result
+  when it succeeds. On an error the target type is recovered -- a `throw` fallback
+  over `NoType` uses `NullableType.GetUnderlyingType(value.Type)`, two differing
+  non-null-literal types fall back to `inst.UnderlyingResultType`, else the
+  non-null operand's type -- and the operands are converted (a `Nullable<T>` wrap
+  of the value for the non-`Ref` kinds, plus a second nullable wrap of the value
+  for the `Nullable` kind, else the fallback to the target type) before a fresh
+  `ResolveResult` replaces the error. The render is a `BinaryOperatorExpression`
+  with the `NullCoalescing` operator. The `NullCoalescingInstruction` IL node
+  already existed (and was already dump/clone-tested); no node changes were needed.
+  Verified by 4 new `ExpressionBuilderNullCoalescingTest` tests (the `Ref` string
+  render, the `Nullable` kind keeping its nullable result, the
+  `NullableWithValueFallback` int recovery, and the throw-over-`NoType` underlying-
+  type recovery), proven by a clean dispatch-neuter RED round (all 4 failed through
+  the `Default` fallback) then restored green; full Debug suite 12380 ran / 12378
+  passed / the 2 standing skips / zero failures, and the CLI baselines are
+  structurally unchanged (the Phase-5 back end is not yet wired into the
+  `--csharp` CLI path).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

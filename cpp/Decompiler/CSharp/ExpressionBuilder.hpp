@@ -286,6 +286,17 @@ public:
     // carrying a plain ResolveResult of the underlying type
     // (NullableType.GetUnderlyingType).
     TranslatedExpression VisitNullableUnwrap(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitNullCoalescingInstruction(NullCoalescingInstruction inst, TranslationContext
+    // context)` (ExpressionBuilder.cs lines 3912-3953): the `a ?? b` render -- translate
+    // both operands, constant-adjust the fallback to the value's type, resolve the
+    // null-coalescing operator, and on an error recover the target type (a throw
+    // fallback over NoType uses the value's underlying type, two differing non-null
+    // types fall back to `inst.UnderlyingResultType`, else the non-null operand's
+    // type) and convert the operands (the nullable wrap for the non-ref kinds); the
+    // render is a BinaryOperatorExpression with the NullCoalescing operator.
+    TranslatedExpression VisitNullCoalescingInstruction(IL::ILInstruction* inst,
+                                                        TranslationContext context);
     // The C# `private TranslatedExpression StObjViaHelperCall(StObj inst)`
     // (ExpressionBuilder.cs lines 3087-3125): the `Unsafe.Write` /
     // `Unsafe.WriteUnaligned` intrinsic rewrite for a store that cannot be a

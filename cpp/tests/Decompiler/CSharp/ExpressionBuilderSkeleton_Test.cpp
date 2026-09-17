@@ -66,6 +66,7 @@
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/Instructions/NullableInstructions.hpp"
+#include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/BitNot.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
@@ -1318,6 +1319,109 @@ TEST(ExpressionBuilderNullableTest, NodeDumpsAndClones)
     auto* cloneTyped = static_cast<IL::NullableUnwrap*>(unwrapClone.get());
     EXPECT_TRUE(cloneTyped->RefInput);
     EXPECT_EQ(cloneTyped->ResultTypeField, IL::StackType::I4);
+}
+
+
+// The null-coalescing arm (VisitNullCoalescingInstruction, the C# lines
+// 3912-3953): translate both operands, constant-adjust the fallback to the
+// value's type, resolve the `??` operator; on an error recover the target type
+// (a throw fallback over NoType uses the value's underlying type, two differing
+// non-null types fall back to inst.UnderlyingResultType, else the non-null
+// operand's type) and convert the operands. Expectations derived from the C#
+// body over the MinimalCorlib fixture.
+
+TEST(ExpressionBuilderNullCoalescingTest, RefKindRendersNullCoalescingOverStrings)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto stringType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    auto a = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, stringType, 0);
+    a->Name = "a";
+    auto b = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, stringType, 1);
+    b->Name = "b";
+    IL::NullCoalescingInstruction coalescing(IL::NullCoalescingKind::Ref,
+                                             std::make_unique<IL::LdLoc>(a),
+                                             std::make_unique<IL::LdLoc>(b));
+    auto expr = builder.Translate(&coalescing);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::NullCoalescing);
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()),
+                                TS::KnownTypeCode::String));
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*binary);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], &coalescing);
+}
+
+TEST(ExpressionBuilderNullCoalescingTest, NullableKindKeepsNullableResult)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    TS::ITypePtr nullableInt = TS::Create(fixture.compilation, *intType);
+    auto a = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, nullableInt, 0);
+    a->Name = "a";
+    auto b = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, nullableInt, 1);
+    b->Name = "b";
+    IL::NullCoalescingInstruction coalescing(IL::NullCoalescingKind::Nullable,
+                                             std::make_unique<IL::LdLoc>(a),
+                                             std::make_unique<IL::LdLoc>(b));
+    coalescing.UnderlyingResultType = IL::StackType::I4;
+    auto expr = builder.Translate(&coalescing);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::NullCoalescing);
+    EXPECT_TRUE(TS::IsNullable(expr.Type()));
+    EXPECT_TRUE(TS::IsKnownType(
+        const_cast<TS::IType&>(TS::GetUnderlyingType(expr.Type())), TS::KnownTypeCode::Int32));
+}
+
+TEST(ExpressionBuilderNullCoalescingTest, ValueFallbackKindRecoversIntFromUnderlyingResultType)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    TS::ITypePtr nullableInt = TS::Create(fixture.compilation, *intType);
+    auto a = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, nullableInt, 0);
+    a->Name = "a";
+    auto b = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 1);
+    b->Name = "b";
+    IL::NullCoalescingInstruction coalescing(
+        IL::NullCoalescingKind::NullableWithValueFallback, std::make_unique<IL::LdLoc>(a),
+        std::make_unique<IL::LdLoc>(b));
+    coalescing.UnderlyingResultType = IL::StackType::I4;
+    auto expr = builder.Translate(&coalescing);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::NullCoalescing);
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()),
+                                TS::KnownTypeCode::Int32));
+}
+
+TEST(ExpressionBuilderNullCoalescingTest, ThrowFallbackOverNoTypeUsesValueUnderlyingType)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    TS::ITypePtr nullableInt = TS::Create(fixture.compilation, *intType);
+    auto a = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, nullableInt, 0);
+    a->Name = "a";
+    IL::NullCoalescingInstruction coalescing(
+        IL::NullCoalescingKind::Nullable, std::make_unique<IL::LdLoc>(a),
+        std::make_unique<IL::Throw>(std::make_unique<IL::LdNull>()));
+    coalescing.UnderlyingResultType = IL::StackType::I4;
+    auto expr = builder.Translate(&coalescing);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::NullCoalescing);
+    // The throw fallback has NoType, so the recovered target type is the value's
+    // underlying type (int), not the nullable itself.
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()),
+                                TS::KnownTypeCode::Int32));
 }
 
 
