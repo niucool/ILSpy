@@ -5032,6 +5032,30 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   standing skips / zero failures, and the `--csharp` (10106360), `--il` (41246545), and
   `-l c` (109438) CLI baselines are all unchanged (the transform is not wired into the seed
   paths).
+- **`IntroduceUnsafeModifier` AST transform** -- the tenth concrete `IAstTransform` over
+  the iteration-160 foundation and the next ported transform in the `CSharpDecompiler
+  .GetAstTransforms()` order (the third entry, after `ReplaceMethodCallsWithOperators`).
+  The transform (`Transforms/IntroduceUnsafeModifier.{hpp,cpp}`) is the `bool`-returning
+  visitor that marks the declaring entity of any pointer / function-pointer / by-ref /
+  array-typed expression (and the syntactic `sizeof`, `*`, `&`, composed pointer type,
+  `->`, and `fixed` forms) with `Modifiers.Unsafe`. `Run` stores the context and drives
+  the visitor; the static `IsUnsafe` is the context-less one-shot query. The overridden
+  `VisitChildren` ORs the children's results and, when any child reported unsafe, adds the
+  modifier to the enclosing `EntityDeclaration` that is not an `Accessor` (an accessor's
+  report propagates to its owner). `HasUnsafeResolveResult` reads the node's resolve
+  result -- the result type, or a `MemberResolveResult`'s parameterized member's parameter
+  types, or a `MethodGroupResolveResult`'s chosen method's return and parameter types --
+  through `IsUnsafeType` (pointer/function-pointer true, array/by-reference recurse into
+  the element, everything else false; the C# `TypeWithElementType` cast ports to the
+  concrete `ArrayType`/`ByReferenceType` leaves). Two pointer-syntax rewrites land too:
+  `*(ptr + int)` becomes `ptr[int]` (gated on the addition's `OperatorResolveResult` first
+  operand being a pointer) and `(*p).x` becomes `p->x`. Verified by 16 tests (the resolve-
+  result shapes, the syntactic shapes, both rewrites, the `Accessor` exclusion, and the
+  no-unsafe keep) proven with a Run-neuter RED round (exactly the 7 resolve-result tests
+  failed with `HasUnsafeResolveResult` disabled, the syntactic tests staying green, then
+  all 16 green after restore); the full Debug suite is now 12559 ran / 12557 passed / the 2
+  standing skips / zero failures. The transform is not wired into the seed paths, so the
+  CLI baselines are unchanged.
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.
