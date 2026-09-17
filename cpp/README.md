@@ -5127,6 +5127,28 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   12612 passed / the 2 standing skips / zero failures, and the `--csharp` (10106360),
   `--il` (41246545), and `-l c` (109438) CLI baselines are unchanged (the machinery is
   not wired into the seed paths).
+- **`PatternStatementTransform` skeleton + structural sub-transforms** -- the first slice of
+  the `CSharpDecompiler.GetAstTransforms()` entry `PatternStatementTransform` (the
+  pattern-matching pass that rewrites the compiler's lowered statement shapes back to the
+  high-level language forms). This slice lands the transform shell (`Run` with the C#
+  reentrancy guard and `Initialize`/`Uninitialize` around the root walk, and the overridden
+  `VisitChildren` replace-and-revisit loop that keeps visiting a child while the visit
+  returns a different node) plus the two sub-transforms that need no pattern tree: the
+  conditional-logic reassociation (`a && (b && c)` -> `(a && b) && c`, the same for `||`)
+  and the negated-equality rewrite (`!(a == b)` -> `a != b`). The pattern-based
+  sub-transforms (`for`/`foreach`/automatic property/automatic event/destructor/
+  try-catch-finally/cascading `if`/using/fixed) and the `DeclareVariables` analysis they
+  compose stay deferred, each named at the visit that would call it. Verified by 11 tests
+  (`PatternStatementTransform_Test.cpp`: both reassociation operators, the mixed and
+  non-conditional keeps, the negated-equality rewrite and its inequality/relational/plain
+  keeps, the nested rewrite, the fully-left-associative flattening the revisit loop
+  produces, and an unrelated-tree identity check); the full Debug suite is 12625 ran /
+  12623 passed / the 2 standing skips / zero failures, and the transform is not wired into
+  the seed paths, so the CLI baselines are unchanged. The
+  `SyntheticWpfModuleTest.AssemblyAttributesInvalidatedByNewNamespace` test's dangling
+  pointer-identity assertions (it compared rebuilt pointers against the cache instances the
+  invalidation frees) were replaced with a content check, since the allocator may reuse the
+  freed addresses -- this surfaced when the added translation units shifted the heap layout.
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

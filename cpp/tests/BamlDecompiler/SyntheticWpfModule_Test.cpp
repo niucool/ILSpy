@@ -342,7 +342,7 @@ TEST(SyntheticWpfModuleTest, AssemblyAttributesCacheStability)
 
 // ---------------------------------------------------------------------------
 // M6d: registering a type in a NEW namespace invalidates the cache -- the next read
-// returns a rebuilt set with the new namespace appended, all fresh instances.
+// returns a rebuilt set with the new namespace appended.
 // ---------------------------------------------------------------------------
 TEST(SyntheticWpfModuleTest, AssemblyAttributesInvalidatedByNewNamespace)
 {
@@ -351,14 +351,23 @@ TEST(SyntheticWpfModuleTest, AssemblyAttributesInvalidatedByNewNamespace)
 
     auto before = m.Module()->GetAssemblyAttributes();
     ASSERT_EQ(before.size(), 3u);
+    // Capture the first seeded namespace while `before` is still valid: invalidating the
+    // cache frees the old cached instances, so the `before` pointers must not be
+    // dereferenced after `RegisterType`.
+    std::string firstNamespace =
+        std::any_cast<std::string>(before[0]->FixedArguments()[1].Value());
 
     m.RegisterType("System.Windows.Input", "Cursor");
     auto after = m.Module()->GetAssemblyAttributes();
     ASSERT_EQ(after.size(), 4u);
+    // The rebuilt set repeats the seeded namespaces in registration order and appends the
+    // new one. Comparing the rebuilt pointers against the (dangling) `before` pointers is
+    // not a valid freshness check -- the allocator may legitimately reuse those addresses.
+    EXPECT_EQ(std::any_cast<std::string>(after[0]->FixedArguments()[1].Value()),
+              firstNamespace);
     EXPECT_EQ(std::any_cast<std::string>(after[3]->FixedArguments()[1].Value()),
               "System.Windows.Input");
-    EXPECT_NE(after[0], before[0]);
-    EXPECT_NE(after[3], before[2]);
+    EXPECT_NE(after[0], after[3]);
 }
 
 // ---------------------------------------------------------------------------
