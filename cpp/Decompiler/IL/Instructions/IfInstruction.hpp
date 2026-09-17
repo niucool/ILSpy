@@ -26,6 +26,9 @@
 #pragma once
 
 #include "Decompiler/IL/ILInstruction.hpp"
+#include "Decompiler/IL/Instructions/Comp.hpp"
+#include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 
 #include <cassert>
 #include <memory>
@@ -49,6 +52,43 @@ public:
         if (Condition) { Condition->Parent = this; Condition->ChildIndex = 0; }
         if (TrueInst) { TrueInst->Parent = this; TrueInst->ChildIndex = 1; }
         if (FalseInst) { FalseInst->Parent = this; FalseInst->ChildIndex = 2; }
+    }
+
+    // The C# `internal static bool IsInConditionSlot(ILInstruction inst)`
+    // (IfInstruction.cs lines 124-139): whether `inst` sits in a Boolean
+    // condition position -- the condition child of an if, or a true/false arm
+    // or null-coalescing fallback that transitively is, or an operand of a
+    // comparison against the constant 0. The C# reads the child's SlotInfo; the
+    // port infers the slot from the parent type and the child index (Parent and
+    // ChildIndex are the same parent link the C# SlotInfo describes).
+    static bool IsInConditionSlot(const ILInstruction* inst)
+    {
+        if (inst == nullptr || inst->Parent == nullptr)
+            return false;
+        ILInstruction* parent = inst->Parent;
+        if (dynamic_cast<IfInstruction*>(parent) != nullptr)
+        {
+            if (inst->ChildIndex == 0) return true;
+            if (inst->ChildIndex == 1 || inst->ChildIndex == 2)
+                return IsInConditionSlot(parent);
+            return false;
+        }
+        if (dynamic_cast<NullCoalescingInstruction*>(parent) != nullptr)
+        {
+            // FallbackInst is the coalescing node's second child.
+            return inst->ChildIndex == 1 && IsInConditionSlot(parent);
+        }
+        if (auto* comp = dynamic_cast<Comp*>(parent))
+        {
+            auto isZero = [](const ILInstruction* e) {
+                const auto* ldc = dynamic_cast<const LdcI4*>(e);
+                return ldc != nullptr && ldc->Value == 0;
+            };
+            if (comp->Left.get() == inst && isZero(comp->Right.get())) return true;
+            if (comp->Right.get() == inst && isZero(comp->Left.get())) return true;
+            return false;
+        }
+        return false;
     }
 
     InstructionFlags DirectFlags() const override { return InstructionFlags::ControlFlow; }

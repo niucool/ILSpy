@@ -198,4 +198,42 @@ inline bool MatchIfInstruction(ILInstruction* inst, ILInstruction*& condition,
     return false;
 }
 
+// The C# `public bool MatchLogicAnd(out ILInstruction? lhs, out ILInstruction?
+// rhs)` (PatternMatching.cs lines 287-301): the short-circuit-and pattern
+// `if (a) b else ldc.i4 0`. Unlike C# `&&`, the ILAst form passes through any I4
+// value on the rhs derived from the true arm, so the render needs the extra
+// boolean guard the VisitIfInstruction arm applies.
+inline bool MatchLogicAnd(const ILInstruction* inst, ILInstruction*& lhs,
+                          ILInstruction*& rhs)
+{
+    const auto* ifInst = dynamic_cast<const IfInstruction*>(inst);
+    if (ifInst != nullptr && MatchLdcI4(ifInst->FalseInst.get(), 0))
+    {
+        lhs = ifInst->Condition.get();
+        rhs = ifInst->TrueInst.get();
+        return true;
+    }
+    lhs = nullptr;
+    rhs = nullptr;
+    return false;
+}
+
+// The C# `public bool MatchLogicOr(out ILInstruction? lhs, out ILInstruction?
+// rhs)` (PatternMatching.cs lines 306-319): the short-circuit-or pattern
+// `if (a) ldc.i4 1 else b`.
+inline bool MatchLogicOr(const ILInstruction* inst, ILInstruction*& lhs,
+                         ILInstruction*& rhs)
+{
+    const auto* ifInst = dynamic_cast<const IfInstruction*>(inst);
+    if (ifInst != nullptr && MatchLdcI4(ifInst->TrueInst.get(), 1))
+    {
+        lhs = ifInst->Condition.get();
+        rhs = ifInst->FalseInst.get();
+        return true;
+    }
+    lhs = nullptr;
+    rhs = nullptr;
+    return false;
+}
+
 } // namespace ILSpy::Decompiler::IL

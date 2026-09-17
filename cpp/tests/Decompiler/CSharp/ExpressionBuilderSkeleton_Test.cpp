@@ -70,6 +70,7 @@
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/AddressOf.hpp"
 #include "Decompiler/IL/Instructions/RefAnyType.hpp"
+#include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/Instructions/BitNot.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
@@ -4541,6 +4542,128 @@ TEST(ExpressionBuilderBinaryNumericTest, IsCSharpSmallIntegerTypeReadsTheDefinit
         std::const_pointer_cast<TS::IType>(
             fixture.compilation.FindType(TS::KnownTypeCode::Int16).shared_from_this()));
     EXPECT_FALSE(TS::IsCSharpSmallIntegerType(enumDef.get()));
+}
+
+// The VisitIfInstruction arm (ExpressionBuilder.cs lines 3956-4049) and the
+// IfInstruction.IsInConditionSlot predicate it composes.
+
+TEST(IfInstructionConditionSlotTest, ChildRolesClassify)
+{
+    // A comparison against the constant 0: the non-constant operand sits in a
+    // condition slot; the 0 constant itself does not (the C# checks the OTHER
+    // operand).
+    IL::Comp zeroComp(std::make_unique<IL::LdcI4>(1), std::make_unique<IL::LdcI4>(0),
+                      IL::ComparisonKind::Inequality, TS::Sign::None);
+    EXPECT_TRUE(IL::IfInstruction::IsInConditionSlot(zeroComp.Left.get()));
+    EXPECT_FALSE(IL::IfInstruction::IsInConditionSlot(zeroComp.Right.get()));
+    // A comparison against a non-zero constant: neither operand qualifies.
+    IL::Comp nonzeroComp(std::make_unique<IL::LdcI4>(1), std::make_unique<IL::LdcI4>(2),
+                         IL::ComparisonKind::Inequality, TS::Sign::None);
+    EXPECT_FALSE(IL::IfInstruction::IsInConditionSlot(nonzeroComp.Left.get()));
+    EXPECT_FALSE(IL::IfInstruction::IsInConditionSlot(nonzeroComp.Right.get()));
+    // Of a root if, only the condition child is in a condition slot; the arms
+    // recurse to the (root) if and come back false.
+    IL::IfInstruction ifInst(std::make_unique<IL::LdcI4>(1), std::make_unique<IL::LdcI4>(2),
+                             std::make_unique<IL::LdcI4>(3));
+    EXPECT_TRUE(IL::IfInstruction::IsInConditionSlot(ifInst.Condition.get()));
+    EXPECT_FALSE(IL::IfInstruction::IsInConditionSlot(ifInst.TrueInst.get()));
+    EXPECT_FALSE(IL::IfInstruction::IsInConditionSlot(ifInst.FalseInst.get()));
+    // A disconnected node has no slot.
+    IL::LdcI4 standalone(9);
+    EXPECT_FALSE(IL::IfInstruction::IsInConditionSlot(&standalone));
+}
+
+TEST(IfInstructionConditionSlotTest, NestedArmReachesConditionSlot)
+{
+    // outer's condition is an inner if; outer is itself the condition of the
+    // root if, so the inner's arms transitively sit in a condition slot.
+    auto inner = std::make_unique<IL::IfInstruction>(
+        std::make_unique<IL::LdcI4>(1), std::make_unique<IL::LdcI4>(2),
+        std::make_unique<IL::LdcI4>(0));
+    auto* innerPtr = inner.get();
+    auto outer = std::make_unique<IL::IfInstruction>(
+        std::move(inner), std::make_unique<IL::LdcI4>(3), std::make_unique<IL::LdcI4>(4));
+    auto* outerPtr = outer.get();
+    IL::IfInstruction root(std::move(outer), std::make_unique<IL::LdcI4>(5),
+                           std::make_unique<IL::LdcI4>(6));
+    EXPECT_TRUE(IL::IfInstruction::IsInConditionSlot(root.Condition.get()));
+    EXPECT_TRUE(IL::IfInstruction::IsInConditionSlot(innerPtr));
+    EXPECT_TRUE(IL::IfInstruction::IsInConditionSlot(innerPtr->Condition.get()));
+    EXPECT_TRUE(IL::IfInstruction::IsInConditionSlot(innerPtr->TrueInst.get()));
+    (void)outerPtr;
+}
+
+TEST(ExpressionBuilderIfInstructionTest, PlainIfRendersConditionalExpression)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::IfInstruction ifInst(std::make_unique<IL::LdcI4>(1), std::make_unique<IL::LdcI4>(2),
+                             std::make_unique<IL::LdcI4>(3));
+    auto expr = builder.Translate(&ifInst);
+    auto* cond = dynamic_cast<Syntax::ConditionalExpression*>(expr.Expression());
+    ASSERT_TRUE(cond != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::PrimitiveExpression*>(cond->Condition()) != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::PrimitiveExpression*>(cond->TrueExpression()) != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::PrimitiveExpression*>(cond->FalseExpression()) != nullptr);
+    // The IL annotation sits on the conditional expression.
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*cond);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], &ifInst);
+}
+
+TEST(ExpressionBuilderIfInstructionTest, BooleanLogicAndRendersConditionalAnd)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto b = MakeLocal(fixture, TS::KnownTypeCode::Boolean, "b");
+    auto c = MakeLocal(fixture, TS::KnownTypeCode::Boolean, "c");
+    IL::IfInstruction ifInst(std::make_unique<IL::LdLoc>(b), std::make_unique<IL::LdLoc>(c),
+                             std::make_unique<IL::LdcI4>(0));
+    auto expr = builder.Translate(&ifInst);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::ConditionalAnd);
+    EXPECT_TRUE(TS::IsKnownType(expr.Type(), TS::KnownTypeCode::Boolean));
+}
+
+TEST(ExpressionBuilderIfInstructionTest, BooleanLogicOrRendersConditionalOr)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto b = MakeLocal(fixture, TS::KnownTypeCode::Boolean, "b");
+    auto c = MakeLocal(fixture, TS::KnownTypeCode::Boolean, "c");
+    IL::IfInstruction ifInst(std::make_unique<IL::LdLoc>(b), std::make_unique<IL::LdcI4>(1),
+                             std::make_unique<IL::LdLoc>(c));
+    auto expr = builder.Translate(&ifInst);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::ConditionalOr);
+    EXPECT_TRUE(TS::IsKnownType(expr.Type(), TS::KnownTypeCode::Boolean));
+}
+
+TEST(ExpressionBuilderIfInstructionTest, NonBooleanLogicAndFallsBackToConditional)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    // The logic-and shape with a non-boolean rhs, at the root (not in a
+    // condition slot), cannot be rendered as `&&`; it degrades to `?:`.
+    IL::IfInstruction ifInst(std::make_unique<IL::LdcI4>(1), std::make_unique<IL::LdcI4>(5),
+                             std::make_unique<IL::LdcI4>(0));
+    auto expr = builder.Translate(&ifInst);
+    EXPECT_TRUE(dynamic_cast<Syntax::ConditionalExpression*>(expr.Expression()) != nullptr);
+}
+
+TEST(ExpressionBuilderIfInstructionTest, MissingFalseArmRendersNopError)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    // The reader's fall-through if has a null FalseInst; the missing arm
+    // translates as the Nop error expression (the C# Nop default).
+    IL::IfInstruction ifInst(std::make_unique<IL::LdcI4>(1), std::make_unique<IL::LdcI4>(2));
+    auto expr = builder.Translate(&ifInst);
+    auto* cond = dynamic_cast<Syntax::ConditionalExpression*>(expr.Expression());
+    ASSERT_TRUE(cond != nullptr);
+    EXPECT_TRUE(cond->FalseExpression() != nullptr);
 }
 
 } // namespace ILSpy::Tests

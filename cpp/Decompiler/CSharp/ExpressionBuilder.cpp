@@ -23,6 +23,7 @@
 
 #include "Decompiler/CSharp/CallBuilder.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
+#include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"
 #include "Decompiler/CSharp/Syntax/AstType.hpp"
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
 #include "Decompiler/CSharp/Syntax/ComposedType.hpp"
@@ -756,6 +757,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitAddressOf(inst, context);
         case IL::OpCode::RefAnyType:
             return VisitRefAnyType(inst, context);
+        case IL::OpCode::IfInstruction:
+            return VisitIfInstruction(inst, context);
         case IL::OpCode::Call:
         case IL::OpCode::CallVirt:
         case IL::OpCode::NewObj:
@@ -1746,6 +1749,168 @@ TranslatedExpression ExpressionBuilder::VisitRefAnyType(IL::ILInstruction* inst,
     return WithRR(WithILInstruction(*memberRef, inst),
                   std::make_shared<Sem::TypeResolveResult>(
                       std::move(runtimeTypeHandleType)));
+}
+
+// The C# `protected internal override TranslatedExpression
+// VisitIfInstruction(IfInstruction inst, TranslationContext context)`
+// (ExpressionBuilder.cs lines 3956-4049): the if-as-expression render. The
+// short-circuit `&&`/`||` shapes (an if whose unused arm is the 0/1 constant)
+// become binary conditional operators when the rhs is boolean or the if itself
+// sits in a condition slot; otherwise the two arms are translated as the two
+// branches of a `?:` conditional, their types united through
+// ResolveConditional (with the GetBestCommonType/target-type recovery when the
+// resolver rejects the pair) and the result re-wrapped in a ref direction
+// expression when the conditional produces a by-reference value.
+TranslatedExpression ExpressionBuilder::VisitIfInstruction(IL::ILInstruction* inst,
+                                                           TranslationContext context)
+{
+    auto* ifInst = static_cast<IL::IfInstruction*>(inst);
+    auto translateArm = [&](IL::ILInstruction* arm) -> TranslatedExpression {
+        if (arm != nullptr)
+            return Translate(arm, context.TypeHint);
+        // The C# generated FalseInst/TrueInst default is a Nop node; the port
+        // models a missing arm as a null child (the reader's fall-through if),
+        // whose translation is the Nop error expression.
+        return ErrorExpression("OpCode not supported: "
+                               + std::string(IL::OpCodeName(IL::OpCode::Nop)));
+    };
+    TranslatedExpression condition = TranslateCondition(ifInst->Condition.get());
+    TranslatedExpression trueBranch = translateArm(ifInst->TrueInst.get());
+    TranslatedExpression falseBranch = translateArm(ifInst->FalseInst.get());
+    Syntax::BinaryOperatorType op = Syntax::BinaryOperatorType::Any;
+    TranslatedExpression rhs;
+    IL::ILInstruction* lhsInst = nullptr;
+    IL::ILInstruction* rhsInst = nullptr;
+    if (IL::MatchLogicAnd(ifInst, lhsInst, rhsInst) && !IL::MatchLdcI4(rhsInst, 1))
+    {
+        op = Syntax::BinaryOperatorType::ConditionalAnd;
+        rhs = trueBranch;
+    }
+    else if (IL::MatchLogicOr(ifInst, lhsInst, rhsInst) && !IL::MatchLdcI4(rhsInst, 0))
+    {
+        op = Syntax::BinaryOperatorType::ConditionalOr;
+        rhs = falseBranch;
+    }
+    // ILAst LogicAnd/LogicOr can return a different value than 0 or 1 if the rhs
+    // is evaluated. We can only correctly translate it to C# if the rhs is of
+    // type boolean, or if we're in a context where the result is only used as a
+    // condition.
+    if (op != Syntax::BinaryOperatorType::Any
+        && (TS::IsKnownType(rhs.Type(), TS::KnownTypeCode::Boolean)
+            || IL::IfInstruction::IsInConditionSlot(ifInst)))
+    {
+        if (GetSize(TS::GetStackType(rhs.Type())) > 4)
+        {
+            rhs = rhs.ConvertTo(*FindType(IL::StackType::I4, TS::GetSign(&rhs.Type())), *this);
+        }
+        rhs = rhs.ConvertToBoolean(*this);
+        auto* boolBinary = new Syntax::BinaryOperatorExpression(
+            condition.Expression(), op, rhs.Expression());
+        return WithRR(
+            WithILInstruction(*boolBinary, inst),
+            std::make_shared<Sem::ResolveResult>(
+                const_cast<TS::IType&>(compilation->FindType(TS::KnownTypeCode::Boolean))
+                    .shared_from_this()));
+    }
+
+    condition = condition.UnwrapImplicitBoolConversion();
+    trueBranch = AdjustConstantExpressionToType(
+        std::move(trueBranch), const_cast<TS::IType&>(falseBranch.Type()));
+    falseBranch = AdjustConstantExpressionToType(
+        std::move(falseBranch), const_cast<TS::IType&>(trueBranch.Type()));
+
+    std::shared_ptr<Sem::ResolveResult> rr = resolver->ResolveConditional(
+        SharedResolveResultAnnotation(*condition.Expression()),
+        SharedResolveResultAnnotation(*trueBranch.Expression()),
+        SharedResolveResultAnnotation(*falseBranch.Expression()));
+    if (rr->IsError())
+    {
+        TS::ITypePtr targetType;
+        if (!trueBranch.Type().Equals(*TS::NullType())
+            && !falseBranch.Type().Equals(*TS::NullType())
+            && !trueBranch.Type().Equals(falseBranch.Type()))
+        {
+            bool success = false;
+            targetType = Resolver::Detail::GetBestCommonType(
+                *typeInference.compilation,
+                Resolver::CSharpConversions::Get(*typeInference.compilation),
+                {SharedResolveResultAnnotation(*trueBranch.Expression()),
+                 SharedResolveResultAnnotation(*falseBranch.Expression())},
+                success, typeInference.algorithm);
+            if (!success || TS::GetStackType(*targetType) != ifInst->ResultType())
+            {
+                // Figure out the target type based on inst.ResultType.
+                if (context.TypeHint != nullptr
+                    && context.TypeHint->Kind() != TS::TypeKind::Unknown
+                    && TS::GetStackType(*context.TypeHint) == ifInst->ResultType())
+                {
+                    targetType = const_cast<TS::IType*>(context.TypeHint)->shared_from_this();
+                }
+                else if (ifInst->ResultType() == IL::StackType::Ref)
+                {
+                    // targetType should be a ref-type
+                    if (trueBranch.Type().Kind() == TS::TypeKind::ByReference)
+                    {
+                        targetType =
+                            const_cast<TS::IType&>(trueBranch.Type()).shared_from_this();
+                    }
+                    else if (falseBranch.Type().Kind() == TS::TypeKind::ByReference)
+                    {
+                        targetType =
+                            const_cast<TS::IType&>(falseBranch.Type()).shared_from_this();
+                    }
+                    else
+                    {
+                        // fall back to 'ref byte' if we can't determine a
+                        // referenced type otherwise
+                        targetType = std::make_shared<TS::ByReferenceType>(
+                            const_cast<TS::IType&>(
+                                compilation->FindType(TS::KnownTypeCode::Byte))
+                                .shared_from_this());
+                    }
+                }
+                else
+                {
+                    targetType = FindType(
+                        ifInst->ResultType(),
+                        context.TypeHint != nullptr ? TS::GetSign(context.TypeHint)
+                                                    : TS::Sign::None);
+                }
+            }
+        }
+        else
+        {
+            targetType = trueBranch.Type().Equals(*TS::NullType())
+                             ? const_cast<TS::IType&>(falseBranch.Type()).shared_from_this()
+                             : const_cast<TS::IType&>(trueBranch.Type()).shared_from_this();
+        }
+        trueBranch = trueBranch.ConvertTo(*targetType, *this);
+        falseBranch = falseBranch.ConvertTo(*targetType, *this);
+        rr = std::make_shared<Sem::ResolveResult>(targetType);
+    }
+    if (rr->Type().Kind() == TS::TypeKind::ByReference)
+    {
+        // C# conditional ref looks like this:
+        // ref (arr != null ? ref trueBranch : ref falseBranch);
+        const auto* byRefType = dynamic_cast<const TS::ByReferenceType*>(&rr->Type());
+        auto conditionalResolveResult = std::make_shared<Sem::ResolveResult>(
+            byRefType != nullptr ? byRefType->Element() : TS::NoType());
+        auto* condExpr = new Syntax::ConditionalExpression(
+            condition.Expression(), trueBranch.Expression(), falseBranch.Expression());
+        TranslatedExpression conditional =
+            WithRR(WithILInstruction(*condExpr, inst), conditionalResolveResult);
+        return WithRR(
+            WithoutILInstruction(*new Syntax::DirectionExpression(
+                Syntax::FieldDirection::Ref, conditional.Expression())),
+            std::make_shared<Sem::ByReferenceResolveResult>(
+                conditionalResolveResult, TS::ReferenceKind::Ref));
+    }
+    else
+    {
+        auto* condExpr = new Syntax::ConditionalExpression(
+            condition.Expression(), trueBranch.Expression(), falseBranch.Expression());
+        return WithRR(WithILInstruction(*condExpr, inst), rr);
+    }
 }
 
 

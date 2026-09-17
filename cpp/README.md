@@ -3177,6 +3177,29 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   sibling `__makeref`/`__refvalue` arms stay deferred because the IL reader
   models `mkrefany` as a degenerate `LdTypeToken` (no `MakeRefAny` node) and no
   `RefAnyValue` node exists.
+- **`ExpressionBuilder` if-expression arm (`VisitIfInstruction`)** -- the C#
+  `VisitIfInstruction` (`ExpressionBuilder.cs` lines 3956-4049) landed and is
+  routed from the `Visit` OpCode switch: the short-circuit `&&`/`||` shapes (an
+  if whose unused arm is the 0/1 constant), gated on the rhs being boolean or
+  the if sitting in a condition slot via the new
+  `IfInstruction::IsInConditionSlot` predicate, render as the binary conditional
+  operators; otherwise the arms are translated as the two branches of a `?:`
+  conditional, their types united through `ResolveConditional` (with the
+  `GetBestCommonType` / ResultType-directed target-type recovery on resolver
+  error) and the result re-wrapped in a ref direction expression when the
+  conditional produces a by-reference value. The two matchers
+  `IL::MatchLogicAnd` / `IL::MatchLogicOr` (`PatternMatching.cs` lines 287-319)
+  landed in `PatternMatching.hpp`. Verified by 7 new tests
+  (`IfInstructionConditionSlotTest` + `ExpressionBuilderIfInstructionTest`): the
+  condition-slot predicate matrix (the 0-comparison's non-constant operand, the
+  root if's condition vs arms, the nested chain) and the four render shapes
+  (plain `?:`, boolean `&&`, boolean `||`, the non-boolean logic-and fallback
+  and the null-false-arm Nop error). Full Debug suite 12397 ran / 12395 passed /
+  the 2 standing skips / zero failures; the CLI baselines unchanged (`--csharp`
+  mscorlib 10106366 bytes, `-l c` 109438 chars, the `--json`-without-`--dump-table`
+  usage check rc 64). The `VisitSwitchInstruction` arm stays deferred; the
+  by-reference conditional-target arm of the render is implemented but has no
+  fixture yet.
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
