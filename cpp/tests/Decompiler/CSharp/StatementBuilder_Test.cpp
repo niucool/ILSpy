@@ -49,6 +49,8 @@
 #include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/LockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/UsingStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
 #include "Decompiler/CSharp/Syntax/CaseLabel.hpp"
 #include "Decompiler/CSharp/Syntax/SwitchSection.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
@@ -97,6 +99,7 @@
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
+#include "Decompiler/IL/Instructions/UsingInstruction.hpp"
 #include "Decompiler/IL/Instructions/LockInstruction.hpp"
 #include "Decompiler/IL/Instructions/YieldReturn.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
@@ -1391,6 +1394,91 @@ TEST(StatementBuilderTest, VisitLockInstructionRendersLockStatement)
     const auto instructions = StatementILInstructions(*stmt);
     ASSERT_EQ(instructions.size(), std::size_t(1));
     EXPECT_EQ(instructions[0], &lockInst);
+}
+
+// ---------------------------------------------------------------------------
+// The using-statement arm (VisitUsingInstruction)
+// ---------------------------------------------------------------------------
+
+// The `using` render: a loaded using variable produces a
+// VariableDeclarationStatement resource acquisition; the body converts and the
+// statement carries the using instruction annotation.
+TEST(StatementBuilderTest, VisitUsingInstructionRendersUsingStatement)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto var = fixture.MakeLocal(TS::KnownTypeCode::Object, "disposable");
+    var->LoadCount = 1;
+    IL::UsingInstruction usingInst(var, std::make_unique<IL::LdNull>(),
+                                   std::make_unique<IL::LdNull>());
+    auto* stmt = builder.Convert(&usingInst);
+    auto* usingStatement = dynamic_cast<Syntax::UsingStatement*>(stmt);
+    ASSERT_TRUE(usingStatement != nullptr);
+    EXPECT_FALSE(usingStatement->IsAsync());
+    auto* vds = dynamic_cast<Syntax::VariableDeclarationStatement*>(
+        usingStatement->ResourceAcquisition());
+    ASSERT_TRUE(vds != nullptr);
+    ASSERT_EQ(vds->Variables().Count(), std::size_t(1));
+    auto* init = vds->Variables()[0];
+    ASSERT_TRUE(init != nullptr);
+    EXPECT_EQ(init->Name(), "disposable");
+    ASSERT_TRUE(init->Annotation<CSharp::ILVariableResolveResult>() != nullptr);
+    EXPECT_EQ(init->Annotation<CSharp::ILVariableResolveResult>()->Variable(), var.get());
+    ASSERT_TRUE(usingStatement->EmbeddedStatement() != nullptr);
+    const auto instructions = StatementILInstructions(*stmt);
+    ASSERT_EQ(instructions.size(), std::size_t(1));
+    EXPECT_EQ(instructions[0], &usingInst);
+}
+
+// A using variable that is neither loaded nor address-taken renders the bare
+// resource expression (no declaration), and a ref-struct resource is valid in C#
+// even though its type does not implement the dispose interface.
+TEST(StatementBuilderTest, VisitUsingInstructionBareResourceForUnusedVariable)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto var = fixture.MakeLocal(TS::KnownTypeCode::Object, "disposable");
+    auto resourceVar = fixture.MakeLocal(TS::KnownTypeCode::Object, "resource");
+    IL::UsingInstruction usingInst(var, std::make_unique<IL::LdLoc>(resourceVar),
+                                   std::make_unique<IL::LdNull>());
+    usingInst.IsRefStruct = true;
+    auto* stmt = builder.Convert(&usingInst);
+    auto* usingStatement = dynamic_cast<Syntax::UsingStatement*>(stmt);
+    ASSERT_TRUE(usingStatement != nullptr);
+    auto* identifier = dynamic_cast<Syntax::IdentifierExpression*>(
+        usingStatement->ResourceAcquisition());
+    ASSERT_TRUE(identifier != nullptr);
+    EXPECT_EQ(CSharp::GetILVariable(*identifier), resourceVar.get());
+}
+
+// `await using` sets the async flag on the rendered statement.
+TEST(StatementBuilderTest, VisitUsingInstructionCarriesTheAsyncFlag)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto var = fixture.MakeLocal(TS::KnownTypeCode::Object, "disposable");
+    IL::UsingInstruction usingInst(var, std::make_unique<IL::LdNull>(),
+                                   std::make_unique<IL::LdNull>());
+    usingInst.IsAsync = true;
+    usingInst.IsRefStruct = true;
+    auto* stmt = builder.Convert(&usingInst);
+    auto* usingStatement = dynamic_cast<Syntax::UsingStatement*>(stmt);
+    ASSERT_TRUE(usingStatement != nullptr);
+    EXPECT_TRUE(usingStatement->IsAsync());
+}
+
+// A resource that is neither a null literal, a ref struct, nor dispose-typed is
+// the deferred try/finally fallback (the AssignVariableNames.GenerateVariableName
+// dependency), so the port raises its loud deferral.
+TEST(StatementBuilderTest, VisitUsingInstructionDefersTheInvalidResourceFallback)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto var = fixture.MakeLocal(TS::KnownTypeCode::Object, "disposable");
+    auto resourceVar = fixture.MakeLocal(TS::KnownTypeCode::Object, "resource");
+    IL::UsingInstruction usingInst(var, std::make_unique<IL::LdLoc>(resourceVar),
+                                   std::make_unique<IL::LdNull>());
+    EXPECT_THROW(builder.Convert(&usingInst), std::logic_error);
 }
 
 // ---------------------------------------------------------------------------

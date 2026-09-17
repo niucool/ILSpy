@@ -58,6 +58,9 @@
 #include "Decompiler/CSharp/Syntax/ComposedType.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ThrowStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/FixedStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/UsingStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
+#include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/VariableInitializer.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
@@ -82,6 +85,7 @@
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
+#include "Decompiler/IL/Instructions/UsingInstruction.hpp"
 #include "Decompiler/IL/Instructions/YieldReturn.hpp"
 #include "Decompiler/IL/PatternMatching.hpp"
 #include "Decompiler/IL/PointerArithmeticOffset.hpp"
@@ -251,6 +255,8 @@ TranslatedStatement StatementBuilder::Visit(IL::ILInstruction* inst)
             return VisitTryFault(inst);
         case IL::OpCode::LockInstruction:
             return VisitLockInstruction(inst);
+        case IL::OpCode::UsingInstruction:
+            return VisitUsingInstruction(inst);
         case IL::OpCode::Initblk:
             return VisitInitblk(inst);
         case IL::OpCode::Cpblk:
@@ -612,6 +618,79 @@ TranslatedStatement StatementBuilder::VisitLockInstruction(IL::ILInstruction* in
         exprBuilder->Translate(lockInst->OnExpression.get()).Expression());
     lockStatement->EmbeddedStatement(ConvertAsBlock(lockInst->Body.get()));
     return WithILInstruction(*lockStatement, inst);
+}
+
+// The C# `protected internal override TranslatedStatement
+// VisitUsingInstruction(UsingInstruction inst)` (lines 533-598): the using
+// statement render. The `TransformToForeach(inst, resource)` first arm is the
+// documented foreach-machinery deferral (it returns null), and the
+// not-valid-in-C# try/finally fallback is deferred with
+// `AssignVariableNames.GenerateVariableName`.
+TranslatedStatement StatementBuilder::VisitUsingInstruction(IL::ILInstruction* inst)
+{
+    auto* usingInst = static_cast<IL::UsingInstruction*>(inst);
+    // The C# `var resource = exprBuilder.Translate(inst.ResourceExpression).Expression;`
+    auto* resource = exprBuilder->Translate(usingInst->ResourceExpression.get()).Expression();
+    // The C# `var transformed = TransformToForeach(inst, resource); if
+    // (transformed != null) return transformed.WithILInstruction(inst);` -- the
+    // foreach-machinery deferral (TransformToForeach answers null).
+    const bool isAsync = usingInst->IsAsync;
+    const IL::ILVariablePtr& var = usingInst->Variable;
+    const TS::KnownTypeCode knownTypeCode = isAsync ? TS::KnownTypeCode::IAsyncDisposable
+                                                    : TS::KnownTypeCode::IDisposable;
+    // The C# local `bool IsValidInCSharp(UsingInstruction inst, KnownTypeCode code)`: a
+    // null-literal resource, a ref struct, or a resource whose underlying type
+    // implements the known dispose interface.
+    bool validInCSharp;
+    if (IL::MatchLdNull(usingInst->ResourceExpression.get()))
+    {
+        validInCSharp = true;
+    }
+    else if (usingInst->IsRefStruct)
+    {
+        validInCSharp = true;
+    }
+    else
+    {
+        validInCSharp = false;
+        const TS::IType& underlying = TS::GetUnderlyingType(*var->Type);
+        for (const TS::IType* baseType : TS::GetAllBaseTypes(underlying))
+        {
+            if (TS::IsKnownType(*baseType, knownTypeCode))
+            {
+                validInCSharp = true;
+                break;
+            }
+        }
+    }
+    if (!validInCSharp)
+    {
+        // The C# emits a try/finally over a fresh dispose variable named through
+        // `AssignVariableNames.GenerateVariableName`; that generator is not ported
+        // (the port's ILFunction has no parameter list and its AssignVariableNames
+        // is the simplified transform), so the fallback is a loud deferral.
+        throw std::logic_error(
+            "StatementBuilder::VisitUsingInstruction: the not-valid-in-C# using "
+            "(the try/finally fallback) is deferred with "
+            "AssignVariableNames.GenerateVariableName");
+    }
+    Syntax::AstNode* usingInit = resource;
+    if (var->LoadCount > 0 || var->AddressCount > 0)
+    {
+        Syntax::AstType* type =
+            (settings->AnonymousTypes() && ::ILSpy::Decompiler::ContainsAnonymousType(*var->Type))
+                ? static_cast<Syntax::AstType*>(new Syntax::SimpleType("var"))
+                : exprBuilder->ConvertType(*var->Type);
+        auto* vds = new Syntax::VariableDeclarationStatement(type, var->Name, resource);
+        vds->Variables()[0]->AddAnnotation(
+            std::make_shared<ILVariableResolveResult>(var, var->Type));
+        usingInit = vds;
+    }
+    auto* usingStatement = new Syntax::UsingStatement();
+    usingStatement->ResourceAcquisition(usingInit);
+    usingStatement->IsAsync(isAsync);
+    usingStatement->EmbeddedStatement(ConvertAsBlock(usingInst->Body.get()));
+    return WithILInstruction(*usingStatement, inst);
 }
 
 // The C# `string EnsureUniqueLabel(Block block)` (lines 1581-1597): the block's

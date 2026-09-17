@@ -2949,6 +2949,29 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   and all four CLI baselines unchanged (--csharp mscorlib 10106366 bytes, --il
   whole-module byte-identical to the 41246545-byte real-ilspycmd gold, -l c
   109438, the --json usage check rc 64).
+- **`StatementBuilder` slice 8 -- the using-statement arm** -- the C#
+  `VisitUsingInstruction` (`StatementBuilder.cs` lines 533-598) landed: the
+  resource expression translation, the `IsValidInCSharp` predicate (the
+  `MatchLdNull` resource, a ref-struct resource, or a resource whose underlying
+  type -- through `NullableType.GetUnderlyingType` and `GetAllBaseTypes` --
+  implements the known dispose interface: `IDisposable`, or `IAsyncDisposable`
+  for an `await using`), and the `UsingStatement` render -- the
+  `VariableDeclarationStatement` resource acquisition when the using variable is
+  loaded or address-taken (the anonymous-type `var` spelling under
+  `settings.AnonymousTypes`, else `ConvertType`, with the
+  `ILVariableResolveResult` annotation on the initializer), otherwise the bare
+  resource expression, and the converted body through `ConvertAsBlock`. The
+  `TransformToForeach` first arm stays the documented foreach-machinery deferral
+  (it answers null), and the not-valid-in-C# try/finally fallback is a loud
+  deferral named at `AssignVariableNames.GenerateVariableName` (the port's
+  simplified `AssignVariableNames` transform carries no scope/member-conflict
+  resolution). Verified by 4 new `StatementBuilderTest` tests (the declaration
+  resource with the annotation pin, the bare-resource render for an unused
+  variable, the `await using` async flag, and the invalid-resource deferral
+  throw), proven by a 2-behavior neuter RED round (the validity check forced
+  true + the async flag forced false: exactly the invalid-fallback and async
+  tests failed) then restored green; the full Debug suite is green and the CLI
+  baselines are unchanged.
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

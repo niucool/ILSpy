@@ -44,16 +44,28 @@
 //
 // Deferrals (each named at the member that needs it): the CancellationToken (the
 // cooperative-cancel ThrowIfCancellationRequested in Convert is a no-op in the
-// port, the DecompileRun convention), the using / foreach Visit arms (the foreach
-// machinery they ride -- TransformToForeach and friends -- lands with the
-// UsingInstruction slice), and, inside the block-container
+// port, the DecompileRun convention), the foreach machinery the using arm rides
+// (the TransformToForeach / TransformToForeachWithoutDispose arms -- the pattern
+// matcher's concrete nodes and the ILInlining/variable-use helpers they need),
+// and, inside the block-container
 // region, the DeclareLocalFunctions local-function declarations (the
 // TypeSystemAstBuilder.ConvertEntity long pole; the port's seed pipeline
 // produces no local functions, so the no-op is unobservable today) and the
 // TransformToForeachWithoutDispose arm of the block instruction loop (a null
 // return -- statements convert through the normal path). An instruction whose
 // C# Visit method has not been ported yet degrades to the Default expression
-// statement instead of crashing. The try-construction region (the C#
+// statement instead of crashing.
+//
+// The using-statement arm (VisitUsingInstruction, lines 533-598) has landed: the
+// resource translation, the IsValidInCSharp predicate (the null literal, a ref
+// struct, or a resource whose underlying type implements the known dispose
+// interface), and the UsingStatement render (the VariableDeclarationStatement
+// resource acquisition when the using variable is loaded/address-taken, else the
+// bare resource expression). The foreach arm and the not-valid-in-C# try/finally
+// fallback (the AssignVariableNames.GenerateVariableName dependency) remain the
+// named deferrals.
+//
+// The try-construction region (the C#
 // MakeTryCatch helper + VisitTryCatch/VisitTryFinally/VisitTryFault, lines
 // 445-505) and the VisitLockInstruction sibling (lines 506-510) have landed
 // beside the leaf arms, the switch region (CreateTypedCaseLabel +
@@ -334,6 +346,17 @@ private:
     // VisitLockInstruction(LockInstruction inst)` (lines 506-510): the lock
     // statement over the translated monitor expression and the converted body.
     TranslatedStatement VisitLockInstruction(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement
+    // VisitUsingInstruction(UsingInstruction inst)` (lines 533-598): the
+    // using-statement render -- the resource expression translation, the validity
+    // check (the null literal, a ref struct, or a resource whose underlying type
+    // implements the known dispose interface), and the `UsingStatement` over the
+    // resource acquisition (a `VariableDeclarationStatement` when the using
+    // variable is loaded/address-taken, else the bare resource expression) and the
+    // converted body. The C# `TransformToForeach` first arm and the not-valid-in-C#
+    // try/finally fallback are documented deferrals (the foreach machinery and
+    // `AssignVariableNames.GenerateVariableName`).
+    TranslatedStatement VisitUsingInstruction(IL::ILInstruction* inst);
     // The C# `protected internal override TranslatedStatement VisitInitblk(Initblk
     // inst)` (lines 1609-1623): the Unsafe.InitBlock/InitBlockUnaligned intrinsic
     // call over the (address, value, size) translations with the IL comment trivia.
