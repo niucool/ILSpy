@@ -5185,6 +5185,24 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   followed-by-statement, expression-resource, setting-off and non-block-parent keeps) proven
   with a neuter RED round (exactly the 2 positive tests failed, the 7 negative tests staying
   green, then all 30 green after restore).
+- **`PrettifyAssignments` compound-assignment rewrite** -- the first slice of the
+  `CSharpDecompiler.GetAstTransforms()` entry after `AddCheckedBlocks` lands the
+  side-effect-free part of `PrettifyAssignments`: `x = x op y` becomes `x op= y` when the
+  left-hand side is safe to evaluate twice (an identifier, `this`/`base`, a type reference,
+  or a member access / indexer / pointer dereference whose parts are all safe) and the
+  binary operator has a compound form (`GetAssignmentOperatorForBinaryOperator`). The cast
+  form `x = (T)(x op y)` (accepting it needs the resolver's implicit-conversion check) and
+  the resolver-driven increment/decrement rewrite (`IntroduceIncrementAndDecrement`) are
+  deferred at the visit. Verified by 20 tests (`PrettifyAssignments_Test.cpp`: the full
+  operator-mapping table and its non-compound defaults, the add/subtract/multiply/bitwise
+  rewrites, the side-effect-free member/base/type-reference/indexer/dereference rewrites and
+  their side-effecting keeps, the already-compound, non-binary-right, non-matching-left,
+  non-compound-operator, and null-right keeps, and a two-statement block walk) proven with an
+  operator-mapping neuter RED round (exactly the 9 positive tests failed, the 9 negative
+  tests staying green, then all 20 green after restore); the full Debug suite is 12664 ran /
+  12662 passed / the 2 standing skips / zero failures, and the transform is not referenced
+  from the seed paths (`grep` finds no use outside its own translation unit and test), so
+  the CLI baselines are unchanged.
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

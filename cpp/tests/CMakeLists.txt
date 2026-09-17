@@ -490,6 +490,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Transforms/IntroduceUnsafeModifier_Test.cpp
     Decompiler/CSharp/Transforms/ContextTrackingVisitor_Test.cpp
     Decompiler/CSharp/Transforms/PatternStatementTransform_Test.cpp
+    Decompiler/CSharp/Transforms/PrettifyAssignments_Test.cpp
     Decompiler/CSharp/Syntax/InterpolatedString_Test.cpp
     Decompiler/CSharp/Syntax/QueryExpression_Test.cpp
     Decompiler/CSharp/Syntax/QueryClauses_Test.cpp
