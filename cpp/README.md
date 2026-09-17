@@ -4873,6 +4873,28 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   removal, and a same-simple-name-different-namespace keep), and the full Debug suite is
   12451 ran / 12449 passed / the 2 standing skips / zero failures. The CLI baselines are
   unchanged (the transform is not wired into the seed `--csharp` path).
+- **`RemoveCompilerGeneratedAssemblyAttributes` project-export transform** -- the third
+  concrete `IAstTransform`, ported per `PORT_PLAN.md`'s Phase 5 and following
+  `RemoveCLSCompliantAttribute` in the `WholeProjectDecompiler` project-export order. The
+  transform (`Transforms/RemoveCompilerGeneratedAssemblyAttributes.{hpp,cpp}`) walks the
+  DIRECT `AttributeSection` children of the tree root and inspects only the `assembly`- and
+  `module`-targeted sections. The `assembly` arm drops `DebuggableAttribute` and
+  `TargetFrameworkAttribute` unconditionally, `CompilationRelaxationsAttribute` only for
+  the single literal `8`, `RuntimeCompatibilityAttribute` only for
+  `WrapNonExceptionThrows = true`, and `SecurityPermissionAttribute` only for
+  `SecurityAction.RequestMinimum, SkipVerification = true`; the `module` arm drops
+  `UnverifiableCodeAttribute` and `RefSafetyRulesAttribute`. A section emptied by the
+  removals is dropped; any other target reaches the C# `continue` and is never cleaned.
+  The argument guards read the ported `PrimitiveExpression`/`NamedExpression`/
+  `MemberReferenceExpression` (the C# `object Value` ports as the `PrimitiveValue` variant,
+  so the `is int`/`is bool` tests use `std::get_if<std::int32_t>`/`std::get_if<bool>`) and
+  the `MemberReferenceExpression.NextSibling` navigation. Verified by 16 tests (the
+  `assembly` name-and-argument guard matrix, the `module` removals, the non-assembly/module
+  target skip, the unannotated keep, the mixed-section partial removal, and a
+  same-simple-name-different-namespace keep) proven with a Run-neuter RED round (8 removal
+  tests failed, then all 16 green after restore), and the full Debug suite is 12467 ran /
+  12465 passed / the 2 standing skips / zero failures. The CLI baselines are unchanged (the
+  transform is not wired into the seed `--csharp` path).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

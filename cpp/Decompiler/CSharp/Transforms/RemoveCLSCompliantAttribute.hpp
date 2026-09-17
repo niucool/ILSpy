@@ -33,9 +33,9 @@
 // the annotation is the resolver's marker that a type reference was bound, and the
 // transform's type test reads the resolved type's full name.
 //
-// The `RemoveEmbeddedAttributes`/`RemoveCompilerGeneratedAssemblyAttributes` siblings in the
-// same source file stay deferred: they need the `TypeDeclaration.GetSymbol()` /
-// `KnownAttribute.Embedded` surfaces the type-declaration writer slices carry.
+// The `RemoveEmbeddedAttributes` sibling in the same source file stays deferred: it needs the
+// `TypeDeclaration.GetSymbol()` / `KnownAttribute.Embedded` surfaces the type-declaration writer
+// slices carry.
 
 #pragma once
 
