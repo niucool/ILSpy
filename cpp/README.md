@@ -5332,6 +5332,33 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   RED round (exactly the 10 query-building tests failed, the 8 keep/guard/combine tests
   staying green, then all 18 green after restore). The transform has no call site in the seed
   pipeline, so the CLI baselines are unchanged.
+- **`IntroduceExtensionMethods`** -- the static-extension-call to extension-syntax rewriter
+  lands in `Transforms/IntroduceExtensionMethods.{hpp,cpp}`: `Run` builds a per-run
+  `CSharpResolver` from the syntax-tree root's `UsingScope` annotation (attached by
+  `IntroduceUsingDeclarations`, not ported yet -- the caller/tests attach it through the new
+  `UsingScopeAnnotation` holder) and the current type definition's namespace, then walks the
+  tree; `VisitNamespaceDeclaration` descends the resolver's using scope by the declaration's
+  dotted name (the previously deferred `NamespaceDeclaration.Identifiers` computed read,
+  now landed), `VisitTypeDeclaration` switches the resolver's current type definition, and
+  `VisitInvocationExpression` rewrites an eligible `C.M(x, args)`/`M(x, args)` call to
+  `x.M(args)`: the first argument becomes the receiver (a `ref`/`in`-unwrapped operand or a
+  constant-null argument wrapped in a cast to the `this` parameter type), the static
+  target's type arguments move to the new member reference, and the
+  `CSharpInvocationResolveResult` annotation is replaced by an `IsExtensionMethodInvocation`
+  copy. All prerequisites (the resolver's `CanTransformToExtensionMethodCall`,
+  `CSharpInvocationResolveResult`, `CSharpConversions`, `UsingScope`/
+  `CSharpTypeResolveContext`) were already ported. The `UsingScopeAnnotation` holder lives in
+  its own header so the widely-included `Annotations.hpp` does not declare the sibling
+  `CSharp::TypeSystem` namespace (which would shadow unqualified `TypeSystem::` lookups), and
+  the transform header type-erases its `InitializeContext` parameter for the same reason.
+  Verified by 19 tests (the `Identifiers` walk, the static shape gate incl. the
+  constant-null -> `ConversionResolveResult` and `DirectionExpression` target rewrites, the
+  identifier-/member-reference-target rewrites, the `ref` unwrap and `out`/
+  `RefExtensionMethods`-off keeps, the null-argument cast wrap, the resolve-result update,
+  and the missing-annotation throw), proven with a `VisitInvocationExpression`-neuter RED
+  round (exactly the 5 positive rewrite tests failed, the 14 predicate/keep tests staying
+  green), the full Debug suite at 12756 ran / 12754 passed / the 2 standing skips, and the
+  unchanged CLI baselines (`--csharp` 10106360, `--il` 41246545, `-l c` 109438 bytes).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.
