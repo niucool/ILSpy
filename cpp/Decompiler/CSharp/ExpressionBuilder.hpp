@@ -46,7 +46,8 @@
 // cast-insertion machinery on TranslatedExpression (the ~350-line C# body -- the
 // loud std::logic_error marks the unported arms and its consumers), the heavy
 // Visit arms that have not landed yet (the LdFlda/LdsFlda/LdLen/LdElema memory
-// arms, the If/Switch expression arms, the dynamic/deconstruct arms), and the
+// arms, the LdFlda/LdsFlda/LdElema pointer arms, the If/Switch expression arms,
+// the dynamic/deconstruct arms), and the
 // CancellationToken (the cooperative-cancel throw is a no-op in the port, the
 // DecompileRun convention).
 
@@ -252,6 +253,14 @@ public:
     // the assignment (with the `ref (a = ref b)` re-assignment shape).
     TranslatedExpression VisitLdObj(IL::ILInstruction* inst, TranslationContext context);
     TranslatedExpression VisitStObj(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitLdLen(LdLen inst,
+    // TranslationContext context)` (ExpressionBuilder.cs lines 3088-3116): the array
+    // length render -- translate the array with the System.Array type hint (converting
+    // a non-array expression to System.Array), pick the `Length`/`LongLength` member
+    // name and the Int32/Int64 result type from the load's StackType, look the property
+    // up on System.Array, and render `array.Member` with the member resolve result (or a
+    // plain Int32/Int64 resolve result when System.Array exposes no such property).
+    TranslatedExpression VisitLdLen(IL::ILInstruction* inst, TranslationContext context);
     // The C# `private TranslatedExpression StObjViaHelperCall(StObj inst)`
     // (ExpressionBuilder.cs lines 3087-3125): the `Unsafe.Write` /
     // `Unsafe.WriteUnaligned` intrinsic rewrite for a store that cannot be a

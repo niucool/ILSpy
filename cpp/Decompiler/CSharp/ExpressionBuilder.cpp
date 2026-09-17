@@ -82,6 +82,7 @@
 #include "Decompiler/IL/Instructions/LdcDecimal.hpp"
 #include "Decompiler/Semantics/ConversionFactories.hpp"
 #include "Decompiler/TypeSystem/IParameter.hpp"
+#include "Decompiler/TypeSystem/IProperty.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
@@ -90,6 +91,7 @@
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/CastClass.hpp"
+#include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/OpCodeName.hpp"
 #include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
@@ -101,6 +103,7 @@
 #include "Decompiler/Semantics/ThisResolveResult.hpp"
 #include "Decompiler/Semantics/ThrowResolveResult.hpp"
 #include "Decompiler/Semantics/ResolveResult.hpp"
+#include "Decompiler/Semantics/MemberResolveResult.hpp"
 #include "Decompiler/Semantics/TypeIsResolveResult.hpp"
 #include "Decompiler/Semantics/TypeOfResolveResult.hpp"
 #include "Decompiler/Semantics/TypeResolveResult.hpp"
@@ -732,6 +735,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitLdObj(inst, context);
         case IL::OpCode::StObj:
             return VisitStObj(inst, context);
+        case IL::OpCode::LdLen:
+            return VisitLdLen(inst, context);
         case IL::OpCode::Call:
         case IL::OpCode::CallVirt:
         case IL::OpCode::NewObj:
@@ -1406,6 +1411,58 @@ TranslatedExpression ExpressionBuilder::StObjViaHelperCall(IL::ILInstruction* in
         return CallUnsafeIntrinsic("Write", {pointer.Expression(), value.Expression()},
                                    *stObj->Type, stObj);
     }
+}
+
+// The C# `protected internal override TranslatedExpression VisitLdLen(LdLen
+// inst, TranslationContext context)` (ExpressionBuilder.cs lines 3088-3116): the
+// `ldlen` array-length render. The array is translated with the System.Array type
+// hint; a non-array expression is converted to System.Array (the raw-pointer shape
+// the C# emits before the member access). The load's StackType selects the member
+// name and the result type -- I4 gives `Length` (Int32), every other stack type
+// gives `LongLength` (Int64). The property is looked up on System.Array; when the
+// type exposes no such property (the MinimalCorlib fixture), the resolve result
+// degrades to a plain Int32/Int64 result.
+TranslatedExpression ExpressionBuilder::VisitLdLen(IL::ILInstruction* inst,
+                                                   TranslationContext context)
+{
+    (void)context;
+    auto* ldLen = static_cast<IL::LdLen*>(inst);
+    const TS::IType& arrayType = compilation->FindType(KnownTypeCode::Array);
+    TranslatedExpression arrayExpr = Translate(ldLen->Argument.get(), &arrayType);
+    if (arrayExpr.Type().Kind() != TS::TypeKind::Array)
+    {
+        arrayExpr = arrayExpr.ConvertTo(const_cast<TS::IType&>(arrayType), *this);
+    }
+    arrayExpr = EnsureTargetNotNullable(arrayExpr, ldLen->Argument.get());
+
+    std::string memberName;
+    KnownTypeCode code;
+    if (ldLen->resultType == IL::StackType::I4)
+    {
+        memberName = "Length";
+        code = KnownTypeCode::Int32;
+    }
+    else
+    {
+        memberName = "LongLength";
+        code = KnownTypeCode::Int64;
+    }
+
+    const TS::IProperty* member = nullptr;
+    {
+        std::vector<const TS::IProperty*> props = arrayType.GetProperties(
+            [&memberName](const TS::IProperty* p) { return p->Name() == memberName; });
+        if (!props.empty())
+            member = props.front();
+    }
+    std::shared_ptr<Sem::ResolveResult> rr =
+        member == nullptr
+            ? std::make_shared<Sem::ResolveResult>(
+                  const_cast<TS::IType&>(compilation->FindType(code)).shared_from_this())
+            : std::make_shared<Sem::MemberResolveResult>(
+                  SharedResolveResultAnnotation(*arrayExpr.Expression()), member);
+    auto* memberRef = new Syntax::MemberReferenceExpression(arrayExpr.Expression(), memberName);
+    return WithRR(WithILInstruction(*memberRef, inst), rr);
 }
 
 

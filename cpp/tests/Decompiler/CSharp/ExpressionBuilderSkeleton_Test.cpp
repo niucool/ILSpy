@@ -63,6 +63,7 @@
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
+#include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/Instructions/BitNot.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
@@ -1029,6 +1030,70 @@ TEST(ExpressionBuilderMemoryTest, LdObjAndStObjCloneCarriesPrefixes)
     ASSERT_TRUE(stCloneTyped != nullptr);
     EXPECT_TRUE(stCloneTyped->IsVolatile);
     EXPECT_EQ(stCloneTyped->UnalignedPrefix, 4);
+}
+
+
+// ---------------------------------------------------------------------------
+// The array-length arm (VisitLdLen): the `ldlen.i4` / `ldlen.i8` renders over an
+// array-typed local. The StackType selects the `Length` (Int32) / `LongLength`
+// (Int64) member name, and the array operand is translated against the
+// System.Array type hint. Expectations derived from the C# VisitLdLen
+// (ExpressionBuilder.cs lines 3088-3116) body over the MinimalCorlib fixture
+// (whose System.Array exposes no properties, so the resolve result degrades to the
+// plain Int32/Int64 result).
+
+TEST(ExpressionBuilderLdLenTest, LdLenI4RendersLength)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto arrayType = std::make_shared<TS::ArrayType>(intType);
+    auto arrayVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, arrayType, 0);
+    arrayVar->Name = "a";
+    IL::LdLen ldLen(IL::StackType::I4, std::make_unique<IL::LdLoc>(arrayVar));
+    auto expr = builder.Translate(&ldLen);
+    auto* memberRef = dynamic_cast<Syntax::MemberReferenceExpression*>(expr.Expression());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "Length");
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(memberRef->Target()) != nullptr);
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()), TS::KnownTypeCode::Int32));
+}
+
+TEST(ExpressionBuilderLdLenTest, LdLenI8RendersLongLength)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto arrayType = std::make_shared<TS::ArrayType>(intType);
+    auto arrayVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, arrayType, 0);
+    arrayVar->Name = "a";
+    IL::LdLen ldLen(IL::StackType::I8, std::make_unique<IL::LdLoc>(arrayVar));
+    auto expr = builder.Translate(&ldLen);
+    auto* memberRef = dynamic_cast<Syntax::MemberReferenceExpression*>(expr.Expression());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "LongLength");
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()), TS::KnownTypeCode::Int64));
+}
+
+TEST(ExpressionBuilderLdLenTest, LdLenRawIRendersLongLength)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto arrayType = std::make_shared<TS::ArrayType>(intType);
+    auto arrayVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, arrayType, 0);
+    arrayVar->Name = "a";
+    // The raw `ldlen` pushes a native int (StackType::I): every non-I4 stack type
+    // selects LongLength.
+    IL::LdLen ldLen(IL::StackType::I, std::make_unique<IL::LdLoc>(arrayVar));
+    auto expr = builder.Translate(&ldLen);
+    auto* memberRef = dynamic_cast<Syntax::MemberReferenceExpression*>(expr.Expression());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "LongLength");
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()), TS::KnownTypeCode::Int64));
 }
 
 

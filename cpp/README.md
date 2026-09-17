@@ -3042,7 +3042,7 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `LdObj` / `StObj` IL nodes gained the `ISupportsVolatilePrefix.IsVolatile` +
   `ISupportsUnalignedPrefix.UnalignedPrefix` operands (rendered before the
   opcode, the `Initblk`/`Cpblk` convention) with their clone cases. The
-  `LdFlda` / `LdsFlda` / `LdLen` / `LdElema` siblings stay deferred (they need
+  `LdFlda` / `LdsFlda` / `LdElema` siblings stay deferred (they need
   `ConvertField`, `GetProperties`, and the indexer machinery). Verified by 10
   new `ExpressionBuilderMemoryTest` tests (the pointer/ref load renders, the
   unaligned `ReadUnaligned` with the type argument, the type-hint preference,
@@ -3053,6 +3053,24 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   12364 ran / 12362 passed / the 2 standing skips / zero failures, and the CLI
   baselines are structurally unchanged (the Phase-5 back end is not yet wired
   into the `--csharp` CLI path).
+- **`ExpressionBuilder` array-length arm (`VisitLdLen`)** -- the C# `VisitLdLen`
+  (`ExpressionBuilder.cs` lines 3088-3116) landed and is routed from the `Visit`
+  OpCode switch (`ldlen`). The array operand is translated against the
+  `System.Array` type hint, converting a non-array expression to `System.Array`
+  and applying `EnsureTargetNotNullable`; the load's `StackType` selects the
+  member name and result type (`I4` -> `Length`/`Int32`, every other stack type
+  -> `LongLength`/`Int64`). The property is looked up on `System.Array` and the
+  member access carries the `MemberResolveResult` (or a plain `Int32`/`Int64`
+  result when the type exposes no such property -- the MinimalCorlib fixture).
+  The `LdFlda` / `LdsFlda` / `LdElema` siblings stay deferred (they need
+  `ConvertField`, the inline-array/`WithSystemIndex` indexer machinery, and the
+  `TupleTransform.MatchTupleFieldAccess` helper). Verified by 3 new
+  `ExpressionBuilderLdLenTest` tests (the `I4` `Length` render, the `I8`
+  `LongLength` render, and the raw-`I` `LongLength` fallback), proven by a
+  dispatch neuter RED round (exactly those 3 tests failed through the `Default`
+  fallback) then restored green; full Debug suite 12367 ran / 12365 passed /
+  the 2 standing skips / zero failures, and the CLI baselines are structurally
+  unchanged (the Phase-5 back end is not yet wired into the `--csharp` CLI path).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
