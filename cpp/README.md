@@ -4982,6 +4982,28 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   the transform disabled, then all 12 green after restore), and the full Debug suite is now
   12522 ran / 12520 passed / the 2 standing skips / zero failures; the `--csharp` CLI baseline
   is unaffected (the transform is not wired into the seed `--csharp` path).
+- **`AddXmlDocumentationTransform`** -- the eighth concrete `IAstTransform` over the
+  iteration-160 `TransformContext` foundation, ported per `PORT_PLAN.md`'s Phase 5 from the
+  `CSharpDecompiler.GetAstTransforms()` order (the LAST transform in the list, after
+  `FixNameCollisions`). The transform (`Transforms/AddXmlDocumentationTransform.{hpp,cpp}`)
+  asks the run's `DocumentationProvider` for each `EntityDeclaration`'s XML documentation
+  and prepends the doc's lines as `CommentType.Documentation` trivia: the first non-blank
+  line fixes the shared indentation (stripped from every line), interior blank lines are
+  restored as empty documentation comments, and trailing blank lines are dropped. A
+  parameterized property decompiles to its accessor methods, so the property's
+  documentation is shown on its first accessor (getter else setter). The slice also landed
+  the `IDocumentationProvider` interface (`Decompiler/Documentation/IDocumentationProvider
+  .hpp`, a nullable `std::optional<std::string> GetDocumentation`) and the
+  `DecompileRun.DocumentationProvider` reader (the concrete `XmlDocumentationProvider`
+  stays with a later Decompiler slice). Verified by 12 tests (the settings/provider
+  early-outs, the single-line and multi-line renders with indentation stripping and blank
+  retention, the carriage-return line splitting, the no-symbol skip, the getter and setter
+  parameterized-property fallbacks, the non-first-accessor and non-parameterized-owner
+  keeps, the resolve-result annotation carried by every comment, and the `XmlException`
+  reporting) proven with a Run-neuter RED round (exactly the 7 positive tests failed with
+  the transform disabled, then all 12 green after restore); the full Debug suite is now
+  12534 ran / 12532 passed / the 2 standing skips / zero failures, and the `--csharp` CLI
+  baseline is unaffected (the transform is not wired into the seed `--csharp` path).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

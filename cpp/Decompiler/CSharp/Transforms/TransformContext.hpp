@@ -32,9 +32,9 @@
 // no-op in the port (the DecompileRun convention); the `Stepper` and the
 // `[Conditional("STEP")]` debug-step methods are no-ops (the port has no debug-step
 // machinery -- the C# methods compile out of a normal build, so a normal C# run is
-// a no-op too); and the `DecompileRun` readers some later transforms use
-// (`DocumentationProvider` / `RecordDecompilers`) stay with their DecompileRun
-// slices.
+// a no-op too); and the `DecompileRun` reader some later transforms use
+// (`RecordDecompilers`) stays with its DecompileRun slice (the `DocumentationProvider`
+// reader landed with the `AddXmlDocumentationTransform` port).
 
 #pragma once
 

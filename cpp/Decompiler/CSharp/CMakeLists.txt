@@ -21,6 +21,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/NormalizeBlockStatements.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/RenameVisualBasicAnonymousTypes.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/FixNameCollisions.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/AddXmlDocumentationTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/AstNode.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/AstType.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/TypeSystemAstBuilder.cpp

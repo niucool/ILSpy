@@ -26,11 +26,11 @@
 //
 // Deferrals (documented at each member): the CancellationToken (the port has no
 // cooperative-cancel machinery -- the C# ctor only stores it, and every consumer
-// calls ThrowIfCancellationRequested() which is a no-op here); the
-// DocumentationProvider (IDocumentationProvider, the XML-doc provider -- no ported
-// consumer yet); RecordDecompilers / AutomaticEvents / TypeHierarchyIsKnown (the
-// CSharpDecompiler type-declaration slices that fill them are not ported yet --
-// the dictionaries land with those slices).
+// calls ThrowIfCancellationRequested() which is a no-op here); RecordDecompilers /
+// AutomaticEvents / TypeHierarchyIsKnown (the CSharpDecompiler type-declaration
+// slices that fill them are not ported yet -- the dictionaries land with those
+// slices). The DocumentationProvider is a caller-supplied interface pointer (the
+// concrete XmlDocumentationProvider stays with a later Decompiler slice).
 
 #pragma once
 
@@ -43,6 +43,10 @@
 #include <string>
 #include <unordered_set>
 
+namespace ILSpy::Decompiler::Documentation {
+class IDocumentationProvider;
+}
+
 namespace ILSpy::Decompiler {
 
 // The C# `enum EnumValueDisplayMode` (the ICSharpCode.Decompiler root namespace):
@@ -54,9 +58,9 @@ enum class EnumValueDisplayMode {
     FirstOnly
 };
 
-// The C# `internal class DecompileRun`. The C# `IDocumentationProvider` /
-// `RecordDecompilers` / `AutomaticEvents` / `TypeHierarchyIsKnown` members are
-// the documented deferrals above.
+// The C# `internal class DecompileRun`. The C# `RecordDecompilers` /
+// `AutomaticEvents` / `TypeHierarchyIsKnown` members are the documented deferrals
+// above.
 class DecompileRun {
 public:
     // The C# `public HashSet<string> DefinedSymbols { get; }` -- the #define symbols
@@ -88,6 +92,17 @@ public:
         return usingScope_;
     }
 
+    // The C# `public IDocumentationProvider? DocumentationProvider { get; set; }` --
+    // the optional XML documentation source. A non-owning pointer (the C# nullable
+    // reference; the caller owns the provider). Null when no documentation is
+    // supplied, which is the `AddXmlDocumentationTransform` early-out.
+    const Documentation::IDocumentationProvider* DocumentationProvider() const {
+        return documentationProvider_;
+    }
+    void SetDocumentationProvider(const Documentation::IDocumentationProvider* provider) {
+        documentationProvider_ = provider;
+    }
+
     // The C# ctor `DecompileRun(DecompilerSettings settings, UsingScope usingScope)`
     // with both ArgumentNullException guards. The settings port alias: the caller
     // owns the bag (the C# GC reference); the using scope is the port's
@@ -108,6 +123,7 @@ private:
     std::optional<std::unordered_set<std::string>> namespaces_;
     const DecompilerSettings* settings_;
     std::shared_ptr<CSharp::TypeSystem::UsingScope> usingScope_;
+    const Documentation::IDocumentationProvider* documentationProvider_ = nullptr;
 };
 
 } // namespace ILSpy::Decompiler
