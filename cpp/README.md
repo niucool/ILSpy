@@ -4895,6 +4895,26 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   tests failed, then all 16 green after restore), and the full Debug suite is 12467 ran /
   12465 passed / the 2 standing skips / zero failures. The CLI baselines are unchanged (the
   transform is not wired into the seed `--csharp` path).
+- **`FlattenSwitchBlocks` AST transform** -- the fourth concrete `IAstTransform` over the
+  iteration-160 `TransformContext` foundation, ported per `PORT_PLAN.md`'s Phase 5 from the
+  `CSharpDecompiler.GetAstTransforms()` order (after `NormalizeBlockStatements`). The
+  transform (`Transforms/FlattenSwitchBlocks.{hpp,cpp}`) walks every `SwitchSection`
+  descendant; when a section has exactly one statement and that statement is a
+  `BlockStatement` carrying no local declaration, it removes the block and `MoveTo`s its
+  statements up into the section (the `case x: { ... }` braces elided). The local-declaration
+  guard (`ContainsLocalDeclaration`) returns true for a `VariableDeclarationStatement`,
+  `LocalFunctionDeclarationStatement`, or `OutVarDeclarationExpression` and recurses into
+  children, but stops at a nested `BlockStatement` (whose own scope keeps the declaration
+  valid), so only declarations that the flatten would hoist out of their scope suppress it.
+  The port's `Descendants()` returns a materialized vector, so reparenting during the walk
+  cannot disturb the iteration -- stricter than the C# lazy LINQ sequence and behaviourally
+  equivalent for this transform. Verified by 8 tests (the single-block flatten with node
+  identity and order, the multiple-statement / non-block-single-statement keeps, the three
+  declaration guards, the nested-declaration-block flatten, and two sections processed
+  independently) proven with a Run-neuter RED round (exactly the 3 flatten tests failed,
+  then all 8 green after restore), and the full Debug suite is 12475 ran / 12473 passed /
+  the 2 standing skips / zero failures; the `-l c` CLI baseline is unchanged at 109438 (the
+  transform is not wired into the seed `--csharp` path).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

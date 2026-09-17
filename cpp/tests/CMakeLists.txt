@@ -481,6 +481,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Transforms/EscapeInvalidIdentifiers_Test.cpp
     Decompiler/CSharp/Transforms/RemoveCLSCompliantAttribute_Test.cpp
     Decompiler/CSharp/Transforms/RemoveCompilerGeneratedAssemblyAttributes_Test.cpp
+    Decompiler/CSharp/Transforms/FlattenSwitchBlocks_Test.cpp
     Decompiler/CSharp/Syntax/InterpolatedString_Test.cpp
     Decompiler/CSharp/Syntax/QueryExpression_Test.cpp
     Decompiler/CSharp/Syntax/QueryClauses_Test.cpp

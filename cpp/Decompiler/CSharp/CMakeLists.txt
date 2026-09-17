@@ -17,6 +17,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/EscapeInvalidIdentifiers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/RemoveCLSCompliantAttribute.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/RemoveCompilerGeneratedAssemblyAttributes.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/FlattenSwitchBlocks.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/AstNode.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/AstType.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/TypeSystemAstBuilder.cpp
