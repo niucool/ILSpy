@@ -4943,6 +4943,25 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   restore), and the full Debug suite is 12498 ran / 12496 passed / the 2 standing skips / zero
   failures; the `--csharp` CLI baseline is unchanged at 10106360 bytes (the transform is not
   wired into the seed `--csharp` path).
+- **`RenameVisualBasicAnonymousTypes` AST transform** -- the sixth concrete `IAstTransform` over
+  the iteration-160 `TransformContext` foundation, ported per `PORT_PLAN.md`'s Phase 5 from the
+  `CSharpDecompiler.GetAstTransforms()` order (the transform directly after `FlattenSwitchBlocks`).
+  The transform (`Transforms/RenameVisualBasicAnonymousTypes.{hpp,cpp}`) gives the anonymous
+  types of a VB assembly a C#-legal name: it walks every `Identifier` whose name contains `$`,
+  resolves the entity the node refers to through the port's `GetSymbol` resolve-result
+  annotation (the `FindEntity` helper reads the node's own symbol and falls back to its parent's,
+  so a field declaration's symbol is found from the `VariableInitializer` holding the name),
+  and replaces the `$` separators with `_` when the entity's declaring type (or the entity
+  itself, when it is an `ITypeDefinition`) passes `NRExtensions.IsAnonymousTypeDeclaredAsNamedType`.
+  It then attaches the three-line explanatory leading comment to every such type declaration.
+  Verified by 12 tests (the field-name rename, the type-reference rename, the every-`$`
+  replacement, the no-`$` / no-symbol / name-mismatch / non-anonymous-declaring-type /
+  read-only-properties keeps, the non-anonymous type-reference keep, the three-comment
+  declaration, and the no-symbol / non-anonymous declaration keeps) proven with a Run-neuter
+  RED round (exactly the 4 positive tests failed with the transform disabled, then all 12 green
+  after restore), and the full Debug suite is unchanged apart from the 12 new tests; the
+  `--csharp` CLI baseline is unaffected (the transform is not wired into the seed `--csharp`
+  path).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.
