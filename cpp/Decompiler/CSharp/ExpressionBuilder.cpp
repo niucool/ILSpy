@@ -104,6 +104,8 @@
 #include "Decompiler/IL/Instructions/AddressOf.hpp"
 #include "Decompiler/IL/Instructions/RefAnyType.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
+#include "Decompiler/IL/Transforms/TupleTransform.hpp"
+#include "Decompiler/CSharp/CSharpDecompiler.hpp"
 #include "Decompiler/IL/OpCodeName.hpp"
 #include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
@@ -861,6 +863,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitLdElema(inst, context);
         case IL::OpCode::LdsFlda:
             return VisitLdsFlda(inst, context);
+        case IL::OpCode::LdFlda:
+            return VisitLdFlda(inst, context);
         case IL::OpCode::NullableRewrap:
             return VisitNullableRewrap(inst, context);
         case IL::OpCode::NullableUnwrap:
@@ -1704,6 +1708,151 @@ TranslatedExpression ExpressionBuilder::VisitLdsFlda(IL::ILInstruction* inst,
         return Default(inst, context);
     ExpressionWithResolveResult fieldAccess = ConvertField(*ldsFlda->Field);
     TranslatedExpression expr = WithILInstruction(fieldAccess, inst);
+    return WithRR(
+        WithoutILInstruction(*new Syntax::DirectionExpression(
+            Syntax::FieldDirection::Ref, expr.Expression())),
+        std::make_shared<Sem::ByReferenceResolveResult>(
+            SharedResolveResultAnnotation(*expr.Expression()), TS::ReferenceKind::Ref));
+}
+
+// The C# `protected internal override TranslatedExpression VisitLdFlda(LdFlda
+// inst, TranslationContext context)` (ExpressionBuilder.cs lines 3118-3194): the
+// `&target.field` render. The fixed-buffer arm rewrites a
+// `ldflda FixedElementField(ldflda target)` into the pointer-typed field access
+// (and, for a managed-ref result in a pointer context, a `ref field[0]`
+// indexer); the tuple arm renders `target.ItemN` (or the tuple's declared
+// element name) with the tuple's own element type; otherwise the base
+// ConvertField render is wrapped in a `ref` DirectionExpression (or an `&`
+// UnaryOperatorExpression when the result is a native pointer). The port's IL
+// reader leaves the resolved `Field` unset (the `Call::Method` convention), so
+// an unresolved node degrades to the Default error expression rather than
+// dereferencing a null field.
+TranslatedExpression ExpressionBuilder::VisitLdFlda(IL::ILInstruction* inst,
+                                                   TranslationContext context)
+{
+    auto* ldFlda = static_cast<IL::LdFlda*>(inst);
+    if (!ldFlda->Field)
+        return Default(inst, context);
+
+    if (settings->FixedBuffers() && ldFlda->Field->Name() == "FixedElementField"
+        && ldFlda->Target != nullptr && ldFlda->Target->Op == IL::OpCode::LdFlda)
+    {
+        auto* nested = static_cast<IL::LdFlda*>(ldFlda->Target.get());
+        TS::ITypePtr elementType;
+        int elementCount = 0;
+        if (nested->Field != nullptr
+            && CSharp::IsFixedField(*nested->Field, elementType, elementCount))
+        {
+            ExpressionWithResolveResult fieldAccess =
+                ConvertField(*nested->Field, nested->Target.get());
+            const auto* mrr = dynamic_cast<const Sem::MemberResolveResult*>(
+                fieldAccess.ResolveResult());
+            // The C# casts the resolve result directly; a by-ref field's
+            // ConvertField returns a ByReferenceResolveResult instead, which the
+            // C# would reject at the cast. Fall through to the general path there
+            // rather than dereferencing null.
+            if (mrr != nullptr)
+            {
+                // `mrr` is owned by the expression's resolve-result annotation;
+                // capture what the rebuilt result needs before removing it.
+                std::shared_ptr<Sem::ResolveResult> targetHandle = mrr->TargetResultHandle();
+                const TS::IMember* member = mrr->Member();
+                fieldAccess.Expression()->RemoveAnnotations<Sem::ResolveResult>();
+                TranslatedExpression result = WithILInstruction(
+                    WithRR(*fieldAccess.Expression(),
+                           std::make_shared<Sem::MemberResolveResult>(
+                               std::move(targetHandle), member,
+                               std::make_shared<TS::PointerType>(elementType))),
+                    inst);
+                if (ldFlda->ResultType() == IL::StackType::Ref)
+                {
+                    // `target.field` has pointer-type. Convert it to a ref when
+                    // the context is going to convert the ref back to a pointer.
+                    bool pinnedInit = inst->Parent != nullptr
+                        && inst->Parent->Op == IL::OpCode::PinnedRegion
+                        && inst->ChildIndex == 0;
+                    auto* parentConv = inst->Parent != nullptr
+                        ? dynamic_cast<IL::Conv*>(inst->Parent) : nullptr;
+                    bool convToPointer = parentConv != nullptr
+                        && parentConv->TargetType == IL::PrimitiveType::U;
+                    if (pinnedInit || convToPointer)
+                    {
+                        return result.ConvertTo(
+                            *std::make_shared<TS::ByReferenceType>(elementType), *this);
+                    }
+                    else
+                    {
+                        // `ref *target.field` needs `target` to be non-movable;
+                        // `ref target.field[0]` does not.
+                        auto* arrayAccess = new Syntax::IndexerExpression(result.Expression());
+                        arrayAccess->Arguments().Add(
+                            new Syntax::PrimitiveExpression(std::int32_t(0)));
+                        auto arrayRR = std::make_shared<Sem::ResolveResult>(elementType);
+                        WithRR(*arrayAccess, arrayRR);
+                        return WithRR(
+                            WithoutILInstruction(*new Syntax::DirectionExpression(
+                                Syntax::FieldDirection::Ref, arrayAccess)),
+                            std::make_shared<Sem::ByReferenceResolveResult>(
+                                arrayRR, TS::ReferenceKind::Ref));
+                    }
+                }
+                return result;
+            }
+        }
+    }
+
+    TranslatedExpression expr;
+    TS::ITypePtr underlyingTupleType;
+    IL::ILInstruction* tupleTarget = nullptr;
+    int position = 0;
+    if (IL::TupleTransform::MatchTupleFieldAccess(*ldFlda, underlyingTupleType, tupleTarget,
+                                                  position))
+    {
+        TranslatedExpression translatedTarget = TranslateTarget(
+            tupleTarget, /*nonVirtualInvocation:*/ true, /*memberStatic:*/ false,
+            *underlyingTupleType);
+        const auto* tupleType =
+            dynamic_cast<const TS::TupleType*>(&translatedTarget.Type());
+        if (tupleType != nullptr
+            && TS::NormalizeTypeVisitor::TypeErasure().EquivalentTypes(
+                   const_cast<TS::TupleType&>(*tupleType), *underlyingTupleType)
+            && position <= static_cast<int>(tupleType->ElementNames().size()))
+        {
+            std::string elementName = tupleType->ElementNames()[position - 1];
+            if (elementName.empty())
+                elementName = "Item" + std::to_string(position);
+            // The tuple element types are more accurate w.r.t. nullability and
+            // dynamic than `inst.Field.Type`, so override the member return type.
+            auto rr = std::make_shared<Sem::MemberResolveResult>(
+                SharedResolveResultAnnotation(*translatedTarget.Expression()),
+                ldFlda->Field.get(), tupleType->ElementTypes()[position - 1]);
+            expr = WithILInstruction(
+                WithRR(*new Syntax::MemberReferenceExpression(
+                           translatedTarget.Expression(), elementName),
+                       rr),
+                inst);
+        }
+        else
+        {
+            expr = WithILInstruction(
+                ConvertField(*ldFlda->Field, ldFlda->Target.get()), inst);
+        }
+    }
+    else
+    {
+        expr = WithILInstruction(ConvertField(*ldFlda->Field, ldFlda->Target.get()), inst);
+    }
+
+    if (ldFlda->ResultType() == IL::StackType::I)
+    {
+        // ldflda producing a native pointer.
+        return WithRR(
+            WithoutILInstruction(*new Syntax::UnaryOperatorExpression(
+                expr.Expression(), Syntax::UnaryOperatorType::AddressOf)),
+            std::make_shared<Sem::ResolveResult>(std::make_shared<TS::PointerType>(
+                const_cast<TS::IType&>(expr.Type()).shared_from_this())));
+    }
+    // ldflda producing a managed pointer.
     return WithRR(
         WithoutILInstruction(*new Syntax::DirectionExpression(
             Syntax::FieldDirection::Ref, expr.Expression())),

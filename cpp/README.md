@@ -4676,6 +4676,37 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   then restored green; full Debug suite 12409 ran / 12407 passed / the 2 standing
   skips / zero failures, and the CLI baselines are structurally unchanged (the
   Phase-5 back end is not yet wired into the `--csharp` CLI path).
+- **`ExpressionBuilder` instance field-address arm (`VisitLdFlda` + `TupleTransform`
+  + `CSharpDecompiler.IsFixedField`)** -- the C# `VisitLdFlda` (`ExpressionBuilder.cs`
+  lines 3118-3194) landed and is routed from the `Visit` OpCode switch (`ldflda`),
+  completing the `ldflda`/`ldsflda` pair. The fixed-buffer arm rewrites
+  `ldflda FixedElementField(ldflda target)` into a pointer-typed field access
+  (through the `ConvertField` render), converting to a by-reference when the
+  result feeds a `PinnedRegion.Init` or a `conv.u`, else rendering the movable-safe
+  `ref target.field[0]` indexer; the tuple arm renders `target.ItemN` (or the
+  tuple's declared element name) with the tuple's own element type when the target
+  type erasure-matches the underlying tuple; otherwise the base `ConvertField`
+  render is wrapped in a `ref` `DirectionExpression` (or an `&`
+  `UnaryOperatorExpression` for a native-pointer result). The two new helpers are
+  `TupleTransform::MatchTupleFieldAccess` (the `Item<N>` parse plus the `Rest`
+  chain unwrap, `TupleTransform.cs` lines 36-64) and `CSharp::IsFixedField`
+  (`CSharpDecompiler.cs` line 2522, the `[FixedBuffer(typeof(T), N)]` decode; the
+  sliced `CSharpDecompiler.hpp` is the future home of the class's static helpers).
+  `MemberResolveResult` gained the `TargetResultHandle()` shared-ownership accessor
+  so the rebuilt pointer-typed result can share the target (the port's `shared_ptr`
+  stand-in for the C# GC reference). Verified by 5 new `ExpressionBuilderFieldTest`
+  tests (the `IsFixedField` decode and miss, the `Item`/`Rest` match and non-Item
+  rejection, the named tuple-element member reference with its inner
+  `MemberResolveResult` pin, the unresolved-field `Default` error, and the
+  fixed-buffer indexer render), with a RED round (a use-after-free in the
+  fixed-buffer arm -- `mrr` is owned by the annotation the C# code removes --
+  caught by the SEH crash and fixed by capturing the target handle/member first,
+  plus the tuple test reading the outer by-reference result instead of the inner
+  member reference) then restored green; full Debug suite 12414 ran / 12411 passed
+  / the 2 standing skips / 1 pre-existing flaky `SyntheticWpfModuleTest` failure
+  (a stale-pointer comparison that fails ~1 in 5 in isolation on the unmodified
+  test), and the CLI baselines are unchanged (the Phase-5 back end is not yet
+  wired into the `--csharp` CLI path).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

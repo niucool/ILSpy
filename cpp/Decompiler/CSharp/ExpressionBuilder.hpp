@@ -43,9 +43,7 @@
 // non-owning pointer (the C# GC reference convention).
 //
 // Deferrals (each named at the member that needs it): the heavy Visit arms that
-// have not landed yet (the LdFlda field-address arm, which needs the
-// TupleTransform.MatchTupleFieldAccess machinery and CSharpDecompiler.IsFixedField,
-// the dynamic/deconstruct arms, and Await, which needs the
+// have not landed yet (the dynamic/deconstruct arms, and Await, which needs the
 // awaiter/GetResultMethod pipeline surfaces), the ConvertField automatic
 // backing-field special cases (the automatic event needs AutoEventDecompiler /
 // PropertyAndEventBackingFieldLookup, the automatic property needs
@@ -297,6 +295,14 @@ public:
     // static field-address render -- resolve the field reference through ConvertField
     // and wrap it in a `ref` DirectionExpression carrying a ByReferenceResolveResult.
     TranslatedExpression VisitLdsFlda(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitLdFlda(
+    // LdFlda inst, TranslationContext context)` (ExpressionBuilder.cs lines
+    // 3118-3194): the `&target.field` render -- the fixed-buffer rewrite
+    // (`TupleTransform` + `CSharpDecompiler.IsFixedField`), the tuple-element
+    // access, and the base ConvertField render wrapped in a `ref`
+    // DirectionExpression (or an `&` UnaryOperatorExpression for a native
+    // pointer result).
+    TranslatedExpression VisitLdFlda(IL::ILInstruction* inst, TranslationContext context);
     // The C# `protected internal override TranslatedExpression
     // VisitNullableRewrap(NullableRewrap inst, TranslationContext context)`
     // (ExpressionBuilder.cs lines 4298-4309): the null-conditional join point --

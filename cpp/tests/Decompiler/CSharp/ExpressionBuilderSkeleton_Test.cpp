@@ -72,6 +72,8 @@
 #include "Decompiler/IL/Instructions/RefAnyType.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
+#include "Decompiler/IL/Transforms/TupleTransform.hpp"
+#include "Decompiler/CSharp/CSharpDecompiler.hpp"
 #include "Decompiler/IL/Instructions/BitNot.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
@@ -111,10 +113,14 @@
 #include "Decompiler/TypeSystem/NullableType.hpp"
 #include "Decompiler/TypeSystem/LookupStubs.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
+#include "Decompiler/TypeSystem/TupleType.hpp"
+#include "Decompiler/TypeSystem/IAttribute.hpp"
+#include "Decompiler/TypeSystem/CustomAttributeTypedArgument.hpp"
 
 #include <gtest/gtest.h>
 
 #include <any>
+#include <map>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -1266,6 +1272,27 @@ TEST(ExpressionBuilderLdElemaTest, NodeCloneCarriesWithSystemIndex)
 // fixture's IField stub fills the C# IField surface the arms read; the port's IL
 // reader leaves the nodes' resolved `Field` unset, so it is wired by hand here.
 
+// A resolved custom attribute stub for the fixed-buffer fixtures: the
+// `[FixedBuffer(typeof(T), N)]` decode IsFixedField reads.
+class AttributeStub : public TS::IAttribute {
+public:
+    AttributeStub(TS::ITypePtr type, std::vector<TS::CustomAttributeTypedArgument> args)
+        : type_(std::move(type)), args_(std::move(args)) {}
+    const TS::IType& AttributeType() const override { return *type_; }
+    const TS::IMethod* Constructor() const override { return nullptr; }
+    bool HasDecodeErrors() const override { return false; }
+    std::vector<TS::CustomAttributeTypedArgument> FixedArguments() const override {
+        return args_;
+    }
+    std::vector<TS::CustomAttributeNamedArgument> NamedArguments() const override {
+        return {};
+    }
+
+private:
+    TS::ITypePtr type_;
+    std::vector<TS::CustomAttributeTypedArgument> args_;
+};
+
 class FieldStub : public TS::IField {
 public:
     FieldStub(std::string name, TS::ITypePtr fieldType, const TS::ICompilation& compilation)
@@ -1285,9 +1312,14 @@ public:
     }
     TS::ITypePtr DeclaringType() const override { return declaringType_; }
     const TS::IModule* ParentModule() const override { return nullptr; }
-    std::vector<const TS::IAttribute*> GetAttributes() const override { return {}; }
-    bool HasAttribute(TS::KnownAttribute) const override { return false; }
-    const TS::IAttribute* GetAttribute(TS::KnownAttribute) const override { return nullptr; }
+    std::vector<const TS::IAttribute*> GetAttributes() const override { return attributes_; }
+    bool HasAttribute(TS::KnownAttribute kind) const override {
+        return GetAttribute(kind) != nullptr;
+    }
+    const TS::IAttribute* GetAttribute(TS::KnownAttribute kind) const override {
+        auto it = knownAttributes_.find(kind);
+        return it == knownAttributes_.end() ? nullptr : it->second;
+    }
     TS::Accessibility Accessibility() const override { return TS::Accessibility::Public; }
     bool IsStatic() const override { return isStatic_; }
     bool IsAbstract() const override { return false; }
@@ -1320,6 +1352,10 @@ public:
     void SetDeclaringTypeDefinition(const TS::ITypeDefinition* value) {
         declaringTypeDefinition_ = value;
     }
+    void SetKnownAttribute(TS::KnownAttribute kind, const TS::IAttribute* attribute) {
+        knownAttributes_[kind] = attribute;
+        attributes_.push_back(attribute);
+    }
 
 private:
     std::string name_;
@@ -1328,6 +1364,8 @@ private:
     TS::ITypePtr declaringType_;
     const TS::ITypeDefinition* declaringTypeDefinition_ = nullptr;
     bool isStatic_ = false;
+    std::vector<const TS::IAttribute*> attributes_;
+    std::map<TS::KnownAttribute, const TS::IAttribute*> knownAttributes_;
 };
 
 TEST(ExpressionBuilderFieldTest, ConvertFieldStaticFieldRendersMemberReference)
@@ -1433,6 +1471,176 @@ TEST(ExpressionBuilderFieldTest, LdsFldaCloneCarriesResolvedField)
     auto* cloneTyped = static_cast<IL::LdsFlda*>(clone.get());
     ASSERT_TRUE(cloneTyped->Field != nullptr);
     EXPECT_EQ(cloneTyped->Field.get(), ldsFlda.Field.get());
+}
+
+TEST(ExpressionBuilderFieldTest, IsFixedFieldDecodesFixedBufferAttribute)
+{
+    BuilderFixture fixture;
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto bufferType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+
+    std::vector<TS::CustomAttributeTypedArgument> args;
+    args.emplace_back(intType, std::any(intType));
+    args.emplace_back(intType, std::any(std::int32_t(16)));
+    AttributeStub attribute(bufferType, std::move(args));
+
+    FieldStub field("FixedBuffer", intType, fixture.compilation);
+    field.SetKnownAttribute(TS::KnownAttribute::FixedBuffer, &attribute);
+
+    TS::ITypePtr type;
+    int count = -1;
+    EXPECT_TRUE(CSharp::IsFixedField(field, type, count));
+    EXPECT_EQ(type.get(), intType.get());
+    EXPECT_EQ(count, 16);
+
+    FieldStub plain("Plain", intType, fixture.compilation);
+    TS::ITypePtr noType;
+    int noCount = 99;
+    EXPECT_FALSE(CSharp::IsFixedField(plain, noType, noCount));
+    EXPECT_TRUE(noType == nullptr);
+    EXPECT_EQ(noCount, 0);
+}
+
+TEST(ExpressionBuilderFieldTest, TupleTransformMatchesItemAndRestChain)
+{
+    TS::SimpleCompilation compilation(Impl::MinimalCorlib::Instance(), {});
+    auto objectType = std::const_pointer_cast<TS::IType>(
+        compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto intType = std::const_pointer_cast<TS::IType>(
+        compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+
+    auto tupleType = std::make_shared<TS::TupleType>(
+        objectType, std::vector<TS::ITypePtr>{objectType, intType},
+        std::vector<std::string>{"", "Second"});
+
+    auto field = std::make_shared<FieldStub>("Item1", objectType, compilation);
+    field->SetDeclaringType(tupleType);
+    auto target = std::make_unique<IL::LdLoc>(
+        std::make_shared<IL::ILVariable>(IL::VariableKind::Local, TS::ITypePtr(tupleType)));
+    IL::LdFlda inst(std::move(target), "Item1");
+    inst.Field = field;
+
+    TS::ITypePtr matchedType;
+    IL::ILInstruction* matchedTarget = nullptr;
+    int position = 0;
+    EXPECT_TRUE(IL::TupleTransform::MatchTupleFieldAccess(inst, matchedType, matchedTarget,
+                                                          position));
+    EXPECT_EQ(position, 1);
+    EXPECT_EQ(matchedType.get(), tupleType.get());
+    EXPECT_EQ(matchedTarget, inst.Target.get());
+
+    auto nonItem = std::make_shared<FieldStub>("Value", objectType, compilation);
+    nonItem->SetDeclaringType(tupleType);
+    IL::LdFlda nonItemInst(
+        std::make_unique<IL::LdLoc>(
+            std::make_shared<IL::ILVariable>(IL::VariableKind::Local, TS::ITypePtr(tupleType))),
+        "Value");
+    nonItemInst.Field = nonItem;
+    TS::ITypePtr unusedType;
+    IL::ILInstruction* unusedTarget = nullptr;
+    int unusedPosition = 7;
+    EXPECT_FALSE(IL::TupleTransform::MatchTupleFieldAccess(nonItemInst, unusedType,
+                                                           unusedTarget, unusedPosition));
+    EXPECT_EQ(unusedPosition, 0);
+}
+
+TEST(ExpressionBuilderFieldTest, LdFldaTupleElementRendersNamedMemberReference)
+{
+    BuilderFixture fixture;
+    auto objectType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    const TS::ITypeDefinition* objectDef =
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).GetDefinition();
+    auto builder = fixture.MakeBuilderForType(objectDef);
+
+    auto tupleType = std::make_shared<TS::TupleType>(
+        objectType, std::vector<TS::ITypePtr>{objectType, intType},
+        std::vector<std::string>{"", "Second"});
+    auto field = std::make_shared<FieldStub>("Item2", intType, fixture.compilation);
+    field->SetDeclaringType(tupleType);
+    field->SetDeclaringTypeDefinition(objectDef);
+
+    auto variable = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, TS::ITypePtr(tupleType));
+    IL::LdFlda inst(std::make_unique<IL::LdLoca>(variable), "Item2");
+    inst.Field = field;
+
+    auto expr = builder.Translate(&inst);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    auto* memberRef =
+        dynamic_cast<Syntax::MemberReferenceExpression*>(direction->Expression());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "Second");
+    const auto* mrr =
+        dynamic_cast<const Sem::MemberResolveResult*>(CSharp::GetResolveResult(*memberRef));
+    ASSERT_TRUE(mrr != nullptr);
+    EXPECT_EQ(mrr->Member(), field.get());
+    const auto* byRef = dynamic_cast<const Sem::ByReferenceResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(byRef != nullptr);
+    EXPECT_EQ(byRef->ReferenceKind(), TS::ReferenceKind::Ref);
+}
+
+TEST(ExpressionBuilderFieldTest, LdFldaUnresolvedFieldRendersDefaultError)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::LdFlda ldFlda(std::make_unique<IL::LdLoc>(
+                          std::make_shared<IL::ILVariable>(IL::VariableKind::Local, nullptr)),
+                      "System.Object::Missing");
+    auto expr = builder.Translate(&ldFlda);
+    EXPECT_TRUE(dynamic_cast<Syntax::ErrorExpression*>(expr.Expression()) != nullptr);
+}
+
+TEST(ExpressionBuilderFieldTest, LdFldaFixedBufferRendersFieldIndexer)
+{
+    BuilderFixture fixture;
+    auto objectType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    const TS::ITypeDefinition* objectDef =
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).GetDefinition();
+    auto builder = fixture.MakeBuilderForType(objectDef);
+
+    std::vector<TS::CustomAttributeTypedArgument> args;
+    args.emplace_back(intType, std::any(intType));
+    args.emplace_back(intType, std::any(std::int32_t(4)));
+    AttributeStub attribute(objectType, std::move(args));
+
+    auto nestedField = std::make_shared<FieldStub>(
+        "Buffer", std::make_shared<TS::PointerType>(intType), fixture.compilation);
+    nestedField->SetStatic(true);
+    nestedField->SetDeclaringType(objectType);
+    nestedField->SetDeclaringTypeDefinition(objectDef);
+    nestedField->SetKnownAttribute(TS::KnownAttribute::FixedBuffer, &attribute);
+
+    auto elementField = std::make_shared<FieldStub>("FixedElementField", intType,
+                                                    fixture.compilation);
+    elementField->SetStatic(true);
+    elementField->SetDeclaringType(objectType);
+    elementField->SetDeclaringTypeDefinition(objectDef);
+
+    auto nested = std::make_unique<IL::LdFlda>(
+        std::make_unique<IL::LdLoc>(
+            std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objectType)),
+        "Buffer");
+    nested->Field = nestedField;
+    IL::LdFlda inst(std::move(nested), "FixedElementField");
+    inst.Field = elementField;
+
+    auto expr = builder.Translate(&inst);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    auto* indexer = dynamic_cast<Syntax::IndexerExpression*>(direction->Expression());
+    ASSERT_TRUE(indexer != nullptr);
+    ASSERT_EQ(indexer->Arguments().Count(), 1);
+    auto* zero = dynamic_cast<Syntax::PrimitiveExpression*>(
+        indexer->Arguments().At(0));
+    ASSERT_TRUE(zero != nullptr);
 }
 
 
