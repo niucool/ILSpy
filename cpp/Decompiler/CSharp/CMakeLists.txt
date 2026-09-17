@@ -26,6 +26,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/PatternStatementTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/PrettifyAssignments.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/CustomPatterns.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/CombineQueryExpressions.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/AstNode.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/AstNodeVisitorAstNode.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/AstType.cpp

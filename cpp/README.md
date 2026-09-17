@@ -5290,6 +5290,26 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   12706 passed / the 2 standing skips / zero failures, and the transform is not wired into
   the seed paths, so the CLI baselines are unchanged (`--csharp` 10106360, `--il`
   41246545, `-l c` 109438 bytes).
+- **`CombineQueryExpressions`** -- the resolver-free LINQ query flattener lands in
+  `Transforms/CombineQueryExpressions.{hpp,cpp}`: a nested query in a from clause becomes
+  a query continuation (`from x in (from y in src ...) ...` -> `... into x ...`) or, when
+  the from identifier is a transparent identifier (`<>h__TransparentIdentifier0` /
+  `<>TranspIdent` / `$VB$It`) and the inner query ends in an anonymous-type select, the
+  from/select pair is removed, the inner clauses are hoisted, the anonymous-type members
+  become `let` clauses (a bare identifier records its `ILVariableResolveResult`, a bare
+  member reference or a named expression adds a `let`), and every transparent-identifier
+  reference is replaced by the underlying member (moving type arguments and copying
+  annotations). The `expr.Cast<T>()`-in-a-from shape moves the cast's type argument into
+  the from clause. `CSharpDecompiler.IsTransparentIdentifier` has no ported home yet, so it
+  is a file-local predicate (shared with the not-yet-ported `IntroduceQueryExpressions`).
+  Verified by 11 tests (the cast move, the continuation and its three guards, the
+  transparent-identifier removal with the let clauses and the reference replacement, the
+  type-argument move and resolve-result propagation, and the settings-off no-op), proven
+  with a `Run`-neuter RED round (exactly the 9 positive tests failed, the 2 no-op tests
+  staying green, then all 11 green after restore). The full Debug suite is now 12719 ran /
+  12717 passed / the 2 standing skips / zero failures, and the transform is not wired into
+  the seed paths, so the CLI baselines are unchanged (`--csharp` 10106360, `--il`
+  41246545, `-l c` 109438 bytes).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.
