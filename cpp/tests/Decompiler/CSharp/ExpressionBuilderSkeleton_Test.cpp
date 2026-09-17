@@ -75,6 +75,7 @@
 #include "Decompiler/IL/Instructions/AddressOf.hpp"
 #include "Decompiler/IL/Instructions/Arglist.hpp"
 #include "Decompiler/IL/Instructions/RefAnyType.hpp"
+#include "Decompiler/IL/Instructions/TypedReferenceInstructions.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/Transforms/TupleTransform.hpp"
@@ -1974,6 +1975,97 @@ TEST(ExpressionBuilderRefAnyTypeTest, RendersRefTypeTypeHandleWithRuntimeTypeHan
     EXPECT_EQ(il[0], &refAnyType);
     // The resolve result is the RuntimeTypeHandle type resolve result.
     ASSERT_TRUE(dynamic_cast<const Sem::TypeResolveResult*>(expr.ResolveResult()) != nullptr);
+}
+
+// The MakeRefAny arm (VisitMakeRefAny, the C# lines 3371-3384): the
+// `__makeref(arg)` render -- the Makeref UndocumentedExpression over the
+// translated argument (a DirectionExpression is stripped to its inner
+// expression), carrying a System.TypedReference resolve result.
+
+TEST(ExpressionBuilderMakeRefAnyTest, RendersMakeRefOverArgumentWithTypedReferenceResolveResult)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto v = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    v->Name = "v";
+    IL::MakeRefAny makeRefAny(intType, std::make_unique<IL::LdLoc>(v));
+    auto expr = builder.Translate(&makeRefAny);
+    auto* doc = dynamic_cast<Syntax::UndocumentedExpression*>(expr.Expression());
+    ASSERT_TRUE(doc != nullptr);
+    EXPECT_EQ(doc->UndocumentedExpressionType(), Syntax::UndocumentedExpressionType::MakeRef);
+    ASSERT_EQ(doc->Arguments().Count(), 1);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(doc->Arguments().At(0)) != nullptr);
+    // The IL annotation sits on the UndocumentedExpression.
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*doc);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], &makeRefAny);
+    ASSERT_TRUE(dynamic_cast<const Sem::TypeResolveResult*>(expr.ResolveResult()) != nullptr);
+}
+
+TEST(ExpressionBuilderMakeRefAnyTest, StripsDirectionExpressionFromArgument)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto v = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    v->Name = "v";
+    // `ldloca` translates to a ref DirectionExpression; `__makeref` takes the
+    // address's inner expression (the C# `arg is DirectionExpression` strip).
+    IL::MakeRefAny makeRefAny(intType, std::make_unique<IL::LdLoca>(v));
+    auto expr = builder.Translate(&makeRefAny);
+    auto* doc = dynamic_cast<Syntax::UndocumentedExpression*>(expr.Expression());
+    ASSERT_TRUE(doc != nullptr);
+    ASSERT_EQ(doc->Arguments().Count(), 1);
+    EXPECT_EQ(dynamic_cast<Syntax::DirectionExpression*>(doc->Arguments().At(0)), nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(doc->Arguments().At(0)) != nullptr);
+}
+
+// The RefAnyValue arm (VisitRefAnyValue, the C# lines 3396-3404): the
+// `ref __refvalue(arg, T)` render -- a RefValue UndocumentedExpression over the
+// translated argument and a TypeReferenceExpression for the node's type, wrapped
+// in a ref DirectionExpression with a ByReferenceResolveResult.
+
+TEST(ExpressionBuilderRefAnyValueTest, RendersRefRefValueWithByReferenceResolveResult)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto v = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    v->Name = "v";
+    IL::RefAnyValue refAnyValue(intType, std::make_unique<IL::LdLoc>(v));
+    auto expr = builder.Translate(&refAnyValue);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    EXPECT_EQ(direction->FieldDirection(), Syntax::FieldDirection::Ref);
+    auto* doc = dynamic_cast<Syntax::UndocumentedExpression*>(direction->Expression());
+    ASSERT_TRUE(doc != nullptr);
+    EXPECT_EQ(doc->UndocumentedExpressionType(), Syntax::UndocumentedExpressionType::RefValue);
+    ASSERT_EQ(doc->Arguments().Count(), 2);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(doc->Arguments().At(0)) != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::TypeReferenceExpression*>(doc->Arguments().At(1)) != nullptr);
+    // The IL annotation sits on the UndocumentedExpression (the C#
+    // WithILInstruction on the inner expression, the direction is Without).
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*doc);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], &refAnyValue);
+    ASSERT_TRUE(dynamic_cast<const Sem::ByReferenceResolveResult*>(expr.ResolveResult()) != nullptr);
+}
+
+TEST(ExpressionBuilderRefAnyValueTest, NullTypeRendersErrorExpression)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto v = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    v->Name = "v";
+    IL::RefAnyValue refAnyValue(nullptr, std::make_unique<IL::LdLoc>(v));
+    auto expr = builder.Translate(&refAnyValue);
+    EXPECT_TRUE(dynamic_cast<Syntax::ErrorExpression*>(expr.Expression()) != nullptr);
 }
 
 // The Arglist arm (VisitArglist, the C# lines 3274-3280): the `__arglist`

@@ -75,6 +75,7 @@
 #include "Decompiler/IL/Instructions/NullableInstructions.hpp"
 #include "Decompiler/IL/Instructions/PinnedRegion.hpp"
 #include "Decompiler/IL/Instructions/RefAnyType.hpp"
+#include "Decompiler/IL/Instructions/TypedReferenceInstructions.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/SimpleInstruction.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
@@ -286,6 +287,16 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         case OpCode::RefAnyType: {
             const auto& s = static_cast<const RefAnyType&>(*this);
             c = std::make_unique<RefAnyType>(s.Argument ? s.Argument->Clone() : nullptr);
+            break;
+        }
+        case OpCode::MakeRefAny: {
+            const auto& s = static_cast<const MakeRefAny&>(*this);
+            c = std::make_unique<MakeRefAny>(s.Type, s.Argument ? s.Argument->Clone() : nullptr);
+            break;
+        }
+        case OpCode::RefAnyValue: {
+            const auto& s = static_cast<const RefAnyValue&>(*this);
+            c = std::make_unique<RefAnyValue>(s.Type, s.Argument ? s.Argument->Clone() : nullptr);
             break;
         }
         case OpCode::NullableRewrap: {

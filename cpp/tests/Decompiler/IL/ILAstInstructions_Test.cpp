@@ -42,6 +42,7 @@
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/Unbox.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
+#include "Decompiler/IL/Instructions/TypedReferenceInstructions.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
@@ -143,6 +144,36 @@ TEST(ILAstInstructions, UnaryInstructionsFlagsAndResult) {
 
     Conv conv(std::make_unique<LdcI4>(1), PrimitiveType::I8, false, Sign::None);
     EXPECT_EQ(conv.ResultType(), StackType::I8);
+}
+
+TEST(ILAstInstructions, TypedReferenceNodesFlagsAndResult) {
+    // MakeRefAny: O result, no direct flags, type + argument dump.
+    MakeRefAny mr(Int32(), std::make_unique<LdcI4>(0));
+    EXPECT_EQ(mr.Op, OpCode::MakeRefAny);
+    EXPECT_EQ(mr.ResultType(), StackType::O);
+    EXPECT_EQ(mr.ChildCount(), 1);
+    EXPECT_EQ(mr.DirectFlags(), InstructionFlags::None);
+    EXPECT_NE(mr.ToString().find("makerefany System.Int32(ldc.i4(0))"), std::string::npos)
+        << mr.ToString();
+
+    // RefAnyValue: Ref result, MayThrow.
+    RefAnyValue rv(Int32(), std::make_unique<LdcI4>(0));
+    EXPECT_EQ(rv.Op, OpCode::RefAnyValue);
+    EXPECT_EQ(rv.ResultType(), StackType::Ref);
+    EXPECT_TRUE(HasFlag(rv.DirectFlags(), InstructionFlags::MayThrow));
+    EXPECT_NE(rv.ToString().find("refanyval System.Int32(ldc.i4(0))"), std::string::npos)
+        << rv.ToString();
+
+    // The clone carries the type operand and clones the argument.
+    auto cloned = std::unique_ptr<MakeRefAny>(static_cast<MakeRefAny*>(mr.Clone().release()));
+    ASSERT_TRUE(cloned != nullptr);
+    EXPECT_EQ(cloned->Type, mr.Type);
+    ASSERT_TRUE(cloned->Argument != nullptr);
+    EXPECT_NE(cloned->Argument.get(), mr.Argument.get());
+    auto clonedRv = std::unique_ptr<RefAnyValue>(static_cast<RefAnyValue*>(rv.Clone().release()));
+    ASSERT_TRUE(clonedRv != nullptr);
+    EXPECT_EQ(clonedRv->Type, rv.Type);
+    ASSERT_TRUE(clonedRv->Argument != nullptr);
 }
 
 TEST(ILAstInstructions, BinaryInstructions) {

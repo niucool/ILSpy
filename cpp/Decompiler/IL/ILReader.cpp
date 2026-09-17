@@ -44,6 +44,7 @@
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Instructions/RefAnyType.hpp"
+#include "Decompiler/IL/Instructions/TypedReferenceInstructions.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
@@ -660,6 +661,14 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             break;
         }
 
+        // ---- refanyval: TypedReference -> the addressed value ----
+        case ILOpCode::Refanyval: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto tr = s.Pop(); if (!tr) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<RefAnyValue>(file.ResolveTypeToken(tok, s.ownerMethodToken), std::move(tr)))) return DecodeOutcome::Bail;
+            break;
+        }
+
         case ILOpCode::Nop:
         case ILOpCode::Break:
             break;
@@ -1262,7 +1271,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
         case ILOpCode::Mkrefany: {
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
             auto ptr = s.Pop(); if (!ptr) return DecodeOutcome::Bail;
-            if (!s.Push(std::make_unique<LdTypeToken>(file.ResolveTokenToString(tok, s.ownerMethodToken)))) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<MakeRefAny>(file.ResolveTypeToken(tok, s.ownerMethodToken), std::move(ptr)))) return DecodeOutcome::Bail;
             break;
         }
 

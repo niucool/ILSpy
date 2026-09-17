@@ -4781,6 +4781,34 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   and all four CLI baselines unchanged (`--csharp` mscorlib 10106348 bytes, `--il`
   whole-module byte-identical to the 41246545-byte gold, `-l c` 109438, the
   `--json`-alone usage check rc 64).
+- **`ExpressionBuilder` typed-reference arms (`VisitMakeRefAny` +
+  `VisitRefAnyValue` + the `MakeRefAny`/`RefAnyValue` IL nodes)** -- the C#
+  `VisitMakeRefAny` (`ExpressionBuilder.cs` lines 3371-3384) and `VisitRefAnyValue`
+  (lines 3396-3404) landed and are routed from the `Visit` OpCode switch, and the
+  reader no longer collapses `mkrefany` onto `LdTypeToken`. A new
+  `TypedReferenceInstructions.hpp` carries the two `UnaryInstruction` nodes beside
+  `RefAnyType`: `MakeRefAny` (type + argument, result `O`, no direct flags) and
+  `RefAnyValue` (type + argument, result `Ref`, `MayThrow`), each with its
+  `ILInstructionClone` case, its `ILAstToCSharp` seed render (`__makeref(arg)`,
+  `__refvalue(arg, T)`), and its `ILReader` mapping (`mkrefany`/`refanyval` with the
+  resolved type token). `VisitMakeRefAny` renders the argument (a `DirectionExpression`
+  is stripped to its inner expression) as the single argument of a `MakeRef`
+  `UndocumentedExpression` with a System.TypedReference `TypeResolveResult`;
+  `VisitRefAnyValue` renders a `RefValue` `UndocumentedExpression` over the translated
+  argument and a `TypeReferenceExpression` for the node's type, wrapped in a ref
+  `DirectionExpression` with a `ByReferenceResolveResult` (the port's unresolved-token
+  null type degrades to the error expression). Verified by 6 tests (the two
+  `MakeRefAny` renders incl. the direction strip, the two `RefAnyValue` shapes, the
+  node flags/dump/clone, and the real-mscorlib `ReadIL.MkrefanyDecodesToDedicatedNode`
+  over `System.Threading.Interlocked::_Exchange`), with a dispatch-neuter RED round
+  where exactly the 3 `Translate`-driven tests failed through the `Default` fallback
+  (the null-type test returns the error expression on either path); full Debug suite
+  12435 ran /
+  12433 passed / the 2 standing skips / zero failures. The `--il` whole-module output
+  is byte-identical to the 41246545-byte gold, `-l c` is 109438, and `--json` with an
+  assembly still returns rc 64; `--csharp` mscorlib is now 10106360 bytes, +12 over
+  the prior 10106348 because the four decoded `mkrefany` sites render the correct
+  `__makeref(...)` instead of the old token stand-in `typeof(0x1B0000F9)`.
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

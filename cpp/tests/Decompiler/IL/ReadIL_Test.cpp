@@ -35,6 +35,7 @@
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/Unbox.hpp"
+#include "Decompiler/IL/Instructions/TypedReferenceInstructions.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 
 #include <gtest/gtest.h>
@@ -308,6 +309,31 @@ TEST(ReadIL, ArglistDecodesToDedicatedNode) {
         walk(fn.get());
     }
     EXPECT_TRUE(found) << "no `arglist` opcode decoded in String::Concat";
+}
+
+TEST(ReadIL, MkrefanyDecodesToDedicatedNode) {
+    // The CIL `mkrefany <T>` opcode (0xC6) makes a typed reference. The reader
+    // must produce the dedicated MakeRefAny node, not the type-token load it
+    // previously collapsed onto. System.Threading.Interlocked's private
+    // _Exchange<T> overload uses `mkrefany !!T` on both ref arguments, so at
+    // least one decoded body must carry a MakeRefAny node.
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+    bool found = false;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0 || found) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        std::function<void(ILInstruction*)> walk = [&](ILInstruction* i) {
+            if (!i) return;
+            if (dynamic_cast<MakeRefAny*>(i) != nullptr) found = true;
+            for (int k = 0; k < i->ChildCount(); ++k) walk(i->GetChild(k));
+        };
+        walk(fn.get());
+    }
+    EXPECT_TRUE(found) << "no `mkrefany` opcode decoded in fixture";
 }
 
 TEST(ReadIL, StfldUsesTargetThenValueStackOrder) {

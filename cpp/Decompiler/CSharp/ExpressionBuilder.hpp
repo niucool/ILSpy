@@ -355,6 +355,20 @@ public:
     // UndocumentedExpression over the translated argument, wrapped in a `TypeHandle`
     // member reference with a TypeResolveResult for System.RuntimeTypeHandle.
     TranslatedExpression VisitRefAnyType(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitMakeRefAny(MakeRefAny inst, TranslationContext context)`
+    // (ExpressionBuilder.cs lines 3371-3384): the `__makeref(arg)` render -- the
+    // translated argument (a DirectionExpression is stripped to its inner
+    // expression) as the single argument of a MakeRef UndocumentedExpression,
+    // carrying a TypeResolveResult for System.TypedReference.
+    TranslatedExpression VisitMakeRefAny(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitRefAnyValue(RefAnyValue inst, TranslationContext context)`
+    // (ExpressionBuilder.cs lines 3396-3404): the `ref __refvalue(arg, T)` render
+    // -- a RefValue UndocumentedExpression over the translated argument and a
+    // TypeReferenceExpression for the node's type, wrapped in a ref
+    // DirectionExpression with a ByReferenceResolveResult.
+    TranslatedExpression VisitRefAnyValue(IL::ILInstruction* inst, TranslationContext context);
     // The C# `protected internal override TranslatedExpression VisitArglist(Arglist
     // inst, TranslationContext context)` (ExpressionBuilder.cs lines 3274-3280):
     // the `__arglist` render -- the ArgListAccess UndocumentedExpression carrying

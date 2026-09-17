@@ -55,6 +55,7 @@
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/PinnedRegion.hpp"
 #include "Decompiler/IL/Instructions/RefAnyType.hpp"
+#include "Decompiler/IL/Instructions/TypedReferenceInstructions.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
@@ -2356,6 +2357,18 @@ private:
                 const auto& ref = static_cast<const RefAnyType&>(inst);
                 return "__reftype(" + (ref.Argument ? Expr(*ref.Argument) : "(default)") +
                        ").TypeHandle";
+            }
+            case OpCode::MakeRefAny: {
+                // `mkrefany <T>` -- the C# `__makeref(arg)` undocumented keyword.
+                const auto& mr = static_cast<const MakeRefAny&>(inst);
+                return "__makeref(" + (mr.Argument ? Expr(*mr.Argument) : "(default)") + ")";
+            }
+            case OpCode::RefAnyValue: {
+                // `refanyval <T>` -- the C# `__refvalue(arg, T)` undocumented
+                // keyword (a managed pointer to the value in the typed reference).
+                const auto& rv = static_cast<const RefAnyValue&>(inst);
+                return "__refvalue(" + (rv.Argument ? Expr(*rv.Argument) : "(default)") +
+                       ", " + TypeDisplayName(rv.Type) + ")";
             }
             case OpCode::LdLen: {
                 const auto& ld = static_cast<const LdLen&>(inst);

@@ -109,6 +109,7 @@
 #include "Decompiler/IL/Instructions/AddressOf.hpp"
 #include "Decompiler/IL/Instructions/Arglist.hpp"
 #include "Decompiler/IL/Instructions/RefAnyType.hpp"
+#include "Decompiler/IL/Instructions/TypedReferenceInstructions.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/Transforms/TupleTransform.hpp"
 #include "Decompiler/CSharp/CSharpDecompiler.hpp"
@@ -884,6 +885,10 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitAddressOf(inst, context);
         case IL::OpCode::RefAnyType:
             return VisitRefAnyType(inst, context);
+        case IL::OpCode::MakeRefAny:
+            return VisitMakeRefAny(inst, context);
+        case IL::OpCode::RefAnyValue:
+            return VisitRefAnyValue(inst, context);
         case IL::OpCode::Arglist:
             return VisitArglist(inst, context);
         case IL::OpCode::IfInstruction:
@@ -2128,6 +2133,64 @@ TranslatedExpression ExpressionBuilder::VisitRefAnyType(IL::ILInstruction* inst,
     return WithRR(WithILInstruction(*memberRef, inst),
                   std::make_shared<Sem::TypeResolveResult>(
                       std::move(runtimeTypeHandleType)));
+}
+
+// The C# `protected internal override TranslatedExpression
+// VisitMakeRefAny(MakeRefAny inst, TranslationContext context)`
+// (ExpressionBuilder.cs lines 3371-3384): the `__makeref(arg)` render -- the
+// translated argument (a DirectionExpression is stripped to its inner expression)
+// as the single argument of a MakeRef UndocumentedExpression carrying a
+// TypeResolveResult for System.TypedReference.
+TranslatedExpression ExpressionBuilder::VisitMakeRefAny(IL::ILInstruction* inst,
+                                                        TranslationContext context)
+{
+    (void)context;
+    auto* makeRefAny = static_cast<IL::MakeRefAny*>(inst);
+    TranslatedExpression translated = Translate(makeRefAny->Argument.get());
+    Syntax::Expression* arg = translated.Expression();
+    if (auto* direction = dynamic_cast<Syntax::DirectionExpression*>(arg))
+        arg = translated.UnwrapChild(direction->Expression()).Expression();
+    auto* doc = new Syntax::UndocumentedExpression();
+    doc->UndocumentedExpressionType(Syntax::UndocumentedExpressionType::MakeRef);
+    doc->Arguments().Add(arg);
+    // The C# `compilation.FindType(new TopLevelTypeName("System",
+    // "TypedReference"))` -- the modules-scan extension over the full type name
+    // (the VisitRefAnyType precedent).
+    TS::ITypePtr typedReferenceType =
+        TS::FindType(*compilation,
+                     TS::FullTypeName(TS::TopLevelTypeName("System", "TypedReference")));
+    return WithRR(WithILInstruction(*doc, inst),
+                  std::make_shared<Sem::TypeResolveResult>(
+                      std::move(typedReferenceType)));
+}
+
+// The C# `protected internal override TranslatedExpression
+// VisitRefAnyValue(RefAnyValue inst, TranslationContext context)`
+// (ExpressionBuilder.cs lines 3396-3404): the `ref __refvalue(arg, T)` render --
+// a RefValue UndocumentedExpression over the translated argument and a
+// TypeReferenceExpression for the node's type, wrapped in a ref
+// DirectionExpression carrying a ByReferenceResolveResult. The port's reader can
+// leave the type null for an unresolved token, so the null-type shape falls back
+// to the error expression (the VisitLdTypeToken convention).
+TranslatedExpression ExpressionBuilder::VisitRefAnyValue(IL::ILInstruction* inst,
+                                                         TranslationContext context)
+{
+    (void)context;
+    auto* refAnyValue = static_cast<IL::RefAnyValue*>(inst);
+    if (!refAnyValue->Type)
+        return ErrorExpression("refanyval without a type operand");
+    auto* doc = new Syntax::UndocumentedExpression();
+    doc->UndocumentedExpressionType(Syntax::UndocumentedExpressionType::RefValue);
+    doc->Arguments().Add(Translate(refAnyValue->Argument.get()).Expression());
+    doc->Arguments().Add(new Syntax::TypeReferenceExpression(ConvertType(*refAnyValue->Type)));
+    TranslatedExpression docExpr =
+        WithRR(WithILInstruction(*doc, inst),
+               std::make_shared<Sem::ResolveResult>(refAnyValue->Type));
+    return WithRR(
+        WithoutILInstruction(*new Syntax::DirectionExpression(
+            Syntax::FieldDirection::Ref, docExpr.Expression())),
+        std::make_shared<Sem::ByReferenceResolveResult>(
+            SharedResolveResultAnnotation(*docExpr.Expression()), TS::ReferenceKind::Ref));
 }
 
 // The C# `protected internal override TranslatedExpression VisitArglist(Arglist
