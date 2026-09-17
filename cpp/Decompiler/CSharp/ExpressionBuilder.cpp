@@ -719,6 +719,10 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitLdVirtFtn(inst, context);
         case IL::OpCode::LdVirtDelegate:
             return VisitLdVirtDelegate(inst, context);
+        case IL::OpCode::Call:
+        case IL::OpCode::CallVirt:
+        case IL::OpCode::NewObj:
+            return VisitCall(inst, context);
         default:
             return Default(inst, context);
     }
@@ -3457,6 +3461,41 @@ TranslatedExpression ExpressionBuilder::VisitLdVirtDelegate(IL::ILInstruction* i
 {
     CallBuilder delegateBuilder(this, *compilation, settings);
     return delegateBuilder.Build(*static_cast<IL::LdVirtDelegate*>(inst));
+}
+
+// The C# `protected internal override TranslatedExpression VisitCall(Call inst,
+// TranslationContext context)` / VisitCallVirt siblings (ExpressionBuilder.cs
+// lines 2455-2462) and the port's dispatch for the one-Call-node model's every
+// call opcode (call/callvirt/newobj). The CallBuilder render is wrapped in the
+// byref direction expression when the resolved method's return type is a
+// by-reference type. A call whose resolved method is null (the port's Call
+// carries an optional Method the IL reader has not yet wired) degrades to the
+// Default error expression, the documented unported-call degradation.
+TranslatedExpression ExpressionBuilder::VisitCall(IL::ILInstruction* inst, TranslationContext context)
+{
+    auto* call = static_cast<IL::Call*>(inst);
+    if (call->Method == nullptr)
+        return Default(inst, context);
+    CallBuilder callBuilder(this, *compilation, settings);
+    return WrapInRef(callBuilder.Build(*call), call->Method->ReturnType());
+}
+
+// The C# `TranslatedExpression WrapInRef(TranslatedExpression expr, IType type)`
+// (ExpressionBuilder.cs lines 2464-2474): the `ref <expr>` direction expression
+// over a by-reference-typed call, its resolve result a ByReferenceResolveResult
+// over the call's own resolve result; non-byref calls pass through unchanged.
+TranslatedExpression ExpressionBuilder::WrapInRef(TranslatedExpression expr,
+                                                  const TS::IType& type)
+{
+    if (type.Kind() == TypeKind::ByReference)
+    {
+        return WithRR(
+            WithoutILInstruction(*new Syntax::DirectionExpression(
+                Syntax::FieldDirection::Ref, expr.Expression())),
+            std::make_shared<Sem::ByReferenceResolveResult>(
+                AliasResolveResult(expr.ResolveResult()), TS::ReferenceKind::Ref));
+    }
+    return expr;
 }
 
 // The user-defined compound-assignment arm (the VisitUserDefinedCompoundAssign

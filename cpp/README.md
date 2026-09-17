@@ -2972,6 +2972,36 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   true + the async flag forced false: exactly the invalid-fallback and async
   tests failed) then restored green; the full Debug suite is green and the CLI
   baselines are unchanged.
+- **`ExpressionBuilder` VisitCall/VisitCallVirt dispatch + WrapInRef** -- the
+  C# `VisitCall` / `VisitCallVirt` (`ExpressionBuilder.cs` lines 2455-2462)
+  and the sibling `WrapInRef(TranslatedExpression, IType)` (lines 2464-2474)
+  landed, wiring the fully-ported `CallBuilder` into the expression dispatch
+  for the first time. The port's `Visit` OpCode switch now routes `Call` /
+  `CallVirt` / `NewObj` to `VisitCall` (the one-Call-node model: the reader
+  reuses `Call` for all three with the `IsNewObj` flag, and `CallBuilder.Build`
+  dispatches the newobj shape internally). `VisitCall` constructs a
+  `CallBuilder` over `this`, renders through `Build`, and wraps the result in
+  the by-reference `DirectionExpression` when the resolved method's return type
+  is a by-reference type; the new `WrapInRef` overload checks
+  `type.Kind() == TypeKind::ByReference`, builds the `ref <expr>` direction
+  expression, and attaches a `ByReferenceResolveResult` over the call's own
+  resolve result (the port's `ResolveResult` is not `enable_shared_from_this`,
+  so the existing file-local `AliasResolveResult` no-op-deleter alias is
+  reused). A call whose resolved `Method` is null (the port's `Call` carries an
+  optional method the reader has not wired; the C# assumes non-null) degrades
+  to the `Default` error expression instead of dereferencing null. Verified by
+  4 new `VisitCallDispatchTest` tests (the static-call route to
+  `CallBuilder.Build` over a `TransformFixture`, the `newobj` route to the
+  `ObjectCreateExpression`, the by-reference-return direction-expression wrap
+  with the `ByReferenceResolveResult` pin, and the null-method degradation),
+  proven by a dispatch neuter RED round (the three opcode cases routed to
+  `Default`: exactly the 3 routed tests failed) then restored green; full Debug
+  suite 12350 ran / 12348 passed / the 2 standing skips / zero failures (the
+  new 4 plus the restored `IsInstOverValueTypeWithImpureArgumentIsError`, whose
+  impure `Call` argument now takes the null-method degradation rather than the
+  old ErrorExpression fallthrough), and all four CLI baselines unchanged
+  (--csharp mscorlib 10106366 bytes, --il byte-identical to the 41246545-byte
+  real-ilspycmd gold, -l c 109438, --json-alone rc 64).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

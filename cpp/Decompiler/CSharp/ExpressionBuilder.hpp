@@ -45,10 +45,10 @@
 // Deferrals (each named at the member that needs it): the full `ConvertTo`
 // cast-insertion machinery on TranslatedExpression (the ~350-line C# body -- the
 // loud std::logic_error marks the unported arms and its consumers), the heavy
-// Visit arms (Call/CallVirt through CallBuilder, the Comp/BinaryNumeric/
-// compound-assignment folds, the block-family arms), and the CancellationToken
-// (the cooperative-cancel throw is a no-op in the port, the DecompileRun
-// convention).
+// Visit arms that have not landed yet (the LdObj/StObj/LdFlda/LdLen/CastClass/
+// Box/Unbox memory arms, the If/Switch expression arms, the dynamic/deconstruct
+// arms), and the CancellationToken (the cooperative-cancel throw is a no-op in
+// the port, the DecompileRun convention).
 
 #pragma once
 
@@ -84,6 +84,7 @@
 namespace ILSpy::Decompiler::IL {
 class UnboxAny;
 class BinaryInstruction;
+class Call;
 class IsInst;
 class LocAlloc;
 class LocAllocSpan;
@@ -285,6 +286,15 @@ public:
     // The C# `VisitLdVirtDelegate` (line 497-500): the CallBuilder.Build
     // virtual-delegate delegation.
     TranslatedExpression VisitLdVirtDelegate(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitCall(Call
+    // inst, TranslationContext context)` / `VisitCallVirt` siblings
+    // (ExpressionBuilder.cs lines 2455-2462): the CallBuilder render over the
+    // call's resolved method, wrapped in the byref direction expression when
+    // the return type is a by-reference type. The port's one-Call-node model
+    // (the reader reuses Call for call/callvirt/newobj with the IsNewObj flag)
+    // routes every opcode here; CallBuilder.Build dispatches the newobj shape
+    // internally.
+    TranslatedExpression VisitCall(IL::ILInstruction* inst, TranslationContext context);
     // The C# `StackAllocExpression TranslateLocAllocSpan(LocAllocSpan inst, IType
     // typeHint, out IType elementType)` (ExpressionBuilder.cs lines 530-539): the
     // span's element type, the count converted to int32, and the StackAllocExpression.
@@ -685,6 +695,15 @@ public:
     // the `ref <expr>` node over the element type. (Declared private in the C#;
     // the port's no-visibility-level convention.)
     static TranslatedExpression WrapInRef(Syntax::Expression& expression, const TS::IType& type);
+
+    // The C# `TranslatedExpression WrapInRef(TranslatedExpression expr, IType
+    // type)` (ExpressionBuilder.cs lines 2464-2474, the sibling of the static
+    // helper above): when `type` is a by-reference type, wraps the translated
+    // call in a `ref <expr>` DirectionExpression whose resolve result is a
+    // ByReferenceResolveResult over the call's own resolve result; every other
+    // type passes the translated expression through unchanged. VisitCall and
+    // VisitCallVirt are the call sites.
+    static TranslatedExpression WrapInRef(TranslatedExpression expr, const TS::IType& type);
 
     // The C# `static TranslatedExpression LdcI4(ICompilation compilation, int val)`
     // (a private TranslatedExpression helper): the int32 literal over its constant.

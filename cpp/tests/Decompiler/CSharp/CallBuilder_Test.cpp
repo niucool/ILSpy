@@ -58,6 +58,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ErrorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/TupleExpression.hpp"
@@ -4901,3 +4902,93 @@ TEST(BuildEntryTest, NotUsableConstructionFallsToTheDelegateConstructorCall)
     EXPECT_EQ(inv->Member()->MemberDefinition(), ctor->MemberDefinition());
 }
 
+
+// ---------------------------------------------------------------------------
+// The ExpressionBuilder VisitCall dispatch (the ExpressionBuilder.cs
+// VisitCall/VisitCallVirt arm that routes the one-Call-node model's call
+// opcodes through CallBuilder.Build, wrapped in the byref direction expression
+// when the resolved method's return type is a by-reference type).
+
+TEST(VisitCallDispatchTest, TranslateRoutesCallToTheCallBuilder)
+{
+    TransformFixture fixture;
+    fixture.foo->SetIsStatic(true);
+    {
+        ParamFixture a(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "a");
+        fixture.foo->SetParameters({a.parameter});
+    }
+    IL::Call call("Foo");
+    call.Method = fixture.foo;
+    call.AddArg(std::make_unique<IL::LdcI4>(1));
+
+    CS::TranslatedExpression result = fixture.builder->Translate(&call);
+    auto* invocation = dynamic_cast<Syntax::InvocationExpression*>(result.Expression());
+    ASSERT_NE(invocation, nullptr);
+    auto* target = dynamic_cast<Syntax::IdentifierExpression*>(invocation->Target());
+    ASSERT_NE(target, nullptr);
+    EXPECT_EQ(target->Identifier(), "Foo");
+}
+
+TEST(VisitCallDispatchTest, TranslateRoutesNewObjToTheObjectCreate)
+{
+    TransformFixture fixture(/*ctorShape=*/true);
+    fixture.holderDef->SetConstructors({fixture.foo.get()});
+    {
+        ParamFixture a(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "a");
+        fixture.foo->SetParameters({a.parameter});
+    }
+    IL::Call call(".ctor");
+    call.IsNewObj = true;
+    call.Method = fixture.foo;
+    call.DeclaringType = TS::ITypePtr(fixture.holderDef.get(), [](TS::IType*) {});
+    call.AddArg(std::make_unique<IL::LdcI4>(1));
+
+    CS::TranslatedExpression result = fixture.builder->Translate(&call);
+    auto* objectCreate =
+        dynamic_cast<Syntax::ObjectCreateExpression*>(result.Expression());
+    ASSERT_NE(objectCreate, nullptr);
+    EXPECT_EQ(objectCreate->Arguments().Count(), 1);
+}
+
+TEST(VisitCallDispatchTest, TranslateWrapsByRefReturnInDirectionExpression)
+{
+    TransformFixture fixture;
+    fixture.foo->SetIsStatic(true);
+    fixture.foo->SetReturnType(
+        fixture.holder.ByRef(fixture.holder.KnownType(TS::KnownTypeCode::Int32)));
+    {
+        ParamFixture a(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "a");
+        fixture.foo->SetParameters({a.parameter});
+    }
+    IL::Call call("Foo");
+    call.Method = fixture.foo;
+    call.ReturnType = IL::StackType::Ref;
+    call.AddArg(std::make_unique<IL::LdcI4>(1));
+
+    CS::TranslatedExpression result = fixture.builder->Translate(&call);
+    auto* direction =
+        dynamic_cast<Syntax::DirectionExpression*>(result.Expression());
+    ASSERT_NE(direction, nullptr);
+    EXPECT_EQ(direction->FieldDirection(), Syntax::FieldDirection::Ref);
+    auto* invocation =
+        dynamic_cast<Syntax::InvocationExpression*>(direction->Expression());
+    ASSERT_NE(invocation, nullptr);
+    auto* byRefRR =
+        dynamic_cast<const Sem::ByReferenceResolveResult*>(result.ResolveResult());
+    ASSERT_NE(byRefRR, nullptr);
+    EXPECT_EQ(byRefRR->ReferenceKind(), TS::ReferenceKind::Ref);
+}
+
+TEST(VisitCallDispatchTest, TranslateDegradesCallWithoutResolvedMethod)
+{
+    TransformFixture fixture;
+    // No resolved method: the C# assumes a non-null Method, while the port's
+    // Call carries an optional one the reader has not wired. The dispatch
+    // degrades to the Default error expression rather than dereferencing null.
+    IL::Call call("Impure");
+    CS::TranslatedExpression result = fixture.builder->Translate(&call);
+    auto* errorExpr =
+        dynamic_cast<Syntax::ErrorExpression*>(result.Expression());
+    ASSERT_NE(errorExpr, nullptr);
+    EXPECT_TRUE(result.ResolveResult()->IsError());
+}
