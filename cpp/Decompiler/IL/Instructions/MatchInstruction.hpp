@@ -180,6 +180,21 @@ public:
         }
     }
 
+    // The C# `internal static bool IsCallToOpEquality(Call call, KnownTypeCode
+    // knownType)` (MatchInstruction.cs line 150): whether the call is a binary
+    // `op_Equality` on the given known type. The port has no `Method.IsOperator`
+    // flag, so the `::op_Equality` name suffix and the declared type are the
+    // approximation (op_Equality is always an operator).
+    static bool IsCallToOpEquality(const Call* call, TypeSystem::KnownTypeCode knownType) {
+        if (!call || call->Arguments.size() != 2 || !call->DeclaringType) return false;
+        static const std::string suffix = "::op_Equality";
+        const std::string& name = call->MethodName;
+        if (name.size() <= suffix.size()) return false;
+        if (name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) return false;
+        auto* k = dynamic_cast<const TypeSystem::KnownType*>(call->DeclaringType.get());
+        return k && k->Code() == knownType;
+    }
+
     // Whether `inst` is a pattern-match-shaped instruction and, if so, the
     // expression it tests. Port of MatchInstruction.IsPatternMatch. A null
     // settings pointer is treated as all-features-on (the C# `?? true`),

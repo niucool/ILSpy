@@ -21,7 +21,8 @@
 // Port of the match-extension methods the C# IL layer carries on
 // `ILInstruction` (ICSharpCode.Decompiler/IL/Instructions/PatternMatching.cs
 // plus the generated `IL/Instructions.cs` region): `MatchLdThis`, `MatchBox`,
-// and `MatchLdObj` as free functions over the port's IL node pointers.
+// `MatchLdObj`, `MatchAddressOf`, and `MatchLdFld` as free functions over the
+// port's IL node pointers.
 //
 // The C# methods return the matched CHILD REFERENCES through the `out`
 // parameters; the port's IL tree owns its children via `unique_ptr` slots, so
@@ -38,6 +39,7 @@
 
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/IL/Instructions/AddressOf.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
@@ -100,6 +102,55 @@ inline bool MatchLdObj(const ILInstruction* inst, ILInstruction*& target,
     }
     target = nullptr;
     type = nullptr;
+    return false;
+}
+
+// The C# `public bool MatchAddressOf(out ILInstruction? value, out IType? type)`
+// (IL/Instructions.cs line 8532): the `addressof <T>` node.
+inline bool MatchAddressOf(const ILInstruction* inst, ILInstruction*& value,
+                           TypeSystem::ITypePtr& type)
+{
+    const auto* addressOf = dynamic_cast<const AddressOf*>(inst);
+    if (addressOf != nullptr) {
+        value = addressOf->Argument.get();
+        type = addressOf->Type;
+        return true;
+    }
+    value = nullptr;
+    type = nullptr;
+    return false;
+}
+
+// The C# `public bool MatchLdFld(out ILInstruction? target, out IField? field)`
+// (PatternMatching.cs line 460): a field load -- an `ldobj` over an `ldflda` with
+// no unaligned prefix and not volatile. `field` is the ldflda's resolved field.
+// The target is the ldflda's target, except for a value-type field whose target
+// is an `addressof` (then the addressof's value is the target).
+inline bool MatchLdFld(const ILInstruction* inst, ILInstruction*& target,
+                       const TypeSystem::IField*& field)
+{
+    const auto* ldobj = dynamic_cast<const LdObj*>(inst);
+    if (ldobj != nullptr && ldobj->Target != nullptr) {
+        const auto* ldflda = dynamic_cast<const LdFlda*>(ldobj->Target.get());
+        if (ldflda != nullptr && ldobj->UnalignedPrefix == 0 && !ldobj->IsVolatile) {
+            field = ldflda->Field.get();
+            bool declaringTypeIsReference =
+                ldflda->Field != nullptr && ldflda->Field->DeclaringType() != nullptr
+                && ldflda->Field->DeclaringType()->IsReferenceType()
+                    == std::optional<bool>(true);
+            ILInstruction* addressTarget = nullptr;
+            TypeSystem::ITypePtr addressType;
+            if (declaringTypeIsReference
+                || !MatchAddressOf(ldflda->Target.get(), addressTarget, addressType)) {
+                target = ldflda->Target.get();
+            } else {
+                target = addressTarget;
+            }
+            return true;
+        }
+    }
+    target = nullptr;
+    field = nullptr;
     return false;
 }
 

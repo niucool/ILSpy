@@ -374,6 +374,26 @@ public:
     // arm patterns (the null label, the typed case constants, the skipped
     // compiler-generated default), and the `_` default arm.
     TranslatedExpression VisitSwitchInstruction(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitMatchInstruction(MatchInstruction inst, TranslationContext context)`
+    // (ExpressionBuilder.cs lines 4989-5005): the `is`-pattern render -- translate
+    // the tested operand (unwrapping a boxing cast when the pattern does not need
+    // it), translate the pattern through TranslatePattern, and emit a
+    // BinaryOperatorExpression with the IsPattern operator carrying a boolean
+    // ResolveResult. The pattern translation is the recursive helper below.
+    TranslatedExpression VisitMatchInstruction(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `ExpressionWithILInstruction TranslatePattern(ILInstruction pattern,
+    // IType leftHandType)` (ExpressionBuilder.cs lines 5007-5118): the pattern
+    // render -- a MatchInstruction becomes a recursive/declaration/type pattern,
+    // a Comp becomes a constant or relational pattern, and a string/decimal
+    // op_Equality call becomes the constant pattern's value. The port returns a
+    // TranslatedExpression (the C# returns the ExpressionWithILInstruction base,
+    // which TranslatedExpression derives from; the port wrappers are flat). The
+    // deconstruct-pattern guards throw NotImplementedException in the C# but the
+    // port's MatchInstruction node does not carry the deconstruct flags, so the
+    // corresponding arms cannot arise.
+    TranslatedExpression TranslatePattern(IL::ILInstruction* pattern,
+                                          const TS::IType* leftHandType);
     // The C# `private TranslatedExpression StObjViaHelperCall(StObj inst)`
     // (ExpressionBuilder.cs lines 3087-3125): the `Unsafe.Write` /
     // `Unsafe.WriteUnaligned` intrinsic rewrite for a store that cannot be a

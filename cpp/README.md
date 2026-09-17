@@ -4751,6 +4751,36 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   skips / zero failures, and all four CLI baselines unchanged (`--csharp` mscorlib
   10106348 bytes, `--il` whole-module byte-identical to the 41246545-byte gold,
   `-l c` 109438, the `--json`-alone usage check rc 64).
+- **`ExpressionBuilder` `is`-pattern arm (`VisitMatchInstruction` +
+  `TranslatePattern` + `PatternMatching.MatchAddressOf`/`MatchLdFld`)** -- the C#
+  `VisitMatchInstruction` (`ExpressionBuilder.cs` lines 4989-5005) and its
+  `TranslatePattern` helper (lines 5007-5118) landed and are routed from the
+  `Visit` OpCode switch. `VisitMatchInstruction` translates the tested operand,
+  unwraps a boxing cast the pattern does not need (the value-type-pattern
+  condition), and emits a `BinaryOperatorExpression` with the `IsPattern` operator
+  carrying a boolean `ResolveResult`. `TranslatePattern` renders a
+  `MatchInstruction` as a recursive pattern (`RecursivePatternExpression`, with the
+  sub-patterns' `NamedArgumentExpression`s resolved through the accessor's
+  `AccessorOwner` / an `ldfld` chain and the designator as a
+  `SingleVariableDesignation` carrying the `ILVariableResolveResult`), a
+  declaration pattern (`DeclarationExpression`, `T x`/`var x`), or a bare type test
+  (`TypeReferenceExpression`); a `Comp` becomes the constant/relational pattern
+  (the `PatternNot`/`PatternRelational*` `UnaryOperatorExpression` forms); and a
+  string/decimal `op_Equality` call becomes the constant value. The
+  deconstruct-pattern guards throw `NotImplementedException` in the C# but the
+  port's `MatchInstruction` node carries no deconstruct flags, so those arms
+  cannot arise. `MatchInstruction.IsCallToOpEquality` was added (the C#
+  `internal static` helper), and `PatternMatching.hpp` gained `MatchAddressOf`
+  and `MatchLdFld` (the `ldobj`-over-`ldflda` field-load matcher). Verified by 9
+  `ExpressionBuilderMatchInstructionTest` tests (the declaration/pure-type/var/
+  null-check/recursive-sub-pattern renders, the relational `Comp` render, the
+  unsupported-pattern `logic_error`, the boxing unwrap, and the node dump/clone),
+  with a dispatch-neuter RED round where exactly the 6 `Translate`-driven tests
+  failed through the `Default` fallback while the 3 direct/node tests stayed green;
+  full Debug suite 12429 ran / 12427 passed / the 2 standing skips / zero failures,
+  and all four CLI baselines unchanged (`--csharp` mscorlib 10106348 bytes, `--il`
+  whole-module byte-identical to the 41246545-byte gold, `-l c` 109438, the
+  `--json`-alone usage check rc 64).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

@@ -50,6 +50,10 @@
 #include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UndocumentedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/RecursivePatternExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DeclarationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
+#include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/ComposedType.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/TranslatedExpression.hpp"
@@ -90,6 +94,7 @@
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
+#include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
@@ -112,6 +117,7 @@
 #include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
 #include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
+#include "Decompiler/TypeSystem/IProperty.hpp"
 #include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
@@ -5221,6 +5227,234 @@ TEST(ExpressionBuilderIfInstructionTest, MissingFalseArmRendersNopError)
     auto* cond = dynamic_cast<Syntax::ConditionalExpression*>(expr.Expression());
     ASSERT_TRUE(cond != nullptr);
     EXPECT_TRUE(cond->FalseExpression() != nullptr);
+}
+
+// The MatchInstruction arm (VisitMatchInstruction + TranslatePattern, the C# lines
+// 4989-5118): the C# 7 `is`-pattern render -- the tested operand wrapped in a
+// `is` BinaryOperatorExpression whose right operand is the pattern tree
+// (declaration, recursive, or bare type), or a constant/relational pattern.
+
+TEST(ExpressionBuilderMatchInstructionTest, TypePatternRendersDeclaration)
+{
+    BuilderFixture fixture;
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto objType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto patternVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType);
+    patternVar->Name = "x";
+    patternVar->LoadCount = 1;  // the designator is used
+    auto sourceVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objType);
+    sourceVar->Name = "o";
+    IL::MatchInstruction match(patternVar, std::make_unique<IL::LdLoc>(sourceVar));
+    match.CheckType = true;
+
+    auto expr = fixture.Translate(&match);
+    auto* binop = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binop != nullptr);
+    EXPECT_EQ(binop->Operator(), Syntax::BinaryOperatorType::IsPattern);
+    // The C# `.WithRR(new ResolveResult(compilation.FindType(Boolean)))`.
+    ASSERT_TRUE(expr.ResolveResult() != nullptr);
+    auto* decl = dynamic_cast<Syntax::DeclarationExpression*>(binop->Right());
+    ASSERT_TRUE(decl != nullptr);
+    auto* type = dynamic_cast<Syntax::PrimitiveType*>(decl->Type());
+    ASSERT_TRUE(type != nullptr);
+    EXPECT_EQ(type->Keyword(), "int");
+    auto* desig = dynamic_cast<Syntax::SingleVariableDesignation*>(decl->Designation());
+    ASSERT_TRUE(desig != nullptr);
+    EXPECT_EQ(desig->Identifier(), "x");
+    EXPECT_TRUE(desig->Annotation<CSharp::ILVariableResolveResult>() != nullptr);
+    // The C# `.WithILInstruction(matchInstruction)` sits on the declaration.
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*decl);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], &match);
+}
+
+TEST(ExpressionBuilderMatchInstructionTest, PureTypePatternRendersTypeReference)
+{
+    BuilderFixture fixture;
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto objType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto patternVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType);
+    patternVar->Name = "x";
+    auto sourceVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objType);
+    sourceVar->Name = "o";
+    // No designator use: the pure `expr is int` shape.
+    IL::MatchInstruction match(patternVar, std::make_unique<IL::LdLoc>(sourceVar));
+    match.CheckType = true;
+
+    auto expr = fixture.Translate(&match);
+    auto* binop = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binop != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::TypeReferenceExpression*>(binop->Right()) != nullptr);
+}
+
+TEST(ExpressionBuilderMatchInstructionTest, VarPatternRendersVarDeclaration)
+{
+    BuilderFixture fixture;
+    auto objType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto patternVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objType);
+    patternVar->Name = "x";
+    patternVar->LoadCount = 1;
+    auto sourceVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objType);
+    sourceVar->Name = "o";
+    // The IsVar shape: no type test, no non-null test, no sub-patterns.
+    IL::MatchInstruction match(patternVar, std::make_unique<IL::LdLoc>(sourceVar));
+
+    auto expr = fixture.Translate(&match);
+    auto* binop = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binop != nullptr);
+    auto* decl = dynamic_cast<Syntax::DeclarationExpression*>(binop->Right());
+    ASSERT_TRUE(decl != nullptr);
+    auto* type = dynamic_cast<Syntax::SimpleType*>(decl->Type());
+    ASSERT_TRUE(type != nullptr);
+    ASSERT_TRUE(type->Identifier().has_value());
+    EXPECT_EQ(type->Identifier().value(), "var");
+}
+
+TEST(ExpressionBuilderMatchInstructionTest, NullCheckPatternRendersRecursivePattern)
+{
+    BuilderFixture fixture;
+    auto objType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto patternVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objType);
+    patternVar->Name = "x";
+    patternVar->LoadCount = 1;
+    auto sourceVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objType);
+    sourceVar->Name = "o";
+    // The `expr is {} x` shape (a non-null test without a type test).
+    IL::MatchInstruction match(patternVar, std::make_unique<IL::LdLoc>(sourceVar));
+    match.CheckNotNull = true;
+
+    auto expr = fixture.Translate(&match);
+    auto* binop = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binop != nullptr);
+    auto* recursive = dynamic_cast<Syntax::RecursivePatternExpression*>(binop->Right());
+    ASSERT_TRUE(recursive != nullptr);
+    EXPECT_TRUE(recursive->Type() == nullptr);
+    EXPECT_EQ(recursive->SubPatterns().Count(), 0);
+    ASSERT_TRUE(recursive->Designation() != nullptr);
+    auto* desig = dynamic_cast<Syntax::SingleVariableDesignation*>(recursive->Designation());
+    ASSERT_TRUE(desig != nullptr);
+    EXPECT_EQ(desig->Identifier(), "x");
+}
+
+TEST(ExpressionBuilderMatchInstructionTest, RecursiveSubPatternRendersNamedArgument)
+{
+    BuilderFixture fixture;
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto objType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto prop = std::make_shared<Impl::FakeProperty>(fixture.compilation);
+    prop->SetName("X");
+    prop->SetReturnType(intType);
+    auto accessor = std::make_shared<Impl::FakeMethod>(fixture.compilation, TS::SymbolKind::Method);
+    accessor->SetName("get_X");
+    accessor->SetReturnType(intType);
+    accessor->SetAccessorOwner(static_cast<const TS::IProperty*>(prop.get()));
+
+    auto call = std::make_unique<IL::Call>("ns::T::get_X");
+    call->Method = accessor;
+    auto comp = std::make_unique<IL::Comp>(std::move(call),
+                                           std::make_unique<IL::LdcI4>(1),
+                                           IL::ComparisonKind::Equality);
+    auto patternVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objType);
+    patternVar->Name = "p";
+    auto sourceVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objType);
+    sourceVar->Name = "o";
+    IL::MatchInstruction match(patternVar, std::make_unique<IL::LdLoc>(sourceVar));
+    match.CheckNotNull = true;
+    match.AddSubPattern(std::move(comp));
+
+    auto expr = fixture.Translate(&match);
+    auto* binop = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binop != nullptr);
+    auto* recursive = dynamic_cast<Syntax::RecursivePatternExpression*>(binop->Right());
+    ASSERT_TRUE(recursive != nullptr);
+    ASSERT_EQ(recursive->SubPatterns().Count(), 1);
+    auto* namedArg =
+        dynamic_cast<Syntax::NamedArgumentExpression*>(recursive->SubPatterns().At(0));
+    ASSERT_TRUE(namedArg != nullptr);
+    EXPECT_EQ(namedArg->Name(), "X");
+    EXPECT_TRUE(dynamic_cast<Syntax::PrimitiveExpression*>(namedArg->Expression()) != nullptr);
+    auto* mrr =
+        dynamic_cast<const Sem::MemberResolveResult*>(CSharp::GetResolveResult(*namedArg));
+    ASSERT_TRUE(mrr != nullptr);
+    EXPECT_EQ(mrr->Member(),
+              static_cast<const TS::IMember*>(static_cast<const TS::IProperty*>(prop.get())));
+}
+
+TEST(ExpressionBuilderMatchInstructionTest, RelationalPatternRendersUnaryPattern)
+{
+    BuilderFixture fixture;
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto builder = fixture.MakeBuilder();
+    auto comp = std::make_unique<IL::Comp>(std::make_unique<IL::LdcI4>(1),
+                                           std::make_unique<IL::LdcI4>(2),
+                                           IL::ComparisonKind::LessThan);
+    auto pattern = builder.TranslatePattern(comp.get(), intType.get());
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(pattern.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    EXPECT_EQ(unary->Operator(), Syntax::UnaryOperatorType::PatternRelationalLessThan);
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*unary);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], comp.get());
+}
+
+TEST(ExpressionBuilderMatchInstructionTest, UnsupportedPatternThrows)
+{
+    BuilderFixture fixture;
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto builder = fixture.MakeBuilder();
+    IL::Nop nop;
+    EXPECT_THROW(builder.TranslatePattern(&nop, intType.get()), std::logic_error);
+}
+
+TEST(ExpressionBuilderMatchInstructionTest, BoxingCastIsUnwrappedForValueTypePattern)
+{
+    BuilderFixture fixture;
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto patternVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType);
+    patternVar->Name = "x";
+    IL::MatchInstruction match(
+        patternVar, std::make_unique<IL::Box>(intType, std::make_unique<IL::LdcI4>(5)));
+    match.CheckType = true;
+
+    auto expr = fixture.Translate(&match);
+    auto* binop = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binop != nullptr);
+    // The boxing cast is unwrapped for a value-type pattern (the C# condition).
+    EXPECT_TRUE(dynamic_cast<Syntax::CastExpression*>(binop->Left()) == nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::PrimitiveExpression*>(binop->Left()) != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::TypeReferenceExpression*>(binop->Right()) != nullptr);
+}
+
+TEST(ExpressionBuilderMatchInstructionTest, MatchInstructionDumpsAndClones)
+{
+    BuilderFixture fixture;
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto patternVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType);
+    patternVar->Name = "x";
+    patternVar->LoadCount = 1;
+    IL::MatchInstruction match(patternVar,
+                               std::make_unique<IL::LdcI4>(7));
+    match.CheckType = true;
+    std::string dump;
+    match.WriteTo(dump);
+    EXPECT_NE(dump.find("match.type"), std::string::npos);
+    auto clone = match.Clone();
+    auto* cloned = dynamic_cast<IL::MatchInstruction*>(clone.get());
+    ASSERT_TRUE(cloned != nullptr);
+    EXPECT_TRUE(cloned->CheckType);
+    EXPECT_EQ(cloned->Variable->Name, "x");
 }
 
 } // namespace ILSpy::Tests

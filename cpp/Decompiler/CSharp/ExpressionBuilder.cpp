@@ -45,6 +45,10 @@
 #include "Decompiler/CSharp/Syntax/Expressions/IsExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/RecursivePatternExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DeclarationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
+#include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/SizeOfExpression.hpp"
@@ -886,6 +890,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitIfInstruction(inst, context);
         case IL::OpCode::SwitchInstruction:
             return VisitSwitchInstruction(inst, context);
+        case IL::OpCode::MatchInstruction:
+            return VisitMatchInstruction(inst, context);
         case IL::OpCode::Call:
         case IL::OpCode::CallVirt:
         case IL::OpCode::NewObj:
@@ -2377,6 +2383,162 @@ TranslatedExpression ExpressionBuilder::VisitSwitchInstruction(IL::ILInstruction
     return WithRR(WithILInstruction(*switchExpr, inst),
                   std::make_shared<Sem::ResolveResult>(
                       const_cast<TS::IType&>(*resultType).shared_from_this()));
+}
+
+// The C# `protected internal override TranslatedExpression VisitMatchInstruction(
+// MatchInstruction inst, TranslationContext context)` (ExpressionBuilder.cs lines
+// 4989-5005): the `is`-pattern render. The tested operand is translated and, when
+// it is a boxing cast the pattern does not need, unwrapped; the pattern itself is
+// rendered by TranslatePattern; the result is a `left is right`
+// BinaryOperatorExpression carrying the boolean ResolveResult.
+TranslatedExpression ExpressionBuilder::VisitMatchInstruction(IL::ILInstruction* inst,
+                                                              TranslationContext)
+{
+    auto* match = static_cast<IL::MatchInstruction*>(inst);
+    TranslatedExpression left = Translate(match->TestedOperand.get());
+    // Remove the boxing conversion if possible, however, a cast is still needed in
+    // the generic value-type pattern case (the C# comment).
+    if (const auto* crr =
+            dynamic_cast<const Sem::ConversionResolveResult*>(left.ResolveResult());
+        crr != nullptr && crr->ConversionProperty()->IsBoxingConversion()
+        && dynamic_cast<Syntax::CastExpression*>(left.Expression()) != nullptr
+        && ((!crr->Input()->Type().IsReferenceType().has_value()
+             || crr->Input()->Type().IsReferenceType().value())
+            || (match->Variable && match->Variable->Type
+                && match->Variable->Type->IsReferenceType() == std::optional<bool>(false))))
+    {
+        auto* cast = static_cast<Syntax::CastExpression*>(left.Expression());
+        left = left.UnwrapChild(cast->Expression());
+    }
+    TranslatedExpression right = TranslatePattern(inst, &left.Type());
+    return WithRR(
+        WithILInstruction(
+            *new Syntax::BinaryOperatorExpression(
+                left.Expression(), Syntax::BinaryOperatorType::IsPattern,
+                right.Expression()),
+            inst),
+        std::make_shared<Sem::ResolveResult>(
+            const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Boolean))
+                .shared_from_this()));
+}
+
+// The C# `ExpressionWithILInstruction TranslatePattern(ILInstruction pattern,
+// IType leftHandType)` (ExpressionBuilder.cs lines 5007-5118): the pattern render
+// behind VisitMatchInstruction. A MatchInstruction becomes a recursive pattern
+// (sub-patterns or a non-null check), a declaration pattern (`T x`/`var x`), or a
+// bare type test; a Comp becomes a constant or relational pattern; and a
+// string/decimal op_Equality call becomes the constant pattern's value. The C#
+// `Debug.Fail`/`continue` arm for a sub-pattern whose tested operand is neither a
+// call nor an ldfld chain is kept as a `continue`. The deconstruct-pattern guards
+// throw NotImplementedException in the C# but the port's MatchInstruction node
+// carries no deconstruct flags, so those arms cannot arise.
+TranslatedExpression ExpressionBuilder::TranslatePattern(IL::ILInstruction* pattern,
+                                                         const TS::IType* leftHandType)
+{
+    if (pattern->Op == IL::OpCode::MatchInstruction)
+    {
+        auto* match = static_cast<IL::MatchInstruction*>(pattern);
+        if (!match->SubPatterns.empty() || (match->CheckNotNull && !match->CheckType))
+        {
+            auto* recursive = new Syntax::RecursivePatternExpression();
+            if (match->CheckType)
+                recursive->Type(ConvertType(*match->Variable->Type));
+            for (auto& subPattern : match->SubPatterns)
+            {
+                const IL::ILInstruction* testedOperand = nullptr;
+                if (!IL::MatchInstruction::IsPatternMatch(subPattern.get(), testedOperand,
+                                                          nullptr))
+                    continue;
+                const TS::IMember* member = nullptr;
+                if (testedOperand != nullptr && testedOperand->Op == IL::OpCode::Call)
+                {
+                    auto* call = static_cast<const IL::Call*>(testedOperand);
+                    if (call->Method)
+                        member = call->Method->AccessorOwner();
+                }
+                else if (testedOperand != nullptr)
+                {
+                    IL::ILInstruction* target = nullptr;
+                    const TS::IField* field = nullptr;
+                    if (IL::MatchLdFld(testedOperand, target, field))
+                        member = field;
+                }
+                if (member == nullptr)
+                    continue;
+                auto* namedArg = new Syntax::NamedArgumentExpression(
+                    member->Name(),
+                    TranslatePattern(subPattern.get(), &member->ReturnType()).Expression());
+                recursive->SubPatterns().Add(
+                    WithRR(*namedArg,
+                           std::make_shared<Sem::MemberResolveResult>(nullptr, member))
+                        .Expression());
+            }
+            if (match->HasDesignator())
+            {
+                auto* designator = new Syntax::SingleVariableDesignation();
+                designator->Identifier(match->Variable->Name);
+                designator->AddAnnotation(
+                    std::make_shared<ILVariableResolveResult>(match->Variable));
+                recursive->Designation(designator);
+            }
+            return TranslatedExpression(WithILInstruction(*recursive, pattern).Expression());
+        }
+        else if (match->HasDesignator() || !match->CheckType)
+        {
+            auto* designator = new Syntax::SingleVariableDesignation();
+            designator->Identifier(match->Variable->Name);
+            designator->AddAnnotation(
+                std::make_shared<ILVariableResolveResult>(match->Variable));
+            Syntax::AstType* type =
+                match->CheckType
+                    ? ConvertType(*match->Variable->Type)
+                    : static_cast<Syntax::AstType*>(new Syntax::SimpleType("var"));
+            auto* decl = new Syntax::DeclarationExpression(type, designator);
+            return TranslatedExpression(WithILInstruction(*decl, pattern).Expression());
+        }
+        else
+        {
+            auto* typeRef =
+                new Syntax::TypeReferenceExpression(ConvertType(*match->Variable->Type));
+            return TranslatedExpression(WithILInstruction(*typeRef, pattern).Expression());
+        }
+    }
+    if (pattern->Op == IL::OpCode::Comp)
+    {
+        auto* comp = static_cast<IL::Comp*>(pattern);
+        TranslatedExpression constantValue = Translate(comp->Right.get(), leftHandType);
+        auto relational = [&](Syntax::UnaryOperatorType op) -> TranslatedExpression {
+            return TranslatedExpression(
+                WithILInstruction(
+                    *new Syntax::UnaryOperatorExpression(constantValue.Expression(), op), comp)
+                    .Expression());
+        };
+        switch (comp->Kind)
+        {
+            case IL::ComparisonKind::Equality:
+                return WithILInstruction(constantValue, comp);
+            case IL::ComparisonKind::Inequality:
+                return relational(Syntax::UnaryOperatorType::PatternNot);
+            case IL::ComparisonKind::LessThan:
+                return relational(Syntax::UnaryOperatorType::PatternRelationalLessThan);
+            case IL::ComparisonKind::LessThanOrEqual:
+                return relational(Syntax::UnaryOperatorType::PatternRelationalLessThanOrEqual);
+            case IL::ComparisonKind::GreaterThan:
+                return relational(Syntax::UnaryOperatorType::PatternRelationalGreaterThan);
+            case IL::ComparisonKind::GreaterThanOrEqual:
+                return relational(Syntax::UnaryOperatorType::PatternRelationalGreaterThanOrEqual);
+            default:
+                throw std::runtime_error("Unexpected comparison kind");
+        }
+    }
+    if (pattern->Op == IL::OpCode::Call)
+    {
+        auto* call = static_cast<IL::Call*>(pattern);
+        if (IL::MatchInstruction::IsCallToOpEquality(call, KnownTypeCode::String)
+            || IL::MatchInstruction::IsCallToOpEquality(call, KnownTypeCode::Decimal))
+            return Translate(call->Arguments[1].get());
+    }
+    throw std::logic_error("TranslatePattern: unsupported pattern");
 }
 
 
