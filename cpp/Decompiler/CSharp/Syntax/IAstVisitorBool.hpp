@@ -192,6 +192,12 @@ public:
     virtual bool VisitQueryContinuationClause(QueryContinuationClause*) = 0;
     virtual bool VisitQueryJoinClause(QueryJoinClause*) = 0;
     virtual bool VisitSyntaxTree(SyntaxTree*) = 0;
+
+    // The C# generator's `T VisitPatternPlaceholder(AstNode placeholder, Pattern pattern)`
+    // (the generic visitor's shared arm): the `<bool>` realization of the placeholder
+    // dispatch. `DepthFirstAstVisitorBool` supplies the default `VisitChildren` walk (which
+    // returns `false`).
+    virtual bool VisitPatternPlaceholder(AstNode* placeholder, PatternMatching::Pattern& pattern) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

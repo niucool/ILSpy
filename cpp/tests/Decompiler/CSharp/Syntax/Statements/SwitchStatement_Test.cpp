@@ -760,9 +760,12 @@ TEST(CSharp_SwitchStatement, IsStatementAndAstNodeNotExpression) {
     EXPECT_EQ(dynamic_cast<Expression*>(&sw), nullptr);
 }
 
-// `SwitchStatement` is `final` (the C# `sealed`).
-TEST(CSharp_SwitchStatement, IsConcreteAndFinal) {
-    EXPECT_TRUE(std::is_final_v<SwitchStatement>);
+// `SwitchStatement` is NOT `final`: the C# carries `[DecompilerAstNode(hasPatternPlaceholder:
+// true)]`, so the generator emits a `PatternPlaceholder` subclass and the class cannot be
+// sealed. The port keeps it inheritable for `PatternPlaceholderNode<SwitchStatement>` (the
+// SwitchSection D268 non-sealed precedent).
+TEST(CSharp_SwitchStatement, IsConcreteAndNotFinal) {
+    EXPECT_FALSE(std::is_final_v<SwitchStatement>);
 }
 
 // ---- Construction --------------------------------------------------------

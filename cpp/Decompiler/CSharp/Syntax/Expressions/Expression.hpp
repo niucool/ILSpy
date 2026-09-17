@@ -29,9 +29,9 @@
 // (the C# `new` keyword hides the `AstNode` overloads and downcasts the result so callers get
 // an `Expression` back instead of an `AstNode`). The generator additionally emits a pattern
 // placeholder (the `implicit operator Expression(Pattern)` + a sealed `PatternPlaceholder`
-// nested class wrapping a `Pattern`) because `hasPatternPlaceholder` is true; that lands when
-// the concrete pattern nodes (`AnyNode`/`NamedNode`/...) are ported (the D219 deferral), so it
-// is deferred here -- the abstract base and the concrete leaf nodes do not depend on it.
+// nested class wrapping a `Pattern`) because `hasPatternPlaceholder` is true; it is ported as
+// the generic `PatternPlaceholderNode<Expression>` (Syntax/PatternPlaceholder.hpp), with the
+// `implicit operator` call sites ported to `PatternExtensions::ToExpression`.
 //
 // The typed `Clone` ports as a covariant pure-virtual override: `AstNode::Clone()` returns
 // `AstNode*` (its base body throws, since C++ has no `MemberwiseClone`); `Expression`

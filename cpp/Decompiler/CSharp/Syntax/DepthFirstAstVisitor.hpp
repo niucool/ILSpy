@@ -601,6 +601,13 @@ public:
     virtual void VisitSyntaxTree(SyntaxTree* node) {
         VisitChildren(node);
     }
+
+    // The C# `public virtual void VisitPatternPlaceholder(AstNode placeholder, Pattern pattern)`
+    // -- the default walk (the placeholder has no AST children of its own; the wrapped pattern
+    // is not an `AstNode`).
+    virtual void VisitPatternPlaceholder(AstNode* placeholder, PatternMatching::Pattern& /*pattern*/) {
+        VisitChildren(placeholder);
+    }
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

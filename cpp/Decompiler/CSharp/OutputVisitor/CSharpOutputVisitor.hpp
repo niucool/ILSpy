@@ -286,6 +286,7 @@ public:
 	void VisitNamedExpression(Syntax::NamedExpression*) override;
 	void VisitNamedArgumentExpression(Syntax::NamedArgumentExpression*) override;
 	void VisitErrorExpression(Syntax::ErrorExpression*) override;
+	void VisitPatternPlaceholder(Syntax::AstNode*, Syntax::PatternMatching::Pattern&) override;
 	void VisitOutVarDeclarationExpression(Syntax::OutVarDeclarationExpression*) override;
 	void VisitWithInitializerExpression(Syntax::WithInitializerExpression*) override;
 	void VisitUndocumentedExpression(Syntax::UndocumentedExpression*) override;

@@ -34,12 +34,10 @@
 // NOT sealed: the C# declares `public partial class ArrayInitializerExpression` (no `sealed`)
 // because `[DecompilerAstNode(hasPatternPlaceholder: true)]` emits a sealed nested
 // `PatternPlaceholder : ArrayInitializerExpression` that derives from it. The port therefore
-// does NOT use `final` (faithful to the C# not being sealed), and the pattern placeholder is
-// DEFERRED (the D226 deferral: `hasPatternPlaceholder` emits an implicit
-// `operator ArrayInitializerExpression(Pattern)` plus a sealed `PatternPlaceholder` nested
-// class implementing `INode`/`IPatternPlaceholder`; it lands with the concrete pattern nodes
-// and `VisitPatternPlaceholder` on `IAstVisitor`). `Clone` is a per-concrete-node override
-// regardless (no `MemberwiseClone` in C++).
+// does NOT use `final` (faithful to the C# not being sealed). The generated placeholder is
+// ported as the generic `PatternPlaceholderNode<ArrayInitializerExpression>`
+// (Syntax/PatternPlaceholder.hpp), which implements `INode`/`IPatternPlaceholder`. `Clone` is a
+// per-concrete-node override regardless (no `MemberwiseClone` in C++).
 //
 // Its generated `DoMatch` has a single term: the collection recursive match
 // `this.Elements.DoMatch(o.Elements, match)` (the generator emits the collection-typed

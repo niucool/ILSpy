@@ -5069,14 +5069,40 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `static readonly`, i.e. process-lifetime, exactly what a non-owning pointer needs); the
   two convenience ctors that allocate a `NamedNode` on the caller's behalf (`OptionalNode
   (string, INode)` and `Choice.Add(string, INode)`) own the node they create. The
-  `ToType`/`ToExpression`/`ToStatement`/`WithName` shims of `PatternExtensions` remain
-  deferred with the not-yet-ported generated pattern-placeholder machinery. Verified by 30
+  `ToType`/`ToExpression`/`ToStatement`/`WithName` shims of `PatternExtensions` landed in the
+  next slice (below). Verified by 30
   tests (`PatternNodes_Test.cpp`: each node's `DoMatch`/`DoMatchCollection`, the `Repeat`
   greedy-count and `MinCount`/`MaxCount` arms over real AST candidates, the `Choice`
   checkpoint restore, the two backreferences against real `IdentifierExpression`s including
   the type-argument rejection, and `PatternExtensions::Match`/`IsMatch`); the full Debug
   suite is 12589 ran / 12587 passed / the 2 standing skips / zero failures, and the CLI
   baselines are unchanged (the nodes are not reachable from the seed paths).
+- **Generated pattern-placeholder machinery** -- `Syntax/PatternPlaceholder.hpp` lands the
+  port of the code the C# generator emits for every `[DecompilerAstNode(hasPatternPlaceholder:
+  true)]` base (`AstNode`, `AstType`, `Expression`, `Statement`, `ArrayInitializerExpression`,
+  `AttributeSection`, `BlockStatement`, `SwitchStatement`, `TryCatchStatement`, `ParameterDeclaration`,
+  `VariableInitializer`): the generated `implicit operator <Base>(Pattern)` plus the
+  `sealed class PatternPlaceholder : <Base>, INode, IPatternPlaceholder`. C++ has no user-defined
+  conversion from `Pattern` and no requirement that each placeholder be a nested class, so a single
+  class template `PatternPlaceholderNode<TNode>` plays every role: it derives from the AST base and
+  delegates `DoMatch`/`DoMatchCollection` to the wrapped `std::shared_ptr<Pattern>` (so a
+  non-deterministic `Repeat`/`OptionalNode` in a collection slot keeps its backtracking), routes
+  `AcceptVisitor`/`AcceptVisitorBool` to the new `VisitPatternPlaceholder` arm on the visitor
+  interfaces (`IAstVisitor`/`IAstVisitorBool` pure, `DepthFirstAstVisitor`/`DepthFirstAstVisitorBool`
+  default to `VisitChildren`, `CSharpOutputVisitor` records the node span -- the pattern-rendering
+  `VisitNodeInPattern` arms stay deferred), and `Clone`s by sharing the pattern. The C#
+  `implicit operator` call sites port to the `PatternExtensions` factories `ToType`/`ToExpression`/
+  `ToStatement` (out-of-line in `PatternPlaceholder.cpp` so the AST bases need not be pulled into
+  `PatternNodes.hpp`) and the `WithName` shims. `IPatternPlaceholder` marks the placeholder (the
+  output visitor's nesting-order assertion). Three `hasPatternPlaceholder` bases that the port had
+  marked `final` (`AttributeSection`, `SwitchStatement`, `TryCatchStatement`) lose `final`, matching
+  the non-sealed C# (their `std::is_final_v` test pins flip to the non-final expectation). Verified
+  by 14 tests (`PatternPlaceholder_Test.cpp`: the three factories + null handling, `WithName`
+  capture and reject, the `NamedNode` delegation, the void/bool `VisitPatternPlaceholder` dispatch,
+  the default walk, the `Repeat` collection delegation, clone-pattern sharing, the marker cast, and
+  a placeholder over every other `hasPatternPlaceholder` base); the full Debug suite is 12603 ran /
+  12599 passed / the 2 standing skips / zero failures, and the CLI baselines are unchanged (the
+  machinery is not reachable from the seed paths).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

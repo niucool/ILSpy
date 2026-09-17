@@ -56,6 +56,14 @@
 #include <utility>
 #include <vector>
 
+namespace ILSpy::Decompiler::CSharp::Syntax {
+// Forward declarations: the pattern-placeholder factories' return/parameter types
+// (`Expression` is complete via IdentifierExpression.hpp; these two need only a pointer
+// or reference declaration).
+class AstType;
+class Statement;
+}
+
 namespace ILSpy::Decompiler::CSharp::Syntax::PatternMatching {
 
 // Converts an owned optional group name to the `optional<string_view>` `Match` captures
@@ -87,6 +95,29 @@ public:
     static bool IsMatch(INode& pattern, INode* other) {
         return pattern.DoMatch(other, PatternMatching::Match::CreateNew());
     }
+
+    // The C# `static AstType ToType(this Pattern pattern)` / `static Expression
+    // ToExpression(this Pattern pattern)` / `static Statement ToStatement(this Pattern
+    // pattern)` -- the generated `implicit operator <Base>(Pattern)` shims. Each wraps the
+    // pattern in a `PatternPlaceholderNode<Base>` (PatternPlaceholder.hpp); a null pattern
+    // yields null (the generated `pattern != null ? new PatternPlaceholder(pattern) : null`).
+    // The definition lives in PatternPlaceholder.cpp (the placeholder template needs the AST
+    // base complete, which this header does not include).
+    static ILSpy::Decompiler::CSharp::Syntax::AstType* ToType(
+        std::shared_ptr<Pattern> pattern);
+    static ILSpy::Decompiler::CSharp::Syntax::Expression* ToExpression(
+        std::shared_ptr<Pattern> pattern);
+    static ILSpy::Decompiler::CSharp::Syntax::Statement* ToStatement(
+        std::shared_ptr<Pattern> pattern);
+
+    // The C# `static Expression WithName(this Expression node, string patternGroupName)` /
+    // `static Statement WithName(this Statement node, string patternGroupName)` -- wrap the
+    // node in a `NamedNode` and then in a pattern placeholder, so the result can occupy an
+    // AST slot while capturing the node under `patternGroupName`.
+    static ILSpy::Decompiler::CSharp::Syntax::Expression* WithName(
+        ILSpy::Decompiler::CSharp::Syntax::Expression& node, const std::string& patternGroupName);
+    static ILSpy::Decompiler::CSharp::Syntax::Statement* WithName(
+        ILSpy::Decompiler::CSharp::Syntax::Statement& node, const std::string& patternGroupName);
 };
 
 // The C# `public class AnyNode : Pattern` (AnyNode.cs): matches any non-null node,

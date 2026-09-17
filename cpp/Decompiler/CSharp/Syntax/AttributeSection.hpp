@@ -103,7 +103,10 @@ namespace ILSpy::Decompiler::CSharp::Syntax {
 // target), not an `AstType` and not an `Expression`. The second ported `GeneralScope`-sub-
 // namespace node, and the first ported node to combine an optional (nullable) single
 // `Identifier` child with a collection.
-class AttributeSection final : public AstNode {
+// Not `final`: the `[DecompilerAstNode(hasPatternPlaceholder: true)]` attribute makes the C#
+// generator emit a nested `PatternPlaceholder` subclass, so the base must be inheritable (the
+// port's `PatternPlaceholderNode<AttributeSection>`).
+class AttributeSection : public AstNode {
 public:
     ~AttributeSection() override = default;
 

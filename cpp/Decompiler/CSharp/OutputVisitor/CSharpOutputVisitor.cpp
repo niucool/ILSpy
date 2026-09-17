@@ -1213,6 +1213,16 @@ void CSharpOutputVisitor::VisitErrorExpression(Syntax::ErrorExpression* errorExp
 	StartNode(errorExpression);
 	EndNode(errorExpression);
 }
+void CSharpOutputVisitor::VisitPatternPlaceholder(Syntax::AstNode* placeholder, Syntax::PatternMatching::Pattern& /*pattern*/) {
+	// The C# `public virtual void VisitPatternPlaceholder(AstNode placeholder, Pattern pattern)`
+	// renders the wrapped pattern between a StartNode/EndNode span (its `VisitNodeInPattern`
+	// dispatch over the pattern node classes). A pattern placeholder only ever appears inside a
+	// pattern tree built by an AST transform -- never in decompiler output -- so the port
+	// records the node span and defers the pattern rendering with the rest of the pattern-output
+	// visitor arms.
+	StartNode(placeholder);
+	EndNode(placeholder);
+}
 void CSharpOutputVisitor::VisitOutVarDeclarationExpression(Syntax::OutVarDeclarationExpression* outVarDeclarationExpression) {
 	StartNode(outVarDeclarationExpression);
 	WriteKeyword(Syntax::OutVarDeclarationExpression::OutKeyword);

@@ -26,10 +26,11 @@
 // backtracking algorithm in `Pattern.DoMatchCollection`.
 //
 // The `PatternExtensions` `Match`/`IsMatch` entry points from INode.cs are ported in
-// PatternNodes.hpp, beside the concrete pattern nodes. The remaining helpers of the C#
-// class (`ToType`, `ToExpression`, `ToStatement`, `WithName`) are conversion shims for
-// the generated pattern-placeholder machinery (not yet ported), so they stay deferred;
-// the core `INode` interface does not need them.
+// PatternNodes.hpp, beside the concrete pattern nodes. The class's conversion shims
+// (`ToType`, `ToExpression`, `ToStatement`, `WithName`) are declared there too and
+// defined in PatternPlaceholder.cpp -- they wrap a `Pattern` in a
+// `PatternPlaceholderNode<TNode>` (PatternPlaceholder.hpp), the port's realization of
+// the generated per-base pattern-placeholder machinery.
 
 #pragma once
 
