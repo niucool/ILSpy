@@ -39,7 +39,11 @@
 // `try { try {} catch {} } finally {}` merge, and the cascading `if`/`else { if }`
 // simplification. The remaining pattern-based sub-transforms (the `for`/`foreach` loops,
 // the automatic property/event rewrites) and the `DeclareVariables` analysis they compose
-// stay deferred -- each is named at the visit that would call it.
+// stay deferred -- each is named at the visit that would call it. The two remaining
+// resolver-free overrides also land here: the pattern-based `fixed` statement (the C# 7.3
+// `&target.GetPinnableReference()` -> `target` rewrite for value types) and the enhanced
+// using declaration (the C# 8 `using var` flag), which need only a resolve-result type read
+// and the settings flags, not `DeclareVariables`.
 
 #pragma once
 
@@ -52,9 +56,11 @@
 // definitions are pulled into the .cpp (the visitor overrides only need the pointer types).
 namespace ILSpy::Decompiler::CSharp::Syntax {
 class DestructorDeclaration;
+class FixedStatement;
 class IfElseStatement;
 class MethodDeclaration;
 class TryCatchStatement;
+class UsingStatement;
 }
 
 namespace ILSpy::Decompiler::CSharp::Transforms {
@@ -98,6 +104,18 @@ public:
     // simplifies a destructor's `try { ... } finally { base.Finalize(); }` body.
     Syntax::AstNode* VisitDestructorDeclaration(
         Syntax::DestructorDeclaration* destructorDeclaration) override;
+
+    // The C# `public override AstNode VisitFixedStatement(FixedStatement fixedStatement)`: with
+    // `PatternBasedFixedStatement` on, replaces a `fixed` variable's `&target
+    // .GetPinnableReference()` initializer with the reference-typed `target` (the C# 7.3
+    // pattern-based `fixed` form for value types), then continues the child walk.
+    Syntax::AstNode* VisitFixedStatement(Syntax::FixedStatement* fixedStatement) override;
+
+    // The C# `public override AstNode VisitUsingStatement(UsingStatement usingStatement)`: walks
+    // the children first, then -- with `UseEnhancedUsing` on and when the statement is the last
+    // statement of a `BlockStatement` and its resource acquisition is a variable declaration --
+    // flags it as the C# 8 enhanced using declaration.
+    Syntax::AstNode* VisitUsingStatement(Syntax::UsingStatement* usingStatement) override;
 
 protected:
     // The C# `protected override AstNode VisitChildren(AstNode node)`: walks the children and

@@ -32,8 +32,11 @@
 #include "Decompiler/CSharp/Syntax/PatternPlaceholder.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/FixedStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/UsingStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
 #include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
@@ -99,6 +102,18 @@ Syntax::BlockStatement* BuildDestructorBodyPattern(PatternTree& tree) {
     tryCatch->FinallyBlock(finallyBlock);
     bodyPattern->Statements().Add(tryCatch);
     return bodyPattern;
+}
+
+// The C# `static readonly Expression addressOfPinnableReference` -- the shared pattern
+// `&<target>.GetPinnableReference()` (the C# 7.3 pattern-based-`fixed` shape for value types).
+// Built into `tree` each call.
+Syntax::Expression* BuildAddressOfPinnableReferencePattern(PatternTree& tree) {
+    auto* memberReference = tree.Make<Syntax::MemberReferenceExpression>(
+        tree.Wrap<Syntax::Expression>(std::make_shared<PM::AnyNode>("target")),
+        std::string("GetPinnableReference"));
+    auto* invocation = tree.Make<Syntax::InvocationExpression>(memberReference);
+    return tree.Make<Syntax::UnaryOperatorExpression>(
+        invocation, Syntax::UnaryOperatorType::AddressOf);
 }
 
 } // namespace
@@ -204,6 +219,50 @@ AstNode* PatternStatementTransform::VisitTryCatchStatement(
     if (TransformTryCatchFinally(tryCatchStatement) != nullptr)
         return tryCatchStatement;
     return Syntax::DepthFirstAstVisitorAstNode::VisitTryCatchStatement(tryCatchStatement);
+}
+
+AstNode* PatternStatementTransform::VisitFixedStatement(Syntax::FixedStatement* fixedStatement) {
+    if (context_->Settings().PatternBasedFixedStatement()) {
+        for (int i = 0; i < fixedStatement->Variables().Count(); i++) {
+            Syntax::VariableInitializer* variable = fixedStatement->Variables()[i];
+            PatternTree tree;
+            auto* pattern = BuildAddressOfPinnableReferencePattern(tree);
+            PM::Match m = PM::PatternExtensions::Match(*pattern, variable->Initializer());
+            if (m.Success()) {
+                Syntax::Expression* target = m.Get<Syntax::Expression>("target").front();
+                // The C# `target.GetResolveResult().Type.IsReferenceType == false`: only a value
+                // type is taken by pattern-based `fixed` (reference types are handled by the
+                // pinned-region detection). A null `IsReferenceType` (unknown) is not `false`.
+                const Sem::ResolveResult* resolveResult = GetResolveResult(*target);
+                if (resolveResult->Type().IsReferenceType() == std::optional<bool>(false)) {
+                    context_->Step("Use pattern-based fixed statement", fixedStatement);
+                    variable->Initializer(Syntax::Detach(target));
+                }
+            }
+        }
+    }
+    return Syntax::DepthFirstAstVisitorAstNode::VisitFixedStatement(fixedStatement);
+}
+
+AstNode* PatternStatementTransform::VisitUsingStatement(Syntax::UsingStatement* usingStatement) {
+    usingStatement = static_cast<Syntax::UsingStatement*>(
+        Syntax::DepthFirstAstVisitorAstNode::VisitUsingStatement(usingStatement));
+    if (!context_->Settings().UseEnhancedUsing())
+        return usingStatement;
+
+    if (Syntax::GetNextStatement(usingStatement) != nullptr
+        || dynamic_cast<Syntax::BlockStatement*>(usingStatement->Parent()) == nullptr) {
+        return usingStatement;
+    }
+
+    if (dynamic_cast<Syntax::VariableDeclarationStatement*>(
+            usingStatement->ResourceAcquisition()) == nullptr) {
+        return usingStatement;
+    }
+
+    context_->Step("Use enhanced using statement", usingStatement);
+    usingStatement->IsEnhanced(true);
+    return usingStatement;
 }
 
 AstNode* PatternStatementTransform::VisitMethodDeclaration(

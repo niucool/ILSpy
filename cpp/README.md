@@ -5171,6 +5171,20 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   staying green, then all 21 green after restore); the full Debug suite is now 12635 ran /
   12633 passed / the 2 standing skips / zero failures, and the transform is not wired into
   the seed paths, so the CLI baselines are unchanged.
+- **`PatternStatementTransform` fixed/using sub-transforms** -- the third slice adds the two
+  remaining visitor overrides that need neither `DeclareVariables` nor a resolver:
+  `VisitFixedStatement` (with `PatternBasedFixedStatement` on, a `&target.GetPinnableReference()`
+  initializer whose resolved `target` is a value type -- `Type.IsReferenceType == false` --
+  becomes the detached `target`, the C# 7.3 pattern-based `fixed` form) and
+  `VisitUsingStatement` (the child walk first, then -- with `UseEnhancedUsing` on, the
+  statement the last in a `BlockStatement`, and a `VariableDeclarationStatement` resource --
+  sets `IsEnhanced` for the C# 8 using-declaration form). The `addressOfPinnableReference`
+  pattern is built per call through the same `PatternTree` owner as the other slices. Verified
+  by 9 new tests (total 30; `PatternStatementTransform_Test.cpp`: the value-type rewrite and
+  its reference-type/non-shape/setting-off keeps, and the enhanced-using flag with its
+  followed-by-statement, expression-resource, setting-off and non-block-parent keeps) proven
+  with a neuter RED round (exactly the 2 positive tests failed, the 7 negative tests staying
+  green, then all 30 green after restore).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

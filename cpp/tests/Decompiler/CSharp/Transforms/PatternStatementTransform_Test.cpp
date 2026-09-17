@@ -38,9 +38,12 @@
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/FixedStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/UsingStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
@@ -48,6 +51,7 @@
 #include "Decompiler/DecompileRun.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/Semantics/MemberResolveResult.hpp"
+#include "Decompiler/Semantics/ResolveResult.hpp"
 #include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
@@ -617,4 +621,191 @@ TEST(PatternStatementTransformTest, SimplifiesDestructorBody)
     RunTransform(fixture, *destructor);
 
     EXPECT_EQ(destructor->Body(), tryBody);
+}
+
+// ---- pattern-based fixed ------------------------------------------------------------
+
+namespace {
+
+// A value-type `IType` stub whose `IsReferenceType()` is `false` (the pattern-based-`fixed`
+// gate's positive input; the base `IType` default is a null optional).
+class ValueStubType : public TS::IType {
+public:
+    TS::TypeKind Kind() const override { return TS::TypeKind::Struct; }
+    std::string Name() const override { return "S"; }
+    std::string ReflectionName() const override { return "S"; }
+    int TypeParameterCount() const override { return 0; }
+    bool StructuralEquals(const TS::IType& other) const override { return &other == this; }
+    std::optional<bool> IsReferenceType() const override { return std::optional<bool>(false); }
+};
+
+// `&<target>.GetPinnableReference()` -- the initializer shape the pattern-based-`fixed`
+// transform matches.
+Syntax::Expression* GetPinnableReferenceAddress(Syntax::Expression* target) {
+    auto* memberReference = new Syntax::MemberReferenceExpression(
+        target, std::string("GetPinnableReference"));
+    auto* invocation = new Syntax::InvocationExpression(memberReference);
+    return new Syntax::UnaryOperatorExpression(invocation, Syntax::UnaryOperatorType::AddressOf);
+}
+
+} // namespace
+
+// A `fixed (int p = &buffer.GetPinnableReference())` over a value-typed `buffer` becomes
+// `fixed (int p = buffer)`.
+TEST(PatternStatementTransformTest, RewritesPatternBasedFixedForValueType)
+{
+    TransformFixture fixture;
+    fixture.settings.SetPatternBasedFixedStatement(true);
+    auto* buffer = Ref("buffer");
+    buffer->AddAnnotation(std::make_shared<Sem::ResolveResult>(
+        std::static_pointer_cast<TS::IType>(std::make_shared<ValueStubType>())));
+    auto* initializer = new Syntax::VariableInitializer(
+        "p", GetPinnableReferenceAddress(buffer));
+    auto* fixedStmt = new Syntax::FixedStatement(new Syntax::PrimitiveType("int"));
+    fixedStmt->Variables().Add(initializer);
+    fixedStmt->EmbeddedStatement(new Syntax::BlockStatement());
+
+    RunOnStatement(fixture, fixedStmt);
+
+    EXPECT_EQ(initializer->Initializer(), static_cast<Syntax::Expression*>(buffer));
+}
+
+// A reference-typed `buffer` keeps the `&buffer.GetPinnableReference()` initializer (the
+// pinned-region detection handles reference types instead).
+TEST(PatternStatementTransformTest, KeepsPatternBasedFixedForReferenceType)
+{
+    TransformFixture fixture;
+    fixture.settings.SetPatternBasedFixedStatement(true);
+    auto* buffer = Ref("buffer");
+    buffer->AddAnnotation(std::make_shared<Sem::ResolveResult>(
+        std::static_pointer_cast<TS::IType>(std::make_shared<DestructorStubType>("object"))));
+    auto* addressOf = GetPinnableReferenceAddress(buffer);
+    auto* initializer = new Syntax::VariableInitializer("p", addressOf);
+    auto* fixedStmt = new Syntax::FixedStatement(new Syntax::PrimitiveType("int"));
+    fixedStmt->Variables().Add(initializer);
+    fixedStmt->EmbeddedStatement(new Syntax::BlockStatement());
+
+    RunOnStatement(fixture, fixedStmt);
+
+    EXPECT_EQ(initializer->Initializer(), addressOf);
+}
+
+// A different initializer shape is left alone even with the setting on.
+TEST(PatternStatementTransformTest, KeepsNonPinnableReferenceInitializer)
+{
+    TransformFixture fixture;
+    fixture.settings.SetPatternBasedFixedStatement(true);
+    auto* initializer = new Syntax::VariableInitializer("p", Ref("buffer"));
+    auto* fixedStmt = new Syntax::FixedStatement(new Syntax::PrimitiveType("int"));
+    fixedStmt->Variables().Add(initializer);
+    fixedStmt->EmbeddedStatement(new Syntax::BlockStatement());
+
+    RunOnStatement(fixture, fixedStmt);
+
+    EXPECT_NE(dynamic_cast<Syntax::IdentifierExpression*>(initializer->Initializer()), nullptr);
+}
+
+// With the setting off the value-typed shape is kept.
+TEST(PatternStatementTransformTest, KeepsPatternBasedFixedWhenSettingOff)
+{
+    TransformFixture fixture;
+    fixture.settings.SetPatternBasedFixedStatement(false);
+    auto* buffer = Ref("buffer");
+    buffer->AddAnnotation(std::make_shared<Sem::ResolveResult>(
+        std::static_pointer_cast<TS::IType>(std::make_shared<ValueStubType>())));
+    auto* addressOf = GetPinnableReferenceAddress(buffer);
+    auto* initializer = new Syntax::VariableInitializer("p", addressOf);
+    auto* fixedStmt = new Syntax::FixedStatement(new Syntax::PrimitiveType("int"));
+    fixedStmt->Variables().Add(initializer);
+    fixedStmt->EmbeddedStatement(new Syntax::BlockStatement());
+
+    RunOnStatement(fixture, fixedStmt);
+
+    EXPECT_EQ(initializer->Initializer(), addressOf);
+}
+
+// ---- enhanced using ----------------------------------------------------------------
+
+// The last statement of a block whose resource acquisition is a variable declaration is
+// flagged as the enhanced using declaration.
+TEST(PatternStatementTransformTest, FlagsEnhancedUsingVariable)
+{
+    TransformFixture fixture;
+    fixture.settings.SetUseEnhancedUsing(true);
+    auto* declaration = new Syntax::VariableDeclarationStatement(
+        new Syntax::PrimitiveType("int"), "x");
+    auto* usingStatement = new Syntax::UsingStatement(
+        declaration, new Syntax::BlockStatement());
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(usingStatement);
+
+    RunTransform(fixture, *block);
+
+    EXPECT_TRUE(usingStatement->IsEnhanced());
+}
+
+// A using statement that is not the last statement of its block stays a using block.
+TEST(PatternStatementTransformTest, KeepsEnhancedUsingWhenFollowedByStatement)
+{
+    TransformFixture fixture;
+    fixture.settings.SetUseEnhancedUsing(true);
+    auto* declaration = new Syntax::VariableDeclarationStatement(
+        new Syntax::PrimitiveType("int"), "x");
+    auto* usingStatement = new Syntax::UsingStatement(
+        declaration, new Syntax::BlockStatement());
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(usingStatement);
+    block->Statements().Add(new Syntax::ExpressionStatement(Ref("after")));
+
+    RunTransform(fixture, *block);
+
+    EXPECT_FALSE(usingStatement->IsEnhanced());
+}
+
+// A using statement whose resource acquisition is an expression (not a variable
+// declaration) stays a using block.
+TEST(PatternStatementTransformTest, KeepsEnhancedUsingWithExpressionResource)
+{
+    TransformFixture fixture;
+    fixture.settings.SetUseEnhancedUsing(true);
+    auto* usingStatement = new Syntax::UsingStatement(
+        Ref("resource"), new Syntax::BlockStatement());
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(usingStatement);
+
+    RunTransform(fixture, *block);
+
+    EXPECT_FALSE(usingStatement->IsEnhanced());
+}
+
+// With the setting off the last-statement variable-declaration using is not flagged.
+TEST(PatternStatementTransformTest, KeepsEnhancedUsingWhenSettingOff)
+{
+    TransformFixture fixture;
+    fixture.settings.SetUseEnhancedUsing(false);
+    auto* declaration = new Syntax::VariableDeclarationStatement(
+        new Syntax::PrimitiveType("int"), "x");
+    auto* usingStatement = new Syntax::UsingStatement(
+        declaration, new Syntax::BlockStatement());
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(usingStatement);
+
+    RunTransform(fixture, *block);
+
+    EXPECT_FALSE(usingStatement->IsEnhanced());
+}
+
+// A using statement not directly inside a block (here the root) is not flagged.
+TEST(PatternStatementTransformTest, KeepsEnhancedUsingOutsideBlock)
+{
+    TransformFixture fixture;
+    fixture.settings.SetUseEnhancedUsing(true);
+    auto* declaration = new Syntax::VariableDeclarationStatement(
+        new Syntax::PrimitiveType("int"), "x");
+    auto* usingStatement = new Syntax::UsingStatement(
+        declaration, new Syntax::BlockStatement());
+
+    RunTransform(fixture, *usingStatement);
+
+    EXPECT_FALSE(usingStatement->IsEnhanced());
 }
