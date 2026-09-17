@@ -22,6 +22,7 @@
 #include "Decompiler/CSharp/ExpressionBuilder.hpp"
 
 #include "Decompiler/CSharp/CallBuilder.hpp"
+#include "Decompiler/CSharp/StatementBuilder.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"
 #include "Decompiler/CSharp/Syntax/AstType.hpp"
@@ -47,6 +48,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/SizeOfExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/StackAllocExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/SwitchExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ThisReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/TypeOfExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
@@ -759,6 +761,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitRefAnyType(inst, context);
         case IL::OpCode::IfInstruction:
             return VisitIfInstruction(inst, context);
+        case IL::OpCode::SwitchInstruction:
+            return VisitSwitchInstruction(inst, context);
         case IL::OpCode::Call:
         case IL::OpCode::CallVirt:
         case IL::OpCode::NewObj:
@@ -1911,6 +1915,78 @@ TranslatedExpression ExpressionBuilder::VisitIfInstruction(IL::ILInstruction* in
             condition.Expression(), trueBranch.Expression(), falseBranch.Expression());
         return WithRR(WithILInstruction(*condExpr, inst), rr);
     }
+}
+
+// The C# `protected internal override TranslatedExpression
+// VisitSwitchInstruction(SwitchInstruction inst, TranslationContext context)`
+// (ExpressionBuilder.cs lines 4176-4229): see the header comment for the contract.
+TranslatedExpression ExpressionBuilder::VisitSwitchInstruction(IL::ILInstruction* inst,
+                                                               TranslationContext context)
+{
+    auto* switchInst = static_cast<IL::SwitchInstruction*>(inst);
+    // switch-expression does not support implicit conversions.
+    SwitchValueTranslation translation = TranslateSwitchValue(*switchInst, true);
+
+    IL::SwitchSection* defaultSection = switchInst->GetDefaultSection();
+    auto* switchExpr = new Syntax::SwitchExpression();
+    switchExpr->Expression(translation.Value.Expression());
+    const TS::IType* resultType;
+    if (context.TypeHint != nullptr && context.TypeHint->Kind() != TS::TypeKind::Unknown
+        && TS::GetStackType(*context.TypeHint) == switchInst->ResultType())
+    {
+        resultType = context.TypeHint;
+    }
+    else
+    {
+        resultType = &TS::FindType(*compilation, switchInst->ResultType(), TS::Sign::None);
+    }
+
+    // The C# local function TranslateSectionBody (the arm body conversion to the
+    // switch's result type, allowImplicitConversion true).
+    auto translateSectionBody = [&](IL::SwitchSection& section) -> Syntax::Expression* {
+        TranslatedExpression body = Translate(section.Body.get(), resultType);
+        return body
+            .ConvertTo(const_cast<TS::IType&>(*resultType), *this,
+                       /*checkForOverflow*/ false,
+                       /*allowImplicitConversion*/ true)
+            .Expression();
+    };
+
+    for (auto& section : switchInst->Sections)
+    {
+        if (section.get() == defaultSection)
+            continue;
+        auto* ses = new Syntax::SwitchExpressionSection();
+        if (section->HasNullLabel)
+        {
+            assert(section->Labels.Count() == 0);
+            ses->Pattern(new Syntax::NullReferenceExpression());
+        }
+        else
+        {
+            std::vector<long long> values = section->Labels.Values();
+            long long val = values.at(0);
+            const std::vector<std::pair<std::optional<std::string>, int>>* map =
+                translation.StringToInt != nullptr ? &translation.StringToInt->Map : nullptr;
+            auto labels = const_cast<StatementBuilder*>(statementBuilder)->CreateTypedCaseLabel(
+                val, const_cast<TS::IType&>(*translation.CaseType), map);
+            ses->Pattern(astBuilder->ConvertConstantValue(labels.at(0)));
+        }
+        ses->Body(translateSectionBody(*section));
+        switchExpr->SwitchSections().Add(ses);
+    }
+
+    if (defaultSection != nullptr && !defaultSection->IsCompilerGeneratedDefaultSection)
+    {
+        auto* defaultSES = new Syntax::SwitchExpressionSection();
+        defaultSES->Pattern(new Syntax::IdentifierExpression("_"));
+        defaultSES->Body(translateSectionBody(*defaultSection));
+        switchExpr->SwitchSections().Add(defaultSES);
+    }
+
+    return WithRR(WithILInstruction(*switchExpr, inst),
+                  std::make_shared<Sem::ResolveResult>(
+                      const_cast<TS::IType&>(*resultType).shared_from_this()));
 }
 
 

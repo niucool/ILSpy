@@ -53,6 +53,7 @@
 #include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
 #include "Decompiler/CSharp/Syntax/CaseLabel.hpp"
 #include "Decompiler/CSharp/Syntax/SwitchSection.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/SwitchExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/EmptyStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
@@ -1745,6 +1746,154 @@ TEST(StatementBuilderTest, TranslateSwitchValueSmallIntegerBail)
     sw.Type = byteType;
     auto result = builder.exprBuilder->TranslateSwitchValue(sw, false);
     EXPECT_EQ(result.CaseType->ReflectionName(), "System.Int32");
+}
+
+// The SwitchInstruction result-type / compiler-generated-default fields and
+// their clone carry (the switch-expression transform's payload).
+TEST(StatementBuilderTest, SwitchInstructionResultTypeAndGeneratedDefaultClone)
+{
+    IL::SwitchInstruction sw(std::make_unique<IL::LdcI4>(0));
+    sw.SetResultType(IL::StackType::I8);
+    EXPECT_EQ(sw.ResultType(), IL::StackType::I8);
+    auto section = std::make_unique<IL::SwitchSection>(Util::LongSet(3LL));
+    section->IsCompilerGeneratedDefaultSection = true;
+    sw.AddSection(std::move(section));
+    std::string dump;
+    sw.WriteTo(dump);
+    EXPECT_NE(dump.find("generated.section("), std::string::npos);
+    auto clone = sw.Clone();
+    auto* cloned = dynamic_cast<IL::SwitchInstruction*>(clone.get());
+    ASSERT_TRUE(cloned != nullptr);
+    EXPECT_EQ(cloned->ResultType(), IL::StackType::I8);
+    ASSERT_EQ(cloned->Sections.size(), std::size_t(1));
+    EXPECT_TRUE(cloned->Sections[0]->IsCompilerGeneratedDefaultSection);
+}
+
+// VisitSwitchInstruction renders the switch expression: the translated
+// governing value, the typed case-label arms, and the `_` default arm; the
+// result type comes from the instruction's stack type when no matching hint is
+// supplied.
+TEST(StatementBuilderTest, VisitSwitchInstructionRendersSwitchExpression)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = fixture.MakeLocal(TS::KnownTypeCode::Int32, "num");
+    IL::SwitchInstruction sw(std::make_unique<IL::LdLoc>(variable));
+    auto secCase = std::make_unique<IL::SwitchSection>(Util::LongSet(1LL));
+    secCase->SetBody(std::make_unique<IL::LdcI4>(10));
+    sw.AddSection(std::move(secCase));
+    auto secDefault = std::make_unique<IL::SwitchSection>(Util::LongSet(
+        std::vector<Util::LongInterval>{Util::LongInterval::Inclusive(2, 100)}));
+    secDefault->SetBody(std::make_unique<IL::LdcI4>(20));
+    sw.AddSection(std::move(secDefault));
+    sw.SetResultType(IL::StackType::I4);
+    auto expr = builder.exprBuilder->Translate(&sw);
+    auto* switchExpr = dynamic_cast<Syntax::SwitchExpression*>(expr.Expression());
+    ASSERT_TRUE(switchExpr != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(switchExpr->Expression()) != nullptr);
+    ASSERT_EQ(switchExpr->SwitchSections().Count(), std::size_t(2));
+    auto* arm0 = switchExpr->SwitchSections()[0];
+    auto* pattern0 = dynamic_cast<Syntax::PrimitiveExpression*>(arm0->Pattern());
+    ASSERT_TRUE(pattern0 != nullptr);
+    const std::int32_t* label0 = std::get_if<std::int32_t>(&pattern0->Value());
+    ASSERT_TRUE(label0 != nullptr);
+    EXPECT_EQ(*label0, 1);
+    auto* body0 = dynamic_cast<Syntax::PrimitiveExpression*>(arm0->Body());
+    ASSERT_TRUE(body0 != nullptr);
+    const std::int32_t* value0 = std::get_if<std::int32_t>(&body0->Value());
+    ASSERT_TRUE(value0 != nullptr);
+    EXPECT_EQ(*value0, 10);
+    auto* arm1 = switchExpr->SwitchSections()[1];
+    auto* pattern1 = dynamic_cast<Syntax::IdentifierExpression*>(arm1->Pattern());
+    ASSERT_TRUE(pattern1 != nullptr);
+    EXPECT_EQ(pattern1->Identifier(), "_");
+    auto* body1 = dynamic_cast<Syntax::PrimitiveExpression*>(arm1->Body());
+    ASSERT_TRUE(body1 != nullptr);
+    const std::int32_t* value1 = std::get_if<std::int32_t>(&body1->Value());
+    ASSERT_TRUE(value1 != nullptr);
+    EXPECT_EQ(*value1, 20);
+    EXPECT_TRUE(TS::IsKnownType(expr.Type(), TS::KnownTypeCode::Int32));
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*switchExpr);
+    ASSERT_EQ(il.size(), std::size_t(1));
+    EXPECT_EQ(il[0], &sw);
+}
+
+// A compiler-generated default section is skipped (its throw helper stays
+// invisible in the decompiled source).
+TEST(StatementBuilderTest, VisitSwitchInstructionSkipsCompilerGeneratedDefault)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = fixture.MakeLocal(TS::KnownTypeCode::Int32, "num");
+    IL::SwitchInstruction sw(std::make_unique<IL::LdLoc>(variable));
+    auto secCase = std::make_unique<IL::SwitchSection>(Util::LongSet(1LL));
+    secCase->SetBody(std::make_unique<IL::LdcI4>(10));
+    sw.AddSection(std::move(secCase));
+    auto secDefault = std::make_unique<IL::SwitchSection>(Util::LongSet(
+        std::vector<Util::LongInterval>{Util::LongInterval::Inclusive(2, 100)}));
+    secDefault->SetBody(std::make_unique<IL::LdcI4>(20));
+    secDefault->IsCompilerGeneratedDefaultSection = true;
+    sw.AddSection(std::move(secDefault));
+    sw.SetResultType(IL::StackType::I4);
+    auto expr = builder.exprBuilder->Translate(&sw);
+    auto* switchExpr = dynamic_cast<Syntax::SwitchExpression*>(expr.Expression());
+    ASSERT_TRUE(switchExpr != nullptr);
+    ASSERT_EQ(switchExpr->SwitchSections().Count(), std::size_t(1));
+    auto* pattern = dynamic_cast<Syntax::PrimitiveExpression*>(
+        switchExpr->SwitchSections()[0]->Pattern());
+    ASSERT_TRUE(pattern != nullptr);
+    EXPECT_FALSE(TS::IsKnownType(expr.Type(), TS::KnownTypeCode::Void));
+}
+
+// A HasNullLabel section renders the `null` arm pattern.
+TEST(StatementBuilderTest, VisitSwitchInstructionNullLabelArm)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = fixture.MakeLocal(TS::KnownTypeCode::Int32, "num");
+    IL::SwitchInstruction sw(std::make_unique<IL::LdLoc>(variable));
+    auto secCase = std::make_unique<IL::SwitchSection>(Util::LongSet(1LL));
+    secCase->SetBody(std::make_unique<IL::LdcI4>(10));
+    sw.AddSection(std::move(secCase));
+    auto nullSection = std::make_unique<IL::SwitchSection>();
+    nullSection->HasNullLabel = true;
+    nullSection->SetBody(std::make_unique<IL::LdcI4>(30));
+    sw.AddSection(std::move(nullSection));
+    auto secDefault = std::make_unique<IL::SwitchSection>(Util::LongSet(
+        std::vector<Util::LongInterval>{Util::LongInterval::Inclusive(2, 100)}));
+    secDefault->SetBody(std::make_unique<IL::LdcI4>(20));
+    sw.AddSection(std::move(secDefault));
+    sw.SetResultType(IL::StackType::I4);
+    auto expr = builder.exprBuilder->Translate(&sw);
+    auto* switchExpr = dynamic_cast<Syntax::SwitchExpression*>(expr.Expression());
+    ASSERT_TRUE(switchExpr != nullptr);
+    ASSERT_EQ(switchExpr->SwitchSections().Count(), std::size_t(3));
+    EXPECT_TRUE(dynamic_cast<Syntax::NullReferenceExpression*>(
+                    switchExpr->SwitchSections()[1]->Pattern())
+                != nullptr);
+}
+
+// A matching type hint supplies the switch expression's result type.
+TEST(StatementBuilderTest, VisitSwitchInstructionUsesMatchingTypeHint)
+{
+    StatementFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = fixture.MakeLocal(TS::KnownTypeCode::Int32, "num");
+    IL::SwitchInstruction sw(std::make_unique<IL::LdLoc>(variable));
+    auto secCase = std::make_unique<IL::SwitchSection>(Util::LongSet(1LL));
+    secCase->SetBody(std::make_unique<IL::LdcI4>(10));
+    sw.AddSection(std::move(secCase));
+    auto secDefault = std::make_unique<IL::SwitchSection>(Util::LongSet(
+        std::vector<Util::LongInterval>{Util::LongInterval::Inclusive(2, 100)}));
+    secDefault->SetBody(std::make_unique<IL::LdcI4>(20));
+    sw.AddSection(std::move(secDefault));
+    sw.SetResultType(IL::StackType::I4);
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto expr = builder.exprBuilder->Translate(&sw, intType.get());
+    EXPECT_EQ(&expr.Type(), intType.get());
+    auto* switchExpr = dynamic_cast<Syntax::SwitchExpression*>(expr.Expression());
+    ASSERT_TRUE(switchExpr != nullptr);
 }
 
 // VisitSwitchInstruction renders the SwitchStatement (the null-container

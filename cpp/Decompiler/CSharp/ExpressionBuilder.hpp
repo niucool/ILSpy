@@ -44,8 +44,8 @@
 //
 // Deferrals (each named at the member that needs it): the heavy Visit arms that
 // have not landed yet (the LdFlda/LdsFlda field-address arms, which need the
-// ConvertField / TupleTransform.MatchTupleFieldAccess machinery, the Switch
-// expression arm, the dynamic/deconstruct arms, and Await, which needs the
+// ConvertField / TupleTransform.MatchTupleFieldAccess machinery, the
+// dynamic/deconstruct arms, and Await, which needs the
 // awaiter/GetResultMethod pipeline surfaces), and the CancellationToken (the
 // cooperative-cancel throw is a no-op in the port, the DecompileRun convention).
 
@@ -316,6 +316,14 @@ public:
     // short-circuit &&/|| shapes and the `?:` conditional with its type
     // unification and the by-reference result wrap.
     TranslatedExpression VisitIfInstruction(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitSwitchInstruction(SwitchInstruction inst, TranslationContext context)`
+    // (ExpressionBuilder.cs lines 4176-4229): the switch-expression render -- the
+    // switch value through TranslateSwitchValue (expression context), the result
+    // type from the type hint or the instruction's stack type, the per-section
+    // arm patterns (the null label, the typed case constants, the skipped
+    // compiler-generated default), and the `_` default arm.
+    TranslatedExpression VisitSwitchInstruction(IL::ILInstruction* inst, TranslationContext context);
     // The C# `private TranslatedExpression StObjViaHelperCall(StObj inst)`
     // (ExpressionBuilder.cs lines 3087-3125): the `Unsafe.Write` /
     // `Unsafe.WriteUnaligned` intrinsic rewrite for a store that cannot be a

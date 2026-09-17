@@ -538,6 +538,7 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             const auto& s = static_cast<const SwitchSection&>(*this);
             auto clone = std::make_unique<SwitchSection>(s.Labels);
             clone->HasNullLabel = s.HasNullLabel;
+            clone->IsCompilerGeneratedDefaultSection = s.IsCompilerGeneratedDefaultSection;
             clone->SetBody(s.Body ? s.Body->Clone() : nullptr);
             c = std::move(clone);
             break;
@@ -547,6 +548,7 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             auto clone = std::make_unique<SwitchInstruction>(s.Value ? s.Value->Clone() : nullptr);
             clone->IsLifted = s.IsLifted;
             clone->Type = s.Type;
+            clone->SetResultType(s.ResultType());
             for (auto& sec : s.Sections) {
                 clone->AddSection(std::unique_ptr<SwitchSection>(
                     static_cast<SwitchSection*>(sec ? sec->Clone().release() : nullptr)));

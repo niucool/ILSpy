@@ -3200,6 +3200,26 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   usage check rc 64). The `VisitSwitchInstruction` arm stays deferred; the
   by-reference conditional-target arm of the render is implemented but has no
   fixture yet.
+- **`ExpressionBuilder` switch-expression arm (`VisitSwitchInstruction`)** -- the
+  C# `VisitSwitchInstruction` (`ExpressionBuilder.cs` lines 4176-4229) landed
+  and is routed from the `Visit` OpCode switch: the governing value through
+  `TranslateSwitchValue(inst, true)` (expression context -- no implicit
+  conversions), the result type taken from a matching type hint or the
+  instruction's stack type, the non-default sections rendering as arms (the
+  `null` pattern for a `HasNullLabel` section, the typed case constant from
+  `StatementBuilder::CreateTypedCaseLabel` for a labelled one), and the `_`
+  default arm unless the section is compiler-generated. The `SwitchInstruction`
+  node gained the C# `SetResultType` / `ResultType` pair (default `Void`, the
+  switch-expression result once the transform shapes a body) and the
+  `SwitchSection.IsCompilerGeneratedDefaultSection` flag with its `generated.`
+  dump prefix; both are carried through `ILInstructionClone`. Verified by 5 new
+  tests (the node result-type/clone, the arms-plus-`_`-default render, the
+  skipped compiler-generated default, the null label, the matching type hint)
+  with a dispatch-neuter RED round where exactly the 4 Visit tests failed while
+  the node test and the pre-existing `TranslateSwitch` statement test stayed
+  green. Full Debug suite 12402 ran / 12400 passed / the 2 standing skips / zero
+  failures. The switch-expression transform that synthesizes these nodes
+  (`ExpressionTransforms.HandleSwitchExpression`) stays deferred.
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

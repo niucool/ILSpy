@@ -50,6 +50,12 @@ public:
     // `case null:`. Mirrors SwitchSection.HasNullLabel in the generated
     // Instructions.cs.
     bool HasNullLabel = false;
+    // True when this section only holds a compiler-generated throw helper of a
+    // switch expression, so the decompiled source hides it (the switch
+    // expression's arm-less default). Mirrors
+    // SwitchSection.IsCompilerGeneratedDefaultSection in the generated
+    // Instructions.cs.
+    bool IsCompilerGeneratedDefaultSection = false;
     SwitchSection() : ILInstruction(OpCode::SwitchSection) {}
     explicit SwitchSection(Util::LongSet labels) : ILInstruction(OpCode::SwitchSection), Labels(std::move(labels)) {}
     InstructionFlags DirectFlags() const override { return InstructionFlags::None; }
@@ -63,6 +69,7 @@ public:
         Body = std::move(body);
     }
     void WriteTo(std::string& out) const override {
+        if (IsCompilerGeneratedDefaultSection) out += "generated.";
         out += "section(";
         bool first = true;
         for (const auto& iv : Labels.Intervals()) {
@@ -103,7 +110,13 @@ public:
         if (Value) { Value->Parent = this; Value->ChildIndex = 0; }
     }
     InstructionFlags DirectFlags() const override { return InstructionFlags::ControlFlow; }
-    StackType ResultType() const override { return StackType::Void; }
+    // The C# `public override StackType ResultType => resultType;` with the
+    // `SetResultType` mutator: a switch expression carries the result type of
+    // its arms once the SwitchExpression transform has shaped it; a plain
+    // statement switch stays Void. Mirrors SwitchInstruction.cs (the
+    // `SetResultType(StackType)` / `ResultType` pair).
+    StackType ResultType() const override { return resultType_; }
+    void SetResultType(StackType resultType) { resultType_ = resultType; }
 
     int ChildCount() const override { return (Value ? 1 : 0) + static_cast<int>(Sections.size()); }
     ILInstruction* GetChild(int i) const override {
@@ -152,6 +165,9 @@ protected:
         Sections[s].reset(static_cast<SwitchSection*>(n.release()));
         return old;
     }
+
+private:
+    StackType resultType_ = StackType::Void;
 };
 
 } // namespace ILSpy::Decompiler::IL
