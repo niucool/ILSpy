@@ -88,6 +88,8 @@
 #include "Decompiler/IL/Instructions/StringToInt.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
+#include "Decompiler/IL/Instructions/Box.hpp"
+#include "Decompiler/IL/Instructions/CastClass.hpp"
 #include "Decompiler/IL/OpCodeName.hpp"
 #include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
@@ -106,6 +108,7 @@
 #include "Decompiler/TypeSystem/ExpressionType.hpp"
 #include "Decompiler/TypeSystem/NormalizeTypeVisitor.hpp"
 #include "Decompiler/TypeSystem/NullableType.hpp"
+#include "Decompiler/TypeSystem/ITypeParameter.hpp"
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"
 #include "Decompiler/TypeSystem/TupleType.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
@@ -719,6 +722,12 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitLdVirtFtn(inst, context);
         case IL::OpCode::LdVirtDelegate:
             return VisitLdVirtDelegate(inst, context);
+        case IL::OpCode::UnboxAny:
+            return VisitUnboxAny(inst, context);
+        case IL::OpCode::Box:
+            return VisitBox(inst, context);
+        case IL::OpCode::CastClass:
+            return VisitCastClass(inst, context);
         case IL::OpCode::Call:
         case IL::OpCode::CallVirt:
         case IL::OpCode::NewObj:
@@ -1089,6 +1098,107 @@ TranslatedExpression ExpressionBuilder::VisitLdTypeToken(IL::ILInstruction* inst
         std::make_shared<Sem::TypeOfResolveResult>(
             std::move(runtimeTypeHandleType),
             token->Type));
+}
+
+// The C# `protected internal override TranslatedExpression VisitUnboxAny(UnboxAny
+// inst, TranslationContext context)` (ExpressionBuilder.cs lines 3285-3320): the
+// unboxing conversion -- the `unbox.any T(isinst T(expr))` shortcut over a nullable
+// value type or a reference type (an `expr as T` with the TryCast conversion), else
+// a cast from object (or, for a type-parameter target the resolver rejects, via the
+// type parameter's effective base class) with the UnboxingConversion.
+TranslatedExpression ExpressionBuilder::VisitUnboxAny(IL::ILInstruction* inst,
+                                                      TranslationContext context)
+{
+    (void)context;
+    auto* unboxAny = static_cast<IL::UnboxAny*>(inst);
+    TranslatedExpression arg;
+    if (auto* isInst = dynamic_cast<IL::IsInst*>(unboxAny->Argument.get());
+        isInst != nullptr && isInst->Type != nullptr
+        && IsUnboxAnyWithIsInst(*unboxAny, *isInst->Type))
+    {
+        // unbox.any T(isinst T(expr)) ==> expr as T
+        // This is used for generic types and nullable value types
+        arg = UnwrapBoxingConversion(Translate(isInst->Argument.get()));
+        auto* asExpr = new Syntax::AsExpression(arg.Expression(), ConvertType(*unboxAny->Type));
+        return WithRR(
+            WithILInstruction(*asExpr, inst),
+            std::make_shared<Sem::ConversionResolveResult>(
+                unboxAny->Type, SharedResolveResultAnnotation(*arg.Expression()),
+                Sem::Conversions::TryCast()));
+    }
+
+    arg = Translate(unboxAny->Argument.get());
+    TS::ITypePtr targetType = unboxAny->Type;
+    if (targetType->Kind() == TS::TypeKind::TypeParameter)
+    {
+        auto rr = resolver->ResolveCast(*targetType,
+                                        SharedResolveResultAnnotation(*arg.Expression()));
+        if (rr->IsError())
+        {
+            // C# 6.2.7 Explicit conversions involving type parameters:
+            // if we can't directly convert to a type parameter,
+            // try via its effective base class.
+            auto* typeParameter = static_cast<TS::ITypeParameter*>(targetType.get());
+            arg = arg.ConvertTo(*typeParameter->EffectiveBaseClass(), *this);
+        }
+    }
+    else
+    {
+        // Before unboxing arg must be a object
+        arg = arg.ConvertTo(
+            const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Object)), *this);
+    }
+
+    auto* cast = new Syntax::CastExpression(ConvertType(*targetType), arg.Expression());
+    return WithRR(
+        WithILInstruction(*cast, inst),
+        std::make_shared<Sem::ConversionResolveResult>(
+            targetType, SharedResolveResultAnnotation(*arg.Expression()),
+            Sem::Conversions::UnboxingConversion()));
+}
+
+// The C# `protected internal override TranslatedExpression VisitBox(Box inst,
+// TranslationContext context)` (ExpressionBuilder.cs lines 3332-3352): the boxing
+// conversion -- the native-integer target preference (nint/nuint under
+// NativeIntegers), the argument conversion to the target type, and the cast to
+// object with the BoxingConversion.
+TranslatedExpression ExpressionBuilder::VisitBox(IL::ILInstruction* inst,
+                                                TranslationContext context)
+{
+    (void)context;
+    auto* box = static_cast<IL::Box*>(inst);
+    TS::ITypePtr targetType = box->Type;
+    auto arg = Translate(box->Argument.get(), targetType.get());
+    if (settings->NativeIntegers() && !arg.Type().Equals(*targetType))
+    {
+        if (IsKnownType(*targetType, KnownTypeCode::IntPtr))
+        {
+            targetType = TS::NInt();
+        }
+        else if (IsKnownType(*targetType, KnownTypeCode::UIntPtr))
+        {
+            targetType = TS::NUInt();
+        }
+    }
+    arg = arg.ConvertTo(*targetType, *this);
+    TS::IType& obj = const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Object));
+    auto* cast = new Syntax::CastExpression(ConvertType(obj), arg.Expression());
+    return WithRR(
+        WithILInstruction(*cast, inst),
+        std::make_shared<Sem::ConversionResolveResult>(
+            obj.shared_from_this(), SharedResolveResultAnnotation(*arg.Expression()),
+            Sem::Conversions::BoxingConversion()));
+}
+
+// The C# `protected internal override TranslatedExpression VisitCastClass(CastClass
+// inst, TranslationContext context)` (ExpressionBuilder.cs lines 3354-3358): the
+// explicit cast -- translate the argument and convert it to the target type.
+TranslatedExpression ExpressionBuilder::VisitCastClass(IL::ILInstruction* inst,
+                                                       TranslationContext context)
+{
+    (void)context;
+    auto* castClass = static_cast<IL::CastClass*>(inst);
+    return Translate(castClass->Argument.get()).ConvertTo(*castClass->Type, *this);
 }
 
 

@@ -67,6 +67,9 @@
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
+#include "Decompiler/IL/Instructions/UnboxAny.hpp"
+#include "Decompiler/IL/Instructions/Box.hpp"
+#include "Decompiler/IL/Instructions/CastClass.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
@@ -741,6 +744,92 @@ TEST(ExpressionBuilderStaticsTest, UnwrapBoxingConversionNoOpWithoutCast)
     auto expr = builder.Translate(&ldnull);
     auto unwrapped = ExpressionBuilder::UnwrapBoxingConversion(expr);
     EXPECT_EQ(unwrapped.Expression(), expr.Expression());
+}
+
+
+// ---------------------------------------------------------------------------
+// The boxing/cast conversion arms (VisitUnboxAny / VisitBox / VisitCastClass):
+// the conversion leaves that need no CallBuilder, no statement machinery, and
+// no control-flow helpers. Expectations derived from the C# bodies
+// (ExpressionBuilder.cs lines 3285-3358) over the MinimalCorlib fixture.
+
+// The fixture's object-typed local (the unboxing/cast source).
+std::shared_ptr<IL::ILVariable> ObjectLocal(const BuilderFixture& fixture)
+{
+    auto variable = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local,
+        std::const_pointer_cast<TS::IType>(
+            fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this()),
+        0);
+    variable->Name = "o";
+    return variable;
+}
+
+TEST(ExpressionBuilderCastTest, UnboxAnyInt32RendersUnboxingCast)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto objectVar = ObjectLocal(fixture);
+    // unbox.any int32(object) is not the isinst shortcut (int32 is a value type),
+    // so it falls through the object conversion to the plain unboxing cast.
+    IL::UnboxAny unboxAny(intType, std::make_unique<IL::LdLoc>(objectVar));
+    auto expr = builder.Translate(&unboxAny);
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(expr.Expression());
+    ASSERT_TRUE(cast != nullptr);
+    const auto* crr = dynamic_cast<const Sem::ConversionResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(crr != nullptr);
+    EXPECT_TRUE(crr->ConversionProperty()->IsUnboxingConversion());
+}
+
+TEST(ExpressionBuilderCastTest, UnboxAnyWithIsInstRendersAsExpression)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto stringType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    auto objectVar = ObjectLocal(fixture);
+    // unbox.any string(isinst string(object)) is the nullable/reference shortcut:
+    // "object as string" rather than a cast.
+    IL::UnboxAny unboxAny(
+        stringType, std::make_unique<IL::IsInst>(stringType, std::make_unique<IL::LdLoc>(objectVar)));
+    auto expr = builder.Translate(&unboxAny);
+    auto* asExpr = dynamic_cast<Syntax::AsExpression*>(expr.Expression());
+    ASSERT_TRUE(asExpr != nullptr);
+    const auto* crr = dynamic_cast<const Sem::ConversionResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(crr != nullptr);
+    EXPECT_TRUE(crr->ConversionProperty()->IsTryCast());
+}
+
+TEST(ExpressionBuilderCastTest, BoxInt32RendersBoxingCast)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    IL::Box box(intType, std::make_unique<IL::LdcI4>(42));
+    auto expr = builder.Translate(&box);
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(expr.Expression());
+    ASSERT_TRUE(cast != nullptr);
+    const auto* crr = dynamic_cast<const Sem::ConversionResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(crr != nullptr);
+    EXPECT_TRUE(crr->ConversionProperty()->IsBoxingConversion());
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()), TS::KnownTypeCode::Object));
+}
+
+TEST(ExpressionBuilderCastTest, CastClassStringRendersExplicitCast)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto stringType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    auto objectVar = ObjectLocal(fixture);
+    IL::CastClass castClass(stringType, std::make_unique<IL::LdLoc>(objectVar));
+    auto expr = builder.Translate(&castClass);
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(expr.Expression());
+    ASSERT_TRUE(cast != nullptr);
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()), TS::KnownTypeCode::String));
 }
 
 

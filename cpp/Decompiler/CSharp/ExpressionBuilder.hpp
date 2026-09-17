@@ -235,6 +235,13 @@ public:
     TranslatedExpression VisitIsInst(IL::ILInstruction* inst, TranslationContext context);
     TranslatedExpression VisitSizeOf(IL::ILInstruction* inst, TranslationContext context);
     TranslatedExpression VisitLdTypeToken(IL::ILInstruction* inst, TranslationContext context);
+    // The boxing/cast conversion family (the C# lines 3285-3358): the unboxing
+    // conversion (`unbox.any`, with the isinst-to-`as` shortcut over nullable
+    // value types and reference types), the boxing conversion (`box`), and the
+    // explicit cast (`castclass`).
+    TranslatedExpression VisitUnboxAny(IL::ILInstruction* inst, TranslationContext context);
+    TranslatedExpression VisitBox(IL::ILInstruction* inst, TranslationContext context);
+    TranslatedExpression VisitCastClass(IL::ILInstruction* inst, TranslationContext context);
     // The C# `protected internal override TranslatedExpression VisitStLoc(StLoc inst,
     // TranslationContext context)` (ExpressionBuilder.cs lines 809-870): the
     // assignment arm -- the stack-slot type refinement, the by-ref re-assignment

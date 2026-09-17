@@ -3002,6 +3002,29 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   old ErrorExpression fallthrough), and all four CLI baselines unchanged
   (--csharp mscorlib 10106366 bytes, --il byte-identical to the 41246545-byte
   real-ilspycmd gold, -l c 109438, --json-alone rc 64).
+- **`ExpressionBuilder` boxing/cast conversion arms** -- the C# `VisitUnboxAny`
+  / `VisitBox` / `VisitCastClass` (`ExpressionBuilder.cs` lines 3285-3358)
+  landed and are routed from the `Visit` OpCode switch (`unbox.any` / `box` /
+  `castclass`). `VisitUnboxAny` renders the
+  `unbox.any T(isinst T(expr))` shortcut over a nullable value type or a
+  reference type as `expr as T` with the `TryCast` conversion (through the
+  already-ported `IsUnboxAnyWithIsInst` + `UnwrapBoxingConversion`), else a
+  cast from object -- the type-parameter target goes through `ResolveCast`
+  with the `EffectiveBaseClass` fallback -- with the `UnboxingConversion`.
+  `VisitBox` prefers the `nint` / `nuint` target under `NativeIntegers`, then
+  casts the converted argument to object with the `BoxingConversion`.
+  `VisitCastClass` translates the argument and `ConvertTo`s the target type
+  (the resolver-driven explicit cast). The `Unbox` / `ExpressionTreeCast` /
+  `Arglist` / `MakeRefAny` / `RefAnyValue` siblings stay deferred: the reader
+  folds `unbox` into `UnboxAny` and creates no nodes for the rest. Verified by
+  4 new `ExpressionBuilderCastTest` tests (the unboxing cast, the
+  isinst-to-`as` shortcut with the `TryCast` pin, the boxing cast over a
+  constant with the object result, and the `castclass` explicit cast), proven
+  by a RED round where exactly those 4 tests failed through the `Default`
+  fallback before the dispatch cases were wired, then restored green; full
+  Debug suite 12354 ran / 12352 passed / the 2 standing skips / zero failures,
+  and the CLI baselines are structurally unchanged (the Phase-5 back end is
+  not yet wired into the `--csharp` CLI path).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
