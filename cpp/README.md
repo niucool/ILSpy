@@ -5807,6 +5807,27 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   failed, the 3 negatives stayed green). The full Debug gtest suite is 12966 ran /
   12964 passed / the 2 standing skips / zero failures, and the CLI baselines are
   unchanged (`--csharp` 10106360, `--il` 41246545, `-l c` 109438 bytes).
+- **`CallBuilder.CallWithNamedArgs`** -- the named-argument block render lands
+  (`CallBuilder.cs` lines 2213-2240), completing the `CallBuilder` public
+  surface. The render lays the block's `StLoc` entries (the promoted arguments,
+  one per `VariableKind.NamedArgument` variable, the instance call's `this_arg`
+  included) into a fresh argument vector, maps each to its parameter slot by its
+  load's `ChildIndex` shifted by `firstParamIndex` (`1` for an instance call),
+  then appends the remaining call arguments (skipping the promoted
+  `NamedArgument` loads), and routes the result through the mainline `Build`
+  with that explicit argument-to-parameter map. The output therefore names the
+  arguments from the first out-of-place one onward, exactly as the C# `
+  BuildArgumentList` map does, and the result carries both the call's and the
+  block's IL-instruction annotations. The `CallInstruction` cast ports to a
+  `dynamic_cast` with a loud `std::logic_error` on a call with no resolved
+  method (the C# assumes non-null). Verified by 5 new tests (the promoted-
+  argument reorder that names `b` then `a`, the in-order promotion that emits no
+  names, the instance-call `firstParamIndex` shift, the call+block annotation
+  pair, and the missing-method throw) proven with a throw-neuter RED round
+  (exactly the 4 positive tests failed, the throw test stayed green). The full
+  Debug gtest suite is 12985 ran / 12983 passed / the 2 standing skips / zero
+  failures, and the CLI baselines are byte-identical (`--csharp` 10106360,
+  `--il` 41246545, `-l c` 109438).
 - **`NamedArgumentTransform` + the `ILInlining` named-argument search** -- the
   named-argument promotion that unblocks the `CallWithNamedArgs` block render
   lands (`NamedArgumentTransform.cs`). The transform has the C# three static
@@ -5826,8 +5847,9 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   context carries no compilation (the `context.TypeSystem.FindType` divergence).
   The C# `OptionsForBlock` aggressive/ordering heuristics are not modeled, so
   only the `IntroduceNamedArguments` flag is set. The transform is NOT wired into
-  `GetILTransforms()`: the `CallWithNamedArgs` block render in `CallBuilder` has
-  not landed, so emitting such blocks would break the seed back end. Verified by
+  `GetILTransforms()`: the `CallWithNamedArgs` block render has since landed in
+  `CallBuilder`, but the seed back end (`ILAstToCSharp`) has no block-kind arm
+  for `CallWithNamedArgs`, so emitting such blocks would break it. Verified by
   a 10-test `NamedArgumentTransformTest` suite (the static-call and instance-call
   promotion structures, the setting-off keep, the existing-block extension, the
   operator / delegate-constructor / empty-parameter-name / this-pointer /
@@ -5839,10 +5861,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   41246545, `-l c` 109438).
 - **`CallBuilder.BuildCollectionInitializerExpression` / `BuildDictionaryInitializerExpression`**
   -- the two object/collection-initializer entry points land (`CallBuilder.cs`
-  lines 667-753), completing the CallBuilder public surface apart from the
-  `CallWithNamedArgs` block render (the `BlockKind.CallWithNamedArgs` producer,
-  `NamedArgumentTransform`/ILInlining named-argument machinery has since landed;
-  only the `CallBuilder` render remains).
+  lines 667-753), completing the `CallBuilder` public surface apart from the
+  `CallWithNamedArgs` block render that has since landed.
   `BuildCollectionInitializerExpression` builds the `Add(...)` argument list
   (inserting a Nop target for an extension method), forces positional/unnamed
   arguments, runs the overload-resolution fix ladder, and answers either the

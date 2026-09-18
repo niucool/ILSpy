@@ -79,6 +79,7 @@
 #include "Decompiler/DecompileRun.hpp"
 #include "Decompiler/IL/Instructions/AddressOf.hpp"
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
+#include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
@@ -86,6 +87,8 @@
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/VariableKind.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
@@ -110,6 +113,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <any>
 #include <iostream>
 #include <memory>
@@ -5318,4 +5322,230 @@ TEST(BuildDictionaryInitializerTest, WithoutAValueAnswersTheDetachedIndexer)
     ASSERT_NE(rr, nullptr);
     EXPECT_EQ(rr->Member()->MemberDefinition(),
               fixture.prop->MemberDefinition());
+}
+
+// ---------------------------------------------------------------------------
+// CallWithNamedArgs: the named-argument call render (CallBuilder.cs lines
+// 2213-2240). The blocks are hand-built (the shape NamedArgumentTransform
+// produces: the promoted argument's StLoc in the block, the remaining call
+// arguments in the call).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A two-int-parameter method named `Target` (the C# `Target(a, b)` render
+// shape) plus the static / instance call builders the tests compose.
+struct NamedArgsCallFixture : BuildArgsFixture
+{
+    std::shared_ptr<TS::TestSupport::LookupTypeDefinition> holderDef;
+    std::shared_ptr<TS::Implementation::FakeMethod> target;
+
+    NamedArgsCallFixture()
+    {
+        holderDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+            "Holder", "H", TS::FullTypeName(TS::TopLevelTypeName("H", "Holder")),
+            TS::TypeKind::Class, TS::Accessibility::Public, holder.compilation,
+            &holder.compilation.MainModule());
+        target = std::make_shared<TS::Implementation::FakeMethod>(
+            holder.compilation, TS::SymbolKind::Method);
+        target->SetName("Target");
+        target->SetIsStatic(true);
+        target->SetDeclaringType(TS::ITypePtr(holderDef.get(), [](TS::IType*) {}));
+        ParamFixture a(holder.KnownType(TS::KnownTypeCode::Int32), "a");
+        ParamFixture b(holder.KnownType(TS::KnownTypeCode::Int32), "b");
+        target->SetParameters({a.parameter, b.parameter});
+        target->SetReturnType(holder.KnownType(TS::KnownTypeCode::Void));
+        holderDef->SetMethods({target.get()});
+        SetCurrentTypeDefinition(holderDef.get());
+    }
+
+    std::shared_ptr<IL::ILVariable> NamedVar(const char* name = "namedArg")
+    {
+        auto v = std::make_shared<IL::ILVariable>(
+            IL::VariableKind::NamedArgument,
+            holder.KnownType(TS::KnownTypeCode::Int32));
+        v->Name = name;
+        return v;
+    }
+};
+
+} // namespace
+
+TEST(CallWithNamedArgsTest, ReordersPromotedArgumentToItsMappedParameter)
+{
+    // The block order promotes parameter `b`'s argument, but the load sits at
+    // the call's second argument slot: the render must name the arguments
+    // (b first, then a) because the promoted value's position no longer matches
+    // its parameter.
+    NamedArgsCallFixture fixture;
+    auto namedV = fixture.NamedVar();
+
+    IL::Block block;
+    block.Kind = IL::BlockKind::CallWithNamedArgs;
+    block.Add(std::make_unique<IL::StLoc>(namedV, std::make_unique<IL::LdcI4>(2)));
+
+    auto call = std::make_unique<IL::Call>("Target");
+    call->Method = fixture.target;
+    call->IsInstanceCall = false;
+    call->ReturnType = IL::StackType::Void;
+    call->AddArg(std::make_unique<IL::LdcI4>(3));      // parameter a
+    call->AddArg(std::make_unique<IL::LdLoc>(namedV)); // parameter b
+    block.SetFinal(std::move(call));
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::TranslatedExpression result = builder.CallWithNamedArgs(block);
+
+    auto* invocation =
+        dynamic_cast<Syntax::InvocationExpression*>(result.Expression());
+    ASSERT_NE(invocation, nullptr);
+    ASSERT_EQ(invocation->Arguments().Count(), 2);
+    auto* first =
+        dynamic_cast<Syntax::NamedArgumentExpression*>(invocation->Arguments()[0]);
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(first->Name(), "b");
+    auto* firstValue =
+        dynamic_cast<Syntax::PrimitiveExpression*>(first->Expression());
+    ASSERT_NE(firstValue, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(firstValue->Value()), 2);
+    auto* second =
+        dynamic_cast<Syntax::NamedArgumentExpression*>(invocation->Arguments()[1]);
+    ASSERT_NE(second, nullptr);
+    EXPECT_EQ(second->Name(), "a");
+    auto* secondValue =
+        dynamic_cast<Syntax::PrimitiveExpression*>(second->Expression());
+    ASSERT_NE(secondValue, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(secondValue->Value()), 3);
+}
+
+TEST(CallWithNamedArgsTest, InOrderPromotionRendersPlainArguments)
+{
+    // A promoted argument whose load already sits at its parameter slot leaves
+    // the map ordinal, so the C# emits no argument names at all.
+    NamedArgsCallFixture fixture;
+    auto namedV = fixture.NamedVar();
+
+    IL::Block block;
+    block.Kind = IL::BlockKind::CallWithNamedArgs;
+    block.Add(std::make_unique<IL::StLoc>(namedV, std::make_unique<IL::LdcI4>(1)));
+
+    auto call = std::make_unique<IL::Call>("Target");
+    call->Method = fixture.target;
+    call->IsInstanceCall = false;
+    call->ReturnType = IL::StackType::Void;
+    call->AddArg(std::make_unique<IL::LdLoc>(namedV)); // parameter a
+    call->AddArg(std::make_unique<IL::LdcI4>(2));      // parameter b
+    block.SetFinal(std::move(call));
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::TranslatedExpression result = builder.CallWithNamedArgs(block);
+
+    auto* invocation =
+        dynamic_cast<Syntax::InvocationExpression*>(result.Expression());
+    ASSERT_NE(invocation, nullptr);
+    ASSERT_EQ(invocation->Arguments().Count(), 2);
+    EXPECT_EQ(dynamic_cast<Syntax::NamedArgumentExpression*>(
+                  invocation->Arguments()[0]),
+              nullptr);
+    EXPECT_EQ(dynamic_cast<Syntax::NamedArgumentExpression*>(
+                  invocation->Arguments()[1]),
+              nullptr);
+}
+
+TEST(CallWithNamedArgsTest, InstanceCallShiftsTheParameterMap)
+{
+    // The instance call's receiver occupies the block's first promoted slot and
+    // the call's argument slot 0; the parameter map shift (firstParamIndex == 1)
+    // must keep the remaining arguments on `a`/`b`.
+    NamedArgsCallFixture fixture;
+    fixture.target->SetIsStatic(false);
+    auto thisV = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Parameter,
+        TS::ITypePtr(fixture.holderDef.get(), [](TS::IType*) {}), -1);
+    thisV->Name = "this";
+    auto thisNamedV = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::NamedArgument,
+        TS::ITypePtr(fixture.holderDef.get(), [](TS::IType*) {}), -1);
+    thisNamedV->Name = "this_arg";
+    auto namedV = fixture.NamedVar();
+
+    IL::Block block;
+    block.Kind = IL::BlockKind::CallWithNamedArgs;
+    block.Add(std::make_unique<IL::StLoc>(thisNamedV,
+                                          std::make_unique<IL::LdLoc>(thisV)));
+    block.Add(std::make_unique<IL::StLoc>(namedV, std::make_unique<IL::LdcI4>(2)));
+
+    auto call = std::make_unique<IL::Call>("Target");
+    call->Method = fixture.target;
+    call->IsInstanceCall = true;
+    call->ReturnType = IL::StackType::Void;
+    call->AddArg(std::make_unique<IL::LdLoc>(thisNamedV)); // this
+    call->AddArg(std::make_unique<IL::LdcI4>(3));          // parameter a
+    call->AddArg(std::make_unique<IL::LdLoc>(namedV));     // parameter b
+    block.SetFinal(std::move(call));
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::TranslatedExpression result = builder.CallWithNamedArgs(block);
+
+    auto* invocation =
+        dynamic_cast<Syntax::InvocationExpression*>(result.Expression());
+    ASSERT_NE(invocation, nullptr);
+    ASSERT_EQ(invocation->Arguments().Count(), 2);
+    auto* first =
+        dynamic_cast<Syntax::NamedArgumentExpression*>(invocation->Arguments()[0]);
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(first->Name(), "b");
+    auto* second =
+        dynamic_cast<Syntax::NamedArgumentExpression*>(invocation->Arguments()[1]);
+    ASSERT_NE(second, nullptr);
+    EXPECT_EQ(second->Name(), "a");
+}
+
+TEST(CallWithNamedArgsTest, CarriesBothTheCallAndBlockAnnotations)
+{
+    // The C# `Build(...).WithILInstruction(call).WithILInstruction(block)`.
+    NamedArgsCallFixture fixture;
+    auto namedV = fixture.NamedVar();
+
+    IL::Block block;
+    block.Kind = IL::BlockKind::CallWithNamedArgs;
+    block.Add(std::make_unique<IL::StLoc>(namedV, std::make_unique<IL::LdcI4>(2)));
+
+    auto call = std::make_unique<IL::Call>("Target");
+    call->Method = fixture.target;
+    call->IsInstanceCall = false;
+    call->ReturnType = IL::StackType::Void;
+    call->AddArg(std::make_unique<IL::LdcI4>(3));
+    call->AddArg(std::make_unique<IL::LdLoc>(namedV));
+    IL::ILInstruction* callPtr = call.get();
+    block.SetFinal(std::move(call));
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::TranslatedExpression result = builder.CallWithNamedArgs(block);
+
+    std::vector<IL::ILInstruction*> instructions =
+        CS::GetILInstructions(*result.Expression());
+    EXPECT_NE(std::find(instructions.begin(), instructions.end(), callPtr),
+              instructions.end());
+    EXPECT_NE(std::find(instructions.begin(), instructions.end(), &block),
+              instructions.end());
+}
+
+TEST(CallWithNamedArgsTest, ThrowsWithoutAResolvedMethod)
+{
+    NamedArgsCallFixture fixture;
+    auto namedV = fixture.NamedVar();
+
+    IL::Block block;
+    block.Kind = IL::BlockKind::CallWithNamedArgs;
+    block.Add(std::make_unique<IL::StLoc>(namedV, std::make_unique<IL::LdcI4>(1)));
+
+    auto call = std::make_unique<IL::Call>("Target");
+    call->IsInstanceCall = false;
+    call->ReturnType = IL::StackType::Void;
+    call->AddArg(std::make_unique<IL::LdcI4>(1));
+    call->AddArg(std::make_unique<IL::LdcI4>(2));
+    block.SetFinal(std::move(call));
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    EXPECT_THROW(builder.CallWithNamedArgs(block), std::logic_error);
 }

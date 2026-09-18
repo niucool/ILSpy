@@ -33,10 +33,14 @@
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
 #include "Decompiler/IL/Instructions/AddressOf.hpp"
+#include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/DefaultValue.hpp"
+#include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/VariableKind.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/NRExtensions.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"
@@ -2230,6 +2234,71 @@ ExpressionWithResolveResult CallBuilder::BuildDictionaryInitializerExpression(
         return assignment;
 
     return ExpressionWithResolveResult(Syntax::Detach(assignmentExpr->Left()));
+}
+
+// The C# `internal TranslatedExpression CallWithNamedArgs(Block block)`
+// (CallBuilder.cs lines 2213-2240) -- the named-argument call render.
+TranslatedExpression CallBuilder::CallWithNamedArgs(IL::Block& block)
+{
+    assert(block.Kind == IL::BlockKind::CallWithNamedArgs);
+    auto* call = dynamic_cast<IL::Call*>(block.FinalInstruction.get());
+    assert(call != nullptr);
+    if (call->Method == nullptr)
+        throw std::logic_error(
+            "CallWithNamedArgs: the call has no resolved method");
+
+    const std::size_t argumentCount = call->Arguments.size();
+    std::vector<IL::ILInstruction*> arguments(argumentCount, nullptr);
+    std::vector<int> argumentToParameterMap(argumentCount, 0);
+    const int firstParamIndex = call->IsInstanceCall ? 1 : 0;
+    std::size_t pos = 0;
+
+    // Arguments from temporary variables (VariableKind.NamedArgument): the
+    // C# `stloc.Variable.LoadInstructions.Single()` is a direct child of the
+    // call, so its ChildIndex is the slot the promoted value occupies.
+    for (const std::unique_ptr<IL::ILInstruction>& inst : block.Instructions)
+    {
+        auto* stloc = dynamic_cast<IL::StLoc*>(inst.get());
+        assert(stloc != nullptr);
+        IL::ILInstruction* load = nullptr;
+        for (const std::unique_ptr<IL::ILInstruction>& arg : call->Arguments)
+        {
+            auto* ldloc = dynamic_cast<IL::LdLoc*>(arg.get());
+            if (ldloc != nullptr && ldloc->Variable.get() == stloc->Variable.get())
+            {
+                load = arg.get();
+                break;
+            }
+        }
+        assert(load != nullptr);
+        assert(load->Parent == call);
+        arguments[pos] = stloc->Value.get();
+        argumentToParameterMap[pos] = load->ChildIndex - firstParamIndex;
+        pos++;
+    }
+
+    // Remaining arguments: the C# `arg.MatchLdLoc(out var v) && v.Kind ==
+    // VariableKind.NamedArgument` skips every promoted load handled above.
+    for (const std::unique_ptr<IL::ILInstruction>& arg : call->Arguments)
+    {
+        auto* ldloc = dynamic_cast<IL::LdLoc*>(arg.get());
+        if (ldloc != nullptr && ldloc->Variable != nullptr
+            && ldloc->Variable->Kind == IL::VariableKind::NamedArgument)
+            continue; // already handled in the loop above
+        arguments[pos] = arg.get();
+        argumentToParameterMap[pos] = arg->ChildIndex - firstParamIndex;
+        pos++;
+    }
+    assert(pos == argumentCount);
+
+    // The C# `call.OpCode` -- the port's one-Call-node convention (as in the
+    // Build(IL::Call) entry): newobj vs call.
+    IL::OpCode callOpCode = call->IsNewObj ? IL::OpCode::NewObj : IL::OpCode::Call;
+    const TS::IType* constrained =
+        call->ConstrainedTo ? call->ConstrainedTo.get() : nullptr;
+    ExpressionWithResolveResult built = Build(callOpCode, *call->Method, arguments,
+                                              argumentToParameterMap, constrained);
+    return WithILInstruction(WithILInstruction(built, call), &block);
 }
 
 // The C# `private static bool IsInterpolatedStringCreation(IMethod method,

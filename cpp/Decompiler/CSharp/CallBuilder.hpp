@@ -75,7 +75,11 @@
 // BuildDictionaryInitializerExpression) are ported; their caller
 // (ExpressionBuilder.TranslateObjectAndCollectionInitializer) and the
 // TransformCollectionAndObjectInitializers/AccessPathElement machinery that
-// builds the initializer blocks remain the deferred consumer.
+// builds the initializer blocks remain the deferred consumer. The named-argument
+// block render (CallWithNamedArgs) is ported too, completing the public surface;
+// its consumer (the ExpressionBuilder block-kind dispatch) and the
+// NamedArgumentTransform's GetILTransforms wiring remain deferred so the seed
+// back end is untouched.
 
 #pragma once
 
@@ -108,6 +112,7 @@ class InitializedObjectResolveResult;
 }
 
 namespace ILSpy::Decompiler::IL {
+class Block;
 class Call;
 class ILInstruction;
 class LdVirtDelegate;
@@ -515,6 +520,18 @@ public:
         std::shared_ptr<Sem::InitializedObjectResolveResult> target,
         const std::vector<IL::ILInstruction*>& indices,
         IL::ILInstruction* value = nullptr);
+
+    // The C# `internal TranslatedExpression CallWithNamedArgs(Block block)`
+    // (CallBuilder.cs lines 2213-2240): the named-argument call render produced
+    // by NamedArgumentTransform -- the block's `StLoc` entries are the promoted
+    // arguments (one per `VariableKind.NamedArgument` variable, the instance
+    // call's `this_arg` included), and the remaining call arguments follow. Each
+    // argument is mapped to its parameter slot by its load's `ChildIndex` (the
+    // `firstParamIndex` shift for an instance call), then the whole vector routes
+    // through the mainline Build with that explicit map. The result carries the
+    // call's and the block's IL-instruction annotations. Made public for tests
+    // (the C# internal member).
+    TranslatedExpression CallWithNamedArgs(IL::Block& block);
 
     // The C# `internal static bool IsSpanBasedStringConcat(IMethod method)`
     // (CallBuilder.cs lines 300-318): whether the method is a static
