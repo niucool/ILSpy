@@ -57,9 +57,14 @@
 // also lands. The inline-array `foreach` rewrite (`TransformForeachOnInlineArray`) also lands:
 // the compiler's `for (i = 0; i < N; i++) { item =
 // <PrivateImplementationDetails>.InlineArrayElementRef(ref buffer, i); ... }` over an
-// `[InlineArray(N)]` buffer is reconstructed as `foreach (item in buffer)`. The automatic
-// property/event rewrites and the backing-field replacement stay deferred -- each is named at
-// the visit that would call it.
+// `[InlineArray(N)]` buffer is reconstructed as `foreach (item in buffer)`. This slice adds the
+// automatic-property rewrite (`VisitPropertyDeclaration` / `TransformAutomaticProperty`): the
+// private compiler-generated backing field and the getter/setter pair are recognized and the
+// accessor bodies cleared, turning the property back into an auto-property, with the backing
+// field declaration removed and its remaining attributes moved onto the property with the
+// `field` target. The automatic-EVENT rewrite (which needs the `PropertyAndEventBackingFieldLookup`
+// metadata machinery) and the `VisitIdentifier` backing-field replacement remain deferred -- each
+// is named at the visit that would call it.
 
 #pragma once
 
@@ -81,6 +86,7 @@ class ForStatement;
 class IdentifierExpression;
 class IfElseStatement;
 class MethodDeclaration;
+class PropertyDeclaration;
 class Statement;
 class TryCatchStatement;
 class UsingStatement;
@@ -90,6 +96,10 @@ class WhileStatement;
 namespace ILSpy::Decompiler::IL {
 class BlockContainer;
 class ILVariable;
+}
+
+namespace ILSpy::Decompiler::TypeSystem {
+class IProperty;
 }
 
 namespace ILSpy::Decompiler::CSharp::Transforms {
@@ -136,6 +146,13 @@ public:
     // The C# `public override AstNode VisitTryCatchStatement(TryCatchStatement ...)`: merges a
     // nested `try { try {} catch {} } finally {}` into a single try-catch-finally.
     Syntax::AstNode* VisitTryCatchStatement(Syntax::TryCatchStatement* tryCatchStatement) override;
+
+    // The C# `public override AstNode VisitPropertyDeclaration(PropertyDeclaration ...)`: with
+    // `AutomaticProperties` on (and a setter present or `GetterOnlyAutomaticProperties` on),
+    // rewrites the private compiler-generated backing-field getter/setter pair back into an
+    // automatic property and hides the backing field declaration, then continues the child walk.
+    Syntax::AstNode* VisitPropertyDeclaration(
+        Syntax::PropertyDeclaration* propertyDeclaration) override;
 
     // The C# `public override AstNode VisitMethodDeclaration(MethodDeclaration ...)`: converts a
     // `Finalize` method into a destructor declaration.
@@ -206,6 +223,23 @@ private:
     // `[InlineArray(N)]` buffer back to `foreach (var item in buffer) { ... }`, or null when
     // the shape does not match.
     Syntax::Statement* TransformForeachOnInlineArray(Syntax::ForStatement* forStatement);
+
+    // The C# `bool CanTransformToAutomaticProperty(IProperty property, bool
+    // accessorsMustBeCompilerGenerated)`: whether the property can be rendered as an
+    // auto-property -- readable, and (when the accessors must be compiler-generated) both the
+    // getter and the setter are compiler-generated with a non-readonly setter.
+    bool CanTransformToAutomaticProperty(
+        const ILSpy::Decompiler::TypeSystem::IProperty& property,
+        bool accessorsMustBeCompilerGenerated);
+
+    // The C# `PropertyDeclaration? TransformAutomaticProperty(PropertyDeclaration ...)`: matches
+    // the getter/setter (or getter-only) backing-field shape and, when the backing field is a
+    // compiler-generated field of the property's own declaring type, clears the accessor bodies
+    // and removes the backing field declaration (moving its attributes onto the property). The
+    // C# always returns null (the property instance is not replaced), so the port keeps the
+    // nullable return for fidelity.
+    Syntax::AstNode* TransformAutomaticProperty(
+        Syntax::PropertyDeclaration* propertyDeclaration);
 
     // The C# `bool MatchLowerBound(int indexNum, out ILVariable? index, ILVariable collection,
     // Statement statement)`: matches `$variable = $collection.GetLowerBound($indexNum)`.

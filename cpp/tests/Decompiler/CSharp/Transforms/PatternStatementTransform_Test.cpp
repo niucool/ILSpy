@@ -27,6 +27,8 @@
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 
 #include "Decompiler/CSharp/Annotations.hpp"
+#include "Decompiler/CSharp/Syntax/Accessor.hpp"
+#include "Decompiler/CSharp/Syntax/Attribute.hpp"
 #include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
 #include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
@@ -39,8 +41,11 @@
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/FieldDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/MethodDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
+#include "Decompiler/CSharp/Syntax/PropertyDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
@@ -66,6 +71,10 @@
 #include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/CustomAttributeNamedArgument.hpp"
+#include "Decompiler/TypeSystem/IField.hpp"
+#include "Decompiler/TypeSystem/IProperty.hpp"
+#include "Decompiler/TypeSystem/KnownAttribute.hpp"
+#include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
 #include "Decompiler/TypeSystem/LookupStubs.hpp"
@@ -1902,4 +1911,344 @@ TEST(PatternStatementTransformTest, KeepsInlineArrayLoopWhenItemNotSingleDefinit
 
     ASSERT_EQ(block->Statements().Count(), 1);
     EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// ---- automatic properties -----------------------------------------------------------
+
+namespace {
+
+// A `FakeField` reporting `[CompilerGenerated]`.
+class CompilerGeneratedField : public Impl::FakeField {
+public:
+    explicit CompilerGeneratedField(const TS::ICompilation& compilation)
+        : Impl::FakeField(compilation) {}
+    bool HasAttribute(TS::KnownAttribute attribute) const override {
+        return attribute == TS::KnownAttribute::CompilerGenerated
+            || Impl::FakeField::HasAttribute(attribute);
+    }
+};
+
+// A `FakeMethod` reporting `[CompilerGenerated]`.
+class CompilerGeneratedMethod : public Impl::FakeMethod {
+public:
+    explicit CompilerGeneratedMethod(const TS::ICompilation& compilation)
+        : Impl::FakeMethod(compilation, TS::SymbolKind::Method) {}
+    bool HasAttribute(TS::KnownAttribute attribute) const override {
+        return attribute == TS::KnownAttribute::CompilerGenerated
+            || Impl::FakeMethod::HasAttribute(attribute);
+    }
+};
+
+// A type definition whose `FullName` is `<ns>.<name>` and whose `FullTypeName` is the
+// matching top-level name (the attribute-type fixture the `IsKnownType` classification and
+// the full-name attribute removal compare against).
+std::shared_ptr<TestSupport::LookupTypeDefinition> MakeNamedTypeDef(
+    const TS::ICompilation& compilation, const std::string& ns, const std::string& name) {
+    const std::string fullName = ns.empty() ? name : ns + "." + name;
+    return std::make_shared<TestSupport::LookupTypeDefinition>(
+        fullName, ns, TS::FullTypeName(TS::TopLevelTypeName(ns, name)), TS::TypeKind::Class,
+        TS::Accessibility::Public, compilation, nullptr);
+}
+
+// `[<resolved type>]` -- an attribute section whose type node resolves to `typeDef`.
+Syntax::AttributeSection* MakeAttributeSection(
+    const std::shared_ptr<TestSupport::LookupTypeDefinition>& typeDef) {
+    auto* simpleType = new Syntax::SimpleType(typeDef->Name());
+    simpleType->AddAnnotation(std::make_shared<Sem::TypeResolveResult>(
+        std::static_pointer_cast<TS::IType>(typeDef)));
+    return new Syntax::AttributeSection(new Syntax::Attribute(simpleType));
+}
+
+// The `IField`-typed `IMember` handle for a fake field: the `FakeField` diamond shares its
+// `IMember` base with `FakeMember`, so the annotation is built through the `FakeMember`
+// subobject, while the identity comparison goes through the unambiguous `IField` subobject.
+const TS::IMember* AsMember(const Impl::FakeMember& member) {
+    return static_cast<const TS::IMember*>(static_cast<const Impl::FakeMember*>(&member));
+}
+const TS::IMember* AsMember(const Impl::FakeMethod& member) {
+    return static_cast<const TS::IMember*>(static_cast<const Impl::FakeMember*>(&member));
+}
+
+// A fully built `class C { <field>; int P { get { return <field>; } set { <field> = value; } } }`
+// with resolved symbols, the compiler backing-field name, and the attribute shapes the
+// automatic-property rewrite consumes.
+class AutoPropertyFixture {
+public:
+    explicit AutoPropertyFixture(TransformFixture& f)
+        : fixture(f),
+          typeDef(MakeNamedTypeDef(f.compilation, "N", "C")),
+          compilerGeneratedAttr(MakeNamedTypeDef(
+              f.compilation, "System.Runtime.CompilerServices", "CompilerGeneratedAttribute")),
+          debuggerBrowsableAttr(
+              MakeNamedTypeDef(f.compilation, "System.Diagnostics", "DebuggerBrowsableAttribute")),
+          markerAttr(MakeNamedTypeDef(f.compilation, "N", "MarkerAttribute")),
+          field(std::make_shared<CompilerGeneratedField>(f.compilation)),
+          getter(std::make_shared<CompilerGeneratedMethod>(f.compilation)),
+          setter(std::make_shared<CompilerGeneratedMethod>(f.compilation)),
+          property(std::make_shared<Impl::FakeProperty>(f.compilation)) {
+        field->SetName("<P>k__BackingField");
+        field->SetDeclaringType(typeDef);
+        field->SetReturnType(f.FindType(TS::KnownTypeCode::Int32));
+        getter->SetName("get_P");
+        getter->SetDeclaringType(typeDef);
+        setter->SetName("set_P");
+        setter->SetDeclaringType(typeDef);
+        property->SetName("P");
+        property->SetDeclaringType(typeDef);
+        property->SetGetter(getter.get());
+        property->SetSetter(setter.get());
+        property->SetReturnType(f.FindType(TS::KnownTypeCode::Int32));
+    }
+
+    // The `IField*` identity the field declaration annotation must resolve to.
+    TS::IField* FieldPointer() { return static_cast<TS::IField*>(field.get()); }
+
+    // Builds `int <P>k__BackingField;` (with the compiler-generated, debugger-browsable and a
+    // marker attribute) plus `int P { get { return <P>k__BackingField; } set { ... } }` inside a
+    // `class C` and returns the type declaration. `withSetter` drops the setter; `useDerivedField`
+    // / `useDerivedAccessors` swap in the non-compiler-generated fakes.
+    Syntax::TypeDeclaration* Make(bool withSetter = true, bool useDerivedField = true,
+                                  bool useDerivedAccessors = true) {
+        if (!useDerivedField) {
+            field = std::make_shared<Impl::FakeField>(fixture.compilation);
+            field->SetName("<P>k__BackingField");
+            field->SetDeclaringType(typeDef);
+            field->SetReturnType(fixture.FindType(TS::KnownTypeCode::Int32));
+        }
+        if (!useDerivedAccessors) {
+            getter = std::make_shared<Impl::FakeMethod>(fixture.compilation, TS::SymbolKind::Method);
+            getter->SetName("get_P");
+            getter->SetDeclaringType(typeDef);
+            setter = std::make_shared<Impl::FakeMethod>(fixture.compilation, TS::SymbolKind::Method);
+            setter->SetName("set_P");
+            setter->SetDeclaringType(typeDef);
+        }
+        property->SetGetter(getter.get());
+        property->SetSetter(withSetter ? setter.get() : nullptr);
+
+        const TS::ITypePtr intType = fixture.FindType(TS::KnownTypeCode::Int32);
+
+        fieldDecl = new Syntax::FieldDeclaration();
+        fieldDecl->ReturnType(new Syntax::PrimitiveType("int"));
+        fieldDecl->Variables().Add(new Syntax::VariableInitializer("<P>k__BackingField"));
+        fieldDecl->AddAnnotation(
+            std::make_shared<Sem::MemberResolveResult>(nullptr, AsMember(*field), intType));
+        fieldDecl->Attributes().Add(MakeAttributeSection(compilerGeneratedAttr));
+        fieldDecl->Attributes().Add(MakeAttributeSection(debuggerBrowsableAttr));
+        fieldDecl->Attributes().Add(MakeAttributeSection(markerAttr));
+
+        prop = new Syntax::PropertyDeclaration();
+        prop->ReturnType(new Syntax::PrimitiveType("int"));
+        prop->Name("P");
+        prop->AddAnnotation(
+            std::make_shared<Sem::MemberResolveResult>(nullptr, AsMember(*property), intType));
+
+        auto* getterAccessor = new Syntax::Accessor(Syntax::AccessorKind::Getter);
+        getterAccessor->Attributes().Add(MakeAttributeSection(compilerGeneratedAttr));
+        auto* getterBody = new Syntax::BlockStatement();
+        getterRef = new Syntax::IdentifierExpression("<P>k__BackingField");
+        getterRef->AddAnnotation(
+            std::make_shared<Sem::MemberResolveResult>(nullptr, AsMember(*field), intType));
+        getterBody->Statements().Add(new Syntax::ReturnStatement(getterRef));
+        getterAccessor->Body(getterBody);
+        prop->Getter(getterAccessor);
+
+        if (withSetter) {
+            auto* setterAccessor = new Syntax::Accessor(Syntax::AccessorKind::Setter);
+            setterAccessor->Attributes().Add(MakeAttributeSection(compilerGeneratedAttr));
+            auto* setterBody = new Syntax::BlockStatement();
+            auto* assignment = new Syntax::AssignmentExpression(
+                new Syntax::IdentifierExpression("<P>k__BackingField"),
+                new Syntax::IdentifierExpression("value"));
+            setterBody->Statements().Add(new Syntax::ExpressionStatement(assignment));
+            setterAccessor->Body(setterBody);
+            prop->Setter(setterAccessor);
+        }
+
+        typeDecl = new Syntax::TypeDeclaration();
+        typeDecl->Name("C");
+        typeDecl->AddAnnotation(std::make_shared<Sem::TypeResolveResult>(
+            std::static_pointer_cast<TS::IType>(typeDef)));
+        typeDecl->Members().Add(fieldDecl);
+        typeDecl->Members().Add(prop);
+        return typeDecl;
+    }
+
+    TransformFixture& fixture;
+    std::shared_ptr<TestSupport::LookupTypeDefinition> typeDef;
+    std::shared_ptr<TestSupport::LookupTypeDefinition> compilerGeneratedAttr;
+    std::shared_ptr<TestSupport::LookupTypeDefinition> debuggerBrowsableAttr;
+    std::shared_ptr<TestSupport::LookupTypeDefinition> markerAttr;
+    std::shared_ptr<Impl::FakeField> field;
+    std::shared_ptr<Impl::FakeMethod> getter;
+    std::shared_ptr<Impl::FakeMethod> setter;
+    std::shared_ptr<Impl::FakeProperty> property;
+    Syntax::TypeDeclaration* typeDecl = nullptr;
+    Syntax::FieldDeclaration* fieldDecl = nullptr;
+    Syntax::PropertyDeclaration* prop = nullptr;
+    Syntax::IdentifierExpression* getterRef = nullptr;
+};
+
+} // namespace
+
+// A getter/setter pair over a compiler-generated backing field becomes an auto-property: the
+// accessor bodies are cleared, the backing field declaration is removed, and its remaining
+// attribute moves onto the property with the `field` target.
+TEST(PatternStatementTransformTest, ConvertsGetterSetterPairToAutoProperty)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    auto* typeDecl = model.Make();
+
+    RunTransform(fixture, *typeDecl);
+
+    EXPECT_TRUE(model.prop->IsAutomaticProperty());
+    EXPECT_EQ(model.prop->Getter()->Body(), nullptr);
+    EXPECT_EQ(model.prop->Setter()->Body(), nullptr);
+    EXPECT_EQ(model.prop->Getter()->Attributes().Count(), 0);
+    EXPECT_EQ(model.prop->Setter()->Attributes().Count(), 0);
+    EXPECT_EQ(typeDecl->Members().Count(), 1);
+    EXPECT_EQ(typeDecl->Members()[0], static_cast<Syntax::EntityDeclaration*>(model.prop));
+    ASSERT_EQ(model.prop->Attributes().Count(), 1);
+    EXPECT_EQ(model.prop->Attributes()[0]->AttributeTarget(), "field");
+    EXPECT_NE(model.prop->Attributes()[0]->Attributes()[0]
+                  ->Type(),
+              nullptr);
+}
+
+// A get-only property over a compiler-generated backing field becomes an auto-property (the
+// read-only pattern).
+TEST(PatternStatementTransformTest, ConvertsGetterOnlyPropertyToAutoProperty)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    auto* typeDecl = model.Make(/*withSetter=*/false);
+
+    RunTransform(fixture, *typeDecl);
+
+    EXPECT_TRUE(model.prop->IsAutomaticProperty());
+    EXPECT_EQ(model.prop->Getter()->Body(), nullptr);
+    EXPECT_EQ(model.prop->Setter(), nullptr);
+    EXPECT_EQ(typeDecl->Members().Count(), 1);
+}
+
+// With `AutomaticProperties` off the property is left alone.
+TEST(PatternStatementTransformTest, KeepsPropertyWhenAutomaticPropertiesDisabled)
+{
+    TransformFixture fixture;
+    fixture.settings.SetAutomaticProperties(false);
+    AutoPropertyFixture model(fixture);
+    auto* typeDecl = model.Make();
+
+    RunTransform(fixture, *typeDecl);
+
+    EXPECT_FALSE(model.prop->IsAutomaticProperty());
+    EXPECT_NE(model.prop->Getter()->Body(), nullptr);
+    EXPECT_EQ(typeDecl->Members().Count(), 2);
+}
+
+// A get-only property with `GetterOnlyAutomaticProperties` off is left alone.
+TEST(PatternStatementTransformTest, KeepsGetterOnlyPropertyWhenGetterOnlyDisabled)
+{
+    TransformFixture fixture;
+    fixture.settings.SetGetterOnlyAutomaticProperties(false);
+    AutoPropertyFixture model(fixture);
+    auto* typeDecl = model.Make(/*withSetter=*/false);
+
+    RunTransform(fixture, *typeDecl);
+
+    EXPECT_FALSE(model.prop->IsAutomaticProperty());
+    EXPECT_NE(model.prop->Getter()->Body(), nullptr);
+    EXPECT_EQ(typeDecl->Members().Count(), 2);
+}
+
+// Accessors that are not compiler-generated block the rewrite (no VB-style `_P` field here).
+TEST(PatternStatementTransformTest, KeepsPropertyWhenAccessorsNotCompilerGenerated)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    auto* typeDecl = model.Make(/*withSetter=*/true, /*useDerivedField=*/true,
+                                /*useDerivedAccessors=*/false);
+
+    RunTransform(fixture, *typeDecl);
+
+    EXPECT_FALSE(model.prop->IsAutomaticProperty());
+    EXPECT_NE(model.prop->Getter()->Body(), nullptr);
+    EXPECT_EQ(typeDecl->Members().Count(), 2);
+}
+
+// A backing field that is not compiler-generated is not hidden.
+TEST(PatternStatementTransformTest, KeepsPropertyWhenFieldNotCompilerGenerated)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    auto* typeDecl = model.Make(/*withSetter=*/true, /*useDerivedField=*/false);
+
+    RunTransform(fixture, *typeDecl);
+
+    EXPECT_FALSE(model.prop->IsAutomaticProperty());
+    EXPECT_NE(model.prop->Getter()->Body(), nullptr);
+    EXPECT_EQ(typeDecl->Members().Count(), 2);
+}
+
+// A property without a resolved symbol is left alone.
+TEST(PatternStatementTransformTest, KeepsPropertyWithoutSymbol)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    auto* typeDecl = model.Make();
+    model.prop->RemoveAnnotations<Sem::ResolveResult>();
+
+    RunTransform(fixture, *typeDecl);
+
+    EXPECT_FALSE(model.prop->IsAutomaticProperty());
+    EXPECT_NE(model.prop->Getter()->Body(), nullptr);
+    EXPECT_EQ(typeDecl->Members().Count(), 2);
+}
+
+// A `readonly set` accessor blocks the rewrite.
+TEST(PatternStatementTransformTest, KeepsPropertyWithReadonlySetter)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    auto* typeDecl = model.Make();
+    model.prop->Setter()->Modifiers(model.prop->Setter()->Modifiers()
+                                    | Syntax::Modifiers::Readonly);
+
+    RunTransform(fixture, *typeDecl);
+
+    EXPECT_FALSE(model.prop->IsAutomaticProperty());
+    EXPECT_NE(model.prop->Getter()->Body(), nullptr);
+    EXPECT_EQ(typeDecl->Members().Count(), 2);
+}
+
+// A backing field whose declaring type differs from the property's is not hidden.
+TEST(PatternStatementTransformTest, KeepsPropertyWhenFieldDeclaringTypeDiffers)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    auto* typeDecl = model.Make();
+    auto otherType = MakeNamedTypeDef(fixture.compilation, "N", "D");
+    model.field->SetDeclaringType(otherType);
+
+    RunTransform(fixture, *typeDecl);
+
+    EXPECT_FALSE(model.prop->IsAutomaticProperty());
+    EXPECT_NE(model.prop->Getter()->Body(), nullptr);
+    EXPECT_EQ(typeDecl->Members().Count(), 2);
+}
+
+// A backing-field name the regex does not recognize blocks the rewrite.
+TEST(PatternStatementTransformTest, KeepsPropertyWhenFieldNameNotBackingField)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    auto* typeDecl = model.Make();
+    model.field->SetName("otherField");
+
+    RunTransform(fixture, *typeDecl);
+
+    EXPECT_FALSE(model.prop->IsAutomaticProperty());
+    EXPECT_NE(model.prop->Getter()->Body(), nullptr);
+    EXPECT_EQ(typeDecl->Members().Count(), 2);
 }

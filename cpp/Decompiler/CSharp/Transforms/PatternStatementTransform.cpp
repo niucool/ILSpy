@@ -19,7 +19,9 @@
 #include "Decompiler/CSharp/Transforms/PatternStatementTransform.hpp"
 
 #include "Decompiler/CSharp/Annotations.hpp"
+#include "Decompiler/CSharp/Syntax/Accessor.hpp"
 #include "Decompiler/CSharp/Syntax/AstNode.hpp"
+#include "Decompiler/CSharp/Syntax/Attribute.hpp"
 #include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
 #include "Decompiler/CSharp/Syntax/CatchClause.hpp"
 #include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
@@ -32,10 +34,12 @@
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
+#include "Decompiler/CSharp/Syntax/FieldDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/MethodDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/PatternMatching/PatternNodes.hpp"
 #include "Decompiler/CSharp/Syntax/PatternPlaceholder.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
+#include "Decompiler/CSharp/Syntax/PropertyDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
 #include "Decompiler/CSharp/Syntax/Slots.hpp"
@@ -47,6 +51,7 @@
 #include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ForeachStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/UsingStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
@@ -55,8 +60,11 @@
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/NRExtensions.hpp"
-#include "Decompiler/TypeSystem/ITypeDefinition.hpp"
+#include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
+#include "Decompiler/TypeSystem/IProperty.hpp"
+#include "Decompiler/TypeSystem/ITypeDefinition.hpp"
+#include "Decompiler/TypeSystem/KnownAttribute.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
 #include <charconv>
@@ -300,6 +308,150 @@ Syntax::Expression* BuildAddressOfPinnableReferencePattern(PatternTree& tree) {
     auto* invocation = tree.Make<Syntax::InvocationExpression>(memberReference);
     return tree.Make<Syntax::UnaryOperatorExpression>(
         invocation, Syntax::UnaryOperatorType::AddressOf);
+}
+
+// The C# `static readonly Regex automaticPropertyBackingFieldNameRegex = new Regex(
+// @"^(<(?<name>.+)>k__BackingField|_(?<name>.+))$")` -- the compiler backing-field name
+// shape: the C# `<Property>k__BackingField` form or the VB `_Property` form. Returns the
+// extracted property name through the out-parameter (the C# `out string? propertyName`).
+bool NameCouldBeBackingFieldOfAutomaticProperty(const std::string& name,
+                                                std::string& propertyName) {
+    const std::string suffix = ">k__BackingField";
+    if (name.size() >= 2 && name.front() == '<'
+        && name.size() > 1 + suffix.size()
+        && name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
+        // The `(?<name>.+)` group is greedy but the trailing `>k__BackingField` anchors it: the
+        // name is everything between the leading `<` and the final `>k__BackingField`.
+        const std::size_t end = name.size() - suffix.size();
+        propertyName = name.substr(1, end - 1);
+        return !propertyName.empty();
+    }
+    if (name.size() >= 2 && name.front() == '_') {
+        propertyName = name.substr(1);
+        return true;
+    }
+    return false;
+}
+
+// The C# `static void RemoveCompilerGeneratedAttribute(AstNodeCollection<AttributeSection>
+// attributeSections, params string[] attributesToRemove)`: removes every attribute whose type
+// symbol resolves to one of the full type names, and removes any section left empty.
+void RemoveAttributeByName(Syntax::AstNodeCollectionT<Syntax::AttributeSection>& attributeSections,
+                           const std::vector<std::string>& attributesToRemove) {
+    for (int i = 0; i < attributeSections.Count(); ) {
+        Syntax::AttributeSection* section = attributeSections[i];
+        Syntax::AstNodeCollectionT<Syntax::Attribute>& attributes = section->Attributes();
+        for (int j = 0; j < attributes.Count(); ) {
+            Syntax::Attribute* attr = attributes[j];
+            const Syntax::AstNode* typeNode = attr->Type();
+            const TS::ISymbol* symbol = typeNode != nullptr ? GetSymbol(*typeNode) : nullptr;
+            const auto* type = dynamic_cast<const TS::INamedElement*>(symbol);
+            bool remove = false;
+            if (type != nullptr) {
+                const std::string fullName = type->FullName();
+                for (const std::string& candidate : attributesToRemove) {
+                    if (fullName == candidate) {
+                        remove = true;
+                        break;
+                    }
+                }
+            }
+            if (remove) {
+                attr->Remove();
+            } else {
+                j++;
+            }
+        }
+        if (section->Attributes().Count() == 0) {
+            section->Remove();
+        } else {
+            i++;
+        }
+    }
+}
+
+// The C# `static void RemoveCompilerGeneratedAttribute(AstNodeCollection<AttributeSection>)` --
+// the single-attribute convenience over the full-name table.
+void RemoveCompilerGeneratedAttribute(
+    Syntax::AstNodeCollectionT<Syntax::AttributeSection>& attributeSections) {
+    RemoveAttributeByName(attributeSections,
+                          {"System.Runtime.CompilerServices.CompilerGeneratedAttribute"});
+}
+
+// The C# `internal static bool RemoveAttribute(EntityDeclaration entityDecl, KnownAttribute
+// attributeType)` (CSharpDecompiler.cs): removes every attribute whose type resolves to the
+// known attribute's metadata type, and removes any section left empty.
+bool RemoveKnownAttribute(Syntax::EntityDeclaration& entityDecl, TS::KnownAttribute attributeType) {
+    bool found = false;
+    Syntax::AstNodeCollectionT<Syntax::AttributeSection>& sections = entityDecl.Attributes();
+    for (int i = 0; i < sections.Count(); ) {
+        Syntax::AttributeSection* section = sections[i];
+        Syntax::AstNodeCollectionT<Syntax::Attribute>& attributes = section->Attributes();
+        for (int j = 0; j < attributes.Count(); ) {
+            Syntax::Attribute* attr = attributes[j];
+            const Syntax::AstNode* typeNode = attr->Type();
+            const auto* type = typeNode != nullptr
+                ? dynamic_cast<const TS::IType*>(GetSymbol(*typeNode))
+                : nullptr;
+            if (type != nullptr && TS::IsKnownType(*type, attributeType)) {
+                attr->Remove();
+                found = true;
+            } else {
+                j++;
+            }
+        }
+        if (section->Attributes().Count() == 0) {
+            section->Remove();
+        } else {
+            i++;
+        }
+    }
+    return found;
+}
+
+// The C# `static readonly PropertyDeclaration automaticPropertyPattern` (and the read-only
+// variant): a getter `{ return <field>; }` and (optionally) a setter `{ <field> = value; }`
+// whose `Attributes`/`Modifiers`/name are wildcards. Built into `tree` each call.
+Syntax::PropertyDeclaration* BuildAutomaticPropertyPattern(PatternTree& tree, bool withSetter) {
+    auto* property = tree.Make<Syntax::PropertyDeclaration>();
+    auto* propertyAttributeAny = tree.Make<PM::AnyNode>();
+    property->Attributes().Add(tree.Wrap<Syntax::AttributeSection>(
+        std::make_shared<PM::Repeat>(propertyAttributeAny)));
+    property->Modifiers(Syntax::Modifiers::Any);
+    property->ReturnType(tree.Wrap<Syntax::AstType>(std::make_shared<PM::AnyNode>()));
+    property->PrivateImplementationType(tree.Wrap<Syntax::AstType>(
+        std::make_shared<PM::OptionalNode>(tree.Make<PM::AnyNode>())));
+    property->Name(PM::Pattern::AnyString);
+
+    auto* getter = tree.Make<Syntax::Accessor>();
+    auto* getterAttributeAny = tree.Make<PM::AnyNode>();
+    getter->Attributes().Add(tree.Wrap<Syntax::AttributeSection>(
+        std::make_shared<PM::Repeat>(getterAttributeAny)));
+    getter->Modifiers(Syntax::Modifiers::Any);
+    auto* getterBody = tree.Make<Syntax::BlockStatement>();
+    auto* returnStatement = tree.Make<Syntax::ReturnStatement>();
+    returnStatement->Expression(tree.Wrap<Syntax::Expression>(
+        std::make_shared<PM::NamedNode>("fieldReference", tree.Make<PM::AnyNode>())));
+    getterBody->Statements().Add(returnStatement);
+    getter->Body(getterBody);
+    property->Getter(getter);
+
+    if (withSetter) {
+        auto* setter = tree.Make<Syntax::Accessor>();
+        auto* setterAttributeAny = tree.Make<PM::AnyNode>();
+        setter->Attributes().Add(tree.Wrap<Syntax::AttributeSection>(
+            std::make_shared<PM::Repeat>(setterAttributeAny)));
+        setter->Modifiers(Syntax::Modifiers::Any);
+        auto* setterBody = tree.Make<Syntax::BlockStatement>();
+        auto* assignment = tree.Make<Syntax::AssignmentExpression>();
+        assignment->Left(tree.Wrap<Syntax::Expression>(
+            std::make_shared<PM::Backreference>("fieldReference")));
+        assignment->Right(tree.Make<Syntax::IdentifierExpression>(std::string("value")));
+        setterBody->Statements().Add(tree.Make<Syntax::ExpressionStatement>(assignment));
+        setter->Body(setterBody);
+        property->Setter(setter);
+    }
+    return property;
 }
 
 } // namespace
@@ -1077,6 +1229,20 @@ AstNode* PatternStatementTransform::VisitUsingStatement(Syntax::UsingStatement* 
     return usingStatement;
 }
 
+AstNode* PatternStatementTransform::VisitPropertyDeclaration(
+    Syntax::PropertyDeclaration* propertyDeclaration) {
+    // The C# `if (context.Settings.AutomaticProperties && (propertyDeclaration.Setter is not
+    // null || context.Settings.GetterOnlyAutomaticProperties)) { ... TransformAutomaticProperty ... }`.
+    if (context_->Settings().AutomaticProperties()
+        && (propertyDeclaration->Setter() != nullptr
+            || context_->Settings().GetterOnlyAutomaticProperties())) {
+        AstNode* result = TransformAutomaticProperty(propertyDeclaration);
+        if (result != nullptr)
+            return result;
+    }
+    return ContextTrackingVisitor::VisitPropertyDeclaration(propertyDeclaration);
+}
+
 AstNode* PatternStatementTransform::VisitMethodDeclaration(
     Syntax::MethodDeclaration* methodDeclaration) {
     // The C# `return TransformDestructor(methodDeclaration) ?? base.VisitMethodDeclaration(...)`.
@@ -1203,6 +1369,148 @@ Syntax::DestructorDeclaration* PatternStatementTransform::TransformDestructorBod
     context_->Step("Simplify destructor body", dtorDef);
     dtorDef->Body(Syntax::Detach(m.Get<Syntax::BlockStatement>("body").front()));
     return dtorDef;
+}
+
+// ---- Automatic properties ----------------------------------------------------------
+
+bool PatternStatementTransform::CanTransformToAutomaticProperty(
+    const TS::IProperty& property, bool accessorsMustBeCompilerGenerated) {
+    // The C# `if (!property.CanGet) return false`.
+    if (!property.CanGet())
+        return false;
+    // The C# `if (accessorsMustBeCompilerGenerated && !property.Getter.IsCompilerGenerated())
+    // return false`.
+    if (accessorsMustBeCompilerGenerated && !IsCompilerGenerated(property.Getter()))
+        return false;
+    // The C# `if (property.Setter is IMethod setter) { ... }`.
+    if (const TS::IMethod* setter = property.Setter()) {
+        if (accessorsMustBeCompilerGenerated && !IsCompilerGenerated(setter))
+            return false;
+        if (TS::HasReadonlyModifier(*setter))
+            return false;
+    }
+    return true;
+}
+
+AstNode* PatternStatementTransform::TransformAutomaticProperty(
+    Syntax::PropertyDeclaration* propertyDeclaration) {
+    // The C# `IProperty? property = propertyDeclaration.GetSymbol() as IProperty`.
+    const auto* property = dynamic_cast<const TS::IProperty*>(GetSymbol(*propertyDeclaration));
+    if (property == nullptr)
+        return nullptr;
+    // The C# `CanTransformToAutomaticProperty(property, !(property.DeclaringTypeDefinition?.
+    // Fields.Any(f => f.Name == "_" + property.Name && f.IsCompilerGenerated()) ?? false))`: the
+    // accessors must be compiler-generated unless the declaring type carries a VB-style `_Name`
+    // compiler-generated backing field.
+    bool accessorsMustBeCompilerGenerated = true;
+    if (const TS::ITypeDefinition* declaringType = property->DeclaringTypeDefinition()) {
+        const std::string vbFieldName = "_" + property->Name();
+        for (const TS::IField* field : declaringType->Fields()) {
+            if (field != nullptr && field->Name() == vbFieldName && IsCompilerGenerated(field)) {
+                accessorsMustBeCompilerGenerated = false;
+                break;
+            }
+        }
+    }
+    if (!CanTransformToAutomaticProperty(*property, accessorsMustBeCompilerGenerated))
+        return nullptr;
+
+    // The C# `automaticPropertyPattern.Match(...)`, falling back to the read-only pattern.
+    const TS::IField* field = nullptr;
+    {
+        PatternTree tree;
+        auto* pattern = BuildAutomaticPropertyPattern(tree, true);
+        PM::Match m = PM::PatternExtensions::Match(*pattern, propertyDeclaration);
+        if (m.Success()) {
+            auto captured = m.Get<Syntax::AstNode>("fieldReference");
+            if (!captured.empty())
+                field = dynamic_cast<const TS::IField*>(GetSymbol(*captured.front()));
+        } else {
+            PatternTree readonlyTree;
+            auto* readonlyPattern = BuildAutomaticPropertyPattern(readonlyTree, false);
+            PM::Match m2 = PM::PatternExtensions::Match(*readonlyPattern, propertyDeclaration);
+            if (m2.Success()) {
+                auto captured = m2.Get<Syntax::AstNode>("fieldReference");
+                if (!captured.empty())
+                    field = dynamic_cast<const TS::IField*>(GetSymbol(*captured.front()));
+            }
+        }
+    }
+    // The C# `if (field == null || !NameCouldBeBackingFieldOfAutomaticProperty(field.Name,
+    // out _)) return null`.
+    if (field == nullptr) {
+        return nullptr;
+    }
+    {
+        std::string ignoredName;
+        if (!NameCouldBeBackingFieldOfAutomaticProperty(field->Name(), ignoredName))
+            return nullptr;
+    }
+    // The C# readonly guards: a `readonly set`/`readonly` property with a setter cannot be an
+    // auto-property.
+    if ((propertyDeclaration->Setter() != nullptr
+            && propertyDeclaration->Setter()->HasModifier(Syntax::Modifiers::Readonly))
+        || (propertyDeclaration->HasModifier(Syntax::Modifiers::Readonly)
+            && propertyDeclaration->Setter() != nullptr)) {
+        return nullptr;
+    }
+    // The C# `if (field.IsCompilerGenerated() && field.DeclaringTypeDefinition ==
+    // property.DeclaringTypeDefinition)`: clear the accessor bodies and hide the backing field.
+    if (IsCompilerGenerated(field)
+        && field->DeclaringTypeDefinition() == property->DeclaringTypeDefinition()) {
+        context_->Step("Convert property to auto-property", propertyDeclaration);
+        // Clearing the accessor body turns it into an auto-property accessor.
+        Syntax::Accessor* getter = propertyDeclaration->Getter();
+        Syntax::Accessor* setter = propertyDeclaration->Setter();
+        if (getter != nullptr) {
+            RemoveCompilerGeneratedAttribute(getter->Attributes());
+            getter->Body(nullptr);
+        }
+        if (setter != nullptr) {
+            RemoveCompilerGeneratedAttribute(setter->Attributes());
+            setter->Body(nullptr);
+        }
+        propertyDeclaration->Modifiers(
+            propertyDeclaration->Modifiers() & ~Syntax::Modifiers::Readonly);
+        if (getter != nullptr)
+            getter->Modifiers(getter->Modifiers() & ~Syntax::Modifiers::Readonly);
+
+        // The C# `fieldDecl = propertyDeclaration.Parent?.Children.OfType<FieldDeclaration>()
+        // .FirstOrDefault(fd => field.Equals(fd.GetSymbol()))` -- the reference-equality
+        // `field.Equals(symbol)` is the C# `object.Equals` (the `IMember.Equals` overload takes
+        // two arguments), so the port compares the resolved `IField` pointers.
+        Syntax::FieldDeclaration* fieldDecl = nullptr;
+        if (propertyDeclaration->Parent() != nullptr) {
+            for (Syntax::AstNode* child : propertyDeclaration->Parent()->Children()) {
+                auto* candidate = dynamic_cast<Syntax::FieldDeclaration*>(child);
+                if (candidate == nullptr)
+                    continue;
+                const auto* candidateField =
+                    dynamic_cast<const TS::IField*>(GetSymbol(*candidate));
+                if (candidateField == field) {
+                    fieldDecl = candidate;
+                    break;
+                }
+            }
+        }
+        if (fieldDecl != nullptr) {
+            fieldDecl->Remove();
+            // Add C# 7.3 attributes on the backing field: the compiler-generated and
+            // debugger-browsable attributes are dropped, the rest move to the property with the
+            // `field` target.
+            RemoveKnownAttribute(*fieldDecl, TS::KnownAttribute::CompilerGenerated);
+            RemoveKnownAttribute(*fieldDecl, TS::KnownAttribute::DebuggerBrowsable);
+            std::vector<Syntax::AttributeSection*> sections;
+            for (int i = 0; i < fieldDecl->Attributes().Count(); i++)
+                sections.push_back(fieldDecl->Attributes()[i]);
+            for (Syntax::AttributeSection* section : sections) {
+                section->AttributeTarget("field");
+                propertyDeclaration->Attributes().Add(Syntax::Detach(section));
+            }
+        }
+    }
+    // Since the property instance is not changed, the visitor continues as usual, so return null.
+    return nullptr;
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Transforms

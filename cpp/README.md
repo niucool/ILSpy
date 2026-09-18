@@ -5487,6 +5487,24 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   item keeps) proven with a `TransformForeachOnInlineArray`-neuter RED round (exactly the 1
   positive test failed, the 10 keep-tests staying green). The automatic property/event
   rewrites and the backing-field replacement stay deferred.
+- **`PatternStatementTransform` automatic-property rewrite** -- the next slice adds
+  `VisitPropertyDeclaration` / `TransformAutomaticProperty` / `CanTransformToAutomaticProperty`:
+  the compiler-generated backing-field getter/setter pair (the `automaticPropertyPattern`) and
+  the getter-only read-only pair (`automaticReadonlyPropertyPattern`) are recognized, the
+  backing-field name (`<Property>k__BackingField` / VB `_Property`) is decoded by a hand-rolled
+  match of the C# regex, the accessor `[CompilerGenerated]` attributes and bodies are cleared,
+  the property/accessor `readonly` modifiers are dropped, and the backing-field declaration is
+  removed with its remaining attributes moved onto the property with the `field` target. The
+  guard chain is faithful: `CanGet`, compiler-generated accessors (unless the declaring type
+  carries a `_Name` compiler-generated field), the backing-field shape, the `readonly set` /
+  `readonly` property rejections, and the field's compiler-generated flag plus declaring-type
+  identity. Verified by 10 tests (the getter-setter and getter-only rewrites plus the
+  `AutomaticProperties`/`GetterOnlyAutomaticProperties`-off, non-compiler-generated accessors,
+  non-compiler-generated field, missing property symbol, `readonly set`, differing field
+  declaring type, and unrecognized field-name keeps) proven with a `TransformAutomaticProperty`
+  -neuter RED round (exactly the 2 positive tests failed, the 9 keep-tests staying green). The
+  automatic-EVENT rewrite (which needs the `PropertyAndEventBackingFieldLookup` metadata
+  machinery) and the `VisitIdentifier` backing-field replacement stay deferred.
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.
