@@ -62,12 +62,13 @@
 // private compiler-generated backing field and the getter/setter pair are recognized and the
 // accessor bodies cleared, turning the property back into an auto-property, with the backing
 // field declaration removed and its remaining attributes moved onto the property with the
-// `field` target. The automatic-EVENT rewrite (whose `PropertyAndEventBackingFieldLookup`
-// metadata machinery has since landed) remains deferred -- it is named at the visit that
-// would call it. The `VisitIdentifier` backing-field replacement also lands: a reference to
-// an auto-property's compiler backing field is rewritten to the property name and re-annotated
-// with a `MemberResolveResult` over the property (`ReplaceBackingFieldUsage` /
-// `IsBackingFieldOfAutomaticProperty`).
+// `field` target. The automatic-EVENT rewrite also lands (`VisitEventDeclaration`): with
+// `AutomaticEvents` on, a field declaration that is the event's compiler backing field (the
+// `PropertyAndEventBackingFieldLookup` metadata association) is removed, so the field-like
+// event declaration hides its backing field. The `VisitIdentifier` backing-field replacement
+// also lands: a reference to an auto-property's compiler backing field is rewritten to the
+// property name and re-annotated with a `MemberResolveResult` over the property
+// (`ReplaceBackingFieldUsage` / `IsBackingFieldOfAutomaticProperty`).
 
 #pragma once
 
@@ -83,7 +84,9 @@
 // definitions are pulled into the .cpp (the visitor overrides only need the pointer types).
 namespace ILSpy::Decompiler::CSharp::Syntax {
 class DestructorDeclaration;
+class EventDeclaration;
 class ExpressionStatement;
+class FieldDeclaration;
 class FixedStatement;
 class ForStatement;
 class Identifier;
@@ -103,6 +106,7 @@ class ILVariable;
 }
 
 namespace ILSpy::Decompiler::TypeSystem {
+class IEvent;
 class IField;
 class IProperty;
 }
@@ -158,6 +162,12 @@ public:
     // automatic property and hides the backing field declaration, then continues the child walk.
     Syntax::AstNode* VisitPropertyDeclaration(
         Syntax::PropertyDeclaration* propertyDeclaration) override;
+
+    // The C# `public override AstNode VisitEventDeclaration(EventDeclaration ...)`: with
+    // `AutomaticEvents` on, removes a sibling field declaration that is the event's compiler
+    // backing field (a field-like event hides its backing field), then continues the child walk.
+    Syntax::AstNode* VisitEventDeclaration(
+        Syntax::EventDeclaration* eventDeclaration) override;
 
     // The C# `public override AstNode VisitMethodDeclaration(MethodDeclaration ...)`: converts a
     // `Finalize` method into a destructor declaration.
@@ -243,6 +253,13 @@ private:
     // `[InlineArray(N)]` buffer back to `foreach (var item in buffer) { ... }`, or null when
     // the shape does not match.
     Syntax::Statement* TransformForeachOnInlineArray(Syntax::ForStatement* forStatement);
+
+    // The C# `static bool IsEventBackingFieldDeclaration(FieldDeclaration fd, IEvent ev)`: whether
+    // the field declaration is the compiler backing field of the event -- a single-variable
+    // private field whose type matches the event's and whose token the metadata file's
+    // `PropertyAndEventBackingFieldLookup` associates with the event.
+    static bool IsEventBackingFieldDeclaration(
+        const Syntax::FieldDeclaration& fd, const ILSpy::Decompiler::TypeSystem::IEvent& ev);
 
     // The C# `bool CanTransformToAutomaticProperty(IProperty property, bool
     // accessorsMustBeCompilerGenerated)`: whether the property can be rendered as an

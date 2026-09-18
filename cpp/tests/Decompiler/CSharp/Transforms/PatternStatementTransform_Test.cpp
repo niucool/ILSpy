@@ -31,6 +31,7 @@
 #include "Decompiler/CSharp/Syntax/Attribute.hpp"
 #include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
 #include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/EventDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BaseReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
@@ -66,14 +67,22 @@
 #include "Decompiler/DecompileRun.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Semantics/MemberResolveResult.hpp"
 #include "Decompiler/Semantics/ResolveResult.hpp"
 #include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/CustomAttributeNamedArgument.hpp"
+#include "Decompiler/TypeSystem/IEvent.hpp"
 #include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/IProperty.hpp"
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCache.hpp"
+#include "Decompiler/TypeSystem/MetadataModule.hpp"
+#include "Decompiler/TypeSystem/StringComparer.hpp"
+#include "Decompiler/TypeSystem/TopLevelTypeName.hpp"
+#include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
+#include "Decompiler/Util/CacheManager.hpp"
 #include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
@@ -81,6 +90,7 @@
 
 #include <memory>
 #include <initializer_list>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -90,6 +100,7 @@ namespace TS = ::ILSpy::Decompiler::TypeSystem;
 namespace Impl = ::ILSpy::Decompiler::TypeSystem::Implementation;
 namespace Sem = ::ILSpy::Decompiler::Semantics;
 namespace Syntax = ::ILSpy::Decompiler::CSharp::Syntax;
+namespace TM = ::ILSpy::Decompiler::Metadata;
 namespace Transforms = ::ILSpy::Decompiler::CSharp::Transforms;
 namespace TestSupport = ::ILSpy::Decompiler::TypeSystem::TestSupport;
 namespace IL = ::ILSpy::Decompiler::IL;
@@ -2099,6 +2110,164 @@ public:
     Syntax::IdentifierExpression* getterRef = nullptr;
 };
 
+// The mscorlib fixture path for the automatic-event rewrite tests.
+const char* EventMscorlibPath() {
+#if defined(_WIN32)
+    return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    return "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+}
+
+// A compilation whose main module is settable and whose FindType routes through the ported
+// KnownTypeCache over the module (the MetadataTypeDefinition_Test CacheCompilation shape).
+class EventCompilation : public TS::ICompilation {
+public:
+    void SetMainModule(const TS::IModule* module) { mainModule_ = module; }
+
+    const TS::IModule& MainModule() const override { return *mainModule_; }
+    std::vector<const TS::IModule*> Modules() const override
+    {
+        return std::vector<const TS::IModule*>{ mainModule_ };
+    }
+    std::vector<const TS::IModule*> ReferencedModules() const override { return {}; }
+    const TS::INamespace& RootNamespace() const override
+    {
+        return mainModule_->RootNamespace();
+    }
+    const TS::INamespace* GetNamespaceForExternAlias(const std::string&) const override
+    {
+        return nullptr;
+    }
+    const TS::IType& FindType(TS::KnownTypeCode code) const override
+    {
+        return knownTypes_.FindType(code);
+    }
+    const TS::StringComparer& NameComparer() const override
+    {
+        return TS::StringComparer::Ordinal();
+    }
+    const ILSpy::Decompiler::Util::CacheManager& CacheManager() const override
+    {
+        return cacheManager_;
+    }
+    TS::TypeSystemOptions TypeSystemOptions() const override
+    {
+        return TS::TypeSystemOptions::Default;
+    }
+
+private:
+    const TS::IModule* mainModule_ = nullptr;
+    ILSpy::Decompiler::Util::CacheManager cacheManager_;
+    TS::KnownTypeCache knownTypes_{ *this };
+};
+
+// The two nodes the automatic-event rewrite operates on: a `TypeDeclaration` holding a
+// `FieldDeclaration` and an `EventDeclaration`.
+struct EventDeclModel {
+    Syntax::TypeDeclaration* type = nullptr;
+    Syntax::FieldDeclaration* field = nullptr;
+    Syntax::EventDeclaration* event = nullptr;
+};
+
+// The metadata-backed context for the automatic-event rewrite: `IsEventBackingFieldDeclaration`
+// reads a field's `ParentModule` / `MetadataFile` and metadata token, so the fake-member fixture
+// cannot drive it and this one builds a real mscorlib module over the fixture types.
+struct EventMetadataFixture {
+    TM::MetadataFile file;
+    EventCompilation compilation;
+    TS::MetadataModule module;
+    DecompilerSettings settings;
+    std::shared_ptr<::ILSpy::Decompiler::CSharp::TypeSystem::UsingScope> usingScope;
+    DecompileRun run;
+    std::shared_ptr<::ILSpy::Decompiler::CSharp::TypeSystem::CSharpTypeResolveContext> context;
+    Syntax::TypeSystemAstBuilder astBuilder;
+
+    explicit EventMetadataFixture(const char* path)
+        : file(path),
+          module(compilation, &file, TS::TypeSystemOptions::Default),
+          usingScope(MakeScope(module)),
+          run(&settings, usingScope),
+          context(std::make_shared<
+              ::ILSpy::Decompiler::CSharp::TypeSystem::CSharpTypeResolveContext>(
+              module, usingScope))
+    {
+        compilation.SetMainModule(&module);
+    }
+
+    std::shared_ptr<::ILSpy::Decompiler::CSharp::TypeSystem::UsingScope> MakeScope(
+        const TS::IModule& mainModule)
+    {
+        auto root = std::make_shared<
+            ::ILSpy::Decompiler::CSharp::TypeSystem::CSharpTypeResolveContext>(mainModule);
+        return std::make_shared<::ILSpy::Decompiler::CSharp::TypeSystem::UsingScope>(
+            root, mainModule.RootNamespace(), std::vector<const TS::INamespace*>{});
+    }
+
+    void Run(Syntax::AstNode& node)
+    {
+        Transforms::TransformContext transformContext(compilation, run, *context, astBuilder);
+        Transforms::PatternStatementTransform transform;
+        transform.Run(node, transformContext);
+    }
+};
+
+// The `ITypePtr` view of a member's return type (the `MemberResolveResult` requires a real
+// shared type; the metadata member's return type is owned by the type system).
+TS::ITypePtr EventTypeHandle(const TS::IType& type)
+{
+    return std::const_pointer_cast<TS::IType>(type.shared_from_this());
+}
+
+const TS::IField* FindNamedField(const TS::ITypeDefinition& definition, const std::string& name)
+{
+    for (const TS::IField* field : definition.Fields())
+        if (field->Name() == name)
+            return field;
+    return nullptr;
+}
+
+const TS::IEvent* FindNamedEvent(const TS::ITypeDefinition& definition, const std::string& name)
+{
+    for (const TS::IEvent* event : definition.Events())
+        if (event->Name() == name)
+            return event;
+    return nullptr;
+}
+
+// Builds `class AppDomain { int <field>; event int <event>; }` with the field/event symbols
+// annotated (the AST shape `VisitEventDeclaration` walks). `fieldVariableCount > 1` builds a
+// multi-variable field declaration.
+EventDeclModel MakeEventDeclModel(EventMetadataFixture& fixture, const TS::IField& field,
+                                  const TS::IEvent& event, int fieldVariableCount = 1)
+{
+    EventDeclModel model;
+    auto* fieldDecl = new Syntax::FieldDeclaration();
+    fieldDecl->ReturnType(new Syntax::PrimitiveType("int"));
+    fieldDecl->Variables().Add(new Syntax::VariableInitializer(field.Name()));
+    for (int i = 1; i < fieldVariableCount; i++)
+        fieldDecl->Variables().Add(
+            new Syntax::VariableInitializer("extra" + std::to_string(i)));
+    fieldDecl->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, static_cast<const TS::IMember*>(&field), EventTypeHandle(field.ReturnType())));
+
+    auto* eventDecl = new Syntax::EventDeclaration();
+    eventDecl->ReturnType(new Syntax::PrimitiveType("int"));
+    eventDecl->Variables().Add(new Syntax::VariableInitializer(event.Name()));
+    eventDecl->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, static_cast<const TS::IMember*>(&event), EventTypeHandle(event.ReturnType())));
+
+    auto* typeDecl = new Syntax::TypeDeclaration();
+    typeDecl->Name("AppDomain");
+    typeDecl->Members().Add(fieldDecl);
+    typeDecl->Members().Add(eventDecl);
+
+    model.type = typeDecl;
+    model.field = fieldDecl;
+    model.event = eventDecl;
+    return model;
+}
+
 } // namespace
 
 // A getter/setter pair over a compiler-generated backing field becomes an auto-property: the
@@ -2492,4 +2661,115 @@ TEST(PatternStatementTransformTest, IsBackingFieldOfAutomaticPropertyRecognizesS
     model.field->SetName("otherField");
     EXPECT_FALSE(Transforms::PatternStatementTransform::IsBackingFieldOfAutomaticProperty(
         *model.field, wrongName));
+}
+
+// ---- Automatic events --------------------------------------------------------------
+
+// A field-like event's compiler backing field (a private field whose metadata token the
+// `PropertyAndEventBackingFieldLookup` associates with the event) is removed from its type
+// when `AutomaticEvents` is on.
+TEST(PatternStatementTransformTest, RemovesEventBackingFieldDeclaration)
+{
+    const char* path = EventMscorlibPath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "mscorlib fixture not present";
+    EventMetadataFixture fixture(path);
+    ASSERT_TRUE(fixture.file.IsValid());
+    const TS::ITypeDefinition* appDomain = fixture.module.GetTypeDefinition(
+        TS::TopLevelTypeName("System", "AppDomain"));
+    ASSERT_NE(appDomain, nullptr);
+    const TS::IField* field = FindNamedField(*appDomain, "AssemblyLoad");
+    const TS::IEvent* event = FindNamedEvent(*appDomain, "AssemblyLoad");
+    ASSERT_NE(field, nullptr);
+    ASSERT_NE(event, nullptr);
+
+    EventDeclModel model = MakeEventDeclModel(fixture, *field, *event);
+    fixture.Run(*model.type);
+
+    EXPECT_EQ(model.type->Members().Count(), 1);
+    EXPECT_EQ(model.type->Members()[0], static_cast<Syntax::EntityDeclaration*>(model.event));
+}
+
+// `AutomaticEvents` off leaves the backing field declaration alone.
+TEST(PatternStatementTransformTest, KeepsEventBackingFieldWhenAutomaticEventsDisabled)
+{
+    const char* path = EventMscorlibPath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "mscorlib fixture not present";
+    EventMetadataFixture fixture(path);
+    fixture.settings.SetAutomaticEvents(false);
+    const TS::ITypeDefinition* appDomain = fixture.module.GetTypeDefinition(
+        TS::TopLevelTypeName("System", "AppDomain"));
+    ASSERT_NE(appDomain, nullptr);
+    const TS::IField* field = FindNamedField(*appDomain, "AssemblyLoad");
+    const TS::IEvent* event = FindNamedEvent(*appDomain, "AssemblyLoad");
+    ASSERT_NE(field, nullptr);
+    ASSERT_NE(event, nullptr);
+
+    EventDeclModel model = MakeEventDeclModel(fixture, *field, *event);
+    fixture.Run(*model.type);
+
+    EXPECT_EQ(model.type->Members().Count(), 2);
+    EXPECT_EQ(model.type->Members()[0], static_cast<Syntax::EntityDeclaration*>(model.field));
+}
+
+// A private field that the lookup does not associate with the event is not removed.
+TEST(PatternStatementTransformTest, KeepsUnassociatedEventSiblingField)
+{
+    const char* path = EventMscorlibPath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "mscorlib fixture not present";
+    EventMetadataFixture fixture(path);
+    const TS::ITypeDefinition* appDomain = fixture.module.GetTypeDefinition(
+        TS::TopLevelTypeName("System", "AppDomain"));
+    ASSERT_NE(appDomain, nullptr);
+    const TS::IField* field = FindNamedField(*appDomain, "_pDomain");
+    const TS::IEvent* event = FindNamedEvent(*appDomain, "AssemblyLoad");
+    ASSERT_NE(field, nullptr);
+    ASSERT_NE(event, nullptr);
+
+    EventDeclModel model = MakeEventDeclModel(fixture, *field, *event);
+    fixture.Run(*model.type);
+
+    EXPECT_EQ(model.type->Members().Count(), 2);
+    EXPECT_EQ(model.type->Members()[0], static_cast<Syntax::EntityDeclaration*>(model.field));
+}
+
+// A field declaration with more than one variable is never an event backing field.
+TEST(PatternStatementTransformTest, KeepsMultiVariableEventSiblingField)
+{
+    const char* path = EventMscorlibPath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "mscorlib fixture not present";
+    EventMetadataFixture fixture(path);
+    const TS::ITypeDefinition* appDomain = fixture.module.GetTypeDefinition(
+        TS::TopLevelTypeName("System", "AppDomain"));
+    ASSERT_NE(appDomain, nullptr);
+    const TS::IField* field = FindNamedField(*appDomain, "AssemblyLoad");
+    const TS::IEvent* event = FindNamedEvent(*appDomain, "AssemblyLoad");
+    ASSERT_NE(field, nullptr);
+    ASSERT_NE(event, nullptr);
+
+    EventDeclModel model = MakeEventDeclModel(fixture, *field, *event, 2);
+    fixture.Run(*model.type);
+
+    EXPECT_EQ(model.type->Members().Count(), 2);
+}
+
+// An event declaration without a resolved `IEvent` symbol leaves the sibling field alone.
+TEST(PatternStatementTransformTest, KeepsEventBackingFieldWhenEventSymbolMissing)
+{
+    const char* path = EventMscorlibPath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "mscorlib fixture not present";
+    EventMetadataFixture fixture(path);
+    const TS::ITypeDefinition* appDomain = fixture.module.GetTypeDefinition(
+        TS::TopLevelTypeName("System", "AppDomain"));
+    ASSERT_NE(appDomain, nullptr);
+    const TS::IField* field = FindNamedField(*appDomain, "AssemblyLoad");
+    const TS::IEvent* event = FindNamedEvent(*appDomain, "AssemblyLoad");
+    ASSERT_NE(field, nullptr);
+    ASSERT_NE(event, nullptr);
+
+    EventDeclModel model = MakeEventDeclModel(fixture, *field, *event);
+    model.event->RemoveAnnotations<Sem::MemberResolveResult>();
+    fixture.Run(*model.type);
+
+    EXPECT_EQ(model.type->Members().Count(), 2);
+    EXPECT_EQ(model.type->Members()[0], static_cast<Syntax::EntityDeclaration*>(model.field));
 }

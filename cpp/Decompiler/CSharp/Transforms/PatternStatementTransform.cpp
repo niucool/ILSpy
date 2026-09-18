@@ -25,6 +25,7 @@
 #include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
 #include "Decompiler/CSharp/Syntax/CatchClause.hpp"
 #include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/EventDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BaseReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
@@ -60,16 +61,21 @@
 #include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/Metadata/PropertyAndEventBackingFieldLookup.hpp"
 #include "Decompiler/NRExtensions.hpp"
 #include "Decompiler/Semantics/MemberResolveResult.hpp"
+#include "Decompiler/TypeSystem/IEvent.hpp"
 #include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
+#include "Decompiler/TypeSystem/IModule.hpp"
 #include "Decompiler/TypeSystem/IProperty.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
 #include <charconv>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -1243,6 +1249,64 @@ AstNode* PatternStatementTransform::VisitPropertyDeclaration(
             return result;
     }
     return ContextTrackingVisitor::VisitPropertyDeclaration(propertyDeclaration);
+}
+
+AstNode* PatternStatementTransform::VisitEventDeclaration(
+    Syntax::EventDeclaration* eventDeclaration) {
+    // A field-like event declaration hides its backing field; remove the field declaration
+    // if it was emitted because other members reference it. (This happens for events that
+    // CSharpDecompiler.DoDecompile already recognized as automatic: the backing field is
+    // hidden from the normal member list, but re-emitted via the work list when referenced.)
+    if (context_->Settings().AutomaticEvents()) {
+        const auto* symbol = dynamic_cast<const TS::IEvent*>(GetSymbol(*eventDeclaration));
+        if (symbol != nullptr) {
+            // The C# `eventDeclaration.Parent?.Children.OfType<FieldDeclaration>()
+            // .FirstOrDefault(fd => IsEventBackingFieldDeclaration(fd, symbol))`.
+            Syntax::FieldDeclaration* fieldDecl = nullptr;
+            if (Syntax::AstNode* parent = eventDeclaration->Parent()) {
+                for (Syntax::AstNode* child : parent->Children()) {
+                    auto* candidate = dynamic_cast<Syntax::FieldDeclaration*>(child);
+                    if (candidate != nullptr
+                        && IsEventBackingFieldDeclaration(*candidate, *symbol)) {
+                        fieldDecl = candidate;
+                        break;
+                    }
+                }
+            }
+            if (fieldDecl != nullptr)
+                fieldDecl->Remove();
+        }
+    }
+    return ContextTrackingVisitor::VisitEventDeclaration(eventDeclaration);
+}
+
+bool PatternStatementTransform::IsEventBackingFieldDeclaration(
+    const Syntax::FieldDeclaration& fd, const TS::IEvent& ev) {
+    // The C# `if (fd.Variables.Count > 1) return false`.
+    if (fd.Variables().Count() > 1)
+        return false;
+    // The C# `if (fd.GetSymbol() is not IField f) return false`.
+    const auto* f = dynamic_cast<const TS::IField*>(GetSymbol(fd));
+    if (f == nullptr)
+        return false;
+    // The C# `if (f.ParentModule is not MetadataModule module) return false`. The port gates on
+    // the module's `MetadataFile()` instead of the concrete `MetadataModule` type: it is the
+    // publicly exposed equivalent (null for a module not created from a file).
+    const TS::IModule* module = f->ParentModule();
+    if (module == nullptr)
+        return false;
+    const Metadata::MetadataFile* metadataFile = module->MetadataFile();
+    if (metadataFile == nullptr)
+        return false;
+    // The C# `return f.Accessibility == Accessibility.Private
+    // && ev.ReturnType.Equals(f.ReturnType)
+    // && module.MetadataFile.PropertyAndEventBackingFieldLookup.IsEventBackingField(
+    //        (FieldDefinitionHandle)f.MetadataToken, out _)`.
+    std::uint32_t eventToken = 0;
+    return f->Accessibility() == TS::Accessibility::Private
+        && ev.ReturnType().Equals(f->ReturnType())
+        && metadataFile->GetPropertyAndEventBackingFieldLookup().IsEventBackingField(
+            f->MetadataToken(), eventToken);
 }
 
 AstNode* PatternStatementTransform::VisitMethodDeclaration(

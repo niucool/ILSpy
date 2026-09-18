@@ -5503,8 +5503,7 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   non-compiler-generated field, missing property symbol, `readonly set`, differing field
   declaring type, and unrecognized field-name keeps) proven with a `TransformAutomaticProperty`
   -neuter RED round (exactly the 2 positive tests failed, the 9 keep-tests staying green). The
-  automatic-EVENT rewrite (whose `PropertyAndEventBackingFieldLookup` metadata
-  machinery has since landed) stays deferred.
+  automatic-EVENT rewrite lands in a later slice (the `VisitEventDeclaration` bullet below).
 - **`PatternStatementTransform` backing-field reference replacement** -- the next slice adds
   `VisitIdentifier` / `ReplaceBackingFieldUsage` and the shared
   `IsBackingFieldOfAutomaticProperty`: with `AutomaticProperties` on, an `Identifier` token that
@@ -5537,8 +5536,19 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `FEvent`-named-event fallback skip; three real-mscorlib association fixtures; a
   whole-mscorlib naming-shape invariant sweep; the invalid-file empty lookup; and the lazy
   accessor identity) proven with a ctor-neuter RED round (5 positive tests failed, the 3
-  negative/lazy tests staying green). The `VisitEventDeclaration` wiring that consumes the
-  lookup is the next slice.
+  negative/lazy tests staying green).
+- **`PatternStatementTransform` automatic-event rewrite** -- the `VisitEventDeclaration` wiring
+  that consumes the lookup lands: with `AutomaticEvents` on, a sibling `FieldDeclaration` that
+  is the event's compiler backing field -- a single-variable private field whose type matches
+  the event's and whose metadata token the `PropertyAndEventBackingFieldLookup` associates with
+  the event -- is removed, so a field-like event declaration hides its backing field. The
+  `IsEventBackingFieldDeclaration` gate reads the field's `ParentModule` / `MetadataFile` and
+  the token association, so it is driven by a metadata-backed fixture (a real mscorlib
+  `MetadataModule` over `System.AppDomain.AssemblyLoad`). Verified by 5 tests (the backing-field
+  removal plus the `AutomaticEvents`-off, unassociated-private-field, multi-variable-field, and
+  missing-event-symbol keeps) proven with a removal-neuter RED round (exactly the positive test
+  failed, the 4 keeps staying green). The full Debug gtest suite is now 12874 ran / 12872
+  passed / the 2 standing skips / zero failures.
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.
