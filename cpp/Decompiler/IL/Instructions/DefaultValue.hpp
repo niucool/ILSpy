@@ -35,6 +35,12 @@ namespace ILSpy::Decompiler::IL {
 class DefaultValue : public SimpleInstruction {
 public:
     TypeSystem::ITypePtr Type;
+    // The C# `public bool ILStackWasEmpty` (DefaultValue.cs line 32): whether
+    // the IL evaluation stack was empty at the point of this instruction, not
+    // counting the instruction's own argument (the initobj target address the
+    // reader already popped when it evaluates the flag). False for synthesized
+    // default(T) nodes.
+    bool ILStackWasEmpty = false;
     explicit DefaultValue(TypeSystem::ITypePtr type)
         : SimpleInstruction(OpCode::DefaultValue), Type(std::move(type)) {}
     StackType ResultType() const override { return StackTypeOf(Type); }

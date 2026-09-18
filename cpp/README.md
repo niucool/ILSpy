@@ -6177,6 +6177,60 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   byte-identical (`--csharp` 10106360, `--il` 41246545 byte-identical to the
   real-ilspycmd gold, `-l c` 109438, the `--json`-with-assembly usage check
   rc 64) because the new entry points have no call site in the seed pipeline.
+- **Phase-5 slice (RUN/220): the three named head-shape prerequisites for the
+  TransformCollectionAndObjectInitializers statement fold** (the pieces the
+  previous slice's Run deferral list named): the reader-populated
+  `ILStackWasEmpty` flags, the shared `MatchCastClass` matcher, and the
+  context-shaped `TransformDisplayClassUsage.IsPotentialClosure`. The IL node
+  classes gain the C# `public bool ILStackWasEmpty` fields -- `Call`
+  (CallInstruction.cs line 61, covering call/callvirt/newobj), `StLoc`
+  (the internal field, StLoc.cs line 37) and `DefaultValue`
+  (DefaultValue.cs line 32) -- carried through their Clone cases, and
+  `ILReader.cpp` populates them through the new
+  `ReaderState::CurrentStackIsEmpty()` (the C# ILReader.cs line 599
+  `currentStack.IsEmpty && expressionStack.Count == 0` equivalent over the
+  port's reader state): after the argument pops at the call/callvirt/newobj
+  decode point (the C# PrepareArguments-then-CurrentStackIsEmpty order), after
+  the value pop at the stloc.0-3/stloc.s arms (the C# Stloc() helper), and
+  after the target pop at the initobj arm (the C# InitObj helper). The
+  stores the reader synthesizes itself keep the C# default false -- the
+  FlushExpressionStack commits, the dup-arm stack-slot stores and the starg
+  arms (the C# `new StLoc(...)` sites that do not set the flag).
+  `PatternMatching.hpp` gains `MatchCastClass` (the Instructions.cs line
+  8807 matcher, the castclass node with its argument and target type as the
+  non-owning out-parameters). The new
+  `Transforms/TransformDisplayClassUsage.{hpp,cpp}` lands the context-shaped
+  `IsPotentialClosure` leaf (TransformDisplayClassUsage.cs lines 718-722):
+  the C# builds a SimpleTypeResolveContext over the ROOT function's method
+  and consults the type-shaped `IsPotentialClosure` (already ported in
+  TypeSystemExtensions) with `method.DeclaringTypeDefinition` and
+  `inst.Method.DeclaringTypeDefinition`; the port's ILTransformContext
+  carries no Function (D78), so the signature takes the root ILFunction
+  directly, and the C# `Method!` null-forgiving dereferences map to null
+  current-type/display-class shapes that answer false (D516). The
+  TransformCollectionAndObjectInitializers.hpp Run deferral note is updated:
+  only the `IsPartOfInitializer` path-stack state machine with its C#-layer
+  settings/resolver threading remains. Verified by 12 new tests: the three
+  reader drives hand-derived from the byte-verified flat disassembly of the
+  same mscorlib fixtures (String.Copy's 12 statement-level nodes all true
+  incl. the newobj; Registry.GetBaseKeyFromKeyName's exact 5-call false set --
+  the two `get_InvariantCulture` sites over their pending ToUpper receiver,
+  the two nested `get_Length` and the receiver-feeding `Substring`; and the
+  lone `initobj` of AsyncTaskMethodBuilder.Create true, with the port's
+  synthetic dup_ stores documented as the false-by-model divergence), the
+  clone-carry matrix over all three node kinds, the two MatchCastClass
+  matchers, and the six IsPotentialClosure drives (nested display struct,
+  non-compiler-generated, foreign nesting tree, shared ancestor,
+  interface-bearing display class, and the null function/method/newobj
+  shapes) -- proven with a six-behavior neuter RED round (7 failures: the
+  three reader tests, the clone test, the two positive closure tests and the
+  positive matcher, with every negative test staying green). The full Debug
+  gtest suite is 13083 ran / 13081 passed / the 2 standing skips / zero
+  failures (exactly +12 over RUN/219), and all four Release CLI baselines
+  are byte-identical (`--csharp` 10106360, `--il` 41246545 byte-identical to
+  the real-ilspycmd gold, `-l c` 109438, the `--json`-with-assembly usage
+  check rc 64) because the flags/matchers are additive fields with no render
+  effect.
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

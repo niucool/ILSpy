@@ -167,6 +167,15 @@ struct ReaderState {
         }
         return nullptr;  // stack underflow -> caller bails
     }
+    // The C# `private bool CurrentStackIsEmpty()` (ILReader.cs line 599):
+    // both the pending expression trees and the committed evaluation stack
+    // are empty. The port's `currentStack` is reset per block and seeded from
+    // the block's recorded input stack (the C# `block.InputStack`), so the
+    // emptiness test reads the whole vector -- no stackBase offset (stackBase
+    // stays 0 in this reader; the field is kept for the Pop shape above).
+    bool CurrentStackIsEmpty() const {
+        return expressionStack.empty() && currentStack.empty();
+    }
 };
 
 // Tag the instruction an opcode created with its [start, pos) IL byte-offset
@@ -538,7 +547,11 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             auto v = GetOrCreateLocal(s, idx);
             auto value = s.Pop();
             if (!value) return DecodeOutcome::Bail;
-            block->Add(std::make_unique<StLoc>(v, std::move(value)));
+            // The C# Stloc() sets the flag after the Pop (ILReader.cs line
+            // 1636): whether anything is left beneath the stored value.
+            auto stloc = std::make_unique<StLoc>(v, std::move(value));
+            stloc->ILStackWasEmpty = s.CurrentStackIsEmpty();
+            block->Add(std::move(stloc));
             break;
         }
         case ILOpCode::Ldloc_s: {
@@ -552,7 +565,9 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             auto v = GetOrCreateLocal(s, idx);
             auto value = s.Pop();
             if (!value) return DecodeOutcome::Bail;
-            block->Add(std::make_unique<StLoc>(v, std::move(value)));
+            auto stloc = std::make_unique<StLoc>(v, std::move(value));
+            stloc->ILStackWasEmpty = s.CurrentStackIsEmpty();
+            block->Add(std::move(stloc));
             break;
         }
         case ILOpCode::Ldloca_s: {
@@ -612,6 +627,10 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
                 if (!a) return DecodeOutcome::Bail;
                 args.push_back(std::move(a));
             }
+            // The C# `call.ILStackWasEmpty = CurrentStackIsEmpty()` -- evaluated
+            // after PrepareArguments popped the arguments, so the flag reports
+            // whether anything BENEATH the call's own operands survived.
+            call->ILStackWasEmpty = s.CurrentStackIsEmpty();
             for (auto it = args.rbegin(); it != args.rend(); ++it) call->AddArg(std::move(*it));
             if (op == ILOpCode::Newobj) {
                 // newobj leaves the constructed object on the stack regardless
@@ -1122,6 +1141,9 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             // the type so downstream transforms (LdLocaDupInitObjTransform) and the
             // C# seed can render `default(T)` rather than a type-erased null/zero.
             auto dv = std::make_unique<DefaultValue>(type);
+            // The C# InitObj sets the flag after the target was popped
+            // (ILReader.cs line 1667).
+            dv->ILStackWasEmpty = s.CurrentStackIsEmpty();
             block->Add(std::make_unique<StObj>(std::move(ptr), std::move(dv), type));
             break;
         }

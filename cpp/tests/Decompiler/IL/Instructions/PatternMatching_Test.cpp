@@ -452,3 +452,42 @@ TEST(PatternMatchingTest, MatchLdLocaMatchesOnlyTheGivenVariable)
     LdLoc load(a);
     EXPECT_FALSE(MatchLdLoca(&load, a.get()));
 }
+
+TEST(PatternMatchingTest, MatchCastClassReadsArgumentAndType)
+{
+    // The C# `MatchCastClass(out argument, out type)` (Instructions.cs line
+    // 8807): the castclass node hands back its argument and target type.
+    auto local = MakeVariable(VariableKind::Local,
+                              std::make_shared<KnownType>(KnownTypeCode::String), 0);
+    LdLoc load(local);
+    auto type = std::make_shared<KnownType>(KnownTypeCode::String);
+    CastClass cast(type, std::make_unique<LdLoc>(local));
+    ILInstruction* argument = nullptr;
+    ITypePtr targetType;
+    ASSERT_TRUE(MatchCastClass(&cast, argument, targetType));
+    EXPECT_EQ(argument, cast.Argument.get());
+    ASSERT_NE(targetType, nullptr);
+    EXPECT_EQ(targetType->ReflectionName(), "System.String");
+
+    // A rejected candidate nulls both outputs.
+    ASSERT_FALSE(MatchCastClass(&load, argument, targetType));
+    EXPECT_EQ(argument, nullptr);
+    EXPECT_EQ(targetType, nullptr);
+}
+
+TEST(PatternMatchingTest, MatchCastClassRejectsOtherNodes)
+{
+    auto local = MakeVariable(VariableKind::Local,
+                              std::make_shared<KnownType>(KnownTypeCode::Int32), 0);
+    // A box node is not a castclass.
+    Box box(std::make_shared<KnownType>(KnownTypeCode::Object),
+            std::make_unique<LdLoc>(local));
+    ILInstruction* argument = reinterpret_cast<ILInstruction*>(1);
+    ITypePtr targetType = std::make_shared<KnownType>(KnownTypeCode::Object);
+    EXPECT_FALSE(MatchCastClass(&box, argument, targetType));
+    EXPECT_EQ(argument, nullptr);
+    EXPECT_EQ(targetType, nullptr);
+    // Neither is the castclass's own argument.
+    LdLoc load(local);
+    EXPECT_FALSE(MatchCastClass(&load, argument, targetType));
+}

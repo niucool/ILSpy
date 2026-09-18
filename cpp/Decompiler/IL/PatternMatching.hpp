@@ -21,7 +21,7 @@
 // Port of the match-extension methods the C# IL layer carries on
 // `ILInstruction` (ICSharpCode.Decompiler/IL/Instructions/PatternMatching.cs
 // plus the generated `IL/Instructions.cs` region): `MatchLdThis`, `MatchBox`,
-// `MatchLdObj`, `MatchAddressOf`, `MatchLdFld`, the variable match helpers
+// `MatchLdObj`, `MatchAddressOf`, `MatchCastClass`, `MatchLdFld`, the variable match helpers
 // (`MatchLdLoc`, `MatchStLoc`), the `MatchLdLoca` / `MatchLdLocRef` pair (the
 // byref-or-value local load), the field match helpers (`MatchLdsFld`,
 // `MatchStsFld`, `MatchStFld`, `MatchLdsFlda`, `MatchLdFlda`), and the array
@@ -47,6 +47,7 @@
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
+#include "Decompiler/IL/Instructions/CastClass.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
@@ -125,6 +126,24 @@ inline bool MatchAddressOf(const ILInstruction* inst, ILInstruction*& value,
         return true;
     }
     value = nullptr;
+    type = nullptr;
+    return false;
+}
+
+// The C# `public bool MatchCastClass(out ILInstruction? argument, out IType? type)`
+// (IL/Instructions.cs line 8807): the `castclass T` node. Consumed by the
+// statement-level initializer detection (an inherited-record construction
+// wrapped in a cast on runtimes without covariant returns).
+inline bool MatchCastClass(const ILInstruction* inst, ILInstruction*& argument,
+                           TypeSystem::ITypePtr& type)
+{
+    const auto* castClass = dynamic_cast<const CastClass*>(inst);
+    if (castClass != nullptr) {
+        argument = castClass->Argument.get();
+        type = castClass->Type;
+        return true;
+    }
+    argument = nullptr;
     type = nullptr;
     return false;
 }

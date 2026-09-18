@@ -177,7 +177,9 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         }
         case OpCode::DefaultValue: {
             const auto& s = static_cast<const DefaultValue&>(*this);
-            c = std::make_unique<DefaultValue>(s.Type);
+            auto clone = std::make_unique<DefaultValue>(s.Type);
+            clone->ILStackWasEmpty = s.ILStackWasEmpty;
+            c = std::move(clone);
             break;
         }
         case OpCode::LdsFlda: {
@@ -238,7 +240,9 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         // ---- one-value-slot nodes ----
         case OpCode::StLoc: {
             const auto& s = static_cast<const StLoc&>(*this);
-            c = std::make_unique<StLoc>(s.Variable, s.Value ? s.Value->Clone() : nullptr);
+            auto clone = std::make_unique<StLoc>(s.Variable, s.Value ? s.Value->Clone() : nullptr);
+            clone->ILStackWasEmpty = s.ILStackWasEmpty;
+            c = std::move(clone);
             break;
         }
         case OpCode::Leave: {
@@ -519,6 +523,7 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             clone->Method = s.Method;
             clone->IsTail = s.IsTail;
             clone->ConstrainedTo = s.ConstrainedTo;
+            clone->ILStackWasEmpty = s.ILStackWasEmpty;
             for (auto& a : s.Arguments) clone->AddArg(a ? a->Clone() : nullptr);
             c = std::move(clone);
             break;

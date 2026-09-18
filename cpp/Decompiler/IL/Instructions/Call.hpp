@@ -154,6 +154,15 @@ public:
     // The C# `public IType? ConstrainedTo` -- the type operand of the
     // 'constrained.' prefix; null when no prefix exists.
     TypeSystem::ITypePtr ConstrainedTo;
+    // The C# `public bool ILStackWasEmpty` (CallInstruction.cs line 61):
+    // whether the IL evaluation stack was empty at the point of this call,
+    // not counting the call's own arguments/return value (evaluated by the
+    // reader AFTER popping the arguments -- the C# PrepareArguments-then-
+    // CurrentStackIsEmpty order). The statement-level initializer detection
+    // (TransformCollectionAndObjectInitializers) uses it to prefer keeping
+    // plain local variables on the statement level. False for calls created
+    // outside the reader (the C# default).
+    bool ILStackWasEmpty = false;
 
     explicit Call(std::string method = std::string()) : ILInstruction(OpCode::Call), MethodName(std::move(method)) {}
 
