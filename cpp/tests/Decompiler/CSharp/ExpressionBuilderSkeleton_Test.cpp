@@ -224,6 +224,19 @@ struct BuilderFixture {
                                  &run);
     }
 
+    // The MakeBuilderForType variant that also sets the context's current member (the
+    // `decompilationContext.CurrentMember` gate the automatic-property requires-qualifier
+    // special case reads). The member must be the canonical IMember subobject the
+    // comparison uses (the property's IProperty-to-IMember upcast).
+    ExpressionBuilder MakeBuilderForTypeAndMember(const TS::ITypeDefinition* currentTypeDefinition,
+                                                  const TS::IMember* currentMember)
+    {
+        typedContext_ = std::make_shared<CSharp::TypeSystem::CSharpTypeResolveContext>(
+            compilation.MainModule(), usingScope, currentTypeDefinition, currentMember);
+        return ExpressionBuilder(nullptr, compilation, *typedContext_, &function_, &settings,
+                                 &run);
+    }
+
 private:
     IL::ILFunction function_;
     std::shared_ptr<CSharp::TypeSystem::CSharpTypeResolveContext> typedContext_;
@@ -1496,6 +1509,187 @@ TEST(ExpressionBuilderFieldTest, ConvertFieldByReferenceTypeWrapsInRefDirection)
     auto* byRef = dynamic_cast<const Sem::ByReferenceResolveResult*>(result.ResolveResult());
     ASSERT_TRUE(byRef != nullptr);
     EXPECT_EQ(byRef->ReferenceKind(), TS::ReferenceKind::Ref);
+}
+
+// The automatic-property requires-qualifier special case (C# ExpressionBuilder.cs
+// lines 325-339): when the field is the backing field of an automatic property that
+// PatternStatementTransform will hide, the qualifier decision is made against the
+// property instead of the field. The observable is the qualified member reference: a local
+// named after the property forces a qualified reference, while the backing field's name
+// alone stays unqualified.
+
+namespace {
+
+// A class fixture whose type declares one compiler-generated backing field and the
+// property it belongs to (the ExpressionBuilder view of the AutoPropertyFixture).
+struct AutoPropertyFieldFixture {
+    BuilderFixture& fixture;
+    std::shared_ptr<TestSupport::LookupTypeDefinition> typeDef;
+    TS::ITypePtr objectType;
+    std::shared_ptr<FieldStub> field;
+    std::shared_ptr<Impl::FakeProperty> property;
+    std::shared_ptr<Impl::FakeMethod> setter;
+    std::shared_ptr<AttributeStub> compilerGenerated;
+
+    explicit AutoPropertyFieldFixture(BuilderFixture& f)
+        : fixture(f),
+          objectType(std::const_pointer_cast<TS::IType>(
+              f.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this())),
+          typeDef(std::make_shared<TestSupport::LookupTypeDefinition>(
+              "N.C", "N", TS::FullTypeName(TS::TopLevelTypeName("N", "C")),
+              TS::TypeKind::Class, TS::Accessibility::Public, f.compilation, nullptr)),
+          field(std::make_shared<FieldStub>("<P>k__BackingField", objectType,
+                                            f.compilation)),
+          property(std::make_shared<Impl::FakeProperty>(f.compilation)),
+          setter(std::make_shared<Impl::FakeMethod>(f.compilation, TS::SymbolKind::Method)),
+          compilerGenerated(std::make_shared<AttributeStub>(objectType, std::vector<TS::CustomAttributeTypedArgument>{})) {
+        TS::ITypePtr typePtr = std::static_pointer_cast<TS::IType>(typeDef);
+        field->SetDeclaringType(typePtr);
+        field->SetDeclaringTypeDefinition(typeDef.get());
+        field->SetKnownAttribute(TS::KnownAttribute::CompilerGenerated,
+                                 compilerGenerated.get());
+        setter->SetName("set_P");
+        setter->SetDeclaringType(typePtr);
+        property->SetName("P");
+        property->SetDeclaringType(typePtr);
+        property->SetReturnType(objectType);
+        property->SetSetter(setter.get());
+    }
+
+    // The canonical IMember view of the property (the identity the context comparison uses).
+    const TS::IMember* PropertyMember() const {
+        return static_cast<const TS::IMember*>(
+            static_cast<const TS::IProperty*>(property.get()));
+    }
+
+    // Publishes the property and field in the type's own member lists so the
+    // IsBackingFieldOfAutomaticProperty lookup and the simple-name resolution succeed.
+    void PublishMembers() {
+        typeDef->SetProperties({static_cast<const TS::IProperty*>(property.get())});
+        typeDef->SetFields({static_cast<const TS::IField*>(field.get())});
+    }
+};
+
+// An LdLoc over the synthetic `this` parameter.
+struct ThisLoad {
+    IL::ILVariablePtr variable;
+    IL::LdLoc ldloc;
+    explicit ThisLoad(TS::ITypePtr type)
+        : variable(std::make_shared<IL::ILVariable>(IL::VariableKind::Parameter,
+                                                    std::move(type), -1)),
+          ldloc(variable) {
+        variable->Name = "this";
+    }
+};
+
+} // namespace
+
+TEST(ExpressionBuilderFieldTest, ConvertFieldAutoPropertyBackingFieldUsesPropertyForQualifier)
+{
+    BuilderFixture fixture;
+    AutoPropertyFieldFixture autoFixture(fixture);
+    autoFixture.PublishMembers();
+
+    // A local named `P` hides the property name (but not the backing-field name), so
+    // the property-based qualifier decision differs from the field-based one.
+    auto pHidden = std::make_shared<IL::ILVariable>(IL::VariableKind::Local,
+                                                    autoFixture.objectType, 0);
+    pHidden->Name = "P";
+    fixture.Function().Variables.push_back(pHidden);
+
+    ThisLoad thisLoad(autoFixture.objectType);
+    auto builder = fixture.MakeBuilderForType(autoFixture.typeDef.get());
+    auto result = builder.ConvertField(*autoFixture.field, &thisLoad.ldloc);
+
+    // The property's name is hidden, so the reference is qualified even though the
+    // field's own name is not hidden.
+    auto* memberRef = dynamic_cast<Syntax::MemberReferenceExpression*>(result.Expression());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "<P>k__BackingField");
+}
+
+TEST(ExpressionBuilderFieldTest, ConvertFieldAutoPropertyQualifierSpecialCaseSkippedWhenAutomaticPropertiesOff)
+{
+    BuilderFixture fixture;
+    fixture.settings.SetAutomaticProperties(false);
+    AutoPropertyFieldFixture autoFixture(fixture);
+    autoFixture.PublishMembers();
+
+    auto pHidden = std::make_shared<IL::ILVariable>(IL::VariableKind::Local,
+                                                    autoFixture.objectType, 0);
+    pHidden->Name = "P";
+    fixture.Function().Variables.push_back(pHidden);
+
+    ThisLoad thisLoad(autoFixture.objectType);
+    auto builder = fixture.MakeBuilderForType(autoFixture.typeDef.get());
+    auto result = builder.ConvertField(*autoFixture.field, &thisLoad.ldloc);
+
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(result.Expression()) != nullptr);
+}
+
+TEST(ExpressionBuilderFieldTest, ConvertFieldAutoPropertyQualifierSpecialCaseSkippedInOwnAccessor)
+{
+    BuilderFixture fixture;
+    AutoPropertyFieldFixture autoFixture(fixture);
+    autoFixture.PublishMembers();
+
+    auto pHidden = std::make_shared<IL::ILVariable>(IL::VariableKind::Local,
+                                                    autoFixture.objectType, 0);
+    pHidden->Name = "P";
+    fixture.Function().Variables.push_back(pHidden);
+
+    ThisLoad thisLoad(autoFixture.objectType);
+    // The current member is the property itself, so the field is rendered as the field.
+    auto builder = fixture.MakeBuilderForTypeAndMember(autoFixture.typeDef.get(),
+                                                       autoFixture.PropertyMember());
+    auto result = builder.ConvertField(*autoFixture.field, &thisLoad.ldloc);
+
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(result.Expression()) != nullptr);
+}
+
+TEST(ExpressionBuilderFieldTest, ConvertFieldAutoPropertyQualifierSpecialCaseRequiresSettableOrGetterOnly)
+{
+    BuilderFixture fixture;
+    fixture.settings.SetGetterOnlyAutomaticProperties(false);
+    AutoPropertyFieldFixture autoFixture(fixture);
+    autoFixture.property->SetSetter(nullptr);
+    autoFixture.PublishMembers();
+
+    auto pHidden = std::make_shared<IL::ILVariable>(IL::VariableKind::Local,
+                                                    autoFixture.objectType, 0);
+    pHidden->Name = "P";
+    fixture.Function().Variables.push_back(pHidden);
+
+    ThisLoad thisLoad(autoFixture.objectType);
+    auto builder = fixture.MakeBuilderForType(autoFixture.typeDef.get());
+    auto result = builder.ConvertField(*autoFixture.field, &thisLoad.ldloc);
+
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(result.Expression()) != nullptr);
+}
+
+TEST(ExpressionBuilderFieldTest, ConvertFieldAutoPropertyQualifierSpecialCaseSkippedForNonBackingField)
+{
+    BuilderFixture fixture;
+    AutoPropertyFieldFixture autoFixture(fixture);
+    autoFixture.PublishMembers();
+    // The field name does not match the backing-field shape, so the special case never fires.
+    auto ordinaryField = std::make_shared<FieldStub>("Other", autoFixture.objectType,
+                                                     fixture.compilation);
+    ordinaryField->SetDeclaringType(
+        std::static_pointer_cast<TS::IType>(autoFixture.typeDef));
+    ordinaryField->SetDeclaringTypeDefinition(autoFixture.typeDef.get());
+    autoFixture.typeDef->SetFields({static_cast<const TS::IField*>(ordinaryField.get())});
+
+    auto pHidden = std::make_shared<IL::ILVariable>(IL::VariableKind::Local,
+                                                    autoFixture.objectType, 0);
+    pHidden->Name = "P";
+    fixture.Function().Variables.push_back(pHidden);
+
+    ThisLoad thisLoad(autoFixture.objectType);
+    auto builder = fixture.MakeBuilderForType(autoFixture.typeDef.get());
+    auto result = builder.ConvertField(*ordinaryField, &thisLoad.ldloc);
+
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(result.Expression()) != nullptr);
 }
 
 TEST(ExpressionBuilderFieldTest, LdsFldaRendersRefDirectionOverFieldReference)

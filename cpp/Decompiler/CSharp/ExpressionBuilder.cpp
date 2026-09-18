@@ -63,6 +63,7 @@
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/CSharp/Transforms/AddCheckedBlocks.hpp"
+#include "Decompiler/CSharp/Transforms/PatternStatementTransform.hpp"
 #include "Decompiler/CSharp/Transforms/ReplaceMethodCallsWithOperators.hpp"
 #include "Decompiler/CSharp/Syntax/OperatorDeclaration.hpp"
 #include "Decompiler/CSharp/TranslatedExpression.hpp"
@@ -704,20 +705,40 @@ bool ExpressionBuilder::RequiresQualifier(const TS::IMember& member,
 
 // The C# `ExpressionWithResolveResult ConvertField(IField field, ILInstruction?
 // targetInstruction = null)` (ExpressionBuilder.cs lines 302-398): the field
-// reference render. The two automatic backing-field special cases at the top of
-// the C# method are deferred: the automatic-event arm needs the AutoEventDecompiler
-// plus the MetadataFile PropertyAndEventBackingFieldLookup (not ported), and the
-// automatic-property requires-qualifier special case, which reads the now-ported
-// PatternStatementTransform.IsBackingFieldOfAutomaticProperty, is not yet wired in
-// here. Both only change the render for a compiler-generated backing field, so the
-// general path below is the faithful render for every ordinary field.
+// reference render. The automatic-property requires-qualifier special case is
+// wired in (the qualifier decision is made against the backing field's property
+// when the auto-property rewrite will hide the field); the automatic-event arm at
+// the top of the C# method stays deferred (it needs the AutoEventDecompiler plus
+// the MetadataFile PropertyAndEventBackingFieldLookup), so a field-like event's
+// backing field renders through the general path.
 ExpressionWithResolveResult ExpressionBuilder::ConvertField(const TS::IField& field,
                                                             IL::ILInstruction* targetInstruction)
 {
     TranslatedExpression target = TranslateTarget(targetInstruction,
                                                   /*nonVirtualInvocation:*/ true,
                                                   field.IsStatic(), *field.DeclaringType());
-    bool requireTarget = RequiresQualifier(field, target);
+    bool requireTarget;
+    // The C# `if (settings.AutomaticProperties && PatternStatementTransform.
+    // IsBackingFieldOfAutomaticProperty(field, out var property) &&
+    // decompilationContext.CurrentMember != property && (property.CanSet ||
+    // settings.GetterOnlyAutomaticProperties))`: the requires-qualifier check is made
+    // against the property instead of the field, because PatternStatementTransform will
+    // hide the field. The property identity is the canonical IMember subobject (the
+    // ReplaceBackingFieldUsage convention).
+    const TS::IProperty* backingProperty = nullptr;
+    if (settings->AutomaticProperties()
+        && Transforms::PatternStatementTransform::IsBackingFieldOfAutomaticProperty(
+            field, backingProperty)
+        && decompilationContext->CurrentMember()
+            != static_cast<const TS::IMember*>(backingProperty)
+        && (backingProperty->CanSet() || settings->GetterOnlyAutomaticProperties()))
+    {
+        requireTarget = RequiresQualifier(*backingProperty, target);
+    }
+    else
+    {
+        requireTarget = RequiresQualifier(field, target);
+    }
     bool targetCasted = false;
     // The C# keeps a `targetResolveResult` local only as the "is a target resolve
     // result available" flag (it is null exactly while `requireTarget` is false);

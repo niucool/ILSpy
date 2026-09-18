@@ -5567,6 +5567,19 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   keep-tests staying green). The full Debug gtest suite is now 12880 ran / 12878 passed / the
   2 standing skips / zero failures, and the CLI baselines are unchanged (`--csharp` 10106360,
   `--il` 41246545 bytes).
+- **`ExpressionBuilder.ConvertField` automatic-property requires-qualifier special case** --
+  the previously deferred half of `ConvertField`'s automatic backing-field handling lands: when
+  `AutomaticProperties` is on and the field is the compiler-generated backing field of an
+  automatic property (`PatternStatementTransform.IsBackingFieldOfAutomaticProperty`), the
+  property is not the current member, and the property is settable (or
+  `GetterOnlyAutomaticProperties` is on), the requires-qualifier decision is made against the
+  property instead of the field (the C# `RequiresQualifier(property, target)`); the property
+  identity is the canonical `IMember` subobject (the `ReplaceBackingFieldUsage` convention).
+  The automatic-EVENT backing-field arm at the top of the C# method stays deferred with
+  `AutoEventDecompiler` / `DecompileBodyForAnalysis`. Verified by 5 tests (the property-based
+  qualifier positive plus the `AutomaticProperties`-off, own-accessor, non-settable-property,
+  and non-backing-field keeps), proven with a `RequiresQualifier(*backingProperty, target)`
+  -neuter RED round (exactly the 1 positive test failed, the 4 keep-tests staying green).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

@@ -44,12 +44,10 @@
 //
 // Deferrals (each named at the member that needs it): the heavy Visit arms that
 // have not landed yet (the dynamic/deconstruct arms, and Await, which needs the
-// awaiter/GetResultMethod pipeline surfaces), the ConvertField automatic
-// backing-field special cases (the automatic event needs AutoEventDecompiler /
-// PropertyAndEventBackingFieldLookup, the automatic property needs
-// PatternStatementTransform.IsBackingFieldOfAutomaticProperty), and the
-// CancellationToken (the cooperative-cancel throw is a no-op in the port, the
-// DecompileRun convention).
+// awaiter/GetResultMethod pipeline surfaces), the ConvertField automatic-event
+// backing-field special case (it needs AutoEventDecompiler /
+// PropertyAndEventBackingFieldLookup), and the CancellationToken (the
+// cooperative-cancel throw is a no-op in the port, the DecompileRun convention).
 
 #pragma once
 
@@ -215,14 +213,13 @@ public:
 
     // The C# `ExpressionWithResolveResult ConvertField(IField field, ILInstruction?
     // targetInstruction = null)` (ExpressionBuilder.cs lines 302-398): the field
-    // reference render -- the target translation, the requires-qualifier decision,
-    // the ambiguous-access retry loop (the simple-name lookup, the member lookup, and
-    // the declaring-type cast), and the member/identifier access with the by-reference
-    // wrap for a ref-typed field. The two automatic backing-field special cases (the
-    // automatic event and the automatic property) are documented deferrals: the first
-    // needs the AutoEventDecompiler / PropertyAndEventBackingFieldLookup machinery, the
-    // second reads the now-ported PatternStatementTransform.IsBackingFieldOfAutomaticProperty
-    // but is not yet wired into this render.
+    // reference render -- the target translation, the requires-qualifier decision
+    // (made against the backing field's property when PatternStatementTransform will
+    // hide the field), the ambiguous-access retry loop (the simple-name lookup, the
+    // member lookup, and the declaring-type cast), and the member/identifier access
+    // with the by-reference wrap for a ref-typed field. The automatic-EVENT
+    // backing-field special case stays a documented deferral (it needs the
+    // AutoEventDecompiler / PropertyAndEventBackingFieldLookup machinery).
     ExpressionWithResolveResult ConvertField(const TS::IField& field,
                                              IL::ILInstruction* targetInstruction = nullptr);
 
