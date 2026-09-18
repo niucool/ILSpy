@@ -5439,6 +5439,21 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   / continue / iterator-declared-inside / by-ref-used-after / non-assignment-first / for-not-using
   keeps) proven with a `TransformFor`-neuter RED round (exactly the 2 positive tests failed, the
   7 keep-tests staying green).
+- **`PatternStatementTransform` `foreach`-over-array rewrite** -- the next slice adds
+  `VisitForStatement` and `TransformForeachOnArray`: the `forOnArrayPattern` match of
+  `for (i = 0; i < array.Length; i = i + 1) { item = array[i]; ... }`, the collection gate
+  (an array or a `string`), the `VariableCanBeUsedAsForeachLocal` item gate (a local/stack-slot
+  with a single definition, not captured outside the loop, not merged, and declared inside the
+  loop), and the index-counter profile (stored twice, loaded three times, never addressed); the
+  matched body is moved into a `ForeachStatement` whose variable designation carries the item
+  variable's `ILVariableResolveResult` and whose item variable becomes a `ForeachLocal`. The
+  address-taken item path (`AddressUsedForSingleCall`) is DEFERRED (no `IL.Call` node and no
+  per-variable address-instruction list yet), as are the inline-array and multidimensional-array
+  `foreach` rewrites. Verified by 9 tests (the array and `string` rewrites, plus the
+  settings-off / wrong-index-profile / non-single-definition item / non-array-or-string
+  collection / parameter item / captured item / `<=` condition keeps) proven with a
+  `TransformForeachOnArray`-neuter RED round (exactly the 2 positive tests failed, the 7
+  keep-tests staying green).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

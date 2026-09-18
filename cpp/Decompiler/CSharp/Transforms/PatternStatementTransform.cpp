@@ -27,6 +27,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/BaseReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
@@ -34,6 +35,8 @@
 #include "Decompiler/CSharp/Syntax/PatternMatching/PatternNodes.hpp"
 #include "Decompiler/CSharp/Syntax/PatternPlaceholder.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
+#include "Decompiler/CSharp/Syntax/SimpleType.hpp"
+#include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
 #include "Decompiler/CSharp/Syntax/Slots.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
@@ -50,7 +53,9 @@
 #include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/NRExtensions.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
 #include <memory>
 #include <stdexcept>
@@ -71,6 +76,7 @@ using Syntax::ExpressionStatement;
 using Syntax::ForStatement;
 using Syntax::ForeachStatement;
 using Syntax::IdentifierExpression;
+using Syntax::IndexerExpression;
 using Syntax::PrimitiveExpression;
 using Syntax::Statement;
 using Syntax::UnaryOperatorExpression;
@@ -80,6 +86,10 @@ using Syntax::WhileStatement;
 namespace {
 
 namespace PM = Syntax::PatternMatching;
+
+// The real type-system namespace alias (the sibling `CSharp::TypeSystem` namespace pulled in by
+// the TypeSystemAstBuilder / TransformContext headers shadows the plain `TypeSystem::` lookup).
+namespace TS = ::ILSpy::Decompiler::TypeSystem;
 
 // Owns the nodes of a pattern tree built for one sub-transform invocation. The C# pattern
 // definitions are `static readonly` (process lifetime); the port rebuilds an equivalent tree
@@ -243,6 +253,14 @@ AstNode* PatternStatementTransform::VisitExpressionStatement(
     return Syntax::DepthFirstAstVisitorAstNode::VisitExpressionStatement(expressionStatement);
 }
 
+AstNode* PatternStatementTransform::VisitForStatement(ForStatement* forStatement) {
+    // The C# runs `TransformForeachOnArray(forStatement)` then `TransformForeachOnInlineArray`.
+    // The inline-array rewrite is DEFERRED (named at its would-be call site).
+    if (Statement* result = TransformForeachOnArray(forStatement))
+        return result;
+    return Syntax::DepthFirstAstVisitorAstNode::VisitForStatement(forStatement);
+}
+
 // The C# `ForStatement? TransformFor(ExpressionStatement node)`: turns `var = init; while
 // (var <op> end) { ...; var = ...; }` into `for (var = init; var <op> end; var = ...) {...}`,
 // and moves a preceding `var = init;` into an existing `for (...)`'s initializer when the
@@ -347,6 +365,153 @@ ForStatement* PatternStatementTransform::TransformFor(ExpressionStatement* node)
     loop->ReplaceWith(forStatement);
     context_->EndStep(forStatement);
     return forStatement;
+}
+
+// The C# `Statement? TransformForeachOnArray(ForStatement forStatement)`: reconstructs a
+// `foreach` over the compiler's index loop `for (i = 0; i < array.Length; i++) { item =
+// array[i]; ... }`. The rewrite also accepts a `string` looped by index (the `Length` member
+// plus the string indexer read as a `char`).
+Statement* PatternStatementTransform::TransformForeachOnArray(ForStatement* forStatement) {
+    if (!context_->Settings().ForEachStatement())
+        return nullptr;
+
+    // `static readonly ForStatement forOnArrayPattern`.
+    PatternTree tree;
+    auto* pattern = tree.Make<ForStatement>();
+
+    auto* indexIdent = tree.Make<IdentifierExpression>(std::string(PM::Pattern::AnyString));
+    auto* indexNamed = tree.Wrap<Expression>(
+        std::make_shared<PM::NamedNode>("indexVariable", indexIdent));
+    auto* zero = tree.Make<PrimitiveExpression>(Syntax::PrimitiveValue(std::int32_t(0)));
+    auto* initAssign = tree.Make<AssignmentExpression>(indexNamed, zero);
+    pattern->Initializers().Add(tree.Make<ExpressionStatement>(initAssign));
+
+    auto* condition = tree.Make<BinaryOperatorExpression>(
+        tree.Wrap<Expression>(std::make_shared<PM::IdentifierExpressionBackreference>("indexVariable")),
+        BinaryOperatorType::LessThan,
+        tree.Make<Syntax::MemberReferenceExpression>(
+            tree.Wrap<Expression>(std::make_shared<PM::NamedNode>("arrayVariable",
+                tree.Make<IdentifierExpression>(std::string(PM::Pattern::AnyString)))),
+            std::string("Length")));
+    pattern->Condition(condition);
+
+    auto* iterRight = tree.Make<BinaryOperatorExpression>(
+        tree.Wrap<Expression>(std::make_shared<PM::IdentifierExpressionBackreference>("indexVariable")),
+        BinaryOperatorType::Add,
+        tree.Make<PrimitiveExpression>(Syntax::PrimitiveValue(std::int32_t(1))));
+    pattern->Iterators().Add(tree.Make<ExpressionStatement>(tree.Make<AssignmentExpression>(
+        tree.Wrap<Expression>(std::make_shared<PM::IdentifierExpressionBackreference>("indexVariable")),
+        iterRight)));
+
+    auto* bodyBlock = tree.Make<Syntax::BlockStatement>();
+    auto* indexer = tree.Make<IndexerExpression>(
+        tree.Wrap<Expression>(std::make_shared<PM::IdentifierExpressionBackreference>("arrayVariable")));
+    indexer->Arguments().Add(
+        tree.Wrap<Expression>(std::make_shared<PM::IdentifierExpressionBackreference>("indexVariable")));
+    bodyBlock->Statements().Add(tree.Make<ExpressionStatement>(tree.Make<AssignmentExpression>(
+        tree.Wrap<Expression>(std::make_shared<PM::NamedNode>("itemVariable",
+            tree.Make<IdentifierExpression>(std::string(PM::Pattern::AnyString)))),
+        indexer)));
+    auto* statementsAny = tree.Make<PM::AnyNode>("statements");
+    bodyBlock->Statements().Add(
+        tree.Wrap<Statement>(std::make_shared<PM::Repeat>(statementsAny)));
+    pattern->EmbeddedStatement(bodyBlock);
+
+    PM::Match m = PM::PatternExtensions::Match(*pattern, forStatement);
+    if (!m.Success())
+        return nullptr;
+    Syntax::IdentifierExpression* itemIdentifier =
+        m.Get<IdentifierExpression>("itemVariable").front();
+    IL::ILVariable* itemVariable = GetILVariable(*itemIdentifier);
+    IL::ILVariable* indexVariable =
+        GetILVariable(*m.Get<IdentifierExpression>("indexVariable").front());
+    IL::ILVariable* arrayVariable =
+        GetILVariable(*m.Get<IdentifierExpression>("arrayVariable").front());
+    if (itemVariable == nullptr || indexVariable == nullptr || arrayVariable == nullptr)
+        return nullptr;
+    if (arrayVariable->Type == nullptr
+        || (arrayVariable->Type->Kind() != TS::TypeKind::Array
+            && !TS::IsKnownType(*arrayVariable->Type, TS::KnownTypeCode::String)))
+        return nullptr;
+    if (!VariableCanBeUsedAsForeachLocal(itemVariable, forStatement))
+        return nullptr;
+    // The index is a pure counter: stored at init + increment, loaded at the condition, the
+    // increment, and the element access; never captured by address.
+    if (indexVariable->StoreCount != 2 || indexVariable->LoadCount != 3
+        || indexVariable->AddressCount != 0)
+        return nullptr;
+
+    context_->Step("Introduce foreach over array", forStatement);
+    auto* body = new Syntax::BlockStatement();
+    for (Statement* statement : m.Get<Statement>("statements"))
+        body->Statements().Add(Syntax::Detach(statement));
+    auto* foreachStmt = new ForeachStatement();
+    foreachStmt->VariableType(
+        context_->Settings().AnonymousTypes() && itemVariable->Type != nullptr
+                && ::ILSpy::Decompiler::ContainsAnonymousType(*itemVariable->Type)
+            ? static_cast<Syntax::AstType*>(new Syntax::SimpleType(std::string("var")))
+            : context_->TypeSystemAstBuilder().ConvertType(*itemVariable->Type));
+    auto* designation = new Syntax::SingleVariableDesignation(itemVariable->Name);
+    foreachStmt->VariableDesignation(designation);
+    foreachStmt->InExpression(
+        Syntax::Detach(m.Get<IdentifierExpression>("arrayVariable").front()));
+    foreachStmt->EmbeddedStatement(body);
+    CopyAnnotationsFrom(foreachStmt, *forStatement);
+    itemVariable->Kind = IL::VariableKind::ForeachLocal;
+    // Add the variable annotation for highlighting (the C# attaches it to the
+    // `VariableDesignation` rather than the loop).
+    const auto* itemResolveResult = itemIdentifier->Annotation<ILVariableResolveResult>();
+    designation->AddAnnotation(std::make_shared<ILVariableResolveResult>(
+        itemResolveResult->VariableHandle(), itemVariable->Type));
+    // TODO : add ForeachAnnotation
+    forStatement->ReplaceWith(foreachStmt);
+    context_->EndStep(foreachStmt);
+    return foreachStmt;
+}
+
+bool PatternStatementTransform::VariableCanBeUsedAsForeachLocal(IL::ILVariable* itemVar,
+                                                               Statement* loop) {
+    if (itemVar == nullptr
+        || (itemVar->Kind != IL::VariableKind::Local
+            && itemVar->Kind != IL::VariableKind::StackSlot)) {
+        // Only locals/temporaries can be converted into a foreach loop variable.
+        return false;
+    }
+
+    IL::BlockContainer* blockContainer = CSharp::GetBlockContainer(*loop);
+
+    if (!itemVar->IsSingleDefinition()) {
+        // A foreach variable cannot be assigned to. As a special case, the address may be
+        // taken for a method call when that call is the only use.
+        if (!AddressUsedForSingleCall(itemVar, blockContainer))
+            return false;
+    }
+
+    if (itemVar->CaptureScope != nullptr && itemVar->CaptureScope != blockContainer) {
+        // Captured variables cannot be declared in the loop unless the loop is their
+        // capture scope.
+        return false;
+    }
+
+    Syntax::AstNode* declPoint = declareVariables_.GetDeclarationPoint(*itemVar);
+    bool declaredInsideLoop = false;
+    for (Syntax::AstNode* ancestor : declPoint->Ancestors()) {
+        if (ancestor == loop) {
+            declaredInsideLoop = true;
+            break;
+        }
+    }
+    return declaredInsideLoop && !declareVariables_.WasMerged(*itemVar);
+}
+
+bool PatternStatementTransform::AddressUsedForSingleCall(IL::ILVariable* /*v*/,
+                                                         IL::BlockContainer* /*loop*/) {
+    // The C# accepts an item variable whose address is taken for a single instance method call
+    // when the call is the only use and lies within the loop. The port has no `IL.Call` node and
+    // no per-variable address-instruction list yet, so the shape cannot be reconstructed; the
+    // address-taken path conservatively rejects (only variables that are not single-definition
+    // reach here, so the common single-definition path is unaffected).
+    return false;
 }
 
 bool PatternStatementTransform::DescendIntoStatement(AstNode* node) {

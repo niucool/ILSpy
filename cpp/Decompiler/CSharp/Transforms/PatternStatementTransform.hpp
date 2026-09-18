@@ -49,9 +49,12 @@
 // the `for` rewrite (`TransformFor`): the `var = init; while (var <op> end) { ...; var = ...; }`
 // to `for` conversion (with the by-ref-local and iterator-declared-inside-loop guards and the
 // no-`continue` rule) and the move of a preceding declaration assignment into an existing
-// `for` initializer. The `foreach` rewrites (array, inline array, multidimensional array),
-// the automatic property/event rewrites, and the backing-field replacement stay deferred --
-// each is named at the visit that would call it.
+// `for` initializer. The `foreach`-over-array rewrite (`TransformForeachOnArray`) also lands:
+// the compiler's `for (i = 0; i < array.Length; i++) { item = array[i]; ... }` index loop is
+// reconstructed as `foreach (item in array)` (also for a `string` looped by index), including
+// the `VariableCanBeUsedAsForeachLocal` gate. The inline-array and multidimensional-array
+// `foreach` rewrites, the automatic property/event rewrites, and the backing-field replacement
+// stay deferred -- each is named at the visit that would call it.
 
 #pragma once
 
@@ -77,6 +80,7 @@ class WhileStatement;
 }
 
 namespace ILSpy::Decompiler::IL {
+class BlockContainer;
 class ILVariable;
 }
 
@@ -112,6 +116,12 @@ public:
     // rewrite is DEFERRED (named at its would-be call site).
     Syntax::AstNode* VisitExpressionStatement(
         Syntax::ExpressionStatement* expressionStatement) override;
+
+    // The C# `public override AstNode VisitForStatement(ForStatement ...)`: rewrites the
+    // compiler's index loop back to `foreach` -- first the array/string form
+    // (`TransformForeachOnArray`), then the inline-array form. The inline-array rewrite
+    // (`TransformForeachOnInlineArray`) is DEFERRED (named at its would-be call site).
+    Syntax::AstNode* VisitForStatement(Syntax::ForStatement* forStatement) override;
 
     // The C# `public override AstNode VisitIfElseStatement(IfElseStatement ...)`: simplifies a
     // cascading `else { if (...) ... }` into `else if (...) ...`.
@@ -171,6 +181,23 @@ private:
     // `var = init; for (...)` declaration move and the `var = init; while (...) {...}` to
     // `for` rewrite, or null when the shape does not match.
     Syntax::ForStatement* TransformFor(Syntax::ExpressionStatement* node);
+
+    // The C# `Statement? TransformForeachOnArray(ForStatement forStatement)`: rewrites the
+    // compiler's `for (i = 0; i < array.Length; i++) { item = array[i]; ... }` shape back to
+    // `foreach (var item in array) { ... }`, or null when the shape does not match.
+    Syntax::Statement* TransformForeachOnArray(Syntax::ForStatement* forStatement);
+
+    // The C# `bool VariableCanBeUsedAsForeachLocal(ILVariable? itemVar, Statement loop)`:
+    // whether the item variable can become the `foreach` loop variable (a local/stack-slot
+    // with a single definition, not captured outside the loop, not merged by the declaration
+    // analysis, and declared inside the loop).
+    bool VariableCanBeUsedAsForeachLocal(IL::ILVariable* itemVar, Syntax::Statement* loop);
+
+    // The C# `static bool AddressUsedForSingleCall(ILVariable v, BlockContainer? loop)`: the
+    // special case accepting an item variable whose address is taken for a single method call.
+    // DEFERRED: the port has no `IL.Call` node yet and no per-variable address-instruction list,
+    // so the address-taken path cannot be reconstructed; the helper conservatively answers false.
+    static bool AddressUsedForSingleCall(IL::ILVariable* v, IL::BlockContainer* loop);
 
     // The C# `bool DescendIntoStatement(AstNode node)`: the descendant-walk predicate that
     // stops at expressions and nested loops (so a `continue` in a nested loop does not block

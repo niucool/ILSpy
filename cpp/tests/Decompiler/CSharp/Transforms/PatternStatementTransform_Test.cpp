@@ -33,6 +33,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/BaseReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
@@ -44,6 +45,7 @@
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/FixedStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ForeachStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
@@ -52,6 +54,7 @@
 #include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
+#include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
 #include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
 #include "Decompiler/DecompileRun.hpp"
@@ -110,6 +113,11 @@ struct TransformFixture {
 
     Transforms::TransformContext MakeContext() {
         return Transforms::TransformContext(compilation, run, *context, astBuilder);
+    }
+
+    TS::ITypePtr FindType(TS::KnownTypeCode code) {
+        return std::const_pointer_cast<TS::IType>(
+            compilation.FindType(code).shared_from_this());
     }
 };
 
@@ -1083,4 +1091,241 @@ TEST(PatternStatementTransformTest, KeepsDeclarationWhenForDoesNotUseVariable)
     ASSERT_EQ(block->Statements().Count(), 2);
     EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(initStmt));
     EXPECT_EQ(forStatement->Initializers().Count(), 0);
+}
+
+// ---- foreach over array ------------------------------------------------------------
+
+namespace {
+
+// Builds the compiler's array index loop
+// `for (index = 0; index < array.Length; index = index + 1) { item = array[index]; <extra> }`.
+Syntax::ForStatement* MakeArrayForLoop(
+    const IL::ILVariablePtr& index, const IL::ILVariablePtr& array,
+    const IL::ILVariablePtr& item,
+    std::initializer_list<Syntax::Statement*> extraStatements = {}) {
+    auto* forStatement = new Syntax::ForStatement();
+    forStatement->Initializers().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(index), Int(0))));
+    forStatement->Condition(new Syntax::BinaryOperatorExpression(
+        Use(index), Syntax::BinaryOperatorType::LessThan,
+        new Syntax::MemberReferenceExpression(Use(array), std::string("Length"))));
+    forStatement->Iterators().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            Use(index), Syntax::AssignmentOperatorType::Assign,
+            new Syntax::BinaryOperatorExpression(
+                Use(index), Syntax::BinaryOperatorType::Add, Int(1)))));
+    auto* body = new Syntax::BlockStatement();
+    auto* indexer = new Syntax::IndexerExpression(Use(array));
+    indexer->Arguments().Add(Use(index));
+    body->Statements().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(item), indexer)));
+    for (Syntax::Statement* statement : extraStatements)
+        body->Statements().Add(statement);
+    forStatement->EmbeddedStatement(body);
+    return forStatement;
+}
+
+} // namespace
+
+// `for (i = 0; i < array.Length; i = i + 1) { item = array[i]; body; }` becomes
+// `foreach (var item in array) { body; }`.
+TEST(PatternStatementTransformTest, TransformsArrayForLoopToForeach)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+    auto* bodyStatement = new Syntax::ExpressionStatement(Ref("Foo"));
+    auto* forStatement = MakeArrayForLoop(index, array, item, {bodyStatement});
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    auto* foreachStmt = dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]);
+    ASSERT_NE(foreachStmt, nullptr);
+    auto* inExpression = dynamic_cast<Syntax::IdentifierExpression*>(foreachStmt->InExpression());
+    ASSERT_NE(inExpression, nullptr);
+    EXPECT_EQ(inExpression->Identifier(), "array");
+    auto* designation = dynamic_cast<Syntax::SingleVariableDesignation*>(
+        foreachStmt->VariableDesignation());
+    ASSERT_NE(designation, nullptr);
+    EXPECT_EQ(designation->Identifier(), "item");
+    EXPECT_EQ(static_cast<int>(item->Kind), static_cast<int>(IL::VariableKind::ForeachLocal));
+    auto* newBody = dynamic_cast<Syntax::BlockStatement*>(foreachStmt->EmbeddedStatement());
+    ASSERT_NE(newBody, nullptr);
+    ASSERT_EQ(newBody->Statements().Count(), 1);
+    EXPECT_EQ(newBody->Statements()[0], static_cast<Syntax::Statement*>(bodyStatement));
+}
+
+// A `string` looped by index also rewrites to `foreach` (the `Length` member plus the string
+// indexer read as a `char`).
+TEST(PatternStatementTransformTest, TransformsStringForLoopToForeach)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto text = Var("text");
+    text->Type = fixture.FindType(TS::KnownTypeCode::String);
+    auto item = Var("item");
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+    auto* forStatement = MakeArrayForLoop(index, text, item);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_NE(dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]), nullptr);
+}
+
+// With `ForEachStatement` off the index loop is left alone.
+TEST(PatternStatementTransformTest, KeepsForLoopWhenForEachSettingOff)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(false);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// The index variable must be a pure counter (stored twice, loaded three times, never
+// addressed); a different profile keeps the loop.
+TEST(PatternStatementTransformTest, KeepsForLoopWhenIndexCountsDiffer)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    index->StoreCount = 3;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// An item variable that is not single-definition (and whose address is not used for a single
+// call) cannot become a foreach local.
+TEST(PatternStatementTransformTest, KeepsForLoopWhenItemNotSingleDefinition)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 2;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// The looped collection must be an array or a string; any other type keeps the loop.
+TEST(PatternStatementTransformTest, KeepsForLoopWhenCollectionIsNotArrayOrString)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto scalar = Var("scalar");
+    scalar->Type = fixture.FindType(TS::KnownTypeCode::Int32);
+    auto item = Var("item");
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+    auto* forStatement = MakeArrayForLoop(index, scalar, item);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// Only locals/stack slots can become the foreach local; a parameter keeps the loop.
+TEST(PatternStatementTransformTest, KeepsForLoopWhenItemIsParameter)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    item->Kind = IL::VariableKind::Parameter;
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// A variable captured outside the loop keeps the loop (it cannot be declared in the loop).
+TEST(PatternStatementTransformTest, KeepsForLoopWhenItemCapturedOutsideLoop)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+    IL::BlockContainer captureScope;
+    item->CaptureScope = &captureScope;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// A condition that is not `<` (here `<=`) does not match the array pattern.
+TEST(PatternStatementTransformTest, KeepsForLoopWhenConditionIsLessThanOrEqual)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+    static_cast<Syntax::BinaryOperatorExpression*>(forStatement->Condition())
+        ->Operator(Syntax::BinaryOperatorType::LessThanOrEqual);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
 }
