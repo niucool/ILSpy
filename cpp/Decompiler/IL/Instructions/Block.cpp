@@ -28,12 +28,36 @@
 
 #include "Decompiler/Disassembler/DisassemblerHelpers.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/PatternMatching.hpp"
 
 namespace ILSpy::Decompiler::IL {
 
 std::string Block::Label() const {
     return Disassembler::OffsetToString(static_cast<int>(StartILOffset));
+}
+
+bool Block::MatchInlineAssignBlock(ILInstruction*& call,
+                                    ILInstruction*& value) const {
+    call = nullptr;
+    value = nullptr;
+    if (Kind != BlockKind::CallInlineAssign)
+        return false;
+    if (Instructions.size() != 1)
+        return false;
+    call = Instructions[0].get();
+    auto* callInstruction = dynamic_cast<Call*>(call);
+    if (callInstruction == nullptr || callInstruction->Arguments.empty())
+        return false;
+    ILVariable* tmp = nullptr;
+    ILInstruction* storedValue = nullptr;
+    if (!MatchStLoc(callInstruction->Arguments.back().get(), tmp)
+        || !MatchStLoc(callInstruction->Arguments.back().get(), tmp, storedValue))
+        return false;
+    if (!(tmp->IsSingleDefinition() && tmp->LoadCount == 1))
+        return false;
+    value = storedValue;
+    return MatchLdLoc(FinalInstruction.get(), tmp);
 }
 
 bool BlockContainer::MatchConditionBlock(Block* block, ILInstruction*& condition,

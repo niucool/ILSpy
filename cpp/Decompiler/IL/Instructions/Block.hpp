@@ -62,6 +62,14 @@ public:
     // Block.cpp (the Disassembler include is not wanted in this header).
     std::string Label() const;
 
+    // The C# `public bool MatchInlineAssignBlock(out CallInstruction? call, out
+    // ILInstruction? value)` (Block.cs lines 436-452): a BlockKind.CallInlineAssign
+    // block holding a single setter call whose last argument is an
+    // `stloc tmp(value)` with a single load, followed by `ldloc tmp`. Answers the
+    // setter call and the extracted assigned value. Defined out-of-line in
+    // Block.cpp (its body calls the PatternMatching.hpp matchers).
+    bool MatchInlineAssignBlock(ILInstruction*& call, ILInstruction*& value) const;
+
     int ChildCount() const override {
         return static_cast<int>(Instructions.size()) + (FinalInstruction ? 1 : 0);
     }

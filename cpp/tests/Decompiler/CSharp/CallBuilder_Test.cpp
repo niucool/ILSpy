@@ -5716,3 +5716,220 @@ TEST(ExpressionBuilderVisitBlockTest, InterpolatedStringUnsupportedCallThrows)
 
     EXPECT_THROW(fixture.builder->Translate(&block), std::logic_error);
 }
+
+// ---------------------------------------------------------------------------
+// CallInlineAssign: Block.MatchInlineAssignBlock (Block.cs lines 436-452) and
+// ExpressionBuilder.TranslateSetterCallAssignment (ExpressionBuilder.cs lines
+// 3477-3488). The blocks are hand-built (the shape TransformAssignment's
+// TransformInlineAssignmentStObjOrCall produces: the single setter call whose
+// last argument is an `stloc tmp(value)`, followed by `ldloc tmp`).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A static single-int-parameter method named `SetValue` (the setter stand-in)
+// plus a single-definition/single-load temporary. `tmp.StoreCount == 1` and
+// `tmp.LoadCount == 1` reproduce the ILVariable.IsSingleDefinition + LoadCount
+// gate MatchInlineAssignBlock applies.
+struct SetterCallFixture : BuildArgsFixture
+{
+    std::shared_ptr<TS::TestSupport::LookupTypeDefinition> holderDef;
+    std::shared_ptr<TS::Implementation::FakeMethod> setter;
+
+    SetterCallFixture()
+    {
+        holderDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+            "Holder", "H", TS::FullTypeName(TS::TopLevelTypeName("H", "Holder")),
+            TS::TypeKind::Class, TS::Accessibility::Public, holder.compilation,
+            &holder.compilation.MainModule());
+        setter = std::make_shared<TS::Implementation::FakeMethod>(
+            holder.compilation, TS::SymbolKind::Method);
+        setter->SetName("SetValue");
+        setter->SetIsStatic(true);
+        setter->SetDeclaringType(
+            TS::ITypePtr(holderDef.get(), [](TS::IType*) {}));
+        ParamFixture value(holder.KnownType(TS::KnownTypeCode::Int32), "value");
+        setter->SetParameters({value.parameter});
+        setter->SetReturnType(holder.KnownType(TS::KnownTypeCode::Void));
+        holderDef->SetMethods({setter.get()});
+        SetCurrentTypeDefinition(holderDef.get());
+    }
+
+    std::shared_ptr<IL::ILVariable> Temp(const char* name = "tmp")
+    {
+        auto variable = std::make_shared<IL::ILVariable>(
+            IL::VariableKind::Local, holder.KnownType(TS::KnownTypeCode::Int32));
+        variable->Name = name;
+        variable->StoreCount = 1;
+        variable->LoadCount = 1;
+        return variable;
+    }
+};
+
+// The canonical CallInlineAssign shape: SetValue(stloc tmp(5)); final ldloc tmp.
+void BuildSetterCallBlock(SetterCallFixture& fixture,
+                          const std::shared_ptr<IL::ILVariable>& tmp,
+                          IL::Block& block)
+{
+    block.Kind = IL::BlockKind::CallInlineAssign;
+    auto call = std::make_unique<IL::Call>("SetValue");
+    call->Method = fixture.setter;
+    call->ReturnType = IL::StackType::Void;
+    call->AddArg(std::make_unique<IL::StLoc>(tmp, std::make_unique<IL::LdcI4>(5)));
+    block.Add(std::move(call));
+    block.SetFinal(std::make_unique<IL::LdLoc>(tmp));
+}
+
+} // namespace
+
+TEST(BlockMatchInlineAssignBlockTest, MatchesTheSetterCallAndExtractsTheStoredValue)
+{
+    SetterCallFixture fixture;
+    auto tmp = fixture.Temp();
+    IL::Block block;
+    BuildSetterCallBlock(fixture, tmp, block);
+
+    IL::ILInstruction* callOut = nullptr;
+    IL::ILInstruction* valueOut = nullptr;
+    ASSERT_TRUE(block.MatchInlineAssignBlock(callOut, valueOut));
+    EXPECT_EQ(callOut, block.Instructions[0].get());
+    auto* value = dynamic_cast<IL::LdcI4*>(valueOut);
+    ASSERT_NE(value, nullptr);
+    EXPECT_EQ(value->Value, 5);
+}
+
+TEST(BlockMatchInlineAssignBlockTest, RejectsWrongKind)
+{
+    SetterCallFixture fixture;
+    auto tmp = fixture.Temp();
+    IL::Block block;
+    BuildSetterCallBlock(fixture, tmp, block);
+    block.Kind = IL::BlockKind::ControlFlow;
+
+    IL::ILInstruction* callOut = nullptr;
+    IL::ILInstruction* valueOut = nullptr;
+    EXPECT_FALSE(block.MatchInlineAssignBlock(callOut, valueOut));
+}
+
+TEST(BlockMatchInlineAssignBlockTest, RejectsAnInstructionCountOtherThanOne)
+{
+    SetterCallFixture fixture;
+    auto tmp = fixture.Temp();
+    IL::Block block;
+    BuildSetterCallBlock(fixture, tmp, block);
+    block.Add(std::make_unique<IL::LdcI4>(0));
+
+    IL::ILInstruction* callOut = nullptr;
+    IL::ILInstruction* valueOut = nullptr;
+    EXPECT_FALSE(block.MatchInlineAssignBlock(callOut, valueOut));
+}
+
+TEST(BlockMatchInlineAssignBlockTest, RejectsANonCallInstruction)
+{
+    SetterCallFixture fixture;
+    IL::Block block;
+    block.Kind = IL::BlockKind::CallInlineAssign;
+    block.Add(std::make_unique<IL::LdcI4>(0));
+    block.SetFinal(std::make_unique<IL::LdcI4>(0));
+
+    IL::ILInstruction* callOut = nullptr;
+    IL::ILInstruction* valueOut = nullptr;
+    EXPECT_FALSE(block.MatchInlineAssignBlock(callOut, valueOut));
+}
+
+TEST(BlockMatchInlineAssignBlockTest, RejectsANonStLocLastArgument)
+{
+    SetterCallFixture fixture;
+    IL::Block block;
+    block.Kind = IL::BlockKind::CallInlineAssign;
+    auto call = std::make_unique<IL::Call>("SetValue");
+    call->Method = fixture.setter;
+    call->AddArg(std::make_unique<IL::LdcI4>(5));
+    block.Add(std::move(call));
+    block.SetFinal(std::make_unique<IL::LdcI4>(0));
+
+    IL::ILInstruction* callOut = nullptr;
+    IL::ILInstruction* valueOut = nullptr;
+    EXPECT_FALSE(block.MatchInlineAssignBlock(callOut, valueOut));
+}
+
+TEST(BlockMatchInlineAssignBlockTest, RejectsAMultiLoadTemporary)
+{
+    SetterCallFixture fixture;
+    auto tmp = fixture.Temp();
+    tmp->LoadCount = 2;
+    IL::Block block;
+    BuildSetterCallBlock(fixture, tmp, block);
+
+    IL::ILInstruction* callOut = nullptr;
+    IL::ILInstruction* valueOut = nullptr;
+    EXPECT_FALSE(block.MatchInlineAssignBlock(callOut, valueOut));
+}
+
+TEST(BlockMatchInlineAssignBlockTest, RejectsAFinalThatIsNotTheTemporaryLoad)
+{
+    SetterCallFixture fixture;
+    auto tmp = fixture.Temp();
+    auto other = fixture.Temp("other");
+    IL::Block block;
+    BuildSetterCallBlock(fixture, tmp, block);
+    block.SetFinal(std::make_unique<IL::LdLoc>(other));
+
+    IL::ILInstruction* callOut = nullptr;
+    IL::ILInstruction* valueOut = nullptr;
+    EXPECT_FALSE(block.MatchInlineAssignBlock(callOut, valueOut));
+}
+
+TEST(ExpressionBuilderVisitBlockTest, CallInlineAssignRendersTheSetterCall)
+{
+    // The setter call's last argument (the `stloc tmp(5)`) is replaced by the
+    // extracted value before the CallBuilder render.
+    SetterCallFixture fixture;
+    auto tmp = fixture.Temp();
+    IL::Block block;
+    BuildSetterCallBlock(fixture, tmp, block);
+
+    CS::TranslatedExpression result = fixture.builder->Translate(&block);
+    auto* invocation =
+        dynamic_cast<Syntax::InvocationExpression*>(result.Expression());
+    ASSERT_NE(invocation, nullptr);
+    ASSERT_EQ(invocation->Arguments().Count(), 1);
+    auto* value = dynamic_cast<Syntax::PrimitiveExpression*>(
+        invocation->Arguments()[0]);
+    ASSERT_NE(value, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(value->Value()), 5);
+}
+
+TEST(ExpressionBuilderVisitBlockTest, CallInlineAssignCarriesTheCallAnnotation)
+{
+    SetterCallFixture fixture;
+    auto tmp = fixture.Temp();
+    IL::Block block;
+    BuildSetterCallBlock(fixture, tmp, block);
+    IL::ILInstruction* callPtr = block.Instructions[0].get();
+
+    CS::TranslatedExpression result = fixture.builder->Translate(&block);
+    std::vector<IL::ILInstruction*> instructions =
+        CS::GetILInstructions(*result.Expression());
+    EXPECT_NE(std::find(instructions.begin(), instructions.end(), callPtr),
+              instructions.end());
+}
+
+TEST(ExpressionBuilderVisitBlockTest, CallInlineAssignWithAnInvalidShapeRendersTheError)
+{
+    SetterCallFixture fixture;
+    auto tmp = fixture.Temp();
+    IL::Block block;
+    BuildSetterCallBlock(fixture, tmp, block);
+    block.Add(std::make_unique<IL::LdcI4>(0)); // breaks the one-instruction contract
+
+    CS::TranslatedExpression result = fixture.builder->Translate(&block);
+    auto* error = dynamic_cast<Syntax::ErrorExpression*>(result.Expression());
+    ASSERT_NE(error, nullptr);
+    auto trailing = error->TrailingTrivia();
+    ASSERT_EQ(trailing.size(), 1u);
+    auto* comment = dynamic_cast<Syntax::Comment*>(trailing[0]);
+    ASSERT_NE(comment, nullptr);
+    EXPECT_EQ(comment->Content(),
+              "Error: MatchInlineAssignBlock() returned false");
+}

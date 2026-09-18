@@ -5792,6 +5792,31 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   The full Debug gtest suite is 12960 ran / 12958 passed / the 2 standing skips /
   zero failures, and the CLI baselines are unchanged (`--csharp` 10106360, `--il`
   41246545, `-l c` 109438 bytes).
+- **`Block.MatchInlineAssignBlock` + `ExpressionBuilder.TranslateSetterCallAssignment`**
+  -- the `BlockKind.CallInlineAssign` block translation lands, closing one more
+  of the remaining `VisitBlock` arms. `Block.MatchInlineAssignBlock`
+  (`Block.cs` lines 436-452) recognizes a single-instruction
+  `CallInlineAssign` block whose setter call's last argument is an
+  `stloc tmp(value)` with a single-definition/single-load `tmp` and whose
+  final instruction is `ldloc tmp`, answering the setter call and the extracted
+  value. `TranslateSetterCallAssignment` (`ExpressionBuilder.cs` lines
+  3477-3488) replaces the call's last argument with that value and routes the
+  call through `CallBuilder.Build`, with the C#
+  `"Error: MatchInlineAssignBlock() returned false"` fallback for an invalid
+  block. The `CallInstruction` parameter cast ports to a `std::logic_error`
+  when the call carries no resolved method (the C# assumes non-null), and the
+  decoded opcode follows the port's one-Call-node convention
+  (`IsNewObj ? NewObj : Call`). Verified by 10 new tests: 7
+  `BlockMatchInlineAssignBlockTest` cases (the positive extraction plus the
+  wrong-kind / instruction-count / non-call / non-stloc-last / multi-load /
+  wrong-final rejections) and 3 `ExpressionBuilderVisitBlockTest` cases (the
+  setter-call render with the substituted value, the call annotation, and the
+  invalid-shape error), proven with a `MatchInlineAssignBlock`-neuter RED round
+  where exactly the 3 positive tests failed and the 7 negatives stayed green.
+  The full Debug gtest suite is 13000 ran / 12998 passed / the 2 standing skips
+  / zero failures, and the CLI baselines are unchanged by construction (no
+  transform produces `CallInlineAssign` blocks yet, so the new code is
+  unreachable from the CLI).
 - **`ExpressionBuilder.VisitBlock` + `TranslateCallWithNamedArgs` / `TranslateInterpolatedString`**
   -- the special-kind block dispatch lands (`ExpressionBuilder.cs` lines
   3406-3468), making the just-ported `CallBuilder.CallWithNamedArgs` render

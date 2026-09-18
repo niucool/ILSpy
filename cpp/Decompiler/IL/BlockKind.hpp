@@ -27,9 +27,8 @@
 // matching C# construct instead of a braced statement list. This port carries
 // only the values the ported code consults; the full C# enum (ArrayInitializer,
 // CollectionInitializer, ObjectInitializer, StackAllocInitializer,
-// CallInlineAssign, CallWithNamedArgs, DeconstructionConversions,
-// DeconstructionAssignments, WithInitializer) is added as the transforms that
-// produce them land.
+// DeconstructionConversions, DeconstructionAssignments, WithInitializer) is
+// added as the transforms that produce them land.
 
 #pragma once
 
@@ -55,6 +54,13 @@ enum class BlockKind : std::uint8_t {
     // argument expressions. Constructed by NamedArgumentTransform when a load
     // cannot be reached by re-ordering the call arguments.
     CallWithNamedArgs,
+    // An inline assignment to a property or indexer setter, e.g.
+    // `Use(this.Property = value);`. Instructions holds the single setter call
+    // whose last argument is an `stloc tmp(value)`; the FinalInstruction is the
+    // `ldloc tmp` that yields the setter's result. Constructed by
+    // TransformAssignment (the C# TransformInlineAssignmentStObjOrCall);
+    // deconstructed through Block.MatchInlineAssignBlock.
+    CallInlineAssign,
 };
 
 } // namespace ILSpy::Decompiler::IL

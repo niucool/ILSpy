@@ -227,6 +227,7 @@ const char* BlockKindName(IL::BlockKind kind)
         case IL::BlockKind::ControlFlow: return "ControlFlow";
         case IL::BlockKind::InterpolatedString: return "InterpolatedString";
         case IL::BlockKind::CallWithNamedArgs: return "CallWithNamedArgs";
+        case IL::BlockKind::CallInlineAssign: return "CallInlineAssign";
     }
     return "?";
 }
@@ -1087,6 +1088,8 @@ TranslatedExpression ExpressionBuilder::VisitBlock(IL::ILInstruction* inst, Tran
             return TranslateCallWithNamedArgs(block);
         case IL::BlockKind::InterpolatedString:
             return TranslateInterpolatedString(block);
+        case IL::BlockKind::CallInlineAssign:
+            return TranslateSetterCallAssignment(block);
         default:
             return ErrorExpression("Unknown block type: " + std::string(BlockKindName(block.Kind)));
     }
@@ -1179,6 +1182,35 @@ TranslatedExpression ExpressionBuilder::TranslateInterpolatedString(IL::Block& b
     ExpressionWithILInstruction expr = WithILInstruction(*content, &block);
     return WithRR(expr, std::make_shared<Sem::ResolveResult>(
         const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::String)).shared_from_this()));
+}
+
+// The C# `private TranslatedExpression TranslateSetterCallAssignment(Block
+// block)` (ExpressionBuilder.cs lines 3477-3488). A non-matching block renders
+// the C# "Error: MatchInlineAssignBlock() returned false" ErrorExpression
+// (the C# comment: "should never happen unless the ILAst is invalid").
+TranslatedExpression ExpressionBuilder::TranslateSetterCallAssignment(IL::Block& block)
+{
+    IL::ILInstruction* callInst = nullptr;
+    IL::ILInstruction* value = nullptr;
+    if (!block.MatchInlineAssignBlock(callInst, value))
+        return ErrorExpression("Error: MatchInlineAssignBlock() returned false");
+    auto* call = static_cast<IL::Call*>(callInst);
+    if (!call->Method)
+        throw std::logic_error(
+            "TranslateSetterCallAssignment: setter call has no resolved method");
+    // The C# `call.Arguments.ToList()` with the last argument (the temporary
+    // stloc) replaced by the extracted assigned value.
+    std::vector<IL::ILInstruction*> arguments;
+    arguments.reserve(call->Arguments.size());
+    for (std::size_t i = 0; i + 1 < call->Arguments.size(); ++i)
+        arguments.push_back(call->Arguments[i].get());
+    arguments.push_back(value);
+    // The port's one-Call-node model: the decoded opcode is the IsNewObj flag
+    // (the call-vs-callvirt distinction is deferred with the reader's decode).
+    IL::OpCode callOpCode = call->IsNewObj ? IL::OpCode::NewObj : IL::OpCode::Call;
+    ExpressionWithResolveResult result = CallBuilder(this, *compilation, settings)
+        .Build(callOpCode, *call->Method, arguments);
+    return WithILInstruction(result, call);
 }
 
 // ---------------------------------------------------------------------------

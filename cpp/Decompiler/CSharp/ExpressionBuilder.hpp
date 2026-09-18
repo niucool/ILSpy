@@ -444,6 +444,14 @@ public:
     // calls, producing the InterpolatedStringExpression with a System.String
     // resolve result.
     TranslatedExpression TranslateInterpolatedString(IL::Block& block);
+    // The C# `private TranslatedExpression TranslateSetterCallAssignment(Block
+    // block)` (ExpressionBuilder.cs lines 3477-3488): the inline property/indexer
+    // setter assignment render -- deconstruct the BlockKind.CallInlineAssign
+    // block through MatchInlineAssignBlock, replace the setter call's last
+    // argument (the temporary stloc) with the extracted value, and route the
+    // call through CallBuilder.Build. A block that does not match renders the C#
+    // "Error: MatchInlineAssignBlock() returned false" ErrorExpression.
+    TranslatedExpression TranslateSetterCallAssignment(IL::Block& block);
     // The C# `private TranslatedExpression StObjViaHelperCall(StObj inst)`
     // (ExpressionBuilder.cs lines 3087-3125): the `Unsafe.Write` /
     // `Unsafe.WriteUnaligned` intrinsic rewrite for a store that cannot be a
