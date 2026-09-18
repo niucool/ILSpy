@@ -422,6 +422,28 @@ public:
     // InvalidExpression inst, TranslationContext context)` (ExpressionBuilder.cs lines
     // 5135-5146): the same error text with the node's Severity as the prefix.
     TranslatedExpression VisitInvalidExpression(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitBlock(Block
+    // block, TranslationContext context)` (ExpressionBuilder.cs lines 3406-3428):
+    // the special-kind block dispatch -- the array/stackalloc/object-collection/
+    // with-initializer, inline-assign, named-argument and interpolated-string
+    // arms, else the "Unknown block type" ErrorExpression. Only the
+    // CallWithNamedArgs and InterpolatedString kinds exist in the ported
+    // BlockKind enum, so the remaining C# arms are unreachable until the
+    // initializer transforms that synthesize those kinds land; the default arm
+    // (a plain ControlFlow block) is faithfully the C# default's ErrorExpression.
+    TranslatedExpression VisitBlock(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `private TranslatedExpression TranslateCallWithNamedArgs(Block
+    // block)` (ExpressionBuilder.cs lines 3470-3475): the named-argument call
+    // render through CallBuilder.CallWithNamedArgs, wrapped in ref when the
+    // called method returns a by-reference type.
+    TranslatedExpression TranslateCallWithNamedArgs(IL::Block& block);
+    // The C# `private TranslatedExpression TranslateInterpolatedString(Block
+    // block)` (ExpressionBuilder.cs lines 3430-3468): the C# 10/.NET 6
+    // `$"..."` block render -- the AppendLiteral text runs and the
+    // AppendFormatted interpolations of the DefaultInterpolatedStringHandler
+    // calls, producing the InterpolatedStringExpression with a System.String
+    // resolve result.
+    TranslatedExpression TranslateInterpolatedString(IL::Block& block);
     // The C# `private TranslatedExpression StObjViaHelperCall(StObj inst)`
     // (ExpressionBuilder.cs lines 3087-3125): the `Unsafe.Write` /
     // `Unsafe.WriteUnaligned` intrinsic rewrite for a store that cannot be a

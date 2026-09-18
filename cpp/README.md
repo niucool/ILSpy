@@ -5792,6 +5792,38 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   The full Debug gtest suite is 12960 ran / 12958 passed / the 2 standing skips /
   zero failures, and the CLI baselines are unchanged (`--csharp` 10106360, `--il`
   41246545, `-l c` 109438 bytes).
+- **`ExpressionBuilder.VisitBlock` + `TranslateCallWithNamedArgs` / `TranslateInterpolatedString`**
+  -- the special-kind block dispatch lands (`ExpressionBuilder.cs` lines
+  3406-3468), making the just-ported `CallBuilder.CallWithNamedArgs` render
+  reachable from the visitor. `VisitBlock` switches on `Block.Kind`:
+  `CallWithNamedArgs` routes through `TranslateCallWithNamedArgs` (the
+  `CallBuilder` render wrapped in `WrapInRef` when the called method returns a
+  by-reference type), `InterpolatedString` routes through
+  `TranslateInterpolatedString`, and everything else is the C# default's
+  `ErrorExpression("Unknown block type: " + block.Kind)`. Only the
+  `CallWithNamedArgs` and `InterpolatedString` kinds exist in the ported
+  `BlockKind` enum (the initializer transforms that synthesize the C#
+  `ArrayInitializer` / `CollectionInitializer` / `ObjectInitializer` /
+  `StackAllocInitializer` / `WithInitializer` / `CallInlineAssign` kinds have
+  not landed), so those arms are absent rather than stubbed.
+  `TranslateInterpolatedString` walks `Instructions[1..]` (skipping the
+  `DefaultInterpolatedStringHandler` construction), renders `AppendLiteral`'s
+  `LdStr` argument with the braces doubled, and renders `AppendFormatted` as an
+  `Interpolation` over its value argument (converted to the call's parameter-1
+  type) with the optional `LdcI4` alignment and `LdStr` suffix, throwing the C#
+  `NotSupportedException` (mapped to `std::logic_error`) on anything else. The
+  port's `CallInstruction.GetParameter(i)` has no counterpart, so a file-local
+  helper resolves the parameter type from the resolved `IMethod`'s parameter
+  list and falls back to the IL reader's `Call.ParameterIType` vector, shifting
+  the argument index by the instance-call `this`. Verified by 5 new tests (the
+  `ControlFlow` default error text, the `CallWithNamedArgs` dispatch reordering
+  `b` then `a` with the block annotation preserved, the literal-escape +
+  alignment interpolation, the four-argument alignment-and-suffix
+  interpolation, and the unsupported-call throw) proven with a
+  dispatch-neuter RED round (all 5 failed). The full Debug gtest suite is 12990
+  ran / 12988 passed / the 2 standing skips / zero failures, and the CLI
+  baselines are byte-identical (`--csharp` 10106360, `--il` 41246545, `-l c`
+  109438).
 - **`CallBuilder.ModifyReturnTypeOfLambda` / `ModifyReturnStatementInsideLambda`**
   -- the previously deferred `CastArguments` anonymous-type lambda-return arm now
   lands. `ModifyReturnTypeOfLambda` reads the lambda's

@@ -5549,3 +5549,170 @@ TEST(CallWithNamedArgsTest, ThrowsWithoutAResolvedMethod)
     CS::CallBuilder builder = fixture.MakeCallBuilder();
     EXPECT_THROW(builder.CallWithNamedArgs(block), std::logic_error);
 }
+
+// ---------------------------------------------------------------------------
+// ExpressionBuilder.VisitBlock: the special-kind block dispatch
+// (ExpressionBuilder.cs lines 3406-3475). The CallWithNamedArgs dispatch (the
+// CallBuilder.CallWithNamedArgs render + the WrapInRef tail), the
+// InterpolatedString render, and the default "Unknown block type"
+// ErrorExpression.
+// ---------------------------------------------------------------------------
+
+TEST(ExpressionBuilderVisitBlockTest, ControlFlowBlockRendersUnknownBlockTypeError)
+{
+    BuilderFixture fixture;
+    IL::Block block; // Kind == ControlFlow (the default)
+    CS::TranslatedExpression result = fixture.builder->Translate(&block);
+    auto* error = dynamic_cast<Syntax::ErrorExpression*>(result.Expression());
+    ASSERT_NE(error, nullptr);
+    // The error text is attached as a trailing multi-line Comment.
+    auto trailing = error->TrailingTrivia();
+    ASSERT_EQ(trailing.size(), 1u);
+    auto* comment = dynamic_cast<Syntax::Comment*>(trailing[0]);
+    ASSERT_NE(comment, nullptr);
+    EXPECT_EQ(comment->Content(), "Unknown block type: ControlFlow");
+}
+
+TEST(ExpressionBuilderVisitBlockTest, CallWithNamedArgsDispatchesToTheCallRender)
+{
+    NamedArgsCallFixture fixture;
+    auto namedV = fixture.NamedVar();
+
+    IL::Block block;
+    block.Kind = IL::BlockKind::CallWithNamedArgs;
+    block.Add(std::make_unique<IL::StLoc>(namedV, std::make_unique<IL::LdcI4>(2)));
+
+    auto call = std::make_unique<IL::Call>("Target");
+    call->Method = fixture.target;
+    call->IsInstanceCall = false;
+    call->ReturnType = IL::StackType::Void;
+    call->AddArg(std::make_unique<IL::LdcI4>(3));      // parameter a
+    call->AddArg(std::make_unique<IL::LdLoc>(namedV)); // parameter b
+    block.SetFinal(std::move(call));
+
+    CS::TranslatedExpression result = fixture.builder->Translate(&block);
+    auto* invocation =
+        dynamic_cast<Syntax::InvocationExpression*>(result.Expression());
+    ASSERT_NE(invocation, nullptr);
+    ASSERT_EQ(invocation->Arguments().Count(), 2);
+    auto* first =
+        dynamic_cast<Syntax::NamedArgumentExpression*>(invocation->Arguments()[0]);
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(first->Name(), "b");
+    // The block's IL-instruction annotation survives the WrapInRef tail.
+    std::vector<IL::ILInstruction*> instructions =
+        CS::GetILInstructions(*result.Expression());
+    EXPECT_NE(std::find(instructions.begin(), instructions.end(), &block),
+              instructions.end());
+}
+
+TEST(ExpressionBuilderVisitBlockTest, InterpolatedStringRendersTextAndFormattedArms)
+{
+    BuilderFixture fixture;
+    auto intType = fixture.holder.KnownType(TS::KnownTypeCode::Int32);
+
+    IL::Block block;
+    block.Kind = IL::BlockKind::InterpolatedString;
+    // Instructions[0] is the handler construction, which the render skips; any
+    // node stands in.
+    block.Add(std::make_unique<IL::LdcI4>(0));
+
+    auto literal = std::make_unique<IL::Call>("X::AppendLiteral");
+    literal->IsInstanceCall = true;
+    literal->AddArg(std::make_unique<IL::LdcI4>(0)); // `this` (never translated)
+    literal->AddArg(std::make_unique<IL::LdStr>("x { y }"));
+    block.Add(std::move(literal));
+
+    auto formatted = std::make_unique<IL::Call>("X::AppendFormatted");
+    formatted->IsInstanceCall = true;
+    // The call's parameter-1 type (argument index 1 -> parameter 0).
+    formatted->ParameterIType.push_back(intType);
+    formatted->AddArg(std::make_unique<IL::LdcI4>(0)); // `this`
+    formatted->AddArg(std::make_unique<IL::LdcI4>(42));
+    formatted->AddArg(std::make_unique<IL::LdcI4>(3)); // alignment
+    block.Add(std::move(formatted));
+
+    auto toStringAndClear = std::make_unique<IL::Call>("X::ToStringAndClear");
+    toStringAndClear->IsInstanceCall = true;
+    block.SetFinal(std::move(toStringAndClear));
+
+    CS::TranslatedExpression result = fixture.builder->Translate(&block);
+    auto* interpolated =
+        dynamic_cast<Syntax::InterpolatedStringExpression*>(result.Expression());
+    ASSERT_NE(interpolated, nullptr);
+    ASSERT_EQ(interpolated->Content().Count(), 2);
+
+    auto* text = dynamic_cast<Syntax::InterpolatedStringText*>(
+        interpolated->Content().At(0));
+    ASSERT_NE(text, nullptr);
+    // The literal's braces are doubled.
+    EXPECT_EQ(text->Text(), "x {{ y }}");
+
+    auto* interpolation = dynamic_cast<Syntax::Interpolation*>(
+        interpolated->Content().At(1));
+    ASSERT_NE(interpolation, nullptr);
+    EXPECT_EQ(interpolation->Alignment(), 3);
+    EXPECT_FALSE(interpolation->Suffix().has_value());
+    auto* value =
+        dynamic_cast<Syntax::PrimitiveExpression*>(interpolation->Expression());
+    ASSERT_NE(value, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(value->Value()), 42);
+
+    ASSERT_NE(result.ResolveResult(), nullptr);
+    EXPECT_TRUE(TS::IsKnownType(result.ResolveResult()->Type(),
+                                TS::KnownTypeCode::String));
+}
+
+TEST(ExpressionBuilderVisitBlockTest, InterpolatedStringRendersAlignmentAndFormatSuffix)
+{
+    BuilderFixture fixture;
+    auto intType = fixture.holder.KnownType(TS::KnownTypeCode::Int32);
+
+    IL::Block block;
+    block.Kind = IL::BlockKind::InterpolatedString;
+    block.Add(std::make_unique<IL::LdcI4>(0));
+
+    // AppendFormatted(value, alignment: 5, format: "X4") -- the four-argument
+    // shape.
+    auto formatted = std::make_unique<IL::Call>("X::AppendFormatted");
+    formatted->IsInstanceCall = true;
+    formatted->ParameterIType.push_back(intType);
+    formatted->AddArg(std::make_unique<IL::LdcI4>(0)); // `this`
+    formatted->AddArg(std::make_unique<IL::LdcI4>(7));
+    formatted->AddArg(std::make_unique<IL::LdcI4>(5));     // alignment
+    formatted->AddArg(std::make_unique<IL::LdStr>("X4"));  // format
+    block.Add(std::move(formatted));
+
+    auto toStringAndClear = std::make_unique<IL::Call>("X::ToStringAndClear");
+    toStringAndClear->IsInstanceCall = true;
+    block.SetFinal(std::move(toStringAndClear));
+
+    CS::TranslatedExpression result = fixture.builder->Translate(&block);
+    auto* interpolated =
+        dynamic_cast<Syntax::InterpolatedStringExpression*>(result.Expression());
+    ASSERT_NE(interpolated, nullptr);
+    ASSERT_EQ(interpolated->Content().Count(), 1);
+    auto* interpolation = dynamic_cast<Syntax::Interpolation*>(
+        interpolated->Content().At(0));
+    ASSERT_NE(interpolation, nullptr);
+    EXPECT_EQ(interpolation->Alignment(), 5);
+    ASSERT_TRUE(interpolation->Suffix().has_value());
+    EXPECT_EQ(interpolation->Suffix().value(), "X4");
+}
+
+TEST(ExpressionBuilderVisitBlockTest, InterpolatedStringUnsupportedCallThrows)
+{
+    BuilderFixture fixture;
+    IL::Block block;
+    block.Kind = IL::BlockKind::InterpolatedString;
+    block.Add(std::make_unique<IL::LdcI4>(0));
+    auto unsupported = std::make_unique<IL::Call>("X::SomethingElse");
+    unsupported->IsInstanceCall = true;
+    unsupported->AddArg(std::make_unique<IL::LdcI4>(0)); // `this`
+    unsupported->AddArg(std::make_unique<IL::LdcI4>(1));
+    block.Add(std::move(unsupported));
+    auto toStringAndClear = std::make_unique<IL::Call>("X::ToStringAndClear");
+    block.SetFinal(std::move(toStringAndClear));
+
+    EXPECT_THROW(fixture.builder->Translate(&block), std::logic_error);
+}

@@ -61,6 +61,9 @@
 #include "Decompiler/CSharp/Syntax/Expressions/ThrowExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UndocumentedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/InterpolatedStringExpression.hpp"
+#include "Decompiler/CSharp/Syntax/InterpolatedStringText.hpp"
+#include "Decompiler/CSharp/Syntax/Interpolation.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/CSharp/Transforms/AddCheckedBlocks.hpp"
@@ -86,6 +89,7 @@
 #include "Decompiler/IL/ILTypeExtensions.hpp"
 #include "Decompiler/IL/PatternMatching.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/PointerArithmeticOffset.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
@@ -175,6 +179,56 @@ std::string CSharpNameByKnownTypeCode(KnownTypeCode code)
     auto name = KnownTypeReference::GetCSharpNameByTypeCode(code);
     assert(name.has_value());
     return std::string(name.value_or("int"));
+}
+
+// The short method name (the part after the last "::") of an ILAst Call. The
+// C# Call carries a resolved IMethod whose Name is already short; the port's
+// MethodName fallback keeps the resolved "Namespace.Type::Method" spelling, so
+// strip the declaring-type prefix when the resolved Method handle is absent.
+std::string ShortCallMethodName(const IL::Call& call)
+{
+    if (call.Method)
+        return call.Method->Name();
+    auto pos = call.MethodName.rfind("::");
+    return pos == std::string::npos ? call.MethodName : call.MethodName.substr(pos + 2);
+}
+
+// The C# `call.GetParameter(argumentIndex)` underlying parameter TYPE (the
+// CallInstruction.GetParameter lookup then `IParameter.Type`): the argument index
+// accounts for an instance call's implicit `this`, so the parameter index is
+// argumentIndex - (IsInstanceCall ? 1 : 0) (newobj is not IsInstanceCall in the
+// port, matching the C# `Method.IsStatic || OpCode == NewObj` first-param rule).
+// Prefers the resolved IMethod's parameter list and falls back to the IL
+// reader's resolved ParameterIType vector; null for the `this` slot or when
+// neither source has the parameter.
+const TS::IType* GetCallParameterType(const IL::Call& call, int argumentIndex)
+{
+    int firstParamIndex = call.IsInstanceCall ? 1 : 0;
+    if (argumentIndex < firstParamIndex)
+        return nullptr;
+    int parameterIndex = argumentIndex - firstParamIndex;
+    if (parameterIndex < 0)
+        return nullptr;
+    if (call.Method) {
+        const auto& parameters = call.Method->Parameters();
+        if (parameterIndex < static_cast<int>(parameters.size()))
+            return &parameters[static_cast<std::size_t>(parameterIndex)]->Type();
+    }
+    if (parameterIndex < static_cast<int>(call.ParameterIType.size()))
+        return call.ParameterIType[static_cast<std::size_t>(parameterIndex)].get();
+    return nullptr;
+}
+
+// The C# `BlockKind` ToString for the VisitBlock default arm's
+// "Unknown block type: " + block.Kind message.
+const char* BlockKindName(IL::BlockKind kind)
+{
+    switch (kind) {
+        case IL::BlockKind::ControlFlow: return "ControlFlow";
+        case IL::BlockKind::InterpolatedString: return "InterpolatedString";
+        case IL::BlockKind::CallWithNamedArgs: return "CallWithNamedArgs";
+    }
+    return "?";
 }
 
 // The C# `$"IL_{offset:x4}"` interpolation: lowercase hex, minimum four digits
@@ -1000,6 +1054,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitInvalidBranch(inst, context);
         case IL::OpCode::InvalidExpression:
             return VisitInvalidExpression(inst, context);
+        case IL::OpCode::Block:
+            return VisitBlock(inst, context);
         case IL::OpCode::Call:
         case IL::OpCode::CallVirt:
         case IL::OpCode::NewObj:
@@ -1012,6 +1068,117 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
 TranslatedExpression ExpressionBuilder::Default(IL::ILInstruction* inst, TranslationContext)
 {
     return ErrorExpression("OpCode not supported: " + std::string(IL::OpCodeName(inst->Op)));
+}
+
+// The C# `protected internal override TranslatedExpression VisitBlock(Block block,
+// TranslationContext context)` (ExpressionBuilder.cs lines 3406-3428). Only the
+// CallWithNamedArgs and InterpolatedString kinds exist in the ported BlockKind
+// enum (the initializer transforms that synthesize the C# ArrayInitializer /
+// CollectionInitializer / ObjectInitializer / StackAllocInitializer /
+// WithInitializer / CallInlineAssign kinds have not landed), so those arms are
+// absent; the default is the C# default's "Unknown block type" ErrorExpression
+// (reachable for a plain ControlFlow block).
+TranslatedExpression ExpressionBuilder::VisitBlock(IL::ILInstruction* inst, TranslationContext)
+{
+    auto& block = *static_cast<IL::Block*>(inst);
+    switch (block.Kind)
+    {
+        case IL::BlockKind::CallWithNamedArgs:
+            return TranslateCallWithNamedArgs(block);
+        case IL::BlockKind::InterpolatedString:
+            return TranslateInterpolatedString(block);
+        default:
+            return ErrorExpression("Unknown block type: " + std::string(BlockKindName(block.Kind)));
+    }
+}
+
+// The C# `private TranslatedExpression TranslateCallWithNamedArgs(Block block)`
+// (ExpressionBuilder.cs lines 3470-3475). The C# casts block.FinalInstruction to
+// CallInstruction to reach the return type; the port reads the resolved IMethod
+// ReturnType (CallBuilder.CallWithNamedArgs requires a non-null Method, so the
+// dereference is safe on every reachable path) and wraps the built call in ref
+// when the method returns a by-reference type.
+TranslatedExpression ExpressionBuilder::TranslateCallWithNamedArgs(IL::Block& block)
+{
+    TranslatedExpression call = CallBuilder(this, *compilation, settings).CallWithNamedArgs(block);
+    auto* finalCall = static_cast<IL::Call*>(block.FinalInstruction.get());
+    return WrapInRef(call, finalCall->Method->ReturnType());
+}
+
+// The C# `private TranslatedExpression TranslateInterpolatedString(Block block)`
+// (ExpressionBuilder.cs lines 3430-3468). Walks Instructions[1..] (skipping
+// Instructions[0], the `stloc v(newobj DefaultInterpolatedStringHandler(...))`
+// handler construction): AppendLiteral adds its LdStr argument as literal text
+// (`{`/`}` escaped), AppendFormatted adds an Interpolation over its value
+// argument (converted to the call's parameter type) with the optional
+// LdcI4 alignment and LdStr format suffix, and anything else is the C#
+// NotSupportedException (mapped to std::logic_error).
+TranslatedExpression ExpressionBuilder::TranslateInterpolatedString(IL::Block& block)
+{
+    auto* content = new Syntax::InterpolatedStringExpression();
+    for (std::size_t i = 1; i < block.Instructions.size(); ++i)
+    {
+        auto& call = *static_cast<IL::Call*>(block.Instructions[i].get());
+
+        // The C# local function `Interpolation BuildInterpolation(int alignment =
+        // 0, string? suffix = null)`: the value argument converted to the call's
+        // parameter-1 type with an allowed implicit conversion.
+        auto buildInterpolation = [&](int alignment, std::optional<std::string> suffix) {
+            const TS::IType* parameterType = GetCallParameterType(call, 1);
+            if (parameterType == nullptr)
+                throw std::logic_error(
+                    "Interpolated-string AppendFormatted call has no parameter 1 type");
+            TranslatedExpression value = Translate(call.Arguments[1].get());
+            value = value.ConvertTo(const_cast<TS::IType&>(*parameterType), *this, false, true);
+            return new Syntax::Interpolation(value.Expression(), alignment, std::move(suffix));
+        };
+
+        std::string name = ShortCallMethodName(call);
+        if (name == "AppendLiteral")
+        {
+            std::string text = static_cast<IL::LdStr*>(call.Arguments[1].get())->Value;
+            std::string escaped;
+            for (char c : text)
+            {
+                if (c == '{') escaped += "{{";
+                else if (c == '}') escaped += "}}";
+                else escaped += c;
+            }
+            content->Content().Add(new Syntax::InterpolatedStringText(std::move(escaped)));
+        }
+        else if (name == "AppendFormatted" && call.Arguments.size() == 2)
+        {
+            content->Content().Add(buildInterpolation(0, std::nullopt));
+        }
+        else if (name == "AppendFormatted" && call.Arguments.size() == 3
+                 && call.Arguments[2]->Op == IL::OpCode::LdStr)
+        {
+            content->Content().Add(buildInterpolation(
+                0, static_cast<IL::LdStr*>(call.Arguments[2].get())->Value));
+        }
+        else if (name == "AppendFormatted" && call.Arguments.size() == 3
+                 && call.Arguments[2]->Op == IL::OpCode::LdcI4)
+        {
+            content->Content().Add(buildInterpolation(
+                static_cast<IL::LdcI4*>(call.Arguments[2].get())->Value, std::nullopt));
+        }
+        else if (name == "AppendFormatted" && call.Arguments.size() == 4
+                 && call.Arguments[2]->Op == IL::OpCode::LdcI4
+                 && call.Arguments[3]->Op == IL::OpCode::LdStr)
+        {
+            content->Content().Add(buildInterpolation(
+                static_cast<IL::LdcI4*>(call.Arguments[2].get())->Value,
+                static_cast<IL::LdStr*>(call.Arguments[3].get())->Value));
+        }
+        else
+        {
+            throw std::logic_error(
+                "NotSupportedException: unsupported interpolated-string call " + name);
+        }
+    }
+    ExpressionWithILInstruction expr = WithILInstruction(*content, &block);
+    return WithRR(expr, std::make_shared<Sem::ResolveResult>(
+        const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::String)).shared_from_this()));
 }
 
 // ---------------------------------------------------------------------------
