@@ -29,8 +29,15 @@
 // The mutation phase (`Run`'s `EnsureExpressionStatementsAreValid`,
 // `InsertDeconstructionVariableDeclarations`, `InsertVariableDeclarations`,
 // `CanBeDeclaredAsOutVariable`, `UpdateAnnotations`, `CombineDeclarationAndInitializer`,
-// `IsReferencedWithinDeclaringCall`) stays DEFERRED, each named at its would-be call
-// site. `Run` therefore throws a loud std::logic_error rather than silently skipping the
+// `IsReferencedWithinDeclaringCall`) is partly ported: the three argument-shaping
+// helpers (`CombineDeclarationAndInitializer`, `CanBeDeclaredAsOutVariable`,
+// `IsReferencedWithinDeclaringCall`) now live here. `Run`, `EnsureExpressionStatementsAreValid`,
+// `InsertDeconstructionVariableDeclarations`, `InsertVariableDeclarations` and
+// `UpdateAnnotations` stay DEFERRED: the first needs `AssignVariableNames.GenerateVariableName`
+// (unported), the second needs the `DeconstructionDesignation` / `DeconstructInstruction`
+// machinery (unported), and the last two write `ILVariableResolveResult` annotations that need
+// `VariableToDeclare` to carry the `ILVariable` shared handle (it currently stores the raw
+// pointer). `Run` therefore throws a loud std::logic_error rather than silently skipping the
 // insertion; the transform is not wired into any seed path yet.
 
 #pragma once
@@ -53,6 +60,7 @@ class BlockContainer;
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 class AssignmentExpression;
+class DirectionExpression;
 class Expression;
 class IdentifierExpression;
 }
@@ -165,6 +173,31 @@ public:
     // by the deferred mutation phase); exposed so the analysis tests can inspect the
     // post-collision variable.
     VariableToDeclare* ResolveVariableToDeclare(IL::ILVariable* variable);
+
+    // The C# `bool CombineDeclarationAndInitializer(VariableToDeclare v, TransformContext
+    // context)`: whether the declaration for `v` should be combined with its initializer
+    // (`T v = expr;`) rather than emitted as a separate statement -- always true for a
+    // by-ref-like type or a for-statement initializer, otherwise the inverse of the
+    // SeparateLocalVariableDeclarations setting. Widened to public for direct TDD.
+    static bool CombineDeclarationAndInitializer(VariableToDeclare& v,
+                                                 TransformContext& context);
+
+    // The C# `bool CanBeDeclaredAsOutVariable(VariableToDeclare v, out DirectionExpression?
+    // dirExpr)`: whether the variable's first use sits in an `out` argument that may be
+    // promoted to an implicitly-typed out variable (`SomeCall(out T v)`). The C# method
+    // reads the `context` field; the port passes the context explicitly because the Run
+    // lifecycle is not ported yet (the C# field is set only during Run). Widened to public
+    // for direct TDD.
+    bool CanBeDeclaredAsOutVariable(VariableToDeclare& v,
+                                    Syntax::DirectionExpression*& dirExpr,
+                                    TransformContext& context);
+
+    // The C# `bool IsReferencedWithinDeclaringCall(DirectionExpression dirExpr,
+    // VariableToDeclare v)`: whether the variable is referenced in another argument of
+    // the calling expression (CS8196 forces the explicit type then). Widened to public
+    // for direct TDD.
+    bool IsReferencedWithinDeclaringCall(Syntax::DirectionExpression& dirExpr,
+                                         VariableToDeclare& v);
 
 private:
     // The C# `readonly Dictionary<ILVariable, VariableToDeclare> variableDict`. The

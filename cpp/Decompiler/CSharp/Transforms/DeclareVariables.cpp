@@ -20,6 +20,7 @@
 
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ErrorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
@@ -29,6 +30,9 @@
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Slots.hpp"
+#include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
@@ -92,8 +96,9 @@ void DeclareVariables::Run(Syntax::AstNode&, TransformContext&) {
     throw std::logic_error(
         "DeclareVariables::Run: the declaration-insertion phase "
         "(EnsureExpressionStatementsAreValid / InsertDeconstructionVariableDeclarations / "
-        "InsertVariableDeclarations / UpdateAnnotations) is not ported yet; use Analyze() for "
-        "the analysis half.");
+        "InsertVariableDeclarations / UpdateAnnotations) is not ported yet -- it needs "
+        "AssignVariableNames.GenerateVariableName and the ILVariable shared handle on "
+        "VariableToDeclare; use Analyze() for the analysis half.");
 }
 
 void DeclareVariables::Analyze(Syntax::AstNode& rootNode) {
@@ -375,6 +380,75 @@ bool DeclareVariables::IsMatchingAssignment(VariableToDeclare& v,
     if (identExpr == nullptr)
         return false;
     return identExpr->Identifier() == v.Name() && identExpr->TypeArguments().Count() == 0;
+}
+
+// ---- Mutation-phase helpers (the deferred Run pieces) ---------------------
+
+bool DeclareVariables::CombineDeclarationAndInitializer(VariableToDeclare& v,
+                                                        TransformContext& context) {
+    // `if (v.Type.IsByRefLike) return true;` -- a by-ref-like variable (a `ref
+    // struct` local) must be initialized at its declaration.
+    if (v.ILVariable()->Type != nullptr && v.ILVariable()->Type->IsByRefLike())
+        return true;
+    // `if (v.InsertionPoint.nextNode.Slot?.Kind == Slots.ForInitializer) return true;`
+    // -- a for-statement initializer is always combined with the declaration.
+    Syntax::AstNode* nextNode = v.InsertionPoint.nextNode;
+    if (nextNode != nullptr && nextNode->Slot() != nullptr
+        && nextNode->Slot()->Kind() == &Syntax::Slots::ForInitializer) {
+        return true;
+    }
+    return !context.Settings().SeparateLocalVariableDeclarations();
+}
+
+bool DeclareVariables::CanBeDeclaredAsOutVariable(VariableToDeclare& v,
+                                                  Syntax::DirectionExpression*& dirExpr,
+                                                  TransformContext& context) {
+    dirExpr = v.FirstUse != nullptr
+        ? dynamic_cast<Syntax::DirectionExpression*>(v.FirstUse->Parent())
+        : nullptr;
+    if (dirExpr == nullptr || dirExpr->FieldDirection() != Syntax::FieldDirection::Out)
+        return false;
+    if (!context.Settings().OutVariables())
+        return false;
+    if (v.DefaultInitialization != VariableInitKind::None)
+        return false;
+    // The C# switch: IfElseStatement / ExpressionStatement return whether the node is
+    // the insertion point; other statements deny promotion (a `while` condition cannot
+    // declare a variable in its parent scope); a lambda body may match the insertion
+    // point. Any other ancestor keeps walking up.
+    for (Syntax::AstNode* node = v.FirstUse; node != nullptr; node = node->Parent()) {
+        if (node->Slot() != nullptr && node->Slot()->Kind() == &Syntax::Slots::EmbeddedStatement)
+            return false;
+        if (dynamic_cast<Syntax::IfElseStatement*>(node) != nullptr
+            || dynamic_cast<Syntax::ExpressionStatement*>(node) != nullptr) {
+            return node == v.InsertionPoint.nextNode;
+        }
+        if (dynamic_cast<Syntax::Statement*>(node) != nullptr)
+            return false;
+        if (auto* lambda = dynamic_cast<Syntax::LambdaExpression*>(node))
+            return lambda->Body() == v.InsertionPoint.nextNode;
+    }
+    return false;
+}
+
+bool DeclareVariables::IsReferencedWithinDeclaringCall(Syntax::DirectionExpression& dirExpr,
+                                                       VariableToDeclare& v) {
+    Syntax::AstNode* call = dirExpr.Parent();
+    if (call == nullptr)
+        return false;
+    for (Syntax::AstNode* argument = call->FirstChild(); argument != nullptr;
+         argument = argument->NextSibling()) {
+        if (argument == &dirExpr)
+            continue;
+        for (Syntax::AstNode* node : argument->DescendantsAndSelf()) {
+            auto* identifier = dynamic_cast<Syntax::IdentifierExpression*>(node);
+            if (identifier != nullptr
+                && ResolveVariableToDeclare(CSharp::GetILVariable(*identifier)) == &v) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Transforms

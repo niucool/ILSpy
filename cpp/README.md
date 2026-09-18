@@ -5580,6 +5580,19 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   qualifier positive plus the `AutomaticProperties`-off, own-accessor, non-settable-property,
   and non-backing-field keeps), proven with a `RequiresQualifier(*backingProperty, target)`
   -neuter RED round (exactly the 1 positive test failed, the 4 keep-tests staying green).
+- **`DeclareVariables` mutation-phase helpers** -- the deferred argument-shaping helpers land:
+  `CombineDeclarationAndInitializer` (by-ref-like / for-initializer / the inverse of
+  `SeparateLocalVariableDeclarations`), `CanBeDeclaredAsOutVariable` (the first use in an `out`
+  direction, gated on `OutVariables` / no required initialization, and the ancestor walk that
+  permits promotion from an expression-statement or lambda body but denies it across an embedded
+  statement), and `IsReferencedWithinDeclaringCall` (the CS8196 sibling-argument scan through
+  `ResolveVariableToDeclare`). The C# reads its `context` field in these methods; the port passes
+  the `TransformContext` explicitly because the `Run` lifecycle is not ported yet. `Run`,
+  `EnsureExpressionStatementsAreValid`, `InsertDeconstructionVariableDeclarations`,
+  `InsertVariableDeclarations` and `UpdateAnnotations` stay deferred (they need
+  `AssignVariableNames.GenerateVariableName`, the deconstruction designation, and the `ILVariable`
+  shared handle on `VariableToDeclare`). Verified by 8 tests with a `TransformContext` fixture
+  (the `AddCheckedBlocks` shape), all 23 `DeclareVariablesTest` cases green.
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.
