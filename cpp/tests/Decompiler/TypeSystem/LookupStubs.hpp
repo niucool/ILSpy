@@ -921,6 +921,13 @@ public:
     // the original behavior so existing tests that do not call the setter are
     // unaffected (the additive-setter convention).
     void SetThisIsRefReadOnly(bool v) { thisIsRefReadOnly_ = v; }
+    // Configurable `IsInitOnly` for the init-only-setter detection
+    // (`TransformCollectionAndObjectInitializers::
+    // TypeContainsInitOnlyProperties` reads `property.Setter.IsInitOnly`).
+    // The default `false` preserves the original behavior so existing tests
+    // that do not call the setter are unaffected (the additive-setter
+    // convention).
+    void SetIsInitOnly(bool v) { isInitOnly_ = v; }
     // Configurable `GetReturnTypeAttributes` for the TypeSystemAstBuilder
     // delegate renderer's `[return: ...]` attribute sections. The default
     // (empty) preserves the prior always-empty behavior (the additive-setter
@@ -1001,8 +1008,8 @@ public:
         return returnTypeAttributes_;
     }
     bool ReturnTypeIsRefReadOnly() const override { return returnTypeIsRefReadOnly_; }
-    bool IsInitOnly() const override { return false; }
     bool ThisIsRefReadOnly() const override { return thisIsRefReadOnly_; }
+    bool IsInitOnly() const override { return isInitOnly_; }
     std::vector<const ITypeParameter*> TypeParameters() const override { return typeParameters_; }
     std::vector<ITypePtr> TypeArguments() const override { return typeArguments_; }
     bool IsExtensionMethod() const override { return isExtensionMethod_; }
@@ -1038,6 +1045,7 @@ private:
     std::vector<const ITypeParameter*> typeParameters_;
     std::vector<ITypePtr> typeArguments_;
     bool thisIsRefReadOnly_ = false;
+    bool isInitOnly_ = false;
     bool isExtensionMethod_ = false;
     std::vector<const IAttribute*> returnTypeAttributes_;
 };

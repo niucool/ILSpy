@@ -22,7 +22,8 @@
 // `ILInstruction` (ICSharpCode.Decompiler/IL/Instructions/PatternMatching.cs
 // plus the generated `IL/Instructions.cs` region): `MatchLdThis`, `MatchBox`,
 // `MatchLdObj`, `MatchAddressOf`, `MatchLdFld`, the variable match helpers
-// (`MatchLdLoc`, `MatchStLoc`), the field match helpers (`MatchLdsFld`,
+// (`MatchLdLoc`, `MatchStLoc`), the `MatchLdLoca` / `MatchLdLocRef` pair (the
+// byref-or-value local load), the field match helpers (`MatchLdsFld`,
 // `MatchStsFld`, `MatchStFld`, `MatchLdsFlda`, `MatchLdFlda`), and the array
 // match helpers (`MatchNewArr`, `MatchStObj`, `MatchLdElema`) as free functions
 // over the port's IL node pointers.
@@ -49,6 +50,7 @@
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
@@ -167,6 +169,45 @@ inline bool MatchLdLoc(const ILInstruction* inst, const ILVariable* variable)
 {
     const auto* ldloc = dynamic_cast<const LdLoc*>(inst);
     return ldloc != nullptr && ldloc->Variable.get() == variable;
+}
+
+// The C# `public bool MatchLdLoca(ILVariable? variable)` (PatternMatching.cs line
+// 88): a bare LdLoca whose variable is the given one.
+inline bool MatchLdLoca(const ILInstruction* inst, const ILVariable* variable)
+{
+    const auto* ldloca = dynamic_cast<const LdLoca*>(inst);
+    return ldloca != nullptr && ldloca->Variable.get() == variable;
+}
+
+// The C# `public bool MatchLdLocRef([NotNullWhen(true)] out ILVariable? variable)`
+// (PatternMatching.cs lines 100-113): matches either an ldloc (when the loaded
+// variable's type is a reference type) or an ldloca (when it is not, or it is a
+// type parameter) -- the load shape a byref-vs-value local produces for a
+// variable of unknown storage kind. The C# `bool? IsReferenceType == true` maps
+// to the optional comparison (an Unknown reference-ness fails both arms).
+inline bool MatchLdLocRef(const ILInstruction* inst, ILVariable*& variable)
+{
+    if (const auto* ldloc = dynamic_cast<const LdLoc*>(inst)) {
+        variable = ldloc->Variable.get();
+        return variable != nullptr && variable->Type != nullptr
+            && variable->Type->IsReferenceType() == std::optional<bool>(true);
+    }
+    if (const auto* ldloca = dynamic_cast<const LdLoca*>(inst)) {
+        variable = ldloca->Variable.get();
+        return variable != nullptr && variable->Type != nullptr
+            && (variable->Type->IsReferenceType() != std::optional<bool>(true)
+                || variable->Type->Kind() == TypeSystem::TypeKind::TypeParameter);
+    }
+    variable = nullptr;
+    return false;
+}
+
+// The C# `public bool MatchLdLocRef(ILVariable? variable)` (line 93): the
+// variable-identity form -- the shape match must report the given variable.
+inline bool MatchLdLocRef(const ILInstruction* inst, const ILVariable* variable)
+{
+    ILVariable* v = nullptr;
+    return MatchLdLocRef(inst, v) && v == variable;
 }
 
 // The C# `public bool MatchStLoc(out ILVariable? variable)` (line 123): a StLoc

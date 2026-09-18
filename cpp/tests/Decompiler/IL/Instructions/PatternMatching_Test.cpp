@@ -389,3 +389,66 @@ TEST(PatternMatchingTest, MatchLdsFldaAndMatchLdFlda)
     EXPECT_EQ(matchedTarget, nullptr);
     EXPECT_EQ(matched, nullptr);
 }
+
+TEST(PatternMatchingTest, MatchLdLocRefMatchesReferenceTypedLdLoc)
+{
+    // A reference-typed variable's load: ldloc matches, ldloca does not.
+    auto refVar = MakeVariable(VariableKind::Local,
+                               std::make_shared<KnownType>(KnownTypeCode::String), 0);
+    LdLoc refLoad(refVar);
+    ILVariable* reported = nullptr;
+    ASSERT_TRUE(MatchLdLocRef(&refLoad, reported));
+    EXPECT_EQ(reported, refVar.get());
+    ASSERT_TRUE(MatchLdLocRef(&refLoad, refVar.get()));
+
+    LdLoca refAddress(refVar);
+    EXPECT_FALSE(MatchLdLocRef(&refAddress, refVar.get()));
+
+    // Another variable does not match.
+    auto other = MakeVariable(VariableKind::Local,
+                              std::make_shared<KnownType>(KnownTypeCode::String), 1);
+    EXPECT_FALSE(MatchLdLocRef(&refLoad, other.get()));
+}
+
+TEST(PatternMatchingTest, MatchLdLocRefMatchesValueTypedLdLoca)
+{
+    // A value-typed variable's address: ldloca matches, ldloc does not.
+    auto valVar = MakeVariable(VariableKind::Local,
+                               std::make_shared<KnownType>(KnownTypeCode::Int32), 0);
+    LdLoca valAddress(valVar);
+    ILVariable* reported = nullptr;
+    ASSERT_TRUE(MatchLdLocRef(&valAddress, reported));
+    EXPECT_EQ(reported, valVar.get());
+    ASSERT_TRUE(MatchLdLocRef(&valAddress, valVar.get()));
+
+    LdLoc valLoad(valVar);
+    EXPECT_FALSE(MatchLdLocRef(&valLoad, valVar.get()));
+}
+
+TEST(PatternMatchingTest, MatchLdLocRefTypeParameterAcceptsLdLoca)
+{
+    // A type parameter's reference-ness is unknown in the port, but its Kind
+    // is TypeParameter, so the ldloca arm's `Kind == TypeParameter` clause
+    // accepts the address load regardless.
+    auto tp = std::make_shared<TypeParameter>(0, TypeParameter::OwnerKind::Class, "T");
+    auto var = MakeVariable(VariableKind::Local, tp, 0);
+    LdLoca address(var);
+    EXPECT_TRUE(MatchLdLocRef(&address, var.get()));
+
+    // A plain ldloc of it still fails (unknown reference-ness is not `true`).
+    LdLoc load(var);
+    EXPECT_FALSE(MatchLdLocRef(&load, var.get()));
+}
+
+TEST(PatternMatchingTest, MatchLdLocaMatchesOnlyTheGivenVariable)
+{
+    auto a = MakeVariable(VariableKind::Local,
+                          std::make_shared<KnownType>(KnownTypeCode::Int32), 0);
+    auto b = MakeVariable(VariableKind::Local,
+                          std::make_shared<KnownType>(KnownTypeCode::Int32), 1);
+    LdLoca address(a);
+    EXPECT_TRUE(MatchLdLoca(&address, a.get()));
+    EXPECT_FALSE(MatchLdLoca(&address, b.get()));
+    LdLoc load(a);
+    EXPECT_FALSE(MatchLdLoca(&load, a.get()));
+}

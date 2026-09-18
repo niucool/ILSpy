@@ -180,6 +180,23 @@ struct ILTransformSettings {
     // ordering blocks inlining keeps the original order instead of being
     // rewritten to a named-argument call. Consulted by the transform's Run.
     bool NamedArguments = true;
+    // DecompilerSettings.ObjectOrCollectionInitializers -- a C# 3.0 setting,
+    // default true. Gates TransformCollectionAndObjectInitializers: with it
+    // off the `stloc v(newobj T(...)); call set_P(ldloc v, ...)` statement
+    // sequences stay as separate statements instead of folding into an
+    // object/collection-initializer block.
+    bool ObjectOrCollectionInitializers = true;
+    // DecompilerSettings.UseObjectCreationOfGenericTypeParameter -- a C# 2.0
+    // setting, default true. Consulted by the same transform's
+    // Activator.CreateInstance<T> arm: with it off the `stloc v(call
+    // Activator.CreateInstance<T>())` head stays a call instead of becoming
+    // `new T()` (the `default(T)` object-creation render).
+    bool UseObjectCreationOfGenericTypeParameter = true;
+    // DecompilerSettings.WithExpressions -- a C# 9.0 setting, default true.
+    // Consulted by the same transform's record-clone arm: with it off a
+    // `<Clone>$` call head stays a call instead of becoming a
+    // BlockKind.WithInitializer block.
+    bool WithExpressions = true;
 };
 
 class ILTransformContext {

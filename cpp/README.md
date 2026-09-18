@@ -6093,6 +6093,37 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   because no transform produces these block kinds yet; the next in-order
   Phase-5 piece is the `TransformCollectionAndObjectInitializers` transform
   itself (the producer of these blocks).
+- **Phase-5 slice (RUN/218): the TransformCollectionAndObjectInitializers
+  member-shape helpers** -- `Decompiler/IL/Transforms/
+  TransformCollectionAndObjectInitializers.{hpp,cpp}` land the class skeleton
+  with the four static helpers the statement-transform body composes:
+  `TypeContainsInitOnlyProperties` (the C# 9 `init`-setter scan that makes Run
+  keep object-initializer statements on the statement level),
+  `IsRecordCloneMethodCall` (the `<Clone>$`-on-a-record head recognition feeding
+  the WithInitializer arm), `IsMethodCallOnVariable` (the
+  MatchLdLocRef/call-receiver/field-target recursive use test that refuses the
+  fold when the variable is still used directly), and
+  `IsValidObjectInitializerTarget` (the C# 6 nested-indexer rule -- an indexer
+  container requires the previous element's return type to be equivalent to
+  the indexer's declaring type), plus the three Run-gate settings flags on
+  `ILTransformSettings` (`ObjectOrCollectionInitializers`,
+  `UseObjectCreationOfGenericTypeParameter`, `WithExpressions`, all default
+  true) and the `MatchLdLoca` / `MatchLdLocRef` pair in the shared
+  `PatternMatching.hpp` (the ldloc-vs-ldloca reference-ness gate, including
+  the TypeParameter ldloca quirk). `Run` itself stays a loud `std::logic_error`
+  deferral -- its remaining prerequisites are the `IsPartOfInitializer`
+  path-stack state machine (which needs the C#-layer settings/resolver
+  threading into `AccessPathElement::GetAccessPath`), `ILInlining::
+  InlineIfPossible` (a one-line wrapper over the ported Aggressive
+  `InlineOneIfPossible`) and `CopyPropagation::Propagate`. Verified by 14 new
+  tests (the helper matrices over the AccessPathElement-style fake fixtures,
+  the settings defaults, the Run deferral contract) proven with a four-way
+  neuter RED round where exactly the 6 positive tests failed, plus a
+  `SetIsInitOnly` additive setter on the test-support `LookupMethod` (the
+  FakeMethod hardcodes false). The full Debug gtest suite is 13063 ran /
+  13061 passed / the 2 standing skips / zero failures, and all three Release
+  CLI baselines are byte-identical (`--csharp` 10106360, `--il` 41246545,
+  `-l c` 109438) because the new code is unreachable from the seed pipeline.
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.
