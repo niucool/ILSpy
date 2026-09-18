@@ -37,7 +37,10 @@
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/PatternMatching.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
+#include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/TypeSystem/SimpleCompilation.hpp"
 #include "Decompiler/TypeSystem/TypeKind.hpp"
 
 #include <gtest/gtest.h>
@@ -55,6 +58,10 @@ using ILSpy::Decompiler::TypeSystem::TypeParameter;
 
 namespace {
 
+using ILSpy::Decompiler::TypeSystem::Implementation::FakeField;
+using ILSpy::Decompiler::TypeSystem::Implementation::MinimalCorlib;
+using ILSpy::Decompiler::TypeSystem::SimpleCompilation;
+
 ILVariablePtr MakeVariable(VariableKind kind, ITypePtr type, std::int32_t index)
 {
     auto v = std::make_shared<ILVariable>();
@@ -64,6 +71,16 @@ ILVariablePtr MakeVariable(VariableKind kind, ITypePtr type, std::int32_t index)
     v->Index = index;
     return v;
 }
+
+// A trivial compilation-backed fake field, so the field match helpers have a
+// real IField identity to report (the resolved `Field` handle the IL reader
+// leaves for tests/transforms to populate).
+struct FieldFixture {
+    SimpleCompilation compilation{ MinimalCorlib::Instance(), {} };
+    std::shared_ptr<FakeField> makeField() {
+        return std::make_shared<FakeField>(compilation);
+    }
+};
 
 } // namespace
 
@@ -219,4 +236,156 @@ TEST(ExpectedTypeForThisPointerTest, UnknownReferenceNessIsUnknown)
     };
     IndeterminateType indeterminate;
     EXPECT_EQ(ExpectedTypeForThisPointer(&indeterminate, nullptr), StackType::Unknown);
+}
+
+// ---------------------------------------------------------------------------
+// MatchLdLoc / MatchStLoc
+
+TEST(PatternMatchingTest, MatchLdLocMatchesOnlyTheGivenVariable)
+{
+    auto v = MakeVariable(VariableKind::Local, nullptr, 0);
+    auto other = MakeVariable(VariableKind::Local, nullptr, 1);
+    LdLoc load(v);
+    EXPECT_TRUE(MatchLdLoc(&load, v.get()));
+    EXPECT_FALSE(MatchLdLoc(&load, other.get()));
+    EXPECT_FALSE(MatchLdLoc(&load, nullptr));
+    LdNull nullLoad;
+    EXPECT_FALSE(MatchLdLoc(&nullLoad, v.get()));
+    EXPECT_FALSE(MatchLdLoc(nullptr, v.get()));
+}
+
+TEST(PatternMatchingTest, MatchStLocReportsVariable)
+{
+    auto v = MakeVariable(VariableKind::Local, nullptr, 0);
+    StLoc store(v, std::make_unique<LdNull>());
+    ILVariable* variable = nullptr;
+    ASSERT_TRUE(MatchStLoc(&store, variable));
+    EXPECT_EQ(variable, v.get());
+
+    LdNull nullLoad;
+    EXPECT_FALSE(MatchStLoc(&nullLoad, variable));
+    EXPECT_EQ(variable, nullptr);
+}
+
+TEST(PatternMatchingTest, MatchStLocVariableReportsValue)
+{
+    auto v = MakeVariable(VariableKind::Local, nullptr, 0);
+    auto other = MakeVariable(VariableKind::Local, nullptr, 1);
+    StLoc store(v, std::make_unique<LdNull>());
+    ILInstruction* value = nullptr;
+    ASSERT_TRUE(MatchStLoc(&store, v.get(), value));
+    EXPECT_EQ(value, store.Value.get());
+
+    EXPECT_FALSE(MatchStLoc(&store, other.get(), value));
+    EXPECT_EQ(value, nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// MatchLdsFld / MatchStsFld / MatchStFld / MatchLdsFlda / MatchLdFlda
+
+TEST(PatternMatchingTest, MatchLdsFldReadsResolvedField)
+{
+    FieldFixture fixture;
+    auto field = fixture.makeField();
+    auto ldsflda = std::make_unique<LdsFlda>("F");
+    ldsflda->Field = field;
+    LdObj load(std::move(ldsflda), std::make_shared<KnownType>(KnownTypeCode::Int32));
+    const ILSpy::Decompiler::TypeSystem::IField* matched = nullptr;
+    ASSERT_TRUE(MatchLdsFld(&load, matched));
+    EXPECT_EQ(matched, field.get());
+
+    // An unaligned ldobj over the same address is not the plain field load.
+    load.UnalignedPrefix = 4;
+    EXPECT_FALSE(MatchLdsFld(&load, matched));
+    EXPECT_EQ(matched, nullptr);
+    load.UnalignedPrefix = 0;
+    // A volatile ldobj is rejected too.
+    load.IsVolatile = true;
+    EXPECT_FALSE(MatchLdsFld(&load, matched));
+}
+
+TEST(PatternMatchingTest, MatchLdsFldRejectsInstanceFieldAddress)
+{
+    FieldFixture fixture;
+    auto field = fixture.makeField();
+    auto ldflda = std::make_unique<LdFlda>(std::make_unique<LdNull>(), "F");
+    ldflda->Field = field;
+    LdObj load(std::move(ldflda), std::make_shared<KnownType>(KnownTypeCode::Int32));
+    const ILSpy::Decompiler::TypeSystem::IField* matched = nullptr;
+    EXPECT_FALSE(MatchLdsFld(&load, matched));
+    EXPECT_EQ(matched, nullptr);
+}
+
+TEST(PatternMatchingTest, MatchStsFldReadsFieldAndValue)
+{
+    FieldFixture fixture;
+    auto field = fixture.makeField();
+    auto ldsflda = std::make_unique<LdsFlda>("F");
+    ldsflda->Field = field;
+    auto value = std::make_unique<LdNull>();
+    ILInstruction* rawValue = value.get();
+    StObj store(std::move(ldsflda), std::move(value),
+                std::make_shared<KnownType>(KnownTypeCode::Int32));
+    const ILSpy::Decompiler::TypeSystem::IField* matched = nullptr;
+    ILInstruction* matchedValue = nullptr;
+    ASSERT_TRUE(MatchStsFld(&store, matched, matchedValue));
+    EXPECT_EQ(matched, field.get());
+    EXPECT_EQ(matchedValue, rawValue);
+
+    store.IsVolatile = true;
+    EXPECT_FALSE(MatchStsFld(&store, matched, matchedValue));
+    EXPECT_EQ(matched, nullptr);
+    EXPECT_EQ(matchedValue, nullptr);
+}
+
+TEST(PatternMatchingTest, MatchStFldReadsTargetFieldAndValue)
+{
+    FieldFixture fixture;
+    auto field = fixture.makeField();
+    auto target = std::make_unique<LdNull>();
+    ILInstruction* rawTarget = target.get();
+    auto ldflda = std::make_unique<LdFlda>(std::move(target), "F");
+    ldflda->Field = field;
+    auto value = std::make_unique<LdNull>();
+    ILInstruction* rawValue = value.get();
+    StObj store(std::move(ldflda), std::move(value),
+                std::make_shared<KnownType>(KnownTypeCode::Int32));
+    ILInstruction* matchedTarget = nullptr;
+    const ILSpy::Decompiler::TypeSystem::IField* matched = nullptr;
+    ILInstruction* matchedValue = nullptr;
+    ASSERT_TRUE(MatchStFld(&store, matchedTarget, matched, matchedValue));
+    EXPECT_EQ(matchedTarget, rawTarget);
+    EXPECT_EQ(matched, field.get());
+    EXPECT_EQ(matchedValue, rawValue);
+
+    LdNull plainStore;
+    EXPECT_FALSE(MatchStFld(&plainStore, matchedTarget, matched, matchedValue));
+    EXPECT_EQ(matchedTarget, nullptr);
+    EXPECT_EQ(matched, nullptr);
+    EXPECT_EQ(matchedValue, nullptr);
+}
+
+TEST(PatternMatchingTest, MatchLdsFldaAndMatchLdFlda)
+{
+    FieldFixture fixture;
+    auto field = fixture.makeField();
+    LdsFlda staticAddress("F");
+    staticAddress.Field = field;
+    const ILSpy::Decompiler::TypeSystem::IField* matched = nullptr;
+    ASSERT_TRUE(MatchLdsFlda(&staticAddress, matched));
+    EXPECT_EQ(matched, field.get());
+    EXPECT_FALSE(MatchLdsFlda(nullptr, matched));
+    EXPECT_EQ(matched, nullptr);
+
+    auto target = std::make_unique<LdNull>();
+    ILInstruction* rawTarget = target.get();
+    LdFlda instanceAddress(std::move(target), "F");
+    instanceAddress.Field = field;
+    ILInstruction* matchedTarget = nullptr;
+    ASSERT_TRUE(MatchLdFlda(&instanceAddress, matchedTarget, matched));
+    EXPECT_EQ(matchedTarget, rawTarget);
+    EXPECT_EQ(matched, field.get());
+    EXPECT_FALSE(MatchLdFlda(&staticAddress, matchedTarget, matched));
+    EXPECT_EQ(matchedTarget, nullptr);
+    EXPECT_EQ(matched, nullptr);
 }

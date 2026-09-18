@@ -5652,6 +5652,20 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   green). The full Debug gtest suite is 12910 ran / 12908 passed / the 2
   standing skips / zero failures, and all three CLI baselines are unchanged
   (`--csharp` 10106360, `--il` 41246545, `-l c` 109438 bytes).
+- **The variable/field IL match helpers** -- `PatternMatching.hpp` gained the
+  remaining shared match extensions the `AutoEventDecompiler` accessor
+  recognizers compose: `MatchLdLoc`/`MatchStLoc` (both out-forms, the
+  variable-equality test and the stored-value out), `MatchLdsFld`,
+  `MatchStsFld`/`MatchStFld` (the `ldobj`/`stobj`-over-`ldsflda`/`ldflda`
+  shapes with the unaligned/volatile rejection), and `MatchLdsFlda`/
+  `MatchLdFlda`. The C# `IField.Equals` field-identity test the accessor
+  matchers add on top stays at their call sites. Verified by 6 tests (the
+  variable identity/out matrix and the static/instance load/store/address
+  field shapes), proven with a `MatchLdsFld`/`MatchLdFlda`-neuter RED round
+  (exactly the 2 positive tests failed, the 13 others staying green). The
+  full Debug gtest suite is 12918 ran / 12916 passed / the 2 standing skips /
+  zero failures, and all three CLI baselines are unchanged (`--csharp`
+  10106360, `--il` 41246545, `-l c` 109438 bytes).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

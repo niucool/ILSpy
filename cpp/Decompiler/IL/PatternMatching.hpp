@@ -21,8 +21,10 @@
 // Port of the match-extension methods the C# IL layer carries on
 // `ILInstruction` (ICSharpCode.Decompiler/IL/Instructions/PatternMatching.cs
 // plus the generated `IL/Instructions.cs` region): `MatchLdThis`, `MatchBox`,
-// `MatchLdObj`, `MatchAddressOf`, and `MatchLdFld` as free functions over the
-// port's IL node pointers.
+// `MatchLdObj`, `MatchAddressOf`, `MatchLdFld`, the variable match helpers
+// (`MatchLdLoc`, `MatchStLoc`), and the field match helpers (`MatchLdsFld`,
+// `MatchStsFld`, `MatchStFld`, `MatchLdsFlda`, `MatchLdFlda`) as free functions
+// over the port's IL node pointers.
 //
 // The C# methods return the matched CHILD REFERENCES through the `out`
 // parameters; the port's IL tree owns its children via `unique_ptr` slots, so
@@ -48,7 +50,9 @@
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
+#include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
 namespace ILSpy::Decompiler::IL {
@@ -148,6 +152,131 @@ inline bool MatchLdFld(const ILInstruction* inst, ILInstruction*& target,
             }
             return true;
         }
+    }
+    target = nullptr;
+    field = nullptr;
+    return false;
+}
+
+// The C# `public bool MatchLdLoc(ILVariable? variable)` (PatternMatching.cs line
+// 78): a bare LdLoc whose variable is the given one. The port compares the raw
+// ILVariable pointers (the C# reference equality on the shared variable object).
+inline bool MatchLdLoc(const ILInstruction* inst, const ILVariable* variable)
+{
+    const auto* ldloc = dynamic_cast<const LdLoc*>(inst);
+    return ldloc != nullptr && ldloc->Variable.get() == variable;
+}
+
+// The C# `public bool MatchStLoc(out ILVariable? variable)` (line 123): a StLoc
+// with its variable.
+inline bool MatchStLoc(ILInstruction* inst, ILVariable*& variable)
+{
+    auto* stloc = dynamic_cast<StLoc*>(inst);
+    if (stloc != nullptr) {
+        variable = stloc->Variable.get();
+        return true;
+    }
+    variable = nullptr;
+    return false;
+}
+
+// The C# `public bool MatchStLoc(ILVariable? variable, out ILInstruction? value)`
+// (line 135): a StLoc to the given variable, reporting the stored value.
+inline bool MatchStLoc(ILInstruction* inst, const ILVariable* variable,
+                       ILInstruction*& value)
+{
+    auto* stloc = dynamic_cast<StLoc*>(inst);
+    if (stloc != nullptr && stloc->Variable.get() == variable) {
+        value = stloc->Value.get();
+        return true;
+    }
+    value = nullptr;
+    return false;
+}
+
+// The C# `public bool MatchLdsFld(out IField? field)` (line 476): a static field
+// load -- an `ldobj` over an `ldsflda` with no unaligned prefix and not volatile.
+inline bool MatchLdsFld(const ILInstruction* inst,
+                        const TypeSystem::IField*& field)
+{
+    const auto* ldobj = dynamic_cast<const LdObj*>(inst);
+    if (ldobj != nullptr && ldobj->Target != nullptr) {
+        const auto* ldsflda = dynamic_cast<const LdsFlda*>(ldobj->Target.get());
+        if (ldsflda != nullptr && ldobj->UnalignedPrefix == 0 && !ldobj->IsVolatile) {
+            field = ldsflda->Field.get();
+            return true;
+        }
+    }
+    field = nullptr;
+    return false;
+}
+
+// The C# `public bool MatchStsFld(out IField? field, out ILInstruction? value)`
+// (line 492): a static field store -- an `stobj` over an `ldsflda` with no
+// unaligned prefix and not volatile.
+inline bool MatchStsFld(const ILInstruction* inst,
+                        const TypeSystem::IField*& field, ILInstruction*& value)
+{
+    const auto* stobj = dynamic_cast<const StObj*>(inst);
+    if (stobj != nullptr && stobj->Target != nullptr) {
+        const auto* ldsflda = dynamic_cast<const LdsFlda*>(stobj->Target.get());
+        if (ldsflda != nullptr && stobj->UnalignedPrefix == 0 && !stobj->IsVolatile) {
+            field = ldsflda->Field.get();
+            value = stobj->Value.get();
+            return true;
+        }
+    }
+    field = nullptr;
+    value = nullptr;
+    return false;
+}
+
+// The C# `public bool MatchStFld(out ILInstruction? target, out IField? field,
+// out ILInstruction? value)` (line 505): an instance field store -- an `stobj`
+// over an `ldflda` with no unaligned prefix and not volatile.
+inline bool MatchStFld(const ILInstruction* inst, ILInstruction*& target,
+                       const TypeSystem::IField*& field, ILInstruction*& value)
+{
+    const auto* stobj = dynamic_cast<const StObj*>(inst);
+    if (stobj != nullptr && stobj->Target != nullptr) {
+        const auto* ldflda = dynamic_cast<const LdFlda*>(stobj->Target.get());
+        if (ldflda != nullptr && stobj->UnalignedPrefix == 0 && !stobj->IsVolatile) {
+            target = ldflda->Target.get();
+            field = ldflda->Field.get();
+            value = stobj->Value.get();
+            return true;
+        }
+    }
+    target = nullptr;
+    field = nullptr;
+    value = nullptr;
+    return false;
+}
+
+// The C# `public bool MatchLdsFlda(out IField? field)` (Instructions.cs line
+// 8796): a bare static field address.
+inline bool MatchLdsFlda(const ILInstruction* inst,
+                         const TypeSystem::IField*& field)
+{
+    const auto* ldsflda = dynamic_cast<const LdsFlda*>(inst);
+    if (ldsflda != nullptr) {
+        field = ldsflda->Field.get();
+        return true;
+    }
+    field = nullptr;
+    return false;
+}
+
+// The C# `public bool MatchLdFlda(out ILInstruction? target, out IField? field)`
+// (Instructions.cs line 8783): a bare instance field address.
+inline bool MatchLdFlda(const ILInstruction* inst, ILInstruction*& target,
+                        const TypeSystem::IField*& field)
+{
+    const auto* ldflda = dynamic_cast<const LdFlda*>(inst);
+    if (ldflda != nullptr) {
+        target = ldflda->Target.get();
+        field = ldflda->Field.get();
+        return true;
     }
     target = nullptr;
     field = nullptr;
