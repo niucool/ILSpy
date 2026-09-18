@@ -62,11 +62,11 @@
 // private compiler-generated backing field and the getter/setter pair are recognized and the
 // accessor bodies cleared, turning the property back into an auto-property, with the backing
 // field declaration removed and its remaining attributes moved onto the property with the
-// `field` target. The automatic-EVENT rewrite (which needs the `PropertyAndEventBackingFieldLookup`
-// metadata machinery) remains deferred -- it is named at the visit that would call it. The
-// `VisitIdentifier` backing-field replacement also lands: a reference to an auto-property's
-// compiler backing field is rewritten to the property name and re-annotated with a
-// `MemberResolveResult` over the property (`ReplaceBackingFieldUsage` /
+// `field` target. The automatic-EVENT rewrite (whose `PropertyAndEventBackingFieldLookup`
+// metadata machinery has since landed) remains deferred -- it is named at the visit that
+// would call it. The `VisitIdentifier` backing-field replacement also lands: a reference to
+// an auto-property's compiler backing field is rewritten to the property name and re-annotated
+// with a `MemberResolveResult` over the property (`ReplaceBackingFieldUsage` /
 // `IsBackingFieldOfAutomaticProperty`).
 
 #pragma once

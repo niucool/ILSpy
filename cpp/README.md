@@ -5503,8 +5503,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   non-compiler-generated field, missing property symbol, `readonly set`, differing field
   declaring type, and unrecognized field-name keeps) proven with a `TransformAutomaticProperty`
   -neuter RED round (exactly the 2 positive tests failed, the 9 keep-tests staying green). The
-  automatic-EVENT rewrite (which needs the `PropertyAndEventBackingFieldLookup` metadata
-  machinery) stays deferred.
+  automatic-EVENT rewrite (whose `PropertyAndEventBackingFieldLookup` metadata
+  machinery has since landed) stays deferred.
 - **`PatternStatementTransform` backing-field reference replacement** -- the next slice adds
   `VisitIdentifier` / `ReplaceBackingFieldUsage` and the shared
   `IsBackingFieldOfAutomaticProperty`: with `AutomaticProperties` on, an `Identifier` token that
@@ -5523,6 +5523,22 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   field, non-compiler-generated accessor, `GetterOnlyAutomaticProperties`-off, and own-accessor
   keeps) proven with a `ReplaceBackingFieldUsage`-neuter RED round (exactly the 2 positive tests
   failed, the 10 keep-tests staying green).
+- **`PropertyAndEventBackingFieldLookup` metadata machinery** -- the metadata class the
+  automatic-EVENT rewrite consumes lands (the `PropertyAndEventBackingFieldLookup.cs` port):
+  one walk over every TypeDef indexes the type's fields by name, maps the
+  `<Property>k__BackingField` / compiler-generated `_Property` field to the property, and maps
+  the same-named / `Event`-suffixed field to the event (the property arm requires the field's
+  own `[CompilerGenerated]` only on the VB `_Property` spelling). The per-type field-name map
+  and event-name set are scratch state, so same-named backing fields in different types never
+  collide. Exposed through the `MetadataFile::GetPropertyAndEventBackingFieldLookup()` lazy
+  pimpl cache (the `GetMethodSemanticsLookup` shape). Verified by 8 tests (a synthetic
+  `BfSynth.dll` built with the real .NET 10 MetadataBuilder pinning the `<P>k__BackingField`,
+  compiler-generated `_Q`, non-compiler-generated `_R`, same-named event field, and the
+  `FEvent`-named-event fallback skip; three real-mscorlib association fixtures; a
+  whole-mscorlib naming-shape invariant sweep; the invalid-file empty lookup; and the lazy
+  accessor identity) proven with a ctor-neuter RED round (5 positive tests failed, the 3
+  negative/lazy tests staying green). The `VisitEventDeclaration` wiring that consumes the
+  lookup is the next slice.
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.
