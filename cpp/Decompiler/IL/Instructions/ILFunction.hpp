@@ -51,6 +51,14 @@ public:
     std::unique_ptr<BlockContainer> Body;
     std::vector<ILVariablePtr> Variables;
 
+    // The C# `public HashSet<ILVariable> CapturedVariables` (ILFunction.cs line 86):
+    // the variables this function captures from an enclosing scope, populated by the
+    // closure-capturing analysis. Non-owning (the C# set holds GC references; the
+    // function's own Variables / the enclosing function own the storage). The
+    // DeclareVariables analysis walks it for a local-function reference so the
+    // captured variables are declared at the function that captures them.
+    std::vector<ILVariable*> CapturedVariables;
+
     // The C# `public string Name` (a get/set field the local-function decoders
     // assign): the source-side name of this function. Empty for functions whose
     // producer did not set one (the ExpressionBuilder's HidesVariableWithName

@@ -31,6 +31,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/IntroduceExtensionMethods.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/IntroduceUsingDeclarations.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/TransformFieldAndConstructorInitializers.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/DeclareVariables.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/AstNode.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/AstNodeVisitorAstNode.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/AstType.cpp

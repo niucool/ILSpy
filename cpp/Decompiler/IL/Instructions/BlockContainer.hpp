@@ -72,6 +72,19 @@ public:
         return Blocks.empty() ? nullptr : Blocks.front().get();
     }
 
+    // The C# `public static BlockContainer? FindClosestContainer(ILInstruction? inst)`
+    // (BlockContainer.cs line 334): walks the parent chain for the closest enclosing
+    // container of any kind (null when none). The DeclareVariables scope analysis
+    // walks a capture scope's parents through this.
+    static BlockContainer* FindClosestContainer(ILInstruction* inst) {
+        while (inst != nullptr) {
+            if (auto* bc = dynamic_cast<BlockContainer*>(inst))
+                return bc;
+            inst = inst->Parent;
+        }
+        return nullptr;
+    }
+
     // The C# `public static BlockContainer? FindClosestSwitchContainer(
     // ILInstruction? inst)` (BlockContainer.cs line 345): walks the parent chain
     // for the closest enclosing Switch-kind container (null when none). The

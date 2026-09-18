@@ -5398,6 +5398,33 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   analysis with the full-body/duplicate/non-const-static shapes, the cross-constructor match,
   the static/instance analyzer classification, and the this/base/default-constructor moves);
   wired into both CMakeLists, with no seed-pipeline call site so the CLI baselines are unchanged.
+- **`DeclareVariables` analysis phase** -- the resolver-free variable-to-declaration placement
+  analysis lands in `Transforms/DeclareVariables.{hpp,cpp}`: `VariableNeedsDeclaration` (the
+  kind matrix the higher-level constructs declare themselves), `IsValidInStatementExpression`
+  (the invocation/object-creation/assignment/error/post-inc-dec/await forms and the
+  null-conditional rewrap recursion), the `InsertionPoint` common-parent computation
+  (`FindInsertionPoints` / `IsRelevantScope` / `FindCommonParent`, with the loop-scope
+  `UsesInitialValue` hoist and the local-function `CapturedVariables` walk), and
+  `ResolveCollisions` (the same-name / nested-block collision merge with the `SourceOrder` /
+  `FirstUse` transfer and the `DefaultInitialization` flag combination). This is the surface
+  `PatternStatementTransform` consumes (`declareVariables.Analyze(rootNode)` and
+  `declareVariables.GetDeclarationPoint(v)`). The mutation phase (`Run`'s
+  `EnsureExpressionStatementsAreValid`, `InsertDeconstructionVariableDeclarations`,
+  `InsertVariableDeclarations`, `CanBeDeclaredAsOutVariable`, `UpdateAnnotations`,
+  `CombineDeclarationAndInitializer`, `IsReferencedWithinDeclaringCall`) is DEFERRED, with
+  `Run` throwing a loud `std::logic_error` rather than silently skipping the insertion. Landed
+  the prerequisites the analysis reads: `ILVariable.CaptureScope` / `UsesInitialValue` /
+  `InitialValueIsInitialized`, `ILFunction.CapturedVariables`,
+  `BlockContainer::FindClosestContainer`, and the `BlockContainerAnnotation` holder +
+  `GetBlockContainer` (the C# `node.Annotation<BlockContainer>()` the scope walk reads).
+  Verified by 15 tests (the kind matrix, the statement-expression matrix, the insertion-point
+  navigation, the common-parent analysis, the loop-scope hoist, the local-function capture
+  walk, the same-name collision merge and its separate-name keep, the `DefaultInitialization`
+  matrix, and the unknown-variable throws) proven with a `ResolveCollisions`-neuter RED round
+  (exactly the 4 collision/record tests failed, the 11 static/navigation tests staying green),
+  and the full Debug suite is 12804 ran / 12802 passed / the 2 standing skips / zero failures.
+  The analysis has no seed-pipeline call site, so the CLI baselines are unchanged (`--csharp`
+  10106360, `--il` 41246545, `-l c` 109438 bytes).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

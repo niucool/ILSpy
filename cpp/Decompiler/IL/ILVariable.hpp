@@ -34,6 +34,8 @@
 
 namespace ILSpy::Decompiler::IL {
 
+class BlockContainer;
+
 class ILVariable {
 public:
     std::string Name;
@@ -65,6 +67,29 @@ public:
     // symbol. Copied by TransformCatchVariable when a catch-local is promoted to
     // the catch variable. Mirrors ILVariable.HasGeneratedName.
     bool HasGeneratedName = false;
+
+    // The C# `public BlockContainer? CaptureScope { get; internal set; }` -- the
+    // block container in which this variable is captured (the loop container for a
+    // variable declared inside a loop, the parent function's container otherwise).
+    // Null for variables that are not captured. Non-owning (the C# GC reference);
+    // the owning tree is the ILFunction. Read by the ported DeclareVariables scope
+    // analysis to place a captured variable's declaration outside its capture scope.
+    BlockContainer* CaptureScope = nullptr;
+
+    // The C# `public bool UsesInitialValue { get; set; }` -- whether the variable's
+    // initial value is used (the `.locals init` semantics). The C# setter refuses to
+    // clear the flag on a parameter; the port's plain field leaves that discipline to
+    // the IL pipeline. Read by the DeclareVariables analysis to choose between the
+    // `default(T)` and `Unsafe.SkipInit(out T)` declaration forms. The port's
+    // `StoreCount` does NOT fold this flag in (the C# `StoreCount` adds 1 when it is
+    // set): the variable-usage reconstruction computes the count directly.
+    bool UsesInitialValue = false;
+
+    // The C# `public bool InitialValueIsInitialized { get; set; }` -- whether the
+    // variable's initial value is zero-initialized (`.locals init`). The C# setter
+    // refuses to clear the flag on a parameter; the port's plain field leaves that
+    // discipline to the IL pipeline.
+    bool InitialValueIsInitialized = false;
 
     // True if the variable is written exactly once and its address is never
     // taken (ILVariable.IsSingleDefinition).

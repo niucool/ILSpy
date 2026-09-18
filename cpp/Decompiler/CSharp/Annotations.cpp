@@ -171,6 +171,12 @@ IL::ILFunction* GetILFunction(const Syntax::AstNode& node) {
     return annotation ? annotation->Function : nullptr;
 }
 
+// The C# `node.Annotation<BlockContainer>()` over the holder channel.
+IL::BlockContainer* GetBlockContainer(const Syntax::AstNode& node) {
+    const auto* annotation = node.Annotation<BlockContainerAnnotation>();
+    return annotation ? annotation->Container : nullptr;
+}
+
 // The C# `UseImplicitlyTypedOutAnnotation.Instance` shared handle (the port's
 // annotation channel owns via shared_ptr; the aliasing-shared_ptr convention --
 // the static Instance() object aliased with a no-op deleter).

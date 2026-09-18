@@ -353,6 +353,22 @@ void WithILFunction(Syntax::AstNode& node, IL::ILFunction* function);
 // ILFunction annotation, or null.
 IL::ILFunction* GetILFunction(const Syntax::AstNode& node);
 
+// The C# `node.Annotation<BlockContainer>()` -- the block container the AST
+// translation attributed to a node (the scope the DeclareVariables analysis tracks
+// for loop bodies and function bodies). The C# stores the ILInstruction itself; the
+// port wraps the non-owning pointer in a holder (the ILFunctionAnnotation
+// precedent).
+class BlockContainerAnnotation final : public Syntax::AnnotationBase {
+public:
+    IL::BlockContainer* Container;
+
+    explicit BlockContainerAnnotation(IL::BlockContainer* container) : Container(container) {}
+};
+
+// The C# `node.Annotation<BlockContainer>()` over the holder channel -- the container
+// carried by the node's BlockContainer annotation, or null.
+IL::BlockContainer* GetBlockContainer(const Syntax::AstNode& node);
+
 // The C# `public static T CopyAnnotationsFrom<T>(this T node, AstNode other)
 // where T : AstNode` -- copies all annotations from `other` to `node` (the same
 // objects, the C# reference-sharing), skipping the trivia holder (each trivia's
