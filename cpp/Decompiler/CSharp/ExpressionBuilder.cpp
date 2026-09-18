@@ -23,6 +23,7 @@
 
 #include "Decompiler/CSharp/CallBuilder.hpp"
 #include "Decompiler/CSharp/StatementBuilder.hpp"
+#include "Decompiler/CSharp/AutoEventDecompiler.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"
 #include "Decompiler/CSharp/Resolver/MemberLookup.hpp"
@@ -140,6 +141,9 @@
 #include "Decompiler/TypeSystem/TupleType.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
+#include "Decompiler/TypeSystem/MetadataModule.hpp"
+#include "Decompiler/TypeSystem/IEvent.hpp"
+#include "Decompiler/TypeSystem/IMethod.hpp"
 #include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
 #include "Decompiler/Util/CSharpPrimitiveCast.hpp"
 
@@ -703,17 +707,90 @@ bool ExpressionBuilder::RequiresQualifier(const TS::IMember& member,
         && dynamic_cast<Syntax::BaseReferenceExpression*>(target.Expression()) == nullptr;
 }
 
+// The C# `bool IsBackingFieldOfAutomaticEvent(IField field,
+// [NotNullWhen(true)] out IEvent? ev)` (ExpressionBuilder.cs lines 400-425): a
+// reference to an automatic (field-like) event's backing field is printed as the
+// event, because the field-like event hides its backing field.
+bool ExpressionBuilder::IsBackingFieldOfAutomaticEvent(const TS::IField& field,
+                                                       const TS::IEvent*& ev)
+{
+    ev = nullptr;
+    // The C# `field.MetadataToken.IsNil || field.ParentModule is not MetadataModule
+    // module`: the nil-token check and the metadata-module narrowing (the port's
+    // IEntity::MetadataToken 0-is-nil convention and the dynamic_cast).
+    if (field.MetadataToken() == 0 || field.ParentModule() == nullptr)
+        return false;
+    const auto* module = dynamic_cast<const TS::MetadataModule*>(field.ParentModule());
+    if (module == nullptr || module->MetadataFile() == nullptr)
+        return false;
+    const Metadata::MetadataFile& metadataFile = *module->MetadataFile();
+    std::uint32_t eventToken = 0;
+    if (!metadataFile.GetPropertyAndEventBackingFieldLookup().IsEventBackingField(
+            field.MetadataToken(), eventToken))
+        return false;
+    ev = module->GetDefinitionEvent(eventToken);
+    if (ev == nullptr)
+        return false;
+    // The C# `decompilationContext.CurrentMember is IMethod { AccessorOwner: IEvent
+    // owner } && owner.Equals(ev)`: within the event's own accessors the field is
+    // printed as-is (the C# single-argument Equals is reference equality, so the
+    // port compares the IEvent pointers).
+    const auto* currentMethod =
+        dynamic_cast<const TS::IMethod*>(decompilationContext->CurrentMember());
+    if (currentMethod != nullptr) {
+        const auto* owner = dynamic_cast<const TS::IEvent*>(currentMethod->AccessorOwner());
+        if (owner != nullptr && owner == ev) {
+            ev = nullptr;
+            return false;
+        }
+    }
+    // The C# `AutoEventDecompiler.IsAutomaticEvent(typeSystem, ev,
+    // statementBuilder.decompileRun, cancellationToken, out var backingField) ||
+    // !backingField.Equals(field.MemberDefinition)`: the memoized verdict and the
+    // field-identity check. The run's recognition caches are logically mutable (the
+    // C# decompileRun reference is not const), so the const member pointer is cast
+    // back for the memoizing overload.
+    const TS::IField* backingField = nullptr;
+    if (!AutoEventDecompiler::IsAutomaticEvent(
+            const_cast<DecompileRun&>(*decompileRun), metadataFile, *ev, backingField)
+        || backingField == nullptr
+        || static_cast<const TS::IMember*>(backingField) != field.MemberDefinition()) {
+        ev = nullptr;
+        return false;
+    }
+    return true;
+}
+
 // The C# `ExpressionWithResolveResult ConvertField(IField field, ILInstruction?
 // targetInstruction = null)` (ExpressionBuilder.cs lines 302-398): the field
-// reference render. The automatic-property requires-qualifier special case is
-// wired in (the qualifier decision is made against the backing field's property
-// when the auto-property rewrite will hide the field); the automatic-event arm at
-// the top of the C# method stays deferred (it needs the AutoEventDecompiler plus
-// the MetadataFile PropertyAndEventBackingFieldLookup), so a field-like event's
-// backing field renders through the general path.
+// reference render. The automatic-event backing-field special case (the field is
+// printed as the field-like event) and the automatic-property requires-qualifier
+// special case are wired in.
 ExpressionWithResolveResult ExpressionBuilder::ConvertField(const TS::IField& field,
                                                             IL::ILInstruction* targetInstruction)
 {
+    // The C# `if (settings.AutomaticEvents && IsBackingFieldOfAutomaticEvent(field,
+    // out var ev))`: the field-like event hides its backing field, so the reference
+    // is printed as the event; inside the declaring type that denotes the backing
+    // field (the C# comment).
+    const TS::IEvent* event = nullptr;
+    if (settings->AutomaticEvents() && IsBackingFieldOfAutomaticEvent(field, event))
+    {
+        TranslatedExpression eventTarget = TranslateTarget(targetInstruction,
+                                                           /*nonVirtualInvocation:*/ true,
+                                                           event->IsStatic(),
+                                                           *event->DeclaringType());
+        bool requireEventTarget = RequiresQualifier(*event, eventTarget);
+        auto eventResolveResult = std::make_shared<Sem::MemberResolveResult>(
+            SharedResolveResultAnnotation(*eventTarget.Expression()),
+            static_cast<const TS::IMember*>(event));
+        Syntax::Expression* eventReference = requireEventTarget
+            ? static_cast<Syntax::Expression*>(
+                  new Syntax::MemberReferenceExpression(eventTarget.Expression(), event->Name()))
+            : static_cast<Syntax::Expression*>(new Syntax::IdentifierExpression(event->Name()));
+        return WithRR(*eventReference, eventResolveResult);
+    }
+
     TranslatedExpression target = TranslateTarget(targetInstruction,
                                                   /*nonVirtualInvocation:*/ true,
                                                   field.IsStatic(), *field.DeclaringType());

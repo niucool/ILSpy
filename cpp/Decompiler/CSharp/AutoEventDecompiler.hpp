@@ -68,6 +68,12 @@ class BlockContainer;
 
 namespace CSharp {
 
+// The REAL type-system namespace alias: the CSharp/TypeSystem sub-namespace
+// (CSharpTypeResolveContext/UsingScope) shadows the plain `TypeSystem::` lookup
+// once a header pulls it in, so the class declarations go through the
+// fully-qualified alias (the TypeSystemAstBuilder TS:: convention).
+namespace TS = ::ILSpy::Decompiler::TypeSystem;
+
 namespace Syntax {
 class EventDeclaration;
 class TypeSystemAstBuilder;
@@ -85,28 +91,28 @@ public:
     // DecompileBodyForAnalysis reads through the file).
     static bool IsAutomaticEvent(DecompileRun& decompileRun,
                                  const Metadata::MetadataFile& file,
-                                 const TypeSystem::IEvent& ev,
-                                 const TypeSystem::IField*& backingField);
+                                 const TS::IEvent& ev,
+                                 const TS::IField*& backingField);
 
     // The C# `static bool IsAutomaticEvent(IDecompilerTypeSystem typeSystem,
     // IEvent ev, CancellationToken cancellationToken, out IField? backingField)`:
     // the un-memoized verdict. `backingField` is null when the event is not
     // automatic.
     static bool IsAutomaticEvent(const Metadata::MetadataFile& file,
-                                 const TypeSystem::IEvent& ev,
-                                 const TypeSystem::IField*& backingField);
+                                 const TS::IEvent& ev,
+                                 const TS::IField*& backingField);
 
     // The C# `static IField? FindBackingField(IEvent ev)`: the declaring type's
     // private (same-static-ness) field the PropertyAndEventBackingFieldLookup
     // associates with the event, or null.
-    static const TypeSystem::IField* FindBackingField(const TypeSystem::IEvent& ev);
+    static const TS::IField* FindBackingField(const TS::IEvent& ev);
 
     // The C# `static bool IsAutomaticAccessor(IDecompilerTypeSystem typeSystem,
     // IMethod accessor, IField field, bool isAddAccessor, CancellationToken)`:
     // decompiles the accessor body with the analysis settings and matches it.
     static bool IsAutomaticAccessor(const Metadata::MetadataFile& file,
-                                    const TypeSystem::IMethod& accessor,
-                                    const TypeSystem::IField& field,
+                                    const TS::IMethod& accessor,
+                                    const TS::IField& field,
                                     bool isAddAccessor);
 
     // The pure body matcher behind IsAutomaticAccessor -- the three recognized
@@ -114,8 +120,8 @@ public:
     // metadata-backed method handle.
     static bool MatchAutomaticAccessorBody(IL::Block& body,
                                            IL::BlockContainer& functionBody,
-                                           const TypeSystem::IMethod& accessor,
-                                           const TypeSystem::IField& field,
+                                           const TS::IMethod& accessor,
+                                           const TS::IField& field,
                                            bool isAddAccessor);
 
     // The C# `internal static void AddFieldLikeEventAttributes(EventDeclaration
@@ -127,8 +133,8 @@ public:
     // IsAutomaticEvent verdict the caller checks first.
     static void AddFieldLikeEventAttributes(Syntax::EventDeclaration& eventDecl,
                                             const Syntax::TypeSystemAstBuilder& astBuilder,
-                                            const TypeSystem::IEvent& ev,
-                                            const TypeSystem::IField& backingField);
+                                            const TS::IEvent& ev,
+                                            const TS::IField& backingField);
 };
 
 } // namespace CSharp

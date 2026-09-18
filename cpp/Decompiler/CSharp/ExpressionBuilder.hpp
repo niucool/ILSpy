@@ -44,9 +44,7 @@
 //
 // Deferrals (each named at the member that needs it): the heavy Visit arms that
 // have not landed yet (the dynamic/deconstruct arms, and Await, which needs the
-// awaiter/GetResultMethod pipeline surfaces), the ConvertField automatic-event
-// backing-field special case (it needs AutoEventDecompiler /
-// PropertyAndEventBackingFieldLookup), and the CancellationToken (the
+// awaiter/GetResultMethod pipeline surfaces), and the CancellationToken (the
 // cooperative-cancel throw is a no-op in the port, the DecompileRun convention).
 
 #pragma once
@@ -213,15 +211,24 @@ public:
 
     // The C# `ExpressionWithResolveResult ConvertField(IField field, ILInstruction?
     // targetInstruction = null)` (ExpressionBuilder.cs lines 302-398): the field
-    // reference render -- the target translation, the requires-qualifier decision
-    // (made against the backing field's property when PatternStatementTransform will
-    // hide the field), the ambiguous-access retry loop (the simple-name lookup, the
-    // member lookup, and the declaring-type cast), and the member/identifier access
-    // with the by-reference wrap for a ref-typed field. The automatic-EVENT
-    // backing-field special case stays a documented deferral (it needs the
-    // AutoEventDecompiler / PropertyAndEventBackingFieldLookup machinery).
+    // reference render -- the automatic-event backing-field special case (the field
+    // is printed as the field-like event), the target translation, the
+    // requires-qualifier decision (made against the backing field's property when
+    // PatternStatementTransform will hide the field), the ambiguous-access retry
+    // loop (the simple-name lookup, the member lookup, and the declaring-type
+    // cast), and the member/identifier access with the by-reference wrap for a
+    // ref-typed field.
     ExpressionWithResolveResult ConvertField(const TS::IField& field,
                                              IL::ILInstruction* targetInstruction = nullptr);
+
+    // The C# `bool IsBackingFieldOfAutomaticEvent(IField field,
+    // [NotNullWhen(true)] out IEvent? ev)` (ExpressionBuilder.cs lines 400-425):
+    // whether the field is the backing field of an automatic (field-like) event
+    // whose reference should be printed as the event. Gated on the
+    // PropertyAndEventBackingFieldLookup association, the current-accessor
+    // self-reference check, the AutoEventDecompiler verdict, and the backing-field
+    // identity check. `ev` is null when the field is not such a backing field.
+    bool IsBackingFieldOfAutomaticEvent(const TS::IField& field, const TS::IEvent*& ev);
 
     // -- The visitor-dispatch surface (the C# ILVisitor base) -------------------------
 

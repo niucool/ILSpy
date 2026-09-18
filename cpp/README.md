@@ -5714,6 +5714,25 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   green). The full Debug gtest suite is 12935 ran / 12933 passed / the 2 standing
   skips / zero failures, and all three CLI baselines are unchanged (`--csharp`
   10106360, `--il` 41246545, `-l c` 109438 bytes).
+- **`ExpressionBuilder.ConvertField` automatic-event arm** -- the last deferred
+  piece of `ConvertField` (the auto-event backing-field special case), wiring the
+  just-ported `AutoEventDecompiler` into its consumer. `IsBackingFieldOfAutomaticEvent`
+  narrows the field's `ParentModule` to a `MetadataModule` and reads the
+  `PropertyAndEventBackingFieldLookup` association, declines inside the event's own
+  accessor (the `AccessorOwner` self-reference check), and requires the memoized
+  `AutoEventDecompiler.IsAutomaticEvent` verdict plus the backing-field identity
+  check. On a hit `ConvertField` renders the reference as the event (the
+  event-target qualifier decision, the event `MemberResolveResult`), else falls
+  through to the field path. The port's `AutoEventDecompiler.hpp` gained the `TS::`
+  namespace alias so it is self-contained under the `CSharp::TypeSystem` shadowing
+  (the header was previously only includable before `UsingScope.hpp`). Verified by
+  5 tests over the real `System.AppDomain.AssemblyLoad` fixture (the helper's
+  positive, the non-automatic memoized verdict, the own-accessor decline, the
+  unassociated-field decline, and the `ConvertField` render carrying the event
+  resolve result) proven with an early-return RED round (exactly the 2 positives
+  failed, the 3 negatives staying green). The full Debug gtest suite is 12940 ran /
+  12938 passed / the 2 standing skips / zero failures, and all three CLI baselines
+  are unchanged (`--csharp` 10106360, `--il` 41246545, `-l c` 109438 bytes).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

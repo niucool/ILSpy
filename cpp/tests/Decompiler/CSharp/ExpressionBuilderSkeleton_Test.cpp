@@ -129,10 +129,15 @@
 #include "Decompiler/TypeSystem/TupleType.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/CustomAttributeTypedArgument.hpp"
+#include "Decompiler/TypeSystem/IEvent.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCache.hpp"
+#include "Decompiler/TypeSystem/MetadataModule.hpp"
+#include "Decompiler/Metadata/MetadataFile.hpp"
 
 #include <gtest/gtest.h>
 
 #include <any>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -1690,6 +1695,231 @@ TEST(ExpressionBuilderFieldTest, ConvertFieldAutoPropertyQualifierSpecialCaseSki
     auto result = builder.ConvertField(*ordinaryField, &thisLoad.ldloc);
 
     EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(result.Expression()) != nullptr);
+}
+
+// ---- The automatic-event backing-field special case (C# ExpressionBuilder.cs
+// lines 302-312 and 400-425): a reference to a field-like event's backing field is
+// printed as the event, gated on the PropertyAndEventBackingFieldLookup
+// association, the AutoEventDecompiler verdict, and the accessor self-reference
+// check. ------------------------------------------------------------------
+
+namespace {
+
+// The mscorlib fixture path (the AutoEventDecompiler_Test convention).
+const char* AutoEventMscorlibPath()
+{
+#ifdef _WIN32
+    return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    return "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+}
+
+// A compilation over a real metadata module -- the metadata-backed ExpressionBuilder
+// fixture (the AutoEventDecompiler_Test MetadataFixture shape). The automatic-event
+// gate reads the field's ParentModule / MetadataFile, so the synthetic MinimalCorlib
+// fixture cannot exercise it.
+struct AutoEventBuilderFixture {
+    class Compilation : public TS::ICompilation {
+    public:
+        void SetMainModule(const TS::IModule* module) { mainModule_ = module; }
+        const TS::IModule& MainModule() const override { return *mainModule_; }
+        std::vector<const TS::IModule*> Modules() const override { return { mainModule_ }; }
+        std::vector<const TS::IModule*> ReferencedModules() const override { return {}; }
+        const TS::INamespace& RootNamespace() const override {
+            return mainModule_->RootNamespace();
+        }
+        const TS::INamespace* GetNamespaceForExternAlias(const std::string&) const override {
+            return nullptr;
+        }
+        const TS::IType& FindType(TS::KnownTypeCode code) const override {
+            return knownTypes_.FindType(code);
+        }
+        const TS::StringComparer& NameComparer() const override {
+            return TS::StringComparer::Ordinal();
+        }
+        const ::ILSpy::Decompiler::Util::CacheManager& CacheManager() const override {
+            return cacheManager_;
+        }
+        TS::TypeSystemOptions TypeSystemOptions() const override {
+            return TS::TypeSystemOptions::Default;
+        }
+    private:
+        const TS::IModule* mainModule_ = nullptr;
+        ::ILSpy::Decompiler::Util::CacheManager cacheManager_;
+        TS::KnownTypeCache knownTypes_{ *this };
+    };
+
+    Metadata::MetadataFile file;
+    Compilation compilation;
+    TS::MetadataModule module;
+    DecompilerSettings settings;
+    std::shared_ptr<CSharp::TypeSystem::CSharpTypeResolveContext> root;
+    std::shared_ptr<CSharp::TypeSystem::UsingScope> usingScope;
+    DecompileRun run;
+    IL::ILFunction function;
+
+    explicit AutoEventBuilderFixture(const char* path)
+        : file(path),
+          module(compilation, &file, TS::TypeSystemOptions::Default),
+          root(std::make_shared<CSharp::TypeSystem::CSharpTypeResolveContext>(module)),
+          usingScope(std::make_shared<CSharp::TypeSystem::UsingScope>(
+              root, module.RootNamespace(), std::vector<const TS::INamespace*>{})),
+          run(&settings, usingScope) {
+        compilation.SetMainModule(&module);
+    }
+
+    const TS::IEvent* FindEvent(const std::string& typeName, const std::string& eventName)
+    {
+        const TS::ITypeDefinition* type =
+            module.GetTypeDefinition(TS::TopLevelTypeName("System", typeName));
+        if (type == nullptr)
+            return nullptr;
+        for (const TS::IEvent* e : type->Events())
+            if (e->Name() == eventName)
+                return e;
+        return nullptr;
+    }
+
+    const TS::IField* FindField(const TS::ITypeDefinition& type, const std::string& name)
+    {
+        for (const TS::IField* f : type.Fields())
+            if (f->Name() == name)
+                return f;
+        return nullptr;
+    }
+
+    // An ExpressionBuilder whose decompilation context's current type is the given
+    // type definition (the metadata typed context outlives the builder).
+    CSharp::ExpressionBuilder MakeBuilderForType(
+        const TS::ITypeDefinition* typeDef, const TS::IMember* currentMember = nullptr)
+    {
+        typedContext = std::make_shared<CSharp::TypeSystem::CSharpTypeResolveContext>(
+            compilation.MainModule(), usingScope, typeDef, currentMember);
+        return CSharp::ExpressionBuilder(nullptr, compilation, *typedContext, &function,
+                                         &settings, &run);
+    }
+
+    std::shared_ptr<CSharp::TypeSystem::CSharpTypeResolveContext> typedContext;
+};
+
+} // namespace
+
+// A field-like event's backing field is recognized, with the event returned.
+TEST(ExpressionBuilderFieldTest, AutoEventBackingFieldIsRecognized)
+{
+    const char* path = AutoEventMscorlibPath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "mscorlib fixture not present";
+    AutoEventBuilderFixture f(path);
+    ASSERT_TRUE(f.file.IsValid());
+    const TS::IEvent* event = f.FindEvent("AppDomain", "AssemblyLoad");
+    ASSERT_NE(event, nullptr);
+    const TS::IField* field = f.FindField(*event->DeclaringTypeDefinition(), "AssemblyLoad");
+    ASSERT_NE(field, nullptr);
+
+    // The run's memoization is seeded with the verdict the AutoEventDecompiler would
+    // produce (the un-memoized accessor-body check is exercised by the
+    // AutoEventDecompiler suite; the port's control-flow pipeline does not produce the
+    // C# accessor shape yet).
+    f.run.AutomaticEvents()[event] = field;
+    auto builder = f.MakeBuilderForType(event->DeclaringTypeDefinition());
+    const TS::IEvent* ev = nullptr;
+    EXPECT_TRUE(builder.IsBackingFieldOfAutomaticEvent(*field, ev));
+    EXPECT_EQ(ev, event);
+}
+
+// With a non-automatic memoized verdict the field is not recognized as an event.
+TEST(ExpressionBuilderFieldTest, AutoEventBackingFieldNotRecognizedWhenNotAutomatic)
+{
+    const char* path = AutoEventMscorlibPath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "mscorlib fixture not present";
+    AutoEventBuilderFixture f(path);
+    ASSERT_TRUE(f.file.IsValid());
+    const TS::IEvent* event = f.FindEvent("AppDomain", "AssemblyLoad");
+    ASSERT_NE(event, nullptr);
+    const TS::IField* field = f.FindField(*event->DeclaringTypeDefinition(), "AssemblyLoad");
+    ASSERT_NE(field, nullptr);
+
+    f.run.AutomaticEvents()[event] = nullptr;
+    auto builder = f.MakeBuilderForType(event->DeclaringTypeDefinition());
+    const TS::IEvent* ev = nullptr;
+    EXPECT_FALSE(builder.IsBackingFieldOfAutomaticEvent(*field, ev));
+    EXPECT_EQ(ev, nullptr);
+}
+
+// Inside the event's own accessor the backing field is printed as the field, so the
+// helper declines.
+TEST(ExpressionBuilderFieldTest, AutoEventBackingFieldNotRecognizedInOwnAccessor)
+{
+    const char* path = AutoEventMscorlibPath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "mscorlib fixture not present";
+    AutoEventBuilderFixture f(path);
+    ASSERT_TRUE(f.file.IsValid());
+    const TS::IEvent* event = f.FindEvent("AppDomain", "AssemblyLoad");
+    ASSERT_NE(event, nullptr);
+    const TS::IField* field = f.FindField(*event->DeclaringTypeDefinition(), "AssemblyLoad");
+    ASSERT_NE(field, nullptr);
+    const TS::IMethod* addAccessor = event->AddAccessor();
+    ASSERT_NE(addAccessor, nullptr);
+
+    f.run.AutomaticEvents()[event] = field;
+    auto builder = f.MakeBuilderForType(event->DeclaringTypeDefinition(),
+                                        static_cast<const TS::IMember*>(addAccessor));
+    const TS::IEvent* ev = nullptr;
+    EXPECT_FALSE(builder.IsBackingFieldOfAutomaticEvent(*field, ev));
+    EXPECT_EQ(ev, nullptr);
+}
+
+// A field the lookup does not associate with an event is never recognized.
+TEST(ExpressionBuilderFieldTest, AutoEventNonBackingFieldIsNotRecognized)
+{
+    const char* path = AutoEventMscorlibPath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "mscorlib fixture not present";
+    AutoEventBuilderFixture f(path);
+    ASSERT_TRUE(f.file.IsValid());
+    const TS::ITypeDefinition* type =
+        f.module.GetTypeDefinition(TS::TopLevelTypeName("System", "AppDomain"));
+    ASSERT_NE(type, nullptr);
+    const TS::IField* ordinary = nullptr;
+    for (const TS::IField* candidate : type->Fields()) {
+        std::uint32_t eventToken = 0;
+        if (!f.file.GetPropertyAndEventBackingFieldLookup().IsEventBackingField(
+                candidate->MetadataToken(), eventToken)) {
+            ordinary = candidate;
+            break;
+        }
+    }
+    ASSERT_NE(ordinary, nullptr);
+    auto builder = f.MakeBuilderForType(type);
+    const TS::IEvent* ev = nullptr;
+    EXPECT_FALSE(builder.IsBackingFieldOfAutomaticEvent(*ordinary, ev));
+    EXPECT_EQ(ev, nullptr);
+}
+
+// ConvertField renders a field-like event's backing field as the event reference.
+TEST(ExpressionBuilderFieldTest, ConvertFieldAutoEventBackingFieldRendersEvent)
+{
+    const char* path = AutoEventMscorlibPath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "mscorlib fixture not present";
+    AutoEventBuilderFixture f(path);
+    ASSERT_TRUE(f.file.IsValid());
+    const TS::IEvent* event = f.FindEvent("AppDomain", "AssemblyLoad");
+    ASSERT_NE(event, nullptr);
+    const TS::IField* field = f.FindField(*event->DeclaringTypeDefinition(), "AssemblyLoad");
+    ASSERT_NE(field, nullptr);
+
+    f.run.AutomaticEvents()[event] = field;
+    auto builder = f.MakeBuilderForType(event->DeclaringTypeDefinition());
+
+    ThisLoad thisLoad(std::const_pointer_cast<TS::IType>(
+        event->DeclaringType()->shared_from_this()));
+    auto result = builder.ConvertField(*field, &thisLoad.ldloc);
+
+    // The reference is the event (its name equals the field's here), but the resolve
+    // result carries the EVENT, not the field.
+    auto* mrr = dynamic_cast<const Sem::MemberResolveResult*>(result.ResolveResult());
+    ASSERT_NE(mrr, nullptr);
+    EXPECT_EQ(dynamic_cast<const TS::IEvent*>(mrr->Member()), event);
 }
 
 TEST(ExpressionBuilderFieldTest, LdsFldaRendersRefDirectionOverFieldReference)
