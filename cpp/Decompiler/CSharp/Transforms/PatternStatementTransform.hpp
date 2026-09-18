@@ -63,8 +63,11 @@
 // accessor bodies cleared, turning the property back into an auto-property, with the backing
 // field declaration removed and its remaining attributes moved onto the property with the
 // `field` target. The automatic-EVENT rewrite (which needs the `PropertyAndEventBackingFieldLookup`
-// metadata machinery) and the `VisitIdentifier` backing-field replacement remain deferred -- each
-// is named at the visit that would call it.
+// metadata machinery) remains deferred -- it is named at the visit that would call it. The
+// `VisitIdentifier` backing-field replacement also lands: a reference to an auto-property's
+// compiler backing field is rewritten to the property name and re-annotated with a
+// `MemberResolveResult` over the property (`ReplaceBackingFieldUsage` /
+// `IsBackingFieldOfAutomaticProperty`).
 
 #pragma once
 
@@ -83,6 +86,7 @@ class DestructorDeclaration;
 class ExpressionStatement;
 class FixedStatement;
 class ForStatement;
+class Identifier;
 class IdentifierExpression;
 class IfElseStatement;
 class MethodDeclaration;
@@ -99,6 +103,7 @@ class ILVariable;
 }
 
 namespace ILSpy::Decompiler::TypeSystem {
+class IField;
 class IProperty;
 }
 
@@ -175,6 +180,21 @@ public:
     // flags it as the C# 8 enhanced using declaration.
     Syntax::AstNode* VisitUsingStatement(Syntax::UsingStatement* usingStatement) override;
 
+    // The C# `public override AstNode VisitIdentifier(Identifier identifier)`: with
+    // `AutomaticProperties` on, replaces the `Identifier` token naming an automatic property's
+    // compiler backing field with the property name (and re-annotates the parent with a
+    // `MemberResolveResult` over the property), so a field the auto-property rewrite hid is
+    // rendered through the property. Returns the new token; otherwise continues the child walk.
+    Syntax::AstNode* VisitIdentifier(Syntax::Identifier* identifier) override;
+
+    // The C# `internal static bool IsBackingFieldOfAutomaticProperty(IField field, out
+    // IProperty? property)`: whether the field is the compiler-generated backing field of an
+    // automatic property declared on the field's own declaring type (the C# `<Property>
+    // k__BackingField` / VB `_Property` name plus the compiler-generated flag plus the matching
+    // same-type property). Consumed by `ReplaceBackingFieldUsage` and `ExpressionBuilder`.
+    static bool IsBackingFieldOfAutomaticProperty(const ILSpy::Decompiler::TypeSystem::IField& field,
+                                                  const ILSpy::Decompiler::TypeSystem::IProperty*& property);
+
 protected:
     // The C# `protected override AstNode VisitChildren(AstNode node)`: walks the children and
     // keeps visiting a node as long as the visit returns a different node (some sub-transforms
@@ -231,6 +251,13 @@ private:
     bool CanTransformToAutomaticProperty(
         const ILSpy::Decompiler::TypeSystem::IProperty& property,
         bool accessorsMustBeCompilerGenerated);
+
+    // The C# `Identifier? ReplaceBackingFieldUsage(Identifier identifier)`: when the token names
+    // an automatic property's backing field -- and the property can be rendered as a
+    // non-readonly auto-property, and the current method is not the property's own accessor --
+    // re-annotates the parent with a `MemberResolveResult` over the property and returns a fresh
+    // token carrying the property name; otherwise null.
+    Syntax::Identifier* ReplaceBackingFieldUsage(Syntax::Identifier* identifier);
 
     // The C# `PropertyDeclaration? TransformAutomaticProperty(PropertyDeclaration ...)`: matches
     // the getter/setter (or getter-only) backing-field shape and, when the backing field is a

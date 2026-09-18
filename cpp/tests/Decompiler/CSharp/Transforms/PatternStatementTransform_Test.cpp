@@ -1969,6 +1969,16 @@ const TS::IMember* AsMember(const Impl::FakeMethod& member) {
     return static_cast<const TS::IMember*>(static_cast<const Impl::FakeMember*>(&member));
 }
 
+// The canonical `IMember` view of a fake property. The port's metadata members derive only from
+// their interface (so `static_cast<IMember*>(IProperty*)` is the identity the transforms and the
+// annotations use), while the `FakeProperty` diamond also has a `FakeMember`-path `IMember`
+// subobject. Tests that compare against a property returned by `GetProperties` or stored as an
+// `AccessorOwner` must use this view.
+const TS::IMember* AsPropertyMember(const Impl::FakeProperty& property) {
+    return static_cast<const TS::IMember*>(
+        static_cast<const TS::IProperty*>(&property));
+}
+
 // A fully built `class C { <field>; int P { get { return <field>; } set { <field> = value; } } }`
 // with resolved symbols, the compiler backing-field name, and the attribute shapes the
 // automatic-property rewrite consumes.
@@ -2251,4 +2261,235 @@ TEST(PatternStatementTransformTest, KeepsPropertyWhenFieldNameNotBackingField)
     EXPECT_FALSE(model.prop->IsAutomaticProperty());
     EXPECT_NE(model.prop->Getter()->Body(), nullptr);
     EXPECT_EQ(typeDecl->Members().Count(), 2);
+}
+
+// ---- Backing-field reference replacement (VisitIdentifier) --------------------------
+
+// A reference to an auto-property's compiler backing field is rewritten to the property name and
+// the parent expression is re-annotated with a `MemberResolveResult` over the property.
+TEST(PatternStatementTransformTest, ReplacesBackingFieldReferenceWithProperty)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    model.typeDef->SetProperties({static_cast<const TS::IProperty*>(model.property.get())});
+    auto* ref = new Syntax::IdentifierExpression("<P>k__BackingField");
+    ref->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, AsMember(*model.field), fixture.FindType(TS::KnownTypeCode::Int32)));
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(new Syntax::ExpressionStatement(ref));
+
+    RunTransform(fixture, *block);
+
+    EXPECT_EQ(ref->Identifier(), "P");
+    const auto* mrr = ref->Annotation<Sem::MemberResolveResult>();
+    ASSERT_NE(mrr, nullptr);
+    EXPECT_EQ(mrr->Member(), AsPropertyMember(*model.property));
+}
+
+// The VB-style `_P` backing field is replaced too.
+TEST(PatternStatementTransformTest, ReplacesVbBackingFieldReferenceWithProperty)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    model.field->SetName("_P");
+    model.typeDef->SetProperties({static_cast<const TS::IProperty*>(model.property.get())});
+    auto* ref = new Syntax::IdentifierExpression("_P");
+    ref->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, AsMember(*model.field), fixture.FindType(TS::KnownTypeCode::Int32)));
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(new Syntax::ExpressionStatement(ref));
+
+    RunTransform(fixture, *block);
+
+    EXPECT_EQ(ref->Identifier(), "P");
+    EXPECT_EQ(ref->Annotation<Sem::MemberResolveResult>()->Member(),
+              AsPropertyMember(*model.property));
+}
+
+// With `AutomaticProperties` off the reference is left untouched.
+TEST(PatternStatementTransformTest, KeepsBackingFieldReferenceWhenAutomaticPropertiesDisabled)
+{
+    TransformFixture fixture;
+    fixture.settings.SetAutomaticProperties(false);
+    AutoPropertyFixture model(fixture);
+    model.typeDef->SetProperties({static_cast<const TS::IProperty*>(model.property.get())});
+    auto* ref = new Syntax::IdentifierExpression("<P>k__BackingField");
+    ref->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, AsMember(*model.field), fixture.FindType(TS::KnownTypeCode::Int32)));
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(new Syntax::ExpressionStatement(ref));
+
+    RunTransform(fixture, *block);
+
+    EXPECT_EQ(ref->Identifier(), "<P>k__BackingField");
+    EXPECT_EQ(ref->Annotation<Sem::MemberResolveResult>()->Member(), AsMember(*model.field));
+}
+
+// A name that is not a backing-field name is left untouched.
+TEST(PatternStatementTransformTest, KeepsNonBackingFieldReference)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    model.typeDef->SetProperties({static_cast<const TS::IProperty*>(model.property.get())});
+    auto* ref = new Syntax::IdentifierExpression("otherField");
+    ref->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, AsMember(*model.field), fixture.FindType(TS::KnownTypeCode::Int32)));
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(new Syntax::ExpressionStatement(ref));
+
+    RunTransform(fixture, *block);
+
+    EXPECT_EQ(ref->Identifier(), "otherField");
+    EXPECT_EQ(ref->Annotation<Sem::MemberResolveResult>()->Member(), AsMember(*model.field));
+}
+
+// A backing-field-named identifier whose parent carries no resolve result is left untouched.
+TEST(PatternStatementTransformTest, KeepsBackingFieldReferenceWithoutResolveResult)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    model.typeDef->SetProperties({static_cast<const TS::IProperty*>(model.property.get())});
+    auto* ref = new Syntax::IdentifierExpression("<P>k__BackingField");
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(new Syntax::ExpressionStatement(ref));
+
+    RunTransform(fixture, *block);
+
+    EXPECT_EQ(ref->Identifier(), "<P>k__BackingField");
+    EXPECT_EQ(ref->Annotation<Sem::MemberResolveResult>(), nullptr);
+}
+
+// A resolve result whose member is not a field is left untouched.
+TEST(PatternStatementTransformTest, KeepsBackingFieldReferenceWhenMemberNotField)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    model.typeDef->SetProperties({static_cast<const TS::IProperty*>(model.property.get())});
+    auto* ref = new Syntax::IdentifierExpression("<P>k__BackingField");
+    ref->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, AsMember(*model.getter), fixture.FindType(TS::KnownTypeCode::Int32)));
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(new Syntax::ExpressionStatement(ref));
+
+    RunTransform(fixture, *block);
+
+    EXPECT_EQ(ref->Identifier(), "<P>k__BackingField");
+    EXPECT_EQ(ref->Annotation<Sem::MemberResolveResult>()->Member(), AsMember(*model.getter));
+}
+
+// A non-compiler-generated backing field is left untouched.
+TEST(PatternStatementTransformTest, KeepsBackingFieldReferenceWhenFieldNotCompilerGenerated)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    auto plainField = std::make_shared<Impl::FakeField>(fixture.compilation);
+    plainField->SetName("<P>k__BackingField");
+    plainField->SetDeclaringType(model.typeDef);
+    plainField->SetReturnType(fixture.FindType(TS::KnownTypeCode::Int32));
+    model.typeDef->SetProperties({static_cast<const TS::IProperty*>(model.property.get())});
+    auto* ref = new Syntax::IdentifierExpression("<P>k__BackingField");
+    ref->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, AsMember(*plainField), fixture.FindType(TS::KnownTypeCode::Int32)));
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(new Syntax::ExpressionStatement(ref));
+
+    RunTransform(fixture, *block);
+
+    EXPECT_EQ(ref->Identifier(), "<P>k__BackingField");
+    EXPECT_EQ(ref->Annotation<Sem::MemberResolveResult>()->Member(), AsMember(*plainField));
+}
+
+// A non-compiler-generated accessor blocks the rewrite.
+TEST(PatternStatementTransformTest, KeepsBackingFieldReferenceWhenAccessorNotCompilerGenerated)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    auto plainGetter = std::make_shared<Impl::FakeMethod>(
+        fixture.compilation, TS::SymbolKind::Method);
+    plainGetter->SetName("get_P");
+    plainGetter->SetDeclaringType(model.typeDef);
+    model.property->SetGetter(plainGetter.get());
+    model.typeDef->SetProperties({static_cast<const TS::IProperty*>(model.property.get())});
+    auto* ref = new Syntax::IdentifierExpression("<P>k__BackingField");
+    ref->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, AsMember(*model.field), fixture.FindType(TS::KnownTypeCode::Int32)));
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(new Syntax::ExpressionStatement(ref));
+
+    RunTransform(fixture, *block);
+
+    EXPECT_EQ(ref->Identifier(), "<P>k__BackingField");
+    EXPECT_EQ(ref->Annotation<Sem::MemberResolveResult>()->Member(), AsMember(*model.field));
+}
+
+// A get-only property with `GetterOnlyAutomaticProperties` off blocks the rewrite.
+TEST(PatternStatementTransformTest, KeepsBackingFieldReferenceWhenGetterOnlyDisabled)
+{
+    TransformFixture fixture;
+    fixture.settings.SetGetterOnlyAutomaticProperties(false);
+    AutoPropertyFixture model(fixture);
+    model.property->SetSetter(nullptr);
+    model.typeDef->SetProperties({static_cast<const TS::IProperty*>(model.property.get())});
+    auto* ref = new Syntax::IdentifierExpression("<P>k__BackingField");
+    ref->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, AsMember(*model.field), fixture.FindType(TS::KnownTypeCode::Int32)));
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(new Syntax::ExpressionStatement(ref));
+
+    RunTransform(fixture, *block);
+
+    EXPECT_EQ(ref->Identifier(), "<P>k__BackingField");
+    EXPECT_EQ(ref->Annotation<Sem::MemberResolveResult>()->Member(), AsMember(*model.field));
+}
+
+// A reference inside the property's own accessor is left untouched (rewriting it would create
+// a recursive property reference).
+TEST(PatternStatementTransformTest, KeepsBackingFieldReferenceInsideOwnAccessor)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    model.typeDef->SetProperties({static_cast<const TS::IProperty*>(model.property.get())});
+    model.getter->SetAccessorOwner(AsPropertyMember(*model.property));
+    auto* ref = new Syntax::IdentifierExpression("<P>k__BackingField");
+    ref->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, AsMember(*model.field), fixture.FindType(TS::KnownTypeCode::Int32)));
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(new Syntax::ExpressionStatement(ref));
+    auto* method = new Syntax::MethodDeclaration();
+    method->Name("get_P");
+    method->ReturnType(new Syntax::PrimitiveType("int"));
+    method->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, AsMember(*model.getter), fixture.FindType(TS::KnownTypeCode::Int32)));
+    method->Body(body);
+
+    RunTransform(fixture, *method);
+
+    EXPECT_EQ(ref->Identifier(), "<P>k__BackingField");
+    EXPECT_EQ(ref->Annotation<Sem::MemberResolveResult>()->Member(), AsMember(*model.field));
+}
+
+// `IsBackingFieldOfAutomaticProperty` recognizes a compiler-generated backing field with a
+// matching property and rejects the non-field/non-backing-field/foreign-type shapes.
+TEST(PatternStatementTransformTest, IsBackingFieldOfAutomaticPropertyRecognizesShapes)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    model.typeDef->SetProperties({static_cast<const TS::IProperty*>(model.property.get())});
+
+    const TS::IProperty* property = nullptr;
+    EXPECT_TRUE(Transforms::PatternStatementTransform::IsBackingFieldOfAutomaticProperty(
+        *model.field, property));
+    EXPECT_EQ(property, static_cast<const TS::IProperty*>(model.property.get()));
+
+    const TS::IProperty* noProperty = nullptr;
+    auto plainField = std::make_shared<Impl::FakeField>(fixture.compilation);
+    plainField->SetName("<P>k__BackingField");
+    plainField->SetDeclaringType(model.typeDef);
+    EXPECT_FALSE(Transforms::PatternStatementTransform::IsBackingFieldOfAutomaticProperty(
+        *plainField, noProperty));
+
+    const TS::IProperty* wrongName = nullptr;
+    model.field->SetName("otherField");
+    EXPECT_FALSE(Transforms::PatternStatementTransform::IsBackingFieldOfAutomaticProperty(
+        *model.field, wrongName));
 }

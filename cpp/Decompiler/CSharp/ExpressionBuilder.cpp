@@ -707,10 +707,10 @@ bool ExpressionBuilder::RequiresQualifier(const TS::IMember& member,
 // reference render. The two automatic backing-field special cases at the top of
 // the C# method are deferred: the automatic-event arm needs the AutoEventDecompiler
 // plus the MetadataFile PropertyAndEventBackingFieldLookup (not ported), and the
-// automatic-property requires-qualifier special case needs
-// PatternStatementTransform.IsBackingFieldOfAutomaticProperty (not ported). Both
-// only change the render for a compiler-generated backing field, so the general
-// path below is the faithful render for every ordinary field.
+// automatic-property requires-qualifier special case, which reads the now-ported
+// PatternStatementTransform.IsBackingFieldOfAutomaticProperty, is not yet wired in
+// here. Both only change the render for a compiler-generated backing field, so the
+// general path below is the faithful render for every ordinary field.
 ExpressionWithResolveResult ExpressionBuilder::ConvertField(const TS::IField& field,
                                                             IL::ILInstruction* targetInstruction)
 {

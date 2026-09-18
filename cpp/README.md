@@ -5504,7 +5504,25 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   declaring type, and unrecognized field-name keeps) proven with a `TransformAutomaticProperty`
   -neuter RED round (exactly the 2 positive tests failed, the 9 keep-tests staying green). The
   automatic-EVENT rewrite (which needs the `PropertyAndEventBackingFieldLookup` metadata
-  machinery) and the `VisitIdentifier` backing-field replacement stay deferred.
+  machinery) stays deferred.
+- **`PatternStatementTransform` backing-field reference replacement** -- the next slice adds
+  `VisitIdentifier` / `ReplaceBackingFieldUsage` and the shared
+  `IsBackingFieldOfAutomaticProperty`: with `AutomaticProperties` on, an `Identifier` token that
+  names an automatic property's compiler backing field is replaced by a fresh token carrying the
+  property name and the parent expression's `MemberResolveResult` is re-pointed at the property
+  (the C# `parent.RemoveAnnotations<MemberResolveResult>()` +
+  `AddAnnotation(new MemberResolveResult(mrr.TargetResult, property))`, built before the removal
+  to avoid the port's annotation use-after-free). The guard chain is faithful: the
+  backing-field name, the compiler-generated flag, the same-type property lookup (`GetProperties`
+  with `IgnoreInheritedMembers`), `CanTransformToAutomaticProperty` with the
+  compiler-generated-accessor requirement inferred from the `_Name` VB naming, the
+  `currentMethod.AccessorOwner != property` self-reference guard, and the `GetterOnlyAutomatic`
+  `CanSet` gate. Verified by 12 tests (the C#/VB reference replacements, the static
+  `IsBackingFieldOfAutomaticProperty` shape matrix, and the `AutomaticProperties`-off,
+  non-backing-field name, missing resolve result, member-not-a-field, non-compiler-generated
+  field, non-compiler-generated accessor, `GetterOnlyAutomaticProperties`-off, and own-accessor
+  keeps) proven with a `ReplaceBackingFieldUsage`-neuter RED round (exactly the 2 positive tests
+  failed, the 10 keep-tests staying green).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

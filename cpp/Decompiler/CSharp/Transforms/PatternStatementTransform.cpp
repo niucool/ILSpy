@@ -35,6 +35,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/FieldDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/Identifier.hpp"
 #include "Decompiler/CSharp/Syntax/MethodDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/PatternMatching/PatternNodes.hpp"
 #include "Decompiler/CSharp/Syntax/PatternPlaceholder.hpp"
@@ -60,6 +61,7 @@
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/NRExtensions.hpp"
+#include "Decompiler/Semantics/MemberResolveResult.hpp"
 #include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
 #include "Decompiler/TypeSystem/IProperty.hpp"
@@ -1390,6 +1392,94 @@ bool PatternStatementTransform::CanTransformToAutomaticProperty(
             return false;
     }
     return true;
+}
+
+bool PatternStatementTransform::IsBackingFieldOfAutomaticProperty(
+    const TS::IField& field, const TS::IProperty*& property) {
+    property = nullptr;
+    // The C# `if (!NameCouldBeBackingFieldOfAutomaticProperty(field.Name, out var propertyName))
+    // return false`.
+    std::string propertyName;
+    if (!NameCouldBeBackingFieldOfAutomaticProperty(field.Name(), propertyName))
+        return false;
+    // The C# `if (!field.IsCompilerGenerated()) return false`.
+    if (!IsCompilerGenerated(&field))
+        return false;
+    // The C# `property = field.DeclaringTypeDefinition?.GetProperties(p => p.Name ==
+    // propertyName, GetMemberOptions.IgnoreInheritedMembers).FirstOrDefault()`.
+    if (const TS::ITypeDefinition* declaringType = field.DeclaringTypeDefinition()) {
+        const std::string& wantedName = propertyName;
+        std::vector<const TS::IProperty*> properties = declaringType->GetProperties(
+            [&wantedName](const TS::IProperty* p) {
+                return p != nullptr && p->Name() == wantedName;
+            },
+            TS::GetMemberOptions::IgnoreInheritedMembers);
+        if (!properties.empty())
+            property = properties.front();
+    }
+    return property != nullptr;
+}
+
+Syntax::Identifier* PatternStatementTransform::ReplaceBackingFieldUsage(
+    Syntax::Identifier* identifier) {
+    // The C# `if (NameCouldBeBackingFieldOfAutomaticProperty(identifier.Name, out _))`.
+    std::string ignoredName;
+    if (!NameCouldBeBackingFieldOfAutomaticProperty(identifier->Name(), ignoredName))
+        return nullptr;
+    // The C# `var parent = identifier.Parent; if (parent == null) return null`.
+    Syntax::AstNode* parent = identifier->Parent();
+    if (parent == nullptr)
+        return nullptr;
+    // The C# `var mrr = parent.Annotation<MemberResolveResult>()`.
+    const auto* mrr = parent->Annotation<Sem::MemberResolveResult>();
+    if (mrr == nullptr)
+        return nullptr;
+    const auto* field = dynamic_cast<const TS::IField*>(mrr->Member());
+    if (field == nullptr)
+        return nullptr;
+    // The C# `IsBackingFieldOfAutomaticProperty(field, out var property)`.
+    const TS::IProperty* property = nullptr;
+    if (!IsBackingFieldOfAutomaticProperty(*field, property))
+        return nullptr;
+    // The C# `CanTransformToAutomaticProperty(property, !(field.IsCompilerGenerated() &&
+    // field.Name == "_" + property.Name))`.
+    const bool accessorsMustBeCompilerGenerated = !(IsCompilerGenerated(field)
+        && field->Name() == "_" + property->Name());
+    if (!CanTransformToAutomaticProperty(*property, accessorsMustBeCompilerGenerated))
+        return nullptr;
+    // The C# `currentMethod?.AccessorOwner != property`: within the property's own accessors the
+    // backing-field reference must stay (the auto-property rewrite clears the bodies instead).
+    if (currentMethod != nullptr
+        && currentMethod->AccessorOwner() == static_cast<const TS::IMember*>(property))
+        return nullptr;
+    // The C# `if (!property.CanSet && !context.Settings.GetterOnlyAutomaticProperties)
+    // return null`.
+    if (!property->CanSet() && !context_->Settings().GetterOnlyAutomaticProperties())
+        return nullptr;
+    context_->Step("Replace backing field use with property", identifier);
+    // The C# `parent.RemoveAnnotations<MemberResolveResult>(); parent.AddAnnotation(new
+    // MemberResolveResult(mrr.TargetResult, property));`. The replacement result is built before
+    // the old annotation is removed: the C# keeps `mrr` alive through the GC, but the port's
+    // annotations own their storage, so reading `mrr` afterwards would be a use-after-free.
+    std::shared_ptr<Sem::ResolveResult> targetResult = mrr->TargetResultHandle();
+    parent->RemoveAnnotations<Sem::MemberResolveResult>();
+    parent->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        std::move(targetResult), static_cast<const TS::IMember*>(property)));
+    return Syntax::Identifier::Create(property->Name());
+}
+
+AstNode* PatternStatementTransform::VisitIdentifier(Syntax::Identifier* identifier) {
+    // The C# `if (context.Settings.AutomaticProperties) { var newIdentifier =
+    // ReplaceBackingFieldUsage(identifier); if (newIdentifier != null) { ... } }`.
+    if (context_->Settings().AutomaticProperties()) {
+        Syntax::Identifier* newIdentifier = ReplaceBackingFieldUsage(identifier);
+        if (newIdentifier != nullptr) {
+            identifier->ReplaceWith(newIdentifier);
+            context_->EndStep(newIdentifier);
+            return newIdentifier;
+        }
+    }
+    return Syntax::DepthFirstAstVisitorAstNode::VisitIdentifier(identifier);
 }
 
 AstNode* PatternStatementTransform::TransformAutomaticProperty(

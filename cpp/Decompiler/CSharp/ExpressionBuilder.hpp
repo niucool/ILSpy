@@ -221,7 +221,8 @@ public:
     // wrap for a ref-typed field. The two automatic backing-field special cases (the
     // automatic event and the automatic property) are documented deferrals: the first
     // needs the AutoEventDecompiler / PropertyAndEventBackingFieldLookup machinery, the
-    // second needs PatternStatementTransform.IsBackingFieldOfAutomaticProperty.
+    // second reads the now-ported PatternStatementTransform.IsBackingFieldOfAutomaticProperty
+    // but is not yet wired into this render.
     ExpressionWithResolveResult ConvertField(const TS::IField& field,
                                              IL::ILInstruction* targetInstruction = nullptr);
 
