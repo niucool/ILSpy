@@ -51,9 +51,9 @@
 // the InlineArray and GetValueOrDefault arms, and the final
 // RequireTarget/RequireTypeArguments invocation render. The EnforceExplicitIn
 // statementBuilder EmitAsRefReadOnly flag write is deferred with the
-// StatementBuilder slice; the CastArguments lambda-return-type arm is deferred
-// with the lambda translation (TranslateFunction/VisitILFunction) that attaches
-// the DecompiledLambdaResolveResult the conversion reads.
+// StatementBuilder slice; the CastArguments lambda-return-type arm is landed
+// (ModifyReturnTypeOfLambda / ModifyReturnStatementInsideLambda), reading the
+// DecompiledLambdaResolveResult annotation the lambda translation attaches.
 //
 // Every render arm of the Build(CallInstruction) entry and the mainline is now
 // ported: the tuple-expression render (the TupleExpression + TupleResolveResult
@@ -113,6 +113,10 @@ namespace TS = ::ILSpy::Decompiler::TypeSystem;
 namespace ILSpy::Decompiler::CSharp {
 
 class ExpressionBuilder;
+
+namespace Syntax {
+class LambdaExpression;
+}
 
 // The C# `struct ExpectedTargetDetails` (CallBuilder.cs lines 34-38): the
 // call-opcode + boxing-need pair the Build arms thread to the target/argument
@@ -324,6 +328,25 @@ public:
     // for tests.
     void CastArguments(std::vector<TranslatedExpression>& arguments,
                        const std::vector<const TS::IParameter*>& expectedParameters);
+
+    // The C# `private void ModifyReturnTypeOfLambda(LambdaExpression lambda)`
+    // (lines 1485-1493): rewrites the lambda body so its result converts to the
+    // `DecompiledLambdaResolveResult.ReturnType` (the resolved delegate's return type),
+    // then records that type as the inferred return type. An expression-bodied lambda
+    // becomes `new TranslatedExpression(body.Detach()).ConvertTo(ReturnType)`; a
+    // block-bodied lambda routes through ModifyReturnStatementInsideLambda. The
+    // `DecompiledLambdaResolveResult` is the resolve-result annotation the lambda
+    // translation attaches (so this reads `lambda.GetResolveResult()`); a lambda with no
+    // such annotation is an internal invariant violation. Made public for tests.
+    void ModifyReturnTypeOfLambda(Syntax::LambdaExpression& lambda);
+
+    // The C# `private void ModifyReturnStatementInsideLambda(IType returnType, AstNode
+    // parent)` (lines 1495-1509): recursively rewrites every `return <expr>` in the
+    // lambda's block body to convert `<expr>` to `returnType`, skipping nested lambdas /
+    // anonymous methods (their returns belong to the nested function). Made public for
+    // tests.
+    void ModifyReturnStatementInsideLambda(const TS::IType& returnType,
+                                           Syntax::AstNode& parent);
 
     // The C# `private void EnforceExplicitIn(TranslatedExpression[] arguments,
     // IParameter[] expectedParameters)` (lines 1345-1356): wraps every argument

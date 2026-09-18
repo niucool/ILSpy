@@ -55,6 +55,12 @@
 #include "Decompiler/CSharp/Syntax/Expressions/ThisReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/LambdaExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AnonymousMethodExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
+#include "Decompiler/CSharp/Resolver/LambdaResolveResult.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
@@ -4991,4 +4997,175 @@ TEST(VisitCallDispatchTest, TranslateDegradesCallWithoutResolvedMethod)
         dynamic_cast<Syntax::ErrorExpression*>(result.Expression());
     ASSERT_NE(errorExpr, nullptr);
     EXPECT_TRUE(result.ResolveResult()->IsError());
+}
+
+// ---------------------------------------------------------------------------
+// ModifyReturnTypeOfLambda / ModifyReturnStatementInsideLambda.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A lambda fixture: an ILFunction with a settable return type and the
+// DecompiledLambdaResolveResult the lambda translation would attach. The shared_ptr return
+// type (not the KnownTypeHolder's no-op alias) is deliberate: the C# assigns
+// `InferredReturnType = ReturnType`, which the port realizes through
+// `shared_from_this()`, so the type must actually be owned by a shared_ptr.
+struct LambdaResolveFixture {
+    IL::ILFunction function;
+    std::shared_ptr<Resolver::DecompiledLambdaResolveResult> resolveResult;
+
+    LambdaResolveFixture(TS::ITypePtr returnType, TS::ITypePtr inferred)
+    {
+        function.ReturnType = std::move(returnType);
+        resolveResult = std::make_shared<Resolver::DecompiledLambdaResolveResult>(
+            &function, std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object),
+            std::move(inferred), /*hasParameterList*/ false,
+            /*isAnonymousMethod*/ false, /*isImplicitlyTyped*/ false);
+    }
+};
+
+// An IdentifierExpression of the given known type carrying the resolve-result annotation
+// that TranslatedExpression's one-argument ctor reads.
+Syntax::IdentifierExpression* TypedIdentifier(
+    const char* name, TS::KnownTypeCode typeCode)
+{
+    auto* ident = new Syntax::IdentifierExpression(name);
+    ident->AddAnnotation(std::make_shared<Sem::TypeResolveResult>(
+        std::make_shared<TS::KnownType>(typeCode)));
+    return ident;
+}
+
+} // namespace
+
+TEST(ModifyReturnTypeOfLambdaTest, ConvertsExpressionBodyToTheResolvedReturnType)
+{
+    BuilderFixture fixture;
+    LambdaResolveFixture lf(std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object),
+                            std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32));
+    auto* lambda = new Syntax::LambdaExpression();
+    Syntax::IdentifierExpression* ident = TypedIdentifier("x", TS::KnownTypeCode::Int32);
+    lambda->Body(ident);
+    lambda->AddAnnotation(lf.resolveResult);
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    builder.ModifyReturnTypeOfLambda(*lambda);
+
+    // The Int32 body is converted to the Object return type: the identifier is wrapped in a
+    // cast and remains the cast's operand.
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(lambda->Body());
+    ASSERT_NE(cast, nullptr);
+    EXPECT_EQ(cast->Expression(), ident);
+    EXPECT_EQ(lf.resolveResult->InferredReturnType.get(),
+              lf.function.ReturnType.get());
+}
+
+TEST(ModifyReturnTypeOfLambdaTest, IdentityReturnTypeLeavesTheBodyUnchanged)
+{
+    BuilderFixture fixture;
+    LambdaResolveFixture lf(std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32),
+                            std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32));
+    auto* lambda = new Syntax::LambdaExpression();
+    Syntax::IdentifierExpression* ident = TypedIdentifier("x", TS::KnownTypeCode::Int32);
+    lambda->Body(ident);
+    lambda->AddAnnotation(lf.resolveResult);
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    builder.ModifyReturnTypeOfLambda(*lambda);
+
+    // The identity conversion inserts no cast; the same node stays the body.
+    EXPECT_EQ(lambda->Body(), static_cast<Syntax::AstNode*>(ident));
+    EXPECT_EQ(lf.resolveResult->InferredReturnType.get(),
+              lf.function.ReturnType.get());
+}
+
+TEST(ModifyReturnTypeOfLambdaTest, ConvertsEachReturnOfABlockBody)
+{
+    BuilderFixture fixture;
+    LambdaResolveFixture lf(std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object),
+                            std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32));
+    auto* lambda = new Syntax::LambdaExpression();
+    auto* block = new Syntax::BlockStatement();
+    Syntax::IdentifierExpression* first = TypedIdentifier("a", TS::KnownTypeCode::Int32);
+    auto* ret = new Syntax::ReturnStatement(first);
+    block->Statements().Add(ret);
+    lambda->Body(block);
+    lambda->AddAnnotation(lf.resolveResult);
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    builder.ModifyReturnTypeOfLambda(*lambda);
+
+    // The block-body arm recurses into the return statement, not the body directly.
+    EXPECT_EQ(lambda->Body(), static_cast<Syntax::AstNode*>(block));
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(ret->Expression());
+    ASSERT_NE(cast, nullptr);
+    EXPECT_EQ(cast->Expression(), first);
+    EXPECT_EQ(lf.resolveResult->InferredReturnType.get(),
+              lf.function.ReturnType.get());
+}
+
+TEST(ModifyReturnStatementInsideLambdaTest, SkipsNestedFunctions)
+{
+    BuilderFixture fixture;
+    auto* lambda = new Syntax::LambdaExpression();
+    auto* block = new Syntax::BlockStatement();
+
+    Syntax::IdentifierExpression* outer =
+        TypedIdentifier("outer", TS::KnownTypeCode::Int32);
+    auto* outerRet = new Syntax::ReturnStatement(outer);
+    block->Statements().Add(outerRet);
+
+    // A nested lambda and a nested anonymous method, each with an untouched return.
+    auto* nestedLambda = new Syntax::LambdaExpression();
+    auto* nestedReturn = new Syntax::ReturnStatement(
+        TypedIdentifier("inner", TS::KnownTypeCode::Int32));
+    auto* nestedBlock = new Syntax::BlockStatement();
+    nestedBlock->Statements().Add(nestedReturn);
+    nestedLambda->Body(nestedBlock);
+    block->Statements().Add(new Syntax::ExpressionStatement(nestedLambda));
+
+    auto* anonymous = new Syntax::AnonymousMethodExpression();
+    auto* anonReturn = new Syntax::ReturnStatement(
+        TypedIdentifier("anon", TS::KnownTypeCode::Int32));
+    auto* anonBlock = new Syntax::BlockStatement();
+    anonBlock->Statements().Add(anonReturn);
+    anonymous->Body(anonBlock);
+    block->Statements().Add(new Syntax::ExpressionStatement(anonymous));
+
+    lambda->Body(block);
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    builder.ModifyReturnStatementInsideLambda(
+        *std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), *block);
+
+    // The lambda's own return is converted; the nested functions' returns are untouched.
+    EXPECT_NE(dynamic_cast<Syntax::CastExpression*>(outerRet->Expression()), nullptr);
+    EXPECT_EQ(dynamic_cast<Syntax::CastExpression*>(nestedReturn->Expression()), nullptr);
+    EXPECT_EQ(dynamic_cast<Syntax::CastExpression*>(anonReturn->Expression()), nullptr);
+}
+
+TEST(ModifyReturnStatementInsideLambdaTest, LeavesAReturnWithoutAnExpressionAlone)
+{
+    BuilderFixture fixture;
+    auto* block = new Syntax::BlockStatement();
+    auto* bareReturn = new Syntax::ReturnStatement();
+    block->Statements().Add(bareReturn);
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    builder.ModifyReturnStatementInsideLambda(
+        *std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), *block);
+
+    EXPECT_EQ(bareReturn->Expression(), nullptr);
+}
+
+TEST(ModifyReturnTypeOfLambdaTest, ThrowsWithoutTheDecompiledResolveResultAnnotation)
+{
+    BuilderFixture fixture;
+    auto* lambda = new Syntax::LambdaExpression();
+    lambda->Body(TypedIdentifier("x", TS::KnownTypeCode::Int32));
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    // The C# unchecked `(DecompiledLambdaResolveResult)` cast throws InvalidCastException;
+    // the port fails loudly on the same invariant (the lambda translation attaches the
+    // annotation, so a lambda without one was never translated).
+    EXPECT_THROW(builder.ModifyReturnTypeOfLambda(*lambda), std::logic_error);
 }

@@ -28,6 +28,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/LambdaExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AnonymousMethodExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
@@ -57,6 +58,10 @@
 #include "Decompiler/CSharp/Syntax/Expressions/TupleExpression.hpp"
 #include "Decompiler/Semantics/TupleResolveResult.hpp"
 #include "Decompiler/CSharp/Resolver/MemberLookup.hpp"
+#include "Decompiler/CSharp/Resolver/LambdaResolveResult.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
+#include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/Semantics/InitializedObjectResolveResult.hpp"
 #include "Decompiler/Semantics/InterpolatedStringResolveResult.hpp"
@@ -1264,18 +1269,7 @@ void CallBuilder::CastArguments(
             if (auto* lambda = dynamic_cast<Syntax::LambdaExpression*>(
                     arguments[i].Expression()))
             {
-                // The C# `ModifyReturnTypeOfLambda(lambda)` arm is DEFERRED:
-                // the `DecompiledLambdaResolveResult` slice it consumes has
-                // landed, but the lambda translation that attaches a resolve
-                // result to a `LambdaExpression` (`TranslateFunction` /
-                // `VisitILFunction`, still unported) is what the C#
-                // `lambda.GetResolveResult()` cast reads, and the body mutation
-                // (`ModifyReturnStatementInsideLambda` + `TranslatedExpression.
-                // Detach`) lands with it.
-                (void)lambda;
-                throw std::logic_error("ModifyReturnTypeOfLambda is deferred "
-                                       "with the lambda translation "
-                                       "(TranslateFunction/VisitILFunction)");
+                ModifyReturnTypeOfLambda(*lambda);
             }
         }
         else
@@ -1307,6 +1301,66 @@ void CallBuilder::CastArguments(
                 *const_cast<TS::IType*>(parameterType), *expressionBuilder_,
                 /*checkForOverflow=*/false, /*allowImplicitConversion=*/false);
         }
+    }
+}
+
+// The C# `private void ModifyReturnTypeOfLambda(LambdaExpression lambda)` (lines 1485-1493).
+void CallBuilder::ModifyReturnTypeOfLambda(Syntax::LambdaExpression& lambda)
+{
+    // The C# `(DecompiledLambdaResolveResult)lambda.GetResolveResult()` -- an
+    // unchecked cast that throws InvalidCastException on any other resolve result.
+    // The lambda translation attaches this annotation; anything else is an internal
+    // invariant violation, so the port fails loudly.
+    auto* resolveResult = dynamic_cast<Resolver::DecompiledLambdaResolveResult*>(
+        const_cast<Sem::ResolveResult*>(GetResolveResult(lambda)));
+    if (resolveResult == nullptr)
+        throw std::logic_error(
+            "ModifyReturnTypeOfLambda: the lambda has no "
+            "DecompiledLambdaResolveResult annotation");
+
+    // The C# `resolveResult.ReturnType` and the `InferredReturnType` assignment share the
+    // same IType instance; `ReturnType()` returns a const reference, so the shared handle
+    // comes off the const-cast (the node owns it).
+    TS::IType& returnType = const_cast<TS::IType&>(resolveResult->ReturnType());
+    if (auto* exprBody = dynamic_cast<Syntax::Expression*>(lambda.Body()))
+    {
+        TranslatedExpression converted =
+            TranslatedExpression(Syntax::Detach(exprBody))
+                .ConvertTo(returnType, *expressionBuilder_);
+        lambda.Body(converted.Expression());
+    }
+    else
+    {
+        // The C# passes the LAMBDA (not its body) so the walk starts at the lambda's
+        // children; the block body is just its first recursed child.
+        ModifyReturnStatementInsideLambda(returnType, lambda);
+    }
+    resolveResult->InferredReturnType = returnType.shared_from_this();
+}
+
+// The C# `private void ModifyReturnStatementInsideLambda(IType returnType, AstNode
+// parent)` (lines 1495-1509).
+void CallBuilder::ModifyReturnStatementInsideLambda(const TS::IType& returnType,
+                                                    Syntax::AstNode& parent)
+{
+    TS::IType& targetType = const_cast<TS::IType&>(returnType);
+    for (Syntax::AstNode* child : parent.Children())
+    {
+        if (dynamic_cast<Syntax::LambdaExpression*>(child) != nullptr
+            || dynamic_cast<Syntax::AnonymousMethodExpression*>(child) != nullptr)
+            continue; // a nested function's returns belong to that function
+        if (auto* ret = dynamic_cast<Syntax::ReturnStatement*>(child))
+        {
+            if (ret->Expression() != nullptr)
+            {
+                TranslatedExpression converted =
+                    TranslatedExpression(Syntax::Detach(ret->Expression()))
+                        .ConvertTo(targetType, *expressionBuilder_);
+                ret->Expression(converted.Expression());
+            }
+            continue;
+        }
+        ModifyReturnStatementInsideLambda(returnType, *child);
     }
 }
 

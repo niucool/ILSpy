@@ -5792,6 +5792,21 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   The full Debug gtest suite is 12960 ran / 12958 passed / the 2 standing skips /
   zero failures, and the CLI baselines are unchanged (`--csharp` 10106360, `--il`
   41246545, `-l c` 109438 bytes).
+- **`CallBuilder.ModifyReturnTypeOfLambda` / `ModifyReturnStatementInsideLambda`**
+  -- the previously deferred `CastArguments` anonymous-type lambda-return arm now
+  lands. `ModifyReturnTypeOfLambda` reads the lambda's
+  `DecompiledLambdaResolveResult` annotation, rewrites an expression body through
+  `new TranslatedExpression(body.Detach()).ConvertTo(ReturnType)` or recurses a
+  block body's returns through `ModifyReturnStatementInsideLambda` (which skips
+  nested lambdas / anonymous methods), and records `InferredReturnType =
+  ReturnType`. The C# unchecked `(DecompiledLambdaResolveResult)` cast ports to a
+  loud `std::logic_error` on a lambda with no such annotation. Verified by 6 new
+  tests (expression-body conversion, identity no-op, block-body return
+  conversion, nested-function skip, bare-return pass-through, missing-annotation
+  throw) proven with a conversion-neuter RED round (exactly the 3 positives
+  failed, the 3 negatives stayed green). The full Debug gtest suite is 12966 ran /
+  12964 passed / the 2 standing skips / zero failures, and the CLI baselines are
+  unchanged (`--csharp` 10106360, `--il` 41246545, `-l c` 109438 bytes).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.
