@@ -6231,6 +6231,70 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   the real-ilspycmd gold, `-l c` 109438, the `--json`-with-assembly usage
   check rc 64) because the flags/matchers are additive fields with no render
   effect.
+- **Phase-5 slice (RUN/221): the `IsPartOfInitializer` statement-scan state
+  machine** -- the named last prerequisite of the
+  TransformCollectionAndObjectInitializers Run body (TransformCollectionAnd
+  ObjectInitializers.cs lines 63-67 + 262-323) -- plus the C#-layer
+  settings/resolver threading the previous slices deferred. The transform
+  class gains the C# private per-scan instance state as public members (the
+  port's testability convention): `possibleIndexVariables` (the
+  Dictionary<ILVariable, (int Index, ILInstruction Value)> of
+  single-definition local stores accepted as possible dictionary-initializer
+  index variables, mapped to the PossibleIndexVariableInfo struct),
+  `currentPath` (the shared member path), `isCollection`, and `pathStack`
+  (the Stack<HashSet<AccessPathElement>> over the new
+  AccessPathElementHash functor -- a vector used as a stack). The new
+  `ResetInitializerScanState()` reproduces Run's per-scan reset (the four
+  Clear calls plus the initial empty-set push), and `MarkUsedIndices` flips
+  the used index variables' recorded Index to -1 (the C# tuple reassignment
+  keeping the Value). `IsPartOfInitializer` itself ports the full state
+  machine: the index-variable arm (a single-definition-local StLoc whose
+  value's strict descendants do not load the initializer variable is recorded
+  with its ChildIndex; a non-matching StLoc falls through to the
+  access-path walk, which rejects it), the `AccessPathElement::GetAccessPath`
+  call threaded with the C#-layer settings and resolver, the
+  target-mismatch and Invalid-kind rejections, the last-element split, the
+  first-difference walk with the pop loop (an `isCollection = false` on every
+  pop) and the push loop (the sibling-set insert, rejecting duplicates and
+  members below an entered collection), and the Adder/Setter arms (the
+  Adder requires an empty top set and sets collection mode; the Setter
+  rejects collection mode, requires exactly one value and a valid target
+  path, upgrades CollectionInitializer to ObjectInitializer unless the head
+  already decided WithInitializer, and ORs the init-only-setter flag through
+  the property's Setter). The threading lands as the design decision the
+  earlier slices named: `ILTransformSettings` gains
+  `DictionaryInitializers` (default true), and `ILTransformContext` gains
+  the two nullable forward-declared C#-layer handles the C# context carries
+  natively -- `CSharpSettings` (the full DecompilerSettings) and `Resolver`
+  (the lazily-created CSharpResolver, named to avoid the self-named-member
+  trap) -- following D78: the IL-layer pipeline callers leave them null
+  (reproducing the C# default-constructed-settings gates and skipping the
+  resolver-driven applicability checks, the divergence pinned by a test),
+  while the C#-layer pipeline and the tests set them; IsPartOfInitializer
+  reads the threaded settings for the direct gate when present and falls
+  back to the subset field. The stray `struct ILTransformContext` forward
+  declaration in HighLevelLoopTransform.hpp (struct-vs-class, C4099) is
+  fixed to `class`. Verified by 12 new tests (the suite is 22): the
+  index-variable arm (the recorded ChildIndex/Value pair, the
+  DictionaryInitializers-off rejection through both the subset gate and the
+  threaded-settings precedence, the subtree-loading-target rejection -- a
+  bare ldloc/ldloca value has no strict descendants so it IS recorded, the
+  faithful C# Descendants semantics -- and the non-single-definition
+  fall-through), the field-store Setter arm with the blockKind upgrade and
+  the last-element-never-in-currentPath invariant, the duplicate-leaf
+  rejection, the nested-path push/pop sequence (B pushed then popped, the
+  sibling sets at both levels), the Adder arm (collection mode, the
+  setter-after-adder and adder-after-setter rejections, and the pop-loop
+  isCollection reset), the accessor-setter's MarkUsedIndices flip, the
+  init-only accessor setting initializerContainsInitOnlyItems (with its own
+  property, since the flag reads the property's Setter), the Invalid-kind
+  and target-mismatch rejections, and the resolver-threaded applicability
+  matrix (a non-Add name rejected with the resolver, a static Add rejected,
+  a real Add accepted over the IEnumerable root type, and the no-resolver
+  divergence pinned: even a non-Add call is folded as an Adder) -- proven
+  with a three-behavior neuter RED round (exactly the DictionaryInitializers
+  gate, the MarkUsedIndices flip, and the pop-loop reset each failing their
+  predicted test, 19 staying green) then restored green.
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

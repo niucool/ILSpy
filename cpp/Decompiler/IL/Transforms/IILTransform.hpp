@@ -26,6 +26,14 @@
 
 #include <functional>
 
+namespace ILSpy::Decompiler::CSharp::Resolver {
+class CSharpResolver;
+}
+
+namespace ILSpy::Decompiler {
+class DecompilerSettings;
+}
+
 namespace ILSpy::Decompiler::IL {
 
 class ILFunction;
@@ -197,11 +205,35 @@ struct ILTransformSettings {
     // `<Clone>$` call head stays a call instead of becoming a
     // BlockKind.WithInitializer block.
     bool WithExpressions = true;
+    // DecompilerSettings.DictionaryInitializers -- a C# 6.0 setting, default
+    // true. Consulted by TransformCollectionAndObjectInitializers.
+    // IsPartOfInitializer: with it off the single-definition local stores the
+    // scan collects as possible index variables (the C# 6
+    // `{ [key] = value }` dictionary-initializer indices) are rejected, and
+    // GetAccessPath's accessor-path arm drops parameterized accesses (the
+    // `settings?.DictionaryInitializers == false` gate).
+    bool DictionaryInitializers = true;
 };
 
 class ILTransformContext {
 public:
     ILTransformSettings Settings;
+    // The C# ILTransformContext's full DecompilerSettings (`context.Settings`,
+    // defaulting to `new DecompilerSettings()` when the caller passes null) and
+    // its lazily-created CSharpResolver (`context.CSharpResolver`) -- the two
+    // C#-layer fields the C# context carries natively, which cross-layer
+    // transforms (TransformCollectionAndObjectInitializers's IsPartOfInitializer
+    // passes both into AccessPathElement.GetAccessPath) consult. The port keeps
+    // them as nullable non-owning handles following the D78 convention: the
+    // IL-layer pipeline callers (the seed CLI paths) leave them null, which
+    // reproduces the C# default-constructed-settings gates (both consulted
+    // settings default on) and skips the resolver-driven applicability checks
+    // (GetAccessPath's `resolver != null` branches); the C#-layer pipeline and
+    // the tests set them for the faithful resolver-checked behavior. The
+    // resolver member name avoids the self-named-member trap (a member named
+    // CSharpResolver would shadow the CSharpResolver TYPE in the class scope).
+    const ::ILSpy::Decompiler::DecompilerSettings* CSharpSettings = nullptr;
+    ::ILSpy::Decompiler::CSharp::Resolver::CSharpResolver* Resolver = nullptr;
     // Debug transition log (C# ILTransformContext.Step). Set by tools/tests to
     // observe per-step rewrites; null in production.
     std::function<void(const char* what)> Step;
