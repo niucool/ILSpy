@@ -348,6 +348,7 @@ add_executable(ilspy_tests
     Decompiler/IL/ILInstructionClone_Test.cpp
     Decompiler/IL/ILAmbience_Test.cpp
     Decompiler/CSharp/ILAstToCSharp_Test.cpp
+    Decompiler/CSharp/AutoEventDecompiler_Test.cpp
     Decompiler/CSharp/ProjectDecompiler/WholeProjectDecompiler_Test.cpp
     Decompiler/CSharp/Syntax/TextLocation_Test.cpp
     Decompiler/CSharp/Syntax/CSharpSlotInfo_Test.cpp

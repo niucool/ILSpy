@@ -5666,6 +5666,34 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   full Debug gtest suite is 12918 ran / 12916 passed / the 2 standing skips /
   zero failures, and all three CLI baselines are unchanged (`--csharp`
   10106360, `--il` 41246545, `-l c` 109438 bytes).
+- **`AutoEventDecompiler`** -- recognizing automatic (field-like) events by
+  structurally matching the compiler-generated add/remove accessor ILAst. The
+  three recognized shapes land: the csc 4 / Roslyn compare-exchange loop, the
+  mcs compare-exchange loop (the combined delegate passed straight to
+  `Interlocked.CompareExchange`), and the pre-4.0 non-thread-safe combine
+  assignment (including the mcs `dup` `this`-alias form). `FindBackingField`
+  reads the declaring type's private, same-static-ness field the
+  `PropertyAndEventBackingFieldLookup` associates with the event;
+  `IsAutomaticEvent` checks explicit-interface-implementation / declaring type /
+  both accessors' `HasBody`, the type-erasure return-type equivalence, and both
+  accessor bodies, memoizing the verdict in the new `DecompileRun.AutomaticEvents`
+  map (the C# `Dictionary<IEvent, IField?>`); `IsAutomaticAccessor` reads the body
+  through the landed `DecompileBodyForAnalysis` analysis prefix. Divergence: the
+  port's IL reader does not resolve `Call::Method` / `LdFlda::Field`, so the
+  matchers read the resolved handle when set and fall back to
+  `MethodName`/`IsInstanceCall` and the node's `Field`; and the port's
+  Loop/ConditionDetection produces a different block shape than the C# for a real
+  automatic-event accessor, so the structural matchers are pinned by synthetic
+  tests and the real `IsAutomaticEvent` verdict is only exercised through
+  `FindBackingField`/memoization. `AddFieldLikeEventAttributes` stays deferred
+  with the type-declaration renderer. Verified by 11 tests (the three matcher
+  shapes plus the wrong-combine-kind / missing-init / wrong-field keeps, the real
+  mscorlib `AppDomain.AssemblyLoad` backing field, the memoization entry, and the
+  fake-event no-field shape), proven with a `MatchAutomaticAccessorBody`-neuter
+  RED round (exactly the 4 positive matcher tests failed, the 7 others staying
+  green). The full Debug gtest suite is 12929 ran / 12927 passed / the 2 standing
+  skips / zero failures, and all three CLI baselines are unchanged (`--csharp`
+  10106360, `--il` 41246545, `-l c` 109438 bytes).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

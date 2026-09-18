@@ -27,10 +27,10 @@
 // Deferrals (documented at each member): the CancellationToken (the port has no
 // cooperative-cancel machinery -- the C# ctor only stores it, and every consumer
 // calls ThrowIfCancellationRequested() which is a no-op here); RecordDecompilers /
-// AutomaticEvents / TypeHierarchyIsKnown (the CSharpDecompiler type-declaration
-// slices that fill them are not ported yet -- the dictionaries land with those
-// slices). The DocumentationProvider is a caller-supplied interface pointer (the
-// concrete XmlDocumentationProvider stays with a later Decompiler slice).
+// TypeHierarchyIsKnown (the CSharpDecompiler type-declaration slices that fill
+// them are not ported yet -- the dictionaries land with those slices). The
+// DocumentationProvider is a caller-supplied interface pointer (the concrete
+// XmlDocumentationProvider stays with a later Decompiler slice).
 
 #pragma once
 
@@ -41,10 +41,16 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace ILSpy::Decompiler::Documentation {
 class IDocumentationProvider;
+}
+
+namespace ILSpy::Decompiler::TypeSystem {
+class IEvent;
+class IField;
 }
 
 namespace ILSpy::Decompiler {
@@ -103,6 +109,17 @@ public:
         documentationProvider_ = provider;
     }
 
+    // The C# `public Dictionary<IEvent, IField?> AutomaticEvents { get; }` -- the
+    // memoized AutoEventDecompiler verdicts (a null value is the "not an automatic
+    // event" verdict). The C# ctor initializes it empty; consumers route through
+    // AutoEventDecompiler.IsAutomaticEvent, which memoizes so all consumers decide
+    // from the same analysis. The keys/values are non-owning (the type system owns
+    // the members); the map keys on the IEvent identity (the C# reference equality).
+    std::unordered_map<const TypeSystem::IEvent*, const TypeSystem::IField*>&
+    AutomaticEvents() {
+        return automaticEvents_;
+    }
+
     // The C# ctor `DecompileRun(DecompilerSettings settings, UsingScope usingScope)`
     // with both ArgumentNullException guards. The settings port alias: the caller
     // owns the bag (the C# GC reference); the using scope is the port's
@@ -124,6 +141,8 @@ private:
     const DecompilerSettings* settings_;
     std::shared_ptr<CSharp::TypeSystem::UsingScope> usingScope_;
     const Documentation::IDocumentationProvider* documentationProvider_ = nullptr;
+    std::unordered_map<const TypeSystem::IEvent*, const TypeSystem::IField*>
+        automaticEvents_;
 };
 
 } // namespace ILSpy::Decompiler
