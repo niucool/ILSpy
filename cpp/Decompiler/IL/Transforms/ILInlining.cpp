@@ -17,7 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
-#include "Decompiler/IL/Transforms/ILInlining.hpp"
+#include "Decompiler/IL/Transforms/NamedArgumentTransform.hpp"
 #include "Decompiler/TypeSystem/IParameter.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
@@ -50,38 +50,71 @@ bool VariableCanBeUsedForInlining(const ILVariable* v) {
     return true;
 }
 
+// The ILFunction root that owns `inst`, found by walking the Parent chain to the
+// root (ILFunction::IsRoot). Every connected instruction is rooted at a function;
+// returns null for a detached/unconnected subtree (a hand-built test tree whose
+// root is not an ILFunction). Mirrors the FunctionOf helper the port's other
+// transforms (NullCoalescingTransform) carry locally.
+ILFunction* FunctionOfBlock(ILInstruction* inst) {
+    for (ILInstruction* p = inst; p != nullptr; p = p->Parent) {
+        if (p->IsRoot()) return static_cast<ILFunction*>(p);
+    }
+    return nullptr;
+}
+
 } // namespace
 
 // Find the single load of `v` (an LdLoc or an LdLoca) inside `expr` that can be
-// replaced by `expressionBeingMoved`. Mirrors ILInlining.FindLoadInNext (subset:
-// no SlotInfo restrictions, no named-argument handling). Faithful to the C#,
-// which returns Found for both an LdLoc(v) and an LdLoca(v) match; the caller
-// gates whether an ldloca can actually be inlined (this port defers the
+// replaced by `expressionBeingMoved`. Mirrors ILInlining.FindLoadInNext. Faithful
+// to the C#, which returns Found for both an LdLoc(v) and an LdLoca(v) match; the
+// caller gates whether an ldloca can actually be inlined (this port defers the
 // ldloca-into-addressof path, so InlineOneIfPossible skips an LdLoca found).
+//
+// The C# `expr.CanInlineIntoSlot(child.ChildIndex, expressionBeingMoved)` gate
+// before each child recursion is not modeled (the port's inlining has no SlotInfo
+// restrictions); the C# named-argument branch is: when a child recursion returns
+// Stop while IntroduceNamedArguments is set and `expr` is a CallInstruction, the
+// call may be converted to a named-argument call.
 FindResult FindLoadInNext(ILInstruction* expr, ILVariable* v,
-                          ILInstruction* expressionBeingMoved) {
-    if (!expr) return {FindResultType::Stop, nullptr};
+                          ILInstruction* expressionBeingMoved,
+                          InliningOptions options) {
+    if (!expr) return FindResult::StopResult();
     if (expr->Op == OpCode::LdLoc) {
         auto* ld = static_cast<LdLoc*>(expr);
-        if (ld->Variable.get() == v) return {FindResultType::Found, ld};
+        if (ld->Variable.get() == v) return FindResult::FoundResult(ld);
         if (MayReorder(expressionBeingMoved->Flags(), expr->Flags()))
-            return {FindResultType::Continue, nullptr};
-        return {FindResultType::Stop, nullptr};
+            return FindResult::ContinueResult();
+        return FindResult::StopResult();
     }
     if (expr->Op == OpCode::LdLoca) {
         auto* lda = static_cast<LdLoca*>(expr);
-        if (lda->Variable.get() == v) return {FindResultType::Found, lda};
+        if (lda->Variable.get() == v) return FindResult::FoundResult(lda);
         if (MayReorder(expressionBeingMoved->Flags(), expr->Flags()))
-            return {FindResultType::Continue, nullptr};
-        return {FindResultType::Stop, nullptr};
+            return FindResult::ContinueResult();
+        return FindResult::StopResult();
+    }
+    if (expr->Op == OpCode::Block
+        && static_cast<Block*>(expr)->Kind == BlockKind::CallWithNamedArgs) {
+        // The C# `expr is Block { Kind: BlockKind.CallWithNamedArgs }` arm:
+        // extending an existing named-argument block has its own search.
+        return NamedArgumentTransform::CanExtendNamedArgument(
+            static_cast<Block*>(expr), v, expressionBeingMoved);
     }
     for (int i = 0; i < expr->ChildCount(); ++i) {
-        FindResult r = FindLoadInNext(expr->GetChild(i), v, expressionBeingMoved);
-        if (r.type != FindResultType::Continue) return r;
+        FindResult r = FindLoadInNext(expr->GetChild(i), v, expressionBeingMoved, options);
+        if (r.type != FindResultType::Continue) {
+            if (r.type == FindResultType::Stop
+                && HasInliningOption(options, InliningOptions::IntroduceNamedArguments)
+                && expr->Op == OpCode::Call) {
+                return NamedArgumentTransform::CanIntroduceNamedArgument(
+                    static_cast<Call*>(expr), expr->GetChild(i), v, expressionBeingMoved);
+            }
+            return r;
+        }
     }
     if (MayReorder(expressionBeingMoved->Flags(), expr->Flags()))
-        return {FindResultType::Continue, nullptr};
-    return {FindResultType::Stop, nullptr};
+        return FindResult::ContinueResult();
+    return FindResult::StopResult();
 }
 
 // The top-level statement containing `inst`: the last ancestor (including inst
@@ -262,6 +295,11 @@ bool IsInConstructorInitializer(const ILFunction* function, const ILInstruction*
 // namespace above and visible here; FindLoadInNext is also at namespace scope
 // (declared in the header) so other transforms can call it directly.
 bool InlineOneIfPossible(Block* block, int pos, ILTransformContext& ctx) {
+    return InlineOneIfPossible(block, pos, InliningOptions::None, ctx);
+}
+
+bool InlineOneIfPossible(Block* block, int pos, InliningOptions options,
+                         ILTransformContext& ctx) {
     if (pos < 0 || static_cast<std::size_t>(pos) >= block->Instructions.size()) return false;
     auto* stloc = dynamic_cast<StLoc*>(block->Instructions[static_cast<std::size_t>(pos)].get());
     if (!stloc) return false;
@@ -278,18 +316,33 @@ bool InlineOneIfPossible(Block* block, int pos, ILTransformContext& ctx) {
         else
             next = block->FinalInstruction.get();
         auto value = stloc->TakeChild(0);
-        FindResult r = FindLoadInNext(next, v, value.get());
+        FindResult r = FindLoadInNext(next, v, value.get(), options);
         // Only inline an LdLoc found. An LdLoca found is the deferred
         // ldloca-into-addressof path (needs an AddressOf node +
         // IsGeneratedTemporaryForAddressOf, not yet ported): skip it and fall
         // through to the dead-store check, preserving the prior LdLoca->Stop
         // behavior. Faithful to the C# DoInline, which gates an LdLoca found on
         // IsGeneratedTemporaryForAddressOf (always false in this port).
-        if (r.type == FindResultType::Found && r.loadInst
-            && r.loadInst->Op == OpCode::LdLoc) {
+        bool inlinable = (r.type == FindResultType::Found
+                          || r.type == FindResultType::NamedArgument)
+                         && r.loadInst && r.loadInst->Op == OpCode::LdLoc;
+        if (inlinable) {
+            if (r.type == FindResultType::NamedArgument) {
+                // The C# DoInline calls NamedArgumentTransform.IntroduceNamedArgument
+                // before the ordinary inlining, so the expression being moved is
+                // evaluated early inside the promoted argument.
+                NamedArgumentTransform::IntroduceNamedArgument(r.callArgument, ctx);
+            }
             ctx.StepOnce("Inline variable");
             r.loadInst->ReplaceWith(std::move(value));
             block->RemoveInstructionAt(static_cast<std::size_t>(pos));
+            if (r.type == FindResultType::NamedArgument) {
+                // The named-argument variable the transform registered needs fresh
+                // usage counts (the C# keeps them incrementally; this port
+                // recomputes after the tree is consistent again).
+                if (ILFunction* function = FunctionOfBlock(block))
+                    ComputeVariableUsage(*function);
+            }
             return true;
         }
         stloc->SetChild(0, std::move(value));  // restore, try dead-store below

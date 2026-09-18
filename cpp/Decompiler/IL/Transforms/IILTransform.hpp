@@ -175,6 +175,11 @@ struct ILTransformSettings {
     // call sequence stays as the raw calls instead of folding to a $"..."
     // InterpolatedString block.
     bool StringInterpolation = true;
+    // DecompilerSettings.NamedArguments (the C# `UseNamedArguments`, default
+    // true). Gates NamedArgumentTransform: with it off a call whose argument
+    // ordering blocks inlining keeps the original order instead of being
+    // rewritten to a named-argument call. Consulted by the transform's Run.
+    bool NamedArguments = true;
 };
 
 class ILTransformContext {

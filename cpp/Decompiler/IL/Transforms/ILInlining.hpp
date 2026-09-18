@@ -54,31 +54,75 @@ class ILFunction;
 class ILInstruction;
 class ILVariable;
 
+// The C# `[Flags] enum InliningOptions` (ILInlining.cs line 30): the options the
+// inlining search consults. The port carries the members the ported callers set:
+// None is the default; IntroduceNamedArguments lets FindLoadInNext promote a call
+// argument to a named argument when the load cannot be reached by re-ordering;
+// AllowInliningOfLdloca / Aggressive / FindDeconstruction /
+// AllowChangingOrderOfEvaluationForExceptions stay deferred with the ldloca-
+// into-addressof path, the aggressive heuristics, and the deconstruction finder.
+enum class InliningOptions : unsigned {
+    None = 0,
+    Aggressive = 1,
+    IntroduceNamedArguments = 2,
+    FindDeconstruction = 4,
+    AllowChangingOrderOfEvaluationForExceptions = 8,
+    AllowInliningOfLdloca = 0x10,
+};
+
+inline InliningOptions operator|(InliningOptions a, InliningOptions b) {
+    return static_cast<InliningOptions>(static_cast<unsigned>(a) | static_cast<unsigned>(b));
+}
+inline InliningOptions operator&(InliningOptions a, InliningOptions b) {
+    return static_cast<InliningOptions>(static_cast<unsigned>(a) & static_cast<unsigned>(b));
+}
+inline bool HasInliningOption(InliningOptions options, InliningOptions flag) {
+    return (static_cast<unsigned>(options) & static_cast<unsigned>(flag)) != 0;
+}
+
 // Inline the StLoc at `pos` into the next instruction's load of its variable,
 // or remove it as a dead store. A free function mirroring the C#
 // `ILInlining.InlineOneIfPossible(block, pos, InliningOptions.None, ctx)` static
-// call (the C# InliningOptions enum is not modeled -- this port has no
-// ldloca-inlining / SlotInfo restrictions). Returns true if the stloc was
-// consumed. Exposed so other per-statement transforms (e.g.
-// NullCoalescingTransform) can call it after a fold that opens up an inlining
-// opportunity, matching the C#.
+// call. Returns true if the stloc was consumed. Exposed so other per-statement
+// transforms (e.g. NullCoalescingTransform) can call it after a fold that opens
+// up an inlining opportunity, matching the C#.
 bool InlineOneIfPossible(Block* block, int pos, ILTransformContext& ctx);
+
+// The options-aware overload (the C# InlineOneIfPossible(block, pos, options,
+// ctx)). NamedArgumentTransform.Run calls it with IntroduceNamedArguments set so
+// a load the search cannot reach by re-ordering is promoted to a named argument.
+bool InlineOneIfPossible(Block* block, int pos, InliningOptions options,
+                         ILTransformContext& ctx);
 
 // Result of ILInlining::FindLoadInNext -- the search for the single load of a
 // variable inside an instruction subtree, into which an expression can be
-// inlined. Faithful to the C# ILInlining.FindResultType / FindResult (subset:
-// no NamedArgument / Deconstruction, which need SlotInfo / named-argument and
-// deconstruct infrastructure this port defers).
+// inlined. Faithful to the C# ILInlining.FindResultType / FindResult (subset: no
+// Deconstruction, which needs the deconstruction finder this port defers).
 //
-//   Found    -- a load of the variable was found; inlining is possible (the
-//               caller decides whether the load's slot permits it).
-//   Stop     -- the load was not found and re-ordering is not possible; abort.
-//   Continue -- the load was not found but the expression can be re-ordered
-//               past the tested subtree; keep searching.
-enum class FindResultType { Found, Stop, Continue };
+//   Found         -- a load of the variable was found; inlining is possible (the
+//                    caller decides whether the load's slot permits it).
+//   Stop          -- the load was not found and re-ordering is not possible; abort.
+//   Continue      -- the load was not found but the expression can be re-ordered
+//                    past the tested subtree; keep searching.
+//   NamedArgument -- a load was found in a call but re-ordering with respect to
+//                    the other call arguments is not possible; the call can be
+//                    converted to a named-argument call (only with
+//                    IntroduceNamedArguments).
+enum class FindResultType { Found, Stop, Continue, NamedArgument };
 struct FindResult {
     FindResultType type;
-    ILInstruction* loadInst;  // the ldloc/ldloca found (valid when type == Found)
+    ILInstruction* loadInst;  // the ldloc/ldloca found (valid when type == Found / NamedArgument)
+    // The call argument that must be promoted to a named argument (valid when
+    // type == NamedArgument). Mirrors the C# FindResult.CallArgument.
+    ILInstruction* callArgument = nullptr;
+    static FindResult FoundResult(ILInstruction* loadInst) {
+        return {FindResultType::Found, loadInst, nullptr};
+    }
+    static FindResult NamedArgumentResult(ILInstruction* loadInst, ILInstruction* callArg) {
+        return {FindResultType::NamedArgument, loadInst, callArg};
+    }
+    static FindResult StopResult() { return {FindResultType::Stop, nullptr, nullptr}; }
+    static FindResult ContinueResult() { return {FindResultType::Continue, nullptr, nullptr}; }
 };
 
 // Find the single load of `v` (an LdLoc or an LdLoca) inside `expr` that can be
@@ -91,7 +135,8 @@ struct FindResult {
 // expression fold and the hoisted-constructor-argument null guard) can locate
 // the use they redirect, matching the C# static call.
 FindResult FindLoadInNext(ILInstruction* expr, ILVariable* v,
-                          ILInstruction* expressionBeingMoved);
+                          ILInstruction* expressionBeingMoved,
+                          InliningOptions options = InliningOptions::None);
 
 // True when `inst` sits in the constructor initializer -- before the chained
 // `: base(...)`/`: this(...)` call -- so a preceding hoisted argument null-guard

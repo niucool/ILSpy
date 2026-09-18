@@ -49,6 +49,12 @@ enum class BlockKind : std::uint8_t {
     // call ToStringAndClear(ldloca v) that yields the string. Constructed by
     // InterpolatedStringTransform.
     InterpolatedString,
+    // A call with named arguments (the C# BlockKind.CallWithNamedArgs). The
+    // FinalInstruction is the call; Instructions holds the promoted argument
+    // stlocs (the `this` pointer first for an instance call) plus any remaining
+    // argument expressions. Constructed by NamedArgumentTransform when a load
+    // cannot be reached by re-ordering the call arguments.
+    CallWithNamedArgs,
 };
 
 } // namespace ILSpy::Decompiler::IL

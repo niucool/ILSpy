@@ -570,6 +570,7 @@ add_executable(ilspy_tests
     Decompiler/IL/Transforms/NullPropagationTransform_Test.cpp
     Decompiler/IL/Transforms/TransformAssignment_Test.cpp
     Decompiler/IL/Transforms/UserDefinedLogicTransform_Test.cpp
+    Decompiler/IL/Transforms/NamedArgumentTransform_Test.cpp
     Decompiler/IL/Transforms/InterpolatedStringTransform_Test.cpp
     Decompiler/IL/Transforms/FixRemainingIncrements_Test.cpp
     Decompiler/IL/Transforms/CopyPropagation_Test.cpp

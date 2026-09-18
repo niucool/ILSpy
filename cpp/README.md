@@ -5807,11 +5807,42 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   failed, the 3 negatives stayed green). The full Debug gtest suite is 12966 ran /
   12964 passed / the 2 standing skips / zero failures, and the CLI baselines are
   unchanged (`--csharp` 10106360, `--il` 41246545, `-l c` 109438 bytes).
+- **`NamedArgumentTransform` + the `ILInlining` named-argument search** -- the
+  named-argument promotion that unblocks the `CallWithNamedArgs` block render
+  lands (`NamedArgumentTransform.cs`). The transform has the C# three static
+  members (`CanIntroduceNamedArgument` / `CanExtendNamedArgument` /
+  `IntroduceNamedArgument`) plus its `IStatementTransform` `Run`; the port reuses
+  them from the extended `ILInlining.FindLoadInNext`, which now carries the C#
+  `InliningOptions` flags and the `FindResultType.NamedArgument` case with the
+  `FindResult.CallArgument` field, and from the options-aware
+  `InlineOneIfPossible` overload whose NamedArgument arm promotes the argument
+  before the ordinary inlining. `IntroduceNamedArgument` wraps the call in a new
+  `BlockKind.CallWithNamedArgs` block (the block kind and the
+  `ILTransformSettings::NamedArguments` gate are added), registers the
+  `VariableKind.NamedArgument` temporary and the `this_arg` variable for an
+  instance call (the `CallInstruction.ExpectedTypeForThisPointer` by-ref rule),
+  and moves the promoted argument into an early `StLoc`; the stack type is mapped
+  to an `IType` with the standalone-`KnownType` convention because the transform
+  context carries no compilation (the `context.TypeSystem.FindType` divergence).
+  The C# `OptionsForBlock` aggressive/ordering heuristics are not modeled, so
+  only the `IntroduceNamedArguments` flag is set. The transform is NOT wired into
+  `GetILTransforms()`: the `CallWithNamedArgs` block render in `CallBuilder` has
+  not landed, so emitting such blocks would break the seed back end. Verified by
+  a 10-test `NamedArgumentTransformTest` suite (the static-call and instance-call
+  promotion structures, the setting-off keep, the existing-block extension, the
+  operator / delegate-constructor / empty-parameter-name / this-pointer /
+  no-later-load guards, and the `FindLoadInNext` NamedArgument result), proven
+  with an `InlineOneIfPossible`-neuter RED round where exactly the 3 positive
+  tests failed and the 7 negatives stayed green. The full Debug gtest suite is
+  12980 ran / 12978 passed / the 2 standing skips / zero failures, and all three
+  Release CLI baselines are byte-identical (`--csharp` 10106360, `--il`
+  41246545, `-l c` 109438).
 - **`CallBuilder.BuildCollectionInitializerExpression` / `BuildDictionaryInitializerExpression`**
   -- the two object/collection-initializer entry points land (`CallBuilder.cs`
   lines 667-753), completing the CallBuilder public surface apart from the
-  `CallWithNamedArgs` block render (blocked on the `BlockKind.CallWithNamedArgs`
-  producer, the `NamedArgumentTransform`/ILInlining named-argument machinery).
+  `CallWithNamedArgs` block render (the `BlockKind.CallWithNamedArgs` producer,
+  `NamedArgumentTransform`/ILInlining named-argument machinery has since landed;
+  only the `CallBuilder` render remains).
   `BuildCollectionInitializerExpression` builds the `Add(...)` argument list
   (inserting a Nop target for an extension method), forces positional/unnamed
   arguments, runs the overload-resolution fix ladder, and answers either the
