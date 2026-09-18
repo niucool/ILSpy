@@ -35,6 +35,8 @@
 #include "Decompiler/IL/Instructions/AddressOf.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/DefaultValue.hpp"
+#include "Decompiler/IL/Instructions/LdNull.hpp"
+#include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/NRExtensions.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"
@@ -2098,6 +2100,136 @@ ExpressionWithResolveResult CallBuilder::HandleConstructorCall(
                 argumentList.ArgumentToParameterMap, std::vector<std::shared_ptr<Sem::ResolveResult>>(),
                 returnTypeOverride));
     }
+}
+
+// The C# `public ExpressionWithResolveResult BuildCollectionInitializerExpression(
+// OpCode callOpCode, IMethod method, InitializedObjectResolveResult target,
+// IReadOnlyList<ILInstruction> callArguments)` (CallBuilder.cs lines 667-726).
+ExpressionWithResolveResult CallBuilder::BuildCollectionInitializerExpression(
+    IL::OpCode callOpCode, const TS::IMethod& method,
+    std::shared_ptr<Sem::InitializedObjectResolveResult> target,
+    const std::vector<IL::ILInstruction*>& callArguments)
+{
+    ExpectedTargetDetails expectedTargetDetails;
+    expectedTargetDetails.CallOpCode = callOpCode;
+    // The C# `var unused = new IdentifierExpression("initializedObject")
+    // .WithRR(target).WithoutILInstruction()`: the identifier exists only to
+    // carry the initialized-object resolve result through the fix ladder and
+    // the resolve-result annotations (it is never rendered).
+    // The C# passes the ORIGINAL `target` to the invocation resolve result even
+    // after the fix ladder may have re-pointed `unused` (the ladder's target
+    // cast), so the handle is kept rather than moved.
+    auto* unusedNode = new Syntax::IdentifierExpression("initializedObject");
+    TranslatedExpression unused =
+        WithoutILInstruction(WithRR(*unusedNode, target));
+
+    std::vector<IL::ILInstruction*> args = callArguments;
+    IL::Nop extensionTarget;
+    if (method.IsExtensionMethod())
+        args.insert(args.begin(), &extensionTarget);
+
+    ArgumentList argumentList = BuildArgumentList(
+        expectedTargetDetails, unused.ResolveResult(), method, 0, args,
+        std::nullopt);
+    argumentList.ArgumentNames = std::nullopt;
+    argumentList.AddNamesToPrimitiveValues = false;
+    argumentList.UseImplicitlyTypedOut = false;
+    const TS::IParameterizedMember* foundMethod = nullptr;
+    CallTransformation transform = GetRequiredTransformationsForCall(
+        expectedTargetDetails, method, unused, argumentList,
+        CallTransformation::None, foundMethod);
+
+    // The C# `Debug.Assert((transform & ~(NoOptionalArgumentAllowed |
+    // NoNamedArgsForPrettiness)) == 0)` is compiled out of the release engine.
+
+    // Calls with only one argument do not need an array initializer expression
+    // to wrap them. Any special cases are handled by the caller.
+    // Note: we intentionally ignore the firstOptionalArgumentIndex here.
+    int skipCount;
+    if (method.IsExtensionMethod())
+    {
+        if (argumentList.Length() == 2)
+            return ExpressionWithResolveResult(
+                argumentList.Arguments[1].Expression(),
+                argumentList.Arguments[1].ResolveResult());
+        skipCount = 1;
+    }
+    else
+    {
+        if (argumentList.Length() == 1)
+            return ExpressionWithResolveResult(
+                argumentList.Arguments[0].Expression(),
+                argumentList.Arguments[0].ResolveResult());
+        skipCount = 0;
+    }
+
+    if ((transform & CallTransformation::NoOptionalArgumentAllowed)
+        != CallTransformation::None)
+        argumentList.FirstOptionalArgumentIndex = -1;
+
+    auto* initializer = new Syntax::ArrayInitializerExpression();
+    for (Syntax::Expression* element : argumentList.GetArgumentExpressions(skipCount))
+        initializer->Elements().Add(element);
+    // The C# target resolve result is the initialized-object result (the
+    // original `target`, not the possibly fix-ladder re-pointed `unused`).
+    return WithRR(
+        *initializer,
+        std::make_shared<Resolver::CSharpInvocationResolveResult>(
+            AliasResolveResult(target.get()), &method,
+            argumentList.GetArgumentResolveResults(skipCount),
+            Resolver::OverloadResolutionErrors::None, method.IsExtensionMethod(),
+            argumentList.IsExpandedForm, false));
+}
+
+// The C# `public ExpressionWithResolveResult BuildDictionaryInitializerExpression(
+// OpCode callOpCode, IMethod method, InitializedObjectResolveResult target,
+// IReadOnlyList<ILInstruction> indices, ILInstruction? value = null)`
+// (CallBuilder.cs lines 728-753).
+ExpressionWithResolveResult CallBuilder::BuildDictionaryInitializerExpression(
+    IL::OpCode callOpCode, const TS::IMethod& method,
+    std::shared_ptr<Sem::InitializedObjectResolveResult> target,
+    const std::vector<IL::ILInstruction*>& indices, IL::ILInstruction* value)
+{
+    ExpectedTargetDetails expectedTargetDetails;
+    expectedTargetDetails.CallOpCode = callOpCode;
+
+    // The C# `callArguments = [new LdNull(), ...indices, value ?? new Nop()]`:
+    // the leading null is the `this` slot BuildArgumentList skips at
+    // firstParamIndex 1 (the C# indexer setter's own parameter list).
+    std::vector<IL::ILInstruction*> callArguments;
+    IL::LdNull thisSlot;
+    IL::Nop missingValue;
+    callArguments.push_back(&thisSlot);
+    for (IL::ILInstruction* index : indices)
+        callArguments.push_back(index);
+    callArguments.push_back(value != nullptr ? value
+                                             : static_cast<IL::ILInstruction*>(&missingValue));
+
+    ArgumentList argumentList = BuildArgumentList(
+        expectedTargetDetails, target.get(), method, 1, callArguments,
+        std::nullopt);
+    auto* unusedNode = new Syntax::IdentifierExpression("initializedObject");
+    TranslatedExpression unused =
+        WithoutILInstruction(WithRR(*unusedNode, std::move(target)));
+
+    ExpressionWithResolveResult assignment = HandleAccessorCall(
+        expectedTargetDetails, method, unused, argumentList.Arguments,
+        argumentList.ArgumentNames);
+
+    auto* assignmentExpr =
+        dynamic_cast<Syntax::AssignmentExpression*>(assignment.Expression());
+    assert(assignmentExpr != nullptr);
+    if (auto* indexer =
+            dynamic_cast<Syntax::IndexerExpression*>(assignmentExpr->Left()))
+    {
+        if (indexer->Target() != nullptr)
+            indexer->Target()->Remove();
+    }
+
+    if (value != nullptr)
+        return assignment;
+
+    return ExpressionWithResolveResult(Syntax::Detach(assignmentExpr->Left()));
 }
 
 // The C# `private static bool IsInterpolatedStringCreation(IMethod method,

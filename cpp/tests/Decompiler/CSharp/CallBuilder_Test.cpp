@@ -40,6 +40,7 @@
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpInvocationResolveResult.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UndocumentedExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
 #include "Decompiler/CSharp/Annotations.hpp"
@@ -5168,4 +5169,153 @@ TEST(ModifyReturnTypeOfLambdaTest, ThrowsWithoutTheDecompiledResolveResultAnnota
     // the port fails loudly on the same invariant (the lambda translation attaches the
     // annotation, so a lambda without one was never translated).
     EXPECT_THROW(builder.ModifyReturnTypeOfLambda(*lambda), std::logic_error);
+}
+
+// ---------------------------------------------------------------------------
+// BuildCollectionInitializerExpression / BuildDictionaryInitializerExpression:
+// the initializer call renders (CallBuilder.cs lines 667-753).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A collection type whose `Add` overloads live on the initialized-object target
+// type: MemberLookup.Lookup resolves them through the type's own method list.
+struct CollectionInitializerFixture : BuildArgsFixture
+{
+    std::shared_ptr<TS::TestSupport::LookupTypeDefinition> collDef;
+    std::shared_ptr<Impl::FakeMethod> add1;
+    std::shared_ptr<Impl::FakeMethod> add2;
+
+    CollectionInitializerFixture()
+    {
+        collDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+            "Collection", "H",
+            TS::FullTypeName(TS::TopLevelTypeName("H", "Collection")),
+            TS::TypeKind::Class, TS::Accessibility::Public, holder.compilation,
+            &holder.compilation.MainModule());
+        add1 = MakeAdd({TS::KnownTypeCode::Int32});
+        add2 = MakeAdd({TS::KnownTypeCode::Int32, TS::KnownTypeCode::Int32});
+        collDef->SetMethods({add1.get(), add2.get()});
+        SetCurrentTypeDefinition(collDef.get());
+    }
+
+    std::shared_ptr<Impl::FakeMethod> MakeAdd(
+        std::vector<TS::KnownTypeCode> parameterTypes)
+    {
+        auto method = std::make_shared<Impl::FakeMethod>(
+            holder.compilation, TS::SymbolKind::Method);
+        method->SetName("Add");
+        method->SetIsStatic(false);
+        method->SetDeclaringType(
+            TS::ITypePtr(collDef.get(), [](TS::IType*) {}));
+        std::vector<std::shared_ptr<const TS::IParameter>> parameters;
+        for (std::size_t i = 0; i < parameterTypes.size(); i++)
+            parameters.push_back(std::make_shared<Impl::DefaultParameter>(
+                holder.KnownType(parameterTypes[i]),
+                "p" + std::to_string(i)));
+        method->SetParameters(parameters);
+        method->SetReturnType(holder.KnownType(TS::KnownTypeCode::Void));
+        return method;
+    }
+
+    std::shared_ptr<Sem::InitializedObjectResolveResult> Target()
+    {
+        return std::make_shared<Sem::InitializedObjectResolveResult>(
+            TS::ITypePtr(collDef.get(), [](TS::IType*) {}));
+    }
+};
+
+} // namespace
+
+TEST(BuildCollectionInitializerTest, SingleArgumentReturnsTheTranslatedArgument)
+{
+    // An `Add` with exactly one argument needs no initializer wrapper: the C#
+    // returns argumentList.Arguments[0] directly.
+    CollectionInitializerFixture fixture;
+    IL::LdcI4 value(7);
+    std::vector<IL::ILInstruction*> args{&value};
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ExpressionWithResolveResult result =
+        builder.BuildCollectionInitializerExpression(
+            IL::OpCode::Call, *fixture.add1, fixture.Target(), args);
+    auto* primitive =
+        dynamic_cast<Syntax::PrimitiveExpression*>(result.Expression());
+    ASSERT_NE(primitive, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(primitive->Value()), 7);
+}
+
+TEST(BuildCollectionInitializerTest, MultipleArgumentsWrapInAnArrayInitializer)
+{
+    CollectionInitializerFixture fixture;
+    IL::LdcI4 a(1);
+    IL::LdcI4 b(2);
+    std::vector<IL::ILInstruction*> args{&a, &b};
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ExpressionWithResolveResult result =
+        builder.BuildCollectionInitializerExpression(
+            IL::OpCode::Call, *fixture.add2, fixture.Target(), args);
+    auto* initializer =
+        dynamic_cast<Syntax::ArrayInitializerExpression*>(result.Expression());
+    ASSERT_NE(initializer, nullptr);
+    ASSERT_EQ(initializer->Elements().Count(), 2);
+    // The invocation resolve result carries the initialized-object target and
+    // the resolved `Add` method.
+    auto* crr = dynamic_cast<const Resolver::CSharpInvocationResolveResult*>(
+        result.ResolveResult());
+    ASSERT_NE(crr, nullptr);
+    EXPECT_EQ(crr->Member(),
+              static_cast<const TS::IParameterizedMember*>(fixture.add2.get()));
+    EXPECT_NE(dynamic_cast<const Sem::InitializedObjectResolveResult*>(
+                  crr->TargetResult()),
+              nullptr);
+}
+
+TEST(BuildDictionaryInitializerTest, ValueSuppliedRendersTheAssignment)
+{
+    IndexerFixture fixture;
+    IL::LdcI4 index(3);
+    IL::LdcI4 value(7);
+    std::vector<IL::ILInstruction*> indices{&index};
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ExpressionWithResolveResult result =
+        builder.BuildDictionaryInitializerExpression(
+            IL::OpCode::Call, *fixture.indexSetter,
+            std::make_shared<Sem::InitializedObjectResolveResult>(
+                fixture.HolderType()),
+            indices, &value);
+    auto* assignment =
+        dynamic_cast<Syntax::AssignmentExpression*>(result.Expression());
+    ASSERT_NE(assignment, nullptr);
+    EXPECT_EQ(assignment->Operator(), Syntax::AssignmentOperatorType::Assign);
+    auto* indexer =
+        dynamic_cast<Syntax::IndexerExpression*>(assignment->Left());
+    ASSERT_NE(indexer, nullptr);
+    // The initialized-object shape drops the indexer target.
+    EXPECT_EQ(indexer->Target(), nullptr);
+    ASSERT_EQ(indexer->Arguments().Count(), 1);
+    ASSERT_NE(assignment->Right(), nullptr);
+}
+
+TEST(BuildDictionaryInitializerTest, WithoutAValueAnswersTheDetachedIndexer)
+{
+    IndexerFixture fixture;
+    IL::LdcI4 index(3);
+    std::vector<IL::ILInstruction*> indices{&index};
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ExpressionWithResolveResult result =
+        builder.BuildDictionaryInitializerExpression(
+            IL::OpCode::Call, *fixture.indexSetter,
+            std::make_shared<Sem::InitializedObjectResolveResult>(
+                fixture.HolderType()),
+            indices, nullptr);
+    auto* indexer = dynamic_cast<Syntax::IndexerExpression*>(result.Expression());
+    ASSERT_NE(indexer, nullptr);
+    EXPECT_EQ(indexer->Target(), nullptr);
+    ASSERT_EQ(indexer->Arguments().Count(), 1);
+    // The detached indexer keeps the member resolve result annotation.
+    auto* rr =
+        dynamic_cast<const Sem::MemberResolveResult*>(result.ResolveResult());
+    ASSERT_NE(rr, nullptr);
+    EXPECT_EQ(rr->Member()->MemberDefinition(),
+              fixture.prop->MemberDefinition());
 }

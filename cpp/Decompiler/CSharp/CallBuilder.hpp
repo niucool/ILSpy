@@ -70,6 +70,12 @@
 // (IsUnambiguousAccess + HandleAccessorCall), the interpolation slice
 // (HandleStringInterpolation + TryGetStringInterpolationTokens +
 // TokenizeFormatString), and the constructor-call slice (HandleConstructorCall).
+// The two object/collection-initializer entry points
+// (BuildCollectionInitializerExpression and
+// BuildDictionaryInitializerExpression) are ported; their caller
+// (ExpressionBuilder.TranslateObjectAndCollectionInitializer) and the
+// TransformCollectionAndObjectInitializers/AccessPathElement machinery that
+// builds the initializer blocks remain the deferred consumer.
 
 #pragma once
 
@@ -98,6 +104,7 @@
 
 namespace ILSpy::Decompiler::Semantics {
 class ResolveResult;
+class InitializedObjectResolveResult;
 }
 
 namespace ILSpy::Decompiler::IL {
@@ -476,6 +483,38 @@ public:
         const ExpectedTargetDetails& expectedTargetDetails,
         const Sem::ResolveResult* target, const TS::IMethod& method,
         ArgumentList argumentList);
+
+    // The C# `public ExpressionWithResolveResult BuildCollectionInitializerExpression(
+    // OpCode callOpCode, IMethod method, InitializedObjectResolveResult target,
+    // IReadOnlyList<ILInstruction> callArguments)` (CallBuilder.cs lines 667-726):
+    // the collection-initializer `Add(...)` render -- the argument list is built,
+    // forced positional/unnamed, run through the overload-resolution fix ladder,
+    // and answered either as the single argument (a one-argument call needs no
+    // initializer wrapper) or as an `ArrayInitializerExpression` over the argument
+    // expressions annotated with a `CSharpInvocationResolveResult`. The `target` is
+    // the C# by-reference `InitializedObjectResolveResult`; the port threads an
+    // owning shared handle (the annotation channel stores it). Made public for
+    // tests (the C# public member).
+    ExpressionWithResolveResult BuildCollectionInitializerExpression(
+        IL::OpCode callOpCode, const TS::IMethod& method,
+        std::shared_ptr<Sem::InitializedObjectResolveResult> target,
+        const std::vector<IL::ILInstruction*>& callArguments);
+
+    // The C# `public ExpressionWithResolveResult BuildDictionaryInitializerExpression(
+    // OpCode callOpCode, IMethod method, InitializedObjectResolveResult target,
+    // IReadOnlyList<ILInstruction> indices, ILInstruction? value = null)`
+    // (CallBuilder.cs lines 728-753): the C# 6 dictionary-initializer render -- the
+    // accessor call over `[null, indices..., value]` (the leading null is the
+    // skipped `this` slot) rendered through HandleAccessorCall; the indexer's target
+    // is dropped (the initialized-object shape), and the result is the assignment
+    // when a value is supplied or the detached indexer otherwise. `value` null maps
+    // to the C# `null` (the C# 6 `{ key }` shape). Made public for tests (the C#
+    // public member).
+    ExpressionWithResolveResult BuildDictionaryInitializerExpression(
+        IL::OpCode callOpCode, const TS::IMethod& method,
+        std::shared_ptr<Sem::InitializedObjectResolveResult> target,
+        const std::vector<IL::ILInstruction*>& indices,
+        IL::ILInstruction* value = nullptr);
 
     // The C# `internal static bool IsSpanBasedStringConcat(IMethod method)`
     // (CallBuilder.cs lines 300-318): whether the method is a static

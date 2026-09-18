@@ -5807,6 +5807,31 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   failed, the 3 negatives stayed green). The full Debug gtest suite is 12966 ran /
   12964 passed / the 2 standing skips / zero failures, and the CLI baselines are
   unchanged (`--csharp` 10106360, `--il` 41246545, `-l c` 109438 bytes).
+- **`CallBuilder.BuildCollectionInitializerExpression` / `BuildDictionaryInitializerExpression`**
+  -- the two object/collection-initializer entry points land (`CallBuilder.cs`
+  lines 667-753), completing the CallBuilder public surface apart from the
+  `CallWithNamedArgs` block render (blocked on the `BlockKind.CallWithNamedArgs`
+  producer, the `NamedArgumentTransform`/ILInlining named-argument machinery).
+  `BuildCollectionInitializerExpression` builds the `Add(...)` argument list
+  (inserting a Nop target for an extension method), forces positional/unnamed
+  arguments, runs the overload-resolution fix ladder, and answers either the
+  single argument (a one-argument call needs no wrapper) or an
+  `ArrayInitializerExpression` annotated with a `CSharpInvocationResolveResult`
+  whose target is the `InitializedObjectResolveResult`.
+  `BuildDictionaryInitializerExpression` builds the `[null, indices..., value]`
+  accessor call, renders it through `HandleAccessorCall` against the
+  initialized-object target, drops the indexer target, and answers the
+  assignment (a value supplied) or the detached indexer (the C# 6 `{ key }`
+  shape). The owning shared handle for the C# by-reference
+  `InitializedObjectResolveResult` is threaded explicitly (the annotation
+  channel stores it). Verified by 4 tests over a `LookupTypeDefinition`
+  collection (single/multi-argument `Add`, the array-initializer wrap and its
+  `CSharpInvocationResolveResult` target/member pins) and the indexer fixture
+  (the assignment render and the detached-indexer arm), proven with an
+  early-return-neuter RED round (all 4 failed, then restored green). The full
+  Debug gtest suite is 12970 ran / 12968 passed / the 2 standing skips / zero
+  failures, and all three CLI baselines are byte-identical (`--csharp`
+  10106360, `--il` 41246545, `-l c` 109438).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.
