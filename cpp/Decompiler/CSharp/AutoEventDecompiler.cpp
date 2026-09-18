@@ -18,6 +18,8 @@
 
 #include "Decompiler/CSharp/AutoEventDecompiler.hpp"
 
+#include "Decompiler/CSharp/Syntax/EventDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/DecompileRun.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
@@ -36,11 +38,15 @@
 #include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
 #include "Decompiler/TypeSystem/IModule.hpp"
+#include "Decompiler/TypeSystem/IAttribute.hpp"
+#include "Decompiler/TypeSystem/INamedElement.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/NormalizeTypeVisitor.hpp"
 #include "Decompiler/TypeSystem/IEvent.hpp"
 
+#include <cassert>
+#include <iterator>
 #include <string>
 
 namespace ILSpy::Decompiler::CSharp {
@@ -86,6 +92,54 @@ bool IsCompareExchangeMethod(const IL::Call& call) {
 // convention the transforms use).
 bool IsSameField(const TS::IField& a, const TS::IField& b) {
     return a.MemberDefinition() == b.MemberDefinition();
+}
+
+// The C# `AutoEventDecompiler.attributeTypesToRemoveFromAutoEventAccessors`.
+constexpr const char* kAttributeTypesToRemoveFromAutoEventAccessors[] = {
+    "System.Runtime.CompilerServices.CompilerGeneratedAttribute",
+    "System.Diagnostics.DebuggerBrowsableAttribute",
+    "System.Runtime.CompilerServices.MethodImplAttribute",
+};
+
+// The C# `AutoEventDecompiler.attributeTypesToRemoveFromAutoEventFields`.
+constexpr const char* kAttributeTypesToRemoveFromAutoEventFields[] = {
+    "System.Runtime.CompilerServices.CompilerGeneratedAttribute",
+    "System.Diagnostics.DebuggerBrowsableAttribute",
+};
+
+// The C# `IType.FullName` for the attribute-type comparison: an `IEntity` type
+// reports `INamedElement::FullName()`, a `ParameterizedType` delegates to its
+// generic, and any other shape falls back to `ReflectionName()` (the file-local
+// helper convention of IntroduceUsingDeclarations / CustomPatterns / TypeSystemAstBuilder).
+std::string TypeFullNameOf(const TS::IType& type) {
+    if (const auto* named = dynamic_cast<const TS::INamedElement*>(&type))
+        return named->FullName();
+    if (const auto* parameterized = dynamic_cast<const TS::ParameterizedType*>(&type))
+        return parameterized->GenericType() ? TypeFullNameOf(*parameterized->GenericType())
+                                            : std::string();
+    return type.ReflectionName();
+}
+
+// The C# `WithoutAttributeTypes(IEnumerable<IAttribute> attributes, string[]
+// attributeTypesToRemove)`: the attributes whose type's full name is not in the
+// removal set, in input order.
+std::vector<const TS::IAttribute*> WithoutAttributeTypes(
+    const std::vector<const TS::IAttribute*>& attributes,
+    const char* const* attributeTypesToRemove, std::size_t attributeTypeCount) {
+    std::vector<const TS::IAttribute*> result;
+    for (const TS::IAttribute* attribute : attributes) {
+        const std::string fullName = TypeFullNameOf(attribute->AttributeType());
+        bool remove = false;
+        for (std::size_t i = 0; i < attributeTypeCount; ++i) {
+            if (fullName == attributeTypesToRemove[i]) {
+                remove = true;
+                break;
+            }
+        }
+        if (!remove)
+            result.push_back(attribute);
+    }
+    return result;
 }
 
 // The C# `bool MatchLdThisOrAlias(ILInstruction inst, ILVariable? thisAlias)`.
@@ -424,6 +478,36 @@ bool AutoEventDecompiler::IsAutomaticEvent(DecompileRun& decompileRun, const Met
     backingField = result ? field : nullptr;
     cache[&ev] = backingField;
     return result;
+}
+
+// The C# `internal static void AddFieldLikeEventAttributes(EventDeclaration eventDecl,
+// TypeSystemAstBuilder astBuilder, IEvent ev, IField backingField)` -- the field-like
+// event's add-accessor and backing-field attributes, as "method:" and "field:"
+// sections with the compiler-generated attributes dropped.
+void AutoEventDecompiler::AddFieldLikeEventAttributes(
+    Syntax::EventDeclaration& eventDecl,
+    const Syntax::TypeSystemAstBuilder& astBuilder,
+    const TS::IEvent& ev, const TS::IField& backingField) {
+    // The C# `ev.AddAccessor!.GetAttributes()`: non-null, guaranteed by the
+    // IsAutomaticEvent check the caller performs first.
+    const TS::IMethod* addAccessor = ev.AddAccessor();
+    assert(addAccessor != nullptr);
+    if (addAccessor != nullptr) {
+        for (Syntax::AttributeSection* section : astBuilder.ConvertAttributes(
+                 WithoutAttributeTypes(addAccessor->GetAttributes(),
+                                       kAttributeTypesToRemoveFromAutoEventAccessors,
+                                       std::size(kAttributeTypesToRemoveFromAutoEventAccessors)),
+                 std::string("method"))) {
+            eventDecl.Attributes().Add(section);
+        }
+    }
+    for (Syntax::AttributeSection* section : astBuilder.ConvertAttributes(
+             WithoutAttributeTypes(backingField.GetAttributes(),
+                                   kAttributeTypesToRemoveFromAutoEventFields,
+                                   std::size(kAttributeTypesToRemoveFromAutoEventFields)),
+             std::string("field"))) {
+        eventDecl.Attributes().Add(section);
+    }
 }
 
 } // namespace ILSpy::Decompiler::CSharp

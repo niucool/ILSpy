@@ -39,10 +39,9 @@
 // aggressive today, so the synthetic matcher tests pin the C# shape while the
 // real `IsAutomaticEvent` verdict is only exercised through `FindBackingField`.
 //
-// Deferred: AddFieldLikeEventAttributes (the EventDeclaration attribute
-// conversion the C# exposes for the field-like event declaration), which needs
-// the full EventDeclaration/TypeSystemAstBuilder attribute pipeline once the
-// type-declaration renderer consumes it.
+// The `AddFieldLikeEventAttributes` helper (the EventDeclaration attribute
+// conversion the C# exposes for the field-like event declaration) is ported; its
+// consumer is the type-declaration renderer.
 
 #pragma once
 
@@ -68,6 +67,11 @@ class BlockContainer;
 }
 
 namespace CSharp {
+
+namespace Syntax {
+class EventDeclaration;
+class TypeSystemAstBuilder;
+}
 
 // The C# `static class AutoEventDecompiler`.
 class AutoEventDecompiler {
@@ -113,6 +117,18 @@ public:
                                            const TypeSystem::IMethod& accessor,
                                            const TypeSystem::IField& field,
                                            bool isAddAccessor);
+
+    // The C# `internal static void AddFieldLikeEventAttributes(EventDeclaration
+    // eventDecl, TypeSystemAstBuilder astBuilder, IEvent ev, IField backingField)`:
+    // adds the add-accessor and backing-field attributes of an automatic event to
+    // its field-like declaration, as "method:" and "field:" sections, dropping the
+    // attributes the compiler puts on automatic events (AutoEventDecompiler.cs).
+    // The C# non-null `AddAccessor` is asserted; it is guaranteed by the
+    // IsAutomaticEvent verdict the caller checks first.
+    static void AddFieldLikeEventAttributes(Syntax::EventDeclaration& eventDecl,
+                                            const Syntax::TypeSystemAstBuilder& astBuilder,
+                                            const TypeSystem::IEvent& ev,
+                                            const TypeSystem::IField& backingField);
 };
 
 } // namespace CSharp

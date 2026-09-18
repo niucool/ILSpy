@@ -5694,6 +5694,26 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   green). The full Debug gtest suite is 12929 ran / 12927 passed / the 2 standing
   skips / zero failures, and all three CLI baselines are unchanged (`--csharp`
   10106360, `--il` 41246545, `-l c` 109438 bytes).
+- **`AutoEventDecompiler.AddFieldLikeEventAttributes`** -- the field-like event
+  attribute conversion, the last deferred member of `AutoEventDecompiler`. The
+  add-accessor's attributes and the backing field's attributes are rendered as
+  `method:` and `field:` attribute sections on the event declaration (the C#
+  `ConvertAttributes(attributes, "method"/"field")`), dropping the
+  compiler-generated attributes (`[CompilerGenerated]`,
+  `[DebuggerBrowsable]` and, on the accessor only, `[MethodImpl]`) by exact
+  attribute-type full name. The full name is read through a file-local
+  `TypeFullNameOf` helper (the port's `IType` has no `FullName`; the
+  `INamedElement`/`ParameterizedType`/`ReflectionName` fallback the other
+  transforms use). The C# non-null `AddAccessor` is asserted (guaranteed by the
+  `IsAutomaticEvent` verdict the caller checks first). Verified by 6 tests (the
+  `method`-then-`field` section order and targets, the accessor
+  `[CompilerGenerated]`/`[MethodImpl]` drops, the field
+  `[CompilerGenerated]`/`[DebuggerBrowsable]` drop, the all-dropped empty shape,
+  and the kept-attribute order preservation) proven with an early-return RED
+  round (exactly the 5 positive tests failed, the all-dropped negative staying
+  green). The full Debug gtest suite is 12935 ran / 12933 passed / the 2 standing
+  skips / zero failures, and all three CLI baselines are unchanged (`--csharp`
+  10106360, `--il` 41246545, `-l c` 109438 bytes).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

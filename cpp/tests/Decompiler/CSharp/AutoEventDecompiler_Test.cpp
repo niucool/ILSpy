@@ -25,6 +25,11 @@
 
 #include "Decompiler/CSharp/AutoEventDecompiler.hpp"
 
+#include "Decompiler/CSharp/Syntax/Attribute.hpp"
+#include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
+#include "Decompiler/CSharp/Syntax/EventDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/MemberType.hpp"
+#include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
 #include "Decompiler/DecompileRun.hpp"
@@ -46,6 +51,7 @@
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/TypeSystem/ICompilation.hpp"
 #include "Decompiler/TypeSystem/IEvent.hpp"
+#include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
@@ -56,9 +62,11 @@
 #include "Decompiler/TypeSystem/StringComparer.hpp"
 #include "Decompiler/TypeSystem/TopLevelTypeName.hpp"
 #include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
+#include "Decompiler/TypeSystem/Implementation/DefaultAttribute.hpp"
 #include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
+#include "Decompiler/TypeSystem/LookupStubs.hpp"
 #include "Decompiler/Util/CacheManager.hpp"
 
 #include <filesystem>
@@ -71,6 +79,7 @@
 namespace TS = ::ILSpy::Decompiler::TypeSystem;
 namespace IL = ::ILSpy::Decompiler::IL;
 namespace CSharp = ::ILSpy::Decompiler::CSharp;
+namespace Syntax = ::ILSpy::Decompiler::CSharp::Syntax;
 namespace Impl = ::ILSpy::Decompiler::TypeSystem::Implementation;
 namespace TM = ::ILSpy::Decompiler::Metadata;
 using ::ILSpy::Decompiler::DecompileRun;
@@ -488,4 +497,183 @@ TEST(AutoEventDecompilerTest, DoesNotFindBackingFieldWithoutDeclaringType) {
     TS::SimpleCompilation compilation{ Impl::MinimalCorlib::Instance(), {} };
     Impl::FakeEvent event(compilation);
     EXPECT_EQ(CSharp::AutoEventDecompiler::FindBackingField(event), nullptr);
+}
+
+// ---- AddFieldLikeEventAttributes -----------------------------------------------
+
+namespace {
+
+// An IType whose FullName is the exact removal-set string while its Name/Namespace
+// render normally (the C# attribute-type FullName comparison). The LookupTypeDefinition
+// FullName returns the first ctor argument, so the short-name field carries the
+// rendered name.
+std::shared_ptr<TS::TestSupport::LookupTypeDefinition> MakeAttributeType(
+    const TS::ICompilation& compilation, const std::string& ns,
+    const std::string& shortName) {
+    const std::string fullName = ns.empty() ? shortName : ns + "." + shortName;
+    return std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        fullName, ns, TS::FullTypeName(TS::TopLevelTypeName(ns, shortName, 0)),
+        TS::TypeKind::Class, TS::Accessibility::Public, compilation, nullptr,
+        TS::KnownTypeCode::None);
+}
+
+// A FakeMethod whose attribute list is configurable.
+class AttributedMethod : public Impl::FakeMethod {
+public:
+    explicit AttributedMethod(const TS::ICompilation& compilation)
+        : Impl::FakeMethod(compilation, TS::SymbolKind::Method) {}
+    std::vector<const TS::IAttribute*> Attributes;
+    std::vector<const TS::IAttribute*> GetAttributes() const override {
+        return Attributes;
+    }
+};
+
+// A FakeField whose attribute list is configurable.
+class AttributedField : public Impl::FakeField {
+public:
+    explicit AttributedField(const TS::ICompilation& compilation)
+        : Impl::FakeField(compilation) {}
+    std::vector<const TS::IAttribute*> Attributes;
+    std::vector<const TS::IAttribute*> GetAttributes() const override {
+        return Attributes;
+    }
+};
+
+// The attribute fixture: an add accessor plus backing field with configurable
+// attributes, an event wired to the accessor, and the ast builder / event declaration
+// AddFieldLikeEventAttributes consumes.
+struct AutoEventAttributesFixture {
+    TS::TestSupport::LookupCompilation compilation;
+    std::shared_ptr<TS::TestSupport::LookupTypeDefinition> compilerGenerated =
+        MakeAttributeType(compilation, "System.Runtime.CompilerServices",
+                          "CompilerGeneratedAttribute");
+    std::shared_ptr<TS::TestSupport::LookupTypeDefinition> debuggerBrowsable =
+        MakeAttributeType(compilation, "System.Diagnostics",
+                          "DebuggerBrowsableAttribute");
+    std::shared_ptr<TS::TestSupport::LookupTypeDefinition> methodImpl =
+        MakeAttributeType(compilation, "System.Runtime.CompilerServices",
+                          "MethodImplAttribute");
+    std::shared_ptr<TS::TestSupport::LookupTypeDefinition> customA =
+        MakeAttributeType(compilation, "N", "CustomA");
+    std::shared_ptr<TS::TestSupport::LookupTypeDefinition> customB =
+        MakeAttributeType(compilation, "N", "CustomB");
+    std::shared_ptr<TS::TestSupport::LookupTypeDefinition> customC =
+        MakeAttributeType(compilation, "N", "CustomC");
+
+    std::shared_ptr<AttributedMethod> addAccessor =
+        std::make_shared<AttributedMethod>(compilation);
+    std::shared_ptr<AttributedField> backingField =
+        std::make_shared<AttributedField>(compilation);
+    Impl::FakeEvent event{ compilation };
+    Syntax::TypeSystemAstBuilder builder;
+    Syntax::EventDeclaration eventDecl;
+
+    AutoEventAttributesFixture() {
+        event.SetAddAccessor(addAccessor.get());
+    }
+
+    // A DefaultAttribute over the given type, kept alive by the fixture (the
+    // configurable attribute vectors hold non-owning pointers).
+    const TS::IAttribute* Attr(
+        const std::shared_ptr<TS::TestSupport::LookupTypeDefinition>& type) {
+        ownedAttributes.push_back(std::make_shared<Impl::DefaultAttribute>(
+            type, std::vector<TS::CustomAttributeTypedArgument>{},
+            std::vector<TS::CustomAttributeNamedArgument>{}));
+        return ownedAttributes.back().get();
+    }
+
+    void Run() {
+        CSharp::AutoEventDecompiler::AddFieldLikeEventAttributes(
+            eventDecl, builder, event, *backingField);
+    }
+
+private:
+    std::vector<std::shared_ptr<TS::IAttribute>> ownedAttributes;
+};
+
+// The rendered leaf name of a section's single attribute type (the stripped short
+// name).
+std::string SectionMemberName(const Syntax::AttributeSection& section) {
+    auto* memberType =
+        dynamic_cast<Syntax::MemberType*>(section.Attributes()[0]->Type());
+    return memberType != nullptr ? memberType->MemberName() : std::string();
+}
+
+} // namespace
+
+// The accessor attributes become `method:` sections and the backing-field
+// attributes become `field:` sections, in that order.
+TEST(AutoEventDecompilerTest, AddFieldLikeEventAttributesTargetsMethodThenField) {
+    AutoEventAttributesFixture f;
+    f.addAccessor->Attributes = { f.Attr(f.customA) };
+    f.backingField->Attributes = { f.Attr(f.customC) };
+
+    f.Run();
+
+    ASSERT_EQ(f.eventDecl.Attributes().Count(), 2);
+    EXPECT_EQ(f.eventDecl.Attributes()[0]->AttributeTarget(), "method");
+    EXPECT_EQ(f.eventDecl.Attributes()[1]->AttributeTarget(), "field");
+    EXPECT_EQ(SectionMemberName(*f.eventDecl.Attributes()[0]), "CustomA");
+    EXPECT_EQ(SectionMemberName(*f.eventDecl.Attributes()[1]), "CustomC");
+}
+
+// The accessor's [CompilerGenerated] is dropped; the other attribute survives.
+TEST(AutoEventDecompilerTest, AddFieldLikeEventAttributesDropsAccessorCompilerGenerated) {
+    AutoEventAttributesFixture f;
+    f.addAccessor->Attributes = { f.Attr(f.compilerGenerated), f.Attr(f.customA) };
+
+    f.Run();
+
+    ASSERT_EQ(f.eventDecl.Attributes().Count(), 1);
+    EXPECT_EQ(f.eventDecl.Attributes()[0]->AttributeTarget(), "method");
+    EXPECT_EQ(SectionMemberName(*f.eventDecl.Attributes()[0]), "CustomA");
+}
+
+// The accessor's [MethodImpl] is dropped; the other attribute survives.
+TEST(AutoEventDecompilerTest, AddFieldLikeEventAttributesDropsAccessorMethodImpl) {
+    AutoEventAttributesFixture f;
+    f.addAccessor->Attributes = { f.Attr(f.methodImpl), f.Attr(f.customB) };
+
+    f.Run();
+
+    ASSERT_EQ(f.eventDecl.Attributes().Count(), 1);
+    EXPECT_EQ(SectionMemberName(*f.eventDecl.Attributes()[0]), "CustomB");
+}
+
+// The backing field's [CompilerGenerated] and [DebuggerBrowsable] are dropped.
+TEST(AutoEventDecompilerTest, AddFieldLikeEventAttributesDropsFieldCompilerGeneratedAndBrowsable) {
+    AutoEventAttributesFixture f;
+    f.backingField->Attributes = { f.Attr(f.compilerGenerated),
+                                   f.Attr(f.debuggerBrowsable),
+                                   f.Attr(f.customC) };
+
+    f.Run();
+
+    ASSERT_EQ(f.eventDecl.Attributes().Count(), 1);
+    EXPECT_EQ(f.eventDecl.Attributes()[0]->AttributeTarget(), "field");
+    EXPECT_EQ(SectionMemberName(*f.eventDecl.Attributes()[0]), "CustomC");
+}
+
+// When every attribute is in the removal set, no sections are added.
+TEST(AutoEventDecompilerTest, AddFieldLikeEventAttributesDropsAllRemovedAttributes) {
+    AutoEventAttributesFixture f;
+    f.addAccessor->Attributes = { f.Attr(f.compilerGenerated), f.Attr(f.methodImpl) };
+    f.backingField->Attributes = { f.Attr(f.compilerGenerated) };
+
+    f.Run();
+
+    EXPECT_EQ(f.eventDecl.Attributes().Count(), 0);
+}
+
+// The kept attributes preserve their input order (WithoutAttributeTypes is a filter,
+// not a reorder).
+TEST(AutoEventDecompilerTest, AddFieldLikeEventAttributesPreservesKeptAccessorOrder) {
+    AutoEventAttributesFixture f;
+    f.addAccessor->Attributes = { f.Attr(f.customB), f.Attr(f.customA) };
+
+    f.Run();
+
+    ASSERT_EQ(f.eventDecl.Attributes().Count(), 2);
+    EXPECT_EQ(SectionMemberName(*f.eventDecl.Attributes()[0]), "CustomB");
+    EXPECT_EQ(SectionMemberName(*f.eventDecl.Attributes()[1]), "CustomA");
 }
