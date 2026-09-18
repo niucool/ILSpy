@@ -4233,20 +4233,70 @@ std::optional<TranslatedExpression> ExpressionBuilder::HandleManagedPointerArith
                                                 inst.CheckForOverflow);
         if (offsetInst)
         {
-            // The fixed-buffer indexer arm: the C# `settings.FixedBuffers &&
-            // Add && LdFlda-of-LdFlda && IsFixedField` shape -- deferred with the
-            // ConvertField/IsFixedField machinery (the CSharpAmbience deferral);
-            // every other shape falls through to the element-offset render.
+            // The fixed-buffer indexer arm: `&buffer.field + offset` over a fixed
+            // buffer renders as `ref buffer[index]` -- the C#
+            // `settings.FixedBuffers && Add && LdFlda-of-LdFlda && IsFixedField`
+            // shape. The nested LdFlda is the fixed-buffer field, so the field
+            // access re-types to a pointer of the declared element type and the
+            // detected offset becomes the element index. Every other shape falls
+            // through to the element-offset render below.
             if (settings->FixedBuffers()
                 && inst.Operator == IL::BinaryNumericOperator::Add
-                && inst.Left != nullptr && inst.Left->Op == IL::OpCode::LdFlda
-                && static_cast<const IL::LdFlda*>(inst.Left.get())->Target != nullptr
-                && static_cast<const IL::LdFlda*>(inst.Left.get())->Target->Op
-                       == IL::OpCode::LdFlda)
+                && inst.Left != nullptr && inst.Left->Op == IL::OpCode::LdFlda)
             {
-                throw std::logic_error(
-                    "FixedBuffers pointer indexing is not supported yet (the "
-                    "ConvertField/IsFixedField machinery is deferred).");
+                auto* ldFlda = static_cast<IL::LdFlda*>(inst.Left.get());
+                if (ldFlda->Target != nullptr
+                    && ldFlda->Target->Op == IL::OpCode::LdFlda)
+                {
+                    auto* nestedLdFlda =
+                        static_cast<IL::LdFlda*>(ldFlda->Target.get());
+                    TS::ITypePtr elementType;
+                    int elementCount = 0;
+                    if (nestedLdFlda->Field != nullptr
+                        && CSharp::IsFixedField(*nestedLdFlda->Field, elementType,
+                                                elementCount))
+                    {
+                        ExpressionWithResolveResult fieldAccess = ConvertField(
+                            *nestedLdFlda->Field, nestedLdFlda->Target.get());
+                        const auto* mrr =
+                            dynamic_cast<const Sem::MemberResolveResult*>(
+                                fieldAccess.ResolveResult());
+                        // A by-ref field's ConvertField returns a
+                        // ByReferenceResolveResult, which the C# cast would reject;
+                        // fall through to the general render there.
+                        if (mrr != nullptr)
+                        {
+                            std::shared_ptr<Sem::ResolveResult> targetHandle =
+                                mrr->TargetResultHandle();
+                            const TS::IMember* member = mrr->Member();
+                            fieldAccess.Expression()
+                                ->RemoveAnnotations<Sem::ResolveResult>();
+                            TranslatedExpression result = WithILInstruction(
+                                WithRR(*fieldAccess.Expression(),
+                                       std::make_shared<Sem::MemberResolveResult>(
+                                           std::move(targetHandle), member,
+                                           std::make_shared<TS::PointerType>(
+                                               elementType))),
+                                &inst);
+                            right = TranslateArrayIndex(
+                                const_cast<IL::ILInstruction*>(offsetInst.Inst));
+                            auto* arrayAccess =
+                                new Syntax::IndexerExpression(result.Expression());
+                            arrayAccess->Arguments().Add(right.Expression());
+                            auto elementRR =
+                                std::make_shared<Sem::ResolveResult>(elementType);
+                            TranslatedExpression indexerExpr = WithILInstruction(
+                                WithRR(*arrayAccess, elementRR), &inst);
+                            return WithRR(
+                                WithoutILInstruction(
+                                    *new Syntax::DirectionExpression(
+                                        Syntax::FieldDirection::Ref,
+                                        indexerExpr.Expression())),
+                                std::make_shared<Sem::ByReferenceResolveResult>(
+                                    elementRR, TS::ReferenceKind::Ref));
+                        }
+                    }
+                }
             }
             right = Translate(const_cast<IL::ILInstruction*>(offsetInst.Inst));
             right = ConvertArrayIndex(std::move(right), inst.RightInputType, true);

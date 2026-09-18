@@ -5593,6 +5593,22 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `AssignVariableNames.GenerateVariableName`, the deconstruction designation, and the `ILVariable`
   shared handle on `VariableToDeclare`). Verified by 8 tests with a `TransformContext` fixture
   (the `AddCheckedBlocks` shape), all 23 `DeclareVariablesTest` cases green.
+- **`ExpressionBuilder` fixed-buffer pointer arithmetic** -- the deferred arm of
+  `HandleManagedPointerArithmetic` lands: `&buffer.field + offset` where the nested
+  `LdFlda` is a `[FixedBuffer(typeof(T), N)]` field (the C# `settings.FixedBuffers &&
+  Add && LdFlda-of-LdFlda && IsFixedField` shape) renders as `ref buffer[index]` --
+  the fixed field access re-types to a pointer of the declared element type through a
+  fresh `MemberResolveResult`, the detected byte offset goes through
+  `TranslateArrayIndex` to become the element index, and the indexer is wrapped in a
+  `ref` `DirectionExpression` carrying a `ByReferenceResolveResult`. A by-ref field
+  (whose `ConvertField` returns a `ByReferenceResolveResult` rather than a
+  `MemberResolveResult`) falls through to the general element-offset intrinsic render.
+  Verified by 3 tests (the `ref buffer[1]` indexer from a 4-byte offset over an int32
+  element, the `FixedBuffers`-off keep, and the non-fixed-nested-field keep), proven
+  with a `settings->FixedBuffers()`-neuter RED round (exactly the positive test failed,
+  the 2 keeps staying green). The full Debug gtest suite is 12896 ran / 12894 passed /
+  the 2 standing skips / zero failures, and all three CLI baselines are unchanged
+  (`--csharp` 10106360, `--il` 41246545, `-l c` 109438 bytes).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

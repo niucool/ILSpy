@@ -1917,6 +1917,162 @@ TEST(ExpressionBuilderFieldTest, LdFldaFixedBufferRendersFieldIndexer)
     ASSERT_TRUE(zero != nullptr);
 }
 
+// The fixed-buffer pointer-arithmetic arm of HandleManagedPointerArithmetic (the C#
+// `settings.FixedBuffers && Add && LdFlda-of-LdFlda && IsFixedField` shape,
+// ExpressionBuilder.cs lines 1414-1426): `&buffer.field + offset` over a fixed
+// buffer renders as `ref buffer[index]`, where the field access re-types to a
+// pointer of the declared element type and the detected byte offset folds to the
+// element index (the LdcI4(4) byte offset over an int32 element becomes index 1).
+TEST(ExpressionBuilderFieldTest, FixedBufferPointerArithmeticRendersRefIndexer)
+{
+    BuilderFixture fixture;
+    auto objectType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    const TS::ITypeDefinition* objectDef =
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).GetDefinition();
+    auto builder = fixture.MakeBuilderForType(objectDef);
+
+    std::vector<TS::CustomAttributeTypedArgument> args;
+    args.emplace_back(intType, std::any(intType));
+    args.emplace_back(intType, std::any(std::int32_t(4)));
+    AttributeStub attribute(objectType, std::move(args));
+
+    auto bufferField = std::make_shared<FieldStub>(
+        "Buffer", std::make_shared<TS::PointerType>(intType), fixture.compilation);
+    bufferField->SetStatic(true);
+    bufferField->SetDeclaringType(objectType);
+    bufferField->SetDeclaringTypeDefinition(objectDef);
+    bufferField->SetKnownAttribute(TS::KnownAttribute::FixedBuffer, &attribute);
+
+    auto valueField = std::make_shared<FieldStub>("Value", intType, fixture.compilation);
+    valueField->SetDeclaringType(objectType);
+    valueField->SetDeclaringTypeDefinition(objectDef);
+
+    auto buffer = std::make_unique<IL::LdFlda>(
+        std::make_unique<IL::LdLoc>(
+            std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objectType)),
+        "Buffer");
+    buffer->Field = bufferField;
+    IL::LdFlda field(std::move(buffer), "Value");
+    field.Field = valueField;
+
+    IL::BinaryNumericInstruction inst(
+        std::make_unique<IL::LdFlda>(std::move(field)),
+        std::make_unique<IL::LdcI4>(4), IL::BinaryNumericOperator::Add, false,
+        TS::Sign::None);
+
+    auto expr = builder.Translate(&inst);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    EXPECT_EQ(direction->FieldDirection(), Syntax::FieldDirection::Ref);
+    auto* indexer = dynamic_cast<Syntax::IndexerExpression*>(direction->Expression());
+    ASSERT_TRUE(indexer != nullptr);
+    ASSERT_EQ(indexer->Arguments().Count(), 1);
+    auto* index = dynamic_cast<Syntax::PrimitiveExpression*>(indexer->Arguments().At(0));
+    ASSERT_TRUE(index != nullptr);
+    const std::int32_t* value = std::get_if<std::int32_t>(&index->Value());
+    ASSERT_TRUE(value != nullptr);
+    EXPECT_EQ(*value, 1);
+}
+
+// With FixedBuffers disabled the arm is skipped and the general element-offset
+// intrinsic render is used (the top level is the unsafe intrinsic call, not a
+// ref-direction indexer).
+TEST(ExpressionBuilderFieldTest, FixedBufferPointerArithmeticDisabledBySetting)
+{
+    BuilderFixture fixture;
+    fixture.settings.SetFixedBuffers(false);
+    auto objectType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    const TS::ITypeDefinition* objectDef =
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).GetDefinition();
+    auto builder = fixture.MakeBuilderForType(objectDef);
+
+    std::vector<TS::CustomAttributeTypedArgument> args;
+    args.emplace_back(intType, std::any(intType));
+    args.emplace_back(intType, std::any(std::int32_t(4)));
+    AttributeStub attribute(objectType, std::move(args));
+
+    auto bufferField = std::make_shared<FieldStub>(
+        "Buffer", std::make_shared<TS::PointerType>(intType), fixture.compilation);
+    bufferField->SetStatic(true);
+    bufferField->SetDeclaringType(objectType);
+    bufferField->SetDeclaringTypeDefinition(objectDef);
+    bufferField->SetKnownAttribute(TS::KnownAttribute::FixedBuffer, &attribute);
+
+    auto valueField = std::make_shared<FieldStub>("Value", intType, fixture.compilation);
+    valueField->SetDeclaringType(objectType);
+    valueField->SetDeclaringTypeDefinition(objectDef);
+
+    auto buffer = std::make_unique<IL::LdFlda>(
+        std::make_unique<IL::LdLoc>(
+            std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objectType)),
+        "Buffer");
+    buffer->Field = bufferField;
+    IL::LdFlda field(std::move(buffer), "Value");
+    field.Field = valueField;
+
+    IL::BinaryNumericInstruction inst(
+        std::make_unique<IL::LdFlda>(std::move(field)),
+        std::make_unique<IL::LdcI4>(4), IL::BinaryNumericOperator::Add, false,
+        TS::Sign::None);
+
+    auto expr = builder.Translate(&inst);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    EXPECT_EQ(dynamic_cast<Syntax::IndexerExpression*>(direction->Expression()), nullptr);
+    EXPECT_NE(dynamic_cast<Syntax::InvocationExpression*>(direction->Expression()),
+              nullptr);
+}
+
+// A nested field without the FixedBuffer attribute is not a fixed field, so the
+// arm is skipped even with FixedBuffers enabled.
+TEST(ExpressionBuilderFieldTest, FixedBufferPointerArithmeticRequiresFixedField)
+{
+    BuilderFixture fixture;
+    auto objectType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    const TS::ITypeDefinition* objectDef =
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).GetDefinition();
+    auto builder = fixture.MakeBuilderForType(objectDef);
+
+    auto bufferField = std::make_shared<FieldStub>(
+        "Buffer", std::make_shared<TS::PointerType>(intType), fixture.compilation);
+    bufferField->SetStatic(true);
+    bufferField->SetDeclaringType(objectType);
+    bufferField->SetDeclaringTypeDefinition(objectDef);
+
+    auto valueField = std::make_shared<FieldStub>("Value", intType, fixture.compilation);
+    valueField->SetDeclaringType(objectType);
+    valueField->SetDeclaringTypeDefinition(objectDef);
+
+    auto buffer = std::make_unique<IL::LdFlda>(
+        std::make_unique<IL::LdLoc>(
+            std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objectType)),
+        "Buffer");
+    buffer->Field = bufferField;
+    IL::LdFlda field(std::move(buffer), "Value");
+    field.Field = valueField;
+
+    IL::BinaryNumericInstruction inst(
+        std::make_unique<IL::LdFlda>(std::move(field)),
+        std::make_unique<IL::LdcI4>(4), IL::BinaryNumericOperator::Add, false,
+        TS::Sign::None);
+
+    auto expr = builder.Translate(&inst);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    EXPECT_EQ(dynamic_cast<Syntax::IndexerExpression*>(direction->Expression()), nullptr);
+    EXPECT_NE(dynamic_cast<Syntax::InvocationExpression*>(direction->Expression()),
+              nullptr);
+}
+
 
 // The null-conditional arms (VisitNullableRewrap / VisitNullableUnwrap, the C#
 // lines 4298-4321): the `?.` join point lifts a non-nullable value-type operand

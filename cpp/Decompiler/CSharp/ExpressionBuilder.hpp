@@ -755,8 +755,8 @@ public:
     // right)` (lines 1386-1484): the managed-pointer (ref) arithmetic -- the
     // ref-ref ByteOffset intrinsic, the ref +/- int Add/Subtract(+ByteOffset)
     // intrinsics over the detected element offset, the int + ref named-argument
-    // arms, and the fixed-buffer indexer direction (the FixedBuffers setting; the
-    // ConvertField/IsFixedField machinery deferred).
+    // arms, and the fixed-buffer indexer direction (the FixedBuffers setting plus
+    // the LdFlda-of-LdFlda fixed-field shape, rendered as `ref buffer[index]`).
     std::optional<TranslatedExpression> HandleManagedPointerArithmetic(
         IL::BinaryNumericInstruction& inst, TranslatedExpression left,
         TranslatedExpression right);
