@@ -5468,6 +5468,25 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `TransformForeachOnMultiDimArray`-neuter RED round (exactly the 1 positive test failed, the 6
   keep-tests staying green). The inline-array `foreach` rewrite, the automatic
   property/event rewrites, and the backing-field replacement stay deferred.
+- **`PatternStatementTransform` `foreach`-over-inline-array rewrite** -- the next slice adds
+  `TransformForeachOnInlineArray`: the compiler's
+  `for ($i = 0; $i < N; $i = $i + 1) { $item =
+  <PrivateImplementationDetails>.InlineArrayElementRef(ref buffer, $i); ... }` over an
+  `[InlineArray(N)]` buffer is reconstructed as `foreach (var item in buffer)`, gated on
+  `ForEachStatement` + `InlineArrays`, the helper's declaring type being
+  `<PrivateImplementationDetails>` with the `InlineArrayElementRef`/
+  `InlineArrayElementRefReadOnly` name, a two-argument call whose first argument is
+  `ref <buffer>` and whose second is the loop index, an inline-array buffer type whose length
+  equals the loop bound (the soundness condition: the helper is the compiler's unchecked
+  accessor, the C# indexer is bounds-checked), the index-counter profile, and the
+  `VariableCanBeUsedAsForeachLocal` item check. The loop body is reused (its leading element
+  assignment removed) and the buffer identifier is detached into the `in` expression. Verified
+  by 11 tests (the inline-array rewrite plus the `InlineArrays`/`ForEachStatement`-off /
+  non-invocation element access / wrong declaring type / wrong helper name / bound-mismatch /
+  wrong index argument / non-inline-array buffer / wrong index profile / non-single-definition
+  item keeps) proven with a `TransformForeachOnInlineArray`-neuter RED round (exactly the 1
+  positive test failed, the 10 keep-tests staying green). The automatic property/event
+  rewrites and the backing-field replacement stay deferred.
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

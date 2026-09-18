@@ -31,6 +31,7 @@
 #include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BaseReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
@@ -63,6 +64,8 @@
 #include "Decompiler/Semantics/MemberResolveResult.hpp"
 #include "Decompiler/Semantics/ResolveResult.hpp"
 #include "Decompiler/Semantics/TypeResolveResult.hpp"
+#include "Decompiler/TypeSystem/IAttribute.hpp"
+#include "Decompiler/TypeSystem/CustomAttributeNamedArgument.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
 #include "Decompiler/TypeSystem/LookupStubs.hpp"
@@ -1561,4 +1564,342 @@ TEST(PatternStatementTransformTest, KeepsMultiDimArrayNestWhenItemNotSingleDefin
                                        statements[3]});
 
     EXPECT_EQ(dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]), nullptr);
+}
+
+// ---- foreach over an inline array ---------------------------------------------------
+
+namespace {
+
+// The `[InlineArray(N)]` attribute stub carrying the positional length argument.
+class TestInlineArrayAttribute : public TS::IAttribute {
+public:
+    TestInlineArrayAttribute(const TS::ITypePtr& intType, int length)
+        : args_({TS::CustomAttributeTypedArgument(intType, std::any(length))}) {}
+
+    const TS::IType& AttributeType() const override {
+        static auto attrType = std::make_shared<TS::SimpleType>(
+            TS::TopLevelTypeName("System.Runtime.CompilerServices", "InlineArrayAttribute"));
+        return *attrType;
+    }
+    const TS::IMethod* Constructor() const override { return nullptr; }
+    bool HasDecodeErrors() const override { return false; }
+    std::vector<TS::CustomAttributeTypedArgument> FixedArguments() const override
+    {
+        return args_;
+    }
+    std::vector<TS::CustomAttributeNamedArgument> NamedArguments() const override { return {}; }
+
+private:
+    std::vector<TS::CustomAttributeTypedArgument> args_;
+};
+
+// A struct definition carrying an `[InlineArray(N)]` attribute (the helper's buffer type).
+class TestInlineArrayDefinition : public TestSupport::LookupTypeDefinition {
+public:
+    using LookupTypeDefinition::LookupTypeDefinition;
+
+    void SetInlineArrayAttribute(const TS::IAttribute* attr) { attr_ = attr; }
+    bool HasAttribute(TS::KnownAttribute attribute) const override {
+        return attribute == TS::KnownAttribute::InlineArray && attr_ != nullptr;
+    }
+    const TS::IAttribute* GetAttribute(TS::KnownAttribute attribute) const override {
+        return attribute == TS::KnownAttribute::InlineArray ? attr_ : nullptr;
+    }
+
+private:
+    const TS::IAttribute* attr_ = nullptr;
+};
+
+// The `<PrivateImplementationDetails>` type (the helper method's declaring type).
+std::shared_ptr<TestSupport::LookupTypeDefinition> MakePrivateImplementationDetails(
+    TransformFixture& fixture) {
+    return std::make_shared<TestSupport::LookupTypeDefinition>(
+        "<PrivateImplementationDetails>", "",
+        TS::FullTypeName(TS::TopLevelTypeName("", "<PrivateImplementationDetails>", 0)),
+        TS::TypeKind::Class, TS::Accessibility::Public, fixture.compilation, nullptr,
+        TS::KnownTypeCode::None);
+}
+
+// The `[InlineArray(N)]` buffer type (leaks the attribute, test scope).
+TS::ITypePtr MakeInlineArrayBuffer(TransformFixture& fixture, int length) {
+    auto def = std::make_shared<TestInlineArrayDefinition>(
+        "Buffer", "Test", TS::FullTypeName(TS::TopLevelTypeName("Test", "Buffer", 0)),
+        TS::TypeKind::Struct, TS::Accessibility::Public, fixture.compilation, nullptr,
+        TS::KnownTypeCode::None);
+    def->SetInlineArrayAttribute(
+        new TestInlineArrayAttribute(fixture.FindType(TS::KnownTypeCode::Int32), length));
+    return def;
+}
+
+// Builds the compiler's inline-array loop
+// `for (index = 0; index < length; index = index + 1) { item = <helper>(ref buffer, index);
+// <extra> }`. `helper` may be null (then the element access carries no symbol).
+Syntax::ForStatement* MakeInlineArrayForLoop(
+    const IL::ILVariablePtr& index, const IL::ILVariablePtr& item,
+    const IL::ILVariablePtr& buffer, const TS::IMethod* helper,
+    const TS::ITypePtr& resultType, int length,
+    std::initializer_list<Syntax::Statement*> extraStatements = {}) {
+    auto* forStatement = new Syntax::ForStatement();
+    forStatement->Initializers().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(index), Int(0))));
+    forStatement->Condition(new Syntax::BinaryOperatorExpression(
+        Use(index), Syntax::BinaryOperatorType::LessThan, Int(length)));
+    forStatement->Iterators().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            Use(index), Syntax::AssignmentOperatorType::Assign,
+            new Syntax::BinaryOperatorExpression(
+                Use(index), Syntax::BinaryOperatorType::Add, Int(1)))));
+    auto* invocation = new Syntax::InvocationExpression(
+        new Syntax::IdentifierExpression("InlineArrayElementRef"));
+    invocation->Arguments().Add(new Syntax::DirectionExpression(
+        Syntax::FieldDirection::Ref, Use(buffer)));
+    invocation->Arguments().Add(Use(index));
+    if (helper != nullptr) {
+        invocation->AddAnnotation(
+            std::make_shared<Sem::MemberResolveResult>(nullptr, helper, resultType));
+    }
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(item), invocation)));
+    for (Syntax::Statement* statement : extraStatements)
+        body->Statements().Add(statement);
+    forStatement->EmbeddedStatement(body);
+    return forStatement;
+}
+
+// The shared inline-array setup (a `[InlineArray(length)]` buffer, the
+// `<PrivateImplementationDetails>.InlineArrayElementRef` helper, and the loop variables).
+struct InlineArrayFixture {
+    std::shared_ptr<TestSupport::LookupTypeDefinition> implementationDetails;
+    TS::ITypePtr bufferType;
+    std::shared_ptr<TestSupport::LookupMethod> helper;
+    IL::ILVariablePtr index = Var("i");
+    IL::ILVariablePtr buffer = Var("buffer");
+    IL::ILVariablePtr item = Var("item");
+    int length = 4;
+
+    explicit InlineArrayFixture(TransformFixture& fixture) {
+        implementationDetails = MakePrivateImplementationDetails(fixture);
+        bufferType = MakeInlineArrayBuffer(fixture, length);
+        buffer->Type = bufferType;
+        helper = std::make_shared<TestSupport::LookupMethod>(
+            "InlineArrayElementRef", fixture.compilation);
+        helper->SetDeclaringType(implementationDetails);
+        index->StoreCount = 2;
+        index->LoadCount = 3;
+        item->StoreCount = 1;
+    }
+
+    Syntax::ForStatement* Make(
+        std::initializer_list<Syntax::Statement*> extraStatements = {}) {
+        return MakeInlineArrayForLoop(index, item, buffer, helper.get(), bufferType, length,
+                                      extraStatements);
+    }
+};
+
+} // namespace
+
+// The compiler's inline-array index loop becomes `foreach (var item in buffer) { body; }`.
+TEST(PatternStatementTransformTest, TransformsInlineArrayForLoopToForeach)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    fixture.settings.SetInlineArrays(true);
+    InlineArrayFixture inlineArray(fixture);
+    auto* bodyStatement = new Syntax::ExpressionStatement(Ref("Foo"));
+    auto* forStatement = inlineArray.Make({bodyStatement});
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    auto* foreachStmt = dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]);
+    ASSERT_NE(foreachStmt, nullptr);
+    auto* inExpression = dynamic_cast<Syntax::IdentifierExpression*>(foreachStmt->InExpression());
+    ASSERT_NE(inExpression, nullptr);
+    EXPECT_EQ(inExpression->Identifier(), "buffer");
+    auto* designation =
+        dynamic_cast<Syntax::SingleVariableDesignation*>(foreachStmt->VariableDesignation());
+    ASSERT_NE(designation, nullptr);
+    EXPECT_EQ(designation->Identifier(), "item");
+    EXPECT_EQ(static_cast<int>(inlineArray.item->Kind),
+              static_cast<int>(IL::VariableKind::ForeachLocal));
+    auto* newBody = dynamic_cast<Syntax::BlockStatement*>(foreachStmt->EmbeddedStatement());
+    ASSERT_NE(newBody, nullptr);
+    ASSERT_EQ(newBody->Statements().Count(), 1);
+    EXPECT_EQ(newBody->Statements()[0], static_cast<Syntax::Statement*>(bodyStatement));
+}
+
+// With `InlineArrays` off the inline-array index loop is left alone.
+TEST(PatternStatementTransformTest, KeepsInlineArrayLoopWhenInlineArraysSettingOff)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    fixture.settings.SetInlineArrays(false);
+    InlineArrayFixture inlineArray(fixture);
+    auto* forStatement = inlineArray.Make();
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// With `ForEachStatement` off the inline-array index loop is left alone.
+TEST(PatternStatementTransformTest, KeepsInlineArrayLoopWhenForEachSettingOff)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(false);
+    fixture.settings.SetInlineArrays(true);
+    InlineArrayFixture inlineArray(fixture);
+    auto* forStatement = inlineArray.Make();
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// An element access that is not an invocation keeps the loop.
+TEST(PatternStatementTransformTest, KeepsInlineArrayLoopWhenElementAccessNotInvocation)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    fixture.settings.SetInlineArrays(true);
+    InlineArrayFixture inlineArray(fixture);
+    auto* forStatement = inlineArray.Make();
+    auto* body = static_cast<Syntax::BlockStatement*>(forStatement->EmbeddedStatement());
+    body->Statements().SetAt(0, new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(inlineArray.item), Ref("element"))));
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// A helper whose declaring type is not `<PrivateImplementationDetails>` keeps the loop.
+TEST(PatternStatementTransformTest, KeepsInlineArrayLoopWhenHelperNotPrivateImplementationDetails)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    fixture.settings.SetInlineArrays(true);
+    InlineArrayFixture inlineArray(fixture);
+    auto otherType = std::make_shared<TestSupport::LookupTypeDefinition>(
+        "Other", "", TS::FullTypeName(TS::TopLevelTypeName("", "Other", 0)),
+        TS::TypeKind::Class, TS::Accessibility::Public, fixture.compilation, nullptr,
+        TS::KnownTypeCode::None);
+    inlineArray.helper->SetDeclaringType(otherType);
+    auto* forStatement = inlineArray.Make();
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// A helper with the wrong name keeps the loop.
+TEST(PatternStatementTransformTest, KeepsInlineArrayLoopWhenHelperNameDiffers)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    fixture.settings.SetInlineArrays(true);
+    InlineArrayFixture inlineArray(fixture);
+    inlineArray.helper = std::make_shared<TestSupport::LookupMethod>(
+        "InlineArrayOther", fixture.compilation);
+    inlineArray.helper->SetDeclaringType(inlineArray.implementationDetails);
+    auto* forStatement = inlineArray.Make();
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// A loop bound that does not equal the inline array length keeps the loop (the index would
+// not be provably in range).
+TEST(PatternStatementTransformTest, KeepsInlineArrayLoopWhenBoundDiffersFromLength)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    fixture.settings.SetInlineArrays(true);
+    InlineArrayFixture inlineArray(fixture);
+    auto* forStatement = MakeInlineArrayForLoop(
+        inlineArray.index, inlineArray.item, inlineArray.buffer, inlineArray.helper.get(),
+        inlineArray.bufferType, inlineArray.length + 1);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// An index argument that is not the loop's index variable keeps the loop.
+TEST(PatternStatementTransformTest, KeepsInlineArrayLoopWhenIndexArgumentDiffers)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    fixture.settings.SetInlineArrays(true);
+    InlineArrayFixture inlineArray(fixture);
+    auto* forStatement = inlineArray.Make();
+    auto* body = static_cast<Syntax::BlockStatement*>(forStatement->EmbeddedStatement());
+    auto* assignment = static_cast<Syntax::ExpressionStatement*>(body->Statements()[0]);
+    auto* assignExpr = dynamic_cast<Syntax::AssignmentExpression*>(assignment->Expression());
+    ASSERT_NE(assignExpr, nullptr);
+    auto* invocation =
+        dynamic_cast<Syntax::InvocationExpression*>(assignExpr->Right());
+    ASSERT_NE(invocation, nullptr);
+    invocation->Arguments().SetAt(1, Use(Var("other")));
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// A buffer whose type is not an inline array keeps the loop.
+TEST(PatternStatementTransformTest, KeepsInlineArrayLoopWhenBufferTypeNotInlineArray)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    fixture.settings.SetInlineArrays(true);
+    InlineArrayFixture inlineArray(fixture);
+    inlineArray.buffer->Type = fixture.FindType(TS::KnownTypeCode::Int32);
+    auto* forStatement = inlineArray.Make();
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// An index variable that is not a pure counter keeps the loop.
+TEST(PatternStatementTransformTest, KeepsInlineArrayLoopWhenIndexCountsDiffer)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    fixture.settings.SetInlineArrays(true);
+    InlineArrayFixture inlineArray(fixture);
+    inlineArray.index->StoreCount = 3;
+    auto* forStatement = inlineArray.Make();
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// An item variable that is not single-definition cannot become the foreach local.
+TEST(PatternStatementTransformTest, KeepsInlineArrayLoopWhenItemNotSingleDefinition)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    fixture.settings.SetInlineArrays(true);
+    InlineArrayFixture inlineArray(fixture);
+    inlineArray.item->StoreCount = 2;
+    auto* forStatement = inlineArray.Make();
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
 }

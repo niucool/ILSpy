@@ -54,8 +54,12 @@
 // reconstructed as `foreach (item in array)` (also for a `string` looped by index), including
 // the `VariableCanBeUsedAsForeachLocal` gate. The multidimensional-array `foreach` rewrite
 // (`TransformForeachOnMultiDimArray`, the nested `GetUpperBound`/`GetLowerBound` index loops)
-// also lands. The inline-array `foreach` rewrite, the automatic property/event rewrites, and
-// the backing-field replacement stay deferred -- each is named at the visit that would call it.
+// also lands. The inline-array `foreach` rewrite (`TransformForeachOnInlineArray`) also lands:
+// the compiler's `for (i = 0; i < N; i++) { item =
+// <PrivateImplementationDetails>.InlineArrayElementRef(ref buffer, i); ... }` over an
+// `[InlineArray(N)]` buffer is reconstructed as `foreach (item in buffer)`. The automatic
+// property/event rewrites and the backing-field replacement stay deferred -- each is named at
+// the visit that would call it.
 
 #pragma once
 
@@ -121,8 +125,8 @@ public:
 
     // The C# `public override AstNode VisitForStatement(ForStatement ...)`: rewrites the
     // compiler's index loop back to `foreach` -- first the array/string form
-    // (`TransformForeachOnArray`), then the inline-array form. The inline-array rewrite
-    // (`TransformForeachOnInlineArray`) is DEFERRED (named at its would-be call site).
+    // (`TransformForeachOnArray`), then the inline-array form
+    // (`TransformForeachOnInlineArray`).
     Syntax::AstNode* VisitForStatement(Syntax::ForStatement* forStatement) override;
 
     // The C# `public override AstNode VisitIfElseStatement(IfElseStatement ...)`: simplifies a
@@ -195,6 +199,13 @@ private:
     // shape does not match.
     Syntax::Statement* TransformForeachOnMultiDimArray(
         Syntax::ExpressionStatement* expressionStatement);
+
+    // The C# `Statement? TransformForeachOnInlineArray(ForStatement forStatement)`: rewrites
+    // the compiler's `for (i = 0; i < N; i++) { item =
+    // <PrivateImplementationDetails>.InlineArrayElementRef(ref buffer, i); ... }` loop over an
+    // `[InlineArray(N)]` buffer back to `foreach (var item in buffer) { ... }`, or null when
+    // the shape does not match.
+    Syntax::Statement* TransformForeachOnInlineArray(Syntax::ForStatement* forStatement);
 
     // The C# `bool MatchLowerBound(int indexNum, out ILVariable? index, ILVariable collection,
     // Statement statement)`: matches `$variable = $collection.GetLowerBound($indexNum)`.
