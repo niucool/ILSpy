@@ -79,6 +79,7 @@
 #include "Decompiler/DecompileRun.hpp"
 #include "Decompiler/IL/Instructions/AddressOf.hpp"
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
@@ -5933,3 +5934,198 @@ TEST(ExpressionBuilderVisitBlockTest, CallInlineAssignWithAnInvalidShapeRendersT
     EXPECT_EQ(comment->Content(),
               "Error: MatchInlineAssignBlock() returned false");
 }
+
+// ---------------------------------------------------------------------------
+// ArrayInitializer: ExpressionBuilder.TranslateArrayInitializer
+// (ExpressionBuilder.cs lines 3685-3771). The blocks are hand-built (the shape
+// TransformArrayInitializers produces: `stloc v(newarr T[dims])` followed by the
+// `stobj T(ldelema T(ldloc v, [idx]), value)` element stores and the final
+// `ldloc v`, the target an InitializerTarget variable).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct ArrayInitializerFixture {
+    BuilderFixture fixture;
+    TS::ITypePtr elementType;
+
+    ArrayInitializerFixture()
+        : elementType(fixture.holder.KnownType(TS::KnownTypeCode::Int32)) {}
+
+    IL::ILVariablePtr Target()
+    {
+        auto v = std::make_shared<IL::ILVariable>();
+        v->Name = "a";
+        v->Kind = IL::VariableKind::InitializerTarget;
+        v->Type = elementType;
+        return v;
+    }
+};
+
+// Builds `stloc v(newarr T[dimSizes])` plus the `values` element stores and the
+// final `ldloc v`. Returns the target variable.
+IL::ILVariablePtr BuildArrayInitializerBlock(ArrayInitializerFixture& fixture,
+                                             const std::vector<int>& dimSizes,
+                                             const std::vector<int>& values,
+                                             IL::Block& block)
+{
+    auto v = fixture.Target();
+    std::vector<std::unique_ptr<IL::ILInstruction>> indices;
+    for (int size : dimSizes)
+        indices.push_back(std::make_unique<IL::LdcI4>(size));
+    block.Add(std::make_unique<IL::StLoc>(
+        v, std::make_unique<IL::NewArr>(fixture.elementType, std::move(indices))));
+    for (int value : values)
+    {
+        auto ldElema = std::make_unique<IL::LdElema>(
+            fixture.elementType, std::make_unique<IL::LdLoc>(v),
+            std::vector<std::unique_ptr<IL::ILInstruction>>{});
+        block.Add(std::make_unique<IL::StObj>(
+            std::move(ldElema), std::make_unique<IL::LdcI4>(value),
+            fixture.elementType));
+    }
+    block.SetFinal(std::make_unique<IL::LdLoc>(v));
+    block.Kind = IL::BlockKind::ArrayInitializer;
+    return v;
+}
+
+} // namespace
+
+TEST(ExpressionBuilderArrayInitializerTest, RendersOneDimensionalElements)
+{
+    ArrayInitializerFixture f;
+    IL::Block block;
+    BuildArrayInitializerBlock(f, {3}, {1, 2, 3}, block);
+
+    CS::TranslatedExpression result = f.fixture.builder->Translate(&block);
+    auto* create =
+        dynamic_cast<Syntax::ArrayCreateExpression*>(result.Expression());
+    ASSERT_NE(create, nullptr);
+    ASSERT_NE(create->Type(), nullptr);
+    auto* primitive = dynamic_cast<Syntax::PrimitiveType*>(create->Type());
+    ASSERT_NE(primitive, nullptr);
+    EXPECT_EQ(primitive->Keyword(), "int");
+    ASSERT_EQ(create->Arguments().Count(), 1);
+    auto* sizeArg =
+        dynamic_cast<Syntax::PrimitiveExpression*>(create->Arguments()[0]);
+    ASSERT_NE(sizeArg, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(sizeArg->Value()), 3);
+    ASSERT_NE(create->Initializer(), nullptr);
+    ASSERT_EQ(create->Initializer()->Elements().Count(), 3);
+    auto* first = dynamic_cast<Syntax::PrimitiveExpression*>(
+        create->Initializer()->Elements().At(0));
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(first->Value()), 1);
+    auto* last = dynamic_cast<Syntax::PrimitiveExpression*>(
+        create->Initializer()->Elements().At(2));
+    ASSERT_NE(last, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(last->Value()), 3);
+
+    // The resolve result carries the reconstructed array type plus the size and
+    // element resolve results.
+    auto* rr = dynamic_cast<const Sem::ArrayCreateResolveResult*>(
+        result.ResolveResult());
+    ASSERT_NE(rr, nullptr);
+    EXPECT_EQ(rr->Type().Kind(), TS::TypeKind::Array);
+    ASSERT_EQ(rr->SizeArguments().size(), 1u);
+    ASSERT_TRUE(rr->InitializerElements().has_value());
+    EXPECT_EQ(rr->InitializerElements()->size(), 3u);
+    // The array-creation annotation is attached to the block.
+    std::vector<IL::ILInstruction*> instructions =
+        CS::GetILInstructions(*result.Expression());
+    EXPECT_NE(std::find(instructions.begin(), instructions.end(), &block),
+              instructions.end());
+}
+
+TEST(ExpressionBuilderArrayInitializerTest, NestsMultiDimensionalElements)
+{
+    ArrayInitializerFixture f;
+    IL::Block block;
+    BuildArrayInitializerBlock(f, {2, 2}, {1, 2, 3, 4}, block);
+
+    CS::TranslatedExpression result = f.fixture.builder->Translate(&block);
+    auto* create =
+        dynamic_cast<Syntax::ArrayCreateExpression*>(result.Expression());
+    ASSERT_NE(create, nullptr);
+    ASSERT_NE(create->Initializer(), nullptr);
+    // The 2x2 shape nests two inner initializers of two elements each.
+    ASSERT_EQ(create->Initializer()->Elements().Count(), 2);
+    auto* outer0 = dynamic_cast<Syntax::ArrayInitializerExpression*>(
+        create->Initializer()->Elements().At(0));
+    auto* outer1 = dynamic_cast<Syntax::ArrayInitializerExpression*>(
+        create->Initializer()->Elements().At(1));
+    ASSERT_NE(outer0, nullptr);
+    ASSERT_NE(outer1, nullptr);
+    ASSERT_EQ(outer0->Elements().Count(), 2);
+    ASSERT_EQ(outer1->Elements().Count(), 2);
+    auto* inner0 =
+        dynamic_cast<Syntax::PrimitiveExpression*>(outer0->Elements().At(0));
+    ASSERT_NE(inner0, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(inner0->Value()), 1);
+    auto* inner3 =
+        dynamic_cast<Syntax::PrimitiveExpression*>(outer1->Elements().At(1));
+    ASSERT_NE(inner3, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(inner3->Value()), 4);
+}
+
+TEST(ExpressionBuilderArrayInitializerTest, NonNewArrBlockThrows)
+{
+    ArrayInitializerFixture f;
+    auto v = f.Target();
+    IL::Block block;
+    block.Kind = IL::BlockKind::ArrayInitializer;
+    block.Add(std::make_unique<IL::StLoc>(v, std::make_unique<IL::LdcI4>(0)));
+    block.SetFinal(std::make_unique<IL::LdLoc>(v));
+    EXPECT_THROW(f.fixture.builder->Translate(&block), std::invalid_argument);
+}
+
+TEST(ExpressionBuilderArrayInitializerTest, WrongVariableKindThrows)
+{
+    ArrayInitializerFixture f;
+    auto v = f.Target();
+    v->Kind = IL::VariableKind::Local; // must be InitializerTarget
+    IL::Block block;
+    block.Kind = IL::BlockKind::ArrayInitializer;
+    block.Add(std::make_unique<IL::StLoc>(
+        v, std::make_unique<IL::NewArr>(
+               f.elementType,
+               std::vector<std::unique_ptr<IL::ILInstruction>>{})));
+    block.SetFinal(std::make_unique<IL::LdLoc>(v));
+    EXPECT_THROW(f.fixture.builder->Translate(&block), std::invalid_argument);
+}
+
+TEST(ExpressionBuilderArrayInitializerTest, NonConstantDimensionThrows)
+{
+    ArrayInitializerFixture f;
+    auto v = f.Target();
+    std::vector<std::unique_ptr<IL::ILInstruction>> indices;
+    indices.push_back(std::make_unique<IL::LdNull>());
+    IL::Block block;
+    block.Kind = IL::BlockKind::ArrayInitializer;
+    block.Add(
+        std::make_unique<IL::StLoc>(v, std::make_unique<IL::NewArr>(
+                                           f.elementType, std::move(indices))));
+    block.SetFinal(std::make_unique<IL::LdLoc>(v));
+    EXPECT_THROW(f.fixture.builder->Translate(&block), std::invalid_argument);
+}
+
+TEST(ExpressionBuilderArrayInitializerTest, MismatchedElementTypeThrows)
+{
+    ArrayInitializerFixture f;
+    auto v = f.Target();
+    auto charType = f.fixture.holder.KnownType(TS::KnownTypeCode::Char);
+    IL::Block block;
+    block.Kind = IL::BlockKind::ArrayInitializer;
+    std::vector<std::unique_ptr<IL::ILInstruction>> indices;
+    indices.push_back(std::make_unique<IL::LdcI4>(1));
+    block.Add(std::make_unique<IL::StLoc>(
+        v, std::make_unique<IL::NewArr>(f.elementType, std::move(indices))));
+    auto ldElema = std::make_unique<IL::LdElema>(
+        charType, std::make_unique<IL::LdLoc>(v),
+        std::vector<std::unique_ptr<IL::ILInstruction>>{});
+    block.Add(std::make_unique<IL::StObj>(
+        std::move(ldElema), std::make_unique<IL::LdcI4>(1), charType));
+    block.SetFinal(std::make_unique<IL::LdLoc>(v));
+    EXPECT_THROW(f.fixture.builder->Translate(&block), std::invalid_argument);
+}
+

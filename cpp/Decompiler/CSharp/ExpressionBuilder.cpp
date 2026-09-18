@@ -21,6 +21,7 @@
 
 #include "Decompiler/CSharp/ExpressionBuilder.hpp"
 
+#include "Decompiler/NRExtensions.hpp"
 #include "Decompiler/CSharp/CallBuilder.hpp"
 #include "Decompiler/CSharp/StatementBuilder.hpp"
 #include "Decompiler/CSharp/AutoEventDecompiler.hpp"
@@ -31,6 +32,7 @@
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
 #include "Decompiler/CSharp/Syntax/ComposedType.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ArrayInitializerExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AsExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BaseReferenceExpression.hpp"
@@ -228,6 +230,7 @@ const char* BlockKindName(IL::BlockKind kind)
         case IL::BlockKind::InterpolatedString: return "InterpolatedString";
         case IL::BlockKind::CallWithNamedArgs: return "CallWithNamedArgs";
         case IL::BlockKind::CallInlineAssign: return "CallInlineAssign";
+        case IL::BlockKind::ArrayInitializer: return "ArrayInitializer";
     }
     return "?";
 }
@@ -255,6 +258,28 @@ bool IsZeroConstant(const std::any& value)
     if (value.type() == typeid(std::uint32_t))
         return std::any_cast<std::uint32_t>(value) == 0u;
     return false;
+}
+
+// The C# `(int)dim.ResolveResult.ConstantValue` unboxing cast (the
+// TranslateArrayInitializer dimension-size read). The port's constant channel is
+// `std::any`; the decoded constants are the 32-bit integer family, but the other
+// integral widths are accepted and narrowed so a widened literal does not turn a
+// valid block into an exception. A non-integral value is the C#'s
+// InvalidCastException (mapped to std::invalid_argument).
+int ConstantValueAsInt(const Sem::ResolveResult& rr)
+{
+    const std::any& value = rr.ConstantValue();
+    const std::type_info& t = value.type();
+    if (t == typeid(std::int32_t)) return std::any_cast<std::int32_t>(value);
+    if (t == typeid(std::uint32_t)) return static_cast<int>(std::any_cast<std::uint32_t>(value));
+    if (t == typeid(std::int64_t)) return static_cast<int>(std::any_cast<std::int64_t>(value));
+    if (t == typeid(std::uint64_t)) return static_cast<int>(std::any_cast<std::uint64_t>(value));
+    if (t == typeid(std::int16_t)) return std::any_cast<std::int16_t>(value);
+    if (t == typeid(std::uint16_t)) return std::any_cast<std::uint16_t>(value);
+    if (t == typeid(char)) return static_cast<unsigned char>(std::any_cast<char>(value));
+    if (t == typeid(std::int8_t)) return std::any_cast<std::int8_t>(value);
+    if (t == typeid(std::uint8_t)) return std::any_cast<std::uint8_t>(value);
+    throw std::invalid_argument("array dimension is not a compile-time integer");
 }
 
 // The C# `expression.Annotation<ResolveResult>()` query over an Expression node.
@@ -1072,18 +1097,20 @@ TranslatedExpression ExpressionBuilder::Default(IL::ILInstruction* inst, Transla
 }
 
 // The C# `protected internal override TranslatedExpression VisitBlock(Block block,
-// TranslationContext context)` (ExpressionBuilder.cs lines 3406-3428). Only the
-// CallWithNamedArgs and InterpolatedString kinds exist in the ported BlockKind
-// enum (the initializer transforms that synthesize the C# ArrayInitializer /
-// CollectionInitializer / ObjectInitializer / StackAllocInitializer /
-// WithInitializer / CallInlineAssign kinds have not landed), so those arms are
-// absent; the default is the C# default's "Unknown block type" ErrorExpression
-// (reachable for a plain ControlFlow block).
+// TranslationContext context)` (ExpressionBuilder.cs lines 3406-3428). The
+// ArrayInitializer, CallInlineAssign, CallWithNamedArgs and InterpolatedString
+// kinds exist in the ported BlockKind enum (the initializer transforms that
+// synthesize the C# CollectionInitializer / ObjectInitializer /
+// StackAllocInitializer / WithInitializer kinds have not landed), so those arms
+// are present; the default is the C# default's "Unknown block type"
+// ErrorExpression (reachable for a plain ControlFlow block).
 TranslatedExpression ExpressionBuilder::VisitBlock(IL::ILInstruction* inst, TranslationContext)
 {
     auto& block = *static_cast<IL::Block*>(inst);
     switch (block.Kind)
     {
+        case IL::BlockKind::ArrayInitializer:
+            return TranslateArrayInitializer(block);
         case IL::BlockKind::CallWithNamedArgs:
             return TranslateCallWithNamedArgs(block);
         case IL::BlockKind::InterpolatedString:
@@ -1211,6 +1238,154 @@ TranslatedExpression ExpressionBuilder::TranslateSetterCallAssignment(IL::Block&
     ExpressionWithResolveResult result = CallBuilder(this, *compilation, settings)
         .Build(callOpCode, *call->Method, arguments);
     return WithILInstruction(result, call);
+}
+
+// The C# `private TranslatedExpression TranslateArrayInitializer(Block block)`
+// (ExpressionBuilder.cs lines 3685-3771). The block shape is the stloc of a
+// `newarr T [dims]` into an InitializerTarget variable whose FinalInstruction is
+// the matching ldloc, followed by the `stobj T(ldelema T(ldloc v, [idx]), value)`
+// element stores. Each store's dimensions are walked against a stack of nested
+// ArrayInitializerExpression lists; once a list reaches its dimension size it is
+// popped and folded into its parent. The C# ArgumentException for any shape
+// mismatch maps to std::invalid_argument (the D196 convention).
+TranslatedExpression ExpressionBuilder::TranslateArrayInitializer(IL::Block& block)
+{
+    auto* stloc = block.Instructions.empty()
+                      ? nullptr
+                      : dynamic_cast<IL::StLoc*>(block.Instructions.front().get());
+    auto* final = dynamic_cast<IL::LdLoc*>(block.FinalInstruction.get());
+    TS::ITypePtr type;
+    if (stloc == nullptr || final == nullptr
+        || !IL::MatchNewArr(stloc->Value.get(), type))
+        throw std::invalid_argument("given Block is invalid!");
+    if (stloc->Variable.get() != final->Variable.get()
+        || stloc->Variable->Kind != IL::VariableKind::InitializerTarget)
+        throw std::invalid_argument("given Block is invalid!");
+    auto* newArr = static_cast<IL::NewArr*>(stloc->Value.get());
+
+    // The C# `newArr.Indices.SelectArray(i => Translate(i))`: the dimension size
+    // expressions, which must all be compile-time constants.
+    std::vector<TranslatedExpression> translatedDimensions;
+    translatedDimensions.reserve(newArr->Indices.size());
+    for (const std::unique_ptr<IL::ILInstruction>& index : newArr->Indices)
+        translatedDimensions.push_back(Translate(index.get()));
+    for (const TranslatedExpression& dim : translatedDimensions)
+        if (!dim.ResolveResult()->IsCompileTimeConstant())
+            throw std::invalid_argument("given Block is invalid!");
+    int dimensions = static_cast<int>(newArr->Indices.size());
+    std::vector<int> dimensionSizes;
+    dimensionSizes.reserve(translatedDimensions.size());
+    for (const TranslatedExpression& dim : translatedDimensions)
+        dimensionSizes.push_back(ConstantValueAsInt(*dim.ResolveResult()));
+
+    // The C# `Stack<ArrayInitializer>` with `ArrayInitializer` the local
+    // (Expression, CurrentElementCount) pair. The loop counter stands in for the
+    // C# Expression.Elements.Count because the HACK in the C# avoids reading it
+    // while the elements are being added.
+    struct ArrayInitializer {
+        Syntax::ArrayInitializerExpression* Expression;
+        int CurrentElementCount;
+        explicit ArrayInitializer(Syntax::ArrayInitializerExpression* expression)
+            : Expression(expression), CurrentElementCount(0) {}
+    };
+    std::vector<ArrayInitializer> container;
+    auto* root = new Syntax::ArrayInitializerExpression();
+    container.emplace_back(root);
+    std::vector<std::shared_ptr<Sem::ResolveResult>> elementResolveResults;
+
+    for (std::size_t i = 1; i < block.Instructions.size(); ++i)
+    {
+        IL::ILInstruction* target = nullptr;
+        IL::ILInstruction* value = nullptr;
+        TS::ITypePtr storedType;
+        if (!IL::MatchStObj(block.Instructions[i].get(), target, value, storedType)
+            || storedType == nullptr || !type->Equals(*storedType))
+            throw std::invalid_argument("given Block is invalid!");
+        TS::ITypePtr elementType;
+        IL::ILInstruction* array = nullptr;
+        if (!IL::MatchLdElema(target, elementType, array)
+            || elementType == nullptr || !type->Equals(*elementType))
+            throw std::invalid_argument("given Block is invalid!");
+        if (!IL::MatchLdLoc(array, final->Variable.get()))
+            throw std::invalid_argument("given Block is invalid!");
+        // Fill the stack with empty expression lists for the missing dimensions.
+        while (static_cast<int>(container.size()) < dimensions)
+        {
+            auto* aie = new Syntax::ArrayInitializerExpression();
+            ArrayInitializer& parentInitializer = container.back();
+            parentInitializer.Expression->Elements().Add(aie);
+            parentInitializer.CurrentElementCount++;
+            container.emplace_back(aie);
+        }
+        // The C# temporarily disables special constants for non-integer element
+        // types so a numeric literal is not rewritten to a named constant.
+        bool oldUseSpecialConstants = astBuilder->UseSpecialConstants();
+        astBuilder->UseSpecialConstants() =
+            !TS::IsCSharpPrimitiveIntegerType(type.get())
+            && !TS::IsKnownType(*type, TS::KnownTypeCode::Decimal);
+        TranslatedExpression val =
+            Translate(value, type.get()).ConvertTo(*type, *this, false, true);
+        astBuilder->UseSpecialConstants() = oldUseSpecialConstants;
+        ArrayInitializer& currentInitializer = container.back();
+        currentInitializer.Expression->Elements().Add(val.Expression());
+        currentInitializer.CurrentElementCount++;
+        elementResolveResults.push_back(
+            SharedResolveResultAnnotation(*val.Expression()));
+        while (!container.empty()
+               && container.back().CurrentElementCount
+                      == dimensionSizes[container.size() - 1])
+        {
+            container.pop_back();
+        }
+    }
+
+    // The element type expression plus the trailing `[...]`s moved off a
+    // ComposedType; an anonymous element type renders as `new[]`.
+    std::vector<Syntax::ArraySpecifier*> additionalSpecifiers;
+    Syntax::AstType* typeExpression = nullptr;
+    if (settings->AnonymousTypes() && ContainsAnonymousType(*type))
+    {
+        typeExpression = nullptr;
+        additionalSpecifiers.push_back(new Syntax::ArraySpecifier());
+    }
+    else
+    {
+        typeExpression = ConvertType(*type);
+        if (auto* compType = dynamic_cast<Syntax::ComposedType*>(typeExpression))
+        {
+            if (compType->ArraySpecifiers().Count() > 0)
+            {
+                for (int j = 0; j < compType->ArraySpecifiers().Count(); ++j)
+                    additionalSpecifiers.push_back(
+                        compType->ArraySpecifiers().At(j)->Clone());
+                compType->ArraySpecifiers().Clear();
+            }
+        }
+    }
+    auto* expr = new Syntax::ArrayCreateExpression();
+    if (typeExpression != nullptr)
+        expr->Type(typeExpression);
+    expr->Initializer(root);
+    for (Syntax::ArraySpecifier* spec : additionalSpecifiers)
+        expr->AdditionalArraySpecifiers().Add(spec);
+    if (!ContainsAnonymousType(*type))
+        for (const std::unique_ptr<IL::ILInstruction>& index : newArr->Indices)
+            expr->Arguments().Add(Translate(index.get()).Expression());
+
+    // The C# calls Translate a third time for the size resolve results (a fresh
+    // TranslatedExpression per index, exactly as the C# Select does).
+    std::vector<std::shared_ptr<Sem::ResolveResult>> sizeArguments;
+    sizeArguments.reserve(newArr->Indices.size());
+    for (const std::unique_ptr<IL::ILInstruction>& index : newArr->Indices)
+        sizeArguments.push_back(
+            SharedResolveResultAnnotation(*Translate(index.get()).Expression()));
+    TS::ITypePtr arrayType = std::make_shared<TS::ArrayType>(type, dimensions);
+    return WithRR(
+        WithILInstruction(*expr, &block),
+        std::make_shared<Sem::ArrayCreateResolveResult>(
+            std::move(arrayType), std::move(sizeArguments),
+            std::optional<std::vector<std::shared_ptr<Sem::ResolveResult>>>(
+                std::move(elementResolveResults))));
 }
 
 // ---------------------------------------------------------------------------

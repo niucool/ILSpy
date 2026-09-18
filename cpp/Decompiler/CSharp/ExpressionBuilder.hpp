@@ -426,11 +426,12 @@ public:
     // block, TranslationContext context)` (ExpressionBuilder.cs lines 3406-3428):
     // the special-kind block dispatch -- the array/stackalloc/object-collection/
     // with-initializer, inline-assign, named-argument and interpolated-string
-    // arms, else the "Unknown block type" ErrorExpression. Only the
-    // CallWithNamedArgs and InterpolatedString kinds exist in the ported
-    // BlockKind enum, so the remaining C# arms are unreachable until the
-    // initializer transforms that synthesize those kinds land; the default arm
-    // (a plain ControlFlow block) is faithfully the C# default's ErrorExpression.
+    // arms, else the "Unknown block type" ErrorExpression. The ArrayInitializer,
+    // CallInlineAssign, CallWithNamedArgs and InterpolatedString kinds exist in
+    // the ported BlockKind enum, so the remaining C# arms are unreachable until
+    // the initializer transforms that synthesize those kinds land; the default
+    // arm (a plain ControlFlow block) is faithfully the C# default's
+    // ErrorExpression.
     TranslatedExpression VisitBlock(IL::ILInstruction* inst, TranslationContext context);
     // The C# `private TranslatedExpression TranslateCallWithNamedArgs(Block
     // block)` (ExpressionBuilder.cs lines 3470-3475): the named-argument call
@@ -452,6 +453,15 @@ public:
     // call through CallBuilder.Build. A block that does not match renders the C#
     // "Error: MatchInlineAssignBlock() returned false" ErrorExpression.
     TranslatedExpression TranslateSetterCallAssignment(IL::Block& block);
+    // The C# `private TranslatedExpression TranslateArrayInitializer(Block
+    // block)` (ExpressionBuilder.cs lines 3685-3771): the C# array-initializer
+    // render over the BlockKind.ArrayInitializer block shape -- the
+    // `stloc v(newarr T [dims])` target plus the `stobj T(ldelema T(ldloc v,
+    // [idx]), value)` element stores, nested into the ArrayInitializerExpression
+    // tree by the container stack and sized by the newarr dimensions. A block
+    // that does not match the C# shape is the ArgumentException (mapped to
+    // std::invalid_argument).
+    TranslatedExpression TranslateArrayInitializer(IL::Block& block);
     // The C# `private TranslatedExpression StObjViaHelperCall(StObj inst)`
     // (ExpressionBuilder.cs lines 3087-3125): the `Unsafe.Write` /
     // `Unsafe.WriteUnaligned` intrinsic rewrite for a store that cannot be a

@@ -5792,6 +5792,33 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   The full Debug gtest suite is 12960 ran / 12958 passed / the 2 standing skips /
   zero failures, and the CLI baselines are unchanged (`--csharp` 10106360, `--il`
   41246545, `-l c` 109438 bytes).
+- **`ExpressionBuilder.TranslateArrayInitializer` (+ the `MatchNewArr` / `MatchStObj` / `MatchLdElema` matchers, `BlockKind.ArrayInitializer`)**
+  -- the C# array-initializer block translation lands, closing another of the
+  remaining `VisitBlock` arms. `TranslateArrayInitializer`
+  (`ExpressionBuilder.cs` lines 3685-3771) deconstructs the
+  `BlockKind.ArrayInitializer` shape -- `stloc v(newarr T[dims])` into an
+  `InitializerTarget` variable whose final instruction is the matching
+  `ldloc v`, followed by the `stobj T(ldelema T(ldloc v, [idx]), value)`
+  element stores -- translates each dimension size as a compile-time constant,
+  and nests the element values into an `ArrayInitializerExpression` tree through
+  a stack of `(Expression, CurrentElementCount)` pairs sized by the
+  `newarr` dimensions. The element type expression is `ConvertType`'d, any
+  trailing `[...]`s are moved off a `ComposedType` onto
+  `AdditionalArraySpecifiers`, special constants are disabled for non-integer
+  element types during the value translation, and the result carries the size
+  arguments and element resolve results in an `ArrayCreateResolveResult`.
+  Adding the three array match helpers to the shared `PatternMatching.hpp`
+  (with `ArrayInstructions.hpp` now included there) completes the IL matcher
+  surface the translation composes; the new `BlockKind.ArrayInitializer` value
+  is appended to the enum (the port never relies on the C# ordinals). Verified
+  by 6 new tests (the one-dimensional render with its `Arguments`/`Initializer`
+  and `ArrayCreateResolveResult` pins, the 2x2 nested render, and the
+  non-`newarr` / wrong-variable-kind / non-constant-dimension / mismatched-
+  element-type rejections) proven with a `TranslateArrayInitializer`-neuter RED
+  round where all 6 failed. The full Debug gtest suite is 13006 ran / 13004
+  passed / the 2 standing skips / zero failures, and the CLI baselines are
+  unchanged by construction (no transform produces `ArrayInitializer` blocks
+  yet, so the new code is unreachable from the CLI).
 - **`Block.MatchInlineAssignBlock` + `ExpressionBuilder.TranslateSetterCallAssignment`**
   -- the `BlockKind.CallInlineAssign` block translation lands, closing one more
   of the remaining `VisitBlock` arms. `Block.MatchInlineAssignBlock`

@@ -25,8 +25,8 @@
 // Transforms that synthesize a non-control-flow block (e.g.
 // InterpolatedStringTransform) set the Kind so the back end can render it as the
 // matching C# construct instead of a braced statement list. This port carries
-// only the values the ported code consults; the full C# enum (ArrayInitializer,
-// CollectionInitializer, ObjectInitializer, StackAllocInitializer,
+// only the values the ported code consults; the full C# enum (CollectionInitializer,
+// ObjectInitializer, StackAllocInitializer,
 // DeconstructionConversions, DeconstructionAssignments, WithInitializer) is
 // added as the transforms that produce them land.
 
@@ -61,6 +61,13 @@ enum class BlockKind : std::uint8_t {
     // TransformAssignment (the C# TransformInlineAssignmentStObjOrCall);
     // deconstructed through Block.MatchInlineAssignBlock.
     CallInlineAssign,
+    // A C# array initializer. Instructions[0] is the
+    // `stloc v(newarr T [dimensions])` target; Instructions[1..] are the
+    // `stobj T(ldelema T(ldloc v, [indices]), value)` element stores; the
+    // FinalInstruction is the `ldloc v`. Constructed by
+    // TransformArrayInitializers; rendered by
+    // ExpressionBuilder.TranslateArrayInitializer.
+    ArrayInitializer,
 };
 
 } // namespace ILSpy::Decompiler::IL

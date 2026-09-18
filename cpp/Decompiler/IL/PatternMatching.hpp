@@ -22,8 +22,9 @@
 // `ILInstruction` (ICSharpCode.Decompiler/IL/Instructions/PatternMatching.cs
 // plus the generated `IL/Instructions.cs` region): `MatchLdThis`, `MatchBox`,
 // `MatchLdObj`, `MatchAddressOf`, `MatchLdFld`, the variable match helpers
-// (`MatchLdLoc`, `MatchStLoc`), and the field match helpers (`MatchLdsFld`,
-// `MatchStsFld`, `MatchStFld`, `MatchLdsFlda`, `MatchLdFlda`) as free functions
+// (`MatchLdLoc`, `MatchStLoc`), the field match helpers (`MatchLdsFld`,
+// `MatchStsFld`, `MatchStFld`, `MatchLdsFlda`, `MatchLdFlda`), and the array
+// match helpers (`MatchNewArr`, `MatchStObj`, `MatchLdElema`) as free functions
 // over the port's IL node pointers.
 //
 // The C# methods return the matched CHILD REFERENCES through the `out`
@@ -42,6 +43,7 @@
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/AddressOf.hpp"
+#include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
@@ -280,6 +282,55 @@ inline bool MatchLdFlda(const ILInstruction* inst, ILInstruction*& target,
     }
     target = nullptr;
     field = nullptr;
+    return false;
+}
+
+// The C# `public bool MatchNewArr(out IType? type)` (Instructions.cs line
+// 8913): a `newarr <T>` node reporting its element type.
+inline bool MatchNewArr(const ILInstruction* inst, TypeSystem::ITypePtr& type)
+{
+    const auto* newArr = dynamic_cast<const NewArr*>(inst);
+    if (newArr != nullptr) {
+        type = newArr->Type;
+        return true;
+    }
+    type = nullptr;
+    return false;
+}
+
+// The C# `public bool MatchStObj(out ILInstruction? target, out ILInstruction?
+// value, out IType? type)` (Instructions.cs line 8859): a `stobj <T>` node
+// reporting its target, value, and element type.
+inline bool MatchStObj(const ILInstruction* inst, ILInstruction*& target,
+                       ILInstruction*& value, TypeSystem::ITypePtr& type)
+{
+    const auto* stobj = dynamic_cast<const StObj*>(inst);
+    if (stobj != nullptr) {
+        target = stobj->Target.get();
+        value = stobj->Value.get();
+        type = stobj->Type;
+        return true;
+    }
+    target = nullptr;
+    value = nullptr;
+    type = nullptr;
+    return false;
+}
+
+// The C# `public bool MatchLdElema(out IType? type, out ILInstruction? array)`
+// (Instructions.cs line 8966): an `ldelema <T>` node reporting its element type
+// and array operand.
+inline bool MatchLdElema(const ILInstruction* inst, TypeSystem::ITypePtr& type,
+                         ILInstruction*& array)
+{
+    const auto* ldElema = dynamic_cast<const LdElema*>(inst);
+    if (ldElema != nullptr) {
+        type = ldElema->Type;
+        array = ldElema->Array.get();
+        return true;
+    }
+    type = nullptr;
+    array = nullptr;
     return false;
 }
 
