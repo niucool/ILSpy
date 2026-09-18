@@ -68,6 +68,13 @@ enum class BlockKind : std::uint8_t {
     // TransformArrayInitializers; rendered by
     // ExpressionBuilder.TranslateArrayInitializer.
     ArrayInitializer,
+    // A C# `stackalloc` initializer. Instructions[0] is the
+    // `stloc v(localloc ...)` / `stloc v(locallocspan ...)` target;
+    // Instructions[1..] are the `stobj T(ldloc v + offset, value)` element stores;
+    // the FinalInstruction is the `ldloc v`. Constructed by
+    // TransformArrayInitializers (DoTransformStackAllocInitializer); rendered by
+    // ExpressionBuilder.TranslateStackAllocInitializer.
+    StackAllocInitializer,
 };
 
 } // namespace ILSpy::Decompiler::IL

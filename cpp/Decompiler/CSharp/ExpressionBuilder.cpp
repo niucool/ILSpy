@@ -231,6 +231,7 @@ const char* BlockKindName(IL::BlockKind kind)
         case IL::BlockKind::CallWithNamedArgs: return "CallWithNamedArgs";
         case IL::BlockKind::CallInlineAssign: return "CallInlineAssign";
         case IL::BlockKind::ArrayInitializer: return "ArrayInitializer";
+        case IL::BlockKind::StackAllocInitializer: return "StackAllocInitializer";
     }
     return "?";
 }
@@ -258,6 +259,48 @@ bool IsZeroConstant(const std::any& value)
     if (value.type() == typeid(std::uint32_t))
         return std::any_cast<std::uint32_t>(value) == 0u;
     return false;
+}
+
+// The C# `IL.Transforms.TransformArrayInitializers.GetNullExpression(IType
+// elementType)` (TransformArrayInitializers.cs lines 1030-1060): the zero
+// constant for a primitive (or enum-over-primitive) element type, else
+// `default(T)`. Copied next to its consumer (the "copied next to its second
+// consumer" convention -- the TransformArrayInitializers transform itself has
+// not landed yet).
+IL::ILInstruction* GetNullExpression(const TS::ITypePtr& elementType)
+{
+    const TS::IType* underlying = TS::GetEnumUnderlyingType(elementType.get());
+    const TS::ITypeDefinition* typeDef =
+        underlying != nullptr ? underlying->GetDefinition() : nullptr;
+    if (typeDef == nullptr)
+        return new IL::DefaultValue(elementType);
+    switch (typeDef->KnownTypeCode())
+    {
+        case TS::KnownTypeCode::Boolean:
+        case TS::KnownTypeCode::Char:
+        case TS::KnownTypeCode::SByte:
+        case TS::KnownTypeCode::Byte:
+        case TS::KnownTypeCode::Int16:
+        case TS::KnownTypeCode::UInt16:
+        case TS::KnownTypeCode::Int32:
+        case TS::KnownTypeCode::UInt32:
+            return new IL::LdcI4(0);
+        case TS::KnownTypeCode::Int64:
+        case TS::KnownTypeCode::UInt64:
+            return new IL::LdcI8(0);
+        case TS::KnownTypeCode::Single:
+            return new IL::LdcF4(0.0f);
+        case TS::KnownTypeCode::Double:
+            return new IL::LdcF8(0.0);
+        case TS::KnownTypeCode::Decimal:
+            return new IL::LdcDecimal();
+        case TS::KnownTypeCode::Void:
+            throw std::invalid_argument("void is not a valid element type!");
+        case TS::KnownTypeCode::IntPtr:
+        case TS::KnownTypeCode::UIntPtr:
+        default:
+            return new IL::DefaultValue(elementType);
+    }
 }
 
 // The C# `(int)dim.ResolveResult.ConstantValue` unboxing cast (the
@@ -1098,19 +1141,21 @@ TranslatedExpression ExpressionBuilder::Default(IL::ILInstruction* inst, Transla
 
 // The C# `protected internal override TranslatedExpression VisitBlock(Block block,
 // TranslationContext context)` (ExpressionBuilder.cs lines 3406-3428). The
-// ArrayInitializer, CallInlineAssign, CallWithNamedArgs and InterpolatedString
-// kinds exist in the ported BlockKind enum (the initializer transforms that
-// synthesize the C# CollectionInitializer / ObjectInitializer /
-// StackAllocInitializer / WithInitializer kinds have not landed), so those arms
-// are present; the default is the C# default's "Unknown block type"
+// ArrayInitializer, StackAllocInitializer, CallInlineAssign, CallWithNamedArgs
+// and InterpolatedString kinds exist in the ported BlockKind enum (the
+// initializer transforms that synthesize the C# CollectionInitializer /
+// ObjectInitializer / WithInitializer kinds have not landed), so those arms are
+// present; the default is the C# default's "Unknown block type"
 // ErrorExpression (reachable for a plain ControlFlow block).
-TranslatedExpression ExpressionBuilder::VisitBlock(IL::ILInstruction* inst, TranslationContext)
+TranslatedExpression ExpressionBuilder::VisitBlock(IL::ILInstruction* inst, TranslationContext context)
 {
     auto& block = *static_cast<IL::Block*>(inst);
     switch (block.Kind)
     {
         case IL::BlockKind::ArrayInitializer:
             return TranslateArrayInitializer(block);
+        case IL::BlockKind::StackAllocInitializer:
+            return TranslateStackAllocInitializer(block, context.TypeHint);
         case IL::BlockKind::CallWithNamedArgs:
             return TranslateCallWithNamedArgs(block);
         case IL::BlockKind::InterpolatedString:
@@ -1386,6 +1431,126 @@ TranslatedExpression ExpressionBuilder::TranslateArrayInitializer(IL::Block& blo
             std::move(arrayType), std::move(sizeArguments),
             std::optional<std::vector<std::shared_ptr<Sem::ResolveResult>>>(
                 std::move(elementResolveResults))));
+}
+
+// The C# `private TranslatedExpression TranslateStackAllocInitializer(Block
+// block, IType typeHint)` (ExpressionBuilder.cs lines 3773-3844). The block shape
+// is the stloc of a `localloc`/`locallocspan` into an InitializerTarget variable
+// whose FinalInstruction is the matching ldloc, followed by the `stobj
+// T(ldloc v [+ offset], value)` element stores. A store's offset comes from the
+// `ptr + count` binary-numeric target (the element size factored out by
+// PointerArithmeticOffset.Detect); the skipped slots are filled with
+// GetNullExpression. The C# ArgumentException for any shape mismatch maps to
+// std::invalid_argument.
+TranslatedExpression ExpressionBuilder::TranslateStackAllocInitializer(
+    IL::Block& block, const TS::IType* typeHint)
+{
+    auto* stloc = block.Instructions.empty()
+                      ? nullptr
+                      : dynamic_cast<IL::StLoc*>(block.Instructions.front().get());
+    auto* final = dynamic_cast<IL::LdLoc*>(block.FinalInstruction.get());
+    if (stloc == nullptr || final == nullptr
+        || stloc->Variable.get() != final->Variable.get()
+        || stloc->Variable->Kind != IL::VariableKind::InitializerTarget)
+        throw std::invalid_argument("given Block is invalid!");
+
+    TS::ITypePtr storedType;
+    IL::ILInstruction* unusedTarget = nullptr;
+    IL::ILInstruction* unusedValue = nullptr;
+    if (block.Instructions.size() < 2
+        || !IL::MatchStObj(block.Instructions[1].get(), unusedTarget, unusedValue,
+                           storedType))
+        throw std::invalid_argument("given Block is invalid!");
+
+    // The hint is unreliable when the allocation size was folded to a constant:
+    // the element type is then read off the stored type instead.
+    const TS::PointerType* hintPointer =
+        typeHint != nullptr ? dynamic_cast<const TS::PointerType*>(typeHint) : nullptr;
+    TS::ITypePtr adjustedHint;
+    if (hintPointer == nullptr
+        || !TS::IsCompatibleTypeForMemoryAccess(
+            const_cast<TS::IType&>(*storedType),
+            const_cast<TS::IType&>(*hintPointer->Element())))
+    {
+        adjustedHint = std::make_shared<TS::PointerType>(storedType);
+    }
+    else
+    {
+        adjustedHint =
+            const_cast<TS::PointerType*>(hintPointer)->shared_from_this();
+    }
+
+    Syntax::StackAllocExpression* stackAllocExpression = nullptr;
+    TS::ITypePtr elementType;
+    if (auto* locAlloc = dynamic_cast<IL::LocAlloc*>(stloc->Value.get()))
+    {
+        stackAllocExpression =
+            TranslateLocAlloc(locAlloc, adjustedHint.get(), elementType);
+    }
+    else if (auto* locAllocSpan =
+                 dynamic_cast<IL::LocAllocSpan*>(stloc->Value.get()))
+    {
+        stackAllocExpression =
+            TranslateLocAllocSpan(locAllocSpan, adjustedHint.get(), elementType);
+    }
+    else
+    {
+        throw std::invalid_argument("given Block is invalid!");
+    }
+
+    auto* initializer = new Syntax::ArrayInitializerExpression();
+    stackAllocExpression->Initializer(initializer);
+    std::int64_t expectedOffset = 0;
+
+    for (std::size_t i = 1; i < block.Instructions.size(); ++i)
+    {
+        IL::ILInstruction* target = nullptr;
+        IL::ILInstruction* value = nullptr;
+        TS::ITypePtr t;
+        if (!IL::MatchStObj(block.Instructions[i].get(), target, value, t)
+            || !TS::IsCompatibleTypeForMemoryAccess(
+                const_cast<TS::IType&>(*elementType),
+                const_cast<TS::IType&>(*t)))
+            throw std::invalid_argument("given Block is invalid!");
+        std::int64_t offset = 0;
+        target = const_cast<IL::ILInstruction*>(
+            UnwrapConv(target, IL::ConversionKind::StopGCTracking));
+
+        if (!IL::MatchLdLoc(target, stloc->Variable.get()))
+        {
+            const IL::ILInstruction* left = nullptr;
+            const IL::ILInstruction* right = nullptr;
+            if (!MatchBinaryNumericInstruction(target, IL::BinaryNumericOperator::Add,
+                                               left, right))
+                throw std::invalid_argument("given Block is invalid!");
+            auto* binary = static_cast<IL::BinaryNumericInstruction*>(target);
+            left = UnwrapConv(left, IL::ConversionKind::StopGCTracking);
+            IL::PointerArithmeticOffset::DetectOutcome offsetInst =
+                IL::PointerArithmeticOffset::Detect(
+                    right, elementType.get(), binary->CheckForOverflow);
+            if (left == nullptr || !IL::MatchLdLoc(left, final->Variable.get())
+                || !offsetInst || !MatchLdcI(offsetInst.Inst, offset))
+                throw std::invalid_argument("given Block is invalid!");
+        }
+        while (expectedOffset < offset)
+        {
+            // The synthesized null node stays alive through the expression's
+            // non-owning IL-instruction annotation: the C# GC keeps it alive,
+            // and the port has no owning channel for a transient here, so the
+            // node is deliberately not freed.
+            initializer->Elements().Add(
+                Translate(GetNullExpression(elementType), elementType.get())
+                    .Expression());
+            expectedOffset++;
+        }
+        TranslatedExpression val =
+            Translate(value, elementType.get())
+                .ConvertTo(*elementType, *this, false, true);
+        initializer->Elements().Add(val.Expression());
+        expectedOffset++;
+    }
+    return WithRR(WithILInstruction(*stackAllocExpression, &block),
+                  std::make_shared<Sem::ResolveResult>(stloc->Variable->Type));
 }
 
 // ---------------------------------------------------------------------------

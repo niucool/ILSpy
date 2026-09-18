@@ -427,11 +427,11 @@ public:
     // the special-kind block dispatch -- the array/stackalloc/object-collection/
     // with-initializer, inline-assign, named-argument and interpolated-string
     // arms, else the "Unknown block type" ErrorExpression. The ArrayInitializer,
-    // CallInlineAssign, CallWithNamedArgs and InterpolatedString kinds exist in
-    // the ported BlockKind enum, so the remaining C# arms are unreachable until
-    // the initializer transforms that synthesize those kinds land; the default
-    // arm (a plain ControlFlow block) is faithfully the C# default's
-    // ErrorExpression.
+    // StackAllocInitializer, CallInlineAssign, CallWithNamedArgs and
+    // InterpolatedString kinds exist in the ported BlockKind enum, so the
+    // remaining C# arms are unreachable until the initializer transforms that
+    // synthesize those kinds land; the default arm (a plain ControlFlow block)
+    // is faithfully the C# default's ErrorExpression.
     TranslatedExpression VisitBlock(IL::ILInstruction* inst, TranslationContext context);
     // The C# `private TranslatedExpression TranslateCallWithNamedArgs(Block
     // block)` (ExpressionBuilder.cs lines 3470-3475): the named-argument call
@@ -462,6 +462,16 @@ public:
     // that does not match the C# shape is the ArgumentException (mapped to
     // std::invalid_argument).
     TranslatedExpression TranslateArrayInitializer(IL::Block& block);
+    // The C# `private TranslatedExpression TranslateStackAllocInitializer(Block
+    // block, IType typeHint)` (ExpressionBuilder.cs lines 3773-3844): the C#
+    // `stackalloc` initializer render over the BlockKind.StackAllocInitializer
+    // block shape -- the `stloc v(localloc/locallocspan)` target plus the
+    // `stobj T(ldloc v [+ elementCount], value)` stores, laid into the
+    // StackAllocExpression's initializer with the skipped offsets filled by
+    // TransformArrayInitializers.GetNullExpression. A block that does not match
+    // the C# shape is the ArgumentException (mapped to std::invalid_argument).
+    TranslatedExpression TranslateStackAllocInitializer(IL::Block& block,
+                                                        const TS::IType* typeHint);
     // The C# `private TranslatedExpression StObjViaHelperCall(StObj inst)`
     // (ExpressionBuilder.cs lines 3087-3125): the `Unsafe.Write` /
     // `Unsafe.WriteUnaligned` intrinsic rewrite for a store that cannot be a

@@ -80,7 +80,9 @@
 #include "Decompiler/IL/Instructions/AddressOf.hpp"
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/StackAllocExpression.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
@@ -6128,4 +6130,201 @@ TEST(ExpressionBuilderArrayInitializerTest, MismatchedElementTypeThrows)
     block.SetFinal(std::make_unique<IL::LdLoc>(v));
     EXPECT_THROW(f.fixture.builder->Translate(&block), std::invalid_argument);
 }
+
+// ---------------------------------------------------------------------------
+// StackAllocInitializer: ExpressionBuilder.TranslateStackAllocInitializer
+// (ExpressionBuilder.cs lines 3773-3844). The blocks are hand-built (the shape
+// TransformArrayInitializers produces: `stloc v(localloc count * sizeof(T))`
+// followed by the `stobj T(ldloc v [+ byte offset], value)` element stores and
+// the final `ldloc v`, the target an InitializerTarget variable of type T*).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct StackAllocInitializerFixture {
+    BuilderFixture fixture;
+    TS::ITypePtr elementType;
+    TS::ITypePtr pointerType;
+
+    StackAllocInitializerFixture()
+        : elementType(fixture.holder.KnownType(TS::KnownTypeCode::Int32)),
+          pointerType(std::make_shared<TS::PointerType>(elementType)) {}
+
+    IL::ILVariablePtr Target()
+    {
+        auto v = std::make_shared<IL::ILVariable>();
+        v->Name = "a";
+        v->Kind = IL::VariableKind::InitializerTarget;
+        v->Type = pointerType;
+        return v;
+    }
+};
+
+// `localloc (count * sizeof(T))`.
+std::unique_ptr<IL::ILInstruction> MakeLocAlloc(
+    StackAllocInitializerFixture& f, int count)
+{
+    return std::make_unique<IL::LocAlloc>(
+        std::make_unique<IL::BinaryNumericInstruction>(
+            std::make_unique<IL::LdcI4>(count),
+            std::make_unique<IL::SizeOf>(f.elementType, "int"),
+            IL::BinaryNumericOperator::Mul, false, TS::Sign::None));
+}
+
+// `stobj T(ldloc v [+ byteOffset], value)`.
+std::unique_ptr<IL::ILInstruction> MakeElementStore(
+    StackAllocInitializerFixture& f, const IL::ILVariablePtr& v, int byteOffset,
+    int value)
+{
+    std::unique_ptr<IL::ILInstruction> target;
+    if (byteOffset == 0)
+        target = std::make_unique<IL::LdLoc>(v);
+    else
+        target = std::make_unique<IL::BinaryNumericInstruction>(
+            std::make_unique<IL::LdLoc>(v),
+            std::make_unique<IL::LdcI4>(byteOffset),
+            IL::BinaryNumericOperator::Add, false, TS::Sign::None);
+    return std::make_unique<IL::StObj>(std::move(target),
+                                       std::make_unique<IL::LdcI4>(value),
+                                       f.elementType);
+}
+
+} // namespace
+
+TEST(ExpressionBuilderStackAllocInitializerTest, RendersSequentialElements)
+{
+    StackAllocInitializerFixture f;
+    auto v = f.Target();
+    IL::Block block;
+    block.Kind = IL::BlockKind::StackAllocInitializer;
+    block.Add(std::make_unique<IL::StLoc>(v, MakeLocAlloc(f, 3)));
+    block.Add(MakeElementStore(f, v, 0, 10));
+    block.Add(MakeElementStore(f, v, 4, 20));
+    block.Add(MakeElementStore(f, v, 8, 30));
+    block.SetFinal(std::make_unique<IL::LdLoc>(v));
+
+    CS::TranslatedExpression result = f.fixture.builder->Translate(&block);
+    auto* stackAlloc =
+        dynamic_cast<Syntax::StackAllocExpression*>(result.Expression());
+    ASSERT_NE(stackAlloc, nullptr);
+    auto* primitive = dynamic_cast<Syntax::PrimitiveType*>(stackAlloc->Type());
+    ASSERT_NE(primitive, nullptr);
+    EXPECT_EQ(primitive->Keyword(), "int");
+    auto* count =
+        dynamic_cast<Syntax::PrimitiveExpression*>(stackAlloc->CountExpression());
+    ASSERT_NE(count, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(count->Value()), 3);
+    ASSERT_NE(stackAlloc->Initializer(), nullptr);
+    ASSERT_EQ(stackAlloc->Initializer()->Elements().Count(), 3);
+    auto* first = dynamic_cast<Syntax::PrimitiveExpression*>(
+        stackAlloc->Initializer()->Elements().At(0));
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(first->Value()), 10);
+    auto* last = dynamic_cast<Syntax::PrimitiveExpression*>(
+        stackAlloc->Initializer()->Elements().At(2));
+    ASSERT_NE(last, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(last->Value()), 30);
+    // The resolve result type is the target variable's pointer type.
+    EXPECT_EQ(result.ResolveResult()->Type().Kind(), TS::TypeKind::Pointer);
+}
+
+TEST(ExpressionBuilderStackAllocInitializerTest, FillsSkippedOffsetsWithNull)
+{
+    StackAllocInitializerFixture f;
+    auto v = f.Target();
+    IL::Block block;
+    block.Kind = IL::BlockKind::StackAllocInitializer;
+    block.Add(std::make_unique<IL::StLoc>(v, MakeLocAlloc(f, 3)));
+    // The store at byte offset 4 (element index 1) is missing: it must be filled
+    // with the element type's zero (LdcI4(0)).
+    block.Add(MakeElementStore(f, v, 0, 10));
+    block.Add(MakeElementStore(f, v, 8, 30));
+    block.SetFinal(std::make_unique<IL::LdLoc>(v));
+
+    CS::TranslatedExpression result = f.fixture.builder->Translate(&block);
+    auto* stackAlloc =
+        dynamic_cast<Syntax::StackAllocExpression*>(result.Expression());
+    ASSERT_NE(stackAlloc, nullptr);
+    ASSERT_NE(stackAlloc->Initializer(), nullptr);
+    ASSERT_EQ(stackAlloc->Initializer()->Elements().Count(), 3);
+    auto* filled = dynamic_cast<Syntax::PrimitiveExpression*>(
+        stackAlloc->Initializer()->Elements().At(1));
+    ASSERT_NE(filled, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(filled->Value()), 0);
+}
+
+TEST(ExpressionBuilderStackAllocInitializerTest, HintSuppliesConstantByteCountElementType)
+{
+    StackAllocInitializerFixture f;
+    auto v = f.Target();
+    IL::Block block;
+    block.Kind = IL::BlockKind::StackAllocInitializer;
+    // A constant byte count (the compiler-folded alloc); the element type is read
+    // from the pointer type hint.
+    block.Add(std::make_unique<IL::StLoc>(
+        v, std::make_unique<IL::LocAlloc>(std::make_unique<IL::LdcI4>(12))));
+    block.Add(MakeElementStore(f, v, 0, 10));
+    block.Add(MakeElementStore(f, v, 4, 20));
+    block.Add(MakeElementStore(f, v, 8, 30));
+    block.SetFinal(std::make_unique<IL::LdLoc>(v));
+
+    CS::TranslatedExpression result =
+        f.fixture.builder->Translate(&block, f.pointerType.get());
+    auto* stackAlloc =
+        dynamic_cast<Syntax::StackAllocExpression*>(result.Expression());
+    ASSERT_NE(stackAlloc, nullptr);
+    auto* primitive = dynamic_cast<Syntax::PrimitiveType*>(stackAlloc->Type());
+    ASSERT_NE(primitive, nullptr);
+    EXPECT_EQ(primitive->Keyword(), "int");
+    auto* count =
+        dynamic_cast<Syntax::PrimitiveExpression*>(stackAlloc->CountExpression());
+    ASSERT_NE(count, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(count->Value()), 3);
+    ASSERT_NE(stackAlloc->Initializer(), nullptr);
+    EXPECT_EQ(stackAlloc->Initializer()->Elements().Count(), 3);
+}
+
+TEST(ExpressionBuilderStackAllocInitializerTest, WrongVariableKindThrows)
+{
+    StackAllocInitializerFixture f;
+    auto v = f.Target();
+    v->Kind = IL::VariableKind::Local; // must be InitializerTarget
+    IL::Block block;
+    block.Kind = IL::BlockKind::StackAllocInitializer;
+    block.Add(std::make_unique<IL::StLoc>(v, MakeLocAlloc(f, 1)));
+    block.Add(MakeElementStore(f, v, 0, 1));
+    block.SetFinal(std::make_unique<IL::LdLoc>(v));
+    EXPECT_THROW(f.fixture.builder->Translate(&block), std::invalid_argument);
+}
+
+TEST(ExpressionBuilderStackAllocInitializerTest, NonLocAllocValueThrows)
+{
+    StackAllocInitializerFixture f;
+    auto v = f.Target();
+    IL::Block block;
+    block.Kind = IL::BlockKind::StackAllocInitializer;
+    block.Add(std::make_unique<IL::StLoc>(v, std::make_unique<IL::LdcI4>(0)));
+    block.Add(MakeElementStore(f, v, 0, 1));
+    block.SetFinal(std::make_unique<IL::LdLoc>(v));
+    EXPECT_THROW(f.fixture.builder->Translate(&block), std::invalid_argument);
+}
+
+TEST(ExpressionBuilderStackAllocInitializerTest, IncompatibleStoreTypeThrows)
+{
+    StackAllocInitializerFixture f;
+    auto v = f.Target();
+    auto charType = f.fixture.holder.KnownType(TS::KnownTypeCode::Char);
+    IL::Block block;
+    block.Kind = IL::BlockKind::StackAllocInitializer;
+    block.Add(std::make_unique<IL::StLoc>(v, MakeLocAlloc(f, 1)));
+    // The first store is int (it derives the element type), the second is char
+    // (incompatible with the memory access).
+    block.Add(MakeElementStore(f, v, 0, 1));
+    block.Add(std::make_unique<IL::StObj>(
+        std::make_unique<IL::LdLoc>(v), std::make_unique<IL::LdcI4>(2),
+        charType));
+    block.SetFinal(std::make_unique<IL::LdLoc>(v));
+    EXPECT_THROW(f.fixture.builder->Translate(&block), std::invalid_argument);
+}
+
 

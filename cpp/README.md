@@ -5792,6 +5792,36 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   The full Debug gtest suite is 12960 ran / 12958 passed / the 2 standing skips /
   zero failures, and the CLI baselines are unchanged (`--csharp` 10106360, `--il`
   41246545, `-l c` 109438 bytes).
+- **`ExpressionBuilder.TranslateStackAllocInitializer` (+ `BlockKind.StackAllocInitializer`,
+  the `TransformArrayInitializers.GetNullExpression` helper)**
+  -- the C# `stackalloc` initializer block translation lands, closing another of
+  the remaining `VisitBlock` arms. `TranslateStackAllocInitializer`
+  (`ExpressionBuilder.cs` lines 3773-3844) deconstructs the
+  `BlockKind.StackAllocInitializer` shape -- `stloc v(localloc ...)` /
+  `stloc v(locallocspan ...)` into an `InitializerTarget` variable whose
+  FinalInstruction is the matching `ldloc v`, followed by the
+  `stobj T(ldloc v [+ count], value)` element stores. The element type comes from
+  `TranslateLocAlloc` / `TranslateLocAllocSpan` (the same `sizeof`-operand / type
+  hint / byte fallback as the bare `stackalloc` render), the type hint adjusted to
+  a `PointerType(storedType)` when it does not pin the element type down, and a
+  store's byte offset is converted to an element index through
+  `PointerArithmeticOffset.Detect`; the skipped slots are filled with the
+  `TransformArrayInitializers.GetNullExpression` zero (`LdcI4(0)` for an integer
+  element type, `LdcI8`/`LdcF4`/`LdcF8`/`LdcDecimal`, else `default(T)`). The C#
+  `ArgumentException` for any shape mismatch maps to `std::invalid_argument`
+  (the D196 convention). Adding the `BlockKind.StackAllocInitializer` value to the
+  enum (appended after `ArrayInitializer` so no existing value is renumbered) and
+  the file-local `GetNullExpression` (the `TransformArrayInitializers` transform
+  itself has not landed yet) completes the slice. Verified by 6 new tests (the
+  sequential-element render with its type/count/initializer pins and pointer
+  resolve result, the missing-element gap fill, the type-hint-plus-constant-byte-
+  count arm, and the wrong-variable-kind / non-`localloc` / incompatible-store
+  rejections) proven with a positive-render-neuter RED round where exactly the 3
+  positive tests failed and the 3 negatives stayed green. The full Debug gtest
+  suite is 13012 ran / 13010 passed / the 2 standing skips / zero failures, and
+  all three Release CLI baselines are byte-identical (`--csharp` 10106360, `--il`
+  41246545, `-l c` 109438) because no transform produces `StackAllocInitializer`
+  blocks yet.
 - **`ExpressionBuilder.TranslateArrayInitializer` (+ the `MatchNewArr` / `MatchStObj` / `MatchLdElema` matchers, `BlockKind.ArrayInitializer`)**
   -- the C# array-initializer block translation lands, closing another of the
   remaining `VisitBlock` arms. `TranslateArrayInitializer`
