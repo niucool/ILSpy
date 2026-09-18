@@ -636,6 +636,8 @@ TEST(ILInlining, RecombineVariablesReassignsLoadStoreAndAddress) {
     ASSERT_EQ(v2->StoreCount, 1);
     ASSERT_EQ(v2->LoadCount, 1);
     ASSERT_EQ(v2->AddressCount, 1);
+    ASSERT_EQ(v2->AddressInstructions.size(), 1u) << "the LdLoca is recorded";
+    EXPECT_EQ(v2->AddressInstructions[0], ldaPtr);
 
     fn->RecombineVariables(v1, v2);
     fn->CheckInvariant(ILPhase::Normal);
@@ -646,9 +648,12 @@ TEST(ILInlining, RecombineVariablesReassignsLoadStoreAndAddress) {
     EXPECT_EQ(v1->StoreCount, 1) << "v1 gained v2's store";
     EXPECT_EQ(v1->LoadCount, 1) << "v1 gained v2's load";
     EXPECT_EQ(v1->AddressCount, 1) << "v1 gained v2's address";
+    ASSERT_EQ(v1->AddressInstructions.size(), 1u) << "v1 absorbed the address instruction";
+    EXPECT_EQ(v1->AddressInstructions[0], ldaPtr);
     EXPECT_EQ(v2->StoreCount, 0) << "v2's counts are drained";
     EXPECT_EQ(v2->LoadCount, 0);
     EXPECT_EQ(v2->AddressCount, 0);
+    EXPECT_TRUE(v2->AddressInstructions.empty()) << "v2's address list is drained";
     bool v1Listed = false, v2Listed = false;
     for (auto& var : fn->Variables) {
         if (var.get() == v1.get()) v1Listed = true;
@@ -656,6 +661,13 @@ TEST(ILInlining, RecombineVariablesReassignsLoadStoreAndAddress) {
     }
     EXPECT_TRUE(v1Listed) << "v1 stays on the function";
     EXPECT_FALSE(v2Listed) << "v2 dropped from the function";
+
+    // A fresh recompute rebuilds the list (the clear-then-populate pass) without
+    // duplicating the reassigned entry.
+    ComputeVariableUsage(*fn);
+    EXPECT_EQ(v1->AddressCount, 1);
+    ASSERT_EQ(v1->AddressInstructions.size(), 1u);
+    EXPECT_EQ(v1->AddressInstructions[0], ldaPtr);
 }
 
 TEST(ILInlining, RecombineVariablesSumsCountsWhenTargetHasExistingUses) {

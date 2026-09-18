@@ -111,9 +111,15 @@ void ReassignUses(ILInstruction* inst, const ILVariablePtr& v1, const ILVariable
         case OpCode::LdLoc:
             reassign(static_cast<LdLoc*>(inst)->Variable, v1->LoadCount);
             break;
-        case OpCode::LdLoca:
-            reassign(static_cast<LdLoca*>(inst)->Variable, v1->AddressCount);
+        case OpCode::LdLoca: {
+            auto* lda = static_cast<LdLoca*>(inst);
+            if (lda->Variable.get() == v2) {
+                lda->Variable = v1;
+                ++v1->AddressCount;
+                v1->AddressInstructions.push_back(lda);
+            }
             break;
+        }
         case OpCode::StLoc:
             reassign(static_cast<StLoc*>(inst)->Variable, v1->StoreCount);
             break;
@@ -171,6 +177,7 @@ void ILFunction::RecombineVariables(ILVariablePtr variable1, ILVariablePtr varia
     variable2->LoadCount = 0;
     variable2->StoreCount = 0;
     variable2->AddressCount = 0;
+    variable2->AddressInstructions.clear();
     for (auto it = Variables.begin(); it != Variables.end(); ++it) {
         if (it->get() == variable2.get()) {
             Variables.erase(it);

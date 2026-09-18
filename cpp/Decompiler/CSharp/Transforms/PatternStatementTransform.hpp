@@ -68,7 +68,11 @@
 // event declaration hides its backing field. The `VisitIdentifier` backing-field replacement
 // also lands: a reference to an auto-property's compiler backing field is rewritten to the
 // property name and re-annotated with a `MemberResolveResult` over the property
-// (`ReplaceBackingFieldUsage` / `IsBackingFieldOfAutomaticProperty`).
+// (`ReplaceBackingFieldUsage` / `IsBackingFieldOfAutomaticProperty`). The address-taken item
+// special case (`AddressUsedForSingleCall`) also lands: an item variable that is not
+// single-definition is accepted when its address is taken exactly once as the this pointer of
+// a single instance method call within the loop, read from `ILVariable.AddressInstructions`
+// (the per-variable list `ComputeVariableUsage` rebuilds).
 
 #pragma once
 
@@ -308,9 +312,10 @@ private:
     bool VariableCanBeUsedAsForeachLocal(IL::ILVariable* itemVar, Syntax::Statement* loop);
 
     // The C# `static bool AddressUsedForSingleCall(ILVariable v, BlockContainer? loop)`: the
-    // special case accepting an item variable whose address is taken for a single method call.
-    // DEFERRED: the port has no `IL.Call` node yet and no per-variable address-instruction list,
-    // so the address-taken path cannot be reconstructed; the helper conservatively answers false.
+    // special case accepting an item variable whose address is taken for a single instance
+    // method call (`StoreCount == 1`, `AddressCount == 1`, `LoadCount == 0`, a non-reference
+    // type, the `LdLoca` passed as the this pointer, and the call not inside a nested loop).
+    // Reads the per-variable `AddressInstructions` list `ComputeVariableUsage` rebuilds.
     static bool AddressUsedForSingleCall(IL::ILVariable* v, IL::BlockContainer* loop);
 
     // The C# `bool DescendIntoStatement(AstNode node)`: the descendant-walk predicate that

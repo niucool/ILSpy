@@ -5447,8 +5447,9 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   loop), and the index-counter profile (stored twice, loaded three times, never addressed); the
   matched body is moved into a `ForeachStatement` whose variable designation carries the item
   variable's `ILVariableResolveResult` and whose item variable becomes a `ForeachLocal`. The
-  address-taken item path (`AddressUsedForSingleCall`) is DEFERRED (no `IL.Call` node and no
-  per-variable address-instruction list yet), as is the inline-array `foreach` rewrite. Verified
+  address-taken item path (`AddressUsedForSingleCall`) landed in a later slice (the
+  `ILVariable.AddressInstructions` list plus the `IsInstanceCall` this-pointer match), as did the
+  inline-array `foreach` rewrite. Verified
   by 9 tests (the array and `string` rewrites, plus the
   settings-off / wrong-index-profile / non-single-definition item / non-array-or-string
   collection / parameter item / captured item / `<=` condition keeps) proven with a
@@ -5549,6 +5550,23 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   missing-event-symbol keeps) proven with a removal-neuter RED round (exactly the positive test
   failed, the 4 keeps staying green). The full Debug gtest suite is now 12874 ran / 12872
   passed / the 2 standing skips / zero failures.
+- **`PatternStatementTransform` address-taken-item special case** -- the previously deferred
+  `AddressUsedForSingleCall` lands, completing the `foreach`-over-array item gate for a variable
+  that is not single-definition but whose address is taken exactly once for a single instance
+  method call (`StoreCount == 1`, `AddressCount == 1`, `LoadCount == 0`, a non-reference type,
+  the `LdLoca` passed as the this pointer at `ChildIndex == 0`, and the call not inside a nested
+  loop). The `ILVariable.AddressInstructions` list (the C# `IReadOnlyList<LdLoca>`) is added and
+  populated by `ComputeVariableUsage` (the reader-event equivalent, cleared on every recompute)
+  and kept current by `ILFunction::RecombineVariables`; the transform's `IsInstanceCall` flag is
+  the stand-in for the C# `!call.Method.IsStatic` (the `InterpolatedStringTransform` convention,
+  since the port's IL reader does not resolve the `IMethod` onto `Call`). Verified by 6 tests
+  (the address-taken rewrite plus the reference-typed item / static call / non-first-argument /
+  nested-container / additional-load keeps) and by strengthened `RecombineVariables` assertions
+  (the list population, the transfer, the drain, and the duplicate-free recompute), proven with
+  an `AddressUsedForSingleCall`-neuter RED round (exactly the 1 positive test failed, the 5
+  keep-tests staying green). The full Debug gtest suite is now 12880 ran / 12878 passed / the
+  2 standing skips / zero failures, and the CLI baselines are unchanged (`--csharp` 10106360,
+  `--il` 41246545 bytes).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

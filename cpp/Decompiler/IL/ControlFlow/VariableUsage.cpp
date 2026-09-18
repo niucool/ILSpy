@@ -66,7 +66,10 @@ void CountUsage(ILInstruction* inst) {
         }
         case OpCode::LdLoca: {
             auto* lda = static_cast<LdLoca*>(inst);
-            if (lda->Variable) ++lda->Variable->AddressCount;
+            if (lda->Variable) {
+                ++lda->Variable->AddressCount;
+                lda->Variable->AddressInstructions.push_back(lda);
+            }
             break;
         }
         case OpCode::TryCatchHandler: {
@@ -119,6 +122,7 @@ void ComputeVariableUsage(ILFunction& function) {
         if (!v) continue;
         v->LoadCount = 0;
         v->AddressCount = 0;
+        v->AddressInstructions.clear();
         v->StoreCount = (v->Kind == VariableKind::Parameter) ? 1 : 0;
         all.insert(v.get());
     }

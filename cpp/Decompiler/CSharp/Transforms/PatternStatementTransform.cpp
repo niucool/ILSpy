@@ -61,6 +61,8 @@
 #include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/PropertyAndEventBackingFieldLookup.hpp"
 #include "Decompiler/NRExtensions.hpp"
@@ -1109,13 +1111,31 @@ bool PatternStatementTransform::VariableCanBeUsedAsForeachLocal(IL::ILVariable* 
     return declaredInsideLoop && !declareVariables_.WasMerged(*itemVar);
 }
 
-bool PatternStatementTransform::AddressUsedForSingleCall(IL::ILVariable* /*v*/,
-                                                         IL::BlockContainer* /*loop*/) {
-    // The C# accepts an item variable whose address is taken for a single instance method call
-    // when the call is the only use and lies within the loop. The port has no `IL.Call` node and
-    // no per-variable address-instruction list yet, so the shape cannot be reconstructed; the
-    // address-taken path conservatively rejects (only variables that are not single-definition
-    // reach here, so the common single-definition path is unaffected).
+bool PatternStatementTransform::AddressUsedForSingleCall(IL::ILVariable* v,
+                                                         IL::BlockContainer* loop) {
+    // The C# accepts a non-single-definition item variable when its address is taken exactly
+    // once for a single instance method call, the call being the only use. `AddressInstructions`
+    // carries the `LdLoca` nodes (the reader-event equivalent ComputeVariableUsage rebuilds).
+    if (v != nullptr && v->StoreCount == 1 && v->AddressCount == 1 && v->LoadCount == 0
+        && v->Type != nullptr && v->Type->IsReferenceType() == false) {
+        if (!v->AddressInstructions.empty()) {
+            IL::ILInstruction* address = v->AddressInstructions[0];
+            // The port's IL reader does not resolve the IMethod onto Call, so `IsInstanceCall`
+            // is the stand-in for the C# `!call.Method.IsStatic` (the InterpolatedStringTransform
+            // convention).
+            auto* call = dynamic_cast<IL::Call*>(address->Parent);
+            if (call != nullptr && address->ChildIndex == 0 && call->IsInstanceCall) {
+                // Used as the this pointer for a method call: acceptable iff the call is not
+                // within a nested loop (a nested BlockContainer before reaching `loop`).
+                for (IL::ILInstruction* node = call->Parent; node != nullptr; node = node->Parent) {
+                    if (node == loop)
+                        return true;
+                    else if (dynamic_cast<IL::BlockContainer*>(node) != nullptr)
+                        break;
+                }
+            }
+        }
+    }
     return false;
 }
 

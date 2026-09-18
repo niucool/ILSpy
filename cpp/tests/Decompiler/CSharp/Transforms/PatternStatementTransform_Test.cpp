@@ -67,6 +67,9 @@
 #include "Decompiler/DecompileRun.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Semantics/MemberResolveResult.hpp"
 #include "Decompiler/Semantics/ResolveResult.hpp"
@@ -1261,6 +1264,186 @@ TEST(PatternStatementTransformTest, KeepsForLoopWhenItemNotSingleDefinition)
     index->LoadCount = 3;
     item->StoreCount = 2;
     auto* forStatement = MakeArrayForLoop(index, array, item);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// Builds an address-taken instance call on `item` whose `LdLoca` is the this pointer
+// (`ChildIndex == 0`), so `AddressUsedForSingleCall` can match. The call's parent chain is
+// rooted at `container`; returns the address `LdLoca` so a test can perturb it.
+IL::ILInstruction* MakeSingleAddressCall(const IL::ILVariablePtr& item,
+                                         IL::BlockContainer* container) {
+    auto* call = new IL::Call("Test::M");
+    call->IsInstanceCall = true;
+    auto ldLoca = std::make_unique<IL::LdLoca>(item);
+    IL::ILInstruction* address = ldLoca.get();
+    call->AddArg(std::move(ldLoca));
+    call->Parent = container;
+    item->AddressCount = 1;
+    item->AddressInstructions.push_back(address);
+    return address;
+}
+
+// An item variable that is not single-definition but whose address is taken for a single
+// instance method call inside the loop can still become the foreach local.
+TEST(PatternStatementTransformTest, TransformsArrayForLoopWhenItemAddressUsedForSingleCall)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    item->Type = fixture.FindType(TS::KnownTypeCode::Int32);
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+
+    IL::BlockContainer container;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+    forStatement->AddAnnotation(
+        std::make_shared<::ILSpy::Decompiler::CSharp::BlockContainerAnnotation>(&container));
+    MakeSingleAddressCall(item, &container);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_NE(dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]), nullptr);
+}
+
+// A reference-typed item is rejected even when its address is taken once (the C#
+// `v.Type.IsReferenceType == false` gate).
+TEST(PatternStatementTransformTest, KeepsForLoopWhenAddressTakenItemIsReferenceType)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    item->Type = fixture.FindType(TS::KnownTypeCode::String);
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+
+    IL::BlockContainer container;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+    forStatement->AddAnnotation(
+        std::make_shared<::ILSpy::Decompiler::CSharp::BlockContainerAnnotation>(&container));
+    MakeSingleAddressCall(item, &container);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// A static call taking the address is not the this-pointer shape.
+TEST(PatternStatementTransformTest, KeepsForLoopWhenAddressTakenCallIsStatic)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    item->Type = fixture.FindType(TS::KnownTypeCode::Int32);
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+
+    IL::BlockContainer container;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+    forStatement->AddAnnotation(
+        std::make_shared<::ILSpy::Decompiler::CSharp::BlockContainerAnnotation>(&container));
+    IL::ILInstruction* address = MakeSingleAddressCall(item, &container);
+    dynamic_cast<IL::Call*>(address->Parent)->IsInstanceCall = false;
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// The address must be the FIRST argument of the call (the this pointer, `ChildIndex == 0`).
+TEST(PatternStatementTransformTest, KeepsForLoopWhenAddressNotFirstArgument)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    item->Type = fixture.FindType(TS::KnownTypeCode::Int32);
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+
+    IL::BlockContainer container;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+    forStatement->AddAnnotation(
+        std::make_shared<::ILSpy::Decompiler::CSharp::BlockContainerAnnotation>(&container));
+    IL::ILInstruction* address = MakeSingleAddressCall(item, &container);
+    address->ChildIndex = 1;
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// The call must lie within the loop; a nested block container before the loop rejects the shape.
+TEST(PatternStatementTransformTest, KeepsForLoopWhenAddressCallIsInNestedContainer)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    item->Type = fixture.FindType(TS::KnownTypeCode::Int32);
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+
+    IL::BlockContainer container;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+    forStatement->AddAnnotation(
+        std::make_shared<::ILSpy::Decompiler::CSharp::BlockContainerAnnotation>(&container));
+    IL::BlockContainer nested;
+    nested.Parent = &container;
+    IL::ILInstruction* address = MakeSingleAddressCall(item, &nested);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// The address-taken shape requires the address to be the variable's ONLY non-store use
+// (`LoadCount == 0`).
+TEST(PatternStatementTransformTest, KeepsForLoopWhenAddressTakenItemIsAlsoLoaded)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    item->Type = fixture.FindType(TS::KnownTypeCode::Int32);
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+    item->LoadCount = 1;
+
+    IL::BlockContainer container;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+    forStatement->AddAnnotation(
+        std::make_shared<::ILSpy::Decompiler::CSharp::BlockContainerAnnotation>(&container));
+    MakeSingleAddressCall(item, &container);
 
     auto* block = RunOnBlock(fixture, {forStatement});
 

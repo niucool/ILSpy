@@ -31,10 +31,12 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace ILSpy::Decompiler::IL {
 
 class BlockContainer;
+class ILInstruction;
 
 class ILVariable {
 public:
@@ -50,6 +52,14 @@ public:
     int LoadCount = 0;
     int StoreCount = 0;
     int AddressCount = 0;
+
+    // The C# `public IReadOnlyList<LdLoca> AddressInstructions` (ILVariable.cs):
+    // every `LdLoca` that takes this variable's address, in tree order. Populated
+    // by ComputeVariableUsage (the reader-event equivalent) and kept current by
+    // ILFunction::RecombineVariables. Non-owning (the C# stores references; the
+    // owning tree is the ILFunction). `AddressCount` equals this list's size on
+    // every fresh recompute.
+    std::vector<ILInstruction*> AddressInstructions;
 
     // Set by transforms (e.g. RemoveInfeasiblePathTransform) to mark a variable
     // whose dead stores RemoveDeadVariableInit should drop even when the
