@@ -1922,6 +1922,34 @@ TEST(ExpressionBuilderFieldTest, ConvertFieldAutoEventBackingFieldRendersEvent)
     EXPECT_EQ(dynamic_cast<const TS::IEvent*>(mrr->Member()), event);
 }
 
+// With AutomaticEvents off the automatic-event special case is skipped and the
+// backing-field reference resolves through the ordinary field path.
+TEST(ExpressionBuilderFieldTest, ConvertFieldAutoEventBackingFieldSkippedWhenAutomaticEventsOff)
+{
+    const char* path = AutoEventMscorlibPath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "mscorlib fixture not present";
+    AutoEventBuilderFixture f(path);
+    ASSERT_TRUE(f.file.IsValid());
+    f.settings.SetAutomaticEvents(false);
+    const TS::IEvent* event = f.FindEvent("AppDomain", "AssemblyLoad");
+    ASSERT_NE(event, nullptr);
+    const TS::IField* field = f.FindField(*event->DeclaringTypeDefinition(), "AssemblyLoad");
+    ASSERT_NE(field, nullptr);
+
+    f.run.AutomaticEvents()[event] = field;
+    auto builder = f.MakeBuilderForType(event->DeclaringTypeDefinition());
+
+    ThisLoad thisLoad(std::const_pointer_cast<TS::IType>(
+        event->DeclaringType()->shared_from_this()));
+    auto result = builder.ConvertField(*field, &thisLoad.ldloc);
+
+    // The resolve result is not the event: the field path ran (whether it
+    // resolved the field itself or fell through to the direct field result).
+    auto* mrr = dynamic_cast<const Sem::MemberResolveResult*>(result.ResolveResult());
+    ASSERT_NE(mrr, nullptr);
+    EXPECT_EQ(dynamic_cast<const TS::IEvent*>(mrr->Member()), nullptr);
+}
+
 TEST(ExpressionBuilderFieldTest, LdsFldaRendersRefDirectionOverFieldReference)
 {
     BuilderFixture fixture;

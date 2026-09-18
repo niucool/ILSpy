@@ -5733,6 +5733,22 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   failed, the 3 negatives staying green). The full Debug gtest suite is 12940 ran /
   12938 passed / the 2 standing skips / zero failures, and all three CLI baselines
   are unchanged (`--csharp` 10106360, `--il` 41246545, `-l c` 109438 bytes).
+- **`MetadataTypeDefinition.GetNestedTypes` GetMembersHelper routing** -- the last
+  deferred arm of the metadata type-definition member surface: the
+  `(IgnoreInheritedMembers | ReturnMemberDefinitions)` short-circuit stays the real
+  `NestedTypes`-only projection, and every other arm now routes
+  `GetMembersHelper::GetNestedTypes` (the base-type walk plus the parameterized
+  nested-type construction that landed as D493 and was already tested directly).
+  Both the filter overload and the typeArguments overload route, so
+  `MemberLookup.LookupType`/`Lookup` no longer throws on a real metadata type and
+  the ordinary `ConvertField` field path resolves simple names through it. Verified
+  by extending the `MetadataTypeDefinitionTest` nested-types case (the routed
+  no-bits and empty-typeArguments arms) and re-adding the previously dropped
+  `ConvertField` automatic-events-off test, which now exercises the field path over
+  the real `System.AppDomain.AssemblyLoad` fixture. The full Debug gtest suite is
+  12941 ran / 12939 passed / the 2 standing skips / zero failures, and all three
+  CLI baselines are unchanged (`--csharp` 10106360, `--il` 41246545, `-l c`
+  109438 bytes).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

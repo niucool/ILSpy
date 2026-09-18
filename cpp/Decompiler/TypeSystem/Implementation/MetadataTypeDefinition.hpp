@@ -172,9 +172,8 @@ public:
     // The C# `IEnumerable<IType> GetNestedTypes(filter, options)`: the
     // `(IgnoreInheritedMembers | ReturnMemberDefinitions)` arm is the
     // NestedTypes-only short-circuit (real); every other arm routes
-    // GetMembersHelper, whose base-type walk is real (DirectBaseTypes
-    // landed) but whose member reads hit the member-family deferral
-    // (convention (e)).
+    // GetMembersHelper (the base-type walk plus the parameterized
+    // nested-type construction).
     std::vector<ITypePtr> GetNestedTypes(
         std::function<bool(const ITypeDefinition*)> filter,
         GetMemberOptions options) const override;

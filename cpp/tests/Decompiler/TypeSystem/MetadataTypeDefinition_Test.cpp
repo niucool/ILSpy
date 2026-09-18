@@ -757,7 +757,7 @@ TEST(MetadataTypeDefinitionTest, DeferralContracts)
 
     // GetNestedTypes: the (IgnoreInheritedMembers | ReturnMemberDefinitions)
     // short-circuit arm is REAL (the nested list as ITypePtr); the routed
-    // arms throw the GetMembersHelper deferral.
+    // arms walk the base types through GetMembersHelper.
     const TS::ITypeDefinition* win32 =
         f.Type("Microsoft.Win32", "Win32Native");
     ASSERT_NE(win32, nullptr);
@@ -772,12 +772,17 @@ TEST(MetadataTypeDefinitionTest, DeferralContracts)
             | TS::GetMemberOptions::ReturnMemberDefinitions);
     ASSERT_EQ(viaFilter.size(), 1u);
     EXPECT_EQ(viaFilter[0]->Name(), "SystemTime");
-    EXPECT_THROW(win32->GetNestedTypes(
-                     nullptr, TS::GetMemberOptions::None),
-                 std::logic_error);
-    EXPECT_THROW((win32->GetNestedTypes(std::vector<TS::ITypePtr>{}, nullptr,
-                                        TS::GetMemberOptions::None)),
-                 std::logic_error);
+    // The routed arm (no short-circuit bits): the base-type walk over
+    // GetNonInterfaceBaseTypes (Object has no nested types, so the declared
+    // list comes back).
+    std::vector<TS::ITypePtr> viaRouting =
+        win32->GetNestedTypes(nullptr, TS::GetMemberOptions::None);
+    EXPECT_EQ(viaRouting.size(), 53u);
+    // The typeArguments overload: an empty argument list matches every
+    // non-generic nested type (totalTypeParameterCount - outer == 0).
+    std::vector<TS::ITypePtr> viaTypeArguments = win32->GetNestedTypes(
+        std::vector<TS::ITypePtr>{}, nullptr, TS::GetMemberOptions::None);
+    EXPECT_EQ(viaTypeArguments.size(), 53u);
 }
 
 TEST(MetadataTypeDefinitionTest, NullableContextIsObliviousOverMscorlib)

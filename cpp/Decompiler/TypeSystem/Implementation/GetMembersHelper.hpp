@@ -52,8 +52,8 @@
 // `StackOverflowException`). This leaf (D489) put that arm in place; this leaf (D490) ports the
 // routing that consumes it.
 //
-// DEFERRED: `GetNestedTypes` (the most complex family -- builds parameterized nested types with a
-// mix of outer-type arguments and nested-type arguments; not used by `MemberLookup.LookupGroup`).
+// DEFERRED: none -- `GetNestedTypes` is implemented (the parameterized nested-type construction over
+// the outer-type / nested-type argument split).
 
 #pragma once
 
