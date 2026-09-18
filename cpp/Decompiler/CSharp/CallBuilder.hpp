@@ -73,12 +73,12 @@
 // The two object/collection-initializer entry points
 // (BuildCollectionInitializerExpression and
 // BuildDictionaryInitializerExpression) are ported; their caller
-// (ExpressionBuilder.TranslateObjectAndCollectionInitializer) and the
-// TransformCollectionAndObjectInitializers/AccessPathElement machinery that
-// builds the initializer blocks remain the deferred consumer. The named-argument
-// block render (CallWithNamedArgs) is ported too, completing the public surface;
-// its consumer (the ExpressionBuilder block-kind dispatch) and the
-// NamedArgumentTransform's GetILTransforms wiring remain deferred so the seed
+// (ExpressionBuilder.TranslateObjectAndCollectionInitializer) has landed too,
+// so only the TransformCollectionAndObjectInitializers transform that builds
+// the initializer blocks remains deferred. The named-argument
+// block render (CallWithNamedArgs) is ported too, completing the public surface
+// (its VisitBlock dispatch landed with the block-kind slice); the
+// NamedArgumentTransform's GetILTransforms wiring remains deferred so the seed
 // back end is untouched.
 
 #pragma once

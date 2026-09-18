@@ -25,8 +25,9 @@
 // the root target variable). Both the IL-side
 // TransformCollectionAndObjectInitializers transform and the C#-side
 // ExpressionBuilder.TranslateObjectAndCollectionInitializer /
-// TranslateWithInitializer (the remaining VisitBlock arms) consume it, so it
-// lives in its own translation unit like the C#'s public struct.
+// TranslateWithInitializer (the object/collection/with-initializer VisitBlock
+// arms) consume it, so it lives in its own translation unit like the C#'s
+// public struct.
 //
 // The C# `GetAccessPath` takes an optional `CSharpResolver` (the C# layer's
 // resolver); the port forward-declares it here and pulls the CSharp-layer

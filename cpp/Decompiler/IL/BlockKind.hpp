@@ -25,10 +25,8 @@
 // Transforms that synthesize a non-control-flow block (e.g.
 // InterpolatedStringTransform) set the Kind so the back end can render it as the
 // matching C# construct instead of a braced statement list. This port carries
-// only the values the ported code consults; the full C# enum (CollectionInitializer,
-// ObjectInitializer, StackAllocInitializer,
-// DeconstructionConversions, DeconstructionAssignments, WithInitializer) is
-// added as the transforms that produce them land.
+// only the values the ported code consults; the full C# enum (the two
+// Deconstruction values) is added as the transforms that produce them land.
 
 #pragma once
 
@@ -75,6 +73,30 @@ enum class BlockKind : std::uint8_t {
     // TransformArrayInitializers (DoTransformStackAllocInitializer); rendered by
     // ExpressionBuilder.TranslateStackAllocInitializer.
     StackAllocInitializer,
+    // A C# collection initializer: `new List<int>() { 1, 2 }`. Instructions[0]
+    // is the `stloc v(...)` construction of the initialized object; the rest
+    // are the `call Add(v, ...)` member calls (and, for nested collection
+    // initializers, the inner stores) collected by
+    // TransformCollectionAndObjectInitializers through AccessPathElement;
+    // the FinalInstruction is the `ldloc v`. Rendered by
+    // ExpressionBuilder.TranslateObjectAndCollectionInitializer (the
+    // Adder arm of the access-path walk).
+    CollectionInitializer,
+    // A C# object initializer: `new C() { Field = 1, Prop = 2 }` (including
+    // the C# 6 dictionary `new C() { [key] = value }` form). The same block
+    // shape as CollectionInitializer (the `stloc v(construction)` head plus
+    // the member stores and the `ldloc v` final); the stores go through
+    // AccessPathElement's Setter arm. Rendered by
+    // ExpressionBuilder.TranslateObjectAndCollectionInitializer.
+    ObjectInitializer,
+    // A C# 9 `with` initializer: the target expression's member assignments
+    // (`obj with { Prop = value }` lowered to a clone + stores). Instructions[0]
+    // is the `stloc v(<any expression>)` target; the rest are the member
+    // stores (the same AccessPathElement shape); the FinalInstruction is the
+    // `ldloc v`. Constructed by TransformCollectionAndObjectInitializers for
+    // the record-clone shape; rendered by
+    // ExpressionBuilder.TranslateWithInitializer.
+    WithInitializer,
 };
 
 } // namespace ILSpy::Decompiler::IL

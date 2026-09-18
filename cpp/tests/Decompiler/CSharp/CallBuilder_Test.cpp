@@ -91,6 +91,8 @@
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/DefaultValue.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/WithInitializerExpression.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
@@ -6328,3 +6330,424 @@ TEST(ExpressionBuilderStackAllocInitializerTest, IncompatibleStoreTypeThrows)
 }
 
 
+// ---------------------------------------------------------------------------
+// ObjectInitializer / CollectionInitializer / WithInitializer:
+// ExpressionBuilder.TranslateObjectAndCollectionInitializer and
+// TranslateWithInitializer (ExpressionBuilder.cs lines 3491-3528 and
+// 3841-3858) -- the last two VisitBlock arms, over the AccessPathElement walk.
+// The blocks are hand-built (the shapes TransformCollectionAndObject
+// Initializers produces: the `stloc v(<construction>)` head, the member
+// stores / Add calls, and the `ldloc v` final over an InitializerTarget
+// variable).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A fake "Person" type: a parameterless ctor (the NewObj head), an int Age
+// field and an Items field (the Setter paths), Add(int)/Add(int,int) methods
+// (the Adder renders resolve over the current type definition, the
+// CollectionInitializerFixture convention), and an Item indexer property with
+// a setter (the C# 6 dictionary-initializer arm).
+struct InitializerFixture : BuildArgsFixture
+{
+    std::shared_ptr<TS::TestSupport::LookupTypeDefinition> personDef;
+    std::shared_ptr<TS::TestSupport::LookupTypeDefinition> activatorDef;
+    std::shared_ptr<Impl::FakeMethod> ctor;
+    std::shared_ptr<Impl::FakeMethod> add1;
+    std::shared_ptr<Impl::FakeMethod> add2;
+    std::shared_ptr<Impl::FakeField> ageField;
+    std::shared_ptr<Impl::FakeField> itemsField;
+    std::shared_ptr<Impl::FakeProperty> itemProperty;
+    std::shared_ptr<Impl::FakeMethod> indexSetter;
+    std::shared_ptr<TS::TestSupport::LookupMethod> createInstance;
+
+    TS::ITypePtr PersonType()
+    {
+        return TS::ITypePtr(personDef.get(), [](TS::IType*) {});
+    }
+
+    TS::ITypePtr Int32Type()
+    {
+        return holder.KnownType(TS::KnownTypeCode::Int32);
+    }
+
+    // The `IMember` view of a fake field matching what the walk stores
+    // (`LdFlda::Field.get()` is an `IField*` -- the direct FakeField-to-
+    // IMember cast is ambiguous through the diamond).
+    const TS::IMember* AsFieldMember(const Impl::FakeField& field)
+    {
+        return static_cast<const TS::IMember*>(static_cast<const TS::IField*>(&field));
+    }
+
+    InitializerFixture()
+    {
+        personDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+            "Person", "H", TS::FullTypeName(TS::TopLevelTypeName("H", "Person")),
+            TS::TypeKind::Class, TS::Accessibility::Public, holder.compilation,
+            &holder.compilation.MainModule());
+
+        ctor = std::make_shared<Impl::FakeMethod>(
+            holder.compilation, TS::SymbolKind::Constructor);
+        ctor->SetName(".ctor");
+        ctor->SetIsStatic(false);
+        ctor->SetDeclaringType(PersonType());
+        ctor->SetReturnType(holder.KnownType(TS::KnownTypeCode::Void));
+        personDef->SetConstructors({ctor.get()});
+
+        add1 = MakeAdd({TS::KnownTypeCode::Int32});
+        add2 = MakeAdd({TS::KnownTypeCode::Int32, TS::KnownTypeCode::Int32});
+        personDef->SetMethods({add1.get(), add2.get()});
+
+        ageField = std::make_shared<Impl::FakeField>(holder.compilation);
+        ageField->SetName("Age");
+        ageField->SetDeclaringType(PersonType());
+        ageField->SetReturnType(Int32Type());
+        personDef->SetFields({ageField.get()});
+
+        itemsField = std::make_shared<Impl::FakeField>(holder.compilation);
+        itemsField->SetName("Items");
+        itemsField->SetDeclaringType(PersonType());
+        itemsField->SetReturnType(PersonType());
+
+        itemProperty = std::make_shared<Impl::FakeProperty>(holder.compilation);
+        itemProperty->SetName("Item");
+        itemProperty->SetDeclaringType(PersonType());
+        itemProperty->SetReturnType(Int32Type());
+        itemProperty->SetIsIndexer(true);
+        itemProperty->SetParameters({std::make_shared<Impl::DefaultParameter>(
+            Int32Type(), "index")});
+        indexSetter = std::make_shared<Impl::FakeMethod>(
+            holder.compilation, TS::SymbolKind::Accessor);
+        indexSetter->SetName("set_Item");
+        indexSetter->SetIsStatic(false);
+        indexSetter->SetDeclaringType(PersonType());
+        indexSetter->SetReturnType(holder.KnownType(TS::KnownTypeCode::Void));
+        indexSetter->SetParameters({
+            std::make_shared<Impl::DefaultParameter>(Int32Type(), "index"),
+            std::make_shared<Impl::DefaultParameter>(Int32Type(), "value")});
+        indexSetter->SetAccessorOwner(static_cast<const TS::IMember*>(
+            static_cast<const TS::IProperty*>(itemProperty.get())));
+        itemProperty->SetSetter(indexSetter.get());
+        personDef->SetProperties({itemProperty.get()});
+
+        SetCurrentTypeDefinition(personDef.get());
+    }
+
+    std::shared_ptr<Impl::FakeMethod> MakeAdd(
+        std::vector<TS::KnownTypeCode> parameterTypes)
+    {
+        auto method = std::make_shared<Impl::FakeMethod>(
+            holder.compilation, TS::SymbolKind::Method);
+        method->SetName("Add");
+        method->SetIsStatic(false);
+        method->SetDeclaringType(PersonType());
+        std::vector<std::shared_ptr<const TS::IParameter>> parameters;
+        for (std::size_t i = 0; i < parameterTypes.size(); i++)
+            parameters.push_back(std::make_shared<Impl::DefaultParameter>(
+                holder.KnownType(parameterTypes[i]), "p" + std::to_string(i)));
+        method->SetParameters(parameters);
+        method->SetReturnType(holder.KnownType(TS::KnownTypeCode::Void));
+        return method;
+    }
+
+    IL::ILVariablePtr Target()
+    {
+        auto v = std::make_shared<IL::ILVariable>(
+            IL::VariableKind::InitializerTarget, PersonType());
+        v->Name = "obj";
+        return v;
+    }
+
+    // `stloc v(newobj .ctor())` -- the construction head over the resolved
+    // ctor.
+    std::unique_ptr<IL::ILInstruction> NewObjHead()
+    {
+        auto newObj = std::make_unique<IL::Call>(".ctor");
+        newObj->IsNewObj = true;
+        newObj->Method = ctor;
+        return newObj;
+    }
+
+    // `call System.Activator.CreateInstance<T>()` with the given type
+    // arguments (exactly one renders the ObjectCreateExpression; anything
+    // else is rejected by the C# `when` guard). The declaring type's full
+    // name is what the arm matches on.
+    std::unique_ptr<IL::ILInstruction> ActivatorHead(
+        std::vector<TS::ITypePtr> typeArguments)
+    {
+        activatorDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+            "System.Activator", "System",
+            TS::FullTypeName(TS::TopLevelTypeName("System", "Activator")),
+            TS::TypeKind::Class, TS::Accessibility::Public, holder.compilation,
+            &holder.compilation.MainModule());
+        createInstance = std::make_shared<TS::TestSupport::LookupMethod>(
+            "CreateInstance", holder.compilation);
+        createInstance->SetStatic(true);
+        createInstance->SetDeclaringType(
+            TS::ITypePtr(activatorDef.get(), [](TS::IType*) {}));
+        createInstance->SetTypeArguments(std::move(typeArguments));
+        auto call = std::make_unique<IL::Call>("CreateInstance");
+        call->Method = createInstance;
+        return call;
+    }
+
+    // `stobj Int32(ldflda Age(ldloc v), ldc.i4 value)` -- the Setter path over
+    // the Age field.
+    std::unique_ptr<IL::ILInstruction> AgeStore(IL::ILVariablePtr v, int value)
+    {
+        auto ldflda = std::make_unique<IL::LdFlda>(
+            std::make_unique<IL::LdLoc>(v), std::string("Age"));
+        ldflda->Field = ageField;
+        return std::make_unique<IL::StObj>(std::move(ldflda),
+                                            std::make_unique<IL::LdcI4>(value),
+                                            Int32Type());
+    }
+
+    // `call Add(ldobj Person(ldflda Items(ldloc v)), ldc.i4 value)` -- the
+    // [Items, Add] nested path.
+    std::unique_ptr<IL::ILInstruction> ItemsAdd(IL::ILVariablePtr v, int value)
+    {
+        auto ldflda = std::make_unique<IL::LdFlda>(
+            std::make_unique<IL::LdLoc>(v), std::string("Items"));
+        ldflda->Field = itemsField;
+        auto call = std::make_unique<IL::Call>("Add");
+        call->Method = add1;
+        call->IsInstanceCall = true;
+        call->AddArg(std::make_unique<IL::LdObj>(std::move(ldflda), PersonType()));
+        call->AddArg(std::make_unique<IL::LdcI4>(value));
+        return call;
+    }
+};
+
+} // namespace
+
+TEST(ExpressionBuilderObjectInitializerTest, NewObjHeadRendersTheFieldAssignment)
+{
+    InitializerFixture f;
+    auto v = f.Target();
+    IL::Block block;
+    block.Kind = IL::BlockKind::ObjectInitializer;
+    block.Add(std::make_unique<IL::StLoc>(v, f.NewObjHead()));
+    block.Add(f.AgeStore(v, 42));
+    block.SetFinal(std::make_unique<IL::LdLoc>(v));
+
+    CS::TranslatedExpression result = f.builder->Translate(&block);
+    auto* oce = dynamic_cast<Syntax::ObjectCreateExpression*>(result.Expression());
+    ASSERT_NE(oce, nullptr);
+    ASSERT_NE(oce->Initializer(), nullptr);
+    ASSERT_EQ(oce->Initializer()->Elements().Count(), 1);
+    // The Setter arm names the assignment by the field: `Age = 42`.
+    auto* named = dynamic_cast<Syntax::NamedExpression*>(
+        oce->Initializer()->Elements().At(0));
+    ASSERT_NE(named, nullptr);
+    EXPECT_EQ(named->Name(), "Age");
+    auto* value = dynamic_cast<Syntax::PrimitiveExpression*>(named->Expression());
+    ASSERT_NE(value, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(value->Value()), 42);
+    // The NamedExpression carries the MemberResolveResult over the field with
+    // the initialized-object target.
+    auto* rr = dynamic_cast<const Sem::MemberResolveResult*>(
+        CS::GetResolveResult(*named));
+    ASSERT_NE(rr, nullptr);
+    EXPECT_EQ(rr->Member(), f.AsFieldMember(*f.ageField));
+    EXPECT_NE(dynamic_cast<const Sem::InitializedObjectResolveResult*>(
+                  rr->TargetResult()),
+              nullptr);
+}
+
+TEST(ExpressionBuilderObjectInitializerTest, NestedCollectionPathFoldsIntoANamedExpression)
+{
+    InitializerFixture f;
+    auto v = f.Target();
+    IL::Block block;
+    block.Kind = IL::BlockKind::ObjectInitializer;
+    block.Add(std::make_unique<IL::StLoc>(v, f.NewObjHead()));
+    block.Add(f.ItemsAdd(v, 1));
+    block.Add(f.ItemsAdd(v, 2));
+    block.SetFinal(std::make_unique<IL::LdLoc>(v));
+
+    CS::TranslatedExpression result = f.builder->Translate(&block);
+    auto* oce = dynamic_cast<Syntax::ObjectCreateExpression*>(result.Expression());
+    ASSERT_NE(oce, nullptr);
+    ASSERT_NE(oce->Initializer(), nullptr);
+    // Both Add calls share the [Items, Add] path, so the finished deeper list
+    // folds into ONE NamedExpression over the path's outer element:
+    // `Items = { 1, 2 }` (the Add-name rule wraps the values).
+    ASSERT_EQ(oce->Initializer()->Elements().Count(), 1);
+    auto* named = dynamic_cast<Syntax::NamedExpression*>(
+        oce->Initializer()->Elements().At(0));
+    ASSERT_NE(named, nullptr);
+    EXPECT_EQ(named->Name(), "Items");
+    auto* values =
+        dynamic_cast<Syntax::ArrayInitializerExpression*>(named->Expression());
+    ASSERT_NE(values, nullptr);
+    ASSERT_EQ(values->Elements().Count(), 2);
+    auto* first = dynamic_cast<Syntax::PrimitiveExpression*>(values->Elements().At(0));
+    auto* second = dynamic_cast<Syntax::PrimitiveExpression*>(values->Elements().At(1));
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(first->Value()), 1);
+    EXPECT_EQ(std::get<std::int32_t>(second->Value()), 2);
+}
+
+TEST(ExpressionBuilderObjectInitializerTest, ActivatorCreateInstanceHeadRendersTheObjectCreate)
+{
+    InitializerFixture f;
+    auto v = f.Target();
+    IL::Block block;
+    block.Kind = IL::BlockKind::ObjectInitializer;
+    block.Add(std::make_unique<IL::StLoc>(v, f.ActivatorHead({f.Int32Type()})));
+    block.SetFinal(std::make_unique<IL::LdLoc>(v));
+
+    CS::TranslatedExpression result = f.builder->Translate(&block);
+    auto* oce = dynamic_cast<Syntax::ObjectCreateExpression*>(result.Expression());
+    ASSERT_NE(oce, nullptr);
+    // The single type argument is the constructed type: `new int()`.
+    auto* primitive = dynamic_cast<Syntax::PrimitiveType*>(oce->Type());
+    ASSERT_NE(primitive, nullptr);
+    EXPECT_EQ(primitive->Keyword(), "int");
+    // No member stores: the initializer is present but empty.
+    ASSERT_NE(oce->Initializer(), nullptr);
+    EXPECT_EQ(oce->Initializer()->Elements().Count(), 0);
+    // The resolve result is the TypeResolveResult over the type argument.
+    auto* rr = dynamic_cast<const Sem::TypeResolveResult*>(result.ResolveResult());
+    ASSERT_NE(rr, nullptr);
+    EXPECT_TRUE(TS::IsKnownType(rr->Type(), TS::KnownTypeCode::Int32));
+}
+
+TEST(ExpressionBuilderObjectInitializerTest, DictionarySetterRendersTheIndexerAssignment)
+{
+    InitializerFixture f;
+    auto v = f.Target();
+    // The index variable whose earlier store substitutes the `ldloc k` index.
+    auto k = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, f.Int32Type());
+    k->Name = "k";
+    IL::Block block;
+    block.Kind = IL::BlockKind::ObjectInitializer;
+    block.Add(std::make_unique<IL::StLoc>(v, f.NewObjHead()));
+    // stloc k(ldc.i4 3): the C# 6 dictionary-initializer index store.
+    block.Add(std::make_unique<IL::StLoc>(k, std::make_unique<IL::LdcI4>(3)));
+    // call set_Item(ldloc v, ldloc k, ldc.i4 7)
+    auto setCall = std::make_unique<IL::Call>("set_Item");
+    setCall->Method = f.indexSetter;
+    setCall->IsInstanceCall = true;
+    setCall->AddArg(std::make_unique<IL::LdLoc>(v));
+    setCall->AddArg(std::make_unique<IL::LdLoc>(k));
+    setCall->AddArg(std::make_unique<IL::LdcI4>(7));
+    block.Add(std::move(setCall));
+    block.SetFinal(std::make_unique<IL::LdLoc>(v));
+
+    CS::TranslatedExpression result = f.builder->Translate(&block);
+    auto* oce = dynamic_cast<Syntax::ObjectCreateExpression*>(result.Expression());
+    ASSERT_NE(oce, nullptr);
+    ASSERT_NE(oce->Initializer(), nullptr);
+    ASSERT_EQ(oce->Initializer()->Elements().Count(), 1);
+    // The dictionary arm renders `Item[3] = 7`: the index store substituted for
+    // the ldloc, the initialized-object target dropped from the indexer.
+    auto* assignment = dynamic_cast<Syntax::AssignmentExpression*>(
+        oce->Initializer()->Elements().At(0));
+    ASSERT_NE(assignment, nullptr);
+    auto* indexer = dynamic_cast<Syntax::IndexerExpression*>(assignment->Left());
+    ASSERT_NE(indexer, nullptr);
+    EXPECT_EQ(indexer->Target(), nullptr);
+    ASSERT_EQ(indexer->Arguments().Count(), 1);
+    auto* index =
+        dynamic_cast<Syntax::PrimitiveExpression*>(indexer->Arguments()[0]);
+    ASSERT_NE(index, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(index->Value()), 3);
+    auto* value = dynamic_cast<Syntax::PrimitiveExpression*>(assignment->Right());
+    ASSERT_NE(value, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(value->Value()), 7);
+}
+
+TEST(ExpressionBuilderObjectInitializerTest, RejectsTheInvalidHeadShapes)
+{
+    InitializerFixture f;
+    // A head that is none of the four construction shapes.
+    {
+        auto v = f.Target();
+        IL::Block block;
+        block.Kind = IL::BlockKind::ObjectInitializer;
+        block.Add(std::make_unique<IL::StLoc>(v, std::make_unique<IL::LdcI4>(0)));
+        block.SetFinal(std::make_unique<IL::LdLoc>(v));
+        EXPECT_THROW(f.builder->Translate(&block), std::invalid_argument);
+    }
+    // A non-InitializerTarget variable.
+    {
+        auto v = f.Target();
+        v->Kind = IL::VariableKind::Local;
+        IL::Block block;
+        block.Kind = IL::BlockKind::ObjectInitializer;
+        block.Add(std::make_unique<IL::StLoc>(v, f.NewObjHead()));
+        block.SetFinal(std::make_unique<IL::LdLoc>(v));
+        EXPECT_THROW(f.builder->Translate(&block), std::invalid_argument);
+    }
+    // No head stloc at all (the member store is the first instruction).
+    {
+        auto v = f.Target();
+        IL::Block block;
+        block.Kind = IL::BlockKind::ObjectInitializer;
+        block.Add(f.AgeStore(v, 1));
+        block.SetFinal(std::make_unique<IL::LdLoc>(v));
+        EXPECT_THROW(f.builder->Translate(&block), std::invalid_argument);
+    }
+    // An Activator call without exactly one type argument.
+    {
+        auto v = f.Target();
+        IL::Block block;
+        block.Kind = IL::BlockKind::ObjectInitializer;
+        block.Add(std::make_unique<IL::StLoc>(v, f.ActivatorHead({})));
+        block.SetFinal(std::make_unique<IL::LdLoc>(v));
+        EXPECT_THROW(f.builder->Translate(&block), std::invalid_argument);
+    }
+}
+
+TEST(ExpressionBuilderObjectInitializerTest, CarriesTheBlockAnnotation)
+{
+    InitializerFixture f;
+    auto v = f.Target();
+    IL::Block block;
+    block.Kind = IL::BlockKind::ObjectInitializer;
+    block.Add(std::make_unique<IL::StLoc>(v, f.NewObjHead()));
+    block.Add(f.AgeStore(v, 42));
+    block.SetFinal(std::make_unique<IL::LdLoc>(v));
+
+    CS::TranslatedExpression result = f.builder->Translate(&block);
+    std::vector<IL::ILInstruction*> instructions =
+        CS::GetILInstructions(*result.Expression());
+    EXPECT_NE(std::find(instructions.begin(), instructions.end(), &block),
+              instructions.end());
+}
+
+TEST(ExpressionBuilderWithInitializerTest, RendersTheTargetExpressionAndItsAssignments)
+{
+    InitializerFixture f;
+    auto v = f.Target();
+    auto w = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, f.PersonType());
+    w->Name = "w";
+    IL::Block block;
+    block.Kind = IL::BlockKind::WithInitializer;
+    // stloc v(ldloc w): the target expression is any expression.
+    block.Add(std::make_unique<IL::StLoc>(v, std::make_unique<IL::LdLoc>(w)));
+    block.Add(f.AgeStore(v, 7));
+    block.SetFinal(std::make_unique<IL::LdLoc>(v));
+
+    CS::TranslatedExpression result = f.builder->Translate(&block);
+    auto* with = dynamic_cast<Syntax::WithInitializerExpression*>(result.Expression());
+    ASSERT_NE(with, nullptr);
+    auto* target = dynamic_cast<Syntax::IdentifierExpression*>(with->Expression());
+    ASSERT_NE(target, nullptr);
+    EXPECT_EQ(target->Identifier(), "w");
+    ASSERT_NE(with->Initializer(), nullptr);
+    ASSERT_EQ(with->Initializer()->Elements().Count(), 1);
+    auto* named = dynamic_cast<Syntax::NamedExpression*>(
+        with->Initializer()->Elements().At(0));
+    ASSERT_NE(named, nullptr);
+    EXPECT_EQ(named->Name(), "Age");
+    auto* value = dynamic_cast<Syntax::PrimitiveExpression*>(named->Expression());
+    ASSERT_NE(value, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(value->Value()), 7);
+    // The resolve result is the plain ResolveResult over the target variable's
+    // type (the same shared handle).
+    EXPECT_EQ(&result.ResolveResult()->Type(), f.personDef.get());
+}

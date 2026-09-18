@@ -54,6 +54,7 @@
 #include "Decompiler/CSharp/TranslationContext.hpp"
 #include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
 #include "Decompiler/CSharp/Resolver/TypeInferenceHelpers.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ArrayInitializerExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
@@ -89,7 +90,12 @@ class Comp;
 class BinaryNumericInstruction;
 class StringToInt;
 class SwitchInstruction;
+struct AccessPathElement;
 enum class ComparisonKind : std::uint8_t;
+}
+
+namespace ILSpy::Decompiler::Semantics {
+class InitializedObjectResolveResult;
 }
 
 namespace ILSpy::Decompiler::CSharp {
@@ -426,12 +432,12 @@ public:
     // block, TranslationContext context)` (ExpressionBuilder.cs lines 3406-3428):
     // the special-kind block dispatch -- the array/stackalloc/object-collection/
     // with-initializer, inline-assign, named-argument and interpolated-string
-    // arms, else the "Unknown block type" ErrorExpression. The ArrayInitializer,
-    // StackAllocInitializer, CallInlineAssign, CallWithNamedArgs and
-    // InterpolatedString kinds exist in the ported BlockKind enum, so the
-    // remaining C# arms are unreachable until the initializer transforms that
-    // synthesize those kinds land; the default arm (a plain ControlFlow block)
-    // is faithfully the C# default's ErrorExpression.
+    // arms, else the "Unknown block type" ErrorExpression. Every kind the ported
+    // BlockKind enum carries has its render arm; the IL-side transforms that
+    // synthesize the CollectionInitializer / ObjectInitializer / WithInitializer
+    // kinds have not landed, so those arms are reachable only through hand-built
+    // blocks; the default arm (a plain ControlFlow block) is faithfully the C#
+    // default's ErrorExpression.
     TranslatedExpression VisitBlock(IL::ILInstruction* inst, TranslationContext context);
     // The C# `private TranslatedExpression TranslateCallWithNamedArgs(Block
     // block)` (ExpressionBuilder.cs lines 3470-3475): the named-argument call
@@ -472,6 +478,60 @@ public:
     // the C# shape is the ArgumentException (mapped to std::invalid_argument).
     TranslatedExpression TranslateStackAllocInitializer(IL::Block& block,
                                                         const TS::IType* typeHint);
+    // The C# `private TranslatedExpression TranslateObjectAndCollectionInitializer(
+    // Block block)` (ExpressionBuilder.cs lines 3491-3528): the object/collection
+    // initializer render over the BlockKind.ObjectInitializer / CollectionInitializer
+    // block shape -- the `stloc v(...)` head (a newobj, a default(T), a
+    // CallWithNamedArgs block, or `Activator.CreateInstance<T>()`) becomes the
+    // ObjectCreateExpression, and the member stores/Add calls (Instructions[1..])
+    // are laid into its initializer through the AccessPathElement walk. A block
+    // that does not match the C# shape is the ArgumentException (mapped to
+    // std::invalid_argument).
+    TranslatedExpression TranslateObjectAndCollectionInitializer(IL::Block& block);
+    // The C# `private TranslatedExpression TranslateWithInitializer(Block block)`
+    // (ExpressionBuilder.cs lines 3841-3858): the C# 9 `with` initializer render
+    // over the BlockKind.WithInitializer block shape -- the `stloc v(<target
+    // expression>)` head becomes the WithInitializerExpression's Expression and
+    // the member stores are laid into its initializer. A block that does not
+    // match the C# shape is the ArgumentException (mapped to
+    // std::invalid_argument).
+    TranslatedExpression TranslateWithInitializer(IL::Block& block);
+    // The C# `private ArrayInitializerExpression BuildArrayInitializerExpression(
+    // Block block, InitializedObjectResolveResult initObjRR)` (ExpressionBuilder.cs
+    // lines 3533-3623): the shared element-tree builder for the object/collection/
+    // with initializers -- walks Instructions[1..] as access paths, nests the
+    // stores into ArrayInitializerExpression lists by the common-path prefix,
+    // renders the Setter tail as a NamedExpression (or the dictionary-initializer
+    // assignment through CallBuilder) and the Adder tail through
+    // BuildCollectionInitializerExpression, and folds the finished element lists
+    // into their parents through MakeInitializerAssignment. The `initObjRR` is
+    // the C# by-reference `InitializedObjectResolveResult`; the port threads the
+    // owning shared handle (the MemberResolveResults and the CallBuilder entries
+    // share it).
+    Syntax::ArrayInitializerExpression* BuildArrayInitializerExpression(
+        IL::Block& block, std::shared_ptr<Sem::InitializedObjectResolveResult> initObjRR);
+    // The C# `IEnumerable<ILInstruction> GetIndices(IEnumerable<ILInstruction>
+    // indices, Dictionary<ILVariable, ILInstruction> indexVariables)`
+    // (ExpressionBuilder.cs lines 3625-3634): the C# 6 dictionary-initializer
+    // index substitution -- an `ldloc` of a variable that had an index-store
+    // earlier in the block is replaced by that store's value, any other
+    // instruction passes through.
+    std::vector<IL::ILInstruction*> GetIndices(
+        const std::vector<IL::ILInstruction*>& indices,
+        const std::unordered_map<IL::ILVariable*, IL::ILInstruction*>& indexVariables);
+    // The C# `private TranslatedExpression MakeInitializerAssignment(
+    // InitializedObjectResolveResult rr, AccessPathElement memberPath,
+    // AccessPathElement valuePath, List<TranslatedExpression> values,
+    // Dictionary<ILVariable, ILInstruction> indexVariables)` (ExpressionBuilder.cs
+    // lines 3636-3669): the finished element-list fold -- an `Add` path member
+    // wraps the values in an ArrayInitializerExpression, a single plain value
+    // passes through, and the result is named by the value path's member (a
+    // NamedExpression) or its indexed AssignmentExpression.
+    TranslatedExpression MakeInitializerAssignment(
+        std::shared_ptr<Sem::InitializedObjectResolveResult> rr,
+        const IL::AccessPathElement& memberPath, const IL::AccessPathElement& valuePath,
+        std::vector<TranslatedExpression> values,
+        const std::unordered_map<IL::ILVariable*, IL::ILInstruction*>& indexVariables);
     // The C# `private TranslatedExpression StObjViaHelperCall(StObj inst)`
     // (ExpressionBuilder.cs lines 3087-3125): the `Unsafe.Write` /
     // `Unsafe.WriteUnaligned` intrinsic rewrite for a store that cannot be a

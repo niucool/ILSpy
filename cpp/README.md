@@ -6049,6 +6049,50 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   Debug gtest suite is 12970 ran / 12968 passed / the 2 standing skips / zero
   failures, and all three CLI baselines are byte-identical (`--csharp`
   10106360, `--il` 41246545, `-l c` 109438).
+- **`ExpressionBuilder.TranslateObjectAndCollectionInitializer` / `TranslateWithInitializer` (+ `BlockKind.CollectionInitializer` / `ObjectInitializer` / `WithInitializer`)**
+  -- the last two `VisitBlock` arms land, consuming the iteration-216
+  `AccessPathElement` machinery. `TranslateObjectAndCollectionInitializer`
+  (ExpressionBuilder.cs lines 3491-3528) deconstructs the
+  `BlockKind.ObjectInitializer` / `CollectionInitializer` shape -- the
+  `stloc v(<construction>)` head into an `InitializerTarget` variable whose
+  final is the matching `ldloc v` -- where the construction is a newobj
+  (rendered through `CallBuilder.Build`'s constructor path; the port has no
+  NewObj node, so the C# `case NewObj` arm is the `IsNewObj` call test and
+  must precede the plain-Call Activator arm), a `default(T)`, a nested
+  `CallWithNamedArgs` block, or `System.Activator.CreateInstance<T>()`
+  (matched by the declaring type's FULL name through the new file-local
+  `TypeFullNameOf` helper -- the port's `IType` has no `FullName`, the
+  AutoEventDecompiler convention), each answered as the
+  `ObjectCreateExpression`. `BuildArrayInitializerExpression` (lines
+  3533-3623) walks `Instructions[1..]` as access paths: `StLoc` index stores
+  feed the C# 6 dictionary-initializer index map, the path difference against
+  the previous instruction pops the finished element-list stack (folding
+  through `MakeInitializerAssignment`), the Setter tail renders a
+  `NamedExpression` over the member (or the dictionary-initializer assignment
+  through `CallBuilder.BuildDictionaryInitializerExpression` with the
+  substituted indices when the path element carries indexer arguments), and
+  the Adder tail routes through `BuildCollectionInitializerExpression`.
+  `MakeInitializerAssignment` (lines 3636-3669) wraps an `Add` path member's
+  values in an `ArrayInitializerExpression` over the unknown type and names
+  the result by the value path's member (or the indexed
+  `AssignmentExpression`). `TranslateWithInitializer` (lines 3841-3858)
+  renders the `BlockKind.WithInitializer` shape as the
+  `WithInitializerExpression` over the target expression. The three new
+  `BlockKind` values are appended to the enum (no existing value renumbered)
+  with `BlockKindName` entries. Verified by 7 new tests (the newobj-head
+  field-assignment render with its `MemberResolveResult` pins, the
+  `[Items, Add]` nested-path fold into `Items = { 1, 2 }`, the
+  `Activator.CreateInstance<T>` head, the dictionary-initializer
+  index-substitution assignment, the invalid-head/variable-kind/Activator-
+  arity rejections, the block annotation, and the with-initializer render)
+  proven with an `invalid_argument`-throw neuter RED round where exactly the 6
+  positive tests failed and the reject-test stayed green (vacuously, as
+  predicted). The full Debug gtest suite is 13049 ran / 13047 passed / the 2
+  standing skips / zero failures, and all three Release CLI baselines are
+  byte-identical (`--csharp` 10106360, `--il` 41246545, `-l c` 109438)
+  because no transform produces these block kinds yet; the next in-order
+  Phase-5 piece is the `TransformCollectionAndObjectInitializers` transform
+  itself (the producer of these blocks).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

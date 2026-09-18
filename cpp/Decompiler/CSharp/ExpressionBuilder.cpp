@@ -48,6 +48,9 @@
 #include "Decompiler/CSharp/Syntax/Expressions/IsExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/NamedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/WithInitializerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/RecursivePatternExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DeclarationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
@@ -120,6 +123,7 @@
 #include "Decompiler/IL/Instructions/RefAnyType.hpp"
 #include "Decompiler/IL/Instructions/TypedReferenceInstructions.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
+#include "Decompiler/IL/Transforms/AccessPathElement.hpp"
 #include "Decompiler/IL/Transforms/TupleTransform.hpp"
 #include "Decompiler/CSharp/CSharpDecompiler.hpp"
 #include "Decompiler/IL/OpCodeName.hpp"
@@ -135,6 +139,7 @@
 #include "Decompiler/Semantics/ThrowResolveResult.hpp"
 #include "Decompiler/Semantics/ResolveResult.hpp"
 #include "Decompiler/Semantics/MemberResolveResult.hpp"
+#include "Decompiler/Semantics/InitializedObjectResolveResult.hpp"
 #include "Decompiler/Semantics/TypeIsResolveResult.hpp"
 #include "Decompiler/Semantics/TypeOfResolveResult.hpp"
 #include "Decompiler/Semantics/TypeResolveResult.hpp"
@@ -153,6 +158,7 @@
 #include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
 #include "Decompiler/Util/CSharpPrimitiveCast.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <cstdio>
 #include <stdexcept>
@@ -221,6 +227,21 @@ const TS::IType* GetCallParameterType(const IL::Call& call, int argumentIndex)
     return nullptr;
 }
 
+// The C# `IType.FullName` for the Activator.CreateInstance declaring-type
+// comparison: an `IEntity` type reports `INamedElement::FullName()`, a
+// `ParameterizedType` delegates to its generic, and any other shape falls
+// back to `ReflectionName()` (the file-local helper convention of
+// AutoEventDecompiler / IntroduceUsingDeclarations / TypeSystemAstBuilder).
+std::string TypeFullNameOf(const TS::IType& type)
+{
+    if (const auto* named = dynamic_cast<const TS::INamedElement*>(&type))
+        return named->FullName();
+    if (const auto* parameterized = dynamic_cast<const TS::ParameterizedType*>(&type))
+        return parameterized->GenericType() ? TypeFullNameOf(*parameterized->GenericType())
+                                            : std::string();
+    return type.ReflectionName();
+}
+
 // The C# `BlockKind` ToString for the VisitBlock default arm's
 // "Unknown block type: " + block.Kind message.
 const char* BlockKindName(IL::BlockKind kind)
@@ -232,6 +253,9 @@ const char* BlockKindName(IL::BlockKind kind)
         case IL::BlockKind::CallInlineAssign: return "CallInlineAssign";
         case IL::BlockKind::ArrayInitializer: return "ArrayInitializer";
         case IL::BlockKind::StackAllocInitializer: return "StackAllocInitializer";
+        case IL::BlockKind::CollectionInitializer: return "CollectionInitializer";
+        case IL::BlockKind::ObjectInitializer: return "ObjectInitializer";
+        case IL::BlockKind::WithInitializer: return "WithInitializer";
     }
     return "?";
 }
@@ -1140,13 +1164,15 @@ TranslatedExpression ExpressionBuilder::Default(IL::ILInstruction* inst, Transla
 }
 
 // The C# `protected internal override TranslatedExpression VisitBlock(Block block,
-// TranslationContext context)` (ExpressionBuilder.cs lines 3406-3428). The
-// ArrayInitializer, StackAllocInitializer, CallInlineAssign, CallWithNamedArgs
-// and InterpolatedString kinds exist in the ported BlockKind enum (the
-// initializer transforms that synthesize the C# CollectionInitializer /
-// ObjectInitializer / WithInitializer kinds have not landed), so those arms are
-// present; the default is the C# default's "Unknown block type"
-// ErrorExpression (reachable for a plain ControlFlow block).
+// TranslationContext context)` (ExpressionBuilder.cs lines 3406-3428). Every
+// C# block kind the ported BlockKind enum carries now has its render arm
+// (ArrayInitializer, StackAllocInitializer, CollectionInitializer /
+// ObjectInitializer, WithInitializer, CallInlineAssign, CallWithNamedArgs and
+// InterpolatedString); the IL-side transforms that synthesize the
+// CollectionInitializer / ObjectInitializer / WithInitializer kinds have not
+// landed, so those arms are reachable only through hand-built blocks; the
+// default is the C# default's "Unknown block type" ErrorExpression (reachable
+// for a plain ControlFlow block).
 TranslatedExpression ExpressionBuilder::VisitBlock(IL::ILInstruction* inst, TranslationContext context)
 {
     auto& block = *static_cast<IL::Block*>(inst);
@@ -1156,6 +1182,11 @@ TranslatedExpression ExpressionBuilder::VisitBlock(IL::ILInstruction* inst, Tran
             return TranslateArrayInitializer(block);
         case IL::BlockKind::StackAllocInitializer:
             return TranslateStackAllocInitializer(block, context.TypeHint);
+        case IL::BlockKind::CollectionInitializer:
+        case IL::BlockKind::ObjectInitializer:
+            return TranslateObjectAndCollectionInitializer(block);
+        case IL::BlockKind::WithInitializer:
+            return TranslateWithInitializer(block);
         case IL::BlockKind::CallWithNamedArgs:
             return TranslateCallWithNamedArgs(block);
         case IL::BlockKind::InterpolatedString:
@@ -1550,6 +1581,384 @@ TranslatedExpression ExpressionBuilder::TranslateStackAllocInitializer(
         expectedOffset++;
     }
     return WithRR(WithILInstruction(*stackAllocExpression, &block),
+                  std::make_shared<Sem::ResolveResult>(stloc->Variable->Type));
+}
+
+// The C# `private TranslatedExpression TranslateObjectAndCollectionInitializer(
+// Block block)` (ExpressionBuilder.cs lines 3491-3528). The block shape is the
+// `stloc v(<construction>)` head into an InitializerTarget variable whose
+// FinalInstruction is the matching `ldloc v`, followed by the member
+// stores/Add calls. The construction may be a newobj (rendered through
+// CallBuilder.Build's constructor path), a default(T), a nested
+// CallWithNamedArgs block, or the `Activator.CreateInstance<T>()` generic
+// call (each rendered as an ObjectCreateExpression); everything else is the
+// C# ArgumentException (mapped to std::invalid_argument). The member
+// stores are laid into the ObjectCreateExpression's initializer through
+// BuildArrayInitializerExpression. The port has no NewObj node (a newobj is
+// a Call with IsNewObj), so the C# `case NewObj` arm is the IsNewObj call test
+// and must precede the plain-Call Activator arm.
+TranslatedExpression ExpressionBuilder::TranslateObjectAndCollectionInitializer(
+    IL::Block& block)
+{
+    auto* stloc = block.Instructions.empty()
+                      ? nullptr
+                      : dynamic_cast<IL::StLoc*>(block.Instructions.front().get());
+    auto* final = dynamic_cast<IL::LdLoc*>(block.FinalInstruction.get());
+    // Check basic structure of block
+    if (stloc == nullptr || final == nullptr
+        || stloc->Variable.get() != final->Variable.get()
+        || stloc->Variable->Kind != IL::VariableKind::InitializerTarget)
+        throw std::invalid_argument("given Block is invalid!");
+    std::shared_ptr<Sem::InitializedObjectResolveResult> initObjRR;
+    TranslatedExpression expr;
+    // Detect type of initializer (the C# `switch (stloc.Value)`)
+    IL::ILInstruction* stlocValue = stloc->Value.get();
+    if (auto* newObjInst = dynamic_cast<IL::Call*>(stlocValue);
+        newObjInst != nullptr && newObjInst->IsNewObj)
+    {
+        // The C# `newObjInst.Method.DeclaringType` -- the C# newobj always has
+        // a resolved method here (the null-method NPE maps to the port's loud
+        // failure, the TranslateSetterCallAssignment convention).
+        if (!newObjInst->Method)
+            throw std::logic_error(
+                "TranslateObjectAndCollectionInitializer: constructor call has no "
+                "resolved method");
+        initObjRR = std::make_shared<Sem::InitializedObjectResolveResult>(
+            newObjInst->Method->DeclaringType());
+        expr = CallBuilder(this, *compilation, settings).Build(*newObjInst);
+    }
+    else if (auto* defaultVal = dynamic_cast<IL::DefaultValue*>(stlocValue))
+    {
+        initObjRR = std::make_shared<Sem::InitializedObjectResolveResult>(
+            defaultVal->Type);
+        auto* oce = new Syntax::ObjectCreateExpression(ConvertType(*defaultVal->Type));
+        expr = WithRR(WithILInstruction(*oce, defaultVal),
+                      std::make_shared<Sem::TypeResolveResult>(defaultVal->Type));
+    }
+    else if (auto* callWithNamedArgs = dynamic_cast<IL::Block*>(stlocValue);
+             callWithNamedArgs != nullptr
+             && callWithNamedArgs->Kind == IL::BlockKind::CallWithNamedArgs)
+    {
+        expr = TranslateCallWithNamedArgs(*callWithNamedArgs);
+        initObjRR = std::make_shared<Sem::InitializedObjectResolveResult>(
+            const_cast<TS::IType&>(expr.Type()).shared_from_this());
+    }
+    else if (auto* c = dynamic_cast<IL::Call*>(stlocValue))
+    {
+        // The C# `c.Method.FullNameIs("System.Activator", "CreateInstance") &&
+        // c.Method.TypeArguments.Count == 1` (TypeSystemExtensions: the member
+        // name plus the declaring type's full name). A call that is not that
+        // method falls through to the default arm's exception, exactly like the
+        // C# `when` guard failing.
+        const std::vector<TS::ITypePtr> typeArguments =
+            c->Method ? c->Method->TypeArguments() : std::vector<TS::ITypePtr>{};
+        if (!c->Method || c->Method->Name() != "CreateInstance"
+            || !c->Method->DeclaringType()
+            || TypeFullNameOf(*c->Method->DeclaringType()) != "System.Activator"
+            || typeArguments.size() != 1)
+            throw std::invalid_argument("given Block is invalid!");
+        TS::ITypePtr type = typeArguments[0];
+        initObjRR = std::make_shared<Sem::InitializedObjectResolveResult>(type);
+        auto* oce = new Syntax::ObjectCreateExpression(ConvertType(*type));
+        expr = WithRR(WithILInstruction(*oce, c),
+                      std::make_shared<Sem::TypeResolveResult>(type));
+    }
+    else
+    {
+        throw std::invalid_argument("given Block is invalid!");
+    }
+    // The C# `(ObjectCreateExpression)expr.Expression` cast: every arm above
+    // renders an ObjectCreateExpression (the newobj arm through CallBuilder's
+    // constructor path); the C# cast's InvalidCastException for a non-matching
+    // render maps to the port's loud failure.
+    auto* oce = dynamic_cast<Syntax::ObjectCreateExpression*>(expr.Expression());
+    if (oce == nullptr)
+        throw std::logic_error(
+            "TranslateObjectAndCollectionInitializer: the construction did not "
+            "render an ObjectCreateExpression");
+    oce->Initializer(BuildArrayInitializerExpression(block, initObjRR));
+    return WithILInstruction(expr, &block);
+}
+
+// The C# `private ArrayInitializerExpression BuildArrayInitializerExpression(
+// Block block, InitializedObjectResolveResult initObjRR)` (ExpressionBuilder.cs
+// lines 3533-3623): the shared element-tree builder for the object/collection/
+// with initializers. Instructions[1..] are decomposed into access paths; the
+// common prefix with the previous path keeps the open element lists, the
+// finished deeper lists are folded into their parents through
+// MakeInitializerAssignment, and each instruction's tail renders as the Adder
+// (a CallBuilder collection-initializer call) or the Setter (a NamedExpression
+// assignment, or the C# 6 dictionary-initializer assignment through
+// CallBuilder). The C# `Stack<List<TranslatedExpression>>` ports to a vector
+// used as a stack (back/push_back/pop_back); the C#
+// `Dictionary<ILVariable, ILInstruction>` ports to a raw-pointer-keyed map
+// (the ILVariable reference-identity convention).
+Syntax::ArrayInitializerExpression* ExpressionBuilder::BuildArrayInitializerExpression(
+    IL::Block& block, std::shared_ptr<Sem::InitializedObjectResolveResult> initObjRR)
+{
+    std::vector<std::vector<TranslatedExpression>> elementsStack;
+    std::vector<TranslatedExpression> elements;
+    elements.reserve(block.Instructions.size());
+    elementsStack.push_back(std::move(elements));
+    std::vector<IL::AccessPathElement> currentPath;
+    bool hasCurrentPath = false;
+    // The C# `Dictionary.Add` throws on a duplicate key; the transform creates
+    // each index variable exactly once, so `emplace`'s keep-first behavior is
+    // unobservable.
+    std::unordered_map<IL::ILVariable*, IL::ILInstruction*> indexVariables;
+
+    for (std::size_t i = 1; i < block.Instructions.size(); ++i)
+    {
+        IL::ILInstruction* inst = block.Instructions[i].get();
+        // Collect indexer variables (for C# 6 dictionary initializers)
+        if (auto* indexStore = dynamic_cast<IL::StLoc*>(inst))
+        {
+            indexVariables.emplace(indexStore->Variable.get(),
+                                    indexStore->Value.get());
+            continue;
+        }
+        // Get current path
+        IL::AccessPathElement::Info info = IL::AccessPathElement::GetAccessPath(
+            inst, &initObjRR->Type(), settings);
+        // This should not happen, because the IL transform should not create
+        // invalid access paths, but we leave it here as sanity check.
+        if (info.Kind == IL::AccessPathKind::Invalid)
+            continue;
+        // Calculate "difference" to previous path
+        if (!hasCurrentPath)
+        {
+            currentPath = std::move(info.Path);
+            hasCurrentPath = true;
+        }
+        else
+        {
+            std::size_t minLen = std::min(currentPath.size(), info.Path.size());
+            std::size_t firstDifferenceIndex = 0;
+            while (firstDifferenceIndex < minLen
+                   && info.Path[firstDifferenceIndex] == currentPath[firstDifferenceIndex])
+                firstDifferenceIndex++;
+            while (elementsStack.size() - 1 > firstDifferenceIndex)
+            {
+                const IL::AccessPathElement& methodElement =
+                    currentPath[elementsStack.size() - 1];
+                const IL::AccessPathElement& pathElement =
+                    currentPath[elementsStack.size() - 2];
+                std::vector<TranslatedExpression> values =
+                    std::move(elementsStack.back());
+                elementsStack.pop_back();
+                elementsStack.back().push_back(MakeInitializerAssignment(
+                    initObjRR, methodElement, pathElement, std::move(values),
+                    indexVariables));
+            }
+            currentPath = std::move(info.Path);
+        }
+        // Fill the stack with empty expression lists
+        while (elementsStack.size() < currentPath.size())
+            elementsStack.emplace_back();
+        const IL::AccessPathElement& lastElement = currentPath.back();
+        auto memberRR =
+            std::make_shared<Sem::MemberResolveResult>(initObjRR, lastElement.Member);
+        switch (info.Kind)
+        {
+            case IL::AccessPathKind::Adder:
+            {
+                assert(dynamic_cast<const TS::IMethod*>(lastElement.Member) != nullptr);
+                elementsStack.back().push_back(WithILInstruction(
+                    CallBuilder(this, *compilation, settings)
+                        .BuildCollectionInitializerExpression(
+                            lastElement.ElementOpCode,
+                            *static_cast<const TS::IMethod*>(lastElement.Member),
+                            initObjRR, *info.Values),
+                    inst));
+                break;
+            }
+            case IL::AccessPathKind::Setter:
+            {
+                assert(dynamic_cast<const TS::IProperty*>(lastElement.Member) != nullptr
+                       || dynamic_cast<const TS::IField*>(lastElement.Member) != nullptr);
+                // The C# `lastElement.Indices?.Length is var indices and > 0` --
+                // a plain property accessor carries an EMPTY array, a field
+                // element carries null (the optional's nullopt).
+                if (lastElement.Indices.has_value() && !lastElement.Indices->empty())
+                {
+                    const TS::IProperty& property =
+                        *static_cast<const TS::IProperty*>(lastElement.Member);
+                    assert(property.Parameters().size() == lastElement.Indices->size());
+                    assert(property.Setter() != nullptr);
+                    elementsStack.back().push_back(WithILInstruction(
+                        CallBuilder(this, *compilation, settings)
+                            .BuildDictionaryInitializerExpression(
+                                lastElement.ElementOpCode, *property.Setter(),
+                                initObjRR,
+                                GetIndices(*lastElement.Indices, indexVariables),
+                                info.Values->front()),
+                        inst));
+                }
+                else
+                {
+                    // The C# `info.Values!.Single()` -- a Setter path always
+                    // carries exactly one value instruction.
+                    assert(info.Values.has_value() && info.Values->size() == 1);
+                    TS::IType& memberRRType = const_cast<TS::IType&>(memberRR->Type());
+                    TranslatedExpression value =
+                        Translate(info.Values->front(), &memberRRType)
+                            .ConvertTo(memberRRType, *this, /*checkForOverflow=*/false,
+                                       /*allowImplicitConversion=*/true);
+                    auto* assignment = new Syntax::NamedExpression(
+                        lastElement.Member->Name(), value.Expression());
+                    elementsStack.back().push_back(
+                        WithRR(WithILInstruction(*assignment, inst), memberRR));
+                }
+                break;
+            }
+            default:
+                // The C# switch has no Invalid arm (the kind was filtered
+                // above); nothing is added.
+                break;
+        }
+    }
+    while (elementsStack.size() > 1)
+    {
+        // The C# `currentPath!` -- a stack deeper than one element implies a
+        // path was recorded (only a valid path pushes lists).
+        assert(hasCurrentPath);
+        const IL::AccessPathElement& methodElement =
+            currentPath[elementsStack.size() - 1];
+        const IL::AccessPathElement& pathElement =
+            currentPath[elementsStack.size() - 2];
+        std::vector<TranslatedExpression> values = std::move(elementsStack.back());
+        elementsStack.pop_back();
+        elementsStack.back().push_back(MakeInitializerAssignment(
+            initObjRR, methodElement, pathElement, std::move(values), indexVariables));
+    }
+    // The C# `new ArrayInitializerExpression(elements.SelectArray(...))` over
+    // the bottom list (the fully-folded `elements` local).
+    auto* result = new Syntax::ArrayInitializerExpression();
+    for (const TranslatedExpression& e : elementsStack.back())
+        result->Elements().Add(e.Expression());
+    return result;
+}
+
+// The C# `IEnumerable<ILInstruction> GetIndices(IEnumerable<ILInstruction>
+// indices, Dictionary<ILVariable, ILInstruction> indexVariables)`
+// (ExpressionBuilder.cs lines 3625-3634): the C# 6 dictionary-initializer index
+// substitution -- an `ldloc` of a variable with an earlier index-store in the
+// block is replaced by that store's value; any other instruction passes
+// through unchanged.
+std::vector<IL::ILInstruction*> ExpressionBuilder::GetIndices(
+    const std::vector<IL::ILInstruction*>& indices,
+    const std::unordered_map<IL::ILVariable*, IL::ILInstruction*>& indexVariables)
+{
+    std::vector<IL::ILInstruction*> result;
+    result.reserve(indices.size());
+    for (IL::ILInstruction* inst : indices)
+    {
+        if (auto* ld = dynamic_cast<IL::LdLoc*>(inst))
+        {
+            auto it = indexVariables.find(ld->Variable.get());
+            if (it != indexVariables.end())
+            {
+                result.push_back(it->second);
+                continue;
+            }
+        }
+        result.push_back(inst);
+    }
+    return result;
+}
+
+// The C# `private TranslatedExpression MakeInitializerAssignment(
+// InitializedObjectResolveResult rr, IL.Transforms.AccessPathElement memberPath,
+// IL.Transforms.AccessPathElement valuePath, List<TranslatedExpression> values,
+// Dictionary<ILVariable, ILInstruction> indexVariables)` (ExpressionBuilder.cs
+// lines 3636-3669): the finished element-list fold. An `Add` path member wraps
+// the values in an ArrayInitializerExpression (the nested collection
+// initializer); a single plain value passes through unmodified; anything else
+// (multiple values, or a single already-named/assigned value) wraps in an
+// ArrayInitializerExpression. The result is named by the value path's member
+// (a NamedExpression) or, when the value path is an indexer, the indexed
+// AssignmentExpression with the substituted indices.
+TranslatedExpression ExpressionBuilder::MakeInitializerAssignment(
+    std::shared_ptr<Sem::InitializedObjectResolveResult> rr,
+    const IL::AccessPathElement& memberPath, const IL::AccessPathElement& valuePath,
+    std::vector<TranslatedExpression> values,
+    const std::unordered_map<IL::ILVariable*, IL::ILInstruction*>& indexVariables)
+{
+    auto wrapInInitializer = [&values]() {
+        auto* aie = new Syntax::ArrayInitializerExpression();
+        for (const TranslatedExpression& v : values)
+            aie->Elements().Add(v.Expression());
+        return WithoutILInstruction(
+            WithRR(*aie, std::make_shared<Sem::ResolveResult>(TS::UnknownType())));
+    };
+
+    TranslatedExpression value;
+    // The C# `memberPath.Member is IMethod method && method.Name == "Add"`.
+    const TS::IMethod* method = dynamic_cast<const TS::IMethod*>(memberPath.Member);
+    if (method != nullptr && method->Name() == "Add")
+    {
+        value = wrapInInitializer();
+    }
+    else if (values.size() == 1
+             && dynamic_cast<Syntax::AssignmentExpression*>(values[0].Expression())
+                    == nullptr
+             && dynamic_cast<Syntax::NamedExpression*>(values[0].Expression()) == nullptr)
+    {
+        value = values[0];
+    }
+    else
+    {
+        value = wrapInInitializer();
+    }
+    if (valuePath.Indices.has_value() && !valuePath.Indices->empty())
+    {
+        auto* index = new Syntax::IndexerExpression(nullptr);
+        for (IL::ILInstruction* i : GetIndices(*valuePath.Indices, indexVariables))
+            index->Arguments().Add(Translate(i).Expression());
+        auto* assignment =
+            new Syntax::AssignmentExpression(index, value.Expression());
+        return WithoutILInstruction(WithRR(
+            *assignment,
+            std::make_shared<Sem::MemberResolveResult>(rr, valuePath.Member)));
+    }
+    else
+    {
+        auto* named =
+            new Syntax::NamedExpression(valuePath.Member->Name(), value.Expression());
+        return WithoutILInstruction(WithRR(
+            *named,
+            std::make_shared<Sem::MemberResolveResult>(rr, valuePath.Member)));
+    }
+}
+
+// The C# `private TranslatedExpression TranslateWithInitializer(Block block)`
+// (ExpressionBuilder.cs lines 3841-3858). The block shape is the
+// `stloc v(<target expression>)` head into an InitializerTarget variable
+// whose FinalInstruction is the matching `ldloc v`, followed by the member
+// stores; the target expression becomes the WithInitializerExpression's
+// Expression and the stores are laid into its initializer through
+// BuildArrayInitializerExpression. A block that does not match the C# shape is
+// the ArgumentException (mapped to std::invalid_argument).
+TranslatedExpression ExpressionBuilder::TranslateWithInitializer(IL::Block& block)
+{
+    auto* stloc = block.Instructions.empty()
+                      ? nullptr
+                      : dynamic_cast<IL::StLoc*>(block.Instructions.front().get());
+    auto* final = dynamic_cast<IL::LdLoc*>(block.FinalInstruction.get());
+    if (stloc == nullptr || final == nullptr
+        || stloc->Variable.get() != final->Variable.get()
+        || stloc->Variable->Kind != IL::VariableKind::InitializerTarget)
+        throw std::invalid_argument("given Block is invalid!");
+
+    auto* withInitializerExpression = new Syntax::WithInitializerExpression();
+    withInitializerExpression->Expression(
+        Translate(stloc->Value.get(), stloc->Variable->Type.get()).Expression());
+    withInitializerExpression->Initializer(BuildArrayInitializerExpression(
+        block,
+        std::make_shared<Sem::InitializedObjectResolveResult>(
+            stloc->Variable->Type)));
+
+    return WithRR(WithILInstruction(*withInitializerExpression, &block),
                   std::make_shared<Sem::ResolveResult>(stloc->Variable->Type));
 }
 
