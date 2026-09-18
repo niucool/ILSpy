@@ -52,9 +52,10 @@
 // `for` initializer. The `foreach`-over-array rewrite (`TransformForeachOnArray`) also lands:
 // the compiler's `for (i = 0; i < array.Length; i++) { item = array[i]; ... }` index loop is
 // reconstructed as `foreach (item in array)` (also for a `string` looped by index), including
-// the `VariableCanBeUsedAsForeachLocal` gate. The inline-array and multidimensional-array
-// `foreach` rewrites, the automatic property/event rewrites, and the backing-field replacement
-// stay deferred -- each is named at the visit that would call it.
+// the `VariableCanBeUsedAsForeachLocal` gate. The multidimensional-array `foreach` rewrite
+// (`TransformForeachOnMultiDimArray`, the nested `GetUpperBound`/`GetLowerBound` index loops)
+// also lands. The inline-array `foreach` rewrite, the automatic property/event rewrites, and
+// the backing-field replacement stay deferred -- each is named at the visit that would call it.
 
 #pragma once
 
@@ -64,6 +65,8 @@
 #include "Decompiler/CSharp/Transforms/DeclareVariables.hpp"
 #include "Decompiler/CSharp/Transforms/IAstTransform.hpp"
 
+#include <vector>
+
 // Forward declarations of the node types the ported sub-transforms take and return. Their
 // definitions are pulled into the .cpp (the visitor overrides only need the pointer types).
 namespace ILSpy::Decompiler::CSharp::Syntax {
@@ -71,6 +74,7 @@ class DestructorDeclaration;
 class ExpressionStatement;
 class FixedStatement;
 class ForStatement;
+class IdentifierExpression;
 class IfElseStatement;
 class MethodDeclaration;
 class Statement;
@@ -90,10 +94,8 @@ namespace ILSpy::Decompiler::CSharp::Transforms {
 class PatternStatementTransform final : public ContextTrackingVisitor, public IAstTransform {
 public:
     // The C# `public void Run(AstNode rootNode, TransformContext context)`: rejects a
-    // reentrant run, seeds the context, and walks the tree. The C# also runs the
-    // `DeclareVariables` analysis here (and clears it afterwards); that analysis is not
-    // ported yet, so the port omits the analyze/clear pair (documented deferral -- it is
-    // only consumed by the deferred `for`/`foreach` sub-transforms).
+    // reentrant run, seeds the context, runs the `DeclareVariables` analysis, and walks the
+    // tree (clearing the analysis afterwards).
     void Run(Syntax::AstNode& rootNode, TransformContext& context) override;
 
     // The C# `public override AstNode VisitBinaryOperatorExpression(...)`: uses the
@@ -110,10 +112,10 @@ public:
         Syntax::UnaryOperatorExpression* expr) override;
 
     // The C# `public override AstNode VisitExpressionStatement(ExpressionStatement ...)`:
-    // rewrites `var = init; while (var <op> end) { ...; var = ...; }` into a `for` loop, and
-    // moves a preceding declaration assignment into an existing `for` initializer. The C#
-    // also runs `TransformForeachOnMultiDimArray` first; the multidimensional-array foreach
-    // rewrite is DEFERRED (named at its would-be call site).
+    // rewrites the compiler's multidimensional-array index loops back to `foreach`
+    // (`TransformForeachOnMultiDimArray`), then `var = init; while (var <op> end) { ...;
+    // var = ...; }` into a `for` loop, and moves a preceding declaration assignment into an
+    // existing `for` initializer.
     Syntax::AstNode* VisitExpressionStatement(
         Syntax::ExpressionStatement* expressionStatement) override;
 
@@ -186,6 +188,29 @@ private:
     // compiler's `for (i = 0; i < array.Length; i++) { item = array[i]; ... }` shape back to
     // `foreach (var item in array) { ... }`, or null when the shape does not match.
     Syntax::Statement* TransformForeachOnArray(Syntax::ForStatement* forStatement);
+
+    // The C# `Statement? TransformForeachOnMultiDimArray(ExpressionStatement ...)`: rewrites
+    // the compiler's nested `GetUpperBound`/`GetLowerBound` index loops over a
+    // multidimensional array back to `foreach (var item in array) { ... }`, or null when the
+    // shape does not match.
+    Syntax::Statement* TransformForeachOnMultiDimArray(
+        Syntax::ExpressionStatement* expressionStatement);
+
+    // The C# `bool MatchLowerBound(int indexNum, out ILVariable? index, ILVariable collection,
+    // Statement statement)`: matches `$variable = $collection.GetLowerBound($indexNum)`.
+    bool MatchLowerBound(int indexNum, IL::ILVariable*& index, IL::ILVariable* collection,
+                         Syntax::Statement* statement);
+
+    // The C# `bool MatchForeachOnMultiDimArray(ILVariable[] upperBounds, ILVariable collection,
+    // Statement firstInitializerStatement, out IdentifierExpression? foreachVariable, out
+    // IList<Statement>? statements, out ILVariable[] lowerBounds)`: walks the per-dimension
+    // lower-bound / `for` nests and captures the body statements and the element assignment.
+    bool MatchForeachOnMultiDimArray(const std::vector<IL::ILVariable*>& upperBounds,
+                                     IL::ILVariable* collection,
+                                     Syntax::Statement* firstInitializerStatement,
+                                     Syntax::IdentifierExpression*& foreachVariable,
+                                     std::vector<Syntax::Statement*>& statements,
+                                     std::vector<IL::ILVariable*>& lowerBounds);
 
     // The C# `bool VariableCanBeUsedAsForeachLocal(ILVariable? itemVar, Statement loop)`:
     // whether the item variable can become the `foreach` loop variable (a local/stack-slot

@@ -1329,3 +1329,236 @@ TEST(PatternStatementTransformTest, KeepsForLoopWhenConditionIsLessThanOrEqual)
     ASSERT_EQ(block->Statements().Count(), 1);
     EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
 }
+
+// ---- foreach over a multidimensional array -----------------------------------------
+
+namespace {
+
+// `$target = $collection.GetUpperBound/$GetLowerBound($dim);`.
+Syntax::ExpressionStatement* BoundCall(const char* method, const IL::ILVariablePtr& target,
+                                        const IL::ILVariablePtr& collection, int dim) {
+    auto* invocation = new Syntax::InvocationExpression(
+        new Syntax::MemberReferenceExpression(Use(collection), std::string(method)));
+    invocation->Arguments().Add(Int(dim));
+    return new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(target), invocation));
+}
+
+// `for (; $index <= $upper; $index = $index + 1) { $lowerBoundAssign; <rest> }` (no
+// initializer -- the index is already set by the preceding lower-bound assignment).
+Syntax::ForStatement* MultiDimFor(const IL::ILVariablePtr& index,
+                                  const IL::ILVariablePtr& upper,
+                                  Syntax::Statement* lowerBoundAssign,
+                                  std::initializer_list<Syntax::Statement*> rest = {}) {
+    auto* forStatement = new Syntax::ForStatement();
+    forStatement->Condition(new Syntax::BinaryOperatorExpression(
+        Use(index), Syntax::BinaryOperatorType::LessThanOrEqual, Use(upper)));
+    forStatement->Iterators().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            Use(index), Syntax::AssignmentOperatorType::Assign,
+            new Syntax::BinaryOperatorExpression(
+                Use(index), Syntax::BinaryOperatorType::Add, Int(1)))));
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(lowerBoundAssign);
+    for (Syntax::Statement* statement : rest)
+        body->Statements().Add(statement);
+    forStatement->EmbeddedStatement(body);
+    return forStatement;
+}
+
+// `$item = $collection[$index0, $index1, ...];`.
+Syntax::ExpressionStatement* ElementAssignment(
+    const IL::ILVariablePtr& item, const IL::ILVariablePtr& collection,
+    std::initializer_list<IL::ILVariablePtr> indices) {
+    auto* indexer = new Syntax::IndexerExpression(Use(collection));
+    for (const IL::ILVariablePtr& index : indices)
+        indexer->Arguments().Add(Use(index));
+    return new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(item), indexer));
+}
+
+// The compiler's rank-2 multidimensional index nest:
+//   $u0 = array.GetUpperBound(0);
+//   $u1 = array.GetUpperBound(1);
+//   $i0 = array.GetLowerBound(0);
+//   for (; $i0 <= $u0; $i0 = $i0 + 1) {
+//       $i1 = array.GetLowerBound(1);
+//       for (; $i1 <= $u1; $i1 = $i1 + 1) {
+//           $item = array[$i0, $i1];
+//           <bodyStatements>
+//       }
+//   }
+std::vector<Syntax::Statement*> MakeMultiDimNest(
+    const IL::ILVariablePtr& collection, const IL::ILVariablePtr& u0,
+    const IL::ILVariablePtr& u1, const IL::ILVariablePtr& i0, const IL::ILVariablePtr& i1,
+    const IL::ILVariablePtr& item,
+    std::initializer_list<Syntax::Statement*> bodyStatements = {},
+    int firstUpperBoundIndex = 0) {
+    auto* innerFor = MultiDimFor(
+        i1, u1, ElementAssignment(item, collection, {i0, i1}), bodyStatements);
+    auto* outerFor = MultiDimFor(i0, u0, BoundCall("GetLowerBound", i1, collection, 1),
+                                 {innerFor});
+    return {
+        BoundCall("GetUpperBound", u0, collection, firstUpperBoundIndex),
+        BoundCall("GetUpperBound", u1, collection, 1),
+        BoundCall("GetLowerBound", i0, collection, 0),
+        outerFor,
+    };
+}
+
+// The shared rank-2 setup (a rank-2 int array and one variable per bound/index/item role).
+struct MultiDimFixture {
+    IL::ILVariablePtr collection = Var("array");
+    IL::ILVariablePtr u0 = Var("u0");
+    IL::ILVariablePtr u1 = Var("u1");
+    IL::ILVariablePtr i0 = Var("i0");
+    IL::ILVariablePtr i1 = Var("i1");
+    IL::ILVariablePtr item = Var("item");
+
+    explicit MultiDimFixture(TransformFixture& fixture) {
+        collection->Type =
+            std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32), 2);
+        u0->StoreCount = 1;
+        u0->LoadCount = 1;
+        u1->StoreCount = 1;
+        u1->LoadCount = 1;
+        i0->StoreCount = 2;
+        i0->LoadCount = 3;
+        i1->StoreCount = 2;
+        i1->LoadCount = 3;
+        item->StoreCount = 1;
+    }
+
+    std::vector<Syntax::Statement*> Make(
+        std::initializer_list<Syntax::Statement*> bodyStatements = {},
+        int firstUpperBoundIndex = 0) {
+        return MakeMultiDimNest(collection, u0, u1, i0, i1, item, bodyStatements,
+                                firstUpperBoundIndex);
+    }
+};
+
+} // namespace
+
+// The nested `GetUpperBound`/`GetLowerBound` index loops over a rank-2 array become
+// `foreach (var item in array) { body; }`.
+TEST(PatternStatementTransformTest, TransformsMultiDimArrayForLoopToForeach)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    MultiDimFixture dim(fixture);
+    auto* bodyStatement = new Syntax::ExpressionStatement(Ref("Foo"));
+    std::vector<Syntax::Statement*> statements = dim.Make({bodyStatement});
+
+    auto* block = RunOnBlock(fixture, {statements[0], statements[1], statements[2],
+                                       statements[3]});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    auto* foreachStmt = dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]);
+    ASSERT_NE(foreachStmt, nullptr);
+    auto* inExpression = dynamic_cast<Syntax::IdentifierExpression*>(foreachStmt->InExpression());
+    ASSERT_NE(inExpression, nullptr);
+    EXPECT_EQ(inExpression->Identifier(), "array");
+    auto* designation =
+        dynamic_cast<Syntax::SingleVariableDesignation*>(foreachStmt->VariableDesignation());
+    ASSERT_NE(designation, nullptr);
+    EXPECT_EQ(designation->Identifier(), "item");
+    EXPECT_EQ(static_cast<int>(dim.item->Kind),
+              static_cast<int>(IL::VariableKind::ForeachLocal));
+    auto* newBody = dynamic_cast<Syntax::BlockStatement*>(foreachStmt->EmbeddedStatement());
+    ASSERT_NE(newBody, nullptr);
+    ASSERT_EQ(newBody->Statements().Count(), 1);
+    EXPECT_EQ(newBody->Statements()[0], static_cast<Syntax::Statement*>(bodyStatement));
+}
+
+// With `ForEachStatement` off the multidimensional index nest is left alone.
+TEST(PatternStatementTransformTest, KeepsMultiDimArrayNestWhenForEachSettingOff)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(false);
+    MultiDimFixture dim(fixture);
+    std::vector<Syntax::Statement*> statements = dim.Make();
+
+    auto* block = RunOnBlock(fixture, {statements[0], statements[1], statements[2],
+                                       statements[3]});
+
+    // The `TransformFor` declaration move may still fold `$i0 = ...` into the `for`
+    // initializer, but the multidim nest itself is not rewritten.
+    EXPECT_NE(block->Statements()[0], nullptr);
+    EXPECT_EQ(dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]), nullptr);
+}
+
+// The collection must be an array type; a scalar keeps the index nest.
+TEST(PatternStatementTransformTest, KeepsMultiDimArrayNestWhenCollectionIsNotArray)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    MultiDimFixture dim(fixture);
+    dim.collection->Type = fixture.FindType(TS::KnownTypeCode::Int32);
+    std::vector<Syntax::Statement*> statements = dim.Make();
+
+    auto* block = RunOnBlock(fixture, {statements[0], statements[1], statements[2],
+                                       statements[3]});
+
+    EXPECT_EQ(dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]), nullptr);
+}
+
+// The upper-bound initializations must be numbered from 0; a `GetUpperBound(1)` first keeps the
+// nest.
+TEST(PatternStatementTransformTest, KeepsMultiDimArrayNestWhenBoundIndexIsWrong)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    MultiDimFixture dim(fixture);
+    std::vector<Syntax::Statement*> statements = dim.Make({}, 1);
+
+    auto* block = RunOnBlock(fixture, {statements[0], statements[1], statements[2],
+                                       statements[3]});
+
+    EXPECT_EQ(dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]), nullptr);
+}
+
+// An upper-bound variable that is loaded more than once (so not a pure bound) keeps the nest.
+TEST(PatternStatementTransformTest, KeepsMultiDimArrayNestWhenUpperBoundNotSingleLoad)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    MultiDimFixture dim(fixture);
+    dim.u0->LoadCount = 2;
+    std::vector<Syntax::Statement*> statements = dim.Make();
+
+    auto* block = RunOnBlock(fixture, {statements[0], statements[1], statements[2],
+                                       statements[3]});
+
+    EXPECT_EQ(dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]), nullptr);
+}
+
+// An index variable that is not a pure counter (stored twice, loaded three times, never
+// addressed) keeps the nest.
+TEST(PatternStatementTransformTest, KeepsMultiDimArrayNestWhenIndexCountsDiffer)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    MultiDimFixture dim(fixture);
+    dim.i0->StoreCount = 3;
+    std::vector<Syntax::Statement*> statements = dim.Make();
+
+    auto* block = RunOnBlock(fixture, {statements[0], statements[1], statements[2],
+                                       statements[3]});
+
+    EXPECT_EQ(dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]), nullptr);
+}
+
+// An item variable that is not single-definition cannot become the foreach local.
+TEST(PatternStatementTransformTest, KeepsMultiDimArrayNestWhenItemNotSingleDefinition)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    MultiDimFixture dim(fixture);
+    dim.item->StoreCount = 2;
+    std::vector<Syntax::Statement*> statements = dim.Make();
+
+    auto* block = RunOnBlock(fixture, {statements[0], statements[1], statements[2],
+                                       statements[3]});
+
+    EXPECT_EQ(dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]), nullptr);
+}

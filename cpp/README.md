@@ -5448,12 +5448,26 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   matched body is moved into a `ForeachStatement` whose variable designation carries the item
   variable's `ILVariableResolveResult` and whose item variable becomes a `ForeachLocal`. The
   address-taken item path (`AddressUsedForSingleCall`) is DEFERRED (no `IL.Call` node and no
-  per-variable address-instruction list yet), as are the inline-array and multidimensional-array
-  `foreach` rewrites. Verified by 9 tests (the array and `string` rewrites, plus the
+  per-variable address-instruction list yet), as is the inline-array `foreach` rewrite. Verified
+  by 9 tests (the array and `string` rewrites, plus the
   settings-off / wrong-index-profile / non-single-definition item / non-array-or-string
   collection / parameter item / captured item / `<=` condition keeps) proven with a
   `TransformForeachOnArray`-neuter RED round (exactly the 2 positive tests failed, the 7
   keep-tests staying green).
+- **`PatternStatementTransform` `foreach`-over-multidimensional-array rewrite** -- the next
+  slice adds `TransformForeachOnMultiDimArray` plus `MatchLowerBound` / `MatchForeachOnMultiDimArray`:
+  the compiler's nested `$u = array.GetUpperBound(dim)` / `$i = array.GetLowerBound(dim)` /
+  `for (; $i <= $u; $i = $i + 1)` / `$item = array[$i0, $i1, ...]` nest over a rank-N array is
+  reconstructed as `foreach (var item in array)`, gated on `ForEachStatement`, an array-typed
+  collection, sequential bound indices from 0, single-definition/single-load upper bounds, the
+  index-counter profile, and the `VariableCanBeUsedAsForeachLocal`/single-definition item
+  checks. The `int.TryParse(Value.ToString())` bound-index read ports as an invariant
+  integer-alternative render plus `std::from_chars`. Verified by 7 tests (the rank-2 rewrite
+  plus the settings-off / non-array collection / wrong bound index / multi-load upper bound /
+  wrong index profile / non-single-definition item keeps) proven with a
+  `TransformForeachOnMultiDimArray`-neuter RED round (exactly the 1 positive test failed, the 6
+  keep-tests staying green). The inline-array `foreach` rewrite, the automatic
+  property/event rewrites, and the backing-field replacement stay deferred.
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

@@ -57,8 +57,12 @@
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
+#include <charconv>
 #include <memory>
+#include <optional>
 #include <stdexcept>
+#include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -118,6 +122,116 @@ public:
 private:
     std::vector<std::unique_ptr<PM::INode>> nodes_;
 };
+
+// The C# `int.TryParse(index.Value?.ToString() ?? "", out int index)` on the captured
+// `GetUpperBound`/`GetLowerBound` argument. The port's `PrimitiveValue` has no `ToString`; the
+// integer alternatives (and a string literal, whose `ToString` is itself) are rendered
+// invariantly and parsed back. Every other alternative (null/bool/char/floating/decimal)
+// renders to text that is not a valid `int`, so it does not parse -- the same outcome as the
+// C# `TryParse`.
+std::optional<int> TryParsePrimitiveAsInt(const Syntax::PrimitiveValue& value) {
+    std::string text;
+    if (auto* v = std::get_if<std::int32_t>(&value))
+        text = std::to_string(*v);
+    else if (auto* v = std::get_if<std::uint32_t>(&value))
+        text = std::to_string(*v);
+    else if (auto* v = std::get_if<std::int64_t>(&value))
+        text = std::to_string(*v);
+    else if (auto* v = std::get_if<std::uint64_t>(&value))
+        text = std::to_string(*v);
+    else if (auto* v = std::get_if<std::string>(&value))
+        text = *v;
+    else
+        return std::nullopt;
+    if (text.empty())
+        return std::nullopt;
+    int result = 0;
+    auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), result);
+    if (error != std::errc() || end != text.data() + text.size())
+        return std::nullopt;
+    return result;
+}
+
+// The C# `static readonly AstNode variableAssignUpperBoundPattern`:
+// `$variable = $collection.GetUpperBound($index);`. Built into `tree` each call.
+Syntax::ExpressionStatement* BuildVariableAssignUpperBoundPattern(PatternTree& tree) {
+    auto* memberReference = tree.Make<Syntax::MemberReferenceExpression>(
+        tree.Wrap<Syntax::Expression>(std::make_shared<PM::NamedNode>("collection",
+            tree.Make<Syntax::IdentifierExpression>(std::string(PM::Pattern::AnyString)))),
+        std::string("GetUpperBound"));
+    auto* invocation = tree.Make<Syntax::InvocationExpression>(memberReference);
+    invocation->Arguments().Add(tree.Wrap<Syntax::Expression>(std::make_shared<PM::NamedNode>(
+        "index", tree.Make<Syntax::PrimitiveExpression>(Syntax::PrimitiveExpression::AnyValue()))));
+    auto* assign = tree.Make<Syntax::AssignmentExpression>(
+        tree.Wrap<Syntax::Expression>(std::make_shared<PM::NamedNode>("variable",
+            tree.Make<Syntax::IdentifierExpression>(std::string(PM::Pattern::AnyString)))),
+        invocation);
+    return tree.Make<Syntax::ExpressionStatement>(assign);
+}
+
+// The C# `static readonly ExpressionStatement variableAssignLowerBoundPattern`:
+// `$variable = $collection.GetLowerBound($index);`. Built into `tree` each call.
+Syntax::ExpressionStatement* BuildVariableAssignLowerBoundPattern(PatternTree& tree) {
+    auto* memberReference = tree.Make<Syntax::MemberReferenceExpression>(
+        tree.Wrap<Syntax::Expression>(std::make_shared<PM::NamedNode>("collection",
+            tree.Make<Syntax::IdentifierExpression>(std::string(PM::Pattern::AnyString)))),
+        std::string("GetLowerBound"));
+    auto* invocation = tree.Make<Syntax::InvocationExpression>(memberReference);
+    invocation->Arguments().Add(tree.Wrap<Syntax::Expression>(std::make_shared<PM::NamedNode>(
+        "index", tree.Make<Syntax::PrimitiveExpression>(Syntax::PrimitiveExpression::AnyValue()))));
+    auto* assign = tree.Make<Syntax::AssignmentExpression>(
+        tree.Wrap<Syntax::Expression>(std::make_shared<PM::NamedNode>("variable",
+            tree.Make<Syntax::IdentifierExpression>(std::string(PM::Pattern::AnyString)))),
+        invocation);
+    return tree.Make<Syntax::ExpressionStatement>(assign);
+}
+
+// The C# `static readonly ForStatement forOnArrayMultiDimPattern`: a lower-bound-initialized
+// `for` loop `for ($i = <lowerBoundAssign's index>; $i <= $upperBoundVariable; $i++) { ... }`
+// whose body starts with `$lowerBoundAssign` (the next dimension's lower bound, or the element
+// assignment for the innermost dimension). Built into `tree` each call.
+Syntax::ForStatement* BuildForOnArrayMultiDimPattern(PatternTree& tree) {
+    auto* pattern = tree.Make<Syntax::ForStatement>();
+    auto* condition = tree.Make<Syntax::BinaryOperatorExpression>(
+        tree.Wrap<Syntax::Expression>(std::make_shared<PM::NamedNode>("indexVariable",
+            tree.Make<Syntax::IdentifierExpression>(std::string(PM::Pattern::AnyString)))),
+        Syntax::BinaryOperatorType::LessThanOrEqual,
+        tree.Wrap<Syntax::Expression>(std::make_shared<PM::NamedNode>("upperBoundVariable",
+            tree.Make<Syntax::IdentifierExpression>(std::string(PM::Pattern::AnyString)))));
+    pattern->Condition(condition);
+    auto* iterRight = tree.Make<Syntax::BinaryOperatorExpression>(
+        tree.Wrap<Syntax::Expression>(
+            std::make_shared<PM::IdentifierExpressionBackreference>("indexVariable")),
+        Syntax::BinaryOperatorType::Add,
+        tree.Make<Syntax::PrimitiveExpression>(Syntax::PrimitiveValue(std::int32_t(1))));
+    pattern->Iterators().Add(tree.Make<Syntax::ExpressionStatement>(tree.Make<Syntax::AssignmentExpression>(
+        tree.Wrap<Syntax::Expression>(
+            std::make_shared<PM::IdentifierExpressionBackreference>("indexVariable")),
+        iterRight)));
+    auto* bodyBlock = tree.Make<Syntax::BlockStatement>();
+    bodyBlock->Statements().Add(
+        tree.Wrap<Syntax::Statement>(std::make_shared<PM::AnyNode>("lowerBoundAssign")));
+    bodyBlock->Statements().Add(tree.Wrap<Syntax::Statement>(
+        std::make_shared<PM::Repeat>(tree.Make<PM::AnyNode>("statements"))));
+    pattern->EmbeddedStatement(bodyBlock);
+    return pattern;
+}
+
+// The C# `static readonly ExpressionStatement foreachVariableOnMultArrayAssignPattern`:
+// `$variable = $collection[$index1, $index2, ...];`. Built into `tree` each call.
+Syntax::ExpressionStatement* BuildForeachVariableOnMultArrayAssignPattern(PatternTree& tree) {
+    auto* indexer = tree.Make<Syntax::IndexerExpression>(
+        tree.Wrap<Syntax::Expression>(std::make_shared<PM::NamedNode>("collection",
+            tree.Make<Syntax::IdentifierExpression>(std::string(PM::Pattern::AnyString)))));
+    indexer->Arguments().Add(tree.Wrap<Syntax::Expression>(std::make_shared<PM::Repeat>(
+        tree.Make<PM::NamedNode>("index",
+            tree.Make<Syntax::IdentifierExpression>(std::string(PM::Pattern::AnyString))))));
+    auto* assign = tree.Make<Syntax::AssignmentExpression>(
+        tree.Wrap<Syntax::Expression>(std::make_shared<PM::NamedNode>("variable",
+            tree.Make<Syntax::IdentifierExpression>(std::string(PM::Pattern::AnyString)))),
+        indexer);
+    return tree.Make<Syntax::ExpressionStatement>(assign);
+}
 
 // The C# `static readonly BlockStatement destructorBodyPattern` -- the shared body shape
 // `try { <body> } finally { base.Finalize(); }`. Built into `tree` each call.
@@ -245,9 +359,10 @@ AstNode* PatternStatementTransform::VisitUnaryOperatorExpression(
 
 AstNode* PatternStatementTransform::VisitExpressionStatement(
     ExpressionStatement* expressionStatement) {
-    // The C# runs `TransformForeachOnMultiDimArray(expressionStatement)` first; the
-    // multidimensional-array foreach rewrite is DEFERRED (named at its would-be call site),
-    // so the port goes straight to TransformFor.
+    // The C# `AstNode? result = TransformForeachOnMultiDimArray(expressionStatement); if
+    // (result != null) return result;`.
+    if (Statement* result = TransformForeachOnMultiDimArray(expressionStatement))
+        return result;
     if (ForStatement* forStatement = TransformFor(expressionStatement))
         return forStatement;
     return Syntax::DepthFirstAstVisitorAstNode::VisitExpressionStatement(expressionStatement);
@@ -467,6 +582,187 @@ Statement* PatternStatementTransform::TransformForeachOnArray(ForStatement* forS
     forStatement->ReplaceWith(foreachStmt);
     context_->EndStep(foreachStmt);
     return foreachStmt;
+}
+
+// The C# `Statement? TransformForeachOnMultiDimArray(ExpressionStatement expressionStatement)`:
+// reconstructs a `foreach` over a multidimensional array from the compiler's nested
+// `GetUpperBound`/`GetLowerBound` index loops. The C# runs this before `TransformFor` on every
+// expression statement; it returns null unless the whole nest matches.
+Statement* PatternStatementTransform::TransformForeachOnMultiDimArray(
+    ExpressionStatement* expressionStatement) {
+    if (!context_->Settings().ForEachStatement())
+        return nullptr;
+    PM::Match m;
+    Statement* stmt = expressionStatement;
+    IL::ILVariable* collection = nullptr;
+    std::vector<IL::ILVariable*> upperBounds;
+    bool haveUpperBounds = false;
+    std::vector<Statement*> statementsToDelete;
+    int i = 0;
+    // First look for all the upper-bound initializations.
+    do {
+        {
+            PatternTree tree;
+            auto* pattern = BuildVariableAssignUpperBoundPattern(tree);
+            m = PM::PatternExtensions::Match(*pattern, stmt);
+        }
+        if (!m.Success())
+            break;
+        if (!haveUpperBounds) {
+            collection = GetILVariable(*m.Get<IdentifierExpression>("collection").front());
+            auto* arrayType = collection != nullptr
+                ? dynamic_cast<TS::ArrayType*>(collection->Type.get()) : nullptr;
+            if (arrayType == nullptr)
+                break;
+            upperBounds.assign(arrayType->Rank(), nullptr);
+            haveUpperBounds = true;
+        } else {
+            statementsToDelete.push_back(stmt);
+        }
+        IL::ILVariable* nextCollection =
+            GetILVariable(*m.Get<IdentifierExpression>("collection").front());
+        if (nextCollection != collection)
+            break;
+        std::optional<int> index = TryParsePrimitiveAsInt(
+            m.Get<PrimitiveExpression>("index").front()->Value());
+        if (!index.has_value() || *index != i)
+            break;
+        upperBounds[i] = GetILVariable(*m.Get<IdentifierExpression>("variable").front());
+        stmt = Syntax::GetNextStatement(stmt);
+        i++;
+    } while (stmt != nullptr && haveUpperBounds
+             && i < static_cast<int>(upperBounds.size()));
+
+    // The C# `upperBounds?.LastOrDefault() == null` guard: the loop must have filled the
+    // whole dimension array.
+    if (upperBounds.empty() || upperBounds.back() == nullptr || collection == nullptr
+        || stmt == nullptr) {
+        return nullptr;
+    }
+    IdentifierExpression* foreachVariable = nullptr;
+    std::vector<Statement*> statements;
+    std::vector<IL::ILVariable*> lowerBounds;
+    if (!MatchForeachOnMultiDimArray(upperBounds, collection, stmt, foreachVariable, statements,
+                                    lowerBounds)) {
+        return nullptr;
+    }
+    statementsToDelete.push_back(stmt);
+    // The matched multidimensional foreach pattern guarantees a statement after stmt.
+    statementsToDelete.push_back(Syntax::GetNextStatement(stmt));
+    IL::ILVariable* itemVariable = GetILVariable(*foreachVariable);
+    if (itemVariable == nullptr || !itemVariable->IsSingleDefinition()
+        || (itemVariable->Kind != IL::VariableKind::Local
+            && itemVariable->Kind != IL::VariableKind::StackSlot)) {
+        return nullptr;
+    }
+    for (IL::ILVariable* upperBound : upperBounds) {
+        if (upperBound == nullptr || !upperBound->IsSingleDefinition()
+            || upperBound->LoadCount != 1) {
+            return nullptr;
+        }
+    }
+    // The index counters are pure counters: stored at init + increment, loaded at the
+    // condition, the increment, and the element access; never captured by address.
+    for (IL::ILVariable* lowerBound : lowerBounds) {
+        if (lowerBound == nullptr || lowerBound->StoreCount != 2 || lowerBound->LoadCount != 3
+            || lowerBound->AddressCount != 0) {
+            return nullptr;
+        }
+    }
+    context_->Step("Introduce foreach over multidimensional array", expressionStatement);
+    auto* body = new Syntax::BlockStatement();
+    for (Statement* statement : statements)
+        body->Statements().Add(Syntax::Detach(statement));
+    auto* foreachStmt = new ForeachStatement();
+    foreachStmt->VariableType(
+        context_->Settings().AnonymousTypes() && itemVariable->Type != nullptr
+                && ::ILSpy::Decompiler::ContainsAnonymousType(*itemVariable->Type)
+            ? static_cast<Syntax::AstType*>(new Syntax::SimpleType(std::string("var")))
+            : context_->TypeSystemAstBuilder().ConvertType(*itemVariable->Type));
+    auto* designation = new Syntax::SingleVariableDesignation(itemVariable->Name);
+    foreachStmt->VariableDesignation(designation);
+    foreachStmt->InExpression(
+        Syntax::Detach(m.Get<IdentifierExpression>("collection").front()));
+    foreachStmt->EmbeddedStatement(body);
+    for (Statement* statement : statementsToDelete)
+        statement->Remove();
+    // foreachStmt.CopyAnnotationsFrom(forStatement); is intentionally commented out in C#.
+    itemVariable->Kind = IL::VariableKind::ForeachLocal;
+    // Add the variable annotation for highlighting (the C# attaches it to the
+    // `VariableDesignation` rather than the loop).
+    const auto* itemResolveResult = foreachVariable->Annotation<ILVariableResolveResult>();
+    designation->AddAnnotation(std::make_shared<ILVariableResolveResult>(
+        itemResolveResult->VariableHandle(), itemVariable->Type));
+    // TODO : add ForeachAnnotation
+    expressionStatement->ReplaceWith(foreachStmt);
+    context_->EndStep(foreachStmt);
+    return foreachStmt;
+}
+
+bool PatternStatementTransform::MatchLowerBound(int indexNum, IL::ILVariable*& index,
+                                                IL::ILVariable* collection,
+                                                Statement* statement) {
+    index = nullptr;
+    PatternTree tree;
+    auto* pattern = BuildVariableAssignLowerBoundPattern(tree);
+    PM::Match m = PM::PatternExtensions::Match(*pattern, statement);
+    if (!m.Success())
+        return false;
+    std::optional<int> i =
+        TryParsePrimitiveAsInt(m.Get<PrimitiveExpression>("index").front()->Value());
+    if (!i.has_value() || indexNum != *i)
+        return false;
+    index = GetILVariable(*m.Get<IdentifierExpression>("variable").front());
+    return GetILVariable(*m.Get<IdentifierExpression>("collection").front()) == collection;
+}
+
+bool PatternStatementTransform::MatchForeachOnMultiDimArray(
+    const std::vector<IL::ILVariable*>& upperBounds, IL::ILVariable* collection,
+    Statement* firstInitializerStatement, IdentifierExpression*& foreachVariable,
+    std::vector<Statement*>& statements, std::vector<IL::ILVariable*>& lowerBounds) {
+    int i = 0;
+    foreachVariable = nullptr;
+    lowerBounds.assign(upperBounds.size(), nullptr);
+    Statement* stmt = firstInitializerStatement;
+    PM::Match m;
+    while (i < static_cast<int>(upperBounds.size())) {
+        IL::ILVariable* indexVariable = nullptr;
+        if (!MatchLowerBound(i, indexVariable, collection, stmt))
+            break;
+        {
+            PatternTree tree;
+            auto* pattern = BuildForOnArrayMultiDimPattern(tree);
+            m = PM::PatternExtensions::Match(*pattern, Syntax::GetNextStatement(stmt));
+        }
+        if (!m.Success())
+            return false;
+        IL::ILVariable* upperBound =
+            GetILVariable(*m.Get<IdentifierExpression>("upperBoundVariable").front());
+        if (upperBounds[i] != upperBound)
+            return false;
+        stmt = m.Get<Statement>("lowerBoundAssign").front();
+        lowerBounds[i] = indexVariable;
+        i++;
+    }
+    // The C# would dereference a default `Match` here when no dimension matched; the guard
+    // turns that latent failure into the same "no rewrite" result.
+    if (!m.Success())
+        return false;
+    if (collection->Type == nullptr || collection->Type->Kind() != TS::TypeKind::Array)
+        return false;
+    {
+        PatternTree tree;
+        auto* pattern = BuildForeachVariableOnMultArrayAssignPattern(tree);
+        PM::Match m2 = PM::PatternExtensions::Match(*pattern, stmt);
+        if (!m2.Success())
+            return false;
+        if (GetILVariable(*m2.Get<IdentifierExpression>("collection").front()) != collection)
+            return false;
+        foreachVariable = m2.Get<IdentifierExpression>("variable").front();
+    }
+    for (Statement* statement : m.Get<Statement>("statements"))
+        statements.push_back(statement);
+    return true;
 }
 
 bool PatternStatementTransform::VariableCanBeUsedAsForeachLocal(IL::ILVariable* itemVar,
