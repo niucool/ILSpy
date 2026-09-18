@@ -5749,6 +5749,26 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   12941 ran / 12939 passed / the 2 standing skips / zero failures, and all three
   CLI baselines are unchanged (`--csharp` 10106360, `--il` 41246545, `-l c`
   109438 bytes).
+- **`MetadataTypeParameter` attribute/constraint surface** -- the three deferred
+  members of the GenericParam-backed type parameter land over the already-ported
+  `AttributeListBuilder` / `CustomAttributeDecoder` / `MetadataModule.ResolveType`:
+  `GetAttributes` builds the row's custom-attribute list (the
+  `SymbolKind.TypeParameter` target, cached), `NullabilityConstraint` decodes the
+  row's `[Nullable]` byte behind `ShouldDecodeNullableAttributes` with the
+  MetadataMethod / ITypeDefinition `NullableContext` fallback, and
+  `TypeConstraints` composes each GenericParamConstraint row's resolved type
+  (with its own attribute rows) plus the ValueType / Object tail, keeping the
+  owning attribute rows alive for the non-owning `TypeConstraint` snapshots.
+  The `AbstractTypeParameter` `DirectBaseTypes` / `EffectiveBaseClass` /
+  `EffectiveInterfaceSet` projection now reads real constraints. Verified by a
+  new 8-test `MetadataTypeParameterTest` (mscorlib's empty attribute lists and
+  Oblivious fallback, CoreLib's `DynamicallyAccessedMembers` attribute and
+  `[Nullable(2)]` decode, the ValueType / Object tails, the interface-only
+  constraint's Object tail, and the Constraint caching) plus the updated
+  `MetadataTypeDefinitionTest.DeferralContracts`, with a 4/7-positive RED
+  round. The full Debug gtest suite is 12949 ran / 12947
+  passed / the 2 standing skips / zero failures, and the CLI baselines are
+  unchanged (`--csharp` 10106360, `--il` 41246545, `-l c` 109438 bytes).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

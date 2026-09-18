@@ -25,7 +25,9 @@
 // over the raw row, the variance mapping, and the raw-flag constraint
 // predicates) plus `HasUnmanagedConstraint` (the option-gated
 // `HasKnownAttribute` scan the iteration-65 SRMExtensions predicate family
-// backs) and the `Equals` / `GetHashCode` / `ToString` trio.
+// backs), the custom-attribute surface (`GetAttributes`, `NullabilityConstraint`,
+// `TypeConstraints` -- convention (d)), and the `Equals` / `GetHashCode` /
+// `ToString` trio.
 //
 // KEY PORT CONVENTIONS:
 //  (a) The C# `ITypeParameter[] Create(...)` factories return ARRAYS the
@@ -50,25 +52,32 @@
 //      option gate runs FIRST (the C# returns false without scanning when
 //      `UnmanagedConstraints` is off), then the `HasKnownAttribute` scan
 //      over the GenericParam row's own CustomAttribute rows.
-//  (d) DEFERRED from the C# file (each a loud `std::logic_error` naming the
-//      gating machinery): `GetAttributes` (the `AttributeListBuilder` +
-//      custom-attribute value decoder), `NullabilityConstraint` (the
-//      `ShouldDecodeNullableAttributes` / `[Nullable]` byte decode -- the
-//      module's `minAccessibilityForNRT` computation and the
-//      CustomAttributeDecoder), and `TypeConstraints` (`module.ResolveType`
-//      -- the `TypeProvider` itself LANDED with the
-//      signature-provider slice, so the gate is now the `ResolveType` +
-//      `ApplyAttributeTypeVisitor` composition). The C#'s `DirectBaseTypes` /
-//      `EffectiveBaseClass` / `EffectiveInterfaceSet` inherited machinery
-//      reads `TypeConstraints`, so those inherit the deferral through the
-//      base class unchanged.
+//  (d) The custom-attribute value surface: `GetAttributes` builds the
+//      `IAttribute` list through the ported `AttributeListBuilder`
+//      (`Add(handle, SymbolKind.TypeParameter)`), `NullabilityConstraint`
+//      decodes the row's `[Nullable]` byte through the ported
+//      `CustomAttributeDecoder` behind `ShouldDecodeNullableAttributes` (with
+//      the MetadataMethod / ITypeDefinition `NullableContext` fallback), and
+//      `TypeConstraints` composes `module.ResolveType` (the TypeProvider /
+//      `ApplyAttributeTypeVisitor` composition) with the per-constraint
+//      `AttributeListBuilder(SymbolKind.Constraint)` rows and the
+//      ValueType / Object tail the C# appends. Each caches its result (the
+//      C# rebuilds per call for the attribute list); `TypeConstraints`
+//      keeps the owning `shared_ptr` attribute rows alive for the
+//      non-owning `TypeConstraint::Attributes()` snapshot. The C#'s
+//      `DirectBaseTypes` / `EffectiveBaseClass` / `EffectiveInterfaceSet`
+//      inherited machinery reads `TypeConstraints`, so those now work
+//      through the base class unchanged.
 
 #pragma once
 
+#include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/Implementation/AbstractTypeParameter.hpp"
+#include "Decompiler/TypeSystem/TypeConstraint.hpp"
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -135,7 +144,10 @@ public:
 
     // --- ITypeParameter ---
 
-    // DEFERRED (convention (d)): the AttributeListBuilder attribute snapshot.
+    // The C# `public override IEnumerable<IAttribute> GetAttributes()`: the
+    // row's custom-attribute rows through `AttributeListBuilder` (the
+    // `SymbolKind.TypeParameter` target). Cached where the C# rebuilds per
+    // call (the divergence documented at the cache members).
     std::vector<const IAttribute*> GetAttributes() const override;
 
     // The C# raw-flag predicates over the GenericParam Attributes column
@@ -161,12 +173,18 @@ public:
     // MetadataFile surface).
     bool HasUnmanagedConstraint() const override;
 
-    // DEFERRED (convention (d)): the [Nullable] byte decode behind
-    // `ShouldDecodeNullableAttributes`.
+    // The C# `public override Nullability NullabilityConstraint`: the row's
+    // own `[Nullable]` byte (behind the `ShouldDecodeNullableAttributes`
+    // gate) with the MetadataMethod / ITypeDefinition `NullableContext`
+    // fallback. Cached in `nullabilityConstraint_` behind the loaded flag.
     ::ILSpy::Decompiler::TypeSystem::Nullability NullabilityConstraint()
         const override;
 
-    // DEFERRED (convention (d)): the `module.ResolveType` constraint decode.
+    // The C# `public override IReadOnlyList<TypeConstraint> TypeConstraints`:
+    // each GenericParamConstraint row resolved through `module.ResolveType`
+    // (with the row's attributes), then the ValueType / Object tail. Cached
+    // in `typeConstraints_` (the owning attribute rows in
+    // `constraintAttributes_`).
     std::vector<TypeConstraint> TypeConstraints() const override;
 
 protected:
@@ -190,6 +208,12 @@ private:
     // GenericParameterAttributes attr)` -- the VarianceMask (0x3) switch.
     static VarianceModifier GetVariance(std::uint16_t attr);
 
+    // The C# `private Nullability LoadNullabilityConstraint()` -- the
+    // `[Nullable]` byte decode behind `ShouldDecodeNullableAttributes`, with
+    // the MetadataMethod / ITypeDefinition `NullableContext` fallback.
+    ::ILSpy::Decompiler::TypeSystem::Nullability LoadNullabilityConstraint()
+        const;
+
     const MetadataModule& module_;
     std::uint32_t handle_;  // the raw 0x2A...... token
     std::uint16_t attr_;    // the raw GenericParam Attributes column
@@ -197,6 +221,25 @@ private:
     // The C# `byte unmanagedConstraint = ThreeState.Unknown;` (False=0 /
     // True=1 / Unknown=2; convention (c)).
     mutable std::uint8_t unmanagedConstraint_ = 2;
+
+    // The custom-attribute list cache (the C# rebuilds per call; this port
+    // caches -- the MetadataMethod attributeList_ convention). `GetAttributes`
+    // projects it as raw pointers.
+    mutable std::vector<std::shared_ptr<IAttribute>> attributeList_;
+    mutable bool attributeListLoaded_ = false;
+
+    // The C# `Nullable nullabilityConstraint = nullabilityNotYetLoaded;`
+    // (a byte sentinel; the port uses the explicit loaded flag).
+    mutable ::ILSpy::Decompiler::TypeSystem::Nullability nullabilityConstraint_ =
+        ::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious;
+    mutable bool nullabilityConstraintLoaded_ = false;
+
+    // The C# `IReadOnlyList<TypeConstraint> constraints` (LazyInit). The
+    // vector is cached and `constraintAttributes_` owns the attribute rows
+    // the non-owning TypeConstraint snapshots reference.
+    mutable std::vector<TypeConstraint> typeConstraints_;
+    mutable bool typeConstraintsLoaded_ = false;
+    mutable std::vector<std::shared_ptr<IAttribute>> constraintAttributes_;
 };
 
 } // namespace ILSpy::Decompiler::TypeSystem::Implementation
