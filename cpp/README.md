@@ -5381,6 +5381,23 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   the 4 positive tests failed, the 12 negative/utility tests staying green), and wired
   into both CMakeLists; it has no call site in the seed pipeline, so the CLI baselines
   are unchanged.
+- **`TransformFieldAndConstructorInitializers`** -- the analysis and mutation phases land in
+  `Transforms/TransformFieldAndConstructorInitializers.{hpp,cpp}`: the this/base-ctor-call
+  patterns (`this..ctor(...)`, `base..ctor(...)`, the cast-wrapped target, and the value-type
+  `this = new TSelf(...)`), the leading-member-assignment pattern, `IsGeneratedPrimaryConstructorBackingField`,
+  the `InitializerSequence` analysis (`Analyze` / `IsMatch` / `CanHaveInitializer`, with the
+  `CoversFullBody` and duplicate-assignment tracking), the `ConstructorInitializerAnalyzer`
+  (constructor classification, `IsBeforeFieldInit`, the static/instance sequence extraction,
+  `MoveConstructorInitializer` moving arguments into a `: this(...)`/`: base(...)` initializer,
+  `MoveFieldInitializersToDeclarations`, and the implicit/empty-static-constructor removal), and
+  `Run`/`TransformDeclaration`. Landed the previously deferred `PropertyDeclaration.IsAutomaticProperty`
+  helper. Deferred at named call sites: the record support (`RecordDecompiler`),
+  the non-record primary-constructor conversion block, the XML-documentation retention checks,
+  the `MemberInitializerInOtherConstructorsAnnotation`, and `TryEvaluateDecimalConstant`.
+  Verified by 17 tests (the backing-field gate, `IsAutomaticProperty`, the leading-assignment
+  analysis with the full-body/duplicate/non-const-static shapes, the cross-constructor match,
+  the static/instance analyzer classification, and the this/base/default-constructor moves);
+  wired into both CMakeLists, with no seed-pipeline call site so the CLI baselines are unchanged.
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

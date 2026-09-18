@@ -497,6 +497,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Transforms/IntroduceQueryExpressions_Test.cpp
     Decompiler/CSharp/Transforms/IntroduceExtensionMethods_Test.cpp
     Decompiler/CSharp/Transforms/IntroduceUsingDeclarations_Test.cpp
+    Decompiler/CSharp/Transforms/TransformFieldAndConstructorInitializers_Test.cpp
     Decompiler/CSharp/Syntax/InterpolatedString_Test.cpp
     Decompiler/CSharp/Syntax/QueryExpression_Test.cpp
     Decompiler/CSharp/Syntax/QueryClauses_Test.cpp
