@@ -57,4 +57,5 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/InterpolatedStringTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/FixRemainingIncrements.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/ReduceNestingTransform.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/CombineExitsTransform.cpp
 )

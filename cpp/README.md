@@ -5609,6 +5609,29 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   the 2 keeps staying green). The full Debug gtest suite is 12896 ran / 12894 passed /
   the 2 standing skips / zero failures, and all three CLI baselines are unchanged
   (`--csharp` 10106360, `--il` 41246545, `-l c` 109438 bytes).
+- **`CombineExitsTransform`** -- the compact early fold `if (cond) leave(a);
+  leave(b)` -> `leave (cond ? a : b)` that the C# `DecompileBodyForAnalysis`
+  prefix appends so a release-mode `return a && b` body is a single statement.
+  A true-branch nested block of the same shape is folded recursively (the
+  `if (cond) { if (cond2) leave(a); leave(b) } leave(c)` decision tree becomes
+  one leave whose value is a nested conditional), and the combined leave is run
+  through `ExpressionTransforms` (the condition `comp(x != 0)` folds to `x`).
+  Block-model adaptation: the C# reads the if and the following leave from
+  `block.Instructions` (if second-to-last, leave last); this port stores the
+  terminator in `Block.FinalInstruction`, so the shape is "the if is the last
+  non-final instruction, the leave is the final" and the fold installs the
+  combined leave as the block's new final. The shared
+  `ExpressionTransforms::RunOnSingleStatement` entry (the C# static the other
+  multi-pass callers use) is ported alongside. Verified by 8 tests (the simple
+  fold, the nested recursion, the post-fold expression rewrite, and the
+  multi-block / non-empty-else / non-leave-arm / Nop-value / non-function-target
+  keeps), proven with a `CombineExits`-neuter RED round (exactly the 3 positive
+  tests failed, the 5 keeps staying green). The full Debug gtest suite is 12904
+  ran / 12902 passed / the 2 standing skips / zero failures, and all three CLI
+  baselines are unchanged (`--csharp` 10106360, `--il` 41246545, `-l c` 109438
+  bytes). The transform stays unwired -- it is the next prerequisite for the
+  `CSharpDecompiler.DecompileBodyForAnalysis` analysis prefix
+  (`AutoEventDecompiler` / the `ConvertField` automatic-event arm).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

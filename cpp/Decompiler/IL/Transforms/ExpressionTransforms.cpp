@@ -58,6 +58,8 @@
 #include "Decompiler/TypeSystem/TypeKind.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
 
+#include <cassert>
+
 namespace ILSpy::Decompiler::IL {
 
 namespace {
@@ -626,6 +628,19 @@ void ExpressionTransforms::Run(Block& block, int pos, StatementTransformContext&
         auto* iff = dynamic_cast<IfInstruction*>(block.FinalInstruction.get());
         if (iff) VisitIfInstruction(iff);
     }
+}
+
+void ExpressionTransforms::RunOnSingleStatement(ILInstruction* statement, ILTransformContext& context) {
+    assert(statement != nullptr);
+    // The C# requires the statement to be a direct child of a Block; the port
+    // visitor walks the statement and its children, so the parent is only
+    // needed by the C# Run signature (kept as an assertion for fidelity).
+    auto* parent = dynamic_cast<Block*>(statement->Parent);
+    assert(parent != nullptr);
+    (void)parent;
+    ExpressionTransforms transform;
+    transform.settings_ = &context.Settings;
+    transform.Visit(statement);
 }
 
 void ExpressionTransforms::Visit(ILInstruction* inst) {
