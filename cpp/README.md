@@ -5792,6 +5792,58 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   The full Debug gtest suite is 12960 ran / 12958 passed / the 2 standing skips /
   zero failures, and the CLI baselines are unchanged (`--csharp` 10106360, `--il`
   41246545, `-l c` 109438 bytes).
+- **`AccessPathElement.GetAccessPath`** -- the shared static machinery from
+  `TransformCollectionAndObjectInitializers.cs` (lines 325-608) that decomposes a
+  store or `Add` call into the member-access path it writes through -- the named
+  prerequisite for the two remaining `ExpressionBuilder.VisitBlock` arms
+  (`TranslateObjectAndCollectionInitializer` / `TranslateWithInitializer`, both of
+  which consume it through `BuildArrayInitializerExpression`). The
+  `AccessPathKind` enum (Invalid/Setter/Adder), the `AccessPathElement` struct
+  (the `OpCode`/`Member`/`Indices` triple, renamed `ElementOpCode` because a C++
+  member named `OpCode` would shadow the type in struct scope), the 5-tuple
+  `GetAccessPath` result (as the nested `Info` struct), `CanBeUsedInInitializer`,
+  `IsAccessorAccessible`, `IsMethodApplicable` (with the nested
+  `CanInferTypeArgumentsFromParameters` over `Detail::InferTypeArguments`),
+  `GetReturnTypeFromInstruction`, and the `Equals`/`GetHashCode`/`ToString`
+  surface land as `IL/Transforms/AccessPathElement.{hpp,cpp}`. PORT
+  CONVENTIONS: the C# takes an optional `CSharpResolver` (the C# layer's
+  resolver) -- the header forward-declares
+  `ILSpy::Decompiler::CSharp::Resolver::CSharpResolver` and only the .cpp pulls
+  the CSharp-layer headers (the applicability checks run only when a resolver is
+  passed); the C# `ILInstruction[]? Indices` ports to
+  `std::optional<std::vector<ILInstruction*>>` because the null-vs-empty
+  distinction is observable (a plain property accessor call always carries an
+  EMPTY array while the field arms carry null, and `Equals` reference-compares
+  the arrays first so null != empty); `Equals` compares members by REFERENCE
+  equality (the C# single-argument `Member.Equals` binds `object.Equals`, the
+  iteration-191 precedent); and the `ILInstructionMatchComparer`'s structural arm
+  is the conservative `StructurallyEquals` approximation (the port has no
+  generated Match/PerformMatch machinery, so pure leaf kinds -- variable loads,
+  constants, ldnull -- plus the ldobj/field/call composites compare structurally
+  while unhandled kinds compare UNEQUAL, the ReduceNestingTransform convention).
+  Documented divergences at their sites: a `Call` with a null `Method` or empty
+  `Arguments` degrades to Invalid (the C# dereferences/NREs on the always-resolved
+  `Method`), an `LdFlda` without a resolved `Field` likewise, a negative
+  accessor-arity `Take` clamps to the empty list (the C# `Take` throws), and the
+  readonly-field gate reads the node's reader-populated `FieldIsReadOnly`
+  stand-in (the `ILInlining::IsReadonlyReference` convention). Verified by 30 new
+  tests (the field-store and nested-`ldflda` walks, the ldobj/ldobj_ifref arms
+  with the readonly gate both ways, the plain/indexer/getter accessor-call
+  shapes with the values-`Last()` getter quirk, the Adder shapes, the newoj /
+  unresolved-method / empty-Add rejections, the values-referencing-target guard
+  including the strict-descendants quirk (a value that IS an `ldloc` of the
+  target does not invalidate), the nested get-only-property rejection, the
+  resolver-driven applicability matrix (static Add, non-Enumerable vs Enumerable
+  root type, the accessor early-return, the DictionaryInitializers and
+  ExtensionMethodsInCollectionInitializers setting gates, the generic-Add
+  inference failure), and the Equals/GetHashCode/ToString matrix including the
+  C# ToString array-render quirk) proven with a three-behavior neuter RED round
+  (the readonly gate, the values-referencing-target check, the null-vs-empty
+  indices collapse: exactly the 3 predicted tests failed, the 27 negatives
+  stayed green) then restored green. The full Debug gtest suite is 13042 ran /
+  13040 passed / the 2 standing skips / zero failures, and all three Release
+  CLI baselines are byte-identical (`--csharp` 10106360, `--il` 41246545,
+  `-l c` 109438) because the machinery has no caller in the seed pipeline yet.
 - **`ExpressionBuilder.TranslateStackAllocInitializer` (+ `BlockKind.StackAllocInitializer`,
   the `TransformArrayInitializers.GetNullExpression` helper)**
   -- the C# `stackalloc` initializer block translation lands, closing another of
