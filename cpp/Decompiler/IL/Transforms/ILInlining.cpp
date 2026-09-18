@@ -368,6 +368,28 @@ bool InlineOneIfPossible(Block* block, int pos, InliningOptions options,
     return false;
 }
 
+bool InlineIfPossible(Block* block, int pos, ILTransformContext& ctx) {
+    return InlineOneIfPossible(block, pos, InliningOptions::Aggressive, ctx);
+}
+
+int InlineInto(Block* block, int pos, InliningOptions options,
+               ILTransformContext& ctx) {
+    // The C# guard is `pos >= block.Instructions.Count` over a list that
+    // includes the final; the port's final sits at the logical index
+    // Instructions.size(), so pos == size is the final's target position (a
+    // legitimate one -- the loop below inlines the preceding stores into it).
+    if (pos > static_cast<int>(block->Instructions.size()))
+        return 0;
+    int count = 0;
+    while (--pos >= 0) {
+        if (InlineOneIfPossible(block, pos, options, ctx))
+            count++;
+        else
+            break;
+    }
+    return count;
+}
+
 namespace {
 
 bool InlineAllInBlock(Block* block, ILTransformContext& ctx) {

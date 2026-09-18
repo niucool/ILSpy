@@ -26,9 +26,11 @@
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <functional>
 #include <vector>
 
@@ -114,6 +116,128 @@ void PropagateAddressSource(ILFunction& function, Block* block,
     block->RemoveInstructionAt(storeIndex);
 }
 
+// The C# `context.TypeSystem.FindType(arg.ResultType)`: the evaluation-stack
+// type of an un-inlined argument mapped to an IType. Unknown -> UnknownType;
+// Ref -> a ByReferenceType over UnknownType; everything else the StackType's
+// ToKnownTypeCode lookup. The port has no compilation in the transform
+// context, so the known type is a standalone KnownType -- the same code/name
+// an ICompilation.FindType returns (copied next to this second consumer per
+// the established convention; NamedArgumentTransform.cpp carries the first).
+TypeSystem::ITypePtr FindTypeForStackType(StackType stackType) {
+    using namespace TypeSystem;
+    if (stackType == StackType::Unknown) return UnknownType();
+    if (stackType == StackType::Ref)
+        return std::make_shared<ByReferenceType>(UnknownType());
+    KnownTypeCode code = ToKnownTypeCode(stackType);
+    if (code == KnownTypeCode::None) return UnknownType();
+    return std::make_shared<KnownType>(code);
+}
+
+// The ILFunction root that owns `inst` (the ILInlining.cpp FunctionOfBlock
+// convention, copied here): walks the Parent chain to the root
+// (ILFunction::IsRoot). Returns null for a detached subtree.
+ILFunction* FunctionOfTree(ILInstruction* inst) {
+    for (ILInstruction* p = inst; p != nullptr; p = p->Parent) {
+        if (p->IsRoot()) return static_cast<ILFunction*>(p);
+    }
+    return nullptr;
+}
+
+// The C# `static void DoPropagate(ILVariable v, ILInstruction copiedExpr,
+// Block block, ref int i, ILTransformContext context)` (CopyPropagation.cs
+// lines 154-178): the shared copy-propagation core both the whole-function Run
+// and the standalone Propagate entry drive.
+//
+//  * Un-inlines the copied expression's direct child instructions into fresh
+//    stack-slot variables ("C_<StartILOffset>", HasGeneratedName, registered
+//    in the function's variable list), each moved into a store inserted at
+//    position i (so the expression's operands are evaluated exactly once,
+//    before every propagated copy).
+//  * Replaces every load of `v` in the whole function with a clone of the
+//    copied expression whose direct children are the fresh loads (the C#
+//    clones per load and then ReplaceWith's each clone child; the port clones
+//    BEFORE moving the children out, since the C# GC aliases the children
+//    between the inserted stores and the original while this port's unique
+//    ownership cannot -- every direct child of each clone is then replaced
+//    with a load, the same net shape).
+//  * Drops the store, re-inlines whatever the rewrite made single-use
+//    (ILInlining.InlineInto), and adjusts the caller's loop index by
+//    -(count + 1) exactly as the C# does.
+//
+// The C# keeps the usage counts fresh through the instruction events; this
+// port recomputes them before the re-inline (the fresh C_ variables start at
+// zero counts) and once more after it (the caller reads fresh counts).
+void DoPropagate(ILVariable* v, ILInstruction* copiedExpr, Block* block,
+                 int& i, ILTransformContext& context) {
+    std::string stepDesc = "Copy propagate " + v->Name;
+    context.StepOnce(stepDesc.c_str());
+    ILFunction* function = FunctionOfTree(block);
+
+    // Snapshot the loads of v across the whole function (the C#
+    // v.LoadInstructions.ToArray(); this port has no per-variable load list,
+    // so the function body is walked -- the collection must precede the
+    // ReplaceWith calls, which destroy each load).
+    std::vector<LdLoc*> loads;
+    if (function != nullptr) {
+        WalkAll(function->Body.get(), [&](ILInstruction* inst) {
+            if (auto* ld = dynamic_cast<LdLoc*>(inst))
+                if (ld->Variable.get() == v) loads.push_back(ld);
+        });
+    }
+
+    const int n = copiedExpr->ChildCount();
+    // One clone per load, taken before the children are moved out.
+    std::vector<std::unique_ptr<ILInstruction>> clones;
+    clones.reserve(loads.size());
+    for (std::size_t k = 0; k < loads.size(); ++k)
+        clones.push_back(copiedExpr->Clone());
+
+    // Un-inline the arguments: take the children out (from the end, so earlier
+    // indices stay valid under the null-leaving TakeChild) and insert one
+    // store per child at position i, in forward order.
+    std::vector<ILVariablePtr> uninlinedArgs;
+    std::vector<std::unique_ptr<ILInstruction>> args;
+    args.reserve(n);
+    for (int j = n - 1; j >= 0; --j)
+        args.push_back(copiedExpr->TakeChild(j));
+    uninlinedArgs.reserve(n);
+    for (int j = 0; j < n; ++j) {
+        auto arg = std::move(args[static_cast<std::size_t>(n - 1 - j)]);
+        assert(arg != nullptr && "DoPropagate: copied expression has a null child");
+        auto variable = std::make_shared<ILVariable>(
+            VariableKind::StackSlot, FindTypeForStackType(arg->ResultType()));
+        variable->Name = "C_" + std::to_string(arg->StartILOffset);
+        variable->HasGeneratedName = true;
+        block->InsertAt(static_cast<std::size_t>(i),
+                        std::make_unique<StLoc>(variable, std::move(arg)));
+        ++i;
+        uninlinedArgs.push_back(std::move(variable));
+    }
+    if (function != nullptr) {
+        for (auto& variable : uninlinedArgs)
+            function->Variables.push_back(variable);
+    }
+
+    // Perform the copy propagation: each load becomes the clone with the fresh
+    // loads in place of the original children, carrying an empty IL range (the
+    // expression is copied from afar; reusing the source's IL range would
+    // mis-locate sequence points).
+    for (std::size_t k = 0; k < loads.size(); ++k) {
+        for (int j = 0; j < n; ++j)
+            clones[k]->SetChild(j, std::make_unique<LdLoc>(uninlinedArgs[static_cast<std::size_t>(j)]));
+        clones[k]->SetILRange(0, 0);
+        loads[k]->ReplaceWith(std::move(clones[k]));
+    }
+
+    block->RemoveInstructionAt(static_cast<std::size_t>(i));
+    if (function != nullptr)
+        ComputeVariableUsage(*function);
+    int c = InlineInto(block, i, InliningOptions::None, context);
+    i -= c + 1;
+    if (function != nullptr)
+        ComputeVariableUsage(*function);
+}
+
 } // namespace
 
 void CopyPropagation::Run(ILFunction& function, ILTransformContext& context) {
@@ -168,6 +292,17 @@ void CopyPropagation::Run(ILFunction& function, ILTransformContext& context) {
         }
     }
     ComputeVariableUsage(function);
+}
+
+void CopyPropagation::Propagate(StLoc* store, ILTransformContext& context) {
+    // The C# Debug.Assert(store.Variable.IsSingleDefinition).
+    assert(store->Variable && store->Variable->IsSingleDefinition());
+    // The C# `(Block)store.Parent` cast: a store's parent is always a block in
+    // a connected tree; a non-block parent is a malformed fixture.
+    auto* block = dynamic_cast<Block*>(store->Parent);
+    assert(block != nullptr && "Propagate: store's parent is not a block");
+    int i = store->ChildIndex;
+    DoPropagate(store->Variable.get(), store->Value.get(), block, i, context);
 }
 
 } // namespace ILSpy::Decompiler::IL

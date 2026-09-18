@@ -94,6 +94,28 @@ bool InlineOneIfPossible(Block* block, int pos, ILTransformContext& ctx);
 bool InlineOneIfPossible(Block* block, int pos, InliningOptions options,
                          ILTransformContext& ctx);
 
+// The C# `public static bool InlineIfPossible(Block block, int pos,
+// ILTransformContext context)` (ILInlining.cs lines 159-165): aggressively
+// inlines the stloc instruction at pos into the next instruction. The
+// Aggressive option in the C# skips the NonAggressiveInlineInto restrictions
+// applied to non-stack-slot variables; this port's inlining implements no such
+// restriction (a documented divergence), so the wrapper delegates with the
+// flag set, keeping the call shape the statement-level transforms
+// (TransformCollectionAndObjectInitializers.Run's tail) use.
+bool InlineIfPossible(Block* block, int pos, ILTransformContext& ctx);
+
+// The C# `public static int InlineInto(Block block, int pos, InliningOptions
+// options, ILTransformContext context)` (ILInlining.cs lines 138-157): inlines
+// the instructions BEFORE pos into block.Instructions[pos], walking backwards
+// from pos-1 while each InlineOneIfPossible succeeds, stopping at the first
+// failure. Returns the number of instructions inlined (the count
+// CopyPropagation.DoPropagate subtracts from its caller's loop index). The C#
+// counts the block final inside Instructions, so its `pos >= Count` guard maps
+// to `pos > Instructions.size()` here (pos == size is the final's index, a
+// legitimate target the C# admits).
+int InlineInto(Block* block, int pos, InliningOptions options,
+               ILTransformContext& ctx);
+
 // Result of ILInlining::FindLoadInNext -- the search for the single load of a
 // variable inside an instruction subtree, into which an expression can be
 // inlined. Faithful to the C# ILInlining.FindResultType / FindResult (subset: no

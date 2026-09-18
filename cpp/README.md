@@ -6124,6 +6124,59 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   13061 passed / the 2 standing skips / zero failures, and all three Release
   CLI baselines are byte-identical (`--csharp` 10106360, `--il` 41246545,
   `-l c` 109438) because the new code is unreachable from the seed pipeline.
+- **Phase-5 slice (RUN/219): the two named TransformCollectionAndObject-
+  Initializers Run prerequisites** -- the standalone inlining/copy-propagation
+  entry points the statement-transform body calls. `ILInlining.{hpp,cpp}` gain
+  `InlineIfPossible` (the C# one-line Aggressive wrapper over
+  `InlineOneIfPossible`; the Aggressive option's C# meaning -- skipping the
+  NonAggressiveInlineInto restrictions for non-stack-slot variables -- has no
+  counterpart in this port's inliner, a documented divergence, so the wrapper
+  delegates with the flag set for call-shape fidelity) and `InlineInto` (the
+  backward `while (--pos >= 0)` walk inlining the instructions before `pos`
+  into `block.Instructions[pos]`, stopping at the first failure and returning
+  the inlined count; the C# counts the block final inside Instructions, so
+  the port maps the `pos >= Count` bound to `pos > Instructions.size()` --
+  `pos == size` is the final's logical index and a legitimate target the
+  loop does fold into). `CopyPropagation.{hpp,cpp}` gain the static
+  `Propagate(StLoc*, ILTransformContext&)` (the C# lines 44-49 entry the
+  statement-level transforms call: the IsSingleDefinition assert, the
+  `(Block)store.Parent` cast, the store's ChildIndex) driving the faithful
+  `DoPropagate` core (the C# lines 154-178): un-inlines the copied
+  expression's direct child instructions into fresh `"C_<StartILOffset>"`
+  stack-slot variables (HasGeneratedName, registered in the function's
+  Variables list -- the whole-function loads snapshot walks the body because
+  the port has no per-variable LoadInstructions list), replaces every load of
+  the variable with a clone of the expression whose direct children are the
+  fresh loads (the port clones BEFORE moving the children out -- the C# GC
+  aliases the children between the inserted stores and the original while
+  unique ownership cannot), clears the clone's IL range, drops the store,
+  runs the `InlineInto` re-inline tail, and adjusts the caller's loop index
+  by `-(count + 1)` exactly as the C# does; the usage counts the C# maintains
+  through instruction events are recomputed before the re-inline (the fresh
+  C_ variables start at zero counts) and once more after it. The
+  `FindTypeForStackType` helper (the C# `context.TypeSystem.FindType(arg.
+  ResultType)` mapping) is copied next to this second consumer per the
+  established convention. The port's existing whole-function `Run` arms are
+  unchanged (their simplified re-point/`PropagateAddressSource` shapes keep
+  the seed pipeline byte-identical; consolidating them onto `DoPropagate` is a
+  possible follow-up). With these landed, the only remaining Run blockers are
+  the `IsPartOfInitializer` path-stack state machine with its C#-layer
+  settings/resolver threading and the remaining head-shape pieces
+  (`MatchCastClass`, the Call node's `ILStackWasEmpty`, the context-shaped
+  `TransformDisplayClassUsage.IsPotentialClosure` overload,
+  `TupleTransform.MatchTupleConstruction`). Verified by 8 new tests (the
+  `InlineIfPossible` fold, the `InlineInto` chain/count/stop-at-first-failure
+  matrix incl. the final-index target and the beyond-bounds zero, and the
+  three `Propagate` drives: the ldloca clone-per-load shape with the empty IL
+  range, the ldelema un-inline + re-inline round trip reconstructing the
+  single-use element access, and the two-load shape keeping the `C_` operand
+  stores) proven with a two-behavior neuter RED round where exactly the 6
+  positive tests failed and the negative/prior tests stayed green. The full
+  Debug gtest suite is 13071 ran / 13069 passed / the 2 standing skips / zero
+  failures (exactly +8 over RUN/218), and all four Release CLI baselines are
+  byte-identical (`--csharp` 10106360, `--il` 41246545 byte-identical to the
+  real-ilspycmd gold, `-l c` 109438, the `--json`-with-assembly usage check
+  rc 64) because the new entry points have no call site in the seed pipeline.
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

@@ -87,12 +87,18 @@ public:
 
     // IStatementTransform: the statement-level fold itself. DEFERRED: the C#
     // body needs the per-transform path-stack state (possibleIndexVariables /
-    // currentPath / isCollection / pathStack), the IsPartOfInitializer
+    // currentPath / isCollection / pathStack) and the IsPartOfInitializer
     // state machine over AccessPathElement::GetAccessPath with the C#-layer
-    // settings and resolver threading, ILFunction::RegisterVariable (already
-    // ported), ILInlining::InlineIfPossible and CopyPropagation::Propagate (the
-    // latter two are not ported as standalone entry points yet). Throws
-    // std::logic_error until then.
+    // settings and resolver threading (GetAccessPath takes the full
+    // DecompilerSettings + an optional CSharpResolver while the IL-layer
+    // StatementTransformContext carries the ILTransformSettings subset) plus
+    // the remaining head-shape pieces (MatchCastClass, the Call node's
+    // ILStackWasEmpty, the context-shaped TransformDisplayClassUsage
+    // IsPotentialClosure overload, TupleTransform.MatchTupleConstruction).
+    // ILFunction::RegisterVariable, ILInlining::InlineIfPossible, CopyPropagation
+    // ::Propagate and DelegateConstruction.MatchDelegateConstruction -- the
+    // other named prerequisites -- are ported. Throws std::logic_error until
+    // then.
     void Run(Block& block, int pos, StatementTransformContext& context) override;
 };
 
