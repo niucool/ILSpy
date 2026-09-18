@@ -5425,6 +5425,20 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   and the full Debug suite is 12804 ran / 12802 passed / the 2 standing skips / zero failures.
   The analysis has no seed-pipeline call site, so the CLI baselines are unchanged (`--csharp`
   10106360, `--il` 41246545, `-l c` 109438 bytes).
+- **`PatternStatementTransform` `for` rewrite** -- with the `DeclareVariables` analysis available,
+  the `for` slice of `PatternStatementTransform` lands: `VisitExpressionStatement` and
+  `TransformFor` (the `variableAssignPattern` match, the declaration-move into an existing
+  `for` initializer, and the `forPattern` while-to-for rewrite), the `DescendIntoStatement`
+  descendant predicate (stop at expressions and nested loops), `ForStatementUsesVariable`,
+  `IsVariableUsedAfter` (the by-ref-local guard), and `IteratorVariablesDeclaredInsideLoopBody`
+  (the `declareVariables.GetDeclarationPoint` gate). `Run` now runs the `declareVariables.Analyze`
+  / `ClearAnalysisResults` pair. The `TransformForeachOnMultiDimArray`, the other `foreach`
+  rewrites, and the automatic property/event rewrites stay deferred at their would-be call sites.
+  Verified by 9 tests (the while-to-for rewrite with the for-initializer/condition/iterator/body
+  placement, the declaration move into a for initializer, and the settings-off / differing-variable
+  / continue / iterator-declared-inside / by-ref-used-after / non-assignment-first / for-not-using
+  keeps) proven with a `TransformFor`-neuter RED round (exactly the 2 positive tests failed, the
+  7 keep-tests staying green).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

@@ -44,23 +44,40 @@
 // `&target.GetPinnableReference()` -> `target` rewrite for value types) and the enhanced
 // using declaration (the C# 8 `using var` flag), which need only a resolve-result type read
 // and the settings flags, not `DeclareVariables`.
+//
+// The `DeclareVariables` analysis phase landed separately; with it in place, this slice adds
+// the `for` rewrite (`TransformFor`): the `var = init; while (var <op> end) { ...; var = ...; }`
+// to `for` conversion (with the by-ref-local and iterator-declared-inside-loop guards and the
+// no-`continue` rule) and the move of a preceding declaration assignment into an existing
+// `for` initializer. The `foreach` rewrites (array, inline array, multidimensional array),
+// the automatic property/event rewrites, and the backing-field replacement stay deferred --
+// each is named at the visit that would call it.
 
 #pragma once
 
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Transforms/ContextTrackingVisitor.hpp"
+#include "Decompiler/CSharp/Transforms/DeclareVariables.hpp"
 #include "Decompiler/CSharp/Transforms/IAstTransform.hpp"
 
 // Forward declarations of the node types the ported sub-transforms take and return. Their
 // definitions are pulled into the .cpp (the visitor overrides only need the pointer types).
 namespace ILSpy::Decompiler::CSharp::Syntax {
 class DestructorDeclaration;
+class ExpressionStatement;
 class FixedStatement;
+class ForStatement;
 class IfElseStatement;
 class MethodDeclaration;
+class Statement;
 class TryCatchStatement;
 class UsingStatement;
+class WhileStatement;
+}
+
+namespace ILSpy::Decompiler::IL {
+class ILVariable;
 }
 
 namespace ILSpy::Decompiler::CSharp::Transforms {
@@ -87,6 +104,14 @@ public:
     // equality with the inequality spelling -- `!(a == b)` becomes `a != b`.
     Syntax::AstNode* VisitUnaryOperatorExpression(
         Syntax::UnaryOperatorExpression* expr) override;
+
+    // The C# `public override AstNode VisitExpressionStatement(ExpressionStatement ...)`:
+    // rewrites `var = init; while (var <op> end) { ...; var = ...; }` into a `for` loop, and
+    // moves a preceding declaration assignment into an existing `for` initializer. The C#
+    // also runs `TransformForeachOnMultiDimArray` first; the multidimensional-array foreach
+    // rewrite is DEFERRED (named at its would-be call site).
+    Syntax::AstNode* VisitExpressionStatement(
+        Syntax::ExpressionStatement* expressionStatement) override;
 
     // The C# `public override AstNode VisitIfElseStatement(IfElseStatement ...)`: simplifies a
     // cascading `else { if (...) ... }` into `else if (...) ...`.
@@ -141,6 +166,34 @@ private:
     // The C# `DestructorDeclaration? TransformDestructorBody(DestructorDeclaration dtorDef)`:
     // simplifies a matched destructor body in place, or null when the shape does not match.
     Syntax::DestructorDeclaration* TransformDestructorBody(Syntax::DestructorDeclaration* dtorDef);
+
+    // The C# `for`-loop rewrite `ForStatement? TransformFor(ExpressionStatement node)`: the
+    // `var = init; for (...)` declaration move and the `var = init; while (...) {...}` to
+    // `for` rewrite, or null when the shape does not match.
+    Syntax::ForStatement* TransformFor(Syntax::ExpressionStatement* node);
+
+    // The C# `bool DescendIntoStatement(AstNode node)`: the descendant-walk predicate that
+    // stops at expressions and nested loops (so a `continue` in a nested loop does not block
+    // the rewrite).
+    static bool DescendIntoStatement(Syntax::AstNode* node);
+
+    // The C# `bool ForStatementUsesVariable(ForStatement, ILVariable?)`: whether the `for`
+    // condition or an iterator references the variable.
+    static bool ForStatementUsesVariable(Syntax::ForStatement* statement,
+                                         IL::ILVariable* variable);
+
+    // The C# `bool IsVariableUsedAfter(Statement loop, ILVariable)`: whether any following
+    // sibling statement references the variable (the by-ref-local guard).
+    static bool IsVariableUsedAfter(Syntax::Statement* loop, IL::ILVariable& variable);
+
+    // The C# `bool IteratorVariablesDeclaredInsideLoopBody(Statement iteratorStatement)`:
+    // whether a variable used by the iterator would be declared in the loop body (which the
+    // rewrite cannot split from the iterator part).
+    bool IteratorVariablesDeclaredInsideLoopBody(Syntax::Statement* iteratorStatement);
+
+    // The C# `readonly DeclareVariables declareVariables` -- the analysis the `for` rewrite
+    // consumes (`Analyze` in `Run`, `GetDeclarationPoint` in the iterator guard).
+    DeclareVariables declareVariables_;
 
     // The C# `[AllowNull] TransformContext context` -- the run state. Null outside a run; the
     // reentrancy check in `Run` reads it.

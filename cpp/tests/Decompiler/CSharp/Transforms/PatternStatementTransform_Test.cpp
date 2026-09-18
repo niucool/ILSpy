@@ -26,30 +26,37 @@
 #include "Decompiler/CSharp/Transforms/PatternStatementTransform.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 
+#include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
 #include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BaseReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/MethodDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/FixedStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/UsingStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
 #include "Decompiler/DecompileRun.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
+#include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/Semantics/MemberResolveResult.hpp"
 #include "Decompiler/Semantics/ResolveResult.hpp"
 #include "Decompiler/Semantics/TypeResolveResult.hpp"
@@ -58,6 +65,7 @@
 #include "Decompiler/TypeSystem/LookupStubs.hpp"
 
 #include <memory>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -69,6 +77,7 @@ namespace Sem = ::ILSpy::Decompiler::Semantics;
 namespace Syntax = ::ILSpy::Decompiler::CSharp::Syntax;
 namespace Transforms = ::ILSpy::Decompiler::CSharp::Transforms;
 namespace TestSupport = ::ILSpy::Decompiler::TypeSystem::TestSupport;
+namespace IL = ::ILSpy::Decompiler::IL;
 using ::ILSpy::Decompiler::DecompileRun;
 using ::ILSpy::Decompiler::DecompilerSettings;
 
@@ -808,4 +817,270 @@ TEST(PatternStatementTransformTest, KeepsEnhancedUsingOutsideBlock)
     RunTransform(fixture, *usingStatement);
 
     EXPECT_FALSE(usingStatement->IsEnhanced());
+}
+
+// ---- for ---------------------------------------------------------------------------
+
+namespace {
+
+IL::ILVariablePtr Var(const std::string& name) {
+    auto variable = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, TS::UnknownType());
+    variable->Name = name;
+    return variable;
+}
+
+// An `IdentifierExpression` named after the variable and carrying its `ILVariableResolveResult`
+// (the annotation the `for` rewrite reads through `GetILVariable`).
+Syntax::IdentifierExpression* Use(const IL::ILVariablePtr& variable) {
+    auto* identifier = new Syntax::IdentifierExpression(variable->Name.c_str());
+    identifier->AddAnnotation(
+        std::make_shared<::ILSpy::Decompiler::CSharp::ILVariableResolveResult>(variable));
+    return identifier;
+}
+
+Syntax::PrimitiveExpression* Int(int value) {
+    return new Syntax::PrimitiveExpression(Syntax::PrimitiveValue(std::int32_t(value)));
+}
+
+// Runs the transform over a block holding `statements` and returns the block.
+Syntax::BlockStatement* RunOnBlock(
+    TransformFixture& fixture, std::initializer_list<Syntax::Statement*> statements) {
+    Transforms::TransformContext context = fixture.MakeContext();
+    auto* block = new Syntax::BlockStatement();
+    for (Syntax::Statement* statement : statements)
+        block->Statements().Add(statement);
+    Transforms::PatternStatementTransform transform;
+    transform.Run(*block, context);
+    return block;
+}
+
+} // namespace
+
+// `i = 0; while (i < n) { body; i = i + 1; }` becomes
+// `for (i = 0; i < n; i = i + 1) { body; }`.
+TEST(PatternStatementTransformTest, TransformsWhileLoopToFor)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForStatement(true);
+    auto i = Var("i");
+    auto n = Var("n");
+    auto* initStmt = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(i), Int(0)));
+    auto* condition = Bin(Use(i), Syntax::BinaryOperatorType::LessThan, Use(n));
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(new Syntax::ExpressionStatement(Use(n)));
+    auto* iteratorStmt = new Syntax::ExpressionStatement(new Syntax::AssignmentExpression(
+        Use(i), Syntax::AssignmentOperatorType::Assign,
+        Bin(Use(i), Syntax::BinaryOperatorType::Add, Int(1))));
+    body->Statements().Add(iteratorStmt);
+    auto* whileStmt = new Syntax::WhileStatement();
+    whileStmt->Condition(condition);
+    whileStmt->EmbeddedStatement(body);
+
+    auto* block = RunOnBlock(fixture, {initStmt, whileStmt});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    auto* forStatement = dynamic_cast<Syntax::ForStatement*>(block->Statements()[0]);
+    ASSERT_NE(forStatement, nullptr);
+    ASSERT_EQ(forStatement->Initializers().Count(), 1);
+    EXPECT_EQ(forStatement->Initializers()[0], static_cast<Syntax::Statement*>(initStmt));
+    EXPECT_EQ(forStatement->Condition(), condition);
+    ASSERT_EQ(forStatement->Iterators().Count(), 1);
+    EXPECT_EQ(forStatement->Iterators()[0], static_cast<Syntax::Statement*>(iteratorStmt));
+    auto* newBody = dynamic_cast<Syntax::BlockStatement*>(forStatement->EmbeddedStatement());
+    ASSERT_NE(newBody, nullptr);
+    EXPECT_EQ(newBody->Statements().Count(), 1);
+}
+
+// With `ForStatement` off the while loop is left in place.
+TEST(PatternStatementTransformTest, KeepsWhileLoopWhenSettingOff)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForStatement(false);
+    auto i = Var("i");
+    auto n = Var("n");
+    auto* initStmt = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(i), Int(0)));
+    auto* whileStmt = new Syntax::WhileStatement();
+    whileStmt->Condition(Bin(Use(i), Syntax::BinaryOperatorType::LessThan, Use(n)));
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(new Syntax::ExpressionStatement(new Syntax::AssignmentExpression(
+        Use(i), Syntax::AssignmentOperatorType::Assign,
+        Bin(Use(i), Syntax::BinaryOperatorType::Add, Int(1)))));
+    whileStmt->EmbeddedStatement(body);
+
+    auto* block = RunOnBlock(fixture, {initStmt, whileStmt});
+
+    EXPECT_EQ(block->Statements().Count(), 2);
+    EXPECT_EQ(block->Statements()[1], static_cast<Syntax::Statement*>(whileStmt));
+}
+
+// The declaration variable and the condition variable must be the same; otherwise the while
+// loop is kept.
+TEST(PatternStatementTransformTest, KeepsWhileLoopWhenVariableDiffers)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForStatement(true);
+    auto i = Var("i");
+    auto j = Var("j");
+    auto n = Var("n");
+    auto* initStmt = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(i), Int(0)));
+    auto* whileStmt = new Syntax::WhileStatement();
+    whileStmt->Condition(Bin(Use(j), Syntax::BinaryOperatorType::LessThan, Use(n)));
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(new Syntax::ExpressionStatement(new Syntax::AssignmentExpression(
+        Use(j), Syntax::AssignmentOperatorType::Assign,
+        Bin(Use(j), Syntax::BinaryOperatorType::Add, Int(1)))));
+    whileStmt->EmbeddedStatement(body);
+
+    auto* block = RunOnBlock(fixture, {initStmt, whileStmt});
+
+    EXPECT_EQ(block->Statements().Count(), 2);
+    EXPECT_EQ(block->Statements()[1], static_cast<Syntax::Statement*>(whileStmt));
+}
+
+// A `continue` in the loop body blocks the rewrite (in a while it jumps to the condition,
+// whereas in a for it jumps to the increment).
+TEST(PatternStatementTransformTest, KeepsWhileLoopWithContinue)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForStatement(true);
+    auto i = Var("i");
+    auto n = Var("n");
+    auto* initStmt = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(i), Int(0)));
+    auto* whileStmt = new Syntax::WhileStatement();
+    whileStmt->Condition(Bin(Use(i), Syntax::BinaryOperatorType::LessThan, Use(n)));
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(new Syntax::ContinueStatement());
+    body->Statements().Add(new Syntax::ExpressionStatement(new Syntax::AssignmentExpression(
+        Use(i), Syntax::AssignmentOperatorType::Assign,
+        Bin(Use(i), Syntax::BinaryOperatorType::Add, Int(1)))));
+    whileStmt->EmbeddedStatement(body);
+
+    auto* block = RunOnBlock(fixture, {initStmt, whileStmt});
+
+    EXPECT_EQ(block->Statements().Count(), 2);
+    EXPECT_EQ(block->Statements()[1], static_cast<Syntax::Statement*>(whileStmt));
+}
+
+// A variable referenced by the iterator that would be declared inside the loop body blocks the
+// rewrite (the iterator cannot be split from the declaration).
+TEST(PatternStatementTransformTest, KeepsWhileLoopWhenIteratorVariableDeclaredInside)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForStatement(true);
+    auto i = Var("i");
+    auto k = Var("k");
+    auto n = Var("n");
+    auto* initStmt = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(i), Int(0)));
+    auto* whileStmt = new Syntax::WhileStatement();
+    whileStmt->Condition(Bin(Use(i), Syntax::BinaryOperatorType::LessThan, Use(n)));
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(k), Int(5))));
+    body->Statements().Add(new Syntax::ExpressionStatement(new Syntax::AssignmentExpression(
+        Use(i), Syntax::AssignmentOperatorType::Assign,
+        Bin(Use(k), Syntax::BinaryOperatorType::Add, Int(1)))));
+    whileStmt->EmbeddedStatement(body);
+
+    auto* block = RunOnBlock(fixture, {initStmt, whileStmt});
+
+    EXPECT_EQ(block->Statements().Count(), 2);
+    EXPECT_EQ(block->Statements()[1], static_cast<Syntax::Statement*>(whileStmt));
+}
+
+// A by-ref local used after the loop keeps the while loop (the hoisted declaration cannot be
+// split into a for initializer).
+TEST(PatternStatementTransformTest, KeepsWhileLoopForByRefVariableUsedAfter)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForStatement(true);
+    auto i = Var("i");
+    i->Type = std::make_shared<TS::ByReferenceType>(TS::UnknownType());
+    auto n = Var("n");
+    auto* initStmt = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(i), Int(0)));
+    auto* whileStmt = new Syntax::WhileStatement();
+    whileStmt->Condition(Bin(Use(i), Syntax::BinaryOperatorType::LessThan, Use(n)));
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(new Syntax::ExpressionStatement(new Syntax::AssignmentExpression(
+        Use(i), Syntax::AssignmentOperatorType::Assign,
+        Bin(Use(i), Syntax::BinaryOperatorType::Add, Int(1)))));
+    whileStmt->EmbeddedStatement(body);
+    auto* afterStmt = new Syntax::ExpressionStatement(Use(i));
+
+    auto* block = RunOnBlock(fixture, {initStmt, whileStmt, afterStmt});
+
+    EXPECT_EQ(block->Statements().Count(), 3);
+    EXPECT_EQ(block->Statements()[1], static_cast<Syntax::Statement*>(whileStmt));
+}
+
+// A first statement that is not a `$var = $init` assignment is not a for declaration.
+TEST(PatternStatementTransformTest, KeepsFirstNonAssignmentStatement)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForStatement(true);
+    auto i = Var("i");
+    auto n = Var("n");
+    auto* firstStmt = new Syntax::ExpressionStatement(new Syntax::InvocationExpression(Ref("Foo")));
+    auto* whileStmt = new Syntax::WhileStatement();
+    whileStmt->Condition(Bin(Use(i), Syntax::BinaryOperatorType::LessThan, Use(n)));
+    whileStmt->EmbeddedStatement(new Syntax::BlockStatement());
+
+    auto* block = RunOnBlock(fixture, {firstStmt, whileStmt});
+
+    EXPECT_EQ(block->Statements().Count(), 2);
+    EXPECT_EQ(block->Statements()[1], static_cast<Syntax::Statement*>(whileStmt));
+}
+
+// `i = 0; for (; i < n; i = i + 1) {}` moves the declaration into the for initializer.
+TEST(PatternStatementTransformTest, MovesDeclarationIntoForInitializer)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForStatement(true);
+    auto i = Var("i");
+    auto n = Var("n");
+    auto* initStmt = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(i), Int(0)));
+    auto* forStatement = new Syntax::ForStatement();
+    forStatement->Condition(Bin(Use(i), Syntax::BinaryOperatorType::LessThan, Use(n)));
+    forStatement->Iterators().Add(new Syntax::ExpressionStatement(new Syntax::AssignmentExpression(
+        Use(i), Syntax::AssignmentOperatorType::Assign,
+        Bin(Use(i), Syntax::BinaryOperatorType::Add, Int(1)))));
+    forStatement->EmbeddedStatement(new Syntax::BlockStatement());
+
+    auto* block = RunOnBlock(fixture, {initStmt, forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+    ASSERT_EQ(forStatement->Initializers().Count(), 1);
+    EXPECT_EQ(forStatement->Initializers()[0], static_cast<Syntax::Statement*>(initStmt));
+}
+
+// A for loop whose condition and iterators do not use the variable keeps the declaration as a
+// separate statement.
+TEST(PatternStatementTransformTest, KeepsDeclarationWhenForDoesNotUseVariable)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForStatement(true);
+    auto i = Var("i");
+    auto j = Var("j");
+    auto n = Var("n");
+    auto* initStmt = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(i), Int(0)));
+    auto* forStatement = new Syntax::ForStatement();
+    forStatement->Condition(Bin(Use(j), Syntax::BinaryOperatorType::LessThan, Use(n)));
+    forStatement->Iterators().Add(new Syntax::ExpressionStatement(new Syntax::AssignmentExpression(
+        Use(j), Syntax::AssignmentOperatorType::Assign,
+        Bin(Use(j), Syntax::BinaryOperatorType::Add, Int(1)))));
+    forStatement->EmbeddedStatement(new Syntax::BlockStatement());
+
+    auto* block = RunOnBlock(fixture, {initStmt, forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 2);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(initStmt));
+    EXPECT_EQ(forStatement->Initializers().Count(), 0);
 }

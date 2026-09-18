@@ -23,22 +23,33 @@
 #include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
 #include "Decompiler/CSharp/Syntax/CatchClause.hpp"
 #include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BaseReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/MethodDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/PatternMatching/PatternNodes.hpp"
 #include "Decompiler/CSharp/Syntax/PatternPlaceholder.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
+#include "Decompiler/CSharp/Syntax/Slots.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/DoWhileStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/FixedStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ForeachStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/UsingStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
 #include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
+#include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 
 #include <memory>
@@ -49,11 +60,22 @@
 namespace ILSpy::Decompiler::CSharp::Transforms {
 
 using Syntax::AstNode;
+using Syntax::AssignmentExpression;
+using Syntax::AssignmentOperatorType;
 using Syntax::BinaryOperatorExpression;
 using Syntax::BinaryOperatorType;
+using Syntax::ContinueStatement;
+using Syntax::DoWhileStatement;
 using Syntax::Expression;
+using Syntax::ExpressionStatement;
+using Syntax::ForStatement;
+using Syntax::ForeachStatement;
+using Syntax::IdentifierExpression;
+using Syntax::PrimitiveExpression;
+using Syntax::Statement;
 using Syntax::UnaryOperatorExpression;
 using Syntax::UnaryOperatorType;
+using Syntax::WhileStatement;
 
 namespace {
 
@@ -127,16 +149,18 @@ void PatternStatementTransform::Run(AstNode& rootNode, TransformContext& context
     context_ = &context;
     try {
         Initialize(context);
+        declareVariables_.Analyze(rootNode);
         rootNode.AcceptVisitorAstNode(*this);
     } catch (...) {
         context_ = nullptr;
         Uninitialize();
+        declareVariables_.ClearAnalysisResults();
         throw;
     }
-    // The C# `finally`: clear the run state and the context slots (`declareVariables
-    // .ClearAnalysisResults()` is omitted with the deferred analysis).
+    // The C# `finally`: clear the run state and the context slots.
     context_ = nullptr;
     Uninitialize();
+    declareVariables_.ClearAnalysisResults();
 }
 
 AstNode* PatternStatementTransform::VisitChildren(AstNode* node) {
@@ -205,6 +229,184 @@ AstNode* PatternStatementTransform::VisitUnaryOperatorExpression(
         }
     }
     return Syntax::DepthFirstAstVisitorAstNode::VisitUnaryOperatorExpression(expr);
+}
+
+// ---- for ---------------------------------------------------------------------------
+
+AstNode* PatternStatementTransform::VisitExpressionStatement(
+    ExpressionStatement* expressionStatement) {
+    // The C# runs `TransformForeachOnMultiDimArray(expressionStatement)` first; the
+    // multidimensional-array foreach rewrite is DEFERRED (named at its would-be call site),
+    // so the port goes straight to TransformFor.
+    if (ForStatement* forStatement = TransformFor(expressionStatement))
+        return forStatement;
+    return Syntax::DepthFirstAstVisitorAstNode::VisitExpressionStatement(expressionStatement);
+}
+
+// The C# `ForStatement? TransformFor(ExpressionStatement node)`: turns `var = init; while
+// (var <op> end) { ...; var = ...; }` into `for (var = init; var <op> end; var = ...) {...}`,
+// and moves a preceding `var = init;` into an existing `for (...)`'s initializer when the
+// loop's condition or iterators reference the variable.
+ForStatement* PatternStatementTransform::TransformFor(ExpressionStatement* node) {
+    if (!context_->Settings().ForStatement())
+        return nullptr;
+
+    // `static readonly AstNode variableAssignPattern`: `$variable = $initializer;`.
+    IL::ILVariable* variable = nullptr;
+    {
+        PatternTree tree;
+        auto* variableNode = tree.Make<IdentifierExpression>(
+            std::string(PM::Pattern::AnyString));
+        auto* variableNamed = tree.Wrap<Expression>(
+            std::make_shared<PM::NamedNode>("variable", variableNode));
+        auto* initializer = tree.Wrap<Expression>(std::make_shared<PM::AnyNode>("initializer"));
+        auto* assign = tree.Make<AssignmentExpression>(variableNamed, initializer);
+        auto* pattern = tree.Make<ExpressionStatement>(assign);
+        PM::Match m1 = PM::PatternExtensions::Match(*pattern, node);
+        if (!m1.Success())
+            return nullptr;
+        variable = GetILVariable(*m1.Get<IdentifierExpression>("variable").front());
+    }
+
+    AstNode* next = node->NextSibling();
+    if (next == nullptr)
+        return nullptr;
+
+    if (auto* forStatement = dynamic_cast<ForStatement*>(next)) {
+        if (ForStatementUsesVariable(forStatement, variable)) {
+            context_->Step("Move declaration into for initializer", node);
+            node->Remove();
+            next->InsertChildAfter(nullptr, node, &Syntax::Slots::ForInitializer);
+            return forStatement;
+        }
+    }
+
+    // `static readonly WhileStatement forPattern`:
+    //   while ($ident <any> $endExpr) { <statement>*; $ident <any>= <any>; }
+    PatternTree tree;
+    auto* conditionIdentNode = tree.Make<IdentifierExpression>(
+        std::string(PM::Pattern::AnyString));
+    auto* conditionLeft = tree.Wrap<Expression>(
+        std::make_shared<PM::NamedNode>("ident", conditionIdentNode));
+    auto* conditionRight = tree.Wrap<Expression>(std::make_shared<PM::AnyNode>("endExpr"));
+    auto* condition = tree.Make<BinaryOperatorExpression>(
+        conditionLeft, BinaryOperatorType::Any, conditionRight);
+    auto* anyStatement = tree.Make<PM::AnyNode>("statement");
+    auto* statementRepeat = tree.Wrap<Statement>(std::make_shared<PM::Repeat>(anyStatement));
+    auto* iteratorLeft = tree.Wrap<Expression>(std::make_shared<PM::Backreference>("ident"));
+    auto* iteratorRight = tree.Wrap<Expression>(std::make_shared<PM::AnyNode>());
+    auto* iteratorAssign = tree.Make<AssignmentExpression>(
+        iteratorLeft, AssignmentOperatorType::Any, iteratorRight);
+    auto* iteratorStmt = tree.Make<ExpressionStatement>(iteratorAssign);
+    auto* iteratorNamed = tree.Wrap<Statement>(
+        std::make_shared<PM::NamedNode>("iterator", iteratorStmt));
+    auto* bodyBlock = tree.Make<Syntax::BlockStatement>();
+    bodyBlock->Statements().Add(statementRepeat);
+    bodyBlock->Statements().Add(iteratorNamed);
+    auto* pattern = tree.Make<WhileStatement>();
+    pattern->Condition(condition);
+    pattern->EmbeddedStatement(bodyBlock);
+
+    PM::Match m3 = PM::PatternExtensions::Match(*pattern, next);
+    if (!m3.Success())
+        return nullptr;
+    // Ensure the variable in the `for` pattern is the same as in the declaration.
+    if (variable != GetILVariable(*m3.Get<IdentifierExpression>("ident").front()))
+        return nullptr;
+    auto* loop = static_cast<WhileStatement*>(next);
+    // Cannot convert to `for` if the iteration variable is a by-ref local used after the loop:
+    // its declaration is hoisted in front, leaving a headless `for` whose only initialization
+    // is the for-initializer ref-assignment (CS8174). Keeping it a while-loop matches the
+    // source and keeps the initializer on the declaration.
+    if (variable != nullptr && variable->Type != nullptr && variable->Type->IsByRefLike()
+        && IsVariableUsedAfter(loop, *variable)) {
+        return nullptr;
+    }
+    auto* iteratorStatement = m3.Get<Statement>("iterator").front();
+    if (IteratorVariablesDeclaredInsideLoopBody(iteratorStatement))
+        return nullptr;
+    // Cannot convert to `for`: `continue` in a while jumps to the condition, whereas in a `for`
+    // it jumps to the increment block, so the rewrite would change semantics.
+    for (AstNode* descendant : loop->DescendantNodes(
+             [](AstNode* n) { return DescendIntoStatement(n); })) {
+        if (dynamic_cast<ContinueStatement*>(descendant) != nullptr)
+            return nullptr;
+    }
+
+    context_->Step("Transform while loop to for", loop);
+    node->Remove();
+    auto* newBody = new Syntax::BlockStatement();
+    for (Statement* stmt : m3.Get<Statement>("statement"))
+        newBody->Statements().Add(Syntax::Detach(stmt));
+    auto* forStatement = new ForStatement();
+    CopyAnnotationsFrom(forStatement, *loop);
+    forStatement->Initializers().Add(node);
+    forStatement->Condition(Syntax::Detach(loop->Condition()));
+    forStatement->Iterators().Add(Syntax::Detach(iteratorStatement));
+    forStatement->EmbeddedStatement(newBody);
+    loop->ReplaceWith(forStatement);
+    context_->EndStep(forStatement);
+    return forStatement;
+}
+
+bool PatternStatementTransform::DescendIntoStatement(AstNode* node) {
+    if (dynamic_cast<Expression*>(node) != nullptr
+        || dynamic_cast<ExpressionStatement*>(node) != nullptr) {
+        return false;
+    }
+    if (dynamic_cast<WhileStatement*>(node) != nullptr
+        || dynamic_cast<ForeachStatement*>(node) != nullptr
+        || dynamic_cast<DoWhileStatement*>(node) != nullptr
+        || dynamic_cast<ForStatement*>(node) != nullptr) {
+        return false;
+    }
+    return true;
+}
+
+bool PatternStatementTransform::ForStatementUsesVariable(ForStatement* statement,
+                                                         IL::ILVariable* variable) {
+    if (statement->Condition() != nullptr) {
+        for (AstNode* n : statement->Condition()->DescendantsAndSelf()) {
+            auto* ie = dynamic_cast<IdentifierExpression*>(n);
+            if (ie != nullptr && GetILVariable(*ie) == variable)
+                return true;
+        }
+    }
+    for (int i = 0; i < statement->Iterators().Count(); i++) {
+        for (AstNode* n : statement->Iterators()[i]->DescendantsAndSelf()) {
+            auto* ie = dynamic_cast<IdentifierExpression*>(n);
+            if (ie != nullptr && GetILVariable(*ie) == variable)
+                return true;
+        }
+    }
+    return false;
+}
+
+bool PatternStatementTransform::IsVariableUsedAfter(Statement* loop, IL::ILVariable& variable) {
+    for (AstNode* sibling = loop->NextSibling(); sibling != nullptr;
+         sibling = sibling->NextSibling()) {
+        for (AstNode* n : sibling->DescendantsAndSelf()) {
+            auto* ie = dynamic_cast<IdentifierExpression*>(n);
+            if (ie != nullptr && GetILVariable(*ie) == &variable)
+                return true;
+        }
+    }
+    return false;
+}
+
+bool PatternStatementTransform::IteratorVariablesDeclaredInsideLoopBody(
+    Statement* iteratorStatement) {
+    for (AstNode* n : iteratorStatement->DescendantsAndSelf()) {
+        auto* id = dynamic_cast<IdentifierExpression*>(n);
+        if (id == nullptr)
+            continue;
+        IL::ILVariable* v = GetILVariable(*id);
+        if (v == nullptr || !DeclareVariables::VariableNeedsDeclaration(v->Kind))
+            continue;
+        if (declareVariables_.GetDeclarationPoint(*v)->Parent() == iteratorStatement->Parent())
+            return true;
+    }
+    return false;
 }
 
 AstNode* PatternStatementTransform::VisitIfElseStatement(Syntax::IfElseStatement* ifElseStatement) {
