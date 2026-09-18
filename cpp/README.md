@@ -5629,9 +5629,29 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   tests failed, the 5 keeps staying green). The full Debug gtest suite is 12904
   ran / 12902 passed / the 2 standing skips / zero failures, and all three CLI
   baselines are unchanged (`--csharp` 10106360, `--il` 41246545, `-l c` 109438
-  bytes). The transform stays unwired -- it is the next prerequisite for the
-  `CSharpDecompiler.DecompileBodyForAnalysis` analysis prefix
-  (`AutoEventDecompiler` / the `ConvertField` automatic-event arm).
+  bytes). The transform stays unwired in the CLI pipeline -- it is consumed by
+  the `RunILTransformsForAnalysis` prefix below.
+- **`CSharpDecompiler.DecompileBodyForAnalysis`** -- the read-and-run analysis
+  path the compiler-generated-code recognizers (`AutoEventDecompiler`,
+  `RecordDecompiler`) use. `GetILTransforms.hpp` now factors the
+  `GetILTransforms()` list into the shared block-transform prefix
+  (`RunILTransformsThroughBlockTransforms`, the C# list truncated after the
+  last `BlockILTransform`), which `RunGetILTransforms` extends with the late
+  transforms and `RunILTransformsForAnalysis` extends with
+  `CombineExitsTransform`; `DecompileBodyForAnalysis` reads a method body
+  (`ILReader.ReadIL`) and runs that prefix with the fixed C# 1.0
+  `AnalysisTransformSettings` (the `DecompilerSettings(LanguageVersion.CSharp1)`
+  feature gates the port models: nullables, anonymous methods, null propagation,
+  string interpolation, throw expressions, the C# 7/8/9 pattern gates, native
+  integers, unsigned right shift, checked operators), so the analysis shape is
+  independent of the caller's user-visible settings. Verified by 6 tests (the
+  settings matrix, the CombineExits fold present in the analysis list and
+  absent from the full pipeline, the real-body read, the nil-body null, and a
+  200-body analysis sweep), proven with a `CombineExits`/`LiftNullables`-neuter
+  RED round (exactly the 2 targeted tests failed, the 4 negatives staying
+  green). The full Debug gtest suite is 12910 ran / 12908 passed / the 2
+  standing skips / zero failures, and all three CLI baselines are unchanged
+  (`--csharp` 10106360, `--il` 41246545, `-l c` 109438 bytes).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

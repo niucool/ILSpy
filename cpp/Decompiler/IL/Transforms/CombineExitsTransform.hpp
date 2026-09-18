@@ -28,7 +28,8 @@
 // CSharpDecompiler.DecompileBodyForAnalysis (so a `return other != null && ...`
 // body is a single statement even in release builds) and in
 // DelegateConstruction. This port lands the transform itself; the
-// DecompileBodyForAnalysis prefix that consumes it is a later slice.
+// `RunILTransformsForAnalysis` prefix that consumes it lives in
+// GetILTransforms.hpp.
 //
 // Block-model adaptation: the C# reads the if and the following leave from
 // block.Instructions (the if second-to-last, the leave last). This port stores
