@@ -5769,6 +5769,29 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   round. The full Debug gtest suite is 12949 ran / 12947
   passed / the 2 standing skips / zero failures, and the CLI baselines are
   unchanged (`--csharp` 10106360, `--il` 41246545, `-l c` 109438 bytes).
+- **`DecompiledLambdaResolveResult`** -- the concrete lambda resolve result the
+  C# back end constructs (the third class in `LambdaResolveResult.cs`) now lands,
+  closing the last deferral of that file. It captures the three ctor bools, holds
+  the `DelegateType` (public readonly) and mutable `InferredReturnType` fields,
+  projects `IsAsync` / `Parameters` / `ReturnType` over the held `ILFunction`, and
+  answers `IsValid` through the conversion controller. The prerequisites are the
+  new `ILFunction.Parameters` field (the `IReadOnlyList<IParameter>` the C# ctor
+  assigns from `method.Parameters`; non-owning, symmetric with the already-ported
+  `ReturnType` field) and the landed `CSharpConversions`: `IsValid` reads
+  `Detail::IdentityConversion` (the port has no public `IdentityConversion`
+  method, the established D547 convention) and the public
+  `CSharpConversions::ImplicitConversion`. `LambdaConversion` gained an
+  `InstancePtr()` owning handle (a no-op-deleter `shared_ptr` over the same
+  `Instance()` singleton) so `IsValid` can return the C# `Conversion` reference
+  as a `shared_ptr` while preserving the singleton's reference identity. Verified
+  by 11 new tests (ctor flags + function projections, `IsAsync`, the
+  `GetInferredReturnType` stored-field pass-through plus the mutable-field
+  assignment, the inherited `ToString` concrete-class-name form, `ShallowClone`
+  sharing `Body`, and the six-arm `IsValid` matrix) proven with a `IsValid`-neuter
+  RED round (exactly the 3 positive tests failed, the 8 negatives stayed green).
+  The full Debug gtest suite is 12960 ran / 12958 passed / the 2 standing skips /
+  zero failures, and the CLI baselines are unchanged (`--csharp` 10106360, `--il`
+  41246545, `-l c` 109438 bytes).
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

@@ -1264,14 +1264,18 @@ void CallBuilder::CastArguments(
             if (auto* lambda = dynamic_cast<Syntax::LambdaExpression*>(
                     arguments[i].Expression()))
             {
-                // The C# `ModifyReturnTypeOfLambda(lambda)` arm is DEFERRED
-                // with the DecompiledLambdaResolveResult slice it consumes
-                // (the resolve-result cast the C# lambda body conversion
-                // reads).
+                // The C# `ModifyReturnTypeOfLambda(lambda)` arm is DEFERRED:
+                // the `DecompiledLambdaResolveResult` slice it consumes has
+                // landed, but the lambda translation that attaches a resolve
+                // result to a `LambdaExpression` (`TranslateFunction` /
+                // `VisitILFunction`, still unported) is what the C#
+                // `lambda.GetResolveResult()` cast reads, and the body mutation
+                // (`ModifyReturnStatementInsideLambda` + `TranslatedExpression.
+                // Detach`) lands with it.
                 (void)lambda;
                 throw std::logic_error("ModifyReturnTypeOfLambda is deferred "
-                                       "with the DecompiledLambdaResolveResult "
-                                       "slice");
+                                       "with the lambda translation "
+                                       "(TranslateFunction/VisitILFunction)");
             }
         }
         else

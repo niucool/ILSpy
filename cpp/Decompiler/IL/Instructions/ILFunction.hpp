@@ -111,6 +111,15 @@ public:
     // ctor reads it as the non-async currentResultType source.
     TypeSystem::ITypePtr ReturnType;
 
+    // The C# `public readonly IReadOnlyList<IParameter> Parameters` field
+    // (ILFunction.cs line 190; the C# ctor assigns method.Parameters, the
+    // explicit-parameter-list ctor assigns its argument): the function's
+    // parameter list. Non-owning -- the type system owns the parameters, the
+    // caller keeps them alive. The seed reader does not assign it yet (same as
+    // ReturnType); the DecompiledLambdaResolveResult `Parameters` accessor reads
+    // it, and tests / the later reader wiring populate it.
+    std::vector<const TypeSystem::IParameter*> Parameters;
+
     // The C# `public bool IsAsync => AsyncReturnType != null` property.
     bool IsAsync() const { return AsyncReturnType != nullptr; }
 

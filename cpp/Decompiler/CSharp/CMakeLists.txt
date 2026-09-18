@@ -52,5 +52,6 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Resolver/CSharpConversionsHelpers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Resolver/CSharpOperators.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Resolver/CSharpResolver.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Resolver/LambdaResolveResult.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Resolver/TypeInferenceHelpers.cpp
 )

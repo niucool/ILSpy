@@ -52,7 +52,8 @@
 // RequireTarget/RequireTypeArguments invocation render. The EnforceExplicitIn
 // statementBuilder EmitAsRefReadOnly flag write is deferred with the
 // StatementBuilder slice; the CastArguments lambda-return-type arm is deferred
-// with ModifyReturnTypeOfLambda/DecompiledLambdaResolveResult.
+// with the lambda translation (TranslateFunction/VisitILFunction) that attaches
+// the DecompiledLambdaResolveResult the conversion reads.
 //
 // Every render arm of the Build(CallInstruction) entry and the mainline is now
 // ported: the tuple-expression render (the TupleExpression + TupleResolveResult
