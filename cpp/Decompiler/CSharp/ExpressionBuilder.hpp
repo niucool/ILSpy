@@ -87,6 +87,8 @@ class BinaryInstruction;
 class IsInst;
 class LocAlloc;
 class LocAllocSpan;
+class LdObj;
+class StObj;
 class Comp;
 class BinaryNumericInstruction;
 enum class ComparisonKind : std::uint8_t;
@@ -249,6 +251,20 @@ public:
     // 523-528): the Span<T> stackalloc render -- TranslateLocAllocSpan's element type
     // over the span's own type as the resolve result.
     TranslatedExpression VisitLocAllocSpan(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitLdObj(LdObj
+    // inst, TranslationContext context)` (ExpressionBuilder.cs lines 2857-2887):
+    // the typed memory load -- the TypeHint override of the load type (when it is
+    // a compatible memory-access type and not a pointer-into-generic case), then
+    // the shared `LdObj` dereference helper. The C# `inst.UnalignedPrefix` arm is
+    // UNREACHABLE in the port (the LdObj node carries no IL prefix field).
+    TranslatedExpression VisitLdObj(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitStObj(StObj
+    // inst, TranslationContext context)` (ExpressionBuilder.cs lines 2968-3046):
+    // the typed memory store -- the StObjViaHelperCall arm for a non-managed-
+    // reference store of a non-unmanaged type, the pointer/byref target
+    // dereference, the plain Assignment, or the `ref (a = ref b)` re-assignment.
+    // The C# `inst.UnalignedPrefix` disjuncts are UNREACHABLE in the port.
+    TranslatedExpression VisitStObj(IL::ILInstruction* inst, TranslationContext context);
     // The C# `StackAllocExpression TranslateLocAllocSpan(LocAllocSpan inst, IType
     // typeHint, out IType elementType)` (ExpressionBuilder.cs lines 530-539): the
     // span's element type, the count converted to int32, and the StackAllocExpression.
@@ -637,6 +653,14 @@ public:
     // pointer arm with the Unsafe.Read<T> intrinsic for a managed load type).
     // Declared private in the C#; the port's no-visibility-level convention.
     ExpressionWithResolveResult LdObj(IL::ILInstruction* address, const TS::IType& loadType);
+
+    // The C# `TranslatedExpression StObjViaHelperCall(StObj inst)` (a private helper,
+    // ExpressionBuilder.cs lines 3048-3086): the `Unsafe.Write<T>(void*, T)` store
+    // render for a non-managed-reference store of a non-unmanaged type. The C#
+    // `WriteUnaligned` arm is UNREACHABLE in the port (the StObj node carries no IL
+    // prefix field). Declared private in the C#; the port's no-visibility-level
+    // convention.
+    TranslatedExpression StObjViaHelperCall(IL::StObj& inst);
 
     // -- The field surface (the C# `internal readonly` fields) ------------------------
 

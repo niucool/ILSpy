@@ -2412,6 +2412,54 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   the 2 standing skips / zero failures, and all four CLI baselines unchanged
   (--csharp mscorlib 10106366 bytes, --il byte-identical to the
   41246545-byte real-ilspycmd gold, -l c 109438, --json-alone rc 64).
+- **`ExpressionBuilder` VisitLdObj/VisitStObj arms + the StObjViaHelperCall
+  helper** -- `VisitLdObj` (ExpressionBuilder.cs lines 2857-2887: the node's
+  `LdObj.Type` as the load type; the `loadTypeUsedInGeneric` flag from
+  `Target.ResultType == StackType.Ref` -- the C# `UnalignedPrefix != 0`
+  disjunct is unreachable because the port's `LdObj` node carries no IL prefix
+  field; the `context.TypeHint` override gate -- a known hint kind, an
+  `IsCompatibleTypeForMemoryAccess(hint, loadType)` match, and the NOT
+  `(loadTypeUsedInGeneric && IsAnyPointer(hint.Kind))` veto -- then the shared
+  private `LdObj(Target, loadType)` dereference render and the
+  `WithILInstruction` annotation), and `VisitStObj` (lines 2968-3046: the
+  `StObjViaHelperCall` branch for a non-`ref` target whose type is not
+  unmanaged; the `ByReferenceType`/`PointerType` hint by target stack type;
+  the `IsCompatiblePointerTypeForMemoryAccess` gate choosing the memory type
+  from the pointer/by-ref element -- the C# `TypeWithElementType` cast ported
+  as the `PointerType`/`ByReferenceType` dynamic-cast pair -- or, in the
+  incompatible arm, translating the value first and taking the value's
+  compatible type or the node type before casting the pointer; the
+  `DirectionExpression`/`AddressOf` `UnwrapChild` strip else a `*pointer`
+  render; the value translated on demand against the target type; the
+  ref-reassignment `ref (a = ref b)` shape through the
+  `SharedResolveResultAnnotation` handle and a `ByReferenceResolveResult` lhs;
+  and the final `AssignmentExpression` through the `Assignment` helper), plus
+  the private `StObjViaHelperCall` (lines 3048-3086: the pointer translate, the
+  `Byte`-ref vs `void*` cast, the value's `IsCompatibleTypeForMemoryAccess`
+  conversion, and the `Unsafe.Write(pointer, value)` intrinsic through
+  `CallUnsafeIntrinsic`). Every C# `UnalignedPrefix`-driven branch
+  (`Unsafe.ReadUnaligned`/`WriteUnaligned`) is unreachable in the port -- the
+  `LdObj`/`StObj` IL nodes carry no prefix field -- and is deliberately not
+  ported. The arms are dead in the CLI path (the Phase-5 seed still drives
+  `--csharp`), so the output is unchanged. Verified by **8** new gtest cases in
+  1 suite over the MinimalCorlib fixture (the pointer-dereference render and
+  the managed-ref strip for LdObj; the TypeHint override to a managed load
+  type producing `Unsafe.Read<string>(byte*)` and the no-hint
+  incompatible-pointer arm; the pointer and managed-ref `StObj` assignments
+  with their `AssignmentExpression` shape; the non-unmanaged `Unsafe.Write`
+  arm; and the `Visit` dispatch for both opcodes), proven with a 3-behavior
+  neuter RED round (3 failures: the TypeHint-override gate and the
+  `StObjViaHelperCall` gate for the pointer and non-unmanaged shapes) then
+  restored green. Full suite in this environment 12097 ran / 12034 passed / 13
+  failed / 101 skipped -- the 13 failures are the pre-existing
+  environment-dependent real-fixture/gold tests (a missing
+  `System.Private.CoreLib` 10.0.8 fixture, a corelib-version mismatch against
+  the 10.0 gold, missing .NET Framework v4.7.2 facades / SDK Roslyn paths, and
+  differing machine GAC-count and PDB-build-path snapshots) that do not touch
+  the C# ExpressionBuilder path; the 8 new tests pass. The standing CLI
+  baselines are unchanged (`--csharp mscorlib` 10106366 bytes, `--il`
+  41246545 bytes, `-l c` 109438; the `--json`-mode argument-parsing path is
+  untouched).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
