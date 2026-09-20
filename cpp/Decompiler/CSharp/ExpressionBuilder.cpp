@@ -26,6 +26,8 @@
 #include "Decompiler/CSharp/Syntax/AstType.hpp"
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
 #include "Decompiler/CSharp/Syntax/ComposedType.hpp"
+#include "Decompiler/CSharp/Syntax/InterpolatedStringText.hpp"
+#include "Decompiler/CSharp/Syntax/Interpolation.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AsExpression.hpp"
@@ -37,6 +39,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/ErrorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/InterpolatedStringExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IsExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
@@ -74,6 +77,8 @@
 #include "Decompiler/IL/PointerArithmeticOffset.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
+#include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
 #include "Decompiler/IL/Instructions/CompoundAssignmentInstruction.hpp"
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
@@ -566,6 +571,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitUserDefinedLogicOperator(inst, context);
         case IL::OpCode::RefAnyType:
             return VisitRefAnyType(inst, context);
+        case IL::OpCode::Block:
+            return VisitBlock(inst, context);
         default:
             return Default(inst, context);
     }
@@ -3680,6 +3687,112 @@ TranslatedExpression ExpressionBuilder::VisitRefAnyType(IL::ILInstruction* inst,
     return WithRR(WithILInstruction(*memberRef, inst),
                   std::make_shared<Sem::TypeResolveResult>(
                       std::move(runtimeTypeHandleType)));
+}
+
+// The C# `protected internal override TranslatedExpression VisitBlock(Block
+// block, TranslationContext context)` (ExpressionBuilder.cs lines 3406-3421).
+// Only the InterpolatedString arm is ported; the other BlockKinds depend on the
+// unported Match* helpers / CallBuilder::Build and fall to the Visit-Default error
+// expression. The arm is dead in the CLI path (the Phase-5 seed still drives
+// `--csharp`).
+TranslatedExpression ExpressionBuilder::VisitBlock(IL::ILInstruction* inst,
+                                                   TranslationContext)
+{
+    auto* block = static_cast<IL::Block*>(inst);
+    switch (block->Kind)
+    {
+        case IL::BlockKind::InterpolatedString:
+            return TranslateInterpolatedString(*block);
+        default:
+            return ErrorExpression(
+                "Block kind not supported: "
+                + std::to_string(static_cast<int>(block->Kind)));
+    }
+}
+
+// The C# `private TranslatedExpression TranslateInterpolatedString(Block block)`
+// (ExpressionBuilder.cs lines 3423-3462): the AppendLiteral/AppendFormatted
+// handler-call sequence over the DefaultInterpolatedStringHandler block. The C#
+// switches on `call.Method.Name` and casts the argument nodes; the port reads the
+// short method name off the Call node's `MethodName` and the parameter type off
+// `ParameterIType` (the Call node carries no resolved IMethod).
+TranslatedExpression ExpressionBuilder::TranslateInterpolatedString(IL::Block& block)
+{
+    std::vector<Syntax::InterpolatedStringContent*> content;
+    for (std::size_t i = 1; i < block.Instructions.size(); ++i)
+    {
+        auto* call = dynamic_cast<IL::Call*>(block.Instructions[i].get());
+        if (call == nullptr || call->Arguments.size() < 2)
+            continue;
+        // The C# `call.Method.Name` -- the short name after the last "::".
+        std::string methodName = call->MethodName;
+        if (auto pos = methodName.rfind("::"); pos != std::string::npos)
+            methodName = methodName.substr(pos + 2);
+        // The C# `call.GetParameter(1)!.Type` -- the first declared parameter's
+        // type (GetParameter skips the implicit `this` for an instance call).
+        int firstParamIndex = (call->IsInstanceCall && !call->IsNewObj) ? 1 : 0;
+        int valueParamIndex = 1 - firstParamIndex;
+        const TS::IType* valueParamType = nullptr;
+        if (valueParamIndex >= 0
+            && valueParamIndex < static_cast<int>(call->ParameterIType.size()))
+            valueParamType = call->ParameterIType[valueParamIndex].get();
+
+        auto buildInterpolation = [&](int alignment,
+                                      std::optional<std::string> suffix) -> Syntax::Interpolation* {
+            TranslatedExpression value = Translate(call->Arguments[1].get());
+            if (valueParamType != nullptr)
+                value = value.ConvertTo(const_cast<TS::IType&>(*valueParamType), *this,
+                                        false, true);
+            return new Syntax::Interpolation(value.Expression(), alignment,
+                                             std::move(suffix));
+        };
+
+        if (methodName == "AppendLiteral")
+        {
+            auto* ldstr = dynamic_cast<IL::LdStr*>(call->Arguments[1].get());
+            std::string text = ldstr ? ldstr->Value : std::string();
+            // The C# `.Replace("{", "{{").Replace("}", "}}")`.
+            std::string escaped;
+            for (char c : text)
+            {
+                if (c == '{') escaped += "{{";
+                else if (c == '}') escaped += "}}";
+                else escaped += c;
+            }
+            content.push_back(new Syntax::InterpolatedStringText(std::move(escaped)));
+        }
+        else if (methodName == "AppendFormatted" && call->Arguments.size() == 2)
+        {
+            content.push_back(buildInterpolation(0, std::nullopt));
+        }
+        else if (methodName == "AppendFormatted" && call->Arguments.size() == 3)
+        {
+            if (auto* ldstr = dynamic_cast<IL::LdStr*>(call->Arguments[2].get()))
+                content.push_back(buildInterpolation(0, ldstr->Value));
+            else if (auto* ldc = dynamic_cast<IL::LdcI4*>(call->Arguments[2].get()))
+                content.push_back(buildInterpolation(ldc->Value, std::nullopt));
+        }
+        else if (methodName == "AppendFormatted" && call->Arguments.size() == 4)
+        {
+            auto* ldc = dynamic_cast<IL::LdcI4*>(call->Arguments[2].get());
+            auto* ldstr = dynamic_cast<IL::LdStr*>(call->Arguments[3].get());
+            if (ldc != nullptr && ldstr != nullptr)
+                content.push_back(buildInterpolation(ldc->Value, ldstr->Value));
+        }
+        else
+        {
+            throw std::logic_error(
+                "Unsupported interpolated string handler call: " + methodName);
+        }
+    }
+    auto* expr = new Syntax::InterpolatedStringExpression();
+    for (auto* c : content)
+        expr->Content().Add(c);
+    return WithRR(
+        WithILInstruction(*expr, &block),
+        std::make_shared<Sem::ResolveResult>(TS::ITypePtr(
+            const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::String))
+                .shared_from_this())));
 }
 
 // The C# `protected internal override TranslatedExpression

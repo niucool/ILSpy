@@ -2638,6 +2638,37 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   The build also gains `gtest_discover_tests(ilspy_tests DISCOVERY_TIMEOUT 120)`:
   the default 5s discovery timeout is exceeded by the 12k-test `--gtest_list_tests`
   enumeration, which had been failing the post-link discovery step.
+- **`ExpressionBuilder` VisitBlock InterpolatedString arm +
+  TranslateInterpolatedString** -- `VisitBlock` (ExpressionBuilder.cs lines
+  3406-3421: the BlockKind dispatch) with the
+  `TranslateInterpolatedString` arm (lines 3423-3462: the
+  DefaultInterpolatedStringHandler AppendLiteral/AppendFormatted call sequence --
+  the `{`/`}` brace escaping, the AppendFormatted value converted to the handler
+  call's parameter type, and the alignment/suffix overloads -- rendered as an
+  `InterpolatedStringExpression` over `InterpolatedStringText`/`Interpolation`
+  with the String resolve result). The C# reads `call.Method.Name` /
+  `call.GetParameter(1).Type`; the port reads the short name after `::` off the
+  Call node's `MethodName` and the parameter type off `ParameterIType` (the Call
+  node carries no resolved IMethod). Only this BlockKind is ported: the other
+  arms depend on the unported `Match*` helper family (`TranslateArrayInitializer`,
+  `TranslateStackAllocInitializer`, `TranslateWithInitializer`) or
+  `CallBuilder::Build` (`TranslateObjectAndCollectionInitializer`,
+  `TranslateSetterCallAssignment`, `TranslateCallWithNamedArgs`) and fall to the
+  Visit-Default error expression. The arm is dead in the CLI path (the Phase-5
+  seed still drives `--csharp`), so the output is unchanged. **CallBuilder is the
+  named next big unlock but is NOT a single manageable slice:** its `Build` path
+  needs unported prerequisites (`ExpressionBuilder::TranslateTarget`, the
+  `ILInstruction::Match*` family, `CallInstruction.ExpectedTypeForThisPointer`,
+  and a resolved `IMethod` on the `Call` node) -- it is a multi-iteration
+  sequence, of which this is the first reachable in-order piece. Verified by
+  **4** new gtest cases in 1 suite over the MinimalCorlib fixture (the literal +
+  formatted content with the brace escaping, the alignment/suffix overload, the
+  `Visit` dispatch, and the unsupported-BlockKind error), proven with a two-arm
+  neuter RED round (2 failures) then restored green. Partial-test policy: the
+  targeted run is **182/182** `ExpressionBuilder*` tests green plus the broader
+  `*CSharp*:*Resolver*:*OutputVisitor*` filter (74s) with only the known
+  environment GAC-snapshot failure, and the standing CLI baselines are unchanged
+  (`--csharp mscorlib` 10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

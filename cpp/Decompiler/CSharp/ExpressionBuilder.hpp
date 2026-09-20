@@ -337,6 +337,12 @@ public:
     // member reference, and the RuntimeTypeHandle resolve result.
     TranslatedExpression VisitRefAnyType(IL::ILInstruction* inst,
                                          TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitBlock(Block
+    // block, TranslationContext context)` (ExpressionBuilder.cs lines 3406-3421):
+    // the BlockKind dispatch. Only the InterpolatedString arm is ported; the other
+    // arms depend on the unported Match* helpers / CallBuilder and fall to an
+    // ErrorExpression (the Visit Default convention).
+    TranslatedExpression VisitBlock(IL::ILInstruction* inst, TranslationContext context);
     // The C# `StackAllocExpression TranslateLocAllocSpan(LocAllocSpan inst, IType
     // typeHint, out IType elementType)` (ExpressionBuilder.cs lines 530-539): the
     // span's element type, the count converted to int32, and the StackAllocExpression.
@@ -379,6 +385,10 @@ public:
     // arithmetic type.
     TranslatedExpression ConvertArrayIndex(TranslatedExpression input, IL::StackType stackType,
                                            bool allowIntPtr);
+    // The C# `private TranslatedExpression TranslateInterpolatedString(Block block)`
+    // (ExpressionBuilder.cs lines 3423-3462): the AppendLiteral/AppendFormatted
+    // handler-call sequence over the DefaultInterpolatedStringHandler block.
+    TranslatedExpression TranslateInterpolatedString(IL::Block& block);
     // The C# `TranslatedExpression IsType(IsInst inst)` helper (ExpressionBuilder.cs
     // line 425): the `expr is T` expression the comp/unbox.any special cases build.
     TranslatedExpression IsType(IL::IsInst& inst);
