@@ -31,6 +31,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AsExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/BaseReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ConditionalExpression.hpp"
@@ -108,6 +109,7 @@
 #include "Decompiler/Semantics/MemberResolveResult.hpp"
 #include "Decompiler/Semantics/OperatorResolveResult.hpp"
 #include "Decompiler/Semantics/SizeOfResolveResult.hpp"
+#include "Decompiler/Semantics/ThisResolveResult.hpp"
 #include "Decompiler/Semantics/ThrowResolveResult.hpp"
 #include "Decompiler/Semantics/ResolveResult.hpp"
 #include "Decompiler/Semantics/TypeIsResolveResult.hpp"
@@ -116,6 +118,7 @@
 #include "Decompiler/TypeSystem/KnownTypeReference.hpp"
 #include "Decompiler/TypeSystem/ExpressionType.hpp"
 #include "Decompiler/TypeSystem/NullableType.hpp"
+#include "Decompiler/TypeSystem/NormalizeTypeVisitor.hpp"
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"
 #include "Decompiler/TypeSystem/TupleType.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
@@ -252,6 +255,43 @@ bool IsZeroLdc(const IL::ILInstruction* inst)
 {
     std::int64_t val = 0;
     return MatchLdcI(inst, val) && val == 0;
+}
+
+// The C# `ILInstruction.MatchLdThis()` (IL/Instructions/PatternMatching.cs line
+// 117): an LdLoc of the `this` parameter (a Parameter variable with a negative
+// index, the ILVariable.IsThis convention).
+bool MatchLdThis(const IL::ILInstruction* inst)
+{
+    if (inst == nullptr || inst->Op != IL::OpCode::LdLoc)
+        return false;
+    auto* ldloc = static_cast<const IL::LdLoc*>(inst);
+    return ldloc->Variable != nullptr
+           && ldloc->Variable->Kind == IL::VariableKind::Parameter
+           && ldloc->Variable->Index < 0;
+}
+
+// The C# generated `ILInstruction.MatchBox(out argument, out type)`.
+bool MatchBox(const IL::ILInstruction* inst, IL::ILInstruction*& argument,
+              TS::ITypePtr& type)
+{
+    if (inst == nullptr || inst->Op != IL::OpCode::Box)
+        return false;
+    auto* box = static_cast<const IL::Box*>(inst);
+    argument = box->Argument.get();
+    type = box->Type;
+    return true;
+}
+
+// The C# generated `ILInstruction.MatchLdObj(out target, out type)`.
+bool MatchLdObj(const IL::ILInstruction* inst, IL::ILInstruction*& target,
+                TS::ITypePtr& type)
+{
+    if (inst == nullptr || inst->Op != IL::OpCode::LdObj)
+        return false;
+    auto* ldobj = static_cast<const IL::LdObj*>(inst);
+    target = ldobj->Target.get();
+    type = ldobj->Type;
+    return true;
 }
 
 // The C# `SyntaxExtensions.IsBitwise(BinaryOperatorType)` (SyntaxExtensions.cs line
@@ -489,6 +529,145 @@ TranslatedExpression ExpressionBuilder::TranslateCondition(IL::ILInstruction* co
         expr = expr.ConvertTo(*FindType(IL::StackType::I4, GetSign(&expr.Type())), *this);
     }
     return expr.ConvertToBoolean(*this, negate);
+}
+
+// The C# `internal TranslatedExpression TranslateTarget(ILInstruction? target,
+// bool nonVirtualInvocation, bool memberStatic, IType memberDeclaringType,
+// IType? constrainedTo = null)` (ExpressionBuilder.cs lines 2734-2831). See the
+// header comment for the arm contract.
+TranslatedExpression ExpressionBuilder::TranslateTarget(
+    IL::ILInstruction* target, bool nonVirtualInvocation, bool memberStatic,
+    TS::IType& memberDeclaringType, const TS::IType* constrainedTo)
+{
+    // The C# local `bool MatchLdThis(ILInstruction inst)` (lines 2812-2829).
+    auto matchLdThis = [&](IL::ILInstruction* inst) -> bool {
+        if (MatchLdThis(inst))
+            return true;
+        const TS::ITypeDefinition* currentType = resolver->CurrentTypeDefinition();
+        if (currentType != nullptr && currentType->Kind() == TS::TypeKind::Struct)
+        {
+            // box T(ldobj T(ldloc this))
+            IL::ILInstruction* arg = nullptr;
+            TS::ITypePtr type;
+            if (!MatchBox(inst, arg, type))
+                return false;
+            IL::ILInstruction* arg2 = nullptr;
+            TS::ITypePtr type2;
+            if (!MatchLdObj(arg, arg2, type2))
+                return false;
+            if (!type->Equals(*type2) || !type->Equals(*currentType))
+                return false;
+            return MatchLdThis(arg2);
+        }
+        return false;
+    };
+
+    if (!memberStatic && target != nullptr)
+    {
+        // The C# local `bool ShouldUseBaseReference()` (lines 2798-2810).
+        bool shouldUseBaseReference = false;
+        if (nonVirtualInvocation && matchLdThis(target))
+        {
+            const TS::IType& effective = constrainedTo ? *constrainedTo : memberDeclaringType;
+            if (effective.GetDefinition() != resolver->CurrentTypeDefinition())
+                shouldUseBaseReference = true;
+        }
+        if (shouldUseBaseReference)
+        {
+            TS::ITypePtr baseReferenceType;
+            const TS::ITypeDefinition* currentType = resolver->CurrentTypeDefinition();
+            if (currentType != nullptr)
+            {
+                for (const TS::ITypePtr& t : currentType->DirectBaseTypes())
+                {
+                    if (t->Kind() != TS::TypeKind::Interface)
+                    {
+                        baseReferenceType = t;
+                        break;
+                    }
+                }
+            }
+            if (!baseReferenceType)
+                baseReferenceType = TS::ITypePtr(
+                    const_cast<TS::IType&>(memberDeclaringType).shared_from_this());
+            auto* baseRef = new Syntax::BaseReferenceExpression();
+            return WithRR(WithILInstruction(*baseRef, target),
+                          std::make_shared<Sem::ThisResolveResult>(
+                              std::move(baseReferenceType), nonVirtualInvocation));
+        }
+        else
+        {
+            const TS::IType& effective = constrainedTo ? *constrainedTo : memberDeclaringType;
+            TS::ITypePtr targetTypeHintOwner;
+            const TS::IType* targetTypeHint = &effective;
+            if (IL::Call::ExpectedTypeForThisPointer(effective, constrainedTo)
+                == IL::StackType::Ref)
+            {
+                auto element = TS::ITypePtr(
+                    const_cast<TS::IType&>(effective).shared_from_this());
+                if (target->ResultType() == IL::StackType::Ref)
+                    targetTypeHintOwner = std::make_shared<TS::ByReferenceType>(std::move(element));
+                else
+                    targetTypeHintOwner = std::make_shared<TS::PointerType>(std::move(element));
+                targetTypeHint = targetTypeHintOwner.get();
+            }
+            TranslatedExpression translatedTarget = Translate(target, targetTypeHint);
+            if (IL::Call::ExpectedTypeForThisPointer(effective, constrainedTo)
+                == IL::StackType::Ref)
+            {
+                // When accessing members on value types, ensure we use a reference of
+                // the correct type, and not a pointer or a reference to a different
+                // type (issue #1333).
+                auto* byRef =
+                    dynamic_cast<TS::ByReferenceType*>(&const_cast<TS::IType&>(translatedTarget.Type()));
+                bool compatible = byRef != nullptr
+                    && TS::NormalizeTypeVisitor::TypeErasure().EquivalentTypes(
+                        const_cast<TS::IType&>(*byRef->Element()),
+                        const_cast<TS::IType&>(effective));
+                if (!compatible)
+                {
+                    auto expectedByRef = std::make_shared<TS::ByReferenceType>(
+                        TS::ITypePtr(const_cast<TS::IType&>(effective).shared_from_this()));
+                    translatedTarget = translatedTarget.ConvertTo(*expectedByRef, *this);
+                }
+            }
+            if (auto* dirExpr =
+                    dynamic_cast<Syntax::DirectionExpression*>(translatedTarget.Expression()))
+            {
+                // (ref x).member => x.member
+                translatedTarget = translatedTarget.UnwrapChild(dirExpr->Expression());
+            }
+            else if (auto* uoe = dynamic_cast<Syntax::UnaryOperatorExpression*>(
+                         translatedTarget.Expression());
+                     uoe != nullptr
+                     && uoe->Operator() == Syntax::UnaryOperatorType::NullConditional
+                     && dynamic_cast<Syntax::DirectionExpression*>(uoe->Expression()) != nullptr)
+            {
+                // (ref x)?.member => x?.member; the new resolve result uses the
+                // underlying type of the input expression without the DirectionExpression.
+                auto* innerDir = static_cast<Syntax::DirectionExpression*>(uoe->Expression());
+                translatedTarget = translatedTarget.UnwrapChild(innerDir->Expression());
+                const TS::IType& underlying =
+                    TS::GetUnderlyingType(translatedTarget.Type());
+                auto* newUoe = new Syntax::UnaryOperatorExpression(
+                    translatedTarget.Expression(), Syntax::UnaryOperatorType::NullConditional);
+                translatedTarget = WithRR(
+                    WithoutILInstruction(*newUoe),
+                    std::make_shared<Sem::ResolveResult>(TS::ITypePtr(
+                        const_cast<TS::IType&>(underlying).shared_from_this())));
+            }
+            return EnsureTargetNotNullable(translatedTarget, target);
+        }
+    }
+    else
+    {
+        const TS::IType& effective = constrainedTo ? *constrainedTo : memberDeclaringType;
+        auto* typeRef =
+            new Syntax::TypeReferenceExpression(ConvertType(const_cast<TS::IType&>(effective)));
+        return WithRR(WithoutILInstruction(*typeRef),
+                      std::make_shared<Sem::TypeResolveResult>(TS::ITypePtr(
+                          const_cast<TS::IType&>(effective).shared_from_this())));
+    }
 }
 
 TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, TranslationContext context)

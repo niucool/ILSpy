@@ -180,6 +180,17 @@ public:
     // (the deferred ConvertTo -- a loud deferral), then ConvertToBoolean.
     TranslatedExpression TranslateCondition(IL::ILInstruction* condition, bool negate = false);
 
+    // The C# `internal TranslatedExpression TranslateTarget(ILInstruction? target,
+    // bool nonVirtualInvocation, bool memberStatic, IType memberDeclaringType,
+    // IType? constrainedTo = null)` (ExpressionBuilder.cs lines 2734-2831): the
+    // call target -- `base` for a non-virtual invocation of a `this` target whose
+    // declaring type differs from the current type, else the translated target
+    // with the ref/pointer type hint (and the managed-reference unwrap), or the
+    // declaring type reference for a static member.
+    TranslatedExpression TranslateTarget(IL::ILInstruction* target, bool nonVirtualInvocation,
+                                         bool memberStatic, TS::IType& memberDeclaringType,
+                                         const TS::IType* constrainedTo = nullptr);
+
     // -- The visitor-dispatch surface (the C# ILVisitor base) -------------------------
 
     // The C# double-dispatch: the OpCode switch calling the per-instruction

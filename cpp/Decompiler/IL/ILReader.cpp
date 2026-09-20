@@ -330,7 +330,11 @@ void InitParameters(ReaderState& s, const MethodSignature& sig,
         v->Name = "this";
         v->Kind = VariableKind::Parameter;
         v->Type = nullptr;
-        v->Index = 0;
+        // The C# `CreateILVariable(index: -1, ..)` convention: the `this`
+        // parameter carries a NEGATIVE index, so `IsThis`/`MatchLdThis` can tell
+        // it apart from the first declared parameter (which gets index 0). The
+        // raw `s.parameters[0]` slot is unaffected.
+        v->Index = -1;
         s.parameters[0] = v;
         idx = 1;
     }
@@ -343,7 +347,9 @@ void InitParameters(ReaderState& s, const MethodSignature& sig,
             v->Name = "arg_" + std::to_string(idx);
         v->Kind = VariableKind::Parameter;
         v->Type = t;
-        v->Index = idx;
+        // The semantic index excludes `this` (the C# `CreateILVariable` convention),
+        // so the first declared parameter is 0 even on an instance method.
+        v->Index = paramIdx;
         s.parameters[idx] = v;
         ++idx;
         ++paramIdx;

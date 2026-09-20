@@ -116,6 +116,23 @@ public:
 
     explicit Call(std::string method = std::string()) : ILInstruction(OpCode::Call), MethodName(std::move(method)) {}
 
+    // The C# `internal static StackType CallInstruction.ExpectedTypeForThisPointer(
+    // IType declaringType, IType? constrainedTo)` (CallInstruction.cs lines
+    // 107-122): Ref when the call is constrained, the declaring type is a type
+    // parameter, or a value type; O for a reference type; Unknown when the
+    // reference-ness is indeterminate.
+    static StackType ExpectedTypeForThisPointer(const TypeSystem::IType& declaringType,
+                                                const TypeSystem::IType* constrainedTo = nullptr) {
+        if (constrainedTo != nullptr)
+            return StackType::Ref;
+        if (declaringType.Kind() == TypeSystem::TypeKind::TypeParameter)
+            return StackType::Ref;
+        std::optional<bool> isReferenceType = declaringType.IsReferenceType();
+        if (isReferenceType.has_value())
+            return *isReferenceType ? StackType::O : StackType::Ref;
+        return StackType::Unknown;
+    }
+
     InstructionFlags DirectFlags() const override {
         return InstructionFlags::SideEffect | InstructionFlags::MayThrow;
     }

@@ -2669,6 +2669,39 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `*CSharp*:*Resolver*:*OutputVisitor*` filter (74s) with only the known
   environment GAC-snapshot failure, and the standing CLI baselines are unchanged
   (`--csharp mscorlib` 10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
+- **CallBuilder prerequisite: `TranslateTarget` + `ExpectedTypeForThisPointer` +
+  the `Match*` subset** -- `ExpressionBuilder::TranslateTarget`
+  (ExpressionBuilder.cs lines 2734-2831: the `base`-reference arm -- a
+  non-virtual `this` target whose declaring type differs from the current type,
+  with the non-interface `DirectBaseTypes.FirstOrDefault()` and the
+  `ThisResolveResult`; the instance arm -- the
+  `Call::ExpectedTypeForThisPointer`-driven ref/pointer type hint, the
+  value-type `ByReferenceType` re-typing via `NormalizeTypeVisitor.TypeErasure`,
+  the `(ref x).member => x.member` DirectionExpression unwrap, and the
+  `(ref x)?.member => x?.member` NullConditional rewrite; and the static arm --
+  the declaring-type `TypeReferenceExpression`), `IL::Call::ExpectedTypeForThisPointer`
+  (the C# `CallInstruction` static, lines 107-122: Ref for constrained /
+  type-parameter / value types, O for reference types, Unknown otherwise), and
+  the file-local `MatchLdThis` / `MatchBox` / `MatchLdObj` helpers (the generated
+  `PatternMatching.cs` out-parameter forms). The IL reader is aligned to the C#
+  `CreateILVariable` convention so `MatchLdThis` is faithful and unambiguous: the
+  `this` parameter now carries `Index = -1` and the declared parameters carry
+  0-based semantic indices (the raw `s.parameters` array slots are unchanged; the
+  IL dump and the full transform pipeline are byte-identical). These are the
+  first three prerequisites of the CallBuilder `Build` path; the next pieces are
+  `BuildArgumentList` then the `Build(OpCode, IMethod, ...)` core. Verified by
+  **8** new gtest cases in 1 suite over the MinimalCorlib fixture (the four
+  `ExpectedTypeForThisPointer` arms -- reference / value / constrained / unknown;
+  the instance-identifier, static-type-reference, value-type managed-reference
+  unwrap, and `base`-reference `TranslateTarget` arms), proven with a two-arm
+  neuter RED round (4 failures: the O/Ref swap and the base-reference gate) then
+  restored green. Partial-test policy: **190/190** `ExpressionBuilder*` tests
+  green; the broader `*CSharp*:*Resolver*:*OutputVisitor*` filter (57s) with only
+  the known environment GAC-snapshot failure; and the IL/transform safety filter
+  `*Transform*:*ILAst*:*ILReader*:*ILFunction*:*Variable*` (968 tests / 967
+  passed / 1 skipped / 0 failed) covering the reader change. The standing CLI
+  baselines are unchanged (`--csharp mscorlib` 10106366 bytes, `--il` 41246545
+  bytes, `-l c` 109438).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
