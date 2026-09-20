@@ -312,6 +312,15 @@ public:
     // NullConditional operator with the GetUnderlyingType result, stripping the
     // managed reference when RefInput holds and RefOutput does not.
     TranslatedExpression VisitNullableUnwrap(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitNullCoalescingInstruction(NullCoalescingInstruction inst, TranslationContext
+    // context)` (ExpressionBuilder.cs lines 3912-3954): the `a ?? b` render -- the
+    // constant-adjusted fallback, the resolver's ResolveBinaryOperator(NullCoalescing),
+    // and the IsError fallback re-typing (the throw-fallback underlying type, the
+    // UnderlyingResultType lookup, or the non-null operand) with the Kind-dependent
+    // Nullable<T> conversions.
+    TranslatedExpression VisitNullCoalescingInstruction(IL::ILInstruction* inst,
+                                                        TranslationContext context);
     // The C# `StackAllocExpression TranslateLocAllocSpan(LocAllocSpan inst, IType
     // typeHint, out IType elementType)` (ExpressionBuilder.cs lines 530-539): the
     // span's element type, the count converted to int32, and the StackAllocExpression.

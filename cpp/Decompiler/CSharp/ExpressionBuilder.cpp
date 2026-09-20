@@ -89,6 +89,7 @@
 #include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/CastClass.hpp"
 #include "Decompiler/IL/Instructions/NullableInstructions.hpp"
+#include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/OpCodeName.hpp"
 #include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
@@ -554,6 +555,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitNullableRewrap(inst, context);
         case IL::OpCode::NullableUnwrap:
             return VisitNullableUnwrap(inst, context);
+        case IL::OpCode::NullCoalescingInstruction:
+            return VisitNullCoalescingInstruction(inst, context);
         default:
             return Default(inst, context);
     }
@@ -3532,6 +3535,71 @@ TranslatedExpression ExpressionBuilder::VisitNullableUnwrap(IL::ILInstruction* i
         std::make_shared<Sem::ResolveResult>(TS::ITypePtr(
             const_cast<TS::IType&>(TS::GetUnderlyingType(arg.Type()))
                 .shared_from_this())));
+}
+
+// The C# `protected internal override TranslatedExpression
+// VisitNullCoalescingInstruction(NullCoalescingInstruction inst,
+// TranslationContext context)` (ExpressionBuilder.cs lines 3912-3954). See the
+// header comment for the arm contract.
+TranslatedExpression ExpressionBuilder::VisitNullCoalescingInstruction(
+    IL::ILInstruction* inst, TranslationContext)
+{
+    auto* nullCoalescing = static_cast<IL::NullCoalescingInstruction*>(inst);
+    TranslatedExpression value = Translate(nullCoalescing->ValueInst.get());
+    TranslatedExpression fallback = Translate(nullCoalescing->FallbackInst.get());
+    fallback = AdjustConstantExpressionToType(
+        fallback, const_cast<TS::IType&>(value.Type()));
+    std::shared_ptr<Sem::ResolveResult> rr = resolver->ResolveBinaryOperator(
+        Syntax::BinaryOperatorType::NullCoalescing,
+        SharedResolveResultAnnotation(*value.Expression()),
+        SharedResolveResultAnnotation(*fallback.Expression()));
+    if (rr->IsError())
+    {
+        TS::ITypePtr targetType;
+        if (dynamic_cast<Syntax::ThrowExpression*>(fallback.Expression()) != nullptr
+            && fallback.Type().Equals(*TS::NoType()))
+        {
+            targetType = TS::ITypePtr(
+                const_cast<TS::IType&>(TS::GetUnderlyingType(value.Type()))
+                    .shared_from_this());
+        }
+        else if (!value.Type().Equals(*TS::NullType())
+                 && !fallback.Type().Equals(*TS::NullType())
+                 && !value.Type().Equals(fallback.Type()))
+        {
+            targetType = FindType(nullCoalescing->UnderlyingResultType, TS::Sign::None);
+        }
+        else
+        {
+            targetType =
+                value.Type().Equals(*TS::NullType())
+                    ? TS::ITypePtr(
+                          const_cast<TS::IType&>(fallback.Type()).shared_from_this())
+                    : TS::ITypePtr(
+                          const_cast<TS::IType&>(value.Type()).shared_from_this());
+        }
+        if (nullCoalescing->Kind != IL::NullCoalescingKind::Ref)
+        {
+            value = value.ConvertTo(*TS::Create(*compilation, *targetType), *this);
+        }
+        else
+        {
+            value = value.ConvertTo(*targetType, *this);
+        }
+        if (nullCoalescing->Kind == IL::NullCoalescingKind::Nullable)
+        {
+            value = value.ConvertTo(*TS::Create(*compilation, *targetType), *this);
+        }
+        else
+        {
+            fallback = fallback.ConvertTo(*targetType, *this);
+        }
+        rr = std::make_shared<Sem::ResolveResult>(std::move(targetType));
+    }
+    auto* binExpr = new Syntax::BinaryOperatorExpression(
+        value.Expression(), Syntax::BinaryOperatorType::NullCoalescing,
+        fallback.Expression());
+    return WithRR(WithILInstruction(*binExpr, inst), std::move(rr));
 }
 
 // The C# `protected internal override TranslatedExpression

@@ -2567,6 +2567,29 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   never touch the C# ExpressionBuilder path; the 5 new tests pass. The standing
   CLI baselines are unchanged (`--csharp mscorlib` 10106366 bytes, `--il`
   41246545 bytes, `-l c` 109438).
+- **`ExpressionBuilder` VisitNullCoalescingInstruction arm** --
+  `VisitNullCoalescingInstruction` (ExpressionBuilder.cs lines 3912-3954: the value
+  and fallback translates, the `AdjustConstantExpressionToType(fallback, value.Type)`
+  constant re-typing, the resolver's `ResolveBinaryOperator(NullCoalescing)` over
+  the two resolve results, and the `rr.IsError` fallback -- the ThrowExpression
+  NoType fallback recovering `NullableType.GetUnderlyingType(value.Type)`, the
+  differing-non-null operand types taking the `FindType(inst.UnderlyingResultType)`
+  lookup, else the non-null operand; then the Kind-dependent conversions (a
+  non-Ref kind converting the value to `NullableType.Create(compilation, targetType)`,
+  the Nullable kind converting it again, the other kinds converting the fallback
+  to `targetType`) and the final `BinaryOperatorExpression(NullCoalescing)` with the
+  resolver result or the `ResolveResult(targetType)`). The arm is dead in the CLI
+  path (the Phase-5 seed still drives `--csharp`), so the output is unchanged.
+  Verified by **4** new gtest cases in 1 suite over the MinimalCorlib fixture (the
+  Ref kind's `a ?? b` render with the identifier operands and IL annotation, the
+  Nullable kind's `Nullable<int> ?? Nullable<int>` render, the ThrowExpression
+  fallback recovering the underlying Int32, and the `Visit` dispatch), proven with
+  an operator-swap neuter RED round (3 failures) then restored green. Full suite in
+  this environment 12120 ran / 12057 passed / 13 failed / 101 skipped -- the 13
+  failures are the same pre-existing environment-dependent real-fixture/gold tests
+  recorded for gnhf 112-116 that never touch the C# ExpressionBuilder path; the 4
+  new tests pass. The standing CLI baselines are unchanged (`--csharp mscorlib`
+  10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
