@@ -2460,6 +2460,36 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   baselines are unchanged (`--csharp mscorlib` 10106366 bytes, `--il`
   41246545 bytes, `-l c` 109438; the `--json`-mode argument-parsing path is
   untouched).
+- **`ExpressionBuilder` VisitLdLen arm + the no-op EnsureTargetNotNullable
+  helper** -- `VisitLdLen` (ExpressionBuilder.cs lines 3088-3116: the
+  `System.Array` hint translate of the array operand, the `ConvertTo(arrayType)`
+  when the operand's kind is not Array, the no-op `EnsureTargetNotNullable`, the
+  `ResultType == StackType.I4` gate selecting `Length` / `Int32` versus the
+  non-I4 `LongLength` / `Int64` -- so the raw native-int `ldlen` also renders
+  `LongLength` -- the `arrayType.GetProperties(p => p.Name == memberName)`
+  first-or-default lookup, the null-member `ResolveResult(Int32/Int64)` fallback
+  versus the `MemberResolveResult(arrayExpr.ResolveResult, member)` arm, and the
+  `MemberReferenceExpression(arrayExpr.Expression, memberName)` render with the
+  LdLen annotation), plus the private `EnsureTargetNotNullable`
+  (lines 2832-2852: the C# body is entirely commented out and returns `expr`
+  unchanged, so the port is a no-op that keeps the call-site shape). The arm is
+  dead in the CLI path (the Phase-5 seed still drives `--csharp`), so the output
+  is unchanged. The MinimalCorlib `System.Array` declares no properties, so the
+  unit tests pin the null-member fallback arm; a real corlib's `Array.Length` /
+  `LongLength` properties would take the `MemberResolveResult` arm. Verified by
+  **4** new gtest cases in 1 suite over the MinimalCorlib fixture (the I4 ->
+  `Length`/Int32 render with the identifier target and the IL annotation, the
+  I8 -> `LongLength`/Int64 arm, the native-I -> `LongLength`/Int64 arm, and the
+  `Visit` dispatch), proven with a branch-swap neuter RED round (3 failures: the
+  I4 / I8 / native-I member-name and result-type pins) then restored green.
+  Full suite in this environment 12101 ran / 12038 passed / 13 failed / 101
+  skipped -- the 13 failures are the same pre-existing environment-dependent
+  real-fixture/gold tests recorded for gnhf 112 (missing `System.Private.CoreLib`
+  10.0.8, corelib-version mismatch, missing .NET Framework v4.7.2 facades / SDK
+  Roslyn paths, and GAC-count / PDB-build-path snapshots) that never touch the
+  C# ExpressionBuilder path; the 4 new tests pass. The standing CLI baselines
+  are unchanged (`--csharp mscorlib` 10106366 bytes, `--il` 41246545 bytes,
+  `-l c` 109438).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

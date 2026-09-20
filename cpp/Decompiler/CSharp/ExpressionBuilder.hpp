@@ -265,6 +265,13 @@ public:
     // dereference, the plain Assignment, or the `ref (a = ref b)` re-assignment.
     // The C# `inst.UnalignedPrefix` disjuncts are UNREACHABLE in the port.
     TranslatedExpression VisitStObj(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitLdLen(LdLen
+    // inst, TranslationContext context)` (ExpressionBuilder.cs lines 3088-3116):
+    // the `arr.Length` / `arr.LongLength` member-reference render -- the array
+    // operand translated with the System.Array hint (converted when it is not
+    // already array-kind), then the Int32 `Length` / Int64 `LongLength` member by
+    // the I4 / non-I4 result type.
+    TranslatedExpression VisitLdLen(IL::ILInstruction* inst, TranslationContext context);
     // The C# `StackAllocExpression TranslateLocAllocSpan(LocAllocSpan inst, IType
     // typeHint, out IType elementType)` (ExpressionBuilder.cs lines 530-539): the
     // span's element type, the count converted to int32, and the StackAllocExpression.
@@ -661,6 +668,14 @@ public:
     // prefix field). Declared private in the C#; the port's no-visibility-level
     // convention.
     TranslatedExpression StObjViaHelperCall(IL::StObj& inst);
+
+    // The C# `private TranslatedExpression EnsureTargetNotNullable(TranslatedExpression
+    // expr, ILInstruction inst)` (ExpressionBuilder.cs lines 2832-2852): a no-op in
+    // the C# too -- the body is entirely commented out (the TODO for improved
+    // nullability support) and returns `expr` unchanged. Ported as-is so the
+    // VisitLdLen call site keeps its shape.
+    TranslatedExpression EnsureTargetNotNullable(TranslatedExpression expr,
+                                                 IL::ILInstruction* inst);
 
     // -- The field surface (the C# `internal readonly` fields) ------------------------
 

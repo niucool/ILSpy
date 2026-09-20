@@ -79,8 +79,10 @@
 #include "Decompiler/IL/Instructions/LdcDecimal.hpp"
 #include "Decompiler/Semantics/ConversionFactories.hpp"
 #include "Decompiler/TypeSystem/IParameter.hpp"
+#include "Decompiler/TypeSystem/IProperty.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
+#include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/IL/OpCodeName.hpp"
@@ -89,6 +91,7 @@
 #include "Decompiler/Semantics/ConstantResolveResult.hpp"
 #include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/Semantics/ErrorResolveResult.hpp"
+#include "Decompiler/Semantics/MemberResolveResult.hpp"
 #include "Decompiler/Semantics/OperatorResolveResult.hpp"
 #include "Decompiler/Semantics/SizeOfResolveResult.hpp"
 #include "Decompiler/Semantics/ThrowResolveResult.hpp"
@@ -533,6 +536,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitLdObj(inst, context);
         case IL::OpCode::StObj:
             return VisitStObj(inst, context);
+        case IL::OpCode::LdLen:
+            return VisitLdLen(inst, context);
         default:
             return Default(inst, context);
     }
@@ -3270,6 +3275,68 @@ TranslatedExpression ExpressionBuilder::VisitStObj(IL::ILInstruction* inst,
         }
     }
     return WithILInstruction(Assignment(target, value), inst);
+}
+
+// The C# `private TranslatedExpression EnsureTargetNotNullable(TranslatedExpression
+// expr, ILInstruction inst)` (ExpressionBuilder.cs lines 2832-2852): a no-op in the
+// C# too -- the body is entirely commented out (the TODO for improved nullability
+// support) and returns `expr` unchanged.
+TranslatedExpression ExpressionBuilder::EnsureTargetNotNullable(
+    TranslatedExpression expr, IL::ILInstruction* inst)
+{
+    (void)inst;
+    return expr;
+}
+
+// The C# `protected internal override TranslatedExpression VisitLdLen(LdLen inst,
+// TranslationContext context)` (ExpressionBuilder.cs lines 3088-3116): the
+// `arr.Length` / `arr.LongLength` member-reference render. The MinimalCorlib
+// `System.Array` declares no properties, so the C#
+// `arrayType.GetProperties(...).FirstOrDefault()` path takes its null-member
+// fallback `ResolveResult(Int32/Int64)` arm; a real corlib's `Length`/`LongLength`
+// property takes the `MemberResolveResult` arm.
+TranslatedExpression ExpressionBuilder::VisitLdLen(IL::ILInstruction* inst,
+                                                   TranslationContext)
+{
+    auto* ldLen = static_cast<IL::LdLen*>(inst);
+    const TS::IType& arrayType = compilation->FindType(KnownTypeCode::Array);
+    TranslatedExpression arrayExpr = Translate(ldLen->Argument.get(), &arrayType);
+    if (arrayExpr.Type().Kind() != TypeKind::Array)
+    {
+        arrayExpr = arrayExpr.ConvertTo(const_cast<TS::IType&>(arrayType), *this);
+    }
+    arrayExpr = EnsureTargetNotNullable(arrayExpr, ldLen->Argument.get());
+    std::string memberName;
+    KnownTypeCode code;
+    if (ldLen->ResultType() == IL::StackType::I4)
+    {
+        memberName = "Length";
+        code = KnownTypeCode::Int32;
+    }
+    else
+    {
+        memberName = "LongLength";
+        code = KnownTypeCode::Int64;
+    }
+    const TS::IProperty* member = nullptr;
+    std::vector<const TS::IProperty*> properties = arrayType.GetProperties(
+        [&](const TS::IProperty* p) { return p->Name() == memberName; });
+    if (!properties.empty())
+        member = properties.front();
+    std::shared_ptr<Sem::ResolveResult> rr;
+    if (member == nullptr)
+    {
+        rr = std::make_shared<Sem::ResolveResult>(TS::ITypePtr(
+            const_cast<TS::IType&>(compilation->FindType(code)).shared_from_this()));
+    }
+    else
+    {
+        rr = std::make_shared<Sem::MemberResolveResult>(
+            SharedResolveResultAnnotation(*arrayExpr.Expression()), member);
+    }
+    auto* memberRef =
+        new Syntax::MemberReferenceExpression(arrayExpr.Expression(), memberName);
+    return WithRR(WithILInstruction(*memberRef, inst), std::move(rr));
 }
 
 // The C# `protected internal override TranslatedExpression
