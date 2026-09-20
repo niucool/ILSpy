@@ -2490,6 +2490,31 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   C# ExpressionBuilder path; the 4 new tests pass. The standing CLI baselines
   are unchanged (`--csharp mscorlib` 10106366 bytes, `--il` 41246545 bytes,
   `-l c` 109438).
+- **`ExpressionBuilder` VisitLdElema arm** -- `VisitLdElema`
+  (ExpressionBuilder.cs lines 3203-3229: the array operand translate, the
+  `arrayExpr.Type as ArrayType` dynamic-cast, the
+  `TypeUtils.IsCompatibleTypeForMemoryAccess(arrayType.ElementType, inst.Type)`
+  gate rebuilding `new ArrayType(compilation, inst.Type, inst.Indices.Count)`
+  (the port's `ArrayType(element, rank)` -- no compilation field) and
+  `ConvertTo`-ing the operand when the element types are incompatible, the
+  `IndexerExpression` over the `TranslateArrayIndex`-translated indices, the
+  `ResolveResult(arrayType.ElementType)` annotation, and the
+  `DirectionExpression(Ref)` / `ByReferenceResolveResult` managed-reference
+  wrapper). The C# `inst.WithSystemIndex` arm is UNREACHABLE in the port (the
+  LdElema node carries no such field), so every index goes through
+  `TranslateArrayIndex`. The arm is dead in the CLI path (the Phase-5 seed still
+  drives `--csharp`), so the output is unchanged. Verified by **5** new gtest
+  cases in 1 suite over the MinimalCorlib fixture (the single-index `ref arr[0]`
+  shape -- DirectionExpression(Ref) over the IndexerExpression with the
+  identifier target and the int32 index, the multi-index argument list, the
+  incompatible-element `object[]`-as-`int` arm inserting the array-type cast, the
+  LdElema annotation on the indexer, and the `Visit` dispatch), proven with a
+  direction-flip neuter RED round (4 failures) then restored green. Full suite in
+  this environment 12106 ran / 12043 passed / 13 failed / 101 skipped -- the 13
+  failures are the same pre-existing environment-dependent real-fixture/gold
+  tests recorded for gnhf 112/113 that never touch the C# ExpressionBuilder
+  path; the 5 new tests pass. The standing CLI baselines are unchanged
+  (`--csharp mscorlib` 10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

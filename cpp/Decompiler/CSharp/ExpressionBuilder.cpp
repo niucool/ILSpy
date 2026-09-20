@@ -36,6 +36,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ErrorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IsExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
@@ -538,6 +539,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitStObj(inst, context);
         case IL::OpCode::LdLen:
             return VisitLdLen(inst, context);
+        case IL::OpCode::LdElema:
+            return VisitLdElema(inst, context);
         default:
             return Default(inst, context);
     }
@@ -3337,6 +3340,43 @@ TranslatedExpression ExpressionBuilder::VisitLdLen(IL::ILInstruction* inst,
     auto* memberRef =
         new Syntax::MemberReferenceExpression(arrayExpr.Expression(), memberName);
     return WithRR(WithILInstruction(*memberRef, inst), std::move(rr));
+}
+
+// The C# `protected internal override TranslatedExpression VisitLdElema(LdElema
+// inst, TranslationContext context)` (ExpressionBuilder.cs lines 3203-3229): the
+// managed-reference `ref arr[i]` render. The C# `inst.WithSystemIndex` arm is
+// UNREACHABLE in the port (the LdElema node carries no such field), so every index
+// goes through TranslateArrayIndex.
+TranslatedExpression ExpressionBuilder::VisitLdElema(IL::ILInstruction* inst,
+                                                     TranslationContext)
+{
+    auto* ldElema = static_cast<IL::LdElema*>(inst);
+    TranslatedExpression arrayExpr = Translate(ldElema->Array.get());
+    auto* arrayType = dynamic_cast<TS::ArrayType*>(&const_cast<TS::IType&>(arrayExpr.Type()));
+    if (arrayType == nullptr
+        || !TS::IsCompatibleTypeForMemoryAccess(*arrayType->Element(), *ldElema->Type))
+    {
+        // The C# `new ArrayType(compilation, inst.Type, inst.Indices.Count)` -- the
+        // port's ArrayType needs no compilation (element and rank are its whole state).
+        auto rebuilt = std::make_shared<TS::ArrayType>(
+            ldElema->Type, static_cast<int>(ldElema->Indices.size()));
+        arrayExpr = arrayExpr.ConvertTo(*rebuilt, *this);
+        arrayType = rebuilt.get();
+    }
+    auto* indexerExpr = new Syntax::IndexerExpression(arrayExpr.Expression());
+    for (const auto& index : ldElema->Indices)
+    {
+        indexerExpr->Arguments().Add(TranslateArrayIndex(index.get()).Expression());
+    }
+    TranslatedExpression indexerWithRR = WithRR(
+        WithILInstruction(*indexerExpr, inst),
+        std::make_shared<Sem::ResolveResult>(arrayType->Element()));
+    return WithRR(
+        WithoutILInstruction(*new Syntax::DirectionExpression(
+            Syntax::FieldDirection::Ref, indexerWithRR.Expression())),
+        std::make_shared<Sem::ByReferenceResolveResult>(
+            SharedResolveResultAnnotation(*indexerWithRR.Expression()),
+            TS::ReferenceKind::Ref));
 }
 
 // The C# `protected internal override TranslatedExpression

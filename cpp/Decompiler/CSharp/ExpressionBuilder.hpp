@@ -272,6 +272,14 @@ public:
     // already array-kind), then the Int32 `Length` / Int64 `LongLength` member by
     // the I4 / non-I4 result type.
     TranslatedExpression VisitLdLen(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitLdElema(LdElema
+    // inst, TranslationContext context)` (ExpressionBuilder.cs lines 3203-3229):
+    // the managed-reference `ref arr[i]` render -- the array operand (re-typed to a
+    // rebuilt element array type when its element type is not memory-access
+    // compatible with the node's type), the indexer over the translated indices,
+    // and the DirectionExpression(Ref) wrapper. The C# `inst.WithSystemIndex` arm
+    // is UNREACHABLE in the port (the LdElema node carries no such field).
+    TranslatedExpression VisitLdElema(IL::ILInstruction* inst, TranslationContext context);
     // The C# `StackAllocExpression TranslateLocAllocSpan(LocAllocSpan inst, IType
     // typeHint, out IType elementType)` (ExpressionBuilder.cs lines 530-539): the
     // span's element type, the count converted to int32, and the StackAllocExpression.
