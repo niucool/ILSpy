@@ -88,6 +88,7 @@
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/CastClass.hpp"
+#include "Decompiler/IL/Instructions/NullableInstructions.hpp"
 #include "Decompiler/IL/OpCodeName.hpp"
 #include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
@@ -549,6 +550,10 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitBox(inst, context);
         case IL::OpCode::CastClass:
             return VisitCastClass(inst, context);
+        case IL::OpCode::NullableRewrap:
+            return VisitNullableRewrap(inst, context);
+        case IL::OpCode::NullableUnwrap:
+            return VisitNullableUnwrap(inst, context);
         default:
             return Default(inst, context);
     }
@@ -3480,6 +3485,53 @@ TranslatedExpression ExpressionBuilder::VisitCastClass(IL::ILInstruction* inst,
 {
     auto* castClass = static_cast<IL::CastClass*>(inst);
     return Translate(castClass->Argument.get()).ConvertTo(*castClass->Type, *this);
+}
+
+// The C# `protected internal override TranslatedExpression
+// VisitNullableRewrap(NullableRewrap inst, TranslationContext context)`
+// (ExpressionBuilder.cs lines 4298-4309). See the header comment for the arm
+// contract.
+TranslatedExpression ExpressionBuilder::VisitNullableRewrap(IL::ILInstruction* inst,
+                                                            TranslationContext)
+{
+    auto* rewrap = static_cast<IL::NullableRewrap*>(inst);
+    TranslatedExpression arg = Translate(rewrap->Argument.get());
+    TS::ITypePtr type =
+        TS::ITypePtr(const_cast<TS::IType&>(arg.Type()).shared_from_this());
+    if (TS::IsNonNullableValueType(arg.Type()))
+    {
+        type = TS::Create(*compilation, arg.Type());
+    }
+    auto* uoe = new Syntax::UnaryOperatorExpression(
+        arg.Expression(), Syntax::UnaryOperatorType::NullConditionalRewrap);
+    return WithRR(WithILInstruction(*uoe, inst),
+                  std::make_shared<Sem::ResolveResult>(std::move(type)));
+}
+
+// The C# `protected internal override TranslatedExpression
+// VisitNullableUnwrap(NullableUnwrap inst, TranslationContext context)`
+// (ExpressionBuilder.cs lines 4311-4321). See the header comment for the arm
+// contract.
+TranslatedExpression ExpressionBuilder::VisitNullableUnwrap(IL::ILInstruction* inst,
+                                                            TranslationContext)
+{
+    auto* unwrap = static_cast<IL::NullableUnwrap*>(inst);
+    TranslatedExpression arg = Translate(unwrap->Argument.get());
+    if (unwrap->RefInput && !unwrap->RefOutput())
+    {
+        if (auto* dir = dynamic_cast<Syntax::DirectionExpression*>(arg.Expression()))
+        {
+            // We can dereference the managed reference by stripping away the 'ref'.
+            arg = arg.UnwrapChild(dir->Expression());
+        }
+    }
+    auto* uoe = new Syntax::UnaryOperatorExpression(
+        arg.Expression(), Syntax::UnaryOperatorType::NullConditional);
+    return WithRR(
+        WithILInstruction(*uoe, inst),
+        std::make_shared<Sem::ResolveResult>(TS::ITypePtr(
+            const_cast<TS::IType&>(TS::GetUnderlyingType(arg.Type()))
+                .shared_from_this())));
 }
 
 // The C# `protected internal override TranslatedExpression

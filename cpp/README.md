@@ -2542,6 +2542,31 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   gnhf 112/113/114 that never touch the C# ExpressionBuilder path; the 5 new
   tests pass. The standing CLI baselines are unchanged (`--csharp mscorlib`
   10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
+- **`ExpressionBuilder` nullable `?.` rewrap/unwrap arms** -- `VisitNullableRewrap`
+  (ExpressionBuilder.cs lines 4298-4309: the
+  `UnaryOperatorExpression(NullConditionalRewrap)` over the argument, with the
+  result type wrapped through `NullableType.Create(compilation, type)` when
+  `NullableType.IsNonNullableValueType(arg.Type)` holds) and
+  `VisitNullableUnwrap` (lines 4311-4321: the
+  `UnaryOperatorExpression(NullConditional)` over the argument -- the
+  `RefInput && !RefOutput` managed-reference strip via `UnwrapChild` -- with the
+  `NullableType.GetUnderlyingType(arg.Type)` result). The debug `Translate`
+  post-condition enforces the rewrap's nullable result type and the unwrap's
+  unwrapped result type, so a neuter that skips the Nullable wrap or the
+  RefInput strip trips the assert rather than failing gracefully; the RED round
+  therefore swaps the two operators. The arms are dead in the CLI path (the
+  Phase-5 seed still drives `--csharp`), so the output is unchanged. Verified by
+  **5** new gtest cases in 1 suite over the MinimalCorlib fixture (the
+  non-nullable `int` -> `Nullable<int>` rewrap, the reference-type passthrough
+  rewrap, the `Nullable<int>` unwrap to `int`, the RefInput DirectionExpression
+  strip leaving the inner indexer, and the `Visit` dispatch for both opcodes),
+  proven with a two-operator-swap neuter RED round (4 failures) then restored
+  green. Full suite in this environment 12116 ran / 12053 passed / 13 failed /
+  101 skipped -- the 13 failures are the same pre-existing
+  environment-dependent real-fixture/gold tests recorded for gnhf 112-115 that
+  never touch the C# ExpressionBuilder path; the 5 new tests pass. The standing
+  CLI baselines are unchanged (`--csharp mscorlib` 10106366 bytes, `--il`
+  41246545 bytes, `-l c` 109438).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

@@ -299,6 +299,19 @@ public:
     // VisitCastClass(CastClass inst, TranslationContext context)`
     // (ExpressionBuilder.cs lines 3354-3357): the ConvertTo(inst.Type) passthrough.
     TranslatedExpression VisitCastClass(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitNullableRewrap(NullableRewrap inst, TranslationContext context)`
+    // (ExpressionBuilder.cs lines 4298-4309): the `?.` join-point render -- the
+    // NullConditionalRewrap operator over the argument, with the result type
+    // wrapped into Nullable<T> when the argument's type is a non-nullable value
+    // type.
+    TranslatedExpression VisitNullableRewrap(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitNullableUnwrap(NullableUnwrap inst, TranslationContext context)`
+    // (ExpressionBuilder.cs lines 4311-4321): the `?.` dereference render -- the
+    // NullConditional operator with the GetUnderlyingType result, stripping the
+    // managed reference when RefInput holds and RefOutput does not.
+    TranslatedExpression VisitNullableUnwrap(IL::ILInstruction* inst, TranslationContext context);
     // The C# `StackAllocExpression TranslateLocAllocSpan(LocAllocSpan inst, IType
     // typeHint, out IType elementType)` (ExpressionBuilder.cs lines 530-539): the
     // span's element type, the count converted to int32, and the StackAllocExpression.
