@@ -330,6 +330,13 @@ public:
     // and the InvocationResolveResult over the resolved method.
     TranslatedExpression VisitUserDefinedLogicOperator(IL::ILInstruction* inst,
                                                        TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitRefAnyType(
+    // RefAnyType inst, TranslationContext context)` (ExpressionBuilder.cs lines
+    // 3386-3394): the `__reftype(arg).TypeHandle` render -- the
+    // UndocumentedExpression(RefType) over the translated argument, the TypeHandle
+    // member reference, and the RuntimeTypeHandle resolve result.
+    TranslatedExpression VisitRefAnyType(IL::ILInstruction* inst,
+                                         TranslationContext context);
     // The C# `StackAllocExpression TranslateLocAllocSpan(LocAllocSpan inst, IType
     // typeHint, out IType elementType)` (ExpressionBuilder.cs lines 530-539): the
     // span's element type, the count converted to int32, and the StackAllocExpression.

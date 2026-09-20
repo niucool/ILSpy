@@ -480,6 +480,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/ExpressionBuilderNullableRewrapUnwrap_Test.cpp
     Decompiler/CSharp/ExpressionBuilderNullCoalescing_Test.cpp
     Decompiler/CSharp/ExpressionBuilderUserDefinedLogic_Test.cpp
+    Decompiler/CSharp/ExpressionBuilderRefAnyType_Test.cpp
     Decompiler/CSharp/Syntax/InterpolatedString_Test.cpp
     Decompiler/CSharp/Syntax/QueryExpression_Test.cpp
     Decompiler/CSharp/Syntax/QueryClauses_Test.cpp
@@ -557,4 +558,4 @@ target_link_libraries(ilspy_tests PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(ilspy_tests)
+gtest_discover_tests(ilspy_tests DISCOVERY_TIMEOUT 120)

@@ -49,6 +49,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/TypeOfExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ThrowExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UndocumentedExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
@@ -85,6 +86,7 @@
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
+#include "Decompiler/IL/Instructions/RefAnyType.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/CastClass.hpp"
@@ -104,6 +106,7 @@
 #include "Decompiler/Semantics/ThrowResolveResult.hpp"
 #include "Decompiler/Semantics/ResolveResult.hpp"
 #include "Decompiler/Semantics/TypeIsResolveResult.hpp"
+#include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/Semantics/TypeOfResolveResult.hpp"
 #include "Decompiler/TypeSystem/KnownTypeReference.hpp"
 #include "Decompiler/TypeSystem/ExpressionType.hpp"
@@ -561,6 +564,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitNullCoalescingInstruction(inst, context);
         case IL::OpCode::UserDefinedLogicOperator:
             return VisitUserDefinedLogicOperator(inst, context);
+        case IL::OpCode::RefAnyType:
+            return VisitRefAnyType(inst, context);
         default:
             return Default(inst, context);
     }
@@ -3654,6 +3659,27 @@ TranslatedExpression ExpressionBuilder::VisitUserDefinedLogicOperator(
             std::vector<std::shared_ptr<Sem::ResolveResult>>{
                 SharedResolveResultAnnotation(*left.Expression()),
                 SharedResolveResultAnnotation(*right.Expression())}));
+}
+
+// The C# `protected internal override TranslatedExpression VisitRefAnyType(
+// RefAnyType inst, TranslationContext context)` (ExpressionBuilder.cs lines
+// 3386-3394). See the header comment for the arm contract.
+TranslatedExpression ExpressionBuilder::VisitRefAnyType(IL::ILInstruction* inst,
+                                                       TranslationContext)
+{
+    auto* refAnyType = static_cast<IL::RefAnyType*>(inst);
+    auto* undoc = new Syntax::UndocumentedExpression(
+        Syntax::UndocumentedExpressionType::RefType);
+    undoc->Arguments().Add(Translate(refAnyType->Argument.get()).Expression());
+    auto* memberRef = new Syntax::MemberReferenceExpression(undoc, "TypeHandle");
+    // The C# `compilation.FindType(new TopLevelTypeName("System",
+    // "RuntimeTypeHandle"))` -- the modules-scan extension over the full type name
+    // (the VisitLdTypeToken lookup).
+    TS::ITypePtr runtimeTypeHandleType = TS::FindType(
+        *compilation, TS::FullTypeName(TS::TopLevelTypeName("System", "RuntimeTypeHandle")));
+    return WithRR(WithILInstruction(*memberRef, inst),
+                  std::make_shared<Sem::TypeResolveResult>(
+                      std::move(runtimeTypeHandleType)));
 }
 
 // The C# `protected internal override TranslatedExpression

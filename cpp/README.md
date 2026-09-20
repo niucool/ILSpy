@@ -2615,6 +2615,29 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   never touch the C# ExpressionBuilder path; the 5 new tests pass. The standing
   CLI baselines are unchanged (`--csharp mscorlib` 10106366 bytes, `--il`
   41246545 bytes, `-l c` 109438).
+- **`ExpressionBuilder` VisitRefAnyType arm** -- `VisitRefAnyType`
+  (ExpressionBuilder.cs lines 3386-3394: the `__reftype(arg).TypeHandle` render --
+  an UndocumentedExpression(RefType) over the translated argument, the TypeHandle
+  `MemberReferenceExpression`, and the `TypeResolveResult` over the resolved
+  System.RuntimeTypeHandle (the same modules-scan `FullTypeName` lookup the
+  VisitLdTypeToken arm uses)). The neighboring reference-family arms
+  (`VisitArglist`/`VisitMakeRefAny`/`VisitRefAnyValue`) stay deferred (their IL
+  nodes are unported), as does the `RefAnyType` source form's C# `Detach()` -- the
+  port's translated argument is an unparented root, so it is added directly. The
+  arm is dead in the CLI path (the Phase-5 seed still drives `--csharp`), so the
+  output is unchanged. Verified by **2** new gtest cases in 1 suite over the
+  MinimalCorlib fixture (the RefType UndocumentedExpression with its single
+  identifier argument, the TypeHandle member, the RuntimeTypeHandle result, and
+  the IL annotation; plus the `Visit` dispatch), proven with a RefType -> RefValue
+  neuter RED round (1 failure) then restored green. Per the standing
+  faster-partial-test policy the full suite was not re-run this iteration; the
+  targeted run is **178/178** ExpressionBuilder tests green plus the broader
+  `*CSharp*:*Resolver*:*OutputVisitor*` filter (52s) with only the known
+  environment GAC-snapshot failure, and the standing CLI baselines are unchanged
+  (`--csharp mscorlib` 10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
+  The build also gains `gtest_discover_tests(ilspy_tests DISCOVERY_TIMEOUT 120)`:
+  the default 5s discovery timeout is exceeded by the 12k-test `--gtest_list_tests`
+  enumeration, which had been failing the post-link discovery step.
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
