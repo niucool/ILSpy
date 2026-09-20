@@ -280,6 +280,25 @@ public:
     // and the DirectionExpression(Ref) wrapper. The C# `inst.WithSystemIndex` arm
     // is UNREACHABLE in the port (the LdElema node carries no such field).
     TranslatedExpression VisitLdElema(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitUnboxAny(UnboxAny inst, TranslationContext context)` (ExpressionBuilder.cs
+    // lines 3285-3320): the `unbox.any T(isinst T(expr))` -> `expr as T` rewrite
+    // (when the node type equals the isinst type and is nullable or a reference
+    // type), else the `(T)expr` cast -- the TypeParameter arm converting through
+    // the effective base class when the resolver's ResolveCast errors, the general
+    // arm converting the operand to object -- with the UnboxingConversion resolve
+    // result.
+    TranslatedExpression VisitUnboxAny(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitBox(Box inst,
+    // TranslationContext context)` (ExpressionBuilder.cs lines 3332-3352): the
+    // `(object)expr` render -- the NativeIntegers IntPtr/UIntPtr -> nint/nuint
+    // substitution, the ConvertTo(targetType), and the BoxingConversion resolve
+    // result over the object cast.
+    TranslatedExpression VisitBox(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitCastClass(CastClass inst, TranslationContext context)`
+    // (ExpressionBuilder.cs lines 3354-3357): the ConvertTo(inst.Type) passthrough.
+    TranslatedExpression VisitCastClass(IL::ILInstruction* inst, TranslationContext context);
     // The C# `StackAllocExpression TranslateLocAllocSpan(LocAllocSpan inst, IType
     // typeHint, out IType elementType)` (ExpressionBuilder.cs lines 530-539): the
     // span's element type, the count converted to int32, and the StackAllocExpression.

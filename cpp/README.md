@@ -2515,6 +2515,33 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   tests recorded for gnhf 112/113 that never touch the C# ExpressionBuilder
   path; the 5 new tests pass. The standing CLI baselines are unchanged
   (`--csharp mscorlib` 10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
+- **`ExpressionBuilder` unbox/box/cast arms** -- `VisitUnboxAny`
+  (ExpressionBuilder.cs lines 3285-3320: the
+  `inst.Argument is IsInst isInst && IsUnboxAnyWithIsInst(inst, isInst.Type)`
+  rewrite to `expr as T` through `UnwrapBoxingConversion`, the general arm's
+  TypeParameter `ResolveCast`/`EffectiveBaseClass` fallback versus the
+  object-convert, and the `CastExpression` with the UnboxingConversion resolve
+  result), `VisitBox` (lines 3332-3352: the NativeIntegers IntPtr/UIntPtr ->
+  nint/nuint substitution, the `ConvertTo(targetType)`, and the object
+  `CastExpression` with the BoxingConversion resolve result), and `VisitCastClass`
+  (lines 3354-3357: the `Translate(inst.Argument).ConvertTo(inst.Type)`
+  passthrough). The port has no separate `Unbox` IL node -- the IL reader folds
+  `unbox` into `UnboxAny` -- so there is no `VisitUnbox` arm to port; the
+  `IsUnboxAnyWithIsInst` and `UnwrapBoxingConversion` static helpers were already
+  present. The arms are dead in the CLI path (the Phase-5 seed still drives
+  `--csharp`), so the output is unchanged. Verified by **5** new gtest cases in 1
+  suite over the MinimalCorlib fixture (the same-reference-type isinst rewrite to
+  AsExpression with its IL annotation, the general object -> Int32 cast with the
+  UnboxingConversion resolve result, the Int32 -> object box with the
+  BoxingConversion resolve result, the Object -> String castclass ConvertTo, and
+  the `Visit` dispatch for all three opcodes), proven with a 4-behavior neuter
+  RED round (4 failures: the isinst condition, both conversion kinds, and the
+  castclass ConvertTo) then restored green. Full suite in this environment 12111
+  ran / 12048 passed / 13 failed / 101 skipped -- the 13 failures are the same
+  pre-existing environment-dependent real-fixture/gold tests recorded for
+  gnhf 112/113/114 that never touch the C# ExpressionBuilder path; the 5 new
+  tests pass. The standing CLI baselines are unchanged (`--csharp mscorlib`
+  10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
