@@ -321,6 +321,15 @@ public:
     // Nullable<T> conversions.
     TranslatedExpression VisitNullCoalescingInstruction(IL::ILInstruction* inst,
                                                         TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitUserDefinedLogicOperator(UserDefinedLogicOperator inst, TranslationContext
+    // context)` (ExpressionBuilder.cs lines 1233-1257): the user-defined `&&`/`||`
+    // render -- both operands translated with their parameter type hints and
+    // converted to them, the ConditionalAnd/ConditionalOr operator by the
+    // op_BitwiseAnd/op_BitwiseOr method name (else the C# InvalidOperationException),
+    // and the InvocationResolveResult over the resolved method.
+    TranslatedExpression VisitUserDefinedLogicOperator(IL::ILInstruction* inst,
+                                                       TranslationContext context);
     // The C# `StackAllocExpression TranslateLocAllocSpan(LocAllocSpan inst, IType
     // typeHint, out IType elementType)` (ExpressionBuilder.cs lines 530-539): the
     // span's element type, the count converted to int32, and the StackAllocExpression.

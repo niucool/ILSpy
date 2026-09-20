@@ -90,12 +90,14 @@
 #include "Decompiler/IL/Instructions/CastClass.hpp"
 #include "Decompiler/IL/Instructions/NullableInstructions.hpp"
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
+#include "Decompiler/IL/Instructions/UserDefinedLogicOperator.hpp"
 #include "Decompiler/IL/OpCodeName.hpp"
 #include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
 #include "Decompiler/Semantics/ConstantResolveResult.hpp"
 #include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/Semantics/ErrorResolveResult.hpp"
+#include "Decompiler/Semantics/InvocationResolveResult.hpp"
 #include "Decompiler/Semantics/MemberResolveResult.hpp"
 #include "Decompiler/Semantics/OperatorResolveResult.hpp"
 #include "Decompiler/Semantics/SizeOfResolveResult.hpp"
@@ -557,6 +559,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitNullableUnwrap(inst, context);
         case IL::OpCode::NullCoalescingInstruction:
             return VisitNullCoalescingInstruction(inst, context);
+        case IL::OpCode::UserDefinedLogicOperator:
+            return VisitUserDefinedLogicOperator(inst, context);
         default:
             return Default(inst, context);
     }
@@ -3600,6 +3604,56 @@ TranslatedExpression ExpressionBuilder::VisitNullCoalescingInstruction(
         value.Expression(), Syntax::BinaryOperatorType::NullCoalescing,
         fallback.Expression());
     return WithRR(WithILInstruction(*binExpr, inst), std::move(rr));
+}
+
+// The C# `protected internal override TranslatedExpression
+// VisitUserDefinedLogicOperator(UserDefinedLogicOperator inst,
+// TranslationContext context)` (ExpressionBuilder.cs lines 1233-1257). See the
+// header comment for the arm contract.
+TranslatedExpression ExpressionBuilder::VisitUserDefinedLogicOperator(
+    IL::ILInstruction* inst, TranslationContext)
+{
+    auto* logicOp = static_cast<IL::UserDefinedLogicOperator*>(inst);
+    if (!logicOp->Method)
+    {
+        // The C# node's `readonly IMethod Method` is never null; the port's seed
+        // string-stand-in construction form carries no resolved method, and the
+        // C# Visit reads the method's parameters/name unconditionally -- a loud
+        // deferral is the only faithful behavior for the stand-in.
+        throw std::logic_error(
+            "VisitUserDefinedLogicOperator: the seed string stand-in node has no "
+            "resolved IMethod; the resolved-method construction form is required "
+            "for the C# back end");
+    }
+    const TS::IMethod& method = *logicOp->Method;
+    const TS::IType& param0 = method.Parameters()[0]->Type();
+    const TS::IType& param1 = method.Parameters()[1]->Type();
+    TranslatedExpression left = Translate(logicOp->Left.get(), &param0)
+                                    .ConvertTo(const_cast<TS::IType&>(param0), *this);
+    TranslatedExpression right = Translate(logicOp->Right.get(), &param1)
+                                     .ConvertTo(const_cast<TS::IType&>(param1), *this);
+    Syntax::BinaryOperatorType op;
+    if (method.Name() == "op_BitwiseAnd")
+    {
+        op = Syntax::BinaryOperatorType::ConditionalAnd;
+    }
+    else if (method.Name() == "op_BitwiseOr")
+    {
+        op = Syntax::BinaryOperatorType::ConditionalOr;
+    }
+    else
+    {
+        throw std::logic_error("Invalid method name");
+    }
+    auto* binExpr =
+        new Syntax::BinaryOperatorExpression(left.Expression(), op, right.Expression());
+    return WithRR(
+        WithILInstruction(*binExpr, inst),
+        std::make_shared<Sem::InvocationResolveResult>(
+            nullptr, &method,
+            std::vector<std::shared_ptr<Sem::ResolveResult>>{
+                SharedResolveResultAnnotation(*left.Expression()),
+                SharedResolveResultAnnotation(*right.Expression())}));
 }
 
 // The C# `protected internal override TranslatedExpression

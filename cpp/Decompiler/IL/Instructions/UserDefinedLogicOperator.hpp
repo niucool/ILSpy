@@ -61,6 +61,7 @@
 #include "Decompiler/IL/OpCode.hpp"
 #include "Decompiler/IL/StackType.hpp"
 #include "Decompiler/IL/Instructions/BinaryInstruction.hpp"
+#include "Decompiler/TypeSystem/IMethod.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
 #include <memory>
@@ -86,6 +87,12 @@ public:
     // Carried so a future UserDefinedLogicTransform can consult it without a
     // MetadataFile handle (the pre-resolve-metadata-at-reader-time pattern).
     TypeSystem::ITypePtr MethodDeclaringType;
+    // The C# `public readonly IMethod Method` -- the resolved operator method
+    // (null on the seed string stand-in construction form). Carried so the
+    // VisitUserDefinedLogicOperator arm can read the parameter types and the
+    // op_BitwiseAnd/op_BitwiseOr name; the UserDefinedCompoundAssign (gnhf 110)
+    // precedent.
+    std::shared_ptr<TypeSystem::IMethod> Method;
 
     UserDefinedLogicOperator(std::string methodName,
                              TypeSystem::ITypePtr methodDeclaringType,
@@ -95,6 +102,15 @@ public:
                             std::move(left), std::move(right)),
           MethodName(std::move(methodName)),
           MethodDeclaringType(std::move(methodDeclaringType)) {}
+
+    // The C# ctor form (`UserDefinedLogicOperator(IMethod method,
+    // ILInstruction left, ILInstruction right)`): the resolved method populates
+    // the string stand-ins (WriteTo prints MethodName) and is kept for the
+    // VisitUserDefinedLogicOperator arm. Implemented out-of-line in the .cpp (the
+    // stand-in derivation mirrors the UserDefinedCompoundAssign gnhf-110 form).
+    UserDefinedLogicOperator(std::shared_ptr<TypeSystem::IMethod> method,
+                             std::unique_ptr<ILInstruction> left,
+                             std::unique_ptr<ILInstruction> right);
 
     // Faithful to the C# `public override StackType ResultType => StackType.O`.
     // A user-defined `&&` / `||` evaluates to the operand type (a reference

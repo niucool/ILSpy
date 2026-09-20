@@ -2590,6 +2590,31 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   recorded for gnhf 112-116 that never touch the C# ExpressionBuilder path; the 4
   new tests pass. The standing CLI baselines are unchanged (`--csharp mscorlib`
   10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
+- **`ExpressionBuilder` VisitUserDefinedLogicOperator arm + the node IMethod form**
+  -- `VisitUserDefinedLogicOperator` (ExpressionBuilder.cs lines 1233-1257: both
+  operands translated with their `Method.Parameters[n].Type` hints and converted to
+  them, the `op_BitwiseAnd`/`op_BitwiseOr` name dispatch to the
+  ConditionalAnd/ConditionalOr operator (else the C# `InvalidOperationException`,
+  ported to `std::logic_error`), and the `InvocationResolveResult(null, Method,
+  [left, right])` over the converted operand resolve results), plus the
+  `UserDefinedLogicOperator` IL node's real-`IMethod` construction form (the
+  `UserDefinedCompoundAssign` gnhf-110 precedent: a `std::shared_ptr<IMethod>
+  Method` field and an IMethod-taking ctor that derives the `ReflectionName::Name`
+  dump stand-in; the new `Instructions/UserDefinedLogicOperator.cpp`). The seed
+  string-stand-in node (no resolved method) throws the loud `std::logic_error`
+  deferral, since the C# Visit consumes the method's parameters unconditionally.
+  The arm is dead in the CLI path (the Phase-5 seed still drives `--csharp`), so
+  the output is unchanged. Verified by **5** new gtest cases in 1 suite over the
+  MinimalCorlib fixture (the op_BitwiseAnd -> `&&` and op_BitwiseOr -> `||` renders
+  over real FakeMethods returning their operand type, the InvocationResolveResult's
+  two arguments, the invalid-method-name throw, the seed deferral throw, and the
+  `Visit` dispatch), proven with a name-dispatch neuter RED round (2 failures) then
+  restored green. Full suite in this environment 12125 ran / 12062 passed / 13
+  failed / 101 skipped -- the 13 failures are the same pre-existing
+  environment-dependent real-fixture/gold tests recorded for gnhf 112-117 that
+  never touch the C# ExpressionBuilder path; the 5 new tests pass. The standing
+  CLI baselines are unchanged (`--csharp mscorlib` 10106366 bytes, `--il`
+  41246545 bytes, `-l c` 109438).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
