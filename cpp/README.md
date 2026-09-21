@@ -2735,6 +2735,36 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `*CSharp*:*Resolver*:*OutputVisitor*` filter (59s) with only the known
   environment GAC-snapshot failure; the standing CLI baselines are unchanged
   (`--csharp mscorlib` 10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
+- **Call resolved-method construction form** -- the `Call` node gains the C#
+  `CallInstruction.Method` (`std::shared_ptr<IMethod> Method`, null on the seed
+  string stand-in form) and the `Call(IMethod, bool isNewObj)` ctor
+  (CallInstruction.cs), out-of-line in a new
+  `Decompiler/IL/Instructions/Call.cpp`. The ctor derives every stand-in field
+  the C# derives from the method: `MethodName`
+  (`DeclaringType.ReflectionName()::Name`), `DeclaringType`, `ReturnIType`,
+  `ParameterIType` (the `Method.Parameters` types, no implicit `this`),
+  `IsInstanceCall` (`!(Method.IsStatic || NewObj)`), `IsNewObj`, `IsOperator`
+  (the real `Method.IsOperator`, replacing the reader's name heuristic for the
+  resolved form), `TypeArgumentsCount` (`Method.TypeArguments.Count`), and
+  `ReturnType` (the C# `ResultType`: `DeclaringType.GetStackType()` for a
+  `newobj`, else `Method.ReturnType.GetStackType()`). This is the resolved
+  `IMethod` the `CallBuilder::Build` path and the
+  VisitCall/VisitCallVirt/VisitNewObj arms consume (the
+  UserDefinedCompoundAssign gnhf-110 / UserDefinedLogicOperator gnhf-118 node
+  upgrade precedent). The reader keeps the string form (it stays type-system-free
+  per D78); a future visitor resolves its token to an `IMethod` and uses this
+  ctor. Verified by **6** new gtest cases in 1 suite in
+  `CallResolvedMethod_Test.cpp` over a `FakeMethod` (the derived-field shape, the
+  static non-instance call, the newobj value-type declaring-type stack type, the
+  operator flag, the type-argument count, and the seed string form), proven with
+  a three-arm neuter RED round (3 failures: the static instance-call gate, the
+  newobj ResultType, and the type-argument count) then restored green.
+  Partial-test policy: the new 6 green; the
+  `*CSharp*:*ExpressionBuilder*:*Resolver*:*OutputVisitor*` filter (64s) with
+  only the known environment GAC-snapshot failure; the IL-layer safety filter
+  `*Call*:*Transform*:*ILAst*:*ILReader*:*ILFunction*:*Clone*` (1356 tests, all
+  passed); the standing CLI baselines are unchanged (`--csharp mscorlib`
+  10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

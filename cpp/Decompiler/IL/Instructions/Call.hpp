@@ -18,11 +18,14 @@
 
 // Call: a method invocation. Children are the arguments (in order); the method
 // is identified by a display name the IL reader fills in from the resolved
-// MethodDef/MemberRef token. DirectFlags = SideEffect | MayThrow.
+// MethodDef/MemberRef token, or by a fully resolved IMethod when constructed
+// through the IMethod-taking ctor (the VisitCall/CallBuilder path).
+// DirectFlags = SideEffect | MayThrow.
 
 #pragma once
 
 #include "Decompiler/IL/ILInstruction.hpp"
+#include "Decompiler/TypeSystem/IMethod.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
 #include <memory>
@@ -33,6 +36,15 @@ namespace ILSpy::Decompiler::IL {
 
 class Call : public ILInstruction {
 public:
+    // The C# `public readonly IMethod Method` (CallInstruction.cs) -- the
+    // resolved method this call invokes. Null on the seed string-stand-in
+    // construction form (the `Call(std::string method)` ctor the IL reader and
+    // the transforms use), non-null on the resolved-method construction form
+    // (the `Call(std::shared_ptr<IMethod>, bool)` ctor), which derives every
+    // stand-in field below from it. A future visitor resolves the reader's
+    // token to an IMethod through a type-system handle and uses that ctor; the
+    // reader itself stays type-system-free (D78) and keeps the string form.
+    std::shared_ptr<TypeSystem::IMethod> Method;
     std::string MethodName;  // "Namespace.Type::Method" (resolved by the IL reader)
     std::vector<std::unique_ptr<ILInstruction>> Arguments;
     StackType ReturnType = StackType::Unknown;
@@ -115,6 +127,18 @@ public:
     bool IsLifted = false;
 
     explicit Call(std::string method = std::string()) : ILInstruction(OpCode::Call), MethodName(std::move(method)) {}
+
+    // The C# ctor form (`CallInstruction(OpCode opCode, IMethod method)` -- here
+    // pinned to the call opcode, with `isNewObj` selecting the C# `NewObj
+    // Subclass): the resolved method populates every stand-in field (MethodName,
+    // ReturnIType/ReturnType, ParameterIType, DeclaringType, IsInstanceCall,
+    // IsNewObj, IsOperator, TypeArgumentsCount) the C# derives from the method,
+    // and is kept for the VisitCall/VisitCallVirt/VisitNewObj arms and the
+    // CallBuilder. Implemented out-of-line in the .cpp (the stand-in derivation
+    // needs the ReflectionName/Name display and StackTypeOf; the
+    // UserDefinedCompoundAssign gnhf-110 / UserDefinedLogicOperator gnhf-118
+    // precedent).
+    Call(std::shared_ptr<TypeSystem::IMethod> method, bool isNewObj = false);
 
     // The C# `internal static StackType CallInstruction.ExpectedTypeForThisPointer(
     // IType declaringType, IType? constrainedTo)` (CallInstruction.cs lines
