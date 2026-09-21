@@ -189,6 +189,17 @@ public:
         const TS::IMethod& method,
         const std::vector<TranslatedExpression>& arguments);
 
+    // The C# `bool IsAppropriateCallTarget(ExpectedTargetDetails expectedTargetDetails,
+    // IMember expectedTarget, IMember actualTarget)` (CallBuilder.cs lines
+    // 1816-1835): whether the overload-resolution result `actualTarget` may stand
+    // in for the IL's `expectedTarget`. True on a type-erasure match; else a
+    // `CallVirt` to an override whose base-member chain (via `GetBaseMembers`)
+    // contains the expected target, unless the expected call needed a boxing
+    // conversion on a non-reference declaring type.
+    static bool IsAppropriateCallTarget(const ExpectedTargetDetails& expectedTargetDetails,
+                                        const TS::IMember& expectedTarget,
+                                        const TS::IMember& actualTarget);
+
 private:
     // The C# `private bool IsPrimitiveValueThatShouldBeNamedArgument(
     // TranslatedExpression arg, IMethod method, IParameter p)` (CallBuilder.cs

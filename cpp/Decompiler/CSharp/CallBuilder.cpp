@@ -33,8 +33,11 @@
 #include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/Semantics/OutVarResolveResult.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
+#include "Decompiler/TypeSystem/IMember.hpp"
 #include "Decompiler/TypeSystem/IParameter.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/InheritanceHelper.hpp"
+#include "Decompiler/TypeSystem/NormalizeTypeVisitor.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/Util/Decimal.hpp"
 
@@ -172,6 +175,33 @@ Syntax::Expression* CallBuilder::HandleDelegateEqualityComparison(
         method.Name() == "op_Equality" ? Syntax::BinaryOperatorType::Equality
                                        : Syntax::BinaryOperatorType::InEquality,
         arguments[1].Expression());
+}
+
+// The C# `bool IsAppropriateCallTarget(ExpectedTargetDetails expectedTargetDetails,
+// IMember expectedTarget, IMember actualTarget)` (CallBuilder.cs lines
+// 1816-1835).
+bool CallBuilder::IsAppropriateCallTarget(
+    const ExpectedTargetDetails& expectedTargetDetails,
+    const TS::IMember& expectedTarget, const TS::IMember& actualTarget) {
+    if (expectedTarget.Equals(&actualTarget, &TS::NormalizeTypeVisitor::TypeErasure()))
+        return true;
+
+    if (expectedTargetDetails.CallOpCode == IL::OpCode::CallVirt
+        && actualTarget.IsOverride()) {
+        TS::ITypePtr declaring = actualTarget.DeclaringType();
+        if (expectedTargetDetails.NeedsBoxingConversion && declaring
+            && declaring->IsReferenceType() != true)
+            return false;
+        for (const TS::IMember* possibleTarget : TS::InheritanceHelper::GetBaseMembers(
+                 actualTarget, /*includeImplementedInterfaces=*/false)) {
+            if (expectedTarget.Equals(possibleTarget,
+                                      &TS::NormalizeTypeVisitor::TypeErasure()))
+                return true;
+            if (!possibleTarget->IsOverride())
+                break;
+        }
+    }
+    return false;
 }
 
 // The C# `object.Equals(a, b)` over two boxed constant values (the

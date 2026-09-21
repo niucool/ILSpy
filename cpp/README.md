@@ -2870,6 +2870,29 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   (23s) with only the known environment GAC-snapshot failure; the standing CLI
   baselines are unchanged (`--csharp mscorlib` 10106366 bytes, `--il` 41246545
   bytes, `-l c` 109438).
+- **CallBuilder::IsAppropriateCallTarget** -- the overload-resolution gate the
+  `GetRequiredTransformationsForCall` / `IsUnambiguousCall` helpers consult
+  (CallBuilder.cs lines 1816-1835): a type-erasure `Equals` match is appropriate;
+  otherwise a `CallVirt` to an override is appropriate when the base-member chain
+  (via `InheritanceHelper::GetBaseMembers`) contains the expected target, with the
+  early rejection when the expected call needed a boxing conversion and the
+  actual declaring type is not a reference type. Verified by **6** new gtest
+  cases in `CallBuilderIsAppropriateCallTarget_Test.cpp` over name+declaring-type
+  equality method stubs (the default `FakeMember` pointer-identity `Equals` does
+  not survive the base-chain walk, which re-views the member through the
+  `IMethod` `IMember` subobject) and a hand-wired `LookupTypeDefinition`
+  base/derived graph: the identity arm, the base-chain walk (true), the
+  boxing-on-non-reference rejection, and the non-override / non-CallVirt /
+  no-matching-base fall-throughs. Proven with a RED round (the identity arm
+  returning false and the base-walk `Equals` arm disabled failed
+  `SameMemberIsAppropriate` + `WalkFindsTheBaseMember`; the boxing gate is
+  distinguished from the walk by the green pair, where the same graph returns
+  true without `NeedsBoxingConversion` and false with it) then restored green.
+  Partial-test policy: **216/216** `CallBuilder*` + `ExpressionBuilder*` tests
+  green; the broader `*CSharp*:*ExpressionBuilder*:*Resolver*:*OutputVisitor*
+  :*Ambience*` filter (21s) with only the known environment GAC-snapshot
+  failure; the standing CLI baselines are unchanged (`--csharp mscorlib`
+  10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
