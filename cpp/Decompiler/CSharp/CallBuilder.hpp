@@ -30,10 +30,22 @@
 
 #pragma once
 
+#include "Decompiler/CSharp/TranslatedExpression.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
+#include "Decompiler/Util/BitSet.hpp"
+
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
 // The real type-system namespace alias (the ExpressionBuilder TS:: convention --
 // the CSharp/TypeSystem sub-namespace shadows the plain `TypeSystem::` lookup).
 namespace TS = ::ILSpy::Decompiler::TypeSystem;
+
+namespace ILSpy::Decompiler::TypeSystem {
+class IParameter;
+}
 
 namespace ILSpy::Decompiler::CSharp {
 
@@ -42,6 +54,55 @@ namespace ILSpy::Decompiler::CSharp {
 // lands with the call arms.
 class CallBuilder {
 public:
+    // The C# `struct ExpectedTargetDetails` (CallBuilder.cs lines 42-46): the call
+    // opcode and whether the boxing conversion on the target must be preserved.
+    struct ExpectedTargetDetails {
+        // The C# `default(OpCode)` zero value is `InvalidBranch` (the port's enum
+        // first value); it is always assigned before the Build arms read it.
+        IL::OpCode CallOpCode = IL::OpCode::InvalidBranch;
+        bool NeedsBoxingConversion = false;
+    };
+
+    // The C# `struct ArgumentList` (CallBuilder.cs lines 48-200): the translated
+    // call arguments plus the expected parameters, names, and optional/named
+    // bookkeeping the Build arms fill in. The C# `string[]` name arrays port to
+    // `std::vector<std::string>` with the empty string standing in for null (the
+    // D222 IsNullOrEmpty convention); a null-name element means "no name".
+    struct ArgumentList {
+        std::vector<TranslatedExpression> Arguments;
+        std::vector<const TS::IParameter*> ExpectedParameters;
+        std::vector<std::string> ParameterNames;
+        std::optional<std::vector<std::string>> ArgumentNames;
+        int FirstOptionalArgumentIndex = -1;
+        Util::BitSet IsPrimitiveValue;
+        std::optional<std::vector<int>> ArgumentToParameterMap;
+        bool AddNamesToPrimitiveValues = false;
+        bool UseImplicitlyTypedOut = false;
+        bool IsExpandedForm = false;
+
+        // The C# `int Length => Arguments.Length`.
+        int Length() const { return static_cast<int>(Arguments.size()); }
+
+        // The C# `string[]? GetArgumentNames(int skipCount = 0)`.
+        std::optional<std::vector<std::string>> GetArgumentNames(int skipCount = 0) const;
+        // The C# `IList<ResolveResult> GetArgumentResolveResults(int skipCount = 0)`.
+        std::vector<std::shared_ptr<Sem::ResolveResult>> GetArgumentResolveResults(
+            int skipCount = 0) const;
+        // The C# `IList<ResolveResult> GetArgumentResolveResultsDirect(int skipCount = 0)`.
+        std::vector<std::shared_ptr<Sem::ResolveResult>> GetArgumentResolveResultsDirect(
+            int skipCount = 0) const;
+        // The C# `IEnumerable<Expression> GetArgumentExpressions(int skipCount = 0)`.
+        std::vector<Syntax::Expression*> GetArgumentExpressions(int skipCount = 0) const;
+        // The C# `bool CanInferAnonymousTypePropertyNamesFromArguments()`.
+        bool CanInferAnonymousTypePropertyNamesFromArguments() const;
+        // The C# `[Conditional("DEBUG")] void CheckNoNamedOrOptionalArguments()`.
+        void CheckNoNamedOrOptionalArguments() const;
+
+    private:
+        // The C# `private int GetActualArgumentCount()`.
+        int GetActualArgumentCount() const;
+    };
+
     virtual ~CallBuilder() = default;
 
     // The C# `internal static bool IsSpanBasedStringConcat(IMethod method)`

@@ -232,6 +232,14 @@ public:
     }
 };
 
+// The non-owning shared handle to the `UseImplicitlyTypedOutAnnotation` singleton
+// (the annotation channel stores `shared_ptr`; the C# singleton is a GC reference).
+inline std::shared_ptr<UseImplicitlyTypedOutAnnotation> UseImplicitlyTypedOutAnnotationHandle() {
+    return std::shared_ptr<UseImplicitlyTypedOutAnnotation>(
+        const_cast<UseImplicitlyTypedOutAnnotation*>(&UseImplicitlyTypedOutAnnotation::Instance()),
+        [](UseImplicitlyTypedOutAnnotation*) {});
+}
+
 // ---------------------------------------------------------------------------
 // The AnnotationExtensions extension surface (free functions in this namespace).
 // ---------------------------------------------------------------------------
@@ -304,6 +312,12 @@ const ILSpy::Decompiler::TypeSystem::ISymbol* GetSymbol(const Syntax::AstNode& n
 // node's resolve-result annotation, or `ErrorResolveResult::UnknownError()` when
 // none is associated.
 const Sem::ResolveResult* GetResolveResult(const Syntax::AstNode& node);
+
+// The owning shared handle behind the node's resolve-result annotation (the port's
+// resolve results are not `enable_shared_from_this`; the annotation channel owns the
+// shared handle the C# GC reference aliases). Null when no resolve-result annotation
+// is present.
+std::shared_ptr<Sem::ResolveResult> GetSharedResolveResult(const Syntax::AstNode& node);
 
 // The C# `public static ILVariable? GetILVariable(this IdentifierExpression expr)` /
 // `(this VariableInitializer vi)` / `(this ForeachStatement loop)` -- the ILVariable

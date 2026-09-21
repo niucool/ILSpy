@@ -127,6 +127,14 @@ const Sem::ResolveResult* GetResolveResult(const Syntax::AstNode& node) {
     return rr != nullptr ? rr : &Sem::ErrorResolveResult::UnknownError();
 }
 
+std::shared_ptr<Sem::ResolveResult> GetSharedResolveResult(const Syntax::AstNode& node) {
+    for (const auto& a : node.SharedAnnotations()) {
+        if (dynamic_cast<Sem::ResolveResult*>(a.get()) != nullptr)
+            return std::static_pointer_cast<Sem::ResolveResult>(a);
+    }
+    return nullptr;
+}
+
 IL::ILVariable* GetILVariable(
     const Syntax::IdentifierExpression& expression) {
     if (const auto* rr = expression.Annotation<ILVariableResolveResult>())

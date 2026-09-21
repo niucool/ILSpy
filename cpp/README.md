@@ -2702,6 +2702,39 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   passed / 1 skipped / 0 failed) covering the reader change. The standing CLI
   baselines are unchanged (`--csharp mscorlib` 10106366 bytes, `--il` 41246545
   bytes, `-l c` 109438).
+- **CallBuilder prerequisite: `ArgumentList` + `ExpectedTargetDetails`** -- the
+  `CallBuilder` nested data holders (CallBuilder.cs lines 42-200):
+  `ExpectedTargetDetails` (the call opcode + the
+  `NeedsBoxingConversion` flag) and `ArgumentList` (the translated arguments,
+  expected parameters, parameter/argument names, the `FirstOptionalArgumentIndex`
+  truncation, the `IsPrimitiveValue` `BitSet`, and the named/optional/
+  expanded-form bookkeeping) with its accessors `GetActualArgumentCount`,
+  `GetArgumentNames` (the primitive-value name fill), `GetArgumentResolveResults`
+  (the out-parameter `OutVarResolveResult` substitution),
+  `GetArgumentResolveResultsDirect`, `GetArgumentExpressions` (the
+  `NamedArgumentExpression` wrapping and the implicit-typed-out annotation),
+  `CanInferAnonymousTypePropertyNamesFromArguments`, and
+  `CheckNoNamedOrOptionalArguments`. The name arrays port to
+  `std::vector<std::string>` with empty-as-null (the `IsNullOrEmpty` convention).
+  The port also gains the public `CSharp::GetSharedResolveResult(node)` (the
+  owning shared handle behind a node's resolve-result annotation, mirroring the
+  ExpressionBuilder's file-local `SharedResolveResultAnnotation`) and
+  `UseImplicitlyTypedOutAnnotationHandle()` (the non-owning shared handle to the
+  annotation singleton, the `CheckedAnnotationHandle` convention). This is the
+  data-holder prerequisite `BuildArgumentList` constructs; the remaining blocker
+  for `BuildArgumentList` itself is a resolved `IMethod` on the `Call` node (the
+  reader is deliberately type-system-free, so the method must be resolved at
+  visit time). Verified by **8** new gtest cases in 1 suite over the MinimalCorlib
+  fixture (the length / optional-index truncation, the primitive-value name fill,
+  the out-var substitution, the direct resolve results, the named-argument
+  wrapping, the implicit-out annotation, the anonymous-type name inference, and
+  the no-named-or-optional assert), proven with a three-arm neuter RED round
+  (3 failures: the optional-index truncation, the out-var substitution, and the
+  named-argument wrapping) then restored green. Partial-test policy: **198/198**
+  `ExpressionBuilder*` + `CallBuilder*` tests green; the broader
+  `*CSharp*:*Resolver*:*OutputVisitor*` filter (59s) with only the known
+  environment GAC-snapshot failure; the standing CLI baselines are unchanged
+  (`--csharp mscorlib` 10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
