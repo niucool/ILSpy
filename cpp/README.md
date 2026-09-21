@@ -2765,6 +2765,37 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `*Call*:*Transform*:*ILAst*:*ILReader*:*ILFunction*:*Clone*` (1356 tests, all
   passed); the standing CLI baselines are unchanged (`--csharp mscorlib`
   10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
+- **CallBuilder instance + `BuildArgumentList`** -- the `CallBuilder` gains its
+  C# instance shape (the `(ExpressionBuilder&, DecompilerSettings&)` ctor) and
+  the positional path of `BuildArgumentList` (CallBuilder.cs lines 941-1052):
+  per-argument `expressionBuilder.Translate` with the parameter type hint, the
+  `IsPrimitiveValueThatShouldBeNamedArgument` boolean-constant flag, the
+  `IsOptionalArgument` gate (compile-time constant / null-literal-conversion,
+  the caller-info-attribute exclusion, the boxed-default equality), the
+  `FirstOptionalArgumentIndex` bookkeeping (the `OptionalArguments` setting
+  gate: -2 none / -1 forbidden / index), the dynamic-to-object parameter type
+  swap, the `ConvertTo` with the dynamic implicit-conversion gate, the
+  `ChangeDirectionExpressionTo` for a referenced parameter, and the
+  `ArgumentList` fill (`ParameterNames`, `UseImplicitlyTypedOut`,
+  `AddNamesToPrimitiveValues` from `NamedArguments && NonTrailingNamedArguments`).
+  The named-argument (`argumentToParameterMap`) path and the params-expansion
+  path (`TransformParamsArgument`, which needs the unported overload-resolution
+  `IsUnambiguousCall` plus the array/invocation resolve-result arms) throw the
+  loud deferral. The boxed-default comparison is a local
+  `BoxedConstantEquals` covering the empty-any null case plus the primitive /
+  string / decimal / boxed-type set (the CSharpOperators EqualsBoxedValues set);
+  the rest of the class is untouched. Verified by **8** new gtest cases in 1
+  suite in `CallBuilderBuildArgumentList_Test.cpp` over a real ExpressionBuilder
+  + `FakeMethod` (the positional fill, the instance-call `this` skip, the
+  boolean-constant primitive flag, the optional-index tracked / reset /
+  setting-forbidden arms, and the two deferred-path throws), proven with a
+  three-arm neuter RED round (3 failures: the primitive flag, the optional
+  match, and the params throw) then restored green. Partial-test policy:
+  **206/206** `CallBuilder*` + `ExpressionBuilder*` tests green; the broader
+  `*CSharp*:*ExpressionBuilder*:*Resolver*:*OutputVisitor*` filter (51s) with
+  only the known environment GAC-snapshot failure; the standing CLI baselines
+  are unchanged (`--csharp mscorlib` 10106366 bytes, `--il` 41246545 bytes,
+  `-l c` 109438).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

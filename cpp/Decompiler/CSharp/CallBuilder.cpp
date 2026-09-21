@@ -21,16 +21,23 @@
 #include "Decompiler/CSharp/CallBuilder.hpp"
 
 #include "Decompiler/CSharp/Annotations.hpp"
+#include "Decompiler/CSharp/ExpressionBuilder.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
+#include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
+#include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/Semantics/OutVarResolveResult.hpp"
+#include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/IParameter.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
+#include "Decompiler/Util/Decimal.hpp"
 
+#include <any>
 #include <cassert>
+#include <stdexcept>
 
 namespace ILSpy::Decompiler::CSharp {
 
@@ -74,6 +81,231 @@ bool CallBuilder::IsSpanBasedStringConcat(const TS::IMethod& method) {
         }
     }
     return true;
+}
+
+// The C# `object.Equals(a, b)` over two boxed constant values (the
+// IsOptionalArgument default comparison): both null (empty `std::any`) are
+// equal, a null/non-null pair is not, a runtime-type mismatch is not, and
+// same-typed primitives / strings / decimals compare by value. The
+// CSharpOperators EqualsBoxedValues set plus the empty-any arm (that helper
+// never sees the null shapes).
+bool BoxedConstantEquals(const std::any& a, const std::any& b) {
+    if (a.has_value() != b.has_value())
+        return false;
+    if (!a.has_value())
+        return true;
+    if (a.type() != b.type())
+        return false;
+    if (const bool* v = std::any_cast<bool>(&a))
+        return *v == std::any_cast<bool>(b);
+    if (const char16_t* v = std::any_cast<char16_t>(&a))
+        return *v == std::any_cast<char16_t>(b);
+    if (const std::int8_t* v = std::any_cast<std::int8_t>(&a))
+        return *v == std::any_cast<std::int8_t>(b);
+    if (const std::uint8_t* v = std::any_cast<std::uint8_t>(&a))
+        return *v == std::any_cast<std::uint8_t>(b);
+    if (const std::int16_t* v = std::any_cast<std::int16_t>(&a))
+        return *v == std::any_cast<std::int16_t>(b);
+    if (const std::uint16_t* v = std::any_cast<std::uint16_t>(&a))
+        return *v == std::any_cast<std::uint16_t>(b);
+    if (const std::int32_t* v = std::any_cast<std::int32_t>(&a))
+        return *v == std::any_cast<std::int32_t>(b);
+    if (const std::uint32_t* v = std::any_cast<std::uint32_t>(&a))
+        return *v == std::any_cast<std::uint32_t>(b);
+    if (const std::int64_t* v = std::any_cast<std::int64_t>(&a))
+        return *v == std::any_cast<std::int64_t>(b);
+    if (const std::uint64_t* v = std::any_cast<std::uint64_t>(&a))
+        return *v == std::any_cast<std::uint64_t>(b);
+    if (const float* v = std::any_cast<float>(&a))
+        return *v == std::any_cast<float>(b);
+    if (const double* v = std::any_cast<double>(&a))
+        return *v == std::any_cast<double>(b);
+    if (const Util::Decimal* v = std::any_cast<Util::Decimal>(&a))
+        return Util::CompareDecimal(*v, std::any_cast<Util::Decimal>(b)) == 0;
+    if (const std::string* v = std::any_cast<std::string>(&a))
+        return *v == std::any_cast<std::string>(b);
+    if (const TS::ITypePtr* v = std::any_cast<TS::ITypePtr>(&a))
+        return *v == std::any_cast<TS::ITypePtr>(b);
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// CallBuilder instance (CallBuilder.cs constructor + BuildArgumentList)
+// ---------------------------------------------------------------------------
+
+CallBuilder::CallBuilder(ExpressionBuilder& expressionBuilder,
+                         const DecompilerSettings& settings)
+    : expressionBuilder_(&expressionBuilder), settings_(&settings) {}
+
+// The C# `private ArgumentList BuildArgumentList(...)` (CallBuilder.cs lines
+// 941-1052). The positional path is ported; the named-argument
+// (`argumentToParameterMap`) path and the params-expansion
+// (`TransformParamsArgument`) path throw the loud deferral (both need the
+// unported overload-resolution machinery). The `target` parameter feeds only
+// TransformParamsArgument, so it is unused on the ported path.
+CallBuilder::ArgumentList CallBuilder::BuildArgumentList(
+    const ExpectedTargetDetails& expectedTargetDetails, const Sem::ResolveResult* target,
+    const TS::IMethod& method, int firstParamIndex,
+    const std::vector<IL::ILInstruction*>& callArguments,
+    const std::optional<std::vector<int>>& argumentToParameterMap)
+{
+    if (argumentToParameterMap.has_value())
+    {
+        throw std::logic_error(
+            "CallBuilder::BuildArgumentList: the named-argument "
+            "(argumentToParameterMap) path is not yet ported");
+    }
+    (void)target;
+    const auto& parameters = method.Parameters();
+    assert(static_cast<int>(callArguments.size())
+           == firstParamIndex + static_cast<int>(parameters.size()));
+
+    ArgumentList list;
+    std::vector<TranslatedExpression> arguments;
+    arguments.reserve(parameters.size());
+    std::vector<const TS::IParameter*> expectedParameters;
+    expectedParameters.reserve(parameters.size());
+    bool isExpandedForm = false;
+    Util::BitSet isPrimitiveValue(static_cast<int>(parameters.size()));
+
+    // Optional arguments: -2 = none, -1 = forbidden, >= 0 = the first argument
+    // that may be removed (the default value of the parameter).
+    int firstOptionalArgumentIndex = settings_->OptionalArguments() ? -2 : -1;
+    for (int i = firstParamIndex; i < static_cast<int>(callArguments.size()); ++i)
+    {
+        const TS::IParameter* parameter = parameters[i - firstParamIndex];
+        TranslatedExpression arg =
+            expressionBuilder_->Translate(callArguments[i], &parameter->Type());
+        if (IsPrimitiveValueThatShouldBeNamedArgument(arg, method, *parameter))
+            isPrimitiveValue.Set(static_cast<int>(arguments.size()));
+        if (IsOptionalArgument(*parameter, arg))
+        {
+            if (firstOptionalArgumentIndex == -2)
+                firstOptionalArgumentIndex = i - firstParamIndex;
+        }
+        else
+        {
+            if (firstOptionalArgumentIndex != -1)
+                firstOptionalArgumentIndex = -2;
+        }
+        if (settings_->ExpandParamsArguments() && parameter->IsParams()
+            && i + 1 == static_cast<int>(callArguments.size()))
+        {
+            if (TransformParamsArgument(expectedTargetDetails, target, method, *parameter,
+                                        arg, expectedParameters, arguments))
+            {
+                firstOptionalArgumentIndex = -1;
+                isExpandedForm = true;
+                continue;
+            }
+        }
+
+        const TS::IType* parameterType;
+        if (parameter->Type().Kind() == TS::TypeKind::Dynamic)
+            parameterType = &expressionBuilder_->compilation->FindType(
+                TS::KnownTypeCode::Object);
+        else
+            parameterType = &parameter->Type();
+
+        bool allowImplicitConversion = arg.Type().Kind() != TS::TypeKind::Dynamic;
+        arg = arg.ConvertTo(const_cast<TS::IType&>(*parameterType), *expressionBuilder_,
+                            /*checkForOverflow=*/false, allowImplicitConversion);
+
+        if (parameter->ReferenceKind() != TS::ReferenceKind::None)
+        {
+            arg = ExpressionBuilder::ChangeDirectionExpressionTo(
+                arg, parameter->ReferenceKind(),
+                callArguments[i]->Op == IL::OpCode::AddressOf);
+        }
+
+        arguments.push_back(std::move(arg));
+        expectedParameters.push_back(parameter);
+    }
+
+    list.Arguments = std::move(arguments);
+    list.ExpectedParameters = std::move(expectedParameters);
+    for (const TS::IParameter* p : list.ExpectedParameters)
+        list.ParameterNames.push_back(p != nullptr ? p->Name() : std::string());
+    list.ArgumentNames = std::nullopt;
+    list.ArgumentToParameterMap = std::nullopt;
+    list.IsExpandedForm = isExpandedForm;
+    list.IsPrimitiveValue = std::move(isPrimitiveValue);
+    list.FirstOptionalArgumentIndex = firstOptionalArgumentIndex;
+    list.UseImplicitlyTypedOut = true;
+    list.AddNamesToPrimitiveValues =
+        settings_->NamedArguments() && settings_->NonTrailingNamedArguments();
+    return list;
+}
+
+// The C# `private bool IsPrimitiveValueThatShouldBeNamedArgument(...)`
+// (CallBuilder.cs lines 1054-1060).
+bool CallBuilder::IsPrimitiveValueThatShouldBeNamedArgument(
+    const TranslatedExpression& arg, const TS::IMethod& method,
+    const TS::IParameter& p) const
+{
+    const Sem::ResolveResult* rr = arg.ResolveResult();
+    if (rr == nullptr || !rr->IsCompileTimeConstant())
+        return false;
+    TS::ITypePtr declaringType = method.DeclaringType();
+    if (declaringType
+        && TS::IsKnownType(*declaringType, TS::KnownTypeCode::NullableOfT))
+        return false;
+    return TS::IsKnownType(p.Type(), TS::KnownTypeCode::Boolean);
+}
+
+// The C# `bool IsOptionalArgument(IParameter parameter, TranslatedExpression
+// arg)` (CallBuilder.cs lines 1128-1141).
+bool CallBuilder::IsOptionalArgument(const TS::IParameter& parameter,
+                                     const TranslatedExpression& arg) const
+{
+    if (!parameter.IsOptional())
+        return false;
+
+    const Sem::ResolveResult* rr = arg.ResolveResult();
+    bool nullLiteralConversion = false;
+    if (auto* crr = dynamic_cast<const Sem::ConversionResolveResult*>(rr))
+    {
+        const Sem::Conversion* conversion = crr->ConversionProperty();
+        nullLiteralConversion = conversion != nullptr
+            && conversion->IsNullLiteralConversion();
+    }
+    if (!(rr != nullptr && rr->IsCompileTimeConstant()) && !nullLiteralConversion)
+        return false;
+
+    for (const TS::IAttribute* attribute : parameter.GetAttributes())
+    {
+        if (attribute == nullptr)
+            continue;
+        const TS::IType& attributeType = attribute->AttributeType();
+        if (TS::IsKnownType(attributeType, TS::KnownAttribute::CallerMemberName)
+            || TS::IsKnownType(attributeType, TS::KnownAttribute::CallerFilePath)
+            || TS::IsKnownType(attributeType, TS::KnownAttribute::CallerLineNumber))
+            return false;
+    }
+    return BoxedConstantEquals(parameter.GetConstantValue(), rr->ConstantValue());
+}
+
+// The C# `private bool TransformParamsArgument(...)` (CallBuilder.cs lines
+// 1062-1126): deferred loudly. It needs the unported overload-resolution
+// `IsUnambiguousCall` plus the CSharpInvocationResolveResult / array-create
+// resolve-result arms; the positional non-params path never reaches it.
+bool CallBuilder::TransformParamsArgument(
+    const ExpectedTargetDetails& expectedTargetDetails,
+    const Sem::ResolveResult* targetResolveResult, const TS::IMethod& method,
+    const TS::IParameter& parameter, const TranslatedExpression& paramsArgument,
+    std::vector<const TS::IParameter*>& expectedParameters,
+    std::vector<TranslatedExpression>& arguments)
+{
+    (void)expectedTargetDetails;
+    (void)targetResolveResult;
+    (void)method;
+    (void)parameter;
+    (void)paramsArgument;
+    (void)expectedParameters;
+    (void)arguments;
+    throw std::logic_error(
+        "CallBuilder::TransformParamsArgument: the params-expansion path is not "
+        "yet ported (needs the overload-resolution IsUnambiguousCall machinery)");
 }
 
 // ---------------------------------------------------------------------------

@@ -47,7 +47,16 @@ namespace ILSpy::Decompiler::TypeSystem {
 class IParameter;
 }
 
+namespace ILSpy::Decompiler {
+class DecompilerSettings;
+namespace IL {
+class ILInstruction;
+}
+}
+
 namespace ILSpy::Decompiler::CSharp {
+
+class ExpressionBuilder;
 
 // The C# `public class CallBuilder` -- the port carries the static half first
 // (the VisitUserDefinedCompoundAssign prerequisite); the instance Build family
@@ -105,6 +114,33 @@ public:
 
     virtual ~CallBuilder() = default;
 
+    // The C# `public CallBuilder(ExpressionBuilder expressionBuilder,
+    // IDecompilerTypeSystem typeSystem, DecompilerSettings settings)` -- the port
+    // keeps the expression builder it translates through and the settings bag it
+    // consults (the type system is reached through the builder's compilation).
+    CallBuilder(ExpressionBuilder& expressionBuilder,
+                const DecompilerSettings& settings);
+
+    // The C# `private ArgumentList BuildArgumentList(ExpectedTargetDetails
+    // expectedTargetDetails, ResolveResult? target, IMethod method, int
+    // firstParamIndex, IReadOnlyList<ILInstruction> callArguments,
+    // IReadOnlyList<int>? argumentToParameterMap)` (CallBuilder.cs lines
+    // 941-1052): translate every call argument to its expected parameter type,
+    // flag the primitive-value arguments that should keep their names, track the
+    // optional-argument index, expand a trailing `params` argument when the
+    // setting allows, and fill the returned ArgumentList. The named-argument
+    // (`argumentToParameterMap`) path and the params-expansion
+    // (`TransformParamsArgument`) path are deferred loudly (both depend on the
+    // unported overload-resolution machinery); the positional path is ported.
+    // Declared private in the C#; the port keeps it public (the no-visibility
+    // convention) so tests can call it directly.
+    ArgumentList BuildArgumentList(const ExpectedTargetDetails& expectedTargetDetails,
+                                   const Sem::ResolveResult* target,
+                                   const TS::IMethod& method,
+                                   int firstParamIndex,
+                                   const std::vector<IL::ILInstruction*>& callArguments,
+                                   const std::optional<std::vector<int>>& argumentToParameterMap);
+
     // The C# `internal static bool IsSpanBasedStringConcat(IMethod method)`
     // (CallBuilder.cs lines 300-318): whether the method is a static
     // `string.Concat` whose every parameter is `ReadOnlySpan<char>` -- the
@@ -115,6 +151,40 @@ public:
     // `ReadOnlySpan<char>` element check (`p.Type.TypeArguments[0]`).
     // Implemented out-of-line in the .cpp.
     static bool IsSpanBasedStringConcat(const TS::IMethod& method);
+
+private:
+    // The C# `private bool IsPrimitiveValueThatShouldBeNamedArgument(
+    // TranslatedExpression arg, IMethod method, IParameter p)` (CallBuilder.cs
+    // lines 1054-1060): a compile-time constant boolean argument of a method
+    // that is not `Nullable<T>` -- such an argument keeps its parameter name.
+    bool IsPrimitiveValueThatShouldBeNamedArgument(const TranslatedExpression& arg,
+                                                   const TS::IMethod& method,
+                                                   const TS::IParameter& p) const;
+
+    // The C# `bool IsOptionalArgument(IParameter parameter, TranslatedExpression
+    // arg)` (CallBuilder.cs lines 1128-1141): whether `arg` is the exact default
+    // value of the optional `parameter`, so it may be omitted from the call.
+    bool IsOptionalArgument(const TS::IParameter& parameter,
+                            const TranslatedExpression& arg) const;
+
+    // The C# `private bool TransformParamsArgument(ExpectedTargetDetails
+    // expectedTargetDetails, ResolveResult? targetResolveResult, IMethod method,
+    // IParameter parameter, TranslatedExpression paramsArgument, ref
+    // List<IParameter> expectedParameters, ref List<TranslatedExpression>
+    // arguments)` (CallBuilder.cs lines 1062-1126): inline a trailing array
+    // argument into the expanded `params` argument list when the call is
+    // unambiguous. Deferred loudly -- it needs the unported overload-resolution
+    // (`IsUnambiguousCall`) plus the array/invocation resolve-result arms.
+    bool TransformParamsArgument(const ExpectedTargetDetails& expectedTargetDetails,
+                                 const Sem::ResolveResult* targetResolveResult,
+                                 const TS::IMethod& method,
+                                 const TS::IParameter& parameter,
+                                 const TranslatedExpression& paramsArgument,
+                                 std::vector<const TS::IParameter*>& expectedParameters,
+                                 std::vector<TranslatedExpression>& arguments);
+
+    ExpressionBuilder* expressionBuilder_ = nullptr;
+    const DecompilerSettings* settings_ = nullptr;
 };
 
 } // namespace ILSpy::Decompiler::CSharp
