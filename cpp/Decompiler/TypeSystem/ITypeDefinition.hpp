@@ -201,6 +201,13 @@ public:
     // this override. Pure-virtual; a single concrete override is the final overrider for both.
     virtual std::string ReflectionName() const = 0;
 
+    // The C# `string Namespace` (flattened to one slot in C#) -- redeclared to disambiguate the
+    // `IType`-vs-`INamedElement` diamond: `IType::Namespace()` (via `ITypeDefinitionOrUnknown`,
+    // the flattened AbstractType default) and `INamedElement::Namespace()` (via `IEntity`) are
+    // two independent paths, so a lookup through an `ITypeDefinition*` would be ambiguous without
+    // this override. Pure-virtual; a single concrete override is the final overrider for both.
+    virtual std::string Namespace() const = 0;
+
     // ---- ITypeDefinition-own accessors ----
 
     // The C# `IReadOnlyList<ITypeDefinition> NestedTypes` -- the nested type definitions declared

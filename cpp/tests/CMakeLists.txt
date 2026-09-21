@@ -104,6 +104,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/Accessibility_Test.cpp
     Decompiler/TypeSystem/TypeSystemOptions_Test.cpp
     Decompiler/TypeSystem/ITypeDefinitionOrUnknown_Test.cpp
+    Decompiler/TypeSystem/ITypeNamespace_Test.cpp
     Decompiler/TypeSystem/KnownAttribute_Test.cpp
     Decompiler/TypeSystem/ICompilationProvider_Test.cpp
     Decompiler/TypeSystem/BaseTypeCollector_Test.cpp

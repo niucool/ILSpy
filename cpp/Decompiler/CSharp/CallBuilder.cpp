@@ -22,6 +22,7 @@
 
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/ExpressionBuilder.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
@@ -106,6 +107,32 @@ bool CallBuilder::IsStringToReadOnlySpanCharImplicitConversion(
     const TS::IParameter* parameter = method.Parameters()[0];
     return parameter != nullptr
         && TS::IsKnownType(parameter->Type(), TS::KnownTypeCode::String);
+}
+
+// The C# `private static bool IsInterpolatedStringCreation(IMethod method,
+// ArgumentList argumentList)` (CallBuilder.cs lines 755-766).
+bool CallBuilder::IsInterpolatedStringCreation(const TS::IMethod& method,
+                                               const ArgumentList& argumentList) {
+    TS::ITypePtr declaring = method.DeclaringType();
+    bool isCreation =
+        method.IsStatic()
+        && ((declaring && TS::IsKnownType(*declaring, TS::KnownTypeCode::String)
+             && method.Name() == "Format")
+            || (declaring && method.Name() == "Create"
+                && declaring->Name() == "FormattableStringFactory"
+                && declaring->Namespace() == "System.Runtime.CompilerServices"));
+    if (!isCreation)
+        return false;
+    if (argumentList.ArgumentNames.has_value())
+        return false;
+    const auto& parameters = method.Parameters();
+    bool lastIsParams = !parameters.empty() && parameters.back() != nullptr
+        && parameters.back()->IsParams();
+    return argumentList.IsExpandedForm
+        || !lastIsParams
+        || (argumentList.Length() == 2
+            && dynamic_cast<Syntax::ArrayCreateExpression*>(
+                   argumentList.Arguments[1].Expression()) != nullptr);
 }
 
 // The C# `static bool IsNullConditional(Expression expr)` (CallBuilder.cs

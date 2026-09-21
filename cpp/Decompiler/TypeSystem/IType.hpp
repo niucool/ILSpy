@@ -114,6 +114,17 @@ public:
     // "System.Int32". Used for tests and diagnostics; the full round-trip
     // name handling lives in FullTypeName for type definitions.
     virtual std::string ReflectionName() const = 0;
+    // The C# `INamedElement.Namespace` (IType.cs via `IType : INamedElement`; the
+    // `AbstractType` default is the empty string). The port's `IType` does not
+    // inherit `INamedElement` (it carries only the name accessors it needs), so
+    // the `AbstractType` default is flattened here as a virtual-WITH-DEFAULT
+    // returning the empty string (the D406 `GetDefinition` / `ChangeNullability`
+    // flattened-AbstractType convention). Concrete types with a real namespace
+    // override it (KnownType / SimpleType / ParameterizedType / the decorators /
+    // UnknownType); an `ITypeDefinition` redeclares it to resolve the
+    // `IType`-vs-`INamedElement` diamond (the `Name` / `ReflectionName`
+    // redeclaration precedent).
+    virtual std::string Namespace() const { return std::string(); }
     virtual int TypeParameterCount() const = 0;
 
     // The C# `IReadOnlyList<ITypeParameter> TypeParameters` (IType.cs:111) -- the type
@@ -378,6 +389,9 @@ public:
     TypeKind Kind() const override;
     std::string Name() const override;
     std::string ReflectionName() const override;
+    // The C# `KnownTypeReference.Namespace` -- the known type's metadata
+    // namespace (out-of-line: `KnownTypeReference` is complete only in the .cpp).
+    std::string Namespace() const override;
     int TypeParameterCount() const override;
     std::optional<bool> IsReferenceType() const override;
     KnownTypeCode Code() const noexcept { return code_; }
@@ -399,6 +413,8 @@ public:
     TypeKind Kind() const override { return kind_; }
     std::string Name() const override { return name_.Name(); }
     std::string ReflectionName() const override { return name_.ReflectionName(); }
+    // The C# `TopLevelTypeName.Namespace`.
+    std::string Namespace() const override { return name_.Namespace(); }
     int TypeParameterCount() const override { return name_.TypeParameterCount(); }
     const TopLevelTypeName& GetTopLevelTypeName() const noexcept { return name_; }
 protected:
@@ -420,6 +436,11 @@ public:
     TypeKind Kind() const override { return genericType_ ? genericType_->Kind() : TypeKind::Class; }
     std::string Name() const override;
     std::string ReflectionName() const override;
+    // The C# `ParameterizedType.Namespace => genericType.Namespace` (delegates to
+    // the generic definition).
+    std::string Namespace() const override {
+        return genericType_ ? genericType_->Namespace() : std::string();
+    }
     int TypeParameterCount() const override { return static_cast<int>(typeArgs_.size()); }
     const ITypePtr& GenericType() const noexcept { return genericType_; }
     const std::vector<ITypePtr>& TypeArguments() const noexcept { return typeArgs_; }
@@ -641,6 +662,11 @@ public:
     TypeKind Kind() const override { return TypeKind::Array; }
     std::string Name() const override;
     std::string ReflectionName() const override;
+    // The C# `DecoratedType.Namespace => baseType.Namespace` (delegates to the
+    // element type).
+    std::string Namespace() const override {
+        return element_ ? element_->Namespace() : std::string();
+    }
     int TypeParameterCount() const override { return 0; }
     const ITypePtr& Element() const noexcept { return element_; }
     int Rank() const noexcept { return rank_; }
@@ -690,6 +716,10 @@ public:
     TypeKind Kind() const override { return TypeKind::ByReference; }
     std::string Name() const override { return element_ ? element_->Name() : std::string(); }
     std::string ReflectionName() const override;
+    // The C# `DecoratedType.Namespace => baseType.Namespace`.
+    std::string Namespace() const override {
+        return element_ ? element_->Namespace() : std::string();
+    }
     int TypeParameterCount() const override { return element_ ? element_->TypeParameterCount() : 0; }
     const ITypePtr& Element() const noexcept { return element_; }
     // Faithful port of ByReferenceType.cs `bool IsByRefLike => true` (a `ref` parameter/local IS a
@@ -713,6 +743,10 @@ public:
     TypeKind Kind() const override { return TypeKind::Pointer; }
     std::string Name() const override { return element_ ? element_->Name() : std::string(); }
     std::string ReflectionName() const override;
+    // The C# `DecoratedType.Namespace => baseType.Namespace`.
+    std::string Namespace() const override {
+        return element_ ? element_->Namespace() : std::string();
+    }
     int TypeParameterCount() const override { return element_ ? element_->TypeParameterCount() : 0; }
     const ITypePtr& Element() const noexcept { return element_; }
     // Faithful port of PointerType.cs VisitChildren.
@@ -742,6 +776,10 @@ public:
     TypeKind Kind() const override { return TypeKind::Other; }
     std::string Name() const override;
     std::string ReflectionName() const override;
+    // The C# `DecoratedType.Namespace => baseType.Namespace`.
+    std::string Namespace() const override {
+        return element_ ? element_->Namespace() : std::string();
+    }
     int TypeParameterCount() const override { return 0; }
     const ITypePtr& Element() const noexcept { return element_; }
     // Faithful port of PinnedType.cs `bool? IsReferenceType =>
@@ -838,6 +876,11 @@ public:
     TypeKind Kind() const override { return isRequired_ ? TypeKind::ModReq : TypeKind::ModOpt; }
     std::string Name() const override { return element_ ? element_->Name() : std::string(); }
     std::string ReflectionName() const override;
+    // The C# `DecoratedType.Namespace => baseType.Namespace` (the element, not the
+    // modifier).
+    std::string Namespace() const override {
+        return element_ ? element_->Namespace() : std::string();
+    }
     int TypeParameterCount() const override { return 0; }
     const ITypePtr& Modifier() const noexcept { return modifier_; }
     const ITypePtr& Element() const noexcept { return element_; }
@@ -899,6 +942,10 @@ public:
         : baseType_(std::move(baseType)), nullability_(nullability) {}
     TypeKind Kind() const override { return baseType_ ? baseType_->Kind() : TypeKind::Unknown; }
     std::string Name() const override { return baseType_ ? baseType_->Name() : std::string(); }
+    // The C# `DecoratedType.Namespace => baseType.Namespace`.
+    std::string Namespace() const override {
+        return baseType_ ? baseType_->Namespace() : std::string();
+    }
     std::string ReflectionName() const override {
         return baseType_ ? baseType_->ReflectionName() : std::string();
     }
@@ -1122,6 +1169,10 @@ public:
     std::string ReflectionName() const override {
         return underlyingType_ ? underlyingType_->ReflectionName() : std::string();
     }
+    // The C# `TupleType.Namespace => UnderlyingType.Namespace`.
+    std::string Namespace() const override {
+        return underlyingType_ ? underlyingType_->Namespace() : std::string();
+    }
     int TypeParameterCount() const override { return 0; }
     // The C# `Cardinality => ElementTypes.Length`.
     int Cardinality() const noexcept { return static_cast<int>(elementTypes_.size()); }
@@ -1218,6 +1269,11 @@ public:
 
     TypeKind Kind() const override { return TypeKind::Unknown; }
     std::string Name() const override { return fullTypeName_.Name(); }
+    // The C# `UnknownType.Namespace => fullTypeName.TopLevelTypeName.Namespace`.
+    std::string Namespace() const override
+    {
+        return fullTypeName_.GetTopLevelTypeName().Namespace();
+    }
     std::string ReflectionName() const override
     {
         return namespaceKnown_ ? fullTypeName_.ReflectionName() : std::string("?");

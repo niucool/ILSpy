@@ -309,6 +309,10 @@ public:
     // IType / ISymbol / ITypeParameter diamond (the D381 convention).
     std::string Name() const override { return typeParameter_->Name(); }
     std::string ReflectionName() const override { return typeParameter_->ReflectionName(); }
+    // The single `Namespace()` override is the final overrider for the two `IType`
+    // subobjects (the Name / ReflectionName diamond precedent); delegates to the
+    // wrapped parameter.
+    std::string Namespace() const override { return typeParameter_->Namespace(); }
     int TypeParameterCount() const override { return typeParameter_->TypeParameterCount(); }
 
     // --- ISymbol ---

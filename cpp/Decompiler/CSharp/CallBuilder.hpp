@@ -164,6 +164,15 @@ public:
     // invocation).
     static bool IsNullConditional(const Syntax::Expression* expr);
 
+    // The C# `private static bool IsInterpolatedStringCreation(IMethod method,
+    // ArgumentList argumentList)` (CallBuilder.cs lines 755-766): whether the
+    // call is a `string.Format` / `FormattableStringFactory.Create` that the
+    // string-interpolation transform can render as an interpolated string. Uses
+    // the `IType::Namespace()` surface (the FormattableStringFactory declaring
+    // type's namespace).
+    static bool IsInterpolatedStringCreation(const TS::IMethod& method,
+                                             const ArgumentList& argumentList);
+
     // The C# `private bool IsDelegateEqualityComparison(IMethod method,
     // IList<TranslatedExpression> arguments)` (CallBuilder.cs lines 1511-1523):
     // whether the call is a `Delegate.op_Equality`/`op_Inequality` comparison

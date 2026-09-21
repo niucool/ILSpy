@@ -2819,6 +2819,41 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   filter (43s) with only the known environment GAC-snapshot failure; the standing
   CLI baselines are unchanged (`--csharp mscorlib` 10106366 bytes, `--il`
   41246545 bytes, `-l c` 109438).
+- **`IType::Namespace()` surface + `IsInterpolatedStringCreation`** -- the port's
+  `IType` gains the `AbstractType` `Namespace` default (a virtual-with-default
+  returning the empty string, the D406 flattened-AbstractType convention),
+  overridden where the C# carries a real namespace: `KnownType` (the
+  `KnownTypeReference` metadata namespace), `SimpleType` (`TopLevelTypeName`),
+  `ParameterizedType` (the generic), the decorator family (`ArrayType` /
+  `ByReferenceType` / `PointerType` / `PinnedType` / `ModifiedType` /
+  `NullabilityAnnotatedType` -> the element; `TupleType` -> the underlying
+  `ValueTuple`), and `UnknownType` (the stored `FullTypeName`). The
+  `ITypeDefinition`-vs-`INamedElement` `Namespace` diamond is resolved by the
+  same pure-virtual redeclaration the port already uses for `Name` /
+  `ReflectionName`, and `NullabilityAnnotatedTypeParameter` gets the matching
+  final overrider for its two `IType` subobjects. This clears the gnhf-125
+  `IsInterpolatedStringCreation` deferral, which is now ported
+  (CallBuilder.cs lines 755-766: the `string.Format` / `FormattableStringFactory
+  .Create` shapes with the argument-name / expanded-form / params / array-literal
+  gates). Note: `TypeSystemAstBuilder.cpp`'s file-local `NamespaceOf` helper is
+  now equivalent to the virtual and is left as-is (a future cleanup can collapse
+  it). Verified by **7** new `ITypeNamespace_Test.cpp` cases (the KnownType /
+  SimpleType / ParameterizedType / decorator / TupleType / UnknownType overrides
+  and the resolved-type-definition double dispatch) plus the restored
+  `IsInterpolatedStringCreation` matrix in `CallBuilderStatics_Test.cpp`, proven
+  with a three-arm neuter RED round (the KnownType namespace, the
+  ParameterizedType delegation, and the FormattableStringFactory namespace gate)
+  then restored green. Partial-test policy: **217/217** `CallBuilder*` +
+  `ExpressionBuilder*` + `ITypeNamespace*` tests green; the broader
+  `*CSharp*:*ExpressionBuilder*:*Resolver*:*OutputVisitor*` filter (55s) with
+  only the known environment GAC-snapshot failure; the type-system safety filter
+  `*IType*:*NamedElement*:*TypeDefinition*:*KnownType*:*Namespace*:*TypeParameter*
+  :*TypeVisitor*:*TypeSystem*:*TypeUtils*:*Specialized*:*Metadata*` (4m) with
+  only the known machine-mscorlib MVID/gold-digest environment failures (the
+  `ModuleHeader` MVID, the mscorlib module-table rows, and the field sweep
+  digest -- all machine-assembly snapshots, none touching the namespace surface);
+  and the standing CLI baselines are unchanged (`--csharp mscorlib` 10106366
+  bytes, `--il` 41246545 bytes, `-l c` 109438).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

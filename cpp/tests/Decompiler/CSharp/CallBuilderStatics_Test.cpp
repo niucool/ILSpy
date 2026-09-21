@@ -27,6 +27,7 @@
 #include "Decompiler/CSharp/CallBuilder.hpp"
 
 #include "Decompiler/CSharp/Annotations.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
@@ -70,6 +71,30 @@ protected:
     bool StructuralEquals(const IType& other) const override { return this == &other; }
 
 private:
+    std::string name_;
+};
+
+// A test-local named type (so a FormattableStringFactory declaring type can be
+// built without a metadata-backed definition); the Namespace side overrides the
+// IType virtual.
+class NamedStubType : public TS::IType {
+public:
+    NamedStubType(std::string ns, std::string name)
+        : ns_(std::move(ns)), name_(std::move(name)) {}
+
+    TS::TypeKind Kind() const override { return TS::TypeKind::Class; }
+    std::string Name() const override { return name_; }
+    std::string Namespace() const override { return ns_; }
+    std::string ReflectionName() const override {
+        return ns_.empty() ? name_ : ns_ + "." + name_;
+    }
+    int TypeParameterCount() const override { return 0; }
+
+protected:
+    bool StructuralEquals(const IType& other) const override { return this == &other; }
+
+private:
+    std::string ns_;
     std::string name_;
 };
 
@@ -134,6 +159,23 @@ struct StaticCallFixture {
         return CSharp::WithRR(CSharp::WithoutILInstruction(*ident),
                               std::make_shared<Sem::ResolveResult>(std::move(type)));
     }
+
+    std::shared_ptr<Impl::FakeMethod> MakeParamsMethod(TS::SymbolKind kind,
+                                                       const std::string& name,
+                                                       TS::ITypePtr declaringType,
+                                                       TS::ITypePtr paramType,
+                                                       TS::ITypePtr returnType)
+    {
+        auto method = std::make_shared<Impl::FakeMethod>(compilation, kind);
+        method->SetName(name);
+        method->SetIsStatic(true);
+        method->SetDeclaringType(std::move(declaringType));
+        method->SetParameters({std::make_shared<Impl::DefaultParameter>(
+            paramType, "args", nullptr, std::vector<const TS::IAttribute*>{} ,
+            TS::ReferenceKind::None, /*isParams=*/true)});
+        method->SetReturnType(std::move(returnType));
+        return method;
+    }
 };
 
 } // namespace
@@ -185,6 +227,72 @@ TEST(CallBuilderStaticsTest, IsStringToReadOnlySpanCharImplicitConversionMatrix)
         {fixture.stringType}, fixture.SpanOfChar());
     EXPECT_FALSE(CSharp::CallBuilder::IsStringToReadOnlySpanCharImplicitConversion(
         *notOperator));
+}
+
+TEST(CallBuilderStaticsTest, IsInterpolatedStringCreationMatrix)
+{
+    StaticCallFixture fixture;
+    auto list = CSharp::CallBuilder::ArgumentList();
+
+    // System.String::Format with a non-params last parameter: recognized.
+    auto format = fixture.MakeMethod(
+        TS::SymbolKind::Method, "Format", fixture.stringType,
+        {fixture.stringType, fixture.stringType}, fixture.stringType);
+    EXPECT_TRUE(CSharp::CallBuilder::IsInterpolatedStringCreation(*format, list));
+
+    // A params last parameter without expansion and a single argument: not a
+    // creation (the call renders as a plain invocation).
+    auto paramsFormat = fixture.MakeParamsMethod(
+        TS::SymbolKind::Method, "Format", fixture.stringType, fixture.stringType,
+        fixture.stringType);
+    EXPECT_FALSE(
+        CSharp::CallBuilder::IsInterpolatedStringCreation(*paramsFormat, list));
+
+    // An expanded form is a creation even with the params overload.
+    auto expanded = list;
+    expanded.IsExpandedForm = true;
+    EXPECT_TRUE(
+        CSharp::CallBuilder::IsInterpolatedStringCreation(*paramsFormat, expanded));
+
+    // A two-argument params call whose second argument is an array literal is a
+    // creation.
+    auto arrayLiteral = list;
+    arrayLiteral.Arguments.push_back(StaticCallFixture::MakeArg(fixture.stringType));
+    auto* arrayCreate = new Syntax::ArrayCreateExpression();
+    arrayLiteral.Arguments.push_back(CSharp::WithRR(
+        CSharp::WithoutILInstruction(*arrayCreate),
+        std::make_shared<Sem::ResolveResult>(fixture.stringType)));
+    EXPECT_TRUE(
+        CSharp::CallBuilder::IsInterpolatedStringCreation(*paramsFormat, arrayLiteral));
+
+    // Named arguments forbid the creation.
+    auto named = list;
+    named.ArgumentNames = std::vector<std::string>{"format"};
+    EXPECT_FALSE(CSharp::CallBuilder::IsInterpolatedStringCreation(*format, named));
+
+    // The FormattableStringFactory.Create shape: recognized by the declaring
+    // type's name + namespace.
+    auto factoryType = std::make_shared<NamedStubType>(
+        "System.Runtime.CompilerServices", "FormattableStringFactory");
+    auto create = fixture.MakeMethod(
+        TS::SymbolKind::Method, "Create", factoryType,
+        {fixture.stringType, fixture.stringType}, fixture.stringType);
+    EXPECT_TRUE(CSharp::CallBuilder::IsInterpolatedStringCreation(*create, list));
+
+    // A different declaring type/name fails the check.
+    auto otherFactory = std::make_shared<NamedStubType>(
+        "System.Runtime.CompilerServices", "OtherFactory");
+    auto otherCreate = fixture.MakeMethod(
+        TS::SymbolKind::Method, "Create", otherFactory,
+        {fixture.stringType, fixture.stringType}, fixture.stringType);
+    EXPECT_FALSE(CSharp::CallBuilder::IsInterpolatedStringCreation(*otherCreate, list));
+    auto wrongNamespace = std::make_shared<NamedStubType>(
+        "System", "FormattableStringFactory");
+    auto wrongNsCreate = fixture.MakeMethod(
+        TS::SymbolKind::Method, "Create", wrongNamespace,
+        {fixture.stringType, fixture.stringType}, fixture.stringType);
+    EXPECT_FALSE(
+        CSharp::CallBuilder::IsInterpolatedStringCreation(*wrongNsCreate, list));
 }
 
 TEST(CallBuilderStaticsTest, IsNullConditionalMatrix)

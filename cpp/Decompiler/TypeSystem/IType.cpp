@@ -51,6 +51,11 @@ std::string KnownType::Name() const {
     const auto* r = LookupKnownType(code_);
     return r ? std::string(r->Name) : std::string();
 }
+// The C# `KnownTypeReference.Namespace` -- the known type's metadata namespace.
+std::string KnownType::Namespace() const {
+    const auto* r = LookupKnownType(code_);
+    return r ? std::string(r->Namespace) : std::string();
+}
 std::string KnownType::ReflectionName() const {
     const auto* r = LookupKnownType(code_);
     if (!r) return "?";
