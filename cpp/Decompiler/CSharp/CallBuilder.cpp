@@ -22,9 +22,11 @@
 
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/ExpressionBuilder.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
 #include "Decompiler/Semantics/ConversionResolveResult.hpp"
@@ -81,6 +83,68 @@ bool CallBuilder::IsSpanBasedStringConcat(const TS::IMethod& method) {
         }
     }
     return true;
+}
+
+// The C# `internal static bool IsStringToReadOnlySpanCharImplicitConversion(
+// IMethod method)` (CallBuilder.cs lines 320-328). The `p.Type.TypeArguments[0]`
+// element reads the ParameterizedType instantiation (the IsSpanBasedStringConcat
+// note).
+bool CallBuilder::IsStringToReadOnlySpanCharImplicitConversion(
+    const TS::IMethod& method) {
+    if (!method.IsOperator() || method.Name() != "op_Implicit")
+        return false;
+    if (method.Parameters().size() != 1)
+        return false;
+    const TS::IType& returnType = method.ReturnType();
+    if (!TS::IsKnownType(returnType, TS::KnownTypeCode::ReadOnlySpanOfT))
+        return false;
+    auto* parameterized = dynamic_cast<const TS::ParameterizedType*>(&returnType);
+    if (parameterized == nullptr || parameterized->TypeArguments().empty()
+        || !TS::IsKnownType(*parameterized->TypeArguments()[0],
+                           TS::KnownTypeCode::Char))
+        return false;
+    const TS::IParameter* parameter = method.Parameters()[0];
+    return parameter != nullptr
+        && TS::IsKnownType(parameter->Type(), TS::KnownTypeCode::String);
+}
+
+// The C# `static bool IsNullConditional(Expression expr)` (CallBuilder.cs
+// lines 1480-1483).
+bool CallBuilder::IsNullConditional(const Syntax::Expression* expr) {
+    auto* unary = dynamic_cast<const Syntax::UnaryOperatorExpression*>(expr);
+    return unary != nullptr
+        && unary->Operator() == Syntax::UnaryOperatorType::NullConditional;
+}
+
+// The C# `private bool IsDelegateEqualityComparison(IMethod method,
+// IList<TranslatedExpression> arguments)` (CallBuilder.cs lines 1511-1523).
+bool CallBuilder::IsDelegateEqualityComparison(
+    const TS::IMethod& method,
+    const std::vector<TranslatedExpression>& arguments) {
+    if (!method.IsOperator())
+        return false;
+    TS::ITypePtr declaring = method.DeclaringType();
+    if (!declaring || !TS::IsKnownType(*declaring, TS::KnownTypeCode::Delegate))
+        return false;
+    if (method.Name() != "op_Equality" && method.Name() != "op_Inequality")
+        return false;
+    if (arguments.size() != 2)
+        return false;
+    if (arguments[0].Type().Kind() != TS::TypeKind::Delegate)
+        return false;
+    return arguments[1].Type().Equals(arguments[0].Type());
+}
+
+// The C# `private Expression HandleDelegateEqualityComparison(IMethod method,
+// IList<TranslatedExpression> arguments)` (CallBuilder.cs lines 1524-1532).
+Syntax::Expression* CallBuilder::HandleDelegateEqualityComparison(
+    const TS::IMethod& method,
+    const std::vector<TranslatedExpression>& arguments) {
+    return new Syntax::BinaryOperatorExpression(
+        arguments[0].Expression(),
+        method.Name() == "op_Equality" ? Syntax::BinaryOperatorType::Equality
+                                       : Syntax::BinaryOperatorType::InEquality,
+        arguments[1].Expression());
 }
 
 // The C# `object.Equals(a, b)` over two boxed constant values (the

@@ -152,6 +152,34 @@ public:
     // Implemented out-of-line in the .cpp.
     static bool IsSpanBasedStringConcat(const TS::IMethod& method);
 
+    // The C# `internal static bool IsStringToReadOnlySpanCharImplicitConversion(
+    // IMethod method)` (CallBuilder.cs lines 320-328): whether the method is the
+    // `op_Implicit` operator converting a `string` to a `ReadOnlySpan<char>` --
+    // the span-based string.Concat operand shape. Implemented out-of-line.
+    static bool IsStringToReadOnlySpanCharImplicitConversion(const TS::IMethod& method);
+
+    // The C# `static bool IsNullConditional(Expression expr)` (CallBuilder.cs
+    // lines 1480-1483): whether the expression is the `?.` null-conditional
+    // operator (so a delegate `Invoke` on it must not be re-rendered as a plain
+    // invocation).
+    static bool IsNullConditional(const Syntax::Expression* expr);
+
+    // The C# `private bool IsDelegateEqualityComparison(IMethod method,
+    // IList<TranslatedExpression> arguments)` (CallBuilder.cs lines 1511-1523):
+    // whether the call is a `Delegate.op_Equality`/`op_Inequality` comparison
+    // that should render as the C# builtin `==`/`!=` operator on two delegate
+    // operands.
+    static bool IsDelegateEqualityComparison(
+        const TS::IMethod& method,
+        const std::vector<TranslatedExpression>& arguments);
+
+    // The C# `private Expression HandleDelegateEqualityComparison(IMethod method,
+    // IList<TranslatedExpression> arguments)` (CallBuilder.cs lines 1524-1532):
+    // the `left == right` / `left != right` render.
+    static Syntax::Expression* HandleDelegateEqualityComparison(
+        const TS::IMethod& method,
+        const std::vector<TranslatedExpression>& arguments);
+
 private:
     // The C# `private bool IsPrimitiveValueThatShouldBeNamedArgument(
     // TranslatedExpression arg, IMethod method, IParameter p)` (CallBuilder.cs

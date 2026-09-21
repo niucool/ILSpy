@@ -2796,6 +2796,29 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   only the known environment GAC-snapshot failure; the standing CLI baselines
   are unchanged (`--csharp mscorlib` 10106366 bytes, `--il` 41246545 bytes,
   `-l c` 109438).
+- **CallBuilder static call-shape helpers** -- the next leaves of the `Build`
+  core (CallBuilder.cs): `IsStringToReadOnlySpanCharImplicitConversion(IMethod)`
+  (the `string` -> `ReadOnlySpan<char>` `op_Implicit`; the deferred sibling of
+  the first-slice `IsSpanBasedStringConcat`, now read off the return type's
+  `ParameterizedType` instantiation), `IsNullConditional(Expression)` (the `?.`
+  operator, which gates the delegate-`Invoke` re-render),
+  `IsDelegateEqualityComparison(IMethod, arguments)` (the `Delegate.op_Equality`/
+  `op_Inequality` on two delegate-kind operands that renders as the C# builtin),
+  and `HandleDelegateEqualityComparison` (the `==`/`!=` render). The
+  `IsInterpolatedStringCreation` helper stays deferred: the C#
+  `method.DeclaringType.Namespace == "System.Runtime.CompilerServices"` arm needs
+  an `IType::Namespace` the port does not yet model (the port's `IType` carries
+  only `Name`/`ReflectionName`, not `INamedElement`). Verified by **3** new
+  gtest cases in 1 suite in `CallBuilderStatics_Test.cpp` (the implicit-conversion
+  matrix, the null-conditional matrix, and the delegate-equality matrix + the
+  `==`/`!=` render over test-local delegate-kind stub types), proven with a
+  three-arm neuter RED round (3 failures: the implicit conversion, the
+  null-conditional, and the delegate-equality gate) then restored green.
+  Partial-test policy: **209/209** `CallBuilder*` + `ExpressionBuilder*` tests
+  green; the broader `*CSharp*:*ExpressionBuilder*:*Resolver*:*OutputVisitor*`
+  filter (43s) with only the known environment GAC-snapshot failure; the standing
+  CLI baselines are unchanged (`--csharp mscorlib` 10106366 bytes, `--il`
+  41246545 bytes, `-l c` 109438).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
