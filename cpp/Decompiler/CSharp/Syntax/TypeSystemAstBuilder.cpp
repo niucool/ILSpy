@@ -169,25 +169,6 @@ const TS::IType* DeclaringTypeOf(const TS::IType& type) {
     return nullptr;
 }
 
-// The C# `IType.Namespace` (IType.cs -- via `IType : INamedElement`; the
-// AbstractType default is the empty string) for the shapes the region reaches:
-// an `IEntity`-carrying type (an ITypeDefinition) reports `INamedElement::
-// Namespace()`; a `ParameterizedType` delegates to its generic (the C#
-// `ParameterizedType.Namespace => genericType.Namespace` -- the record-
-// IEquatable base-list omission reads `IEquatable<R>`'s namespace, which
-// resolves through the generic); an `UnknownType` reports its stored full type
-// name's namespace (the C# `UnknownType.Namespace => fullTypeName.TopLevelTypeName.Namespace`);
-// anything else is the empty default.
-std::string NamespaceOf(const TS::IType& type) {
-    if (const auto* entity = dynamic_cast<const TS::IEntity*>(&type))
-        return entity->Namespace();
-    if (const auto* pt = dynamic_cast<const TS::ParameterizedType*>(&type))
-        return pt->GenericType() ? NamespaceOf(*pt->GenericType()) : std::string();
-    if (const auto* unknown = dynamic_cast<const class TS::UnknownType*>(&type))
-        return unknown->FullTypeName().GetTopLevelTypeName().Namespace();
-    return std::string();
-}
-
 // The C# `IType.TypeArguments` for a definition-shaped type (the
 // `MetadataTypeDefinition`/`UnknownType` override `=> TypeParameters`): the
 // declared type parameters as owning ITypePtr handles (the D529 shared_from_this +
@@ -437,7 +418,7 @@ AstType* TypeSystemAstBuilder::ConvertTypeHelper(TS::IType& type) const {
                 continue; // the D516 null-entry guard
             AstType* callConvSyntax;
             const std::string& name = customCallConv->Name();
-            if (NamespaceOf(*customCallConv) == "System.Runtime.CompilerServices"
+            if (customCallConv->Namespace() == "System.Runtime.CompilerServices"
                 && name.rfind("CallConv", 0) == 0 && name.length() > 8) {
                 callConvSyntax = new PrimitiveType(name.substr(8));
                 if (AddResolveResultAnnotations()) {
@@ -658,7 +639,7 @@ AstType* TypeSystemAstBuilder::ConvertTypeHelper(
                           *const_cast<TS::IType*>(declaringTypeForAnnotation));
     } else {
         // Handle top-level types.
-        const std::string namespaceName = NamespaceOf(genericType);
+        const std::string namespaceName = genericType.Namespace();
         if (namespaceName.empty()) {
             result->Target(MakeGlobal());
             result->IsDoubleColon(true);
@@ -713,7 +694,7 @@ bool TypeSystemAstBuilder::TypeMatches(
 bool TypeSystemAstBuilder::TypeDefMatches(const TS::ITypeDefinition& typeDef,
                                           const TS::IType* type) const {
     if (type == nullptr || type->Name() != typeDef.Name()
-        || NamespaceOf(*type) != typeDef.Namespace()
+        || type->Namespace() != typeDef.Namespace()
         || type->TypeParameterCount() != typeDef.TypeParameterCount())
         return false;
     const bool defIsNested = typeDef.DeclaringTypeDefinition() != nullptr;
@@ -3088,7 +3069,7 @@ EntityDeclaration* TypeSystemAstBuilder::ConvertTypeDefinition(
                 continue;
             } else if (SupportRecordClasses() && typeDefinition.IsRecord()
                        && baseType->Name() == "IEquatable"
-                       && NamespaceOf(*baseType) == "System"
+                       && baseType->Namespace() == "System"
                        && RecordIEquatableOmitted(*baseType, typeDefinition)) {
                 // Omit "IEquatable<R>" in records.
                 continue;

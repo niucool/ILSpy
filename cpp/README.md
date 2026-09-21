@@ -2854,6 +2854,22 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   digest -- all machine-assembly snapshots, none touching the namespace surface);
   and the standing CLI baselines are unchanged (`--csharp mscorlib` 10106366
   bytes, `--il` 41246545 bytes, `-l c` 109438).
+- **Collapse `TypeSystemAstBuilder::NamespaceOf` onto `IType::Namespace()`** -- the
+  gnhf-126 follow-up: the file-local `NamespaceOf(const IType&)` helper (the
+  `IEntity` / `ParameterizedType` / `UnknownType` dispatch the builder used
+  because `IType` had no namespace surface) is deleted, and its four call sites
+  (`ConvertTypeHelper`'s top-level namespace, `TypeDefMatches`, the record
+  `IEquatable<R>` base-list omission, the function-pointer `CallConv*` custom
+  calling convention) now read `IType::Namespace()` directly. The virtual's
+  overrides dispatch identically to the helper (the `IEntity`-carrying definition
+  reports `INamedElement::Namespace`, `ParameterizedType` delegates to its
+  generic, `UnknownType` reads its `FullTypeName`, everything else the empty
+  default), so the change is behavior-preserving. Verified by the existing
+  `*TypeSystemAstBuilder*` suite (**364** tests, all green) and the broader
+  `*CSharp*:*ExpressionBuilder*:*Resolver*:*OutputVisitor*:*Ambience*` filter
+  (23s) with only the known environment GAC-snapshot failure; the standing CLI
+  baselines are unchanged (`--csharp mscorlib` 10106366 bytes, `--il` 41246545
+  bytes, `-l c` 109438).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
