@@ -200,6 +200,15 @@ public:
                                         const TS::IMember& expectedTarget,
                                         const TS::IMember& actualTarget);
 
+    // The C# `private ExpressionWithResolveResult HandleImplicitConversion(IMethod method,
+    // TranslatedExpression argument)` (CallBuilder.cs lines 1534-1556): the user-defined
+    // `op_Implicit` render -- re-check the implicit conversion, cast the argument to the
+    // operator's source type when the cached conversion is not the operator itself, unwrap
+    // an `in` direction, and emit the cast to the target type with a
+    // ConversionResolveResult. Public for the tests (the port's no-visibility convention).
+    ExpressionWithResolveResult HandleImplicitConversion(const TS::IMethod& method,
+                                                         TranslatedExpression argument);
+
 private:
     // The C# `private bool IsPrimitiveValueThatShouldBeNamedArgument(
     // TranslatedExpression arg, IMethod method, IParameter p)` (CallBuilder.cs

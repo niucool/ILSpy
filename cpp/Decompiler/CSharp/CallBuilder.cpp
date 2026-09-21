@@ -22,14 +22,18 @@
 
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/ExpressionBuilder.hpp"
+#include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
+#include "Decompiler/Semantics/Conversion.hpp"
 #include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/Semantics/OutVarResolveResult.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
@@ -202,6 +206,47 @@ bool CallBuilder::IsAppropriateCallTarget(
         }
     }
     return false;
+}
+
+// The C# `private ExpressionWithResolveResult HandleImplicitConversion(IMethod method,
+// TranslatedExpression argument)` (CallBuilder.cs lines 1534-1556).
+ExpressionWithResolveResult CallBuilder::HandleImplicitConversion(
+    const TS::IMethod& method, TranslatedExpression argument) {
+    Resolver::CSharpConversions& conversions =
+        Resolver::CSharpConversions::Get(*expressionBuilder_->compilation);
+    TS::IType& targetType = const_cast<TS::IType&>(method.ReturnType());
+    std::shared_ptr<Sem::Conversion> conv = conversions.ImplicitConversion(
+        const_cast<TS::IType&>(argument.Type()), targetType);
+    const TS::IMethod* convMethod = conv ? conv->Method() : nullptr;
+    if (!(conv && conv->IsUserDefined() && conv->IsValid() && convMethod != nullptr
+          && convMethod->Equals(&method, &TS::NormalizeTypeVisitor::TypeErasure()))) {
+        // The implicit conversion to the target type is not directly possible, so
+        // first insert a cast to the operator's source (parameter) type.
+        const TS::IParameter* parameter =
+            method.Parameters().empty() ? nullptr : method.Parameters()[0];
+        if (parameter != nullptr) {
+            argument = argument.ConvertTo(const_cast<TS::IType&>(parameter->Type()),
+                                          *expressionBuilder_);
+        }
+        conv = conversions.ImplicitConversion(const_cast<TS::IType&>(argument.Type()),
+                                              targetType);
+    }
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(argument.Expression());
+    if (direction != nullptr && direction->FieldDirection() == Syntax::FieldDirection::In) {
+        // `(TargetType)(in arg)` is invalid syntax; also, `f(in arg)` is invalid when
+        // there is an implicit conversion involved.
+        argument = argument.UnwrapChild(direction->Expression());
+    }
+    auto* cast = new Syntax::CastExpression(expressionBuilder_->ConvertType(targetType),
+                                            argument.Expression());
+    std::shared_ptr<Sem::ResolveResult> input =
+        GetSharedResolveResult(*argument.Expression());
+    if (input == nullptr)
+        input = std::make_shared<Sem::ResolveResult>(
+            const_cast<TS::IType&>(argument.Type()).shared_from_this());
+    return WithRR(*cast, std::make_shared<Sem::ConversionResolveResult>(
+                             targetType.shared_from_this(), std::move(input),
+                             std::move(conv)));
 }
 
 // The C# `object.Equals(a, b)` over two boxed constant values (the

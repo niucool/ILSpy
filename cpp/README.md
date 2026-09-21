@@ -2893,6 +2893,23 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   :*Ambience*` filter (21s) with only the known environment GAC-snapshot
   failure; the standing CLI baselines are unchanged (`--csharp mscorlib`
   10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
+- **CallBuilder::HandleImplicitConversion** -- the user-defined `op_Implicit`
+  render arm (CallBuilder.cs lines 1534-1556): re-query the implicit conversion
+  via `CSharpConversions::Get(compilation).ImplicitConversion`, cast the argument
+  to the operator's source (parameter) type when the cached conversion is not the
+  operator itself (`IsUserDefined && IsValid && Method.Equals(method, TypeErasure)`),
+  unwrap an `in` `DirectionExpression`, and emit the `CastExpression` to the
+  target type with a `ConversionResolveResult`. Verified by **2** new gtest cases
+  in `CallBuilderHandleImplicitConversion_Test.cpp` over a real ExpressionBuilder
+  + a `FakeMethod` `op_Implicit(Int32) -> Int64` (the cast + result-type shape
+  and the `in`-direction unwrap), proven with a two-arm neuter RED round (both
+  failed: the `in`-unwrap gate disabled and the result RR downgraded to a plain
+  `ResolveResult`) then restored green. Partial-test policy: **218/218**
+  `CallBuilder*` + `ExpressionBuilder*` tests green; the broader
+  `*CSharp*:*ExpressionBuilder*:*Resolver*:*OutputVisitor*:*Ambience*` filter
+  (44s) with only the known environment GAC-snapshot failure; the standing CLI
+  baselines are unchanged (`--csharp mscorlib` 10106366 bytes, `--il` 41246545
+  bytes, `-l c` 109438).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
