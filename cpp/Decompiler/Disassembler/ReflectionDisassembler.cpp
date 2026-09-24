@@ -1621,9 +1621,23 @@ void ReflectionDisassembler::DisassembleMethodBlock(Metadata::MetadataFile& modu
     WriteSecurityDeclarations(module,
         module.GetDeclarativeSecurityAttributes(methodToken));
 
-    // The C# `methodDefinition.HasBody()` -- RelativeVirtualAddress != 0
-    // (0 for abstract/extern/pinvoke-only methods).
-    if (module.GetMethodRVA(methodToken) != 0) {
+    // The C# `methodDefinition.HasBody()` (SRMExtensions.cs line 130): the
+    // no-body attribute arms (Abstract, PinvokeImpl) and the no-body impl
+    // arms (InternalCall, Native, Unmanaged, Runtime) carry no IL body even
+    // when an RVA exists -- the net065 mixed-mode pinvokeimpl thunks decode
+    // their native stubs as garbage IL without this gate.
+    constexpr std::uint32_t kNoBodyMethodAttrs =
+        static_cast<std::uint32_t>(MethodAttributes::Abstract)
+        | static_cast<std::uint32_t>(MethodAttributes::PinvokeImpl);
+    constexpr std::uint32_t kNoBodyImplAttrs =
+        static_cast<std::uint32_t>(MethodImplAttributes::InternalCall)
+        | static_cast<std::uint32_t>(MethodImplAttributes::Native)
+        | static_cast<std::uint32_t>(MethodImplAttributes::Unmanaged)
+        | static_cast<std::uint32_t>(MethodImplAttributes::Runtime);
+    if ((module.GetMethodAttributes(methodToken) & kNoBodyMethodAttrs) == 0
+        && (module.GetMethodImplAttributes(methodToken) & kNoBodyImplAttrs)
+            == 0
+        && module.GetMethodRVA(methodToken) != 0) {
         methodBodyDisassembler_->Disassemble(module, methodToken);
     }
     // The C# close comment: the declaring type's short NAME, not the full
