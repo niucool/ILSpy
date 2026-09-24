@@ -803,3 +803,20 @@ token-level conventions (each a candidate for the Phase 5 Emitter):
 2. **The residual IL-transform OOB** -- now one site
    (`IndexRangeTransform::TransformIndexing`), 14/46 capa samples
    still abort; the remaining 33 produce text.
+
+## 5. The MethodBodyReader DBG litter cleanup (for the next merge)
+
+The merged mainline carries committed debug fprintf litter in
+`cpp/Decompiler/Metadata/MethodBodyReader.hpp` (the
+`DBG LocateUsHeap enter` and `DBG cor20 captured` sites, committed
+during ilspy's crash-fix run -- the same class as the InlineArray
+PROBE prints, which the mainline has since removed). Both sites are
+removed on port-baml; the `.entrypoint` capture they diagnosed is
+verified intact (capa1's `--il` still emits it), stderr is clean, and
+the affected suites stay green (the only new failures in the merged
+tree's sweep are the two
+`ReflectionDisassemblerTest.DisassembleFieldInvalidRvaCommentIsComplete`
+variants, which need `ILSPY_TEST_MSCORLIB` set to a corpus mscorlib --
+they pass with `ILSPY_TEST_MSCORLIB=/home/jim/ilspy-test-fixtures/net48/mscorlib.dll`
+and pre-date this cleanup; flagging rather than editing the mainline's
+gating).
