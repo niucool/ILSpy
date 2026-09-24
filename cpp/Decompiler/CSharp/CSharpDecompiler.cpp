@@ -41,6 +41,27 @@ void CSharpDecompiler::RunILTransforms(IL::ILFunction& function,
     function.RunTransforms(GetILTransforms(), context);
 }
 
+// The context wiring the C# ILTransformContext carries natively: the
+// PEFile (the port's Metadata pointer) and the CreateILReader deep-decode
+// entry (the port's DelegateBodyResolver hook over ReadIL).
+static void WireTransformContext(IL::ILTransformContext& context,
+                                 const Metadata::MetadataFile& file) {
+    context.Metadata = const_cast<Metadata::MetadataFile*>(&file);
+    context.DelegateBodyResolver =
+        [&file](std::uint32_t methodToken,
+                std::uint32_t methodRva) -> std::unique_ptr<IL::ILFunction> {
+            if (methodRva == 0) return nullptr;
+            return IL::ReadIL(file, methodToken, methodRva);
+        };
+}
+
+void CSharpDecompiler::RunILTransforms(IL::ILFunction& function,
+                                       const Metadata::MetadataFile& file) {
+    IL::ILTransformContext context;
+    WireTransformContext(context, file);
+    function.RunTransforms(GetILTransforms(), context);
+}
+
 std::string CSharpDecompiler::DecompileFunctionToString(
     IL::ILFunction& function, std::string_view returnType,
     std::string_view methodName, std::string_view paramDecl) {
@@ -93,7 +114,13 @@ bool CSharpDecompiler::DecompileMethodToString(
         auto paramNames = file.GetParameterNames(methodToken);
         paramDecl = MethodDeclString(*sig, paramNames);
     }
-    out = DecompileFunctionToString(*fn, returnType, methodName, paramDecl);
+    // The pipeline run rides the metadata-wired overload (the C# context
+    // carries the PEFile for the closure transforms' deep-decode).
+    IL::ILTransformContext transformContext;
+    WireTransformContext(transformContext, file);
+    RunILTransforms(*fn, transformContext);
+    fn->CheckInvariant(IL::ILPhase::Normal);
+    out = IL::ILAstToCSharp(*fn, returnType, methodName, paramDecl);
     return true;
 }
 

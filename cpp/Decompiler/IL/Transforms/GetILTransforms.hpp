@@ -49,6 +49,7 @@
 #include "Decompiler/IL/Transforms/HighLevelLoopTransform.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/Transforms/LocalFunctionDecompiler.hpp"
+#include "Decompiler/IL/Transforms/DelegateConstruction.hpp"
 #include "Decompiler/IL/Transforms/TransformDisplayClassUsage.hpp"
 #include "Decompiler/IL/Transforms/NamedArgumentTransform.hpp"
 #include "Decompiler/IL/Transforms/DeconstructionTransform.hpp"
@@ -180,11 +181,10 @@ inline std::vector<std::unique_ptr<IILTransform>> GetILTransforms() {
     transforms.push_back(std::make_unique<FixRemainingIncrements>());
     transforms.push_back(std::make_unique<CopyPropagation>());
     // The C# slot between CopyPropagation and LocalFunctionDecompiler
-    // carries DelegateConstruction (CSharpDecompiler.cs line 168); the
-    // port has only the matcher helper (MatchDelegateConstruction), not
-    // the transform Run -- deferred with it, the C# order keeps the
-    // closure transforms contiguous either way.
-    // transforms.push_back(std::make_unique<DelegateConstruction>());
+    // (CSharpDecompiler.cs line 168): the transform Run embeds the decoded
+    // lambda bodies (the deep-decode rides the context's
+    // DelegateBodyResolver hook).
+    transforms.push_back(std::make_unique<DelegateConstruction>());
     transforms.push_back(std::make_unique<LocalFunctionDecompiler>());
     transforms.push_back(std::make_unique<TransformDisplayClassUsage>());
     transforms.push_back(

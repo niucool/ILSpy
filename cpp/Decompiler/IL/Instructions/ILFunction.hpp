@@ -102,6 +102,18 @@ public:
     // Non-owning: the scope is a node of the enclosing tree.
     BlockContainer* DeclarationScope = nullptr;
 
+    // The C# `public HashSet<ILVariable> CapturedVariables { get; }`
+    // (ILFunction.cs): the variables the lambdas/local functions nested in
+    // this function capture (DelegateConstruction's ReplaceDelegateTargetVisitor
+    // adds the delegate target's variable; TransformDisplayClassUsage prunes
+    // the dead entries). The port keeps a vector of shared handles with a
+    // linear Contains probe (the C# reference-equality set).
+    std::vector<ILVariablePtr> CapturedVariables;
+
+    // Whether the variable is already recorded as captured by this function
+    // (the HashSet.Add reference-equality probe).
+    bool CapturesVariable(const ILVariable* v) const;
+
     // The C# `public InstructionCollection<ILFunction> LocalFunctions` (child
     // slot 1): the local functions / lambdas nested in this function. Owned here
     // (the C# tree's parent ownership); appended by the closure-decoder slices.

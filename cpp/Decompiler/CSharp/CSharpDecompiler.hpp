@@ -63,6 +63,14 @@ public:
     static void RunILTransforms(IL::ILFunction& function,
                                 IL::ILTransformContext& context);
 
+    // The metadata-wired overload: the context carries the module (the C#
+    // context.PEFile) and the deep-decode resolver (the C#
+    // context.CreateILReader() body read) so the closure transforms
+    // (DelegateConstruction's lambda embedding) can decode nested bodies.
+    static void RunILTransforms(IL::ILFunction& function,
+                                const ::ILSpy::Decompiler::Metadata::
+                                    MetadataFile& file);
+
     // The C# Decompile path's per-body half (the DecodeMethodBody +
     // decompile-body flow the CLI's --csharp block carries inline): runs
     // the transform pipeline over the function and renders the C#-ish

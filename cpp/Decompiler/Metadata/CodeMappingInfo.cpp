@@ -199,34 +199,7 @@ bool ParseLocalFunctionName(const std::string& name) {
     return pos == name.size();
 }
 
-// The C# `LocalFunctionDecompiler.IsLocalFunctionMethod(MetadataFile,
-// MethodDefinitionHandle)` (the module-local shape; the C# context gate is
-// dropped -- the port passes the module directly).
-bool IsLocalFunctionMethod(const MetadataFile& module,
-                           std::uint32_t methodToken) {
-    if (methodToken == 0) return false;
-    const std::string name = module.ResolveTokenToString(
-        methodToken, /*ownerMethodToken=*/0);
-    if (name.empty()) return false;
-    if (!ParseLocalFunctionName(name)) return false;
-    const std::uint32_t attributes = module.GetMethodAttributes(methodToken);
-    // The C# `(method.Attributes & MethodAttributes.Assembly) == 0` gate
-    // (MethodAttributes.Assembly = 0x0004) plus the CompilerGenerated chain.
-    constexpr std::uint32_t kMethodAttributesAssembly = 0x0004;
-    if ((attributes & kMethodAttributesAssembly) == 0) return false;
-    const std::uint32_t declaringType =
-        module.GetMethodDeclaringTypeToken(methodToken);
-    if (HasKnownAttribute(module, methodToken,
-                          TS::KnownAttribute::CompilerGenerated)) {
-        return true;
-    }
-    if (declaringType != 0 &&
-        HasKnownAttribute(module, declaringType,
-                          TS::KnownAttribute::CompilerGenerated)) {
-        return true;
-    }
-    return false;
-}
+
 
 // The C# `TryGetExtensionImplementation(MetadataReader, MethodDefinitionHandle,
 // out MethodDefinitionHandle)` (CSharpDecompiler.cs): the extension-group /
@@ -327,6 +300,35 @@ std::uint32_t GetDeclaringTypeOfToken(const MetadataFile& metadata,
 }
 
 } // namespace
+
+// The C# `LocalFunctionDecompiler.IsLocalFunctionMethod(MetadataFile,
+// MethodDefinitionHandle)` (the module-local shape; the C# context gate is
+// dropped -- the port passes the module directly).
+bool IsLocalFunctionMethod(const MetadataFile& module,
+                           std::uint32_t methodToken) {
+    if (methodToken == 0) return false;
+    const std::string name = module.ResolveTokenToString(
+        methodToken, /*ownerMethodToken=*/0);
+    if (name.empty()) return false;
+    if (!ParseLocalFunctionName(name)) return false;
+    const std::uint32_t attributes = module.GetMethodAttributes(methodToken);
+    // The C# `(method.Attributes & MethodAttributes.Assembly) == 0` gate
+    // (MethodAttributes.Assembly = 0x0004) plus the CompilerGenerated chain.
+    constexpr std::uint32_t kMethodAttributesAssembly = 0x0004;
+    if ((attributes & kMethodAttributesAssembly) == 0) return false;
+    const std::uint32_t declaringType =
+        module.GetMethodDeclaringTypeToken(methodToken);
+    if (HasKnownAttribute(module, methodToken,
+                          TS::KnownAttribute::CompilerGenerated)) {
+        return true;
+    }
+    if (declaringType != 0 &&
+        HasKnownAttribute(module, declaringType,
+                          TS::KnownAttribute::CompilerGenerated)) {
+        return true;
+    }
+    return false;
+}
 
 std::shared_ptr<CodeMappingInfo> GetCodeMappingInfo(const MetadataFile& module,
                                                     std::uint32_t memberToken) {

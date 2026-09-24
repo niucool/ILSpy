@@ -25,9 +25,11 @@
 #pragma once
 
 #include <functional>
+#include <cstdint>
 #include <memory>
 
 namespace ILSpy::Decompiler::TypeSystem { class ICompilation; }
+namespace ILSpy::Decompiler::Metadata { class MetadataFile; }
 
 namespace ILSpy::Decompiler::TypeSystem {
 class ITypeDefinition;
@@ -283,6 +285,22 @@ public:
     // not part of any type tree).
     const ::ILSpy::Decompiler::TypeSystem::ITypeDefinition* CurrentTypeDefinition
         = nullptr;
+    // The metadata module the transforms deep-decode through (the C# context
+    // carries the PEFile; the port's transforms consult the MetadataFile for
+    // the metadata-level probes -- LocalFunctionDecompiler.IsLocalFunctionMethod
+    // -- and the deep-decode inputs). Null in the minimal construction; the
+    // probes that need it reject when null.
+    ::ILSpy::Decompiler::Metadata::MetadataFile* Metadata = nullptr;
+    // The DelegateConstruction deep-decode entry (the C#
+    // context.CreateILReader() + GetMethodBody + ReadIL(..., ILFunctionKind.
+    // Delegate, genericContext) path): resolves a delegate target's body from
+    // the metadata. The hook takes the MethodDef token and the RVA and
+    // returns the decoded ILFunction (the caller sets Kind/DelegateType), or
+    // null when the body does not decode. Unset by default; production wiring
+    // is ReadIL(module, token, rva) at the facade call site.
+    std::function<std::unique_ptr<ILFunction>(std::uint32_t methodToken,
+                                              std::uint32_t methodRva)>
+        DelegateBodyResolver;
 
     void StepOnce(const char* what) const {
         if (Step) Step(what);

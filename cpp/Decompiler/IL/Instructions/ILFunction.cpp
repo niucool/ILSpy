@@ -208,6 +208,12 @@ static std::string TransformTypeName(const IILTransform& transform) {
     return sep == std::string::npos ? mangled : mangled.substr(sep + 2);
 }
 
+bool ILFunction::CapturesVariable(const ILVariable* v) const {
+    for (const auto& captured : CapturedVariables)
+        if (captured.get() == v) return true;
+    return false;
+}
+
 void ILFunction::RunTransforms(
     const std::vector<std::unique_ptr<IILTransform>>& transforms,
     ILTransformContext& context) {

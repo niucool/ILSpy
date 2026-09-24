@@ -27,6 +27,7 @@
 
 #pragma once
 
+#include "Decompiler/IL/Transforms/IILTransform.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
 #include <string>
@@ -45,10 +46,20 @@ struct DelegateConstructionMatch {
     ILInstruction* target = nullptr;
     TypeSystem::ITypePtr delegateType;
     std::string targetMethod;
+    // The resolved method the matched ldftn/ldvirtftn/ldvirtdelegate node
+    // carries (the C# `((IInstructionWithMethodOperand)...).Method`). Null on
+    // reader-built nodes (the reader discards the token target; the stand-in
+    // convention) -- the transform's token gates then reject.
+    const TypeSystem::IMethod* method = nullptr;
 };
 
-class DelegateConstruction {
+class DelegateConstruction : public IILTransform {
 public:
+    // The C# `void IILTransform.Run(ILFunction, ILTransformContext)` --
+    // walks the function, matches the delegate constructions, and embeds
+    // the decoded lambda bodies (the transform's Run; the gates below).
+    void Run(ILFunction& function, ILTransformContext& context) override;
+
     // Match a delegate construction -- the C# `case NewObj call:` (a `newobj
     // DelegateType(target, ldftn/ldvirtftn method)`, modelled as a Call with
     // IsNewObj, exactly two arguments, the second an ldftn or ldvirtftn) or the

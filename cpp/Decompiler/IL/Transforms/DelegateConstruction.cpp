@@ -55,9 +55,15 @@ bool DelegateConstruction::MatchDelegateConstruction(ILInstruction* inst,
 
         out.target = call->Arguments[0].get();
         out.delegateType = call->DeclaringType;
-        out.targetMethod = (opArg->Op == OpCode::LdFtn)
-            ? static_cast<LdFtn*>(opArg)->MethodName
-            : static_cast<LdVirtFtn*>(opArg)->MethodName;
+        if (opArg->Op == OpCode::LdFtn) {
+            auto* ftn = static_cast<LdFtn*>(opArg);
+            out.targetMethod = ftn->MethodName;
+            out.method = ftn->Method.get();
+        } else {
+            auto* vftn = static_cast<LdVirtFtn*>(opArg);
+            out.targetMethod = vftn->MethodName;
+            out.method = vftn->Method.get();
+        }
     } else if (inst->Op == OpCode::LdVirtDelegate) {
         // The `case LdVirtDelegate ldVirtDelegate:` branch -- a virtual delegate
         // construction already folded by TransformDelegateCtorLdVirtFtnToLdVirtDelegate.
@@ -70,6 +76,7 @@ bool DelegateConstruction::MatchDelegateConstruction(ILInstruction* inst,
         out.target = ldv->Argument.get();
         out.targetMethod = ldv->MethodName;
         out.delegateType = ldv->Type;
+        out.method = ldv->Method.get();
     } else {
         return false;
     }

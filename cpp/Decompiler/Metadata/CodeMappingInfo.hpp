@@ -84,6 +84,13 @@ private:
 // owning handle (the C# return is a GC reference). A nil `member` token
 // yields an empty mapping over a nil TypeDef (the C# GetDeclaringType nil
 // chain).
+// The C# `LocalFunctionDecompiler.IsLocalFunctionMethod(MetadataFile,
+// MethodDefinitionHandle)`: the metadata-level probe (the name shape + the
+// compiler-generated gate). The DelegateConstruction transform's
+// local-function rejection consults it.
+bool IsLocalFunctionMethod(const MetadataFile& module,
+                           std::uint32_t methodToken);
+
 std::shared_ptr<CodeMappingInfo> GetCodeMappingInfo(const MetadataFile& module,
                                                     std::uint32_t memberToken);
 
