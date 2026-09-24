@@ -66,6 +66,7 @@
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/TypeSystem/TypeKind.hpp"
 #include "ILSpyCmd/IlspyCmdProgram.hpp"
+#include "Decompiler/CSharp/CSharpDecompiler.hpp"
 #include "ILSpyCmd/MetadataTableDumper.hpp"
 #include "ILSpyCmd/TypesParser.hpp"
 
@@ -600,18 +601,15 @@ int RunMain(int argc, char** argv) {
         for (const auto& m : methods) {
             if (m.RVA == 0) continue;  // abstract/extern/pinvoke-only
             if (wantCSharp) {
-                // IL -> ILAst -> C#-ish text, end to end. The ILAst goes
-                // through the pipeline's first transform
-                // (ControlFlowSimplification) before rendering.
+                // IL -> ILAst -> C#-ish text, end to end, through the
+                // CSharpDecompiler facade (the C# Decompile path's shape:
+                // the decode, the transform pipeline, the render). The
+                // signature strings come from the metadata reader (the
+                // facade's metadata entry derives them in the C#; the port
+                // keeps the reader calls at the call site until the
+                // metadata-surface slice lands).
                 auto fn = ILSpy::Decompiler::IL::ReadIL(file, m.Token, m.RVA);
                 if (!fn) continue;
-                // The C# CSharpDecompiler.GetILTransforms() + ILFunction.RunTransforms
-                // pipeline -- flattened into the shared IL runner so the
-                // BamlDecompiler's ConnectionIdRewritePass drives the same
-                // list.
-                ILSpy::Decompiler::IL::ILTransformContext transformContext;
-                ILSpy::Decompiler::IL::RunGetILTransforms(*fn, transformContext);
-                fn->CheckInvariant(ILSpy::Decompiler::IL::ILPhase::Normal);
                 std::string returnType = "void";
                 std::string paramDecl;
                 if (auto sig = file.GetMethodSignature(m.Token)) {
@@ -630,7 +628,8 @@ int RunMain(int argc, char** argv) {
                     }
                 }
                 std::cout << "// " << t.Namespace << "." << t.Name << "\n"
-                          << ILSpy::Decompiler::IL::ILAstToCSharp(*fn, returnType, m.Name, paramDecl)
+                          << ILSpy::Decompiler::CSharp::CSharpDecompiler::DecompileFunctionToString(
+                                 *fn, returnType, m.Name, paramDecl)
                           << '\n';
                 ++methodsPrinted;
                 continue;

@@ -7,6 +7,7 @@ add_subdirectory(TypeSystem)
 add_subdirectory(ProjectDecompiler)
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/ILAstToCSharp.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/CSharpDecompiler.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Annotations.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/TranslatedExpression.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ExpressionBuilder.cpp
