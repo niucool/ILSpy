@@ -35,6 +35,7 @@
 #include "Decompiler/Metadata/MetadataFile.hpp"
 
 #include "ILSpyX/LoadedAssembly.hpp"
+#include "ILSpyX/Settings/DecompilerSettings.hpp"
 
 #include <memory>
 
@@ -77,5 +78,16 @@ std::shared_ptr<Decompiler::DebugInfo::IDebugInfoProvider> GetDebugInfoOrNull(
 // file)`.
 std::shared_ptr<Decompiler::TypeSystem::ICompilation> GetTypeSystemOrNull(
     const Decompiler::Metadata::MetadataFile& file);
+
+// The C# `public static ICompilation?
+// GetTypeSystemWithDecompilerSettingsOrNull(this MetadataFile file,
+// DecompilerSettings settings)`: the options-keyed type system over the
+// mapped settings (the mapping lives on the ILSpyX settings subclass --
+// see the GetOptions note there); the parameter is the base settings
+// type, as in the C#.
+std::shared_ptr<Decompiler::TypeSystem::ICompilation>
+GetTypeSystemWithDecompilerSettingsOrNull(
+    const Decompiler::Metadata::MetadataFile& file,
+    const Decompiler::DecompilerSettings& settings);
 
 }  // namespace ILSpy::ILSpyX

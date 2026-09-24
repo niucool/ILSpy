@@ -43,6 +43,8 @@
 
 #include "Decompiler/DecompilerSettings.hpp"
 
+#include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
+
 #include <string>
 
 namespace ILSpy::ILSpyX::Settings {
@@ -70,6 +72,15 @@ public:
     // flags (the port answers the membership half; the CLI's -ds parse
     // walks the same table for the value).
     static bool IsKnownOption(const std::string& name);
+
+    // The C# `public static TypeSystemOptions
+    // DecompilerTypeSystem.GetOptions(DecompilerSettings settings)`
+    // (DecompilerTypeSystem.cs; the port homes the mapping here, on the
+    // ILSpyX settings subclass, because the engine-side
+    // DecompilerTypeSystem is not ported): the 18 settings flags map
+    // onto their TypeSystemOptions bits, starting from None.
+    static ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions GetOptions(
+        const EngineSettings& settings);
 };
 
 }  // namespace ILSpy::ILSpyX::Settings

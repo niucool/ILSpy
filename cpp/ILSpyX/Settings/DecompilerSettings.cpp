@@ -199,4 +199,67 @@ bool DecompilerSettings::IsKnownOption(const std::string& name)
     return false;
 }
 
+Decompiler::TypeSystem::TypeSystemOptions
+DecompilerSettings::GetOptions(const EngineSettings& settings)
+{
+    // The C# DecompilerTypeSystem.GetOptions mapping, flag for flag.
+    using TypeSystemOptions = Decompiler::TypeSystem::TypeSystemOptions;
+    TypeSystemOptions typeSystemOptions = TypeSystemOptions::None;
+    if (settings.Dynamic()) {
+        typeSystemOptions = typeSystemOptions | TypeSystemOptions::Dynamic;
+    }
+    if (settings.TupleTypes()) {
+        typeSystemOptions = typeSystemOptions | TypeSystemOptions::Tuple;
+    }
+    if (settings.ExtensionMethods()) {
+        typeSystemOptions = typeSystemOptions | TypeSystemOptions::ExtensionMethods;
+    }
+    if (settings.DecimalConstants()) {
+        typeSystemOptions = typeSystemOptions | TypeSystemOptions::DecimalConstants;
+    }
+    if (settings.IntroduceRefModifiersOnStructs()) {
+        typeSystemOptions = typeSystemOptions | TypeSystemOptions::RefStructs;
+    }
+    if (settings.IntroduceReadonlyAndInModifiers()) {
+        typeSystemOptions = typeSystemOptions | TypeSystemOptions::ReadOnlyStructsAndParameters;
+    }
+    if (settings.IntroduceUnmanagedConstraint()) {
+        typeSystemOptions = typeSystemOptions | TypeSystemOptions::UnmanagedConstraints;
+    }
+    if (settings.NullableReferenceTypes()) {
+        typeSystemOptions = typeSystemOptions | TypeSystemOptions::NullabilityAnnotations;
+    }
+    if (settings.ReadOnlyMethods()) {
+        typeSystemOptions = typeSystemOptions | TypeSystemOptions::ReadOnlyMethods;
+    }
+    if (settings.NativeIntegers()) {
+        typeSystemOptions = typeSystemOptions | TypeSystemOptions::NativeIntegers;
+    }
+    if (settings.FunctionPointers()) {
+        typeSystemOptions = typeSystemOptions | TypeSystemOptions::FunctionPointers;
+    }
+    if (settings.ScopedRef()) {
+        typeSystemOptions = typeSystemOptions | TypeSystemOptions::ScopedRef;
+    }
+    if (settings.NumericIntPtr()) {
+        typeSystemOptions = typeSystemOptions | TypeSystemOptions::NativeIntegersWithoutAttribute;
+    }
+    if (settings.RefReadOnlyParameters()) {
+        typeSystemOptions = typeSystemOptions | TypeSystemOptions::RefReadOnlyParameters;
+    }
+    if (settings.ParamsCollections()) {
+        typeSystemOptions = typeSystemOptions | TypeSystemOptions::ParamsCollections;
+    }
+    if (settings.FirstClassSpanTypes()) {
+        typeSystemOptions = typeSystemOptions | TypeSystemOptions::FirstClassSpanTypes;
+    }
+    if (settings.ExtensionMembers()) {
+        typeSystemOptions = typeSystemOptions | TypeSystemOptions::ExtensionMembers;
+    }
+    if (settings.AsyncAwait()) {
+        typeSystemOptions = typeSystemOptions | TypeSystemOptions::RuntimeAsync;
+    }
+    return typeSystemOptions;
+}
+
 }  // namespace ILSpy::ILSpyX::Settings

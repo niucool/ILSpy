@@ -18,6 +18,8 @@
 
 #include "ILSpyX/LoadedAssemblyExtensions.hpp"
 
+#include "ILSpyX/Settings/DecompilerSettings.hpp"
+
 #include "ILSpyX/AssemblyListSnapshot.hpp"
 #include "ILSpyX/LoadedAssembly.hpp"
 
@@ -65,6 +67,17 @@ std::shared_ptr<Decompiler::TypeSystem::ICompilation> GetTypeSystemOrNull(
     const Decompiler::Metadata::MetadataFile& file)
 {
     return GetLoadedAssembly(file).GetTypeSystemOrNull();
+}
+
+std::shared_ptr<Decompiler::TypeSystem::ICompilation>
+GetTypeSystemWithDecompilerSettingsOrNull(
+    const Decompiler::Metadata::MetadataFile& file,
+    const Decompiler::DecompilerSettings& settings)
+{
+    // The C# `GetLoadedAssembly(file).GetTypeSystemOrNull(
+    // DecompilerTypeSystem.GetOptions(settings))`.
+    return GetLoadedAssembly(file).GetTypeSystemOrNull(
+        Settings::DecompilerSettings::GetOptions(settings));
 }
 
 }  // namespace ILSpy::ILSpyX
