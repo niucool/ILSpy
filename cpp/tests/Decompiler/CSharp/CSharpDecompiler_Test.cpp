@@ -178,4 +178,72 @@ TEST(CSharpDecompilerTest, DecompileTypeRendersTheTypeAndMembers)
     FAIL() << "no type in the corpus decompiled";
 }
 
+// The PartialTypeInfo registry (the C# `partialTypes` dictionary): a
+// registered declared member is skipped in the type's member iteration,
+// and merging a second info with the same declaring type unionizes the
+// member sets (the C# AddDeclaredMembers shape).
+TEST(CSharpDecompilerTest, PartialTypeInfoSkipsDeclaredMembers)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile module(path);
+    ASSERT_TRUE(module.IsValid());
+    // Find the first type with a decodable method body; capture its method
+    // set and the first body's text.
+    for (const auto& t : module.TypeDefs()) {
+        if (t.Name == "<Module>") continue;
+        auto methods = module.GetMethods(t.Token);
+        std::uint32_t firstBody = 0;
+        std::string firstMethod;
+        for (const auto& m : methods) {
+            if (m.RVA == 0) continue;
+            std::string text;
+            if (!CSharp::CSharpDecompiler::DecompileMethodToString(
+                    module, m.Token, m.RVA, m.Name, text))
+                continue;
+            firstBody = m.Token;
+            firstMethod = m.Name;
+            break;
+        }
+        if (firstBody == 0) continue;
+        // Register the method as partially declared: it disappears from the
+        // type's rendered members.
+        Metadata::PartialTypeInfo info(t.Token);
+        info.AddDeclaredMember(firstBody);
+        CSharp::CSharpDecompiler::AddPartialTypeDefinition(info);
+        std::string text;
+        ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
+            module, t.Token, text));
+        EXPECT_EQ(text.find(firstMethod), std::string::npos)
+            << "the declared member is skipped in the type render";
+        SUCCEED();
+        return;
+    }
+    FAIL() << "no type with a decodable body in the corpus";
+}
+
+// The merge: two infos for the same declaring type unionize (the C#
+// AddDeclaredMembers path in AddPartialTypeDefinition).
+TEST(CSharpDecompilerTest, PartialTypeInfosMergeForTheSameType)
+{
+    Metadata::PartialTypeInfo a(0x02000001);
+    a.AddDeclaredMember(0x06000001);
+    Metadata::PartialTypeInfo b(0x02000001);
+    b.AddDeclaredMember(0x06000002);
+    CSharp::CSharpDecompiler::AddPartialTypeDefinition(a);
+    CSharp::CSharpDecompiler::AddPartialTypeDefinition(b);
+    // The merged registry holds both members: the accessors answer
+    // through the registry's copy (the C# `partialTypes.TryGetValue` shape;
+    // the lookup surface is the static FindPartialTypeInfo probe).
+    EXPECT_TRUE(CSharp::CSharpDecompiler::FindPartialTypeInfo(0x02000001)
+                    ->IsDeclaredMember(0x06000001));
+    EXPECT_TRUE(CSharp::CSharpDecompiler::FindPartialTypeInfo(0x02000001)
+                    ->IsDeclaredMember(0x06000002));
+    EXPECT_FALSE(CSharp::CSharpDecompiler::FindPartialTypeInfo(0x02000001)
+                     ->IsDeclaredMember(0x06000003));
+    EXPECT_EQ(CSharp::CSharpDecompiler::FindPartialTypeInfo(0x02000009),
+              nullptr)
+        << "an unregistered type has no partial info";
+}
+
 } // namespace

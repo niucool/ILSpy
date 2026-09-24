@@ -21,9 +21,11 @@
 
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/Metadata/PartialTypeInfo.hpp"
 #include "Decompiler/IL/Transforms/GetILTransforms.hpp"
 #include "Decompiler/IL/ILReader.hpp"
 
+#include <map>
 #include <utility>
 
 namespace ILSpy::Decompiler::CSharp {
@@ -100,9 +102,21 @@ bool CSharpDecompiler::DecompileMethodToString(
 bool CSharpDecompiler::DecompileTypeToString(
     const Metadata::MetadataFile& file, std::uint32_t typeToken,
     std::string& out) {
+    // The C# DecompileType member iteration: the partial-type info gates
+    // the members (the C# `DoDecompileMember`'s
+    // `partialType.IsDeclaredMember(entity) -> return` skip, and the
+    // `partial` modifier note -- the C# renders `partial` on the type
+    // declaration; the port's ILAstToCSharp method-text renderer carries
+    // no type-header surface, so the modifier is deferred with it).
+    const Metadata::PartialTypeInfo* partialType =
+        FindPartialTypeInfo(typeToken);
     bool rendered = false;
     for (const auto& m : file.GetMethods(typeToken)) {
         if (m.RVA == 0) continue;
+        if (partialType != nullptr &&
+            partialType->IsDeclaredMember(m.Token)) {
+            continue;
+        }
         std::string text;
         if (DecompileMethodToString(file, m.Token, m.RVA, m.Name, text)) {
             out += text;
@@ -111,6 +125,39 @@ bool CSharpDecompiler::DecompileTypeToString(
         }
     }
     return rendered;
+}
+
+namespace {
+
+// The C# `readonly Dictionary<TypeDefinitionHandle, PartialTypeInfo>
+// partialTypes` (CSharpDecompiler.cs line 1479): the facade-level registry
+// (a function-local static -- the C# field hangs off the CSharpDecompiler
+// INSTANCE; the port's per-method entries are static today, so the registry
+// rides the same static scope; the instance ctor lands with the
+// metadata-slice ctor).
+std::map<std::uint32_t, Metadata::PartialTypeInfo>& PartialTypes() {
+    static std::map<std::uint32_t, Metadata::PartialTypeInfo> registry;
+    return registry;
+}
+
+} // namespace
+
+void CSharpDecompiler::AddPartialTypeDefinition(Metadata::PartialTypeInfo info) {
+    // The C# `partialTypes.TryGetValue(info.DeclaringTypeDefinitionHandle,
+    // out var existingInfo)` shape: a second registration unionizes.
+    auto it = PartialTypes().find(info.DeclaringTypeDefinitionToken());
+    if (it == PartialTypes().end()) {
+        PartialTypes().emplace(info.DeclaringTypeDefinitionToken(),
+                               std::move(info));
+        return;
+    }
+    it->second.AddDeclaredMembers(info);
+}
+
+const Metadata::PartialTypeInfo* CSharpDecompiler::FindPartialTypeInfo(
+    std::uint32_t declaringTypeToken) {
+    auto it = PartialTypes().find(declaringTypeToken);
+    return it == PartialTypes().end() ? nullptr : &it->second;
 }
 
 } // namespace ILSpy::Decompiler::CSharp

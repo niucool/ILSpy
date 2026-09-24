@@ -34,6 +34,7 @@
 
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
+#include "Decompiler/Metadata/PartialTypeInfo.hpp"
 
 #include <memory>
 #include <string>
@@ -42,6 +43,9 @@
 namespace ILSpy::Decompiler::Metadata {
 struct MethodSignature;
 class MetadataFile;
+// The partial-type info (PartialTypeInfo.cs -- defined out-of-line in the
+// .cpp; the port's registry is token-keyed).
+class PartialTypeInfo;
 } // namespace ILSpy::Decompiler::Metadata
 
 namespace ILSpy::Decompiler::CSharp {
@@ -92,6 +96,20 @@ public:
     static bool DecompileTypeToString(
         const ::ILSpy::Decompiler::Metadata::MetadataFile& file,
         std::uint32_t typeToken, std::string& out);
+
+    // The C# `public void AddPartialTypeDefinition(PartialTypeInfo info)`
+    // (CSharpDecompiler.cs line 1481): register the partial-type info under
+    // its declaring type token (a second registration for the same type
+    // unionizes the declared-member sets, the C# AddDeclaredMembers path).
+    static void AddPartialTypeDefinition(
+        ::ILSpy::Decompiler::Metadata::PartialTypeInfo info);
+
+    // The registry probe (the C# `partialTypes.TryGetValue(...)` shape the
+    // member iteration consults): the registered info for a type token, or
+    // null.
+    static const ::ILSpy::Decompiler::Metadata::PartialTypeInfo*
+        FindPartialTypeInfo(
+        std::uint32_t declaringTypeToken);
 };
 
 } // namespace ILSpy::Decompiler::CSharp
