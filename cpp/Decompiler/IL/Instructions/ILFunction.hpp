@@ -34,6 +34,8 @@
 
 namespace ILSpy::Decompiler::IL {
 
+class ILTransformContext;
+
 // The C# `enum ILFunctionKind` (ILFunction.cs lines 466-490): TopLevelFunction /
 // Delegate / ExpressionTree / LocalFunction. Introduced by the decompiler
 // pipeline steps (DelegateConstruction, TransformExpressionTrees,
@@ -150,6 +152,20 @@ public:
     // increment replaces the C# property-setter's list maintenance. A no-op
     // when variable1 and variable2 are the same variable (or either is null).
     void RecombineVariables(ILVariablePtr variable1, ILVariablePtr variable2);
+
+    // The C# `public void RunTransforms(IEnumerable<IILTransform> transforms,
+    // ILTransformContext context)` (ILFunction.cs line 402): the fixed
+    // per-body pipeline driver -- CheckInvariant before, then per transform
+    // the step group (the C# StepStartGroup(transform type name); the
+    // port's single Step hook carries the type name), the Run, and the
+    // invariant check after (the C# cancellation/token and trace-
+    // stopwatch bookkeeping are deferred with those surfaces). Implemented
+    // out-of-line (the IILTransform definition is not included here --
+    // ILFunction.hpp and IILTransform.hpp would cycle; the .cpp includes
+    // the transform header).
+    void RunTransforms(
+        const std::vector<std::unique_ptr<class IILTransform>>& transforms,
+        ILTransformContext& context);
 
     ILFunction() : ILInstruction(OpCode::ILFunction) {}
     InstructionFlags DirectFlags() const override { return InstructionFlags::None; }
