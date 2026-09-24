@@ -141,3 +141,102 @@ differently with mono's (content-pinned); they have no existence gates yet.
 - The `ConnectionIdRewritePass` registers `InitializeComponent` once per connector-interface
   sweep (`IComponentConnector` and `IStyleConnector`), so a code-behind type implementing only
   the first still registers it twice. Also faithful to the C# order of operations.
+
+---
+
+# Phase 8 (ILSpyX core subset) port log
+
+The same worktree's second assignment. Scope per PORT_PLAN.md section
+"Phase 8": FileLoaders/, Abstractions/, PdbProvider/, Util/, Extensions/,
+Instrumentation/, and the CLI-relevant Settings/ -- with Analyzers/, Search/,
+TreeView/, and MermaidDiagrammer/ deferred by the plan's ILSpyX sub-scoping.
+
+## 1. State on arrival
+
+- **PdbProvider/ was already ported** (`cpp/ILSpyX/PdbProvider/`:
+  DebugInfoUtils + PortableDebugInfoProvider, both with test suites). The
+  plan's "Cecil bridge replaced" is exactly what the port does -- the
+  `-usepdb` flow runs through the port's own providers, and the C#
+  `MonoCecilDebugInfoProvider` (the Mono.Cecil bridge) has no port
+  analogue by design. Nothing to add there.
+- Nothing else of the scope existed: no FileLoaders, no LoadedPackage, no
+  GuessFileType, no CollectionExtensions, no Abstractions, no Settings.
+- The vcpkg manifest already declared the needed dependencies (`lz4` for the
+  XALZ loader, `miniz` for zip reading), both already linked into `ilspy`.
+
+## 2. Slices landed (branch `port-baml`, after the Phase 9 work)
+
+1. `f917701e0` -- **GuessFileType + CollectionExtensions**. The three-stage
+   sniffer (BOM dispatch, RFC 3629 state machine over at most 500 KB, XML
+   probe over the port's gold-pinned XmlTextParser) and the generic
+   collection helpers. Documented divergences: the XML probe parses the
+   whole document where XmlTextReader.MoveToContent reads only the first
+   content node (trailing root-level content reports Text, not Xml), and
+   the BOM arms decode invalid bytes to U+FFFD (the .NET replacement
+   fallback -- those files reach the XML stage and classify as Text).
+2. `097fb1061` -- **LoadedPackage**, the package model the archive/bundle
+   loaders produce: the folder tree (both separators; empty final
+   components -- zip directory rows -- contribute nothing), FromZipFile
+   through miniz (each entry re-opens the zip on demand exactly as the C#
+   does), FromBundle over the shared image with the DumpPackage raw-deflate
+   semantics and the corrupted-entry size-mismatch message. The
+   Resource/ByteArrayResource base surface is declared here with a
+   placement note (its C# home is Decompiler/Metadata/Resource.cs; the
+   package model is the only Phase 8 consumer). Deferred: the
+   LoadedAssembly pipeline (PackageFolder's IAssemblyResolver surface).
+3. `17721e552` -- **The file loaders and the registry**: PEFileLoader (MZ
+   gate), BundleFileLoader and ArchiveFileLoader (by file name, with the
+   ParentBundle guard and the InvalidDataException-to-null swallow),
+   XamarinCompressedFileLoader (the full XALZ contract: header validation,
+   the 255x expansion bound, lz4 decode, exact-length check), and
+   FileLoaderRegistry (Xamarin, Bundle, PE, Archive -- the C# precedence
+   order). **Deferred: WebCilFileLoader** (the WebCIL container reader is
+   an unfilled Phase 1 gap) and **MetadataFileLoader** (the metadata-only
+   MetadataFile shape the port's PE-only reader never constructs; a .pdb
+   fed to it returns null in the C# as well). One Phase 1 addition: the
+   MetadataFile in-memory constructor (fileName, image bytes) mirroring
+   the C# PEFile-over-stream form, under the same never-throwing contract;
+   the MetadataFile-consuming suites, BAML suites, and CLI smoke all match
+   their pre-change baseline.
+4. `3a3e63e50` -- **ILanguage** (the decompiler-facing abstraction; the
+   TypeToString default argument carried on the interface's own
+   declaration, which in C++ static binding is exactly the C# behavior).
+   Deferred: IResourceFileHandler + ResourceFileHandlerContext (the
+   whole-project-export path, Phase 10's BamlAwareWholeProjectDecompiler;
+   the signature takes the not-yet-ported LoadedAssembly) and
+   IResourceNodeFactory / ITreeNode (the GUI tree model).
+5. `5d8e07520` -- **The settings layer**: ILSpySettings (the XML-backed
+   provider: SettingsFilePathProvider, Section, Update with the version
+   stamp; the saved sidecar is read back with its UTF-8 BOM consumed),
+   MutexProtector (a POSIX flock on a temp-dir lock file with a
+   process-local depth counter for the C# re-entrancy),
+   SettingsServiceBase (the type-indexed section cache), and the ILSpyX
+   DecompilerSettings wrapper (the engine's 110 Browsable bool flags as an
+   explicit name -> getter/setter table generated from the C# property
+   declarations; IsKnownOption for the -ds surface). Deferred: the Clone
+   override (value-return covariance) and the PropertyChanged wiring.
+6. **Instrumentation/ILSpyXEventSource does not port** (ETW event-source
+   logging; the same deferral the port already records for the
+   UniversalAssemblyResolver's instrumentation note).
+
+## 3. Verification
+
+Test-first per slice (RED against stubs, then GREEN); ASan
+(`cpp/build/linux-asan`) over every new suite with zero reports (the
+sweep caught one real test-side buffer overrun -- a mis-sized string
+literal -- which was fixed before commit). Final state of the ILSpyX
+scope: 91 tests across 15 suites, 87 passed / 0 failed / 4 skipped (the
+pre-existing PdbProvider env-gated fixtures). The Phase 9 BAML suites
+(31 passed / 0 failed) and the CLI smoke are unchanged.
+
+## 4. Notes for the next phases
+
+- The CLI wiring of the loaders (`-p` whole-project, package tree
+  traversal) and the settings flags (`--ilspy-settingsfile`, `-ds`) are
+  Phase 10 consumers of these surfaces; nothing here changes CLI behavior.
+- `-genpdb` needs `PortablePdbWriter` (ICSharpCode.Decompiler/DebugInfo/,
+  445 lines, Phase 5/7 territory) -- unported; the Phase 8 exit criterion
+  "-genpdb writes a Portable PDB" is blocked on it, recorded here.
+- `MetadataFileLoader`'s and `WebCilFileLoader`'s deferrals mean the
+  registry has four loaders, not six; files only the deferred two would
+  claim (raw metadata blobs, WebCIL modules) fall through to null today.
