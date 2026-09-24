@@ -248,3 +248,77 @@ batch -- recorded for the next slice (Disassembler/MethodBodyDisassembler
 territory, the same phase as T7/T8's file family). Repro: `ilspy_cli
 /home/jim/ilspy-test-fixtures/net48/System.EnterpriseServices.Wrapper.dll
 --il` vs the oracle (diff hunks at IL_003c and friends).
+
+## PD8 -- the merged-main sweep + the T6 fix (2026-09-24)
+
+### Item 1 -- the T10 bisect: complete, no early return exists
+
+Re-confirmed on the merged tree: the --csharp walk (main.cpp's seed
+scaffold) COMPLETES over capa07 (310 methods, 183 with bodies; the tail
+rows `Null.Obfuscator.Null.Obfuscator` 02000091 and `.Null.Obfuscator`
+020000C1 carry zero methods through GetMethods -- the obfuscator's
+extern-only members the oracle renders as `extern ? ()`, RVA 0, which
+the seed's `if (m.RVA == 0) continue;` skips by design). There is no
+early-return path to fix: rc=0 with the shorter output is the seed's
+honest shape, and the 438-vs-3520 (capa07), 43-line (capa47/48) and
+197-line (net016) diffs are the missing whole-project scaffolding
+(usings, assembly attributes, nested-type and property/event member
+declarations) -- the Phase-5/7 back end in cpp/Decompiler/CSharp/ +
+the main.cpp scaffold. Documented for the controller; NOT fixed
+(main-line territory per the assignment).
+
+### Item 2 -- the merged-main sweep: --il 268/286, all 45 --cs crashes gone
+
+The merged main (post `29c7c74a0` + `075695c62`) sweep
+(/tmp/diffval/merged1, 572 runs, ILSPY_PORT = the merged linux-ninja
+build):
+
+| mode | IDENTICAL | DIFFERENT | PORT-CRASH | PORT-FAIL | BOTH-FAIL |
+|---|---|---|---|---|---|
+| --il (286) | 268 | 12 | 2 (capa07/09, the out_of_range + trailing-bytes throws) | 0 | 4 |
+| --cs (286) | 0 | 49 | 0 (was 45) | 222 | 15 |
+
+* --il: 261 -> 268 identical (+7: the T7 RVA-truncation rows capa
+  6c8b/749e/a301 x2 and the T9 net017); the remaining 12 DIFFERENT rows
+  were the 11 `.entrypoint` drops (T6) + net065 (T12 calli).
+* --cs: ilspy's crash fixes eliminate all 45 crash rows
+  (TransformCollectionAndObjectInitializers stale-pos guard + the
+  CheckInvariant sites); each converted row now decompiles with rc=0 and
+  diffs as the seed-scaffold shape (the usings/attributes scaffolding --
+  the same T10-family shape, NOT new corruption; spot-checked capa04 and
+  net017). The PROBE stderr litter is gone from the merged tree.
+
+### Item 2b -- the T6 root cause + fix (found during the sweep triage)
+
+Root cause pinned to the exact line: the cor20 walk lives in
+`MethodBodyReader.hpp`'s `LocateUsHeap()` and captures
+`entryPointToken_` as a side effect; `GetEntryPointToken()` read the
+field WITHOUT triggering the walk, so a token-only first query returned
+the never-initialized 0 -- the `.entrypoint` check in
+MethodBodyDisassembler.cpp:598 then never matched for any module whose
+entry method is disassembled before the first `ldstr` (mscorlib's
+library shapes and every body-after-first-string module masked it, which
+is why the 41 MB byte-identical pin never caught it). Filed as a fix on
+this branch (`5a9ccbc2c`, RED-first: the fresh-open patch-the-cor20
+test) and verified against the sweep: all 11 entrypoint rows
+(039a/2fd4/354a/e842 x the -cleaned variants) re-diffed IDENTICAL, the
+worktree sweep now reads --il 279 IDENTICAL / 1 DIFFERENT (net065) /
+2 PORT-CRASH / 4 BOTH-FAIL, full-suite failure set unchanged (139
+env-pinned), ASan clean.
+
+Post-fix projected merged-main tally: --il 279 identical + 2 caught-
+graceful (a6ab1e60b's catch converts the capa07/09 aborts to the C#-
+shaped failure) + net065 (T12) = the remaining --il work is exactly T12
+(the calli standalone-signature decode), T4/T5 (the two decoder throws'
+root causes), and T3 (the --cs metadata-only scaffolding).
+
+### Item 3 -- standing by
+
+Observations for the next chunk: (a) my `5a9ccbc2c` T6 fix is committed
+on this branch -- merge at will (it is independent of the
+TransformDisplayClassUsage WIP I saw in-flight on main and touches only
+MethodBodyReader.hpp + the DebugDirectory test); (b) T12's calli decode
+is the largest remaining --il miss (1 row, ~213 hunks) and is
+Disassembler territory; (c) T4/T5 root causes are pinned
+(SignatureTypeProviderDecoder Fail sites) and a6ab1e60b's catch already
+matches the C# shape for them.
