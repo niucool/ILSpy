@@ -30,11 +30,13 @@
 //
 // KEY PORT CONVENTIONS:
 //  (a) Like `CustomAttributeTypedArgument`, the BCL struct is generic
-//      (`CustomAttributeNamedArgument<TType>`) but the ILSpy type system uses only the
-//      `IType` instantiation, so the faithful port absorbs the `<IType>` instantiation into
-//      the `TypeSystem` namespace as a concrete (non-template) struct (the same
-//      `CustomAttributeTypedArgument` / D384 `MethodSemanticsAttributes` / D381
-//      `IEntity.MetadataToken` BCL-absorption convention).
+//      (`CustomAttributeNamedArgument<TType>`) with two instantiations in the repo (the
+//      ILSpy type system's `IType` and the ReflectionDisassembler
+//      SecurityDeclarationDecoder's `(PrimitiveTypeCode, string)` tuple), so the port
+//      carries the template (`CustomAttributeNamedArgumentT<TType>`) plus the
+//      `CustomAttributeNamedArgument` alias for the `ITypePtr` instantiation the
+//      TypeSystem surface uses (the `...T`-suffix-plus-alias convention, the
+//      `CustomAttributeTypedArgumentT` precedent).
 //  (b) The C# `string? Name` (nullable -- `CustomAttributeDecoder.DecodeNamedArguments` reads
 //      it from `valueReader.ReadSerializedString()`, which returns null for a malformed blob)
 //      ports to `std::string` where the empty string represents the null case (the D357
@@ -47,10 +49,10 @@
 //      `CustomAttributeNamedArgumentKind` enum (a `Field`/`Property` tag); the
 //      default-constructed value is `Field` (the lower serialization code, a safe default
 //      the decoder overwrites before use).
-//  (d) The C# `TType Type` (non-null) ports to `ITypePtr` (the `CustomAttributeTypedArgument.Type`
-//      convention); the C# `object? Value` ports to `std::any` (the
-//      `CustomAttributeTypedArgument.Value` convention -- a type-erased boxed value, empty for
-//      `null`).
+//  (d) The C# `TType Type` (non-null) ports to the `TType` template parameter (the
+//      `CustomAttributeTypedArgumentT.Type` convention); the C# `object? Value` ports to
+//      `std::any` (the `CustomAttributeTypedArgumentT.Value` convention -- a type-erased
+//      boxed value, empty for `null`).
 //  (e) The C# `readonly struct` (a value type with a ctor and readonly properties) ports to
 //      a `struct` with private fields and public accessor member functions (the `TypeConstraint`
 //      / `CustomAttributeTypedArgument` readonly-struct convention); the ctor stores all four
@@ -76,19 +78,21 @@ namespace ILSpy::Decompiler::TypeSystem {
 // `Kind` (field vs property), the argument `Type` (non-null for a decoded argument), and
 // the boxed `Value` (or empty for `null`). A value type (the C# `readonly struct`); default
 // construction gives an empty name, `Field`, a null type, and an empty value.
-struct CustomAttributeNamedArgument {
+template <typename TType>
+struct CustomAttributeNamedArgumentT {
     // The C# `CustomAttributeNamedArgument(string? name, CustomAttributeNamedArgumentKind
     // kind, TType type, object? value)`. The name may be empty (the C# null/malformed case);
     // the type may be a null `shared_ptr`; the value may be empty (the C# `null`).
-    CustomAttributeNamedArgument(std::string name, CustomAttributeNamedArgumentKind kind,
-        ITypePtr type, std::any value)
+    CustomAttributeNamedArgumentT(std::string name, CustomAttributeNamedArgumentKind kind,
+        TType type, std::any value)
         : name_(std::move(name)), kind_(kind), type_(std::move(type)), value_(std::move(value))
     {
     }
 
     // The C# implicit parameterless struct ctor (zeroes the fields). An empty name, `Field`,
-    // a null `ITypePtr`, and an empty `std::any` (the decoder's zero-fill sentinel).
-    CustomAttributeNamedArgument() = default;
+    // a default-constructed `TType` (a null `ITypePtr` for the IType instantiation), and an
+    // empty `std::any` (the decoder's zero-fill sentinel).
+    CustomAttributeNamedArgumentT() = default;
 
     // The C# `string? Name { get; }` -- the field or property name. An empty string for the
     // C# null/malformed case (the consumer treats the name as non-null via `Name!`).
@@ -98,8 +102,9 @@ struct CustomAttributeNamedArgument {
     CustomAttributeNamedArgumentKind Kind() const { return kind_; }
 
     // The C# `TType Type { get; }` -- the argument type. A nullable `ITypePtr` (the shared,
-    // cached `IType` handle); null for an argument whose type could not be decoded.
-    ITypePtr Type() const { return type_; }
+    // cached `IType` handle) for the IType instantiation; null for an argument whose type
+    // could not be decoded.
+    TType Type() const { return type_; }
 
     // The C# `object? Value { get; }` -- the boxed argument value. A `std::any` (the
     // type-erased boxed value); empty for `null`. Retrieve with `std::any_cast`, test with
@@ -109,8 +114,11 @@ struct CustomAttributeNamedArgument {
 private:
     std::string name_;
     CustomAttributeNamedArgumentKind kind_ = CustomAttributeNamedArgumentKind::Field;
-    ITypePtr type_;
+    TType type_{};
     std::any value_;
 };
+
+// The `ITypePtr` instantiation the TypeSystem surface uses (convention (a)).
+using CustomAttributeNamedArgument = CustomAttributeNamedArgumentT<ITypePtr>;
 
 } // namespace ILSpy::Decompiler::TypeSystem

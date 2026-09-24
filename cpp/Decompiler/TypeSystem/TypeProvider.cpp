@@ -321,8 +321,17 @@ Metadata::PrimitiveTypeCode TypeProvider::GetUnderlyingEnumType(
     return Metadata::ToPrimitiveTypeCode(def->KnownTypeCode());
 }
 
+Metadata::PrimitiveTypeCode TypeProvider::GetUnderlyingEnumType(
+    ITypePtr type) const {
+    return GetUnderlyingEnumType(*type);
+}
+
 bool TypeProvider::IsSystemType(const IType& type) const {
     return IsKnownType(type, KnownTypeCode::Type);
+}
+
+bool TypeProvider::IsSystemType(ITypePtr type) const {
+    return IsSystemType(*type);
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem
