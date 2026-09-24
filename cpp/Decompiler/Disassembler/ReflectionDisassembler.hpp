@@ -84,6 +84,7 @@
 
 #include "Decompiler/Disassembler/MethodBodyDisassembler.hpp"
 #include "Decompiler/Disassembler/IEntityProcessor.hpp"
+#include "Decompiler/Metadata/AssemblyNameReference.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/SignatureTypeProvider.hpp"
 #include "Decompiler/Output/ITextOutput.hpp"
@@ -150,6 +151,15 @@ public:
     // reordering -- the Process passthrough below.
     IEntityProcessor* EntityProcessor() const;
     void EntityProcessor(IEntityProcessor* value);
+
+    // The C# `public IAssemblyResolver AssemblyResolver { get; set; }`
+    // (line 83): the resolver the security-declaration paths consult -- the
+    // "bytearray"/decoded arms of WriteSecurityDeclarations and the
+    // SecurityDeclarationDecoder's ResolveType. Caller-owned (the EntityProcessor
+    // pointer-property convention); null (the default, and the CLI's value)
+    // leaves the raw-blob dump as the only path.
+    Metadata::IAssemblyResolver* AssemblyResolver() const;
+    void AssemblyResolver(Metadata::IAssemblyResolver* value);
 
     // The C# private `Process(MetadataFile module,
     // IReadOnlyCollection<THandle> items)` overloads -- seven in C#, typed by
@@ -565,6 +575,7 @@ private:
     // The C# `IEntityProcessor EntityProcessor` auto-property backing field
     // (null until set -- never dereferenced by this class).
     IEntityProcessor* entityProcessor_ = nullptr;
+    Metadata::IAssemblyResolver* assemblyResolver_ = nullptr;
 
     // The fresh MethodBodyDisassembler the chaining constructor owns (null
     // when the caller supplied one).

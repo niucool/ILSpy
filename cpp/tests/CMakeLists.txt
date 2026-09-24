@@ -64,6 +64,7 @@ add_executable(ilspy_tests
     Decompiler/Disassembler/ILStructure_Test.cpp
     Decompiler/Disassembler/MethodBodyDisassembler_Test.cpp
     Decompiler/Disassembler/ReflectionDisassembler_Test.cpp
+    Decompiler/Disassembler/SecurityDeclarationDecoder_Test.cpp
     Decompiler/Disassembler/SortByNameProcessor_Test.cpp
     Decompiler/DebugInfo/IDebugInfoProvider_Test.cpp
     ILSpyX/PdbProvider/PortableDebugInfoProvider_Test.cpp

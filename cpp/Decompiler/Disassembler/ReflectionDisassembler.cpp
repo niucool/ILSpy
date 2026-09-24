@@ -945,6 +945,17 @@ void ReflectionDisassembler::EntityProcessor(IEntityProcessor* value) {
     entityProcessor_ = value;
 }
 
+// The C# `public IAssemblyResolver AssemblyResolver { get; set; }` -- the
+// port's pointer getter/setter over the caller-owned resolver.
+Metadata::IAssemblyResolver* ReflectionDisassembler::AssemblyResolver() const {
+    return assemblyResolver_;
+}
+
+void ReflectionDisassembler::AssemblyResolver(
+    Metadata::IAssemblyResolver* value) {
+    assemblyResolver_ = value;
+}
+
 // The C# private `Process` overloads (`EntityProcessor?.Process(module,
 // items) ?? items`): the unprocessed collection when no processor is set.
 std::vector<std::uint32_t> ReflectionDisassembler::Process(
