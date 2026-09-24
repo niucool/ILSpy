@@ -26,6 +26,8 @@
 
 #include <functional>
 
+namespace ILSpy::Decompiler::TypeSystem { class ICompilation; }
+
 namespace ILSpy::Decompiler::IL {
 
 class ILFunction;
@@ -104,6 +106,12 @@ struct ILTransformSettings {
     // transforms recover the literal and the <PrivateImplementationDetails>
     // cache field disappears from the output.
     bool ArrayInitializers = true;
+    // Whether to introduce named arguments (the C# 4.0 named-argument
+    // recovery). DecompilerSettings.NamedArguments -- default true. Gates
+    // NamedArgumentTransform.Run (the per-statement transform the
+    // StatementTransform consults; the InliningOptions.IntroduceNamedArguments
+    // option it ORs into the inlining options).
+    bool NamedArguments = true;
     // Whether to detect the C# 6.0 null-conditional operator (`?.`).
     // DecompilerSettings.NullPropagation -- default true. Gates
     // NullPropagationTransform (the `v != null ? v.AccessChain : null` ->
@@ -183,6 +191,12 @@ public:
     // Debug transition log (C# ILTransformContext.Step). Set by tools/tests to
     // observe per-step rewrites; null in production.
     std::function<void(const char* what)> Step;
+    // The C# `public IDecompilerTypeSystem TypeSystem` (ILTransformContext.cs)
+    // -- the decompilation's type system the transforms consult (the port
+    // stores the raw ICompilation; the C# surface is the
+    // SimpleCompilation-derived interface). Null in the minimal construction;
+    // the transforms that need it (NamedArgumentIntroduce's FindType) assert.
+    ::ILSpy::Decompiler::TypeSystem::ICompilation* TypeSystem = nullptr;
 
     void StepOnce(const char* what) const {
         if (Step) Step(what);

@@ -48,6 +48,7 @@
 #include "Decompiler/IL/Transforms/FixRemainingIncrements.hpp"
 #include "Decompiler/IL/Transforms/HighLevelLoopTransform.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
+#include "Decompiler/IL/Transforms/NamedArgumentTransform.hpp"
 #include "Decompiler/IL/Transforms/InlineReturnTransform.hpp"
 #include "Decompiler/IL/Transforms/InterpolatedStringTransform.hpp"
 #include "Decompiler/IL/Transforms/LdLocaDupInitObjTransform.hpp"
@@ -210,6 +211,12 @@ inline void RunGetILTransforms(ILFunction& function, ILTransformContext& context
         // UserDefinedLogicTransform: the lifted user-defined &&/||/
         // ?? operators on nullable operands (a later per-statement
         // child in the C# GetILTransforms() order).
+        // NamedArgumentTransform: the named-argument introduction for the
+        // argument whose inlining is blocked by a sibling's side effects (the
+        // next per-statement child in the C# GetILTransforms() order, after
+        // the deferred DeconstructionTransform and before
+        // UserDefinedLogicTransform). Gated on the NamedArguments setting.
+        statementTransform.AddChild(std::make_unique<NamedArgumentTransform>());
         statementTransform.AddChild(std::make_unique<UserDefinedLogicTransform>());
         // InterpolatedStringTransform: the C# 10/.NET 6 `$"..."` fold
         // (the last per-statement child in the C# GetILTransforms()

@@ -56,6 +56,13 @@ enum class BlockKind : std::uint8_t {
     CollectionInitializer,
     ObjectInitializer,
     CallInlineAssign,
+    // A call whose arguments were promoted to named arguments (the C#
+    // BlockKind.CallWithNamedArgs): Instructions[0] is the this-pointer store
+    // for an instance call (the C# always inserts the receiver store at slot 0
+    // for instance calls); Instructions[1..] are the named-argument stores
+    // (StLoc(v, arg)); the FinalInstruction is the call whose argument slots
+    // now carry LdLoc loads. Constructed by NamedArgumentTransform.
+    CallWithNamedArgs,
 };
 
 } // namespace ILSpy::Decompiler::IL
