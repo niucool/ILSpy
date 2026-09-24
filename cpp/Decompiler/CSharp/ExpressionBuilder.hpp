@@ -91,6 +91,7 @@ class LdObj;
 class StObj;
 class Comp;
 class BinaryNumericInstruction;
+class SwitchInstruction;
 enum class ComparisonKind : std::uint8_t;
 }
 
@@ -173,6 +174,22 @@ public:
     // UnknownType null object), runs the visitor dispatch, and validates the
     // Translate post-condition in debug builds (the C# DEBUG block).
     TranslatedExpression Translate(IL::ILInstruction* inst, const TS::IType* typeHint = nullptr);
+
+    // The C# `internal (TranslatedExpression, IType, StringToInt?)
+    // TranslateSwitchValue(SwitchInstruction inst, bool isExpressionContext)`
+    // (ExpressionBuilder.cs lines 4059-4134): the switch governing-type
+    // machinery -- the value translation with the I8/I4 stack-type
+    // normalization (the small-integer interval overflow check through
+    // `Labels.ContainingInterval()`) and the GetCSharpSwitchGoverningType
+    // gate. The StringToInt arm throws loudly (the StringToInt IL node is
+    // not ported). The tuple ports to the 3-field struct
+    // (value / governingType / no map -- the StringToInt map is absent).
+    struct SwitchValue {
+        TranslatedExpression value;
+        TS::ITypePtr governingType;
+    };
+    SwitchValue TranslateSwitchValue(IL::SwitchInstruction* inst,
+                                     bool isExpressionContext);
 
     // The C# `public TranslatedExpression TranslateCondition(ILInstruction
     // condition, bool negate = false)`: translate with the Boolean hint, widen

@@ -53,6 +53,9 @@
 
 #pragma once
 
+#include "Decompiler/Semantics/ConstantResolveResult.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/SwitchStatement.hpp"
+#include "Decompiler/CSharp/Syntax/SwitchSection.hpp"
 #include "Decompiler/CSharp/TranslatedStatement.hpp"
 #include "Decompiler/CSharp/TranslatedExpression.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
@@ -90,6 +93,8 @@ class Rethrow;
 class PinnedRegion;
 class StLoc;
 class StObj;
+class SwitchInstruction;
+class SwitchSection;
 class Throw;
 } // namespace IL
 
@@ -106,6 +111,11 @@ class ExpressionBuilder;
 
 // The TS alias (the CallBuilder TS:: convention).
 namespace TS = ::ILSpy::Decompiler::TypeSystem;
+
+// The Syntax/Sem namespace aliases (the file-local conventions; the AST and
+// Semantics types appear in the switch-family signatures).
+namespace Syntax = ::ILSpy::Decompiler::CSharp::Syntax;
+namespace Sem = ::ILSpy::Decompiler::Semantics;
 
 // Port of the C# `sealed class StatementBuilder : ILVisitor<TranslatedStatement>`
 // (see the header comment). The C# ctor
@@ -189,6 +199,24 @@ private:
     // The C# `TryCatchStatement MakeTryCatch(ILInstruction tryBlock)`: the
     // try-block conversion with the extend-existing-try-catch reuse.
     TranslatedStatement MakeTryCatch(IL::ILInstruction* tryBlock);
+
+    // The switch family (the C# `VisitSwitchInstruction`/`TranslateSwitch`/
+    // `CreateTypedCaseLabel`/`ConvertSwitchSectionBody`, CallBuilder.cs's
+    // sibling slices at StatementBuilder.cs lines 156-346). The C#
+    // `IEnumerable<ConstantResolveResult> CreateTypedCaseLabel(long, IType,
+    // List<(string?, int)>?)` ports to a materializing vector (the eager-
+    // iteration convention); the StringToInt map arm asserts (the node is not
+    // ported).
+    TranslatedStatement VisitSwitchInstruction(IL::SwitchInstruction* inst);
+    Syntax::SwitchStatement* TranslateSwitch(IL::BlockContainer* switchContainer,
+                                             IL::SwitchInstruction* inst);
+    std::vector<std::shared_ptr<Sem::ConstantResolveResult>> CreateTypedCaseLabel(
+        std::int64_t i, const TS::IType& type,
+        const std::optional<std::vector<std::pair<std::optional<std::string>, int>>>& map)
+        const;
+    void ConvertSwitchSectionBody(Syntax::SwitchSection* astSection,
+                                  IL::ILInstruction* bodyInst);
+    IL::SwitchSection* GetDefaultSection(IL::SwitchInstruction* inst) const;
 
 private:
     // The C# `protected override TranslatedStatement Default(ILInstruction

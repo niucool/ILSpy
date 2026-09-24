@@ -28,11 +28,13 @@
 #include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IsExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/GotoCaseStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/GotoDefaultStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/LabelStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/GotoStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/FixedStatement.hpp"
@@ -51,6 +53,13 @@
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/PinnedRegion.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
+#include "Decompiler/Util/Interval.hpp"
+#include "Decompiler/Util/LongSet.hpp"
+#include "Decompiler/TypeSystem/ReflectionHelper.hpp"
+#include "Decompiler/TypeSystem/NullableType.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
+#include "Decompiler/Util/CSharpPrimitiveCast.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/CSharp/Syntax/CatchClause.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
@@ -60,7 +69,6 @@
 #include "Decompiler/IL/Instructions/LockInstruction.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
-#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
 #include <cassert>
 
@@ -143,6 +151,8 @@ TranslatedStatement StatementBuilder::Convert(IL::ILInstruction* inst) {
         return VisitLockInstruction(lockInstruction);
     if (auto* pinnedRegion = dynamic_cast<IL::PinnedRegion*>(inst))
         return VisitPinnedRegion(pinnedRegion);
+    if (auto* switchInstruction = dynamic_cast<IL::SwitchInstruction*>(inst))
+        return VisitSwitchInstruction(switchInstruction);
     if (auto* block = dynamic_cast<IL::Block*>(inst))
         return VisitBlock(block);
     return Default(inst);
@@ -252,6 +262,14 @@ namespace {
 // `nop` (the port probes the Op directly).
 bool StatementBuilderMatchNop(const IL::ILInstruction* inst) {
     return inst != nullptr && inst->Op == IL::OpCode::Nop;
+}
+
+// The C# `br.TargetContainer` (Branch.cs line 69): the target block's parent
+// container (the C# `targetBlock?.Parent` downcast).
+IL::BlockContainer* BranchTargetContainer(const IL::Branch* br) {
+    if (br == nullptr || br->TargetBlock == nullptr)
+        return nullptr;
+    return dynamic_cast<IL::BlockContainer*>(br->TargetBlock->Parent);
 }
 
 // The C# `handler.Filter.MatchLdcI4(1)` extension: whether the instruction is
@@ -544,6 +562,241 @@ TranslatedStatement StatementBuilder::VisitPinnedRegion(IL::PinnedRegion* inst) 
     fixedStmt->Variables().Add(initializer);
     fixedStmt->EmbeddedStatement(Convert(inst->Body.get()).Statement());
     return WithILInstruction(*fixedStmt, inst);
+}
+
+
+// The C# `internal IEnumerable<ConstantResolveResult> CreateTypedCaseLabel(long i,
+// IType type, List<(string? Key, int Value)>? map = null)` (StatementBuilder.cs
+// lines 156-201): the typed case-label constant over the switch's governing
+// type. The C# generator (`yield return`) ports to a materializing vector (the
+// eager-iteration convention); the map arm (the StringToInt case) asserts --
+// the StringToInt node is not ported.
+std::vector<std::shared_ptr<Sem::ConstantResolveResult>>
+StatementBuilder::CreateTypedCaseLabel(
+    std::int64_t i, const TS::IType& type,
+    const std::optional<std::vector<std::pair<std::optional<std::string>, int>>>& map)
+    const {
+    std::vector<std::shared_ptr<Sem::ConstantResolveResult>> results;
+    // unpack nullable type, if necessary:
+    // we need to do this in all cases, because there are nullable bools and
+    // enum types as well.
+    const TS::IType& underlying = TS::GetUnderlyingType(type);
+    if (TS::IsKnownType(underlying, TS::KnownTypeCode::Boolean)) {
+        results.push_back(std::make_shared<Sem::ConstantResolveResult>(
+            std::const_pointer_cast<TS::IType>(
+                const_cast<TS::IType&>(underlying).shared_from_this()),
+            std::any(i != 0)));
+        return results;
+    }
+    if (map.has_value()) {
+        assert(TS::IsKnownType(underlying, TS::KnownTypeCode::String)
+               && "CreateTypedCaseLabel: the map arm requires a string switch");
+        for (const auto& entry : *map) {
+            if (entry.second == i)
+                results.push_back(std::make_shared<Sem::ConstantResolveResult>(
+                    std::const_pointer_cast<TS::IType>(
+                        const_cast<TS::IType&>(underlying).shared_from_this()),
+                    std::any(entry.first)));
+        }
+        return results;
+    }
+    std::any value;
+    if (underlying.Kind() == TS::TypeKind::Enum) {
+        const TS::IType* enumType = TS::GetEnumUnderlyingType(&underlying);
+        TS::TypeCode typeCode = enumType != nullptr
+            ? TS::GetTypeCode(*enumType)
+            : TS::TypeCode::Empty;
+        if (typeCode != TS::TypeCode::Empty) {
+            value = ::ILSpy::Decompiler::Util::Cast(typeCode, std::any(i),
+                                                    /*checkForOverflow=*/false);
+        } else {
+            value = std::any(i);
+        }
+    } else {
+        TS::TypeCode typeCode = TS::GetTypeCode(underlying);
+        if (typeCode != TS::TypeCode::Empty) {
+            value = ::ILSpy::Decompiler::Util::Cast(typeCode, std::any(i),
+                                                    /*checkForOverflow=*/false);
+        } else {
+            value = std::any(i);
+        }
+    }
+    results.push_back(std::make_shared<Sem::ConstantResolveResult>(
+        std::const_pointer_cast<TS::IType>(
+            const_cast<TS::IType&>(underlying).shared_from_this()),
+        std::move(value)));
+    return results;
+}
+
+// The C# `public SwitchSection GetDefaultSection()` (SwitchInstruction.cs
+// lines 177-189): the section with the most labels stands default.
+IL::SwitchSection* StatementBuilder::GetDefaultSection(
+    IL::SwitchInstruction* inst) const {
+    IL::SwitchSection* defaultSection = inst->Sections.front().get();
+    for (const auto& section : inst->Sections) {
+        if (static_cast<std::int64_t>(section->Labels.Count())
+            > static_cast<std::int64_t>(defaultSection->Labels.Count())) {
+            defaultSection = section.get();
+        }
+    }
+    return defaultSection;
+}
+
+// The C# `private void ConvertSwitchSectionBody(Syntax.SwitchSection
+// astSection, ILInstruction bodyInst)` (StatementBuilder.cs lines 321-337):
+// the section body conversion with the `break;` insertion (the C# checks
+// `EndPointUnreachable`).
+void StatementBuilder::ConvertSwitchSectionBody(Syntax::SwitchSection* astSection,
+                                                IL::ILInstruction* bodyInst) {
+    TranslatedStatement body = Convert(bodyInst);
+    astSection->Statements().Add(body.Statement());
+    if (!IL::HasFlag(bodyInst->Flags(), IL::InstructionFlags::EndPointUnreachable)) {
+        // we need to insert 'break;'
+        if (auto* block = dynamic_cast<Syntax::BlockStatement*>(body.Statement())) {
+            block->Statements().Add(new Syntax::BreakStatement());
+        } else {
+            astSection->Statements().Add(new Syntax::BreakStatement());
+        }
+    }
+}
+
+
+// The C# `SwitchStatement TranslateSwitch(BlockContainer? switchContainer,
+// SwitchInstruction inst)` (StatementBuilder.cs lines 203-319): the switch
+// construction -- the break/continue state swap, the value translation (the
+// StringToInt arm deferred with the StringToInt IL node), the per-section
+// case labels + the branch inlining through the case-label mapping, and the
+// remaining-block fallthrough with the end-container goto.
+// The C# `protected internal override TranslatedStatement
+// VisitSwitchInstruction(SwitchInstruction inst)` (StatementBuilder.cs line
+// 203): a free-standing switch translates with no surrounding container (the
+// `break` bookkeeping inside TranslateSwitch leaves the switch immediately).
+TranslatedStatement StatementBuilder::VisitSwitchInstruction(
+    IL::SwitchInstruction* inst) {
+    return WithILInstruction(*TranslateSwitch(nullptr, inst), inst);
+}
+
+Syntax::SwitchStatement* StatementBuilder::TranslateSwitch(
+    IL::BlockContainer* switchContainer, IL::SwitchInstruction* inst) {
+    IL::BlockContainer* oldBreakTarget = breakTarget;
+    // 'break' within a switch would only leave the switch
+    breakTarget = switchContainer;
+    std::optional<std::map<IL::Block*, std::optional<std::shared_ptr<Sem::ResolveResult>>>>
+        oldCaseLabelMapping = caseLabelMapping;
+    caseLabelMapping =
+        std::map<IL::Block*, std::optional<std::shared_ptr<Sem::ResolveResult>>>{};
+
+    // The C# `exprBuilder.TranslateSwitchValue(inst, false)` -- the port's
+    // machinery lives on the ExpressionBuilder (the StringToInt arm is
+    // deferred with the StringToInt IL node).
+    auto [value, type] =
+        exprBuilder->TranslateSwitchValue(inst, /*isExpressionContext=*/false);
+
+    IL::SwitchSection* defaultSection = GetDefaultSection(inst);
+
+    auto* stmt = new Syntax::SwitchStatement();
+    stmt->Expression(value.Expression());
+    std::map<IL::SwitchSection*, Syntax::SwitchSection*> translationDictionary;
+    // initialize C# switch sections.
+    for (const auto& section : inst->Sections) {
+        // This is used in the block-label mapping.
+        std::shared_ptr<Sem::ConstantResolveResult> firstValueResolveResult;
+        auto* astSection = new Syntax::SwitchSection();
+        // Create case labels:
+        if (section.get() == defaultSection) {
+            astSection->CaseLabels().Add(new Syntax::CaseLabel());
+            firstValueResolveResult = nullptr;
+        } else {
+            // The C# `section.Labels.Values.SelectMany(i => CreateTypedCaseLabel(i,
+            // type, strToInt?.Map)).ToArray()` -- the map is absent (the
+            // StringToInt arm is deferred), so each label maps to its own
+            // typed case constant.
+            std::vector<std::shared_ptr<Sem::ConstantResolveResult>> values;
+            for (long long label : section->Labels.Values())
+                for (const auto& rr : CreateTypedCaseLabel(label, *type, std::nullopt))
+                    values.push_back(rr);
+            if (section->HasNullLabel) {
+                astSection->CaseLabels().Add(new Syntax::CaseLabel(
+                    new Syntax::NullReferenceExpression()));
+                firstValueResolveResult = std::make_shared<Sem::ConstantResolveResult>(
+                    TS::NullType(), std::any());
+            } else {
+                assert(!values.empty()
+                       && "a non-default switch section has at least one label");
+                firstValueResolveResult = values.front();
+            }
+            for (const auto& label : values) {
+                astSection->CaseLabels().Add(
+                    new Syntax::CaseLabel(exprBuilder->ConvertConstantValue(
+                                              label, /*allowImplicitConversion=*/true)
+                                              .Expression()));
+            }
+        }
+        if (auto* br = dynamic_cast<IL::Branch*>(section->Body.get())) {
+            // we can only inline the block, if all branches are in the
+            // switchContainer. The C# `Descendants.OfType<Branch>()` walk is
+            // approximated with the branch's own container check (the port's
+            // switch sections carry their branches with resolved targets).
+            if (BranchTargetContainer(br) == switchContainer)
+                caseLabelMapping->emplace(br->TargetBlock, firstValueResolveResult);
+        }
+        translationDictionary.emplace(section.get(), astSection);
+        stmt->SwitchSections().Add(astSection);
+    }
+    for (const auto& section : inst->Sections) {
+        auto* astSection = translationDictionary[section.get()];
+        if (auto* br = dynamic_cast<IL::Branch*>(section->Body.get())) {
+            // we can only inline the block, if all branches are in the
+            // switchContainer.
+            if (BranchTargetContainer(br) == switchContainer)
+                ConvertSwitchSectionBody(astSection, br->TargetBlock);
+            else
+                ConvertSwitchSectionBody(astSection, section->Body.get());
+        } else if (auto* leave = dynamic_cast<IL::Leave*>(section->Body.get())) {
+            if (astSection->CaseLabels().Count() == 1
+                && astSection->CaseLabels().At(0)->Expression() == nullptr
+                && leave->TargetContainer == switchContainer) {
+                stmt->SwitchSections().Remove(astSection);
+            } else {
+                ConvertSwitchSectionBody(astSection, section->Body.get());
+            }
+        } else {
+            ConvertSwitchSectionBody(astSection, section->Body.get());
+        }
+    }
+    if (switchContainer != nullptr && stmt->SwitchSections().Count() > 0) {
+        // Translate any remaining blocks:
+        Syntax::SwitchSection* lastSection = stmt->SwitchSections().At(
+            stmt->SwitchSections().Count() - 1);
+        for (const auto& block : switchContainer->Blocks) {
+            if (caseLabelMapping->count(block.get()) > 0)
+                continue;
+            lastSection->Statements().Add(
+                new Syntax::LabelStatement(EnsureUniqueLabel(block.get())));
+            for (const auto& nestedInst : block->Instructions) {
+                TranslatedStatement nestedStmt = Convert(nestedInst.get());
+                if (auto* b = dynamic_cast<Syntax::BlockStatement*>(nestedStmt.Statement())) {
+                    for (int i = 0; i < b->Statements().Count(); i++) {
+                        lastSection->Statements().Add(
+                            Syntax::Detach(b->Statements().At(i)));
+                    }
+                } else {
+                    lastSection->Statements().Add(nestedStmt.Statement());
+                }
+            }
+            assert(block->FinalInstruction == nullptr
+                   || block->FinalInstruction->Op == IL::OpCode::Nop);
+        }
+        auto endLabel = endContainerLabels.find(switchContainer);
+        if (endLabel != endContainerLabels.end()) {
+            lastSection->Statements().Add(new Syntax::LabelStatement(endLabel->second));
+            lastSection->Statements().Add(new Syntax::BreakStatement());
+        }
+    }
+
+    breakTarget = oldBreakTarget;
+    caseLabelMapping = oldCaseLabelMapping;
+    return stmt;
 }
 
 } // namespace ILSpy::Decompiler::CSharp

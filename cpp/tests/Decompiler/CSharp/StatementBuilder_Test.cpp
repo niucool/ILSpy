@@ -62,6 +62,7 @@
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
@@ -552,6 +553,48 @@ TEST(StatementBuilderTest, VisitPinnedRegionRendersFixed)
     ASSERT_TRUE(addressOf != nullptr);
     EXPECT_EQ(addressOf->Operator(), Syntax::UnaryOperatorType::AddressOf);
     EXPECT_TRUE(fixedStatement->EmbeddedStatement() != nullptr);
+}
+
+
+TEST(StatementBuilderTest, VisitSwitchInstructionRendersSwitchWithCaseLabels)
+{
+    StatementFixture fixture;
+    StatementBuilder builder(fixture.compilation, *fixture.context_, &fixture.function,
+                             &fixture.settings, &fixture.run);
+    // `switch (ldc.i4 1) { case 0: goto IL_0010; case 1: nop; }` -- the
+    // governing value is the constant 1, the sections carry the labels via
+    // the LongSet, and the bodies are branches into the container's blocks.
+    auto block0 = std::make_unique<IL::Block>();
+    block0->Label = "IL_0005";
+    IL::Branch branch0(block0.get());
+    IL::SwitchSection section0;
+    section0.Labels = Util::LongSet(static_cast<long long>(0));
+    section0.Body = std::make_unique<IL::Branch>(block0.get());
+    // The second section carries more labels than the first, so it stands
+    // default (GetDefaultSection picks the max-label section) and section 0
+    // renders as `case 0:`.
+    IL::SwitchSection section1;
+    section1.Labels = Util::LongSet(Util::LongInterval::Inclusive(5, 6));
+    section1.Body = std::make_unique<IL::Branch>(block0.get());
+    IL::SwitchInstruction switchInstruction(std::make_unique<IL::LdcI4>(1));
+    switchInstruction.Sections.push_back(std::make_unique<IL::SwitchSection>(std::move(section0)));
+    switchInstruction.Sections.push_back(std::make_unique<IL::SwitchSection>(std::move(section1)));
+    auto result = builder.Convert(&switchInstruction);
+
+    auto* switchStatement =
+        dynamic_cast<Syntax::SwitchStatement*>(result.Statement());
+    ASSERT_TRUE(switchStatement != nullptr);
+    ASSERT_TRUE(switchStatement->Expression() != nullptr);
+    ASSERT_EQ(switchStatement->SwitchSections().Count(), 2);
+    auto* astSection = switchStatement->SwitchSections().At(0);
+    ASSERT_EQ(astSection->CaseLabels().Count(), 1);
+    auto* caseLabel = astSection->CaseLabels().At(0);
+    ASSERT_TRUE(caseLabel->Expression() != nullptr);
+    auto* value = dynamic_cast<Syntax::PrimitiveExpression*>(caseLabel->Expression());
+    ASSERT_TRUE(value != nullptr);
+    const std::int32_t* number = std::get_if<std::int32_t>(&value->Value());
+    ASSERT_TRUE(number != nullptr);
+    EXPECT_EQ(*number, 0);
 }
 
 
