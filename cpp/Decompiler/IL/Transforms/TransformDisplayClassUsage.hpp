@@ -157,6 +157,32 @@ public:
         const TypeSystem::ITypeDefinition* definition,
         ILTransformContext& context,
         const TypeSystem::ITypeDefinition* decompiledTypeDefinition);
+
+    // The C# `void AnalyzeFunction(ILFunction)` -- the analysis phase: the
+    // per-variable walk (the port collects the store/load/address uses into
+    // side maps -- the C# ILVariable maintains the lists incrementally),
+    // DetectDisplayClass over the collected stores, the
+    // ValidateDisplayClassUses cull, and the uninitialized-fields pass.
+    // The probes/test surface runs the same shape and hands the maps out.
+    struct AnalysisState {
+        std::map<ILVariable*, std::shared_ptr<DisplayClass>> displayClasses;
+        std::map<ILVariable*, ILVariable*> displayClassCopyMap;
+    };
+    static void AnalyzeFunction(ILFunction& function,
+                                ILTransformContext& context,
+                                const TypeSystem::ITypeDefinition*
+                                    decompiledTypeDefinition,
+                                AnalysisState& state);
+
+    // The probes/test surface: AnalyzeFunction with the state exposed (the
+    // file-local-probe convention).
+    static void AnalyzeFunctionForTests(
+        ILFunction& function, ILTransformContext& context,
+        std::map<ILVariable*, std::shared_ptr<DisplayClass>>& displayClasses) {
+        AnalysisState state;
+        AnalyzeFunction(function, context, nullptr, state);
+        displayClasses = std::move(state.displayClasses);
+    }
 };
 
 } // namespace ILSpy::Decompiler::IL
