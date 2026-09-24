@@ -67,6 +67,8 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdlib>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
@@ -86,6 +88,32 @@ constexpr const char* Wpf = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319
 constexpr const char* Facade =
     "C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\System.Runtime\\"
     "v4.0_4.0.0.0__b03f5f7f11d50a3a\\System.Runtime.dll";
+
+// The S1-S6 golds were captured by the probe against the real .NET
+// Framework 4.8 install this suite was developed on (the fixed paths
+// above); on a host without it the drives see invalid MetadataFiles and
+// diverge from the golds, so they skip instead (the repo's fixture-skip
+// convention).
+bool FxInstallPresent()
+{
+    namespace fs = std::filesystem;
+    return fs::exists(std::string(Fx) + "\\mscorlib.dll")
+        && fs::exists(std::string(Fx) + "\\System.dll");
+}
+
+// The mscorlib the WithOptions unit drives use (any mscorlib carrying
+// the 4.0.0.0 full name the assertions pin -- the repo-wide
+// ILSPY_TEST_MSCORLIB convention).
+std::string MscorlibPath()
+{
+#if defined(_WIN32)
+    return std::string(Fx) + "\\mscorlib.dll";
+#else
+    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB"); env != nullptr)
+        return env;
+    return "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+}
 
 // The probe's FixedResolver: a case-insensitive name -> MetadataFile map
 // plus the call log (the port's IAssemblyResolver has no async pair -- the
@@ -178,6 +206,11 @@ void DriveAndCompare(const std::string& mainPath,
 }
 
 TEST(BamlDecompilerTypeSystemTest, FullWpfMapResolvesAllDefaultsReal) {
+    if (!FxInstallPresent() || !std::filesystem::exists(
+            std::string(Wpf) + "\\PresentationFramework.dll")) {
+        GTEST_SKIP() << "the .NET Framework 4.8 install (Fx/WPF fixture) "
+                     << "not present on this host";
+    }
     DriveAndCompare(std::string(Fx) + "\\mscorlib.dll", [](FixedResolver& r) {
         r.Add("System", std::string(Fx) + "\\System.dll");
         r.Add("WindowsBase", std::string(Wpf) + "\\WindowsBase.dll");
@@ -189,6 +222,10 @@ TEST(BamlDecompilerTypeSystemTest, FullWpfMapResolvesAllDefaultsReal) {
 }
 
 TEST(BamlDecompilerTypeSystemTest, SystemOnlyMapSubstitutesWpfSynthetics) {
+    if (!FxInstallPresent()) {
+        GTEST_SKIP() << "the .NET Framework 4.8 install (Fx/WPF fixture) "
+                     << "not present on this host";
+    }
     DriveAndCompare(std::string(Fx) + "\\mscorlib.dll", [](FixedResolver& r) {
         r.Add("System", std::string(Fx) + "\\System.dll");
     }, ILSpy::Tests::kBdtsGold_S2);
@@ -200,6 +237,10 @@ TEST(BamlDecompilerTypeSystemTest, EmptyMapFallsBackToMinimalCorlib) {
 }
 
 TEST(BamlDecompilerTypeSystemTest, FacadeDedupsOwnAssemblyRefsWithDefaults) {
+    if (!FxInstallPresent() || !std::filesystem::exists(Facade)) {
+        GTEST_SKIP() << "the .NET Framework 4.8 install (Fx/WPF/GAC fixture) "
+                     << "not present on this host";
+    }
     DriveAndCompare(Facade, [](FixedResolver& r) {
         r.Add("mscorlib", std::string(Fx) + "\\mscorlib.dll");
         r.Add("System", std::string(Fx) + "\\System.dll");
@@ -208,6 +249,10 @@ TEST(BamlDecompilerTypeSystemTest, FacadeDedupsOwnAssemblyRefsWithDefaults) {
 }
 
 TEST(BamlDecompilerTypeSystemTest, CraftedManifestDrivesEveryQueueArm) {
+    if (!FxInstallPresent()) {
+        GTEST_SKIP() << "the .NET Framework 4.8 install (Fx/WPF fixture) "
+                     << "not present on this host";
+    }
     DriveAndCompare(ILSpy::Tests::WriteBdtsSynthDll(), [](FixedResolver& r) {
         r.Add("DepOne", std::string(Fx) + "\\System.XML.dll");
         r.Add("DepTwo", ILSpy::Tests::WriteBdtsDepDll());
@@ -219,20 +264,37 @@ TEST(BamlDecompilerTypeSystemTest, CraftedManifestDrivesEveryQueueArm) {
 TEST(BamlDecompilerTypeSystemTest, FileTableRowsMatchGold) {
     // The S6 gold: mscorlib's five .nlp rows are resource files (no
     // metadata), the crafted manifest's sub.mod carries metadata and
-    // nometa.mod does not.
-    Metadata::MetadataFile mscorlib(std::string(Fx) + "\\mscorlib.dll");
-    auto rows = mscorlib.GetAssemblyFiles();
-    ASSERT_EQ(rows.size(), 5u);
-    const std::array<const char*, 7> gold = ILSpy::Tests::kBdtsGold_S6;
-    for (std::size_t i = 0; i < 5; i++) {
-        EXPECT_EQ("FILE|mscorlib|" + rows[i].Name + "|"
-                + (rows[i].ContainsMetadata ? "True" : "False"),
-            gold[i]);
-    }
+    // nometa.mod does not. The mscorlib half pins the .NET Framework 4.8
+    // mscorlib's own File table (the five .nlp rows -- a Windows-NLS
+    // fixture the mono profiles do not carry); the crafted-manifest half
+    // is fixture-embedded and runs everywhere.
+    const std::string mscorlibFixture = std::string(Fx) + "\\mscorlib.dll";
+    if (std::filesystem::exists(mscorlibFixture)) {
+        Metadata::MetadataFile mscorlib(mscorlibFixture);
+        auto rows = mscorlib.GetAssemblyFiles();
+        ASSERT_EQ(rows.size(), 5u);
+        const std::array<const char*, 7> gold = ILSpy::Tests::kBdtsGold_S6;
+        for (std::size_t i = 0; i < 5; i++) {
+            EXPECT_EQ("FILE|mscorlib|" + rows[i].Name + "|"
+                    + (rows[i].ContainsMetadata ? "True" : "False"),
+                gold[i]);
+        }
 
+        Metadata::MetadataFile synth(ILSpy::Tests::WriteBdtsSynthDll());
+        rows = synth.GetAssemblyFiles();
+        ASSERT_EQ(rows.size(), 2u);
+        for (std::size_t i = 0; i < 2; i++) {
+            EXPECT_EQ("FILE|BdtsSynth|" + rows[i].Name + "|"
+                    + (rows[i].ContainsMetadata ? "True" : "False"),
+                gold[5 + i]);
+        }
+        return;
+    }
+    // The degraded host: only the embedded crafted-manifest rows.
     Metadata::MetadataFile synth(ILSpy::Tests::WriteBdtsSynthDll());
-    rows = synth.GetAssemblyFiles();
+    auto rows = synth.GetAssemblyFiles();
     ASSERT_EQ(rows.size(), 2u);
+    const std::array<const char*, 7> gold = ILSpy::Tests::kBdtsGold_S6;
     for (std::size_t i = 0; i < 2; i++) {
         EXPECT_EQ("FILE|BdtsSynth|" + rows[i].Name + "|"
                 + (rows[i].ContainsMetadata ? "True" : "False"),
@@ -245,7 +307,12 @@ TEST(BamlDecompilerTypeSystemTest, WithOptionsResolvesToTheMetadataModule) {
     // a SimpleCompilation over it resolves the reference through its
     // SimpleTypeResolveContext and the adapter constructs the MetadataModule
     // for (compilation, file, options).
-    Metadata::MetadataFile file(std::string(Fx) + "\\mscorlib.dll");
+    const std::string path = MscorlibPath();
+    if (!std::filesystem::exists(path)) {
+        GTEST_SKIP() << "mscorlib fixture " << path
+                     << " not present on this host";
+    }
+    Metadata::MetadataFile file(path);
     std::unique_ptr<TS::IModuleReference> reference =
         file.WithOptions(TS::TypeSystemOptions::Default);
     TS::SimpleCompilation compilation(*reference, {});

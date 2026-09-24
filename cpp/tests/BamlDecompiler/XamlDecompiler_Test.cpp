@@ -62,6 +62,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 
@@ -295,10 +296,20 @@ TEST_F(XamlDecompilerTest, SettingsPropertyRoundTrip)
 // C1-C4 decompile the identical streams byte-identically; F1-F12 pin the
 // failure matrix).
 
-// The .NET Framework 4.8 mscorlib (the BamlDecompilerTypeSystem_Test
-// convention: this host's framework install is a build requirement).
-constexpr const char* kFxMscorlibPath =
-    "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+// The .NET Framework 4.x mscorlib the ctor family drives (the repo-wide
+// ILSPY_TEST_MSCORLIB convention; the golds only require a mscorlib with
+// the 4.0.0.0 full name -- System.String and the standard resource
+// surface -- which the mono 4.5-profile mscorlib also satisfies).
+std::string FxMscorlibPath()
+{
+#if defined(_WIN32)
+    return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB"); env != nullptr)
+        return env;
+    return "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+}
 
 // Writes `bytes` to a temp file with the given stem and returns the path.
 std::string WriteBytesFile(const std::string& stem, const std::string& bytes)
@@ -321,8 +332,23 @@ std::string WriteBytesFile(const std::string& stem, const std::string& bytes)
 // main-module System.String type.
 TEST(XamlDecompilerCtorFamily, FileNameSettingsCtorDecompilesTheGoldStreams)
 {
+#if !defined(_WIN32)
+    // The ctor family's file-name+settings form builds its resolver with
+    // ThrowOnAssemblyResolveErrors=true (the C# default), so the default
+    // BAML references must actually resolve: on Windows the GAC serves
+    // the WPF assemblies. A POSIX host has neither the GAC nor the
+    // PresentationCore/PresentationFramework set (the mono profiles ship
+    // only WindowsBase and System.Xaml), so the unresolved reference
+    // throws and this drive needs the Windows host.
+    GTEST_SKIP() << "needs the Windows GAC for the WPF default references";
+#else
+    const std::string mscorlib = FxMscorlibPath();
+    if (!std::filesystem::exists(mscorlib)) {
+        GTEST_SKIP() << "mscorlib fixture " << mscorlib
+                     << " not present on this host";
+    }
     BamlDecompilerSettings settings;
-    BDT::XamlDecompiler decompiler(kFxMscorlibPath, settings);
+    BDT::XamlDecompiler decompiler(mscorlib, settings);
 
     const std::vector<std::uint8_t> streamA = FromHex(kStreamAHex);
     BamlDecompilationResult resultA =
@@ -345,20 +371,26 @@ TEST(XamlDecompilerCtorFamily, FileNameSettingsCtorDecompilesTheGoldStreams)
     EXPECT_EQ(resultB.TypeName()->FullName(), "System.String");
     ASSERT_EQ(resultB.AssemblyReferences().size(), 1u);
     EXPECT_EQ(resultB.AssemblyReferences()[0], kMscorlibFullName);
+#endif
 }
 
 TEST(XamlDecompilerCtorFamily, FileNameResolverCtorDecompilesTheGoldStreams)
 {
+    const std::string mscorlib = FxMscorlibPath();
+    if (!std::filesystem::exists(mscorlib)) {
+        GTEST_SKIP() << "mscorlib fixture " << mscorlib
+                     << " not present on this host";
+    }
     const std::vector<std::uint8_t> streamA = FromHex(kStreamAHex);
     const std::vector<std::uint8_t> streamB = FromHex(kStreamBHex);
 
-    MD::MetadataFile file(kFxMscorlibPath);
+    MD::MetadataFile file(mscorlib);
     ASSERT_TRUE(file.IsValid());
-    MD::UniversalAssemblyResolver resolver(kFxMscorlibPath, false,
+    MD::UniversalAssemblyResolver resolver(mscorlib, false,
         MD::DetectTargetFrameworkId(file), std::nullopt,
         MD::PEStreamOptions::Default, MD::MetadataReaderOptions::Default);
     BamlDecompilerSettings settings;
-    BDT::XamlDecompiler decompiler(kFxMscorlibPath, resolver, &settings);
+    BDT::XamlDecompiler decompiler(mscorlib, resolver, &settings);
 
     BamlDecompilationResult resultA =
         decompiler.Decompile(streamA.data(), streamA.size());
@@ -375,10 +407,15 @@ TEST(XamlDecompilerCtorFamily, FileNameResolverCtorDecompilesTheGoldStreams)
 
 TEST(XamlDecompilerCtorFamily, FileResolverCtorDecompilesTheGoldStreams)
 {
+    const std::string mscorlib = FxMscorlibPath();
+    if (!std::filesystem::exists(mscorlib)) {
+        GTEST_SKIP() << "mscorlib fixture " << mscorlib
+                     << " not present on this host";
+    }
     const std::vector<std::uint8_t> streamA = FromHex(kStreamAHex);
-    MD::MetadataFile file(kFxMscorlibPath);
+    MD::MetadataFile file(mscorlib);
     ASSERT_TRUE(file.IsValid());
-    MD::UniversalAssemblyResolver resolver(kFxMscorlibPath, false,
+    MD::UniversalAssemblyResolver resolver(mscorlib, false,
         MD::DetectTargetFrameworkId(file), std::nullopt,
         MD::PEStreamOptions::Default, MD::MetadataReaderOptions::Default);
     BDT::XamlDecompiler decompiler(file, resolver, nullptr);
@@ -390,9 +427,14 @@ TEST(XamlDecompilerCtorFamily, FileResolverCtorDecompilesTheGoldStreams)
 
 TEST(XamlDecompilerCtorFamily, TypeSystemCtorDecompilesTheGoldStreams)
 {
-    MD::MetadataFile file(kFxMscorlibPath);
+    const std::string mscorlib = FxMscorlibPath();
+    if (!std::filesystem::exists(mscorlib)) {
+        GTEST_SKIP() << "mscorlib fixture " << mscorlib
+                     << " not present on this host";
+    }
+    MD::MetadataFile file(mscorlib);
     ASSERT_TRUE(file.IsValid());
-    MD::UniversalAssemblyResolver resolver(kFxMscorlibPath, false,
+    MD::UniversalAssemblyResolver resolver(mscorlib, false,
         MD::DetectTargetFrameworkId(file), std::nullopt,
         MD::PEStreamOptions::Default, MD::MetadataReaderOptions::Default);
     BDT::BamlDecompilerTypeSystem typeSystem(file, resolver);
@@ -409,16 +451,26 @@ TEST(XamlDecompilerCtorFamily, TypeSystemCtorDecompilesTheGoldStreams)
 // F1-F12 matrix).
 TEST(XamlDecompilerCtorFamily, MissingFileThrowsFileNotFoundException)
 {
-    // F6: the parent directory exists, the file does not.
+    // F6: the parent directory exists, the file does not. The .NET message
+    // names the path as given, and whether the parent exists is a property
+    // of the host's real file system -- so the drive uses a Windows path on
+    // Windows and a POSIX temp-directory path elsewhere (the probe's C:\
+    // fixture only has an existing parent on a Windows host).
+#if defined(_WIN32)
+    const std::string missing =
+        "C:\\temp-probe\\XamlDecompilerProbe\\definitely_missing_xamldec.dll";
+#else
+    const std::string missing = (std::filesystem::temp_directory_path()
+            / "definitely_missing_xamldec.dll")
+        .string();
+#endif
     try {
         BamlDecompilerSettings settings;
-        BDT::XamlDecompiler decompiler(
-            "C:\\temp-probe\\XamlDecompilerProbe\\definitely_missing_xamldec.dll",
-            settings);
+        BDT::XamlDecompiler decompiler(missing, settings);
         FAIL() << "expected the FileNotFoundException";
     } catch (const std::runtime_error& ex) {
         EXPECT_STREQ(ex.what(),
-            "Could not find file 'C:\\temp-probe\\XamlDecompilerProbe\\definitely_missing_xamldec.dll'.");
+            ("Could not find file '" + missing + "'.").c_str());
     }
 }
 
@@ -706,7 +758,12 @@ TEST(XamlDecompilerCtorFamily, PEReaderParseAnswersTheMetadataBlock)
         EXPECT_GT(block.size, 0u);
     }
     {
-        std::ifstream input(kFxMscorlibPath, std::ios::binary);
+        const std::string mscorlib = FxMscorlibPath();
+        if (!std::filesystem::exists(mscorlib)) {
+            GTEST_SKIP() << "mscorlib fixture " << mscorlib
+                         << " not present on this host";
+        }
+        std::ifstream input(mscorlib, std::ios::binary);
         std::vector<std::uint8_t> bytes(
             (std::istreambuf_iterator<char>(input)),
             std::istreambuf_iterator<char>());

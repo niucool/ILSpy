@@ -41,6 +41,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -59,6 +61,36 @@ std::string BamlHexToBytes(const char* hex)
         bytes.push_back(static_cast<char>(hi * 16 + lo));
     }
     return bytes;
+}
+
+// The .NET Framework 4.x mscorlib the pass's type system needs on every
+// host (the repo-wide ILSPY_TEST_MSCORLIB convention): KnownThings resolves
+// the "mscorlib" default reference through the resolver, and only a real
+// mscorlib gives System.Boolean its KnownTypeCode (the synthetic
+// stand-in's Boolean has none, so _contentLoaded would never register).
+std::string MscorlibPath()
+{
+#if defined(_WIN32)
+    return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB"); env != nullptr)
+        return env;
+    return "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+}
+
+// Points the fixture's resolver at the mscorlib's directory so the
+// assembly-resolution walk finds it (the resolver only searches the main
+// assembly's directory, the machine GAC, and the dotnet shared framework
+// -- none of which carry a .NET Framework mscorlib on a POSIX host).
+void AddMscorlibSearchDirectory(
+    Decompiler::Metadata::UniversalAssemblyResolver& resolver)
+{
+    const std::string path = MscorlibPath();
+    if (!std::filesystem::exists(path))
+        return;
+    resolver.AddSearchDirectory(
+        std::filesystem::path(path).parent_path().string());
 }
 
 } // namespace
@@ -81,6 +113,7 @@ TEST(ConnectionIdRewritePassTest, GoldRender)
     Decompiler::Metadata::UniversalAssemblyResolver resolver(
         path, false,
         Decompiler::Metadata::DetectTargetFrameworkId(module, std::nullopt));
+    AddMscorlibSearchDirectory(resolver);
     BamlDecompilerSettings settings;
     auto xaml = ILSpy::ILSpyCmd::DecompileBaml(module, resolver,
         value->bytes.data(), value->bytes.size(), settings);
@@ -95,6 +128,11 @@ TEST(ConnectionIdRewritePassTest, GoldRender)
 // because DecompileBaml drops the result.
 TEST(ConnectionIdRewritePassTest, GeneratedMembersRegistered)
 {
+    const std::string mscorlib = MscorlibPath();
+    if (!std::filesystem::exists(mscorlib)) {
+        GTEST_SKIP() << "mscorlib fixture " << mscorlib
+                     << " not present on this host";
+    }
     std::string path = ILSpy::Tests::WriteConnIdResDll();
     ASSERT_FALSE(path.empty());
     Decompiler::Metadata::MetadataFile module(path);
@@ -105,6 +143,7 @@ TEST(ConnectionIdRewritePassTest, GeneratedMembersRegistered)
     Decompiler::Metadata::UniversalAssemblyResolver resolver(
         path, false,
         Decompiler::Metadata::DetectTargetFrameworkId(module, std::nullopt));
+    AddMscorlibSearchDirectory(resolver);
     BamlDecompilerSettings settings;
     BamlDecompiler::BamlDecompilerTypeSystem typeSystem(module, resolver);
     BamlDecompiler::XamlDecompiler decompiler(typeSystem, &settings);
