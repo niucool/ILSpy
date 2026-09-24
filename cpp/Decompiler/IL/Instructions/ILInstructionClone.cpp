@@ -38,6 +38,7 @@
 #include "Decompiler/IL/ILInstruction.hpp"
 
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
+#include "Decompiler/IL/Instructions/AddressOf.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/BitNot.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
@@ -215,6 +216,11 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         case OpCode::Box: {
             const auto& s = static_cast<const Box&>(*this);
             c = std::make_unique<Box>(s.Type, s.Argument ? s.Argument->Clone() : nullptr);
+            break;
+        }
+        case OpCode::AddressOf: {
+            const auto& s = static_cast<const AddressOf&>(*this);
+            c = std::make_unique<AddressOf>(s.Value ? s.Value->Clone() : nullptr, s.Type);
             break;
         }
         case OpCode::CastClass: {

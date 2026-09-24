@@ -42,6 +42,7 @@
 #include "Decompiler/CSharp/Transforms/AddCheckedBlocks.hpp"
 #include "Decompiler/CSharp/Transforms/ReplaceMethodCallsWithOperators.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/AddressOf.hpp"
 #include "Decompiler/IL/Instructions/CompoundAssignmentInstruction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
@@ -746,24 +747,6 @@ TEST(UserDefinedCompoundAssignTest, HasCheckedEquivalentTwinAnnotatesUnchecked)
     EXPECT_FALSE(annotation->IsExplicit);
 }
 
-// A test-local stand-in for the C# `AddressOf` unary instruction (the port has
-// no dedicated node class yet): a Ref-typed unary over the wrapped computation.
-class TestAddressOf final : public IL::UnaryInstruction {
-public:
-    explicit TestAddressOf(std::unique_ptr<IL::ILInstruction> argument)
-        : IL::UnaryInstruction(IL::OpCode::AddressOf, std::move(argument))
-    {
-    }
-    IL::StackType ResultType() const override { return IL::StackType::Ref; }
-    void WriteTo(std::string& out) const override
-    {
-        out += "addressof(";
-        if (Argument)
-            Argument->WriteTo(out);
-        out += ")";
-    }
-};
-
 TEST(UserDefinedCompoundAssignTest, StringConcatRendersAddAssignment)
 {
     BuilderFixture fixture;
@@ -822,7 +805,8 @@ TEST(UserDefinedCompoundAssignTest, SpanBasedConcatConvertsTheValueToChar)
     // whose single argument is an AddressOf over the char computation.
     auto newObj = std::make_unique<IL::Call>(std::string("System.String::Concat"));
     newObj->IsNewObj = true;
-    newObj->AddArg(std::make_unique<TestAddressOf>(std::make_unique<IL::LdLoc>(local)));
+    newObj->AddArg(std::make_unique<IL::AddressOf>(
+        std::make_unique<IL::LdLoc>(local), charType));
     IL::UserDefinedCompoundAssign node(
         concat, IL::CompoundEvalMode::EvaluatesToNewValue,
         std::make_unique<IL::LdLoc>(local), IL::CompoundTargetKind::Property,

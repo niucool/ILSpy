@@ -541,6 +541,7 @@ add_executable(ilspy_tests
     Decompiler/IL/Transforms/StatementTransform_Test.cpp
     Decompiler/IL/Transforms/ExpressionTransforms_Test.cpp
     Decompiler/IL/Instructions/MatchInstruction_Test.cpp
+    Decompiler/IL/Instructions/AddressOf_Test.cpp
     Decompiler/IL/Instructions/UsingInstruction_Test.cpp
     Decompiler/IL/Instructions/Conv_Test.cpp
     Decompiler/IL/Instructions/Comp_Test.cpp
