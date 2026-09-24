@@ -194,6 +194,63 @@ public:
         const TS::IMethod& method,
         const std::vector<SpanConcatOperand>& operands);
 
+    // The C# `private enum TokenKind` (CallBuilder.cs lines 838-845) -- the
+    // format-string token classes the interpolation tokenizer yields.
+    enum class TokenKind {
+        Error,
+        String,
+        Argument,
+        ArgumentWithFormat,
+        ArgumentWithAlignment,
+        ArgumentWithAlignmentAndFormat,
+    };
+
+    // The C# `(TokenKind Kind, int Index, int Alignment, string? Format)`
+    // token tuple (CallBuilder.cs lines 770-838 usage). `Format` carries the
+    // literal text for a String token and the format suffix for the
+    // format-bearing argument tokens (the C# `string?` -- an empty optional
+    // is the C# null).
+    struct InterpolationToken {
+        TokenKind Kind = TokenKind::Error;
+        int Index = 0;
+        int Alignment = 0;
+        std::optional<std::string> Format;
+    };
+
+    // The C# `private IEnumerable<(TokenKind, string?)> TokenizeFormatString(
+    // string value)` (CallBuilder.cs lines 841-941): the format-string
+    // tokenizer -- literal runs, the `{{`/`}}` escapes, and the argument
+    // holes with their optional `,alignment` and `:format` suffixes. The C#
+    // iterator-with-local-functions materializes eagerly into a vector (the
+    // ToVector convention); an unterminated hole or a stray `}` yields an
+    // Error token (the caller aborts). Implemented out-of-line.
+    static std::vector<std::pair<TokenKind, std::optional<std::string>>>
+    TokenizeFormatString(const std::string& value);
+
+    // The C# `private bool TryGetStringInterpolationTokens(ArgumentList
+    // argumentList, out string? format, out List<(TokenKind, int, int,
+    // string?)> tokens)` (CallBuilder.cs lines 770-838): whether the call's
+    // argument shape is a plain `string.Format("...", args)` renderable as
+    // an interpolated string -- a constant string first argument (no named
+    // arguments, no argument-to-parameter map), no other string literal
+    // among the arguments, and format holes that reference the arguments
+    // exactly once and in order. `format`/`tokens` are written only on the
+    // true return. Implemented out-of-line.
+    static bool TryGetStringInterpolationTokens(
+        const ArgumentList& argumentList, std::string& format,
+        std::vector<InterpolationToken>& tokens);
+
+    // The C# `private ExpressionWithResolveResult HandleStringInterpolation(
+    // IMethod method, ArgumentList argumentList)` (CallBuilder.cs lines
+    // 595-666): the `string.Format("...", args)` render as an
+    // InterpolatedStringExpression (the `FormattableStringFactory.Create`
+    // shape casts the result to FormattableString). Returns the default
+    // wrapper (a null expression) when the tokens fail -- the C# `return
+    // default`. Public for the tests (the port's no-visibility convention).
+    // Implemented out-of-line.
+    ExpressionWithResolveResult HandleStringInterpolation(
+        const TS::IMethod& method, const ArgumentList& argumentList);
+
     // The C# `static bool IsNullConditional(Expression expr)` (CallBuilder.cs
     // lines 1480-1483): whether the expression is the `?.` null-conditional
     // operator (so a delegate `Invoke` on it must not be re-rendered as a plain
