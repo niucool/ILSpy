@@ -77,6 +77,7 @@
 #include "Decompiler/IL/ControlFlow/LoopDetection.hpp"
 #include "Decompiler/IL/ControlFlow/RemoveRedundantReturn.hpp"
 #include "Decompiler/IL/ControlFlow/SwitchDetection.hpp"
+#include "Decompiler/IL/Transforms/SwitchOnStringTransform.hpp"
 #include "Decompiler/IL/ControlFlow/RemoveUnreachableBlocks.hpp"
 
 namespace ILSpy::Decompiler::IL {
@@ -139,6 +140,14 @@ inline void RunGetILTransforms(ILFunction& function, ILTransformContext& context
     // second CFS and before LoopDetection (per GetILTransforms()), so
     // loops are still flat back-edges the continue/break analysis walks.
     SwitchDetection().Run(function, context);
+    // SwitchOnStringTransform: fold the compiler's switch-on-string
+    // shapes (the Roslyn cascading-if + ComputeStringHash arms; the
+    // C#1-IsInterned and legacy Dictionary/Hashtable shapes are deferred
+    // with their surfaces) into a SwitchInstruction over a StringToInt
+    // dispatch. Runs after SwitchDetection and before
+    // SwitchOnNullableTransform (per GetILTransforms()). Gated on the
+    // SwitchStatementOnString setting (default true).
+    SwitchOnStringTransform().Run(function, context);
     // SwitchOnNullable: fold the C# compiler's switch-on-
     // Nullable<T> shapes (legacy csc and Roslyn) into a lifted
     // SwitchInstruction with an explicit `case null:` arm. Runs

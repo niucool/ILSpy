@@ -125,6 +125,14 @@ struct ILTransformSettings {
     // InlineArrays -- default true. Gates InlineArrayTransform (the
     // RunOnExpression folds inside ExpressionTransforms).
     bool InlineArrays = true;
+    // Whether to fold the compiler's switch-on-string shapes into a
+    // SwitchInstruction over a StringToInt hash dispatch (the C#
+    // settings.SwitchStatementOnString, default true).
+    bool SwitchStatementOnString = true;
+    // Whether a switch over a ReadOnlySpan<char>/Span<char> local is
+    // recognized alongside the string shapes (the C#
+    // settings.SwitchOnReadOnlySpanChar).
+    bool SwitchOnReadOnlySpanChar = true;
     // Whether to fold LINQ Expression.Lambda call trees back into
     // ILFunctions (the C# settings.ExpressionTrees, default false).
     bool ExpressionTrees = false;
