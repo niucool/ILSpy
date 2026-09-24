@@ -189,8 +189,18 @@ SecurityDeclarationDecoder::ResolveType(const std::string& typeName,
 
     const Metadata::MetadataFile* containingModule = nullptr;
     std::uint32_t typeDefToken = 0;
-    // if we deal with an assembly-qualified name, resolve the assembly
+    // if we deal with an assembly-qualified name, resolve the assembly. The
+    // C# derefs `resolver` unconditionally here -- a null resolver is the
+    // C# NullReferenceException (the flag-without-resolver combination the
+    // GUI never produces; the C# WriteDecodedCustomAttributeBlob /
+    // WriteSecurityDeclarations catch arms do NOT catch it). The port maps
+    // the NRE to std::runtime_error with the .NET message (the BamlNode NRE
+    // convention) rather than the undefined null deref.
     if (assemblyNamePart) {
+        if (resolver_ == nullptr) {
+            throw std::runtime_error(
+                "Object reference not set to an instance of an object.");
+        }
         containingModule = resolver_->Resolve(
             Metadata::AssemblyNameReference::Parse(*assemblyNamePart));
     }

@@ -22,6 +22,7 @@
 #include "Decompiler/Disassembler/ReflectionDisassembler.hpp"
 
 #include "Decompiler/Disassembler/DisassemblerHelpers.hpp"
+#include "Decompiler/Metadata/CustomAttributeDecoder.hpp"
 #include "Decompiler/TypeSystem/CustomAttributeTypedArgument.hpp"
 #include "Decompiler/Disassembler/DisassemblerSignatureTypeProvider.hpp"
 #include "Decompiler/Disassembler/EnumNameCollection.hpp"
@@ -1058,6 +1059,66 @@ void ReflectionDisassembler::WriteSimpleValue(Output::ITextOutput& output,
     WriteOperand(output, value);
 }
 
+// The C# `void WriteDecodedCustomAttributeBlob(CustomAttribute attr,
+// MetadataFile module)` -- see the header comment.
+void ReflectionDisassembler::WriteDecodedCustomAttributeBlob(
+    const Metadata::MetadataFile& module,
+    const Metadata::CustomAttributeRowInfo& attr) {
+    Metadata::CustomAttributeValueT<SecurityDeclarationType> value;
+    try {
+        // The C# `var provider = new SecurityDeclarationDecoder(output,
+        // AssemblyResolver, module); value = attr.DecodeValue(provider);`
+        // -- one decoder per row over the resolver-backed provider.
+        SecurityDeclarationDecoder provider(output_, AssemblyResolver(),
+            module);
+        Metadata::CustomAttributeDecoderT<SecurityDeclarationDecoder> decoder(module,
+            provider);
+        value = decoder.DecodeValue(attr.ConstructorToken,
+            attr.ValueBlob ? attr.ValueBlob->data() : nullptr,
+            attr.ValueBlob ? attr.ValueBlob->size() : 0);
+    } catch (const std::invalid_argument&) {
+        // The C# catch (BadImageFormatException): the comment plus the raw
+        // blob dump. (The C# catches ONLY BadImageFormatException -- the
+        // EnumUnderlyingTypeResolveException and any other failure
+        // propagate.)
+        output_.Write("/* Could not decode attribute value */ ");
+        WriteBlob(attr.ValueBlob ? attr.ValueBlob->data() : nullptr,
+            attr.ValueBlob ? attr.ValueBlob->size() : 0);
+        return;
+    }
+
+    output_.Write("{");
+    output_.Indent();
+
+    for (const auto& arg : value.FixedArguments) {
+        output_.WriteLine();
+        WriteValue(output_, arg.Type(), arg.Value());
+    }
+
+    for (const auto& arg : value.NamedArguments) {
+        output_.WriteLine();
+        switch (arg.Kind()) {
+            case TypeSystem::CustomAttributeNamedArgumentKind::Field:
+                output_.Write("field ");
+                break;
+            case TypeSystem::CustomAttributeNamedArgumentKind::Property:
+                output_.Write("property ");
+                break;
+        }
+
+        // The C# `arg.Type.Name ?? PrimitiveTypeCodeToString(arg.Type.Code)`.
+        output_.Write(arg.Type().Name
+                ? *arg.Type().Name
+                : PrimitiveTypeCodeToString(arg.Type().Code));
+        output_.Write(" " + Escape(arg.Name()) + " = ");
+        WriteValue(output_, arg.Type(), arg.Value());
+    }
+
+    output_.WriteLine();
+    output_.Unindent();
+    output_.Write("}");
+}
+
 // The C# private `Process` overloads (`EntityProcessor?.Process(module,
 // items) ?? items`): the unprocessed collection when no processor is set.
 std::vector<std::uint32_t> ReflectionDisassembler::Process(
@@ -1095,13 +1156,10 @@ void ReflectionDisassembler::WriteAttributes(const Metadata::MetadataFile& modul
         if (attr->ValueBlob.has_value()) {
             output_.Write(" = ");
             if (DecodeCustomAttributeBlobs) {
-                // WriteDecodedCustomAttributeBlob (the SecurityDeclarationDecoder
-                // custom-attribute-value decode) is not yet ported -- loud
-                // rather than wrong.
-                throw std::logic_error(
-                    "WriteDecodedCustomAttributeBlob is not yet ported");
+                WriteDecodedCustomAttributeBlob(module, *attr);
+            } else {
+                WriteBlob(attr->ValueBlob->data(), attr->ValueBlob->size());
             }
-            WriteBlob(attr->ValueBlob->data(), attr->ValueBlob->size());
         }
         output_.WriteLine();
     }

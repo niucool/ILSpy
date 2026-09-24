@@ -195,6 +195,22 @@ public:
         const std::any& value);
     static void WriteSimpleValue(Output::ITextOutput& output,
         const std::any& value, const std::string& typeName);
+
+    // The C# `void WriteDecodedCustomAttributeBlob(CustomAttribute attr,
+    // MetadataFile module)` (lines 1873-1915) -- the DecodeCustomAttributeBlobs
+    // path of WriteAttributes: the attribute value decoded through the
+    // CustomAttributeDecoderT<SecurityDeclarationDecoder> instantiation
+    // (the PD1 template over the PD2 provider) and rendered as the "{ ... }"
+    // block -- one indented line per fixed argument (the WriteValue render)
+    // and per named argument (the "field "/"property " prefix, the type
+    // name, the escaped member name, " = ", the WriteValue render). The
+    // BadImageFormatException catch arm (the C# catches ONLY that family --
+    // the EnumUnderlyingTypeResolveException propagates) renders the
+    // "/* Could not decode attribute value */" comment plus the raw blob
+    // dump. The C# keeps the member private; the port keeps it public so
+    // the tests can drive it directly.
+    void WriteDecodedCustomAttributeBlob(const Metadata::MetadataFile& module,
+        const Metadata::CustomAttributeRowInfo& attr);
     std::vector<std::uint32_t> Process(const Metadata::MetadataFile& module,
         const std::vector<std::uint32_t>& items,
         ProcessedEntityKind kind) const;
