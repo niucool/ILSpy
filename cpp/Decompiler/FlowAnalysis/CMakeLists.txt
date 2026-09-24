@@ -3,4 +3,5 @@
 
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Dominance.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ReachingDefinitionsVisitor.cpp
 )

@@ -71,4 +71,5 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/CombineExitsTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/DelegateConstruction_impl.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/IntroduceNativeIntTypeOnLocals.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/SplitVariables.cpp
 )

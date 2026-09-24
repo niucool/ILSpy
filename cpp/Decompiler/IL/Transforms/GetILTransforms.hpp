@@ -50,6 +50,7 @@
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/Transforms/LocalFunctionDecompiler.hpp"
 #include "Decompiler/IL/Transforms/DelegateConstruction.hpp"
+#include "Decompiler/IL/Transforms/SplitVariables.hpp"
 #include "Decompiler/IL/Transforms/IntroduceNativeIntTypeOnLocals.hpp"
 #include "Decompiler/IL/Transforms/TransformDisplayClassUsage.hpp"
 #include "Decompiler/IL/Transforms/NamedArgumentTransform.hpp"
@@ -129,6 +130,11 @@ private:
 inline std::vector<std::unique_ptr<IILTransform>> GetILTransforms() {
     std::vector<std::unique_ptr<IILTransform>> transforms;
     transforms.push_back(std::make_unique<ControlFlowSimplification>());
+    // The C# list head (CSharpDecompiler.cs line ~91-93):
+    // ControlFlowSimplification { aggressivelyDuplicateReturnBlocks } ->
+    // SplitVariables -> ILInlining; the port's ControlFlowSimplification
+    // has no duplication flag, so the SplitVariables entry follows it.
+    transforms.push_back(std::make_unique<SplitVariables>());
     transforms.push_back(std::make_unique<StObjToStLoc>());
     transforms.push_back(std::make_unique<ILInlining>());
     transforms.push_back(std::make_unique<InlineReturnTransform>());

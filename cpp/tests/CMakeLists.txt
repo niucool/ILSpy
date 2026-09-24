@@ -544,6 +544,7 @@ add_executable(ilspy_tests
     Decompiler/IL/ControlFlowSimplification_Test.cpp
     Decompiler/IL/ControlFlowGraph_Test.cpp
     Decompiler/FlowAnalysis/Dominance_Test.cpp
+    Decompiler/FlowAnalysis/ReachingDefinitions_Test.cpp
     Decompiler/IL/ILInlining_Test.cpp
     Decompiler/IL/LoopDetection_Test.cpp
     Decompiler/IL/ConditionDetection_Test.cpp
