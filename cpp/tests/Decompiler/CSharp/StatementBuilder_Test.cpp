@@ -34,19 +34,29 @@
 #include "Decompiler/CSharp/Syntax/Expressions/IsExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/EmptyStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/GotoCaseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/GotoStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ThrowStatement.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/Branch.hpp"
+#include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/Semantics/ConstantResolveResult.hpp"
 #include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
 #include "Decompiler/TypeSystem/LookupStubs.hpp"
@@ -241,6 +251,119 @@ TEST(StatementBuilderTest, ConvertStLocStripsTopLevelRefOnAddressOfValue)
     // (the C# `expr.UnwrapChild(dirExpr.Expression)`).
     EXPECT_TRUE(dynamic_cast<Syntax::DirectionExpression*>(expression->Expression())
                 == nullptr);
+}
+
+
+TEST(StatementBuilderTest, VisitBranchToUnlabeledBlockRendersGoto)
+{
+    StatementFixture fixture;
+    StatementBuilder builder(fixture.compilation, *fixture.context_,
+                             &fixture.function, &fixture.settings, &fixture.run);
+    IL::Block target;
+    target.Label = "IL_0005";
+    IL::Branch branch(&target);
+    auto result = builder.Convert(&branch);
+
+    auto* gotoStatement = dynamic_cast<Syntax::GotoStatement*>(result.Statement());
+    ASSERT_TRUE(gotoStatement != nullptr);
+    EXPECT_EQ(gotoStatement->Label(), "IL_0005");
+}
+
+TEST(StatementBuilderTest, VisitBranchToContinueTargetRendersContinue)
+{
+    StatementFixture fixture;
+    StatementBuilder builder(fixture.compilation, *fixture.context_,
+                             &fixture.function, &fixture.settings, &fixture.run);
+    IL::Block target;
+    target.Label = "IL_0002";
+    // The loop-translation machinery sets the continue target before
+    // translating the body; the branch to it renders `continue;`.
+    builder.continueTarget = &target;
+    IL::Branch branch(&target);
+    auto result = builder.Convert(&branch);
+
+    EXPECT_TRUE(dynamic_cast<Syntax::ContinueStatement*>(result.Statement()) != nullptr);
+}
+
+TEST(StatementBuilderTest, VisitLeaveToReturnContainerRendersReturn)
+{
+    StatementFixture fixture;
+    // The C# ctor reads the current-return container from the function body;
+    // the port's fixture wires the function's body container.
+    fixture.function.Body = std::make_unique<IL::BlockContainer>();
+    fixture.function.Body->AddBlock(std::make_unique<IL::Block>());
+    // The C# function's return type is set by the reader; the port's ctor
+    // reads it into currentResultType (the `IsAsync ? AsyncReturnType :
+    // ReturnType` chain).
+    fixture.function.ReturnType = fixture.TypePtr(TS::KnownTypeCode::String);
+    StatementBuilder builder(fixture.compilation, *fixture.context_, &fixture.function,
+                             &fixture.settings, &fixture.run);
+    IL::Leave leave(&*fixture.function.Body, std::make_unique<IL::LdStr>("done"));
+    auto result = builder.Convert(&leave);
+
+    auto* returnStatement =
+        dynamic_cast<Syntax::ReturnStatement*>(result.Statement());
+    ASSERT_TRUE(returnStatement != nullptr);
+    ASSERT_TRUE(returnStatement->Expression() != nullptr);
+    auto* text = dynamic_cast<Syntax::PrimitiveExpression*>(returnStatement->Expression());
+    ASSERT_TRUE(text != nullptr);
+    ASSERT_TRUE(std::holds_alternative<std::string>(text->Value()));
+    EXPECT_EQ(std::get<std::string>(text->Value()), "done");
+}
+
+TEST(StatementBuilderTest, VisitLeaveToNonReturnContainerRendersGotoEnd)
+{
+    StatementFixture fixture;
+    StatementBuilder builder(fixture.compilation, *fixture.context_, &fixture.function,
+                             &fixture.settings, &fixture.run);
+    IL::BlockContainer other;
+    other.Blocks.push_back(std::make_unique<IL::Block>());
+    other.Blocks.front()->Label = "IL_0042";
+    IL::Leave leave(&other);
+    auto result = builder.Convert(&leave);
+
+    auto* gotoStatement = dynamic_cast<Syntax::GotoStatement*>(result.Statement());
+    ASSERT_TRUE(gotoStatement != nullptr);
+    EXPECT_EQ(gotoStatement->Label(), "end_IL_0042");
+}
+
+TEST(StatementBuilderTest, VisitLeaveMatchingBreakTargetRendersBreak)
+{
+    StatementFixture fixture;
+    StatementBuilder builder(fixture.compilation, *fixture.context_, &fixture.function,
+                             &fixture.settings, &fixture.run);
+    IL::BlockContainer loop;
+    builder.breakTarget = &loop;
+    IL::Leave leave(&loop);
+    auto result = builder.Convert(&leave);
+
+    EXPECT_TRUE(dynamic_cast<Syntax::BreakStatement*>(result.Statement()) != nullptr);
+}
+
+TEST(StatementBuilderTest, VisitBranchToCaseLabelRendersGotoCase)
+{
+    StatementFixture fixture;
+    StatementBuilder builder(fixture.compilation, *fixture.context_, &fixture.function,
+                             &fixture.settings, &fixture.run);
+    IL::Block caseBlock;
+    caseBlock.Label = "IL_0010";
+    builder.caseLabelMapping =
+        std::map<IL::Block*, std::optional<std::shared_ptr<Sem::ResolveResult>>>{};
+    builder.caseLabelMapping->emplace(
+        &caseBlock,
+        std::make_shared<Sem::ConstantResolveResult>(
+            fixture.TypePtr(TS::KnownTypeCode::Int32), std::any(std::int32_t{7})));
+    IL::Branch branch(&caseBlock);
+    auto result = builder.Convert(&branch);
+
+    auto* gotoCase = dynamic_cast<Syntax::GotoCaseStatement*>(result.Statement());
+    ASSERT_TRUE(gotoCase != nullptr);
+    ASSERT_TRUE(gotoCase->LabelExpression() != nullptr);
+    auto* value = dynamic_cast<Syntax::PrimitiveExpression*>(gotoCase->LabelExpression());
+    ASSERT_TRUE(value != nullptr);
+    const std::int32_t* number = std::get_if<std::int32_t>(&value->Value());
+    ASSERT_TRUE(number != nullptr);
+    EXPECT_EQ(*number, 7);
 }
 
 

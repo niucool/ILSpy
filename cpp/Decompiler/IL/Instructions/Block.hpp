@@ -53,6 +53,12 @@ public:
     // (Block.IncomingEdgeCount in the C#).
     int IncomingEdgeCount = 0;
 
+    // The C# `public string Label` (Block.cs) -- the label name the
+    // LabelDecompiler assigns (the `IL_XXXX`/`label_N` forms). Empty until a
+    // label decompiler runs; the StatementBuilder's gotos/labels render it
+    // (EnsureUniqueLabel).
+    std::string Label;
+
     Block() : ILInstruction(OpCode::Block) {}
     InstructionFlags DirectFlags() const override { return InstructionFlags::None; }
     StackType ResultType() const override { return StackType::Void; }

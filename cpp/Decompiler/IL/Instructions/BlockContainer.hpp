@@ -48,6 +48,16 @@ public:
     std::vector<std::unique_ptr<Block>> Blocks;
     ContainerKind Kind = ContainerKind::Normal;
 
+    // The C# `public Block EntryPoint { get; }` -- the container's entry block
+    // (the C# `entryPoint!` HACK: every container must have one per the
+    // invariant, so the accessor returns non-null). The port derives it as the
+    // first block (the container-construction convention -- the C# sets
+    // `EntryPoint = Blocks.FirstOrDefault()` at creation); null only for a
+    // blockless degenerate container the port's tests build directly.
+    Block* EntryPoint() const {
+        return Blocks.empty() ? nullptr : Blocks.front().get();
+    }
+
     BlockContainer() : ILInstruction(OpCode::BlockContainer) {}
     InstructionFlags DirectFlags() const override { return InstructionFlags::None; }
     StackType ResultType() const override { return StackType::Void; }

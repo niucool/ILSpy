@@ -27,12 +27,21 @@
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IsExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/GotoCaseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/GotoDefaultStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/GotoStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/EmptyStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ThrowStatement.hpp"
 #include "Decompiler/DecompileRun.hpp"
+#include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
+#include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
@@ -102,6 +111,10 @@ TranslatedStatement StatementBuilder::Convert(IL::ILInstruction* inst) {
         return VisitThrow(throwInst);
     if (auto* rethrow = dynamic_cast<IL::Rethrow*>(inst))
         return VisitRethrow(rethrow);
+    if (auto* branch = dynamic_cast<IL::Branch*>(inst))
+        return VisitBranch(branch);
+    if (auto* leave = dynamic_cast<IL::Leave*>(inst))
+        return VisitLeave(leave);
     return Default(inst);
 }
 
@@ -200,6 +213,111 @@ TranslatedStatement StatementBuilder::VisitThrow(IL::Throw* inst) {
 // `throw;`.
 TranslatedStatement StatementBuilder::VisitRethrow(IL::Rethrow* inst) {
     return WithILInstruction(*new Syntax::ThrowStatement(), inst);
+}
+
+
+namespace {
+
+// The C# `inst.Value.MatchNop()` extension: whether the instruction is an
+// `LdNull`... no -- a `nop`. The C# `MatchNop` checks the OpCode against
+// `Nop`. The port probes the Op directly.
+bool StatementBuilderMatchNop(const IL::ILInstruction* inst) {
+    return inst != nullptr && inst->Op == IL::OpCode::Nop;
+}
+
+} // namespace
+
+// The C# `string EnsureUniqueLabel(Block block)` (StatementBuilder.cs lines
+// 1566-1582): the per-block label, with the duplicate-label `_N` suffixes
+// (the C# `duplicateLabels[block.Label]++` walk).
+std::string StatementBuilder::EnsureUniqueLabel(IL::Block* block) {
+    auto it = labels.find(block);
+    if (it != labels.end())
+        return it->second;
+    auto dup = duplicateLabels.find(block->Label);
+    if (dup == duplicateLabels.end()) {
+        labels.emplace(block, block->Label);
+        duplicateLabels.emplace(block->Label, 1);
+        return block->Label;
+    }
+    std::string label = block->Label + "_" + std::to_string(dup->second + 1);
+    duplicateLabels[block->Label]++;
+    labels.emplace(block, label);
+    return label;
+}
+
+// The C# `protected internal override TranslatedStatement VisitBranch(Branch
+// inst)` (StatementBuilder.cs lines 347-368): a `continue;` to the continue
+// target, a `goto case`/`goto default` through the case-label mapping, or a
+// `goto` to the uniquely-labelled block.
+TranslatedStatement StatementBuilder::VisitBranch(IL::Branch* inst) {
+    if (inst->TargetBlock == continueTarget) {
+        continueCount++;
+        return WithILInstruction(*new Syntax::ContinueStatement(), inst);
+    }
+    if (caseLabelMapping.has_value()) {
+        auto labelIt = caseLabelMapping->find(inst->TargetBlock);
+        if (labelIt != caseLabelMapping->end()) {
+            if (!labelIt->second.has_value())
+                return WithILInstruction(*new Syntax::GotoDefaultStatement(), inst);
+            return WithILInstruction(
+                *new Syntax::GotoCaseStatement(
+                    exprBuilder->ConvertConstantValue(labelIt->second.value(),
+                                                      /*allowImplicitConversion=*/true)
+                        .Expression()),
+                inst);
+        }
+    }
+    return WithILInstruction(*new Syntax::GotoStatement(EnsureUniqueLabel(inst->TargetBlock)),
+                             inst);
+}
+
+// The C# `protected internal override TranslatedStatement VisitLeave(Leave
+// inst)` (StatementBuilder.cs lines 369-423): a `break;` to the break target,
+// a `yield break;`/`return [expr];` when leaving the return container, or a
+// `goto end_<label>;` for the enclosing-container exit.
+TranslatedStatement StatementBuilder::VisitLeave(IL::Leave* inst) {
+    if (inst->TargetContainer == breakTarget)
+        return WithILInstruction(*new Syntax::BreakStatement(), inst);
+    if (inst->TargetContainer == currentReturnContainer) {
+        if (currentIsIterator)
+            return WithILInstruction(*new Syntax::YieldBreakStatement(), inst);
+        if (!StatementBuilderMatchNop(inst->Value.get())) {
+            // The C# lambda/expr-tree arm (the IsPossibleLossOfTypeInformation
+            // cast for an ILFunctionKind.ExpressionTree/Delegate function) is
+            // deferred with the ILFunctionKind surface; the plain return with
+            // the implicit conversion is the non-lambda path.
+            TranslatedExpression expr =
+                exprBuilder->Translate(inst->Value.get(), currentResultType.get())
+                    .ConvertTo(const_cast<TS::IType&>(*currentResultType),
+                               *exprBuilder,
+                               /*checkForOverflow=*/false,
+                               /*allowImplicitConversion=*/true);
+            return WithILInstruction(*new Syntax::ReturnStatement(expr.Expression()),
+                                     inst);
+        }
+        return WithILInstruction(*new Syntax::ReturnStatement(), inst);
+    }
+    std::string label;
+    auto it = endContainerLabels.find(inst->TargetContainer);
+    if (it == endContainerLabels.end()) {
+        label = "end_" + std::string(inst->TargetContainer != nullptr
+                                         ? inst->TargetContainer->EntryPoint() != nullptr
+                                             ? inst->TargetContainer->EntryPoint()->Label
+                                             : std::string()
+                                         : std::string());
+        auto dup = duplicateLabels.find(label);
+        if (dup == duplicateLabels.end()) {
+            duplicateLabels.emplace(label, 1);
+        } else {
+            duplicateLabels[label]++;
+            label += "_" + std::to_string(dup->second);
+        }
+        endContainerLabels.emplace(inst->TargetContainer, label);
+    } else {
+        label = it->second;
+    }
+    return WithILInstruction(*new Syntax::GotoStatement(label), inst);
 }
 
 } // namespace ILSpy::Decompiler::CSharp

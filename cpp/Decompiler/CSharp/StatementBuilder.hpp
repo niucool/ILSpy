@@ -56,10 +56,14 @@
 #include "Decompiler/CSharp/TranslatedStatement.hpp"
 #include "Decompiler/CSharp/TranslatedExpression.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
+#include "Decompiler/Semantics/ResolveResult.hpp"
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
+#include <map>
 #include <memory>
+#include <optional>
+#include <string>
 #include <vector>
 
 namespace ILSpy::Decompiler {
@@ -68,9 +72,12 @@ class DecompileRun;
 class ExpressionBuilder;
 
 namespace IL {
+class Block;
 class BlockContainer;
+class Branch;
 class ILFunction;
 class IsInst;
+class Leave;
 class Nop;
 class Rethrow;
 class StLoc;
@@ -129,6 +136,29 @@ public:
     // new BlockStatement { stmt }` wrap.
     TranslatedStatement ConvertAsBlock(IL::ILInstruction* inst);
 
+    // The branch state machine (the C# fields at StatementBuilder.cs lines
+    // 336-344): the continue/break/case-label/end-container bookkeeping the
+    // loop- and switch-translation slices drive. `continueTarget` is a
+    // non-owning Block*; `caseLabelMapping` maps a block to the constant case
+    // value (`std::nullopt` marks the default case); `labels` /
+    // `duplicateLabels` / `endContainerLabels` are the EnsureUniqueLabel /
+    // end-label de-dup tables.
+    IL::Block* continueTarget = nullptr;
+    int continueCount = 0;
+    // The C# `Dictionary<Block, ConstantResolveResult?>?` -- the port models
+    // the nullability with an optional map; the value is the `ResolveResult`
+    // shared handle, nullopt for the default case.
+    std::optional<std::map<IL::Block*, std::optional<std::shared_ptr<Sem::ResolveResult>>>>
+        caseLabelMapping;
+    IL::BlockContainer* breakTarget = nullptr;
+    std::map<IL::BlockContainer*, std::string> endContainerLabels;
+    std::map<IL::Block*, std::string> labels;
+    std::map<std::string, int> duplicateLabels;
+
+    // The C# `string EnsureUniqueLabel(Block block)` (StatementBuilder.cs):
+    // the per-block label with the duplicate `_N` suffixes.
+    std::string EnsureUniqueLabel(IL::Block* block);
+
 private:
     // The C# `protected internal override` leaf visitors this slice ports; the
     // private members are the C# `protected internal` surface (the port keeps
@@ -139,6 +169,8 @@ private:
     TranslatedStatement VisitNop(IL::Nop* inst);
     TranslatedStatement VisitThrow(IL::Throw* inst);
     TranslatedStatement VisitRethrow(IL::Rethrow* inst);
+    TranslatedStatement VisitBranch(IL::Branch* inst);
+    TranslatedStatement VisitLeave(IL::Leave* inst);
 
 private:
     // The C# `protected override TranslatedStatement Default(ILInstruction
