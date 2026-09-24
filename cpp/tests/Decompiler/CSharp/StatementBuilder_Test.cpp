@@ -43,6 +43,7 @@
 #include "Decompiler/CSharp/Syntax/Statements/LockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/GotoStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
@@ -595,6 +596,59 @@ TEST(StatementBuilderTest, VisitSwitchInstructionRendersSwitchWithCaseLabels)
     const std::int32_t* number = std::get_if<std::int32_t>(&value->Value());
     ASSERT_TRUE(number != nullptr);
     EXPECT_EQ(*number, 0);
+}
+
+
+TEST(StatementBuilderTest, VisitBlockContainerRendersWhileLoop)
+{
+    StatementFixture fixture;
+    StatementBuilder builder(fixture.compilation, *fixture.context_, &fixture.function,
+                             &fixture.settings, &fixture.run);
+    // `while (1) { v = 42; }` -- the While container: the entry block is the
+    // condition (the if in the port's FinalInstruction slot; the false arm
+    // leaves the container, the true arm branches to the body), the body
+    // stores the constant and branches back to the entry (the `continue;`
+    // edge). The entry sees two incoming edges (the loop's dispatch plus the
+    // body's back edge), so the loop shape is recognized.
+    auto container = std::make_unique<IL::BlockContainer>();
+    container->Kind = IL::ContainerKind::While;
+    auto entry = std::make_unique<IL::Block>();
+    entry->Label = "IL_0000";
+    entry->FinalInstruction = std::make_unique<IL::IfInstruction>(
+        std::make_unique<IL::LdcI4>(1), std::make_unique<IL::Branch>(nullptr),
+        nullptr);
+    IL::Block* entryPtr = entry.get();
+    container->AddBlock(std::move(entry));
+    auto body = std::make_unique<IL::Block>();
+    body->Label = "IL_0010";
+    auto variable = std::make_shared<IL::ILVariable>(IL::VariableKind::Local,
+                                                     fixture.TypePtr(TS::KnownTypeCode::Int32));
+    variable->Name = "v";
+    body->Instructions.push_back(
+        std::make_unique<IL::StLoc>(variable, std::make_unique<IL::LdcI4>(42)));
+    IL::Block* bodyPtr = body.get();
+    container->AddBlock(std::move(body));
+    // Wire the branches now that the blocks sit in the container.
+    auto* entryIf = static_cast<IL::IfInstruction*>(entryPtr->FinalInstruction.get());
+    static_cast<IL::Branch*>(entryIf->TrueInst.get())->TargetBlock = bodyPtr;
+    auto* leave = new IL::Leave(container.get());
+    entryIf->FalseInst.reset(leave);
+    bodyPtr->FinalInstruction = std::make_unique<IL::Branch>(entryPtr);
+    entryPtr->IncomingEdgeCount = 2;  // loop dispatch + the body back edge
+    bodyPtr->IncomingEdgeCount = 1;   // the condition's true arm
+    auto result = builder.Convert(container.get());
+
+    auto* whileStatement =
+        dynamic_cast<Syntax::WhileStatement*>(result.Statement());
+    ASSERT_TRUE(whileStatement != nullptr);
+    ASSERT_TRUE(whileStatement->Condition() != nullptr);
+    ASSERT_TRUE(whileStatement->EmbeddedStatement() != nullptr);
+    // The body renders the store plus the `continue;` -- and the trailing
+    // continue is removed (it is redundant with the loop edge).
+    auto* embeddedBlock =
+        dynamic_cast<Syntax::BlockStatement*>(whileStatement->EmbeddedStatement());
+    ASSERT_TRUE(embeddedBlock != nullptr);
+    ASSERT_EQ(embeddedBlock->Statements().Count(), 1);
 }
 
 

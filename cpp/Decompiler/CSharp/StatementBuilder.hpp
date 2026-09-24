@@ -138,6 +138,10 @@ public:
     IL::BlockContainer* currentReturnContainer = nullptr;
     TS::ITypePtr currentResultType;
     bool currentIsIterator = false;
+    // The C# `ILFunction currentFunction` field (read by VisitBlockContainer's
+    // `currentFunction.Body == container` check and the DeclareLocalFunctions
+    // walk).
+    IL::ILFunction* currentFunction = nullptr;
 
     StatementBuilder(const ::ILSpy::Decompiler::TypeSystem::ICompilation& typeSystem,
                      const ::ILSpy::Decompiler::TypeSystem::ITypeResolveContext& decompilationContext,
@@ -217,6 +221,23 @@ private:
     void ConvertSwitchSectionBody(Syntax::SwitchSection* astSection,
                                   IL::ILInstruction* bodyInst);
     IL::SwitchSection* GetDefaultSection(IL::SwitchInstruction* inst) const;
+
+    // The block-container/loop family (the C# `VisitBlockContainer`/
+    // `ConvertLoop`/`ConvertBlockContainer`/`DeclareLocalFunctions`,
+    // StatementBuilder.cs lines 1300-1582). The C# IEnumerable block sequences
+    // (Skip/Except/SkipLast) port to materialized vectors; the
+    // TransformToForeachWithoutDispose arm is deferred with the foreach
+    // surface; DeclareLocalFunctions throws when it would emit (the
+    // local-function declaration machinery is not ported).
+    TranslatedStatement VisitBlockContainer(IL::BlockContainer* container);
+    Syntax::Statement* ConvertLoop(IL::BlockContainer* container);
+    Syntax::BlockStatement* ConvertBlockContainer(IL::BlockContainer* container,
+                                                  bool isLoop);
+    void ConvertBlockContainer(Syntax::BlockStatement* blockStatement,
+                               IL::BlockContainer* container,
+                               const std::vector<IL::Block*>& blocks, bool isLoop);
+    void DeclareLocalFunctions(IL::BlockContainer* container,
+                               Syntax::BlockStatement* blockStatement);
 
 private:
     // The C# `protected override TranslatedStatement Default(ILInstruction
