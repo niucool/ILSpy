@@ -42,16 +42,28 @@
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/CSharp/Syntax/CatchClause.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/LockStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
+#include "Decompiler/IL/Instructions/IfInstruction.hpp"
+#include "Decompiler/IL/Instructions/LockInstruction.hpp"
+#include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
 #include <cassert>
 
 namespace ILSpy::Decompiler::CSharp {
+
+namespace Sem = ::ILSpy::Decompiler::Semantics;
+namespace TS = ::ILSpy::Decompiler::TypeSystem;
 
 StatementBuilder::StatementBuilder(const TS::ICompilation& typeSystem,
                                    const TS::ITypeResolveContext& decompilationContext,
@@ -115,6 +127,18 @@ TranslatedStatement StatementBuilder::Convert(IL::ILInstruction* inst) {
         return VisitBranch(branch);
     if (auto* leave = dynamic_cast<IL::Leave*>(inst))
         return VisitLeave(leave);
+    if (auto* ifInstruction = dynamic_cast<IL::IfInstruction*>(inst))
+        return VisitIfInstruction(ifInstruction);
+    if (auto* tryCatch = dynamic_cast<IL::TryCatch*>(inst))
+        return VisitTryCatch(tryCatch);
+    if (auto* tryFinally = dynamic_cast<IL::TryFinally*>(inst))
+        return VisitTryFinally(tryFinally);
+    if (auto* tryFault = dynamic_cast<IL::TryFault*>(inst))
+        return VisitTryFault(tryFault);
+    if (auto* lockInstruction = dynamic_cast<IL::LockInstruction*>(inst))
+        return VisitLockInstruction(lockInstruction);
+    if (auto* block = dynamic_cast<IL::Block*>(inst))
+        return VisitBlock(block);
     return Default(inst);
 }
 
@@ -218,11 +242,17 @@ TranslatedStatement StatementBuilder::VisitRethrow(IL::Rethrow* inst) {
 
 namespace {
 
-// The C# `inst.Value.MatchNop()` extension: whether the instruction is an
-// `LdNull`... no -- a `nop`. The C# `MatchNop` checks the OpCode against
-// `Nop`. The port probes the Op directly.
+// The C# `inst.Value.MatchNop()` extension: whether the instruction is a
+// `nop` (the port probes the Op directly).
 bool StatementBuilderMatchNop(const IL::ILInstruction* inst) {
     return inst != nullptr && inst->Op == IL::OpCode::Nop;
+}
+
+// The C# `handler.Filter.MatchLdcI4(1)` extension: whether the instruction is
+// an `ldc.i4 <value>` with the given constant.
+bool StatementBuilderMatchLdcI4(const IL::ILInstruction* inst, std::int32_t value) {
+    return inst != nullptr && inst->Op == IL::OpCode::LdcI4
+        && static_cast<const IL::LdcI4*>(inst)->Value == value;
 }
 
 } // namespace
@@ -318,6 +348,148 @@ TranslatedStatement StatementBuilder::VisitLeave(IL::Leave* inst) {
         label = it->second;
     }
     return WithILInstruction(*new Syntax::GotoStatement(label), inst);
+}
+
+
+
+// The C# `protected internal override TranslatedStatement VisitIfInstruction
+// (IfInstruction inst)` (StatementBuilder.cs lines 148-155).
+TranslatedStatement StatementBuilder::VisitIfInstruction(IL::IfInstruction* inst) {
+    TranslatedExpression condition = exprBuilder->TranslateCondition(inst->Condition.get());
+    TranslatedStatement trueStatement = Convert(inst->TrueInst.get());
+    // The C# `inst.FalseInst.OpCode == OpCode.Nop ? null : Convert(inst.FalseInst)`
+    // -- the false statement is the raw Statement pointer (null for the Nop).
+    Syntax::Statement* falseStatement =
+        inst->FalseInst->Op == IL::OpCode::Nop
+            ? nullptr
+            : Convert(inst->FalseInst.get()).Statement();
+    return WithILInstruction(
+        *new Syntax::IfElseStatement(condition.Expression(),
+                                     trueStatement.Statement(),
+                                     falseStatement),
+        inst);
+}
+
+// The C# `protected internal override TranslatedStatement VisitTryCatch
+// (TryCatch inst)` (StatementBuilder.cs lines 456-485): the catch clauses with
+// the variable/type/filter shape.
+TranslatedStatement StatementBuilder::VisitTryCatch(IL::TryCatch* inst) {
+    auto* tryCatch = new Syntax::TryCatchStatement();
+    tryCatch->TryBlock(
+        dynamic_cast<Syntax::BlockStatement*>(ConvertAsBlock(inst->TryBlock.get()).Statement()));
+    for (const auto& handler : inst->Handlers) {
+        auto* catchClause = new Syntax::CatchClause();
+        // The C# `catchClause.AddAnnotation(handler)` -- the caught-exception
+        // handler instruction rides the IL-instruction annotation channel.
+        catchClause->AddAnnotation(
+            std::make_shared<ILInstructionAnnotation>(handler.get()));
+        IL::ILVariable* v = handler->Variable.get();
+        if (v != nullptr) {
+            // The C# `catchClause.AddAnnotation(new ILVariableResolveResult(v,
+            // v.Type))` -- the variable resolve result the ambience reads.
+            catchClause->AddAnnotation(
+                std::make_shared<ILVariableResolveResult>(handler->Variable,
+                                                          v->Type));
+            if (v->StoreCount > 1 || v->LoadCount > 0 || v->AddressCount > 0) {
+                catchClause->VariableName(v->Name);
+                catchClause->Type(exprBuilder->ConvertType(*v->Type));
+            } else if (!TS::IsKnownType(*v->Type, TS::KnownTypeCode::Object)) {
+                catchClause->Type(exprBuilder->ConvertType(*v->Type));
+            }
+        }
+        if (!StatementBuilderMatchLdcI4(handler->Filter.get(), 1))
+            catchClause->Condition(
+                exprBuilder->TranslateCondition(handler->Filter.get()).Expression());
+        catchClause->Body(
+            dynamic_cast<Syntax::BlockStatement*>(ConvertAsBlock(handler->Body.get()).Statement()));
+        tryCatch->CatchClauses().Add(catchClause);
+    }
+    return WithILInstruction(*tryCatch, inst);
+}
+
+// The C# `protected internal override TranslatedStatement VisitTryFinally
+// (TryFinally inst)` (StatementBuilder.cs lines 486-492): the MakeTryCatch
+// reuse plus the `finally` block.
+TranslatedStatement StatementBuilder::VisitTryFinally(IL::TryFinally* inst) {
+    TranslatedStatement tryBlock = MakeTryCatch(inst->TryBlock.get());
+    auto* tryCatch = static_cast<Syntax::TryCatchStatement*>(tryBlock.Statement());
+    tryCatch->FinallyBlock(
+        dynamic_cast<Syntax::BlockStatement*>(ConvertAsBlock(inst->FinallyBlock.get()).Statement()));
+    return WithILInstruction(*tryCatch, inst);
+}
+
+// The C# `protected internal override TranslatedStatement VisitTryFault
+// (TryFault inst)` (StatementBuilder.cs lines 493-505): the `try { } fault { }`
+// render with the `/*try-fault*/` comment marker and the implicit `throw;`.
+TranslatedStatement StatementBuilder::VisitTryFault(IL::TryFault* inst) {
+    auto* tryCatch = new Syntax::TryCatchStatement();
+    tryCatch->TryBlock(
+        dynamic_cast<Syntax::BlockStatement*>(ConvertAsBlock(inst->TryBlock.get()).Statement()));
+    TranslatedStatement fault = ConvertAsBlock(inst->FaultBlock.get());
+    auto* faultBlock = static_cast<Syntax::BlockStatement*>(fault.Statement());
+    auto* marker = new Syntax::EmptyStatement();
+    marker->AddTrailingTrivia(new Syntax::Comment("try-fault"));
+    faultBlock->Statements().InsertBefore(
+        faultBlock->Statements().Count() > 0
+            ? faultBlock->Statements().At(0)
+            : nullptr,
+        marker);
+    faultBlock->Statements().Add(new Syntax::ThrowStatement());
+    auto* faultCatch = new Syntax::CatchClause();
+    faultCatch->Body(faultBlock);
+    tryCatch->CatchClauses().Add(faultCatch);
+    return WithILInstruction(*tryCatch, inst);
+}
+
+// The C# `protected internal override TranslatedStatement VisitLockInstruction
+// (LockInstruction inst)` (StatementBuilder.cs lines 506-511).
+TranslatedStatement StatementBuilder::VisitLockInstruction(IL::LockInstruction* inst) {
+    auto* lockStatement = new Syntax::LockStatement();
+    lockStatement->Expression(exprBuilder->Translate(inst->OnExpression.get()).Expression());
+    lockStatement->EmbeddedStatement(
+        ConvertAsBlock(inst->Body.get()).Statement());
+    return WithILInstruction(*lockStatement, inst);
+}
+
+
+// The C# `TryCatchStatement MakeTryCatch(ILInstruction tryBlock)`
+// (StatementBuilder.cs lines 88-95): the try-block conversion with the
+// extend-existing-try-catch reuse (a converted TryCatchStatement with no
+// finally block IS the try-catch; anything else wraps).
+TranslatedStatement StatementBuilder::MakeTryCatch(IL::ILInstruction* tryBlock) {
+    TranslatedStatement tryBlockConverted = Convert(tryBlock);
+    auto* tryCatch =
+        dynamic_cast<Syntax::TryCatchStatement*>(tryBlockConverted.Statement());
+    if (tryCatch != nullptr && tryCatch->FinallyBlock() == nullptr)
+        return TranslatedStatement(tryCatch); // extend existing try-catch
+    Syntax::BlockStatement* wrapped =
+        dynamic_cast<Syntax::BlockStatement*>(tryBlockConverted.Statement());
+    if (wrapped == nullptr) {
+        wrapped = new Syntax::BlockStatement();
+        wrapped->Statements().Add(tryBlockConverted.Statement());
+    }
+    auto* result = new Syntax::TryCatchStatement();
+    result->TryBlock(wrapped);
+    return TranslatedStatement(result);
+}
+
+
+// The C# `protected internal override TranslatedStatement VisitBlock(Block
+// block)` (StatementBuilder.cs lines 1280-1298): a ControlFlow block renders as
+// the converted statement list (the final instruction appended when it is not
+// a `nop`); the TransformToForeachWithoutDispose arm is deferred with the
+// foreach surface.
+TranslatedStatement StatementBuilder::VisitBlock(IL::Block* block) {
+    if (block->Kind != IL::BlockKind::ControlFlow)
+        return Default(block);
+    // Block without container
+    auto* blockStatement = new Syntax::BlockStatement();
+    for (auto& instruction : block->Instructions)
+        blockStatement->Statements().Add(Convert(instruction.get()).Statement());
+    if (block->FinalInstruction != nullptr
+        && block->FinalInstruction->Op != IL::OpCode::Nop)
+        blockStatement->Statements().Add(Convert(block->FinalInstruction.get()).Statement());
+    return WithILInstruction(*blockStatement, block);
 }
 
 } // namespace ILSpy::Decompiler::CSharp

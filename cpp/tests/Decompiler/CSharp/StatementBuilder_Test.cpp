@@ -38,6 +38,9 @@
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/EmptyStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/GotoCaseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/LockStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/GotoStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
@@ -47,13 +50,16 @@
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
+#include "Decompiler/IL/Instructions/LockInstruction.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/Semantics/ConstantResolveResult.hpp"
@@ -364,6 +370,138 @@ TEST(StatementBuilderTest, VisitBranchToCaseLabelRendersGotoCase)
     const std::int32_t* number = std::get_if<std::int32_t>(&value->Value());
     ASSERT_TRUE(number != nullptr);
     EXPECT_EQ(*number, 7);
+}
+
+
+TEST(StatementBuilderTest, VisitIfInstructionRendersIfElse)
+{
+    StatementFixture fixture;
+    StatementBuilder builder(fixture.compilation, *fixture.context_, &fixture.function,
+                             &fixture.settings, &fixture.run);
+    // `if (ldc.i4 1) nop; else nop;` -- the true branch renders (an
+    // ExpressionStatement over the constant), the false Nop branch renders as
+    // the absent else (the C# `FalseInst.OpCode == OpCode.Nop ? null : ...`).
+    IL::IfInstruction ifInstruction(std::make_unique<IL::LdcI4>(1),
+                                    std::make_unique<IL::Nop>(),
+                                    std::make_unique<IL::Nop>());
+    auto result = builder.Convert(&ifInstruction);
+
+    auto* ifElse = dynamic_cast<Syntax::IfElseStatement*>(result.Statement());
+    ASSERT_TRUE(ifElse != nullptr);
+    ASSERT_TRUE(ifElse->Condition() != nullptr);
+    // The true branch is the converted constant expression statement.
+    EXPECT_TRUE(ifElse->TrueStatement() != nullptr);
+    // The Nop false branch becomes the null else.
+    EXPECT_EQ(ifElse->FalseStatement(), nullptr);
+}
+
+TEST(StatementBuilderTest, VisitTryCatchRendersCatchClauses)
+{
+    StatementFixture fixture;
+    StatementBuilder builder(fixture.compilation, *fixture.context_, &fixture.function,
+                             &fixture.settings, &fixture.run);
+    // `try { nop; } catch (Exception e) { nop; }` -- the handler's variable is
+    // stored once (StoreCount == 1), so the clause renders the type only.
+    auto exceptionType = fixture.TypePtr(TS::KnownTypeCode::Exception);
+    auto handlerVariable = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::ExceptionLocal, exceptionType);
+    handlerVariable->Name = "e";
+    auto handlerBody = std::make_unique<IL::Block>();
+    handlerBody->Instructions.push_back(std::make_unique<IL::Nop>());
+    auto caughtVariable = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::ExceptionLocal, exceptionType);
+    caughtVariable->Name = "e";
+    // The handler: (filter, body, variable) -- the filter is `ldc.i4 1` (the
+    // C# `MatchLdcI4(1)` trivial-filter gate).
+    auto handler = std::make_unique<IL::TryCatchHandler>(
+        /*filter=*/std::make_unique<IL::LdcI4>(1), std::move(handlerBody),
+        std::move(caughtVariable));
+    auto tryBlock = std::make_unique<IL::Block>();
+    tryBlock->Instructions.push_back(std::make_unique<IL::Nop>());
+    IL::TryCatch tryCatch(std::move(tryBlock));
+    tryCatch.Handlers.push_back(std::move(handler));
+    auto result = builder.Convert(&tryCatch);
+
+    auto* tryCatchStatement =
+        dynamic_cast<Syntax::TryCatchStatement*>(result.Statement());
+    ASSERT_TRUE(tryCatchStatement != nullptr);
+    ASSERT_EQ(tryCatchStatement->CatchClauses().Count(), 1);
+    auto* clause = tryCatchStatement->CatchClauses().At(0);
+    ASSERT_TRUE(clause != nullptr);
+    // The type renders because the caught type is not System.Object.
+    EXPECT_TRUE(clause->Type() != nullptr);
+}
+
+TEST(StatementBuilderTest, VisitTryFinallyRendersFinally)
+{
+    StatementFixture fixture;
+    StatementBuilder builder(fixture.compilation, *fixture.context_, &fixture.function,
+                             &fixture.settings, &fixture.run);
+    auto tryBody = std::make_unique<IL::Block>();
+    tryBody->Instructions.push_back(std::make_unique<IL::Nop>());
+    auto finallyBody = std::make_unique<IL::Block>();
+    finallyBody->Instructions.push_back(std::make_unique<IL::Nop>());
+    IL::TryFinally tryFinally(std::move(tryBody), std::move(finallyBody));
+    auto result = builder.Convert(&tryFinally);
+
+    auto* tryCatchStatement =
+        dynamic_cast<Syntax::TryCatchStatement*>(result.Statement());
+    ASSERT_TRUE(tryCatchStatement != nullptr);
+    EXPECT_TRUE(tryCatchStatement->FinallyBlock() != nullptr);
+}
+
+TEST(StatementBuilderTest, VisitTryFaultRendersFaultMarkerAndThrow)
+{
+    StatementFixture fixture;
+    StatementBuilder builder(fixture.compilation, *fixture.context_, &fixture.function,
+                             &fixture.settings, &fixture.run);
+    auto tryBody = std::make_unique<IL::Block>();
+    tryBody->Instructions.push_back(std::make_unique<IL::Nop>());
+    auto faultBody = std::make_unique<IL::Block>();
+    faultBody->FinalInstruction = std::make_unique<IL::Nop>();
+    IL::TryFault tryFault(std::move(tryBody), std::move(faultBody));
+    auto result = builder.Convert(&tryFault);
+
+    auto* tryCatchStatement =
+        dynamic_cast<Syntax::TryCatchStatement*>(result.Statement());
+    ASSERT_TRUE(tryCatchStatement != nullptr);
+    ASSERT_EQ(tryCatchStatement->CatchClauses().Count(), 1);
+    auto* faultClause = tryCatchStatement->CatchClauses().At(0);
+    ASSERT_TRUE(faultClause != nullptr);
+    ASSERT_TRUE(faultClause->Body() != nullptr);
+    // The C# inserts the `/*try-fault*/` comment marker and a bare `throw;`
+    // into the fault block.
+    ASSERT_EQ(faultClause->Body()->Statements().Count(), 2);
+    auto* marker = dynamic_cast<Syntax::EmptyStatement*>(
+        faultClause->Body()->Statements().At(0));
+    ASSERT_TRUE(marker != nullptr);
+    ASSERT_EQ(marker->TrailingTrivia().size(), 1u);
+    auto* comment = dynamic_cast<Syntax::Comment*>(marker->TrailingTrivia()[0]);
+    ASSERT_TRUE(comment != nullptr);
+    EXPECT_EQ(comment->Content(), "try-fault");
+    EXPECT_TRUE(dynamic_cast<Syntax::ThrowStatement*>(
+                    faultClause->Body()->Statements().At(1))
+                != nullptr);
+}
+
+TEST(StatementBuilderTest, VisitLockInstructionRendersLock)
+{
+    StatementFixture fixture;
+    StatementBuilder builder(fixture.compilation, *fixture.context_, &fixture.function,
+                             &fixture.settings, &fixture.run);
+    auto body = std::make_unique<IL::Block>();
+    body->Instructions.push_back(std::make_unique<IL::Nop>());
+    IL::LockInstruction lockInstruction(std::make_unique<IL::LdStr>("gate"),
+                                        std::move(body));
+    auto result = builder.Convert(&lockInstruction);
+
+    auto* lockStatement = dynamic_cast<Syntax::LockStatement*>(result.Statement());
+    ASSERT_TRUE(lockStatement != nullptr);
+    ASSERT_TRUE(lockStatement->Expression() != nullptr);
+    auto* text = dynamic_cast<Syntax::PrimitiveExpression*>(lockStatement->Expression());
+    ASSERT_TRUE(text != nullptr);
+    ASSERT_TRUE(std::holds_alternative<std::string>(text->Value()));
+    EXPECT_EQ(std::get<std::string>(text->Value()), "gate");
 }
 
 

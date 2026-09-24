@@ -74,10 +74,17 @@ class ExpressionBuilder;
 namespace IL {
 class Block;
 class BlockContainer;
+class Block;
 class Branch;
 class ILFunction;
+class IfInstruction;
 class IsInst;
 class Leave;
+class LockInstruction;
+class TryCatch;
+class TryCatchHandler;
+class TryFinally;
+class TryFault;
 class Nop;
 class Rethrow;
 class StLoc;
@@ -171,6 +178,15 @@ private:
     TranslatedStatement VisitRethrow(IL::Rethrow* inst);
     TranslatedStatement VisitBranch(IL::Branch* inst);
     TranslatedStatement VisitLeave(IL::Leave* inst);
+    TranslatedStatement VisitIfInstruction(IL::IfInstruction* inst);
+    TranslatedStatement VisitTryCatch(IL::TryCatch* inst);
+    TranslatedStatement VisitTryFinally(IL::TryFinally* inst);
+    TranslatedStatement VisitTryFault(IL::TryFault* inst);
+    TranslatedStatement VisitLockInstruction(IL::LockInstruction* inst);
+    TranslatedStatement VisitBlock(IL::Block* inst);
+    // The C# `TryCatchStatement MakeTryCatch(ILInstruction tryBlock)`: the
+    // try-block conversion with the extend-existing-try-catch reuse.
+    TranslatedStatement MakeTryCatch(IL::ILInstruction* tryBlock);
 
 private:
     // The C# `protected override TranslatedStatement Default(ILInstruction
