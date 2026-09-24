@@ -69,6 +69,7 @@ add_executable(ilspy_tests
     ILSpyX/PdbProvider/DebugInfoUtils_Test.cpp
     ILSpyX/Util/GuessFileType_Test.cpp
     ILSpyX/Extensions/CollectionExtensions_Test.cpp
+    ILSpyX/LoadedPackage_Test.cpp
     ILSpyCmd/IlspyCmdProgram_Test.cpp
     ILSpyCmd/ResourceExtensions_Test.cpp
     ILSpyCmd/MetadataTableDumper_Test.cpp
