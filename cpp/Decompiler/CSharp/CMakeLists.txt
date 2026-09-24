@@ -17,6 +17,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/FlattenSwitchBlocks.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/FixNameCollisions.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/EscapeInvalidIdentifiers.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/RemoveCompilerGeneratedAssemblyAttributes.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/PrettifyAssignments.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/NormalizeBlockStatements.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/RequiredNamespaceCollector.cpp

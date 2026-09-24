@@ -580,6 +580,7 @@ add_executable(ilspy_tests
     Decompiler/IL/Transforms/TransformExpressionTrees_Test.cpp
     Decompiler/IL/Transforms/SwitchOnStringTransform_Test.cpp
     Decompiler/IL/Transforms/LocalFunctionDecompiler_Test.cpp
+    Decompiler/CSharp/Transforms/RemoveCompilerGeneratedAssemblyAttributes_Test.cpp
     Decompiler/IL/Transforms/NullPropagationTransform_Test.cpp
     Decompiler/IL/Transforms/TransformAssignment_Test.cpp
     Decompiler/IL/Transforms/UserDefinedLogicTransform_Test.cpp
