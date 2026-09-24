@@ -106,6 +106,29 @@ struct ILTransformSettings {
     // transforms recover the literal and the <PrivateImplementationDetails>
     // cache field disappears from the output.
     bool ArrayInitializers = true;
+    // Whether to fold the collection/object initializer statements back into
+    // a Block initializer (the C# 3.0 `new List<int> { 1, 2 }` /
+    // `new Data { A = 1 }` recovery). DecompilerSettings.
+    // ObjectOrCollectionInitializers -- default true. Gates
+    // TransformCollectionAndObjectInitializers (the per-statement transform
+    // after TransformArrayInitializers) and its IsPartOfInitializer scan.
+    bool ObjectOrCollectionInitializers = true;
+    // Whether to detect the dictionary-initializer form inside the
+    // object-initializer scan (`dict["k"] = v` and the index-variable stloc
+    // entries). DecompilerSettings.DictionaryInitializers -- default true.
+    bool DictionaryInitializers = true;
+    // Whether `with`-expression constructs (record clone calls and
+    // WithInitializer blocks) are decompiled. DecompilerSettings.
+    // WithExpressions -- default true. Gates the record-clone
+    // (IsRecordCloneMethodCall) arm and the with-initializer block kind.
+    bool WithExpressions = true;
+    // Whether to decompile `new T()` over a generic type parameter via the
+    // Activator.CreateInstance pattern (the C# 2.0
+    // UseObjectCreationOfGenericTypeParameter setting). Default false (the
+    // C# < CSharp2 default; the port's ILTransformSettings default follows
+    // DecompilerSettings::SetLanguageVersion's CSharp2 gate). Gates the
+    // Activator.CreateInstance arm of TransformCollectionAndObjectInitializers.
+    bool UseObjectCreationOfGenericTypeParameter = false;
     // Whether to introduce named arguments (the C# 4.0 named-argument
     // recovery). DecompilerSettings.NamedArguments -- default true. Gates
     // NamedArgumentTransform.Run (the per-statement transform the

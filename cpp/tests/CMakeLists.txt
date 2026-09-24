@@ -564,6 +564,7 @@ add_executable(ilspy_tests
     Decompiler/IL/Transforms/NullCoalescingTransform_Test.cpp
     Decompiler/IL/Transforms/NamedArgumentTransform_Test.cpp
     Decompiler/IL/Transforms/TransformArrayInitializers_Test.cpp
+    Decompiler/IL/Transforms/TransformCollectionAndObjectInitializers_Test.cpp
     Decompiler/IL/Transforms/NullPropagationTransform_Test.cpp
     Decompiler/IL/Transforms/TransformAssignment_Test.cpp
     Decompiler/IL/Transforms/UserDefinedLogicTransform_Test.cpp

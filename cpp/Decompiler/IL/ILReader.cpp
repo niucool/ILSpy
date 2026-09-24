@@ -598,7 +598,15 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             if (!callSig) return DecodeOutcome::Bail;
             int argCount = static_cast<int>(callSig->ParameterTypes.size()) + (callSig->IsInstance ? 1 : 0);
             if (op == ILOpCode::Newobj) argCount = static_cast<int>(callSig->ParameterTypes.size());
+            // The C# `call.ILStackWasEmpty = CurrentStackIsEmpty();` -- captured
+            // BEFORE the argument pops (the C# checks the stack state before
+            // decoding the arguments; the ILStackWasEmpty field feeds the
+            // statement-level-initializer gate in
+            // TransformCollectionAndObjectInitializers).
+            const bool ilStackWasEmpty = s.expressionStack.empty() &&
+                                         s.currentStack.size() <= s.stackBase;
             auto call = std::make_unique<Call>(file.ResolveTokenToString(tok, s.ownerMethodToken));
+            call->ILStackWasEmpty = ilStackWasEmpty;
             call->ReturnType = StackTypeOf(callSig->ReturnType);
             call->ReturnIType = callSig->ReturnType;
             call->ParameterIType = callSig->ParameterTypes;

@@ -31,6 +31,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/ILInlining.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/NamedArgumentTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/TransformArrayInitializers.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/TransformCollectionAndObjectInitializers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/InlineReturnTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/AssignVariableNames.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/CopyPropagation.cpp

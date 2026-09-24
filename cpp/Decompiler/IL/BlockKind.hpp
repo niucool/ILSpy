@@ -63,6 +63,12 @@ enum class BlockKind : std::uint8_t {
     // (StLoc(v, arg)); the FinalInstruction is the call whose argument slots
     // now carry LdLoc loads. Constructed by NamedArgumentTransform.
     CallWithNamedArgs,
+    // A `with`-expression body (the C# BlockKind.WithInitializer):
+    // Instructions[0] is the stloc v(newobj/clonetype) construction;
+    // Instructions[1..] are the property setter stores; the FinalInstruction
+    // is the ldloc v that yields the record. Constructed by the record-clone
+    // arm of TransformCollectionAndObjectInitializers.
+    WithInitializer,
 };
 
 } // namespace ILSpy::Decompiler::IL

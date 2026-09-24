@@ -84,6 +84,13 @@ public:
     // True for call/callvirt on an instance method (Arguments[0] is the
     // receiver); false for static calls and newobj. Set by the IL reader.
     bool IsInstanceCall = false;
+    // The C# `public bool ILStackWasEmpty` (CallInstruction.cs) -- whether the
+    // evaluation stack was empty at the point of this call (not counting the
+    // arguments/return value of the call itself). Set by the IL reader BEFORE
+    // the argument pops. Consumed by
+    // TransformCollectionAndObjectInitializers (the statement-level local
+    // bail) and the seed's statement-level checks.
+    bool ILStackWasEmpty = false;
     // True for a `newobj` call (the C# models this as a separate NewObj node;
     // this port reuses Call with this flag, matching the IsInstanceCall
     // precedent). The IL reader sets it from the decoded opcode. Consumed by
