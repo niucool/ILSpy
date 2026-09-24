@@ -27,6 +27,7 @@
 #pragma once
 
 #include "Decompiler/IL/Instructions/SimpleInstruction.hpp"
+#include "Decompiler/TypeSystem/IMethod.hpp"
 #include "Decompiler/IL/Instructions/UnaryInstruction.hpp"
 #include "Decompiler/IL/InstructionFlags.hpp"
 #include "Decompiler/IL/StackType.hpp"
@@ -42,8 +43,19 @@ namespace ILSpy::Decompiler::IL {
 class LdFtn : public SimpleInstruction {
 public:
     std::string MethodName;
+    // The C# `IMethod Method { get; }` -- the resolved method the CallBuilder
+    // delegate-construction arm reads. Null on reader-built nodes (the IL
+    // reader discards the token target; the stand-in convention); the
+    // CallBuilder path asserts it (the C# node is only ever created with a
+    // method).
+    std::shared_ptr<const TypeSystem::IMethod> Method;
     explicit LdFtn(std::string method = std::string())
         : SimpleInstruction(OpCode::LdFtn), MethodName(std::move(method)) {}
+    // The IMethod-bearing ctor (the C# `new LdFtn(method)` -- the resolved
+    // method the CallBuilder consumes; the MethodName derives from it).
+    LdFtn(std::shared_ptr<const TypeSystem::IMethod> method)
+        : SimpleInstruction(OpCode::LdFtn),
+          MethodName(std::string(method->Name())), Method(std::move(method)) {}
     StackType ResultType() const override { return StackType::I; }
     void WriteTo(std::string& out) const override {
         out += "ldftn("; out += MethodName; out += ')';
@@ -54,8 +66,17 @@ public:
 class LdVirtFtn : public SimpleInstruction {
 public:
     std::string MethodName;
+    // The C# `IMethod Method { get; }` -- the resolved virtual method the
+    // CallBuilder delegate-construction arm reads. Null on reader-built nodes
+    // (the IL reader discards the token target; the stand-in convention).
+    std::shared_ptr<const TypeSystem::IMethod> Method;
     explicit LdVirtFtn(std::string method = std::string())
         : SimpleInstruction(OpCode::LdVirtFtn), MethodName(std::move(method)) {}
+    // The IMethod-bearing ctor (the C# `new LdVirtFtn(method)` -- the resolved
+    // virtual method the CallBuilder consumes; the MethodName derives from it).
+    LdVirtFtn(std::shared_ptr<const TypeSystem::IMethod> method)
+        : SimpleInstruction(OpCode::LdVirtFtn),
+          MethodName(std::string(method->Name())), Method(std::move(method)) {}
     StackType ResultType() const override { return StackType::I; }
     void WriteTo(std::string& out) const override {
         out += "ldvirtftn("; out += MethodName; out += ')';

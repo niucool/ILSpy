@@ -490,6 +490,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/CallBuilderIsAppropriateCallTarget_Test.cpp
     Decompiler/CSharp/CallBuilderStringConcat_Test.cpp
     Decompiler/CSharp/CallBuilderStringInterpolation_Test.cpp
+    Decompiler/CSharp/CallBuilderBuildCall_Test.cpp
     Decompiler/CSharp/CallBuilderBuild_Test.cpp
     Decompiler/CSharp/CallBuilderDelegateReference_Test.cpp
     Decompiler/CSharp/CallBuilderRangeConstruction_Test.cpp

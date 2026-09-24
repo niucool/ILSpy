@@ -579,6 +579,26 @@ public:
     // local-function surface (its only caller, the
     // DisambiguateDelegateReference local-function arm, is likewise deferred).
 
+    // The C# `private TranslatedExpression HandleDelegateConstruction(CallInstruction
+    // inst)` (CallBuilder.cs lines 1906-1934): the newobj delegate-construction
+    // form -- the ldftn/ldvirtftn dispatch (the resolved-method handles the
+    // gnhf-135 LdVirtDelegate / this-slice LdFtn-LdVirtFtn extensions carry),
+    // the CanUseDelegateConstruction gate over the delegate's Invoke method,
+    // and the BuildArgumentList + HandleConstructorCall fallback. Implemented
+    // out-of-line.
+    TranslatedExpression HandleDelegateConstruction(const IL::Call& inst);
+
+    // The C# `public TranslatedExpression Build(CallInstruction inst, IType?
+    // typeHint = null)` (CallBuilder.cs lines 202-232): the Call/NewObj
+    // dispatch -- the delegate-construction arm (the MatchDelegateConstruction
+    // newobj shape; the TupleTransform arm is deferred with the tuple
+    // surface), the span-based string-concat arm, and the default
+    // Build(opCode, ...) with the IL `tail.` comment. The port name
+    // `BuildCall` avoids the overload clash with `Build(OpCode, ...)` (the
+    // C# overloads by parameter list). Implemented out-of-line.
+    TranslatedExpression BuildCall(const IL::Call& inst,
+                                   const TS::IType* typeHint = nullptr);
+
     // The C# `public ExpressionWithResolveResult Build(OpCode callOpCode, IMethod
     // method, IReadOnlyList<ILInstruction> callArguments, IReadOnlyList<int>?
     // argumentToParameterMap = null, IType? constrainedTo = null)` (CallBuilder.cs

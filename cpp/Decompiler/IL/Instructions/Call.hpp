@@ -125,6 +125,17 @@ public:
     // so a default-false call never trips that bail). It is a settable field so
     // a future resolver-backed path can mark a lifted operator call.
     bool IsLifted = false;
+    // The C# `public bool IsTail` (CallInstruction.cs) -- the IL `tail.`
+    // prefix the Build render surfaces as a `/*tail.*/` inline comment. The
+    // reader never sets it yet (F# emits tail calls pervasively; the reader
+    // decodes the prefix as part of the extended opcode -- the additive
+    // field keeps the stand-in model honest without reader changes).
+    bool IsTail = false;
+    // The C# `public IType? ConstrainedTo` (CallInstruction.cs) -- the
+    // `constrained.` prefix's type operand, set at visit time when the
+    // resolved method is generic over a type parameter. Null on the stand-in
+    // construction form.
+    TypeSystem::ITypePtr ConstrainedTo;
 
     explicit Call(std::string method = std::string()) : ILInstruction(OpCode::Call), MethodName(std::move(method)) {}
 

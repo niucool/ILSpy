@@ -47,6 +47,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Comment.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InterpolatedStringExpression.hpp"
@@ -60,6 +61,7 @@
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Transforms/DelegateConstruction.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
@@ -2619,6 +2621,108 @@ ExpressionWithResolveResult CallBuilder::Build(
                       Resolver::OverloadResolutionErrors::None,
                       /*isExtensionMethodInvocation=*/false,
                       /*isExpandedForm=*/argumentList.IsExpandedForm));
+}
+
+// The C# `private TranslatedExpression HandleDelegateConstruction(CallInstruction
+// inst)` (CallBuilder.cs lines 1906-1934): the `newobj DelegateType(target,
+// ldftn/ldvirtftn method)` form -- the ldftn/ldvirtftn dispatch supplies the
+// referenced method and the call opcode, `CanUseDelegateConstruction` picks the
+// method-group render, and the fallback builds the constructor call over the
+// delegate's own constructor.
+TranslatedExpression CallBuilder::HandleDelegateConstruction(const IL::Call& inst)
+{
+    assert(inst.Arguments.size() == 2
+           && "HandleDelegateConstruction: a delegate-construction newobj has a "
+              "this-arg and a function-pointer argument");
+    IL::ILInstruction* thisArg = inst.Arguments[0].get();
+    IL::ILInstruction* func = inst.Arguments[1].get();
+    const TS::IMethod* method = nullptr;
+    ExpectedTargetDetails expectedTargetDetails{};
+    if (auto* ldFtn = dynamic_cast<const IL::LdFtn*>(func)) {
+        method = ldFtn->Method.get();
+        expectedTargetDetails.CallOpCode = IL::OpCode::Call;
+    } else if (auto* ldVirtFtn = dynamic_cast<const IL::LdVirtFtn*>(func)) {
+        method = ldVirtFtn->Method.get();
+        expectedTargetDetails.CallOpCode = IL::OpCode::CallVirt;
+    } else {
+        throw std::logic_error(
+            "CallBuilder::HandleDelegateConstruction: unknown function-pointer "
+            "instruction type");
+    }
+    assert(method != nullptr
+           && "HandleDelegateConstruction: the ldftn/ldvirtftn must carry a "
+              "resolved method (the C# node is only ever created with one)");
+    assert(inst.Method != nullptr && inst.Method->DeclaringType() != nullptr
+           && "HandleDelegateConstruction: the newobj must be resolved");
+    const TS::IMethod* invokeMethod =
+        TS::GetDelegateInvokeMethod(*inst.Method->DeclaringType());
+    if (CanUseDelegateConstruction(*method, thisArg, invokeMethod)) {
+        return HandleDelegateConstruction(*inst.Method->DeclaringType(), *method,
+                                          expectedTargetDetails, thisArg,
+                                          const_cast<IL::Call*>(&inst));
+    }
+    ArgumentList argumentList = BuildArgumentList(
+        expectedTargetDetails, nullptr, *inst.Method, 0, {thisArg, func},
+        std::nullopt);
+    ExpectedTargetDetails constructorDetails{};
+    constructorDetails.CallOpCode = IL::OpCode::NewObj;
+    return WithILInstruction(
+        HandleConstructorCall(constructorDetails, nullptr, *inst.Method,
+                              argumentList),
+        const_cast<IL::Call*>(&inst));
+}
+
+// The C# `public TranslatedExpression Build(CallInstruction inst, IType?
+// typeHint = null)` (CallBuilder.cs lines 202-232): the call/newobj dispatch --
+// the delegate-construction arm (the MatchDelegateConstruction newobj shape),
+// the tuple-construction arm (deferred with the TupleTransform surface), the
+// span-based string-concat arm, and the default `Build(opCode, ...)` with the
+// IL `tail.` comment surface.
+TranslatedExpression CallBuilder::BuildCall(const IL::Call& inst,
+                                            const TS::IType* typeHint)
+{
+    (void)typeHint;
+    if (inst.IsNewObj) {
+        IL::DelegateConstructionMatch match;
+        if (IL::DelegateConstruction::MatchDelegateConstruction(
+                const_cast<IL::Call*>(&inst), match)) {
+            (void)match;
+            return HandleDelegateConstruction(inst);
+        }
+        // The C# `settings.TupleTypes &&
+        // TupleTransform.MatchTupleConstruction(...)` arm: the tuple
+        // construction render is deferred with the TupleTransform surface
+        // (the port has no MatchTupleConstruction helper).
+    }
+    std::vector<SpanConcatOperand> operands;
+    if (settings_->StringConcat() && IsSpanBasedStringConcat(inst, operands)) {
+        assert(inst.Method != nullptr && "the Concat call must be resolved");
+        return WithILInstruction(BuildStringConcat(*inst.Method, operands),
+                                 const_cast<IL::Call*>(&inst));
+    }
+    assert(inst.Method != nullptr && "BuildCall requires a resolved method");
+    std::vector<IL::ILInstruction*> callArguments;
+    callArguments.reserve(inst.Arguments.size());
+    for (const auto& arg : inst.Arguments)
+        callArguments.push_back(arg.get());
+    // The port's `Call(IsNewObj=true)` keeps `Op == OpCode::Call` (the stand-in
+    // convention); the C# `NewObj` node's OpCode IS OpCode.NewObj, so map it
+    // for the firstParamIndex logic the Build integrator derives from the
+    // opcode.
+    IL::OpCode callOpCode = inst.IsNewObj ? IL::OpCode::NewObj : inst.Op;
+    ExpressionWithResolveResult result =
+        Build(callOpCode, *inst.Method, callArguments, std::nullopt,
+              inst.ConstrainedTo.get());
+    TranslatedExpression translated =
+        WithILInstruction(result, const_cast<IL::Call*>(&inst));
+    if (inst.IsTail) {
+        // Surface the IL 'tail.' prefix as an inline marker, e.g.
+        // '/*tail.*/Callee(x)'. F# emits tail calls pervasively, and the
+        // prefix is otherwise dropped entirely.
+        translated.Expression()->AddLeadingTrivia(
+            new Syntax::Comment("tail.", Syntax::CommentType::MultiLine));
+    }
+    return translated;
 }
 
 } // namespace ILSpy::Decompiler::CSharp
