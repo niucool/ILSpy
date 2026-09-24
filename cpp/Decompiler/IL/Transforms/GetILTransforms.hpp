@@ -48,11 +48,14 @@
 #include "Decompiler/IL/Transforms/FixRemainingIncrements.hpp"
 #include "Decompiler/IL/Transforms/HighLevelLoopTransform.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
+#include "Decompiler/IL/Transforms/LocalFunctionDecompiler.hpp"
+#include "Decompiler/IL/Transforms/TransformDisplayClassUsage.hpp"
 #include "Decompiler/IL/Transforms/NamedArgumentTransform.hpp"
 #include "Decompiler/IL/Transforms/DeconstructionTransform.hpp"
 #include "Decompiler/IL/Transforms/IndexRangeTransform.hpp"
 #include "Decompiler/IL/Transforms/TransformArrayInitializers.hpp"
 #include "Decompiler/IL/Transforms/TransformCollectionAndObjectInitializers.hpp"
+#include "Decompiler/IL/Transforms/TransformExpressionTrees.hpp"
 #include "Decompiler/IL/Transforms/InlineReturnTransform.hpp"
 #include "Decompiler/IL/Transforms/InterpolatedStringTransform.hpp"
 #include "Decompiler/IL/Transforms/LdLocaDupInitObjTransform.hpp"
@@ -164,6 +167,8 @@ inline std::vector<std::unique_ptr<IILTransform>> GetILTransforms() {
             std::make_unique<TransformArrayInitializers>());
         statementTransform->AddChild(
             std::make_unique<TransformCollectionAndObjectInitializers>());
+        statementTransform->AddChild(
+            std::make_unique<TransformExpressionTrees>());
         statementTransform->AddChild(std::make_unique<DeconstructionTransform>());
         statementTransform->AddChild(std::make_unique<IndexRangeTransform>());
         statementTransform->AddChild(std::make_unique<NamedArgumentTransform>());
@@ -172,14 +177,25 @@ inline std::vector<std::unique_ptr<IILTransform>> GetILTransforms() {
             std::make_unique<InterpolatedStringTransform>());
         transforms.push_back(std::move(statementTransform));
     }
-    transforms.push_back(
-        std::make_unique<RunAdapter<HighLevelLoopTransform>>());
     transforms.push_back(std::make_unique<FixRemainingIncrements>());
     transforms.push_back(std::make_unique<CopyPropagation>());
-    transforms.push_back(std::make_unique<AssignVariableNames>());
+    // The C# slot between CopyPropagation and LocalFunctionDecompiler
+    // carries DelegateConstruction (CSharpDecompiler.cs line 168); the
+    // port has only the matcher helper (MatchDelegateConstruction), not
+    // the transform Run -- deferred with it, the C# order keeps the
+    // closure transforms contiguous either way.
+    // transforms.push_back(std::make_unique<DelegateConstruction>());
+    transforms.push_back(std::make_unique<LocalFunctionDecompiler>());
+    transforms.push_back(std::make_unique<TransformDisplayClassUsage>());
+    transforms.push_back(
+        std::make_unique<RunAdapter<HighLevelLoopTransform>>());
     transforms.push_back(std::make_unique<ReduceNestingTransform>());
     transforms.push_back(std::make_unique<RemoveUnreachableBlocks>());
     transforms.push_back(std::make_unique<RemoveRedundantReturn>());
+    // The C# tail ends with AssignVariableNames (after
+    // IntroduceDynamicTypeOnLocals / IntroduceNativeIntTypeOnLocals,
+    // neither ported yet).
+    transforms.push_back(std::make_unique<AssignVariableNames>());
     return transforms;
 }
 

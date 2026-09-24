@@ -32,6 +32,13 @@
 #include "Decompiler/IL/Transforms/SwitchOnStringTransform.hpp"
 #include "Decompiler/IL/Transforms/SwitchOnNullableTransform.hpp"
 #include "Decompiler/IL/Transforms/StatementTransform.hpp"
+#include "Decompiler/IL/Transforms/LocalFunctionDecompiler.hpp"
+#include "Decompiler/IL/Transforms/TransformDisplayClassUsage.hpp"
+#include "Decompiler/IL/Transforms/CopyPropagation.hpp"
+#include "Decompiler/IL/Transforms/HighLevelLoopTransform.hpp"
+#include "Decompiler/IL/Transforms/TransformExpressionTrees.hpp"
+#include "Decompiler/IL/Transforms/TransformCollectionAndObjectInitializers.hpp"
+#include "Decompiler/IL/Transforms/IndexRangeTransform.hpp"
 
 #include <gtest/gtest.h>
 
@@ -99,6 +106,86 @@ TEST(GetILTransformsTest, StatementTransformCarriesTheInterleavedChildren)
     // C# comment: inlining runs first because it does not trigger re-runs).
     EXPECT_FALSE(statement->ChildCount() == 0)
         << "the StatementTransform carries its interleaved children";
+}
+
+// The pipeline adoption (the C# list carries DelegateConstruction,
+// LocalFunctionDecompiler and TransformDisplayClassUsage between
+// CopyPropagation and HighLevelLoopTransform -- CSharpDecompiler.cs lines
+// 168-170): the ported LocalFunctionDecompiler and
+// TransformDisplayClassUsage entries sit at their C# positions;
+// DelegateConstruction has no ported transform Run yet (only the matcher
+// helper), so its slot is documented as deferred.
+TEST(GetILTransformsTest, PipelineCarriesTheClosureTransforms)
+{
+    auto transforms = IL::GetILTransforms();
+    std::size_t copyPropPos = transforms.size();
+    std::size_t lfdPos = transforms.size();
+    std::size_t tduPos = transforms.size();
+    std::size_t loopPos = transforms.size();
+    for (std::size_t i = 0; i < transforms.size(); i++) {
+        if (dynamic_cast<IL::CopyPropagation*>(transforms[i].get()) != nullptr) {
+            copyPropPos = i;
+        }
+        if (dynamic_cast<IL::LocalFunctionDecompiler*>(
+                transforms[i].get()) != nullptr) {
+            lfdPos = i;
+        }
+        if (dynamic_cast<IL::TransformDisplayClassUsage*>(
+                transforms[i].get()) != nullptr) {
+            tduPos = i;
+        }
+        if (dynamic_cast<IL::HighLevelLoopTransform*>(
+                transforms[i].get()) != nullptr) {
+            loopPos = i;
+        }
+    }
+    ASSERT_LT(copyPropPos, transforms.size()) << "CopyPropagation is present";
+    ASSERT_LT(lfdPos, transforms.size())
+        << "LocalFunctionDecompiler is adopted into the pipeline";
+    ASSERT_LT(tduPos, transforms.size())
+        << "TransformDisplayClassUsage is adopted into the pipeline";
+    // The C# order: CopyPropagation -> DelegateConstruction (deferred) ->
+    // LocalFunctionDecompiler -> TransformDisplayClassUsage ->
+    // HighLevelLoopTransform.
+    EXPECT_LT(copyPropPos, lfdPos);
+    EXPECT_LT(lfdPos, tduPos);
+    EXPECT_LT(tduPos, loopPos);
+}
+
+// The TransformExpressionTrees entry rides the StatementTransform children
+// at its C# position (between TransformCollectionAndObjectInitializers and
+// IndexRangeTransform -- CSharpDecompiler.cs lines 148-150).
+TEST(GetILTransformsTest, StatementTransformCarriesTransformExpressionTrees)
+{
+    auto transforms = IL::GetILTransforms();
+    const IL::StatementTransform* statement = nullptr;
+    for (const auto& t : transforms) {
+        if (auto* st = dynamic_cast<IL::StatementTransform*>(t.get())) {
+            statement = st;
+        }
+    }
+    ASSERT_NE(statement, nullptr) << "the StatementTransform entry is present";
+    // The child ordering probe: the children are IStatementTransform
+    // instances; find the three entries' relative positions by dynamic_cast.
+    std::size_t colInit = SIZE_MAX, trees = SIZE_MAX, indexRange = SIZE_MAX;
+    for (int i = 0; i < statement->ChildCount(); i++) {
+        const auto* child = statement->Child(i);
+        if (dynamic_cast<const IL::TransformCollectionAndObjectInitializers*>(
+                child) != nullptr) {
+            colInit = static_cast<std::size_t>(i);
+        }
+        if (dynamic_cast<const IL::TransformExpressionTrees*>(child) != nullptr) {
+            trees = static_cast<std::size_t>(i);
+        }
+        if (dynamic_cast<const IL::IndexRangeTransform*>(child) != nullptr) {
+            indexRange = static_cast<std::size_t>(i);
+        }
+    }
+    ASSERT_NE(colInit, SIZE_MAX) << "TransformCollectionAndObjectInitializers is present";
+    ASSERT_NE(trees, SIZE_MAX) << "TransformExpressionTrees is a child";
+    ASSERT_NE(indexRange, SIZE_MAX) << "IndexRangeTransform is present";
+    EXPECT_LT(colInit, trees);
+    EXPECT_LT(trees, indexRange);
 }
 
 } // namespace

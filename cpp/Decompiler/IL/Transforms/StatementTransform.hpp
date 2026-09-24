@@ -122,6 +122,11 @@ public:
     // test surface: the interleaved per-statement children the C# ctor's
     // params array carries).
     int ChildCount() const { return static_cast<int>(children_.size()); }
+    // The child at the index (the list-factory test's ordering probe).
+    const IStatementTransform* Child(int index) const
+    {
+        return children_.at(static_cast<std::size_t>(index)).get();
+    }
 
     void Run(ILFunction& function, ILTransformContext& context) override;
 
