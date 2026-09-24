@@ -385,7 +385,17 @@ int RunMain(int argc, char** argv) {
     // this replaces was the pre-Phase-6 stand-in.
     if (wantIl || wantIlSequencePoints) {
         std::ostringstream buffer;
-        int rc = ILSpy::ILSpyCmd::ShowIL(asmPath, buffer, wantIlSequencePoints, pdbFile);
+        int rc = 0;
+        // The C# global catch around PerformPerFileAction covers the
+        // disassembler's BadImageFormatException (the ReflectionDisassembler
+        // event/type-token throws for a malformed row); the port renders the
+        // message only (no managed stack trace) and exits EX_SOFTWARE.
+        try {
+            rc = ILSpy::ILSpyCmd::ShowIL(asmPath, buffer, wantIlSequencePoints, pdbFile);
+        } catch (const std::exception& ex) {
+            std::cerr << ex.what() << '\n';
+            return 70;  // ProgramExitCodes.EX_SOFTWARE
+        }
         // The C# -o branch (`output = File.CreateText(Path.Combine(
         // outputDirectory, outputName) + ".il")`): the render goes to the
         // per-action output file, nothing to stdout.
