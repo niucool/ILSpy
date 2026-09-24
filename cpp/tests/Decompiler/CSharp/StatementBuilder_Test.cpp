@@ -807,20 +807,23 @@ TEST(StatementBuilderTest, TransformToForeachRendersForeachStatement)
     getEnumerator->SetName("GetEnumerator");
     getEnumerator->SetDeclaringType(fixture.TypePtr(TS::KnownTypeCode::Object));
     getEnumerator->SetReturnType(enumVariable->Type);
+    // The fake enumerator members declare themselves on the enumerator type
+    // (Int32, the never-disposable struct) so the CallBuilder inserts no
+    // receiver cast and the MoveNext pattern matches the bare identifier.
     auto moveNext = std::make_shared<Impl::FakeMethod>(
         fixture.compilation, TS::SymbolKind::Method);
     moveNext->SetName("MoveNext");
-    moveNext->SetDeclaringType(fixture.TypePtr(TS::KnownTypeCode::Object));
+    moveNext->SetDeclaringType(enumVariable->Type);
     moveNext->SetReturnType(fixture.TypePtr(TS::KnownTypeCode::Boolean));
     auto currentProperty = std::make_shared<Impl::FakeProperty>(
         fixture.compilation);
     currentProperty->SetName("Current");
-    currentProperty->SetDeclaringType(fixture.TypePtr(TS::KnownTypeCode::Object));
+    currentProperty->SetDeclaringType(enumVariable->Type);
     currentProperty->SetReturnType(foreachVariable->Type);
     auto getCurrent = std::make_shared<Impl::FakeMethod>(
         fixture.compilation, TS::SymbolKind::Method);
     getCurrent->SetName("get_Current");
-    getCurrent->SetDeclaringType(fixture.TypePtr(TS::KnownTypeCode::Object));
+    getCurrent->SetDeclaringType(enumVariable->Type);
     getCurrent->SetAccessorOwner(
         static_cast<const TS::IProperty*>(currentProperty.get()));
     getCurrent->SetAccessorKind(
@@ -903,6 +906,118 @@ TEST(StatementBuilderTest, TransformToForeachRendersForeachStatement)
     EXPECT_TRUE(foreachStatement->InExpression() != nullptr);
     // The foreach variable is the un-inlined store's variable, promoted to
     // ForeachLocal (the C# UseExistingVariable arm).
+    auto* designation =
+        dynamic_cast<Syntax::SingleVariableDesignation*>(foreachStatement->VariableDesignation());
+    ASSERT_TRUE(designation != nullptr);
+    EXPECT_EQ(designation->Identifier(), "item");
+    EXPECT_TRUE(foreachStatement->EmbeddedStatement() != nullptr);
+}
+
+TEST(StatementBuilderTest, TransformToForeachWithoutDisposeRendersForeachStatement)
+{
+    StatementFixture fixture;
+    StatementBuilder builder(fixture.compilation, *fixture.context_, &fixture.function,
+                             &fixture.settings, &fixture.run);
+    // The bare 'enumerator = collection.GetEnumerator(); while (enumerator.MoveNext())'
+    // shape without any using/try-finally: the compiler emits it when the
+    // enumerator type can never require disposal (a struct or a sealed class
+    // without IDisposable). The Int32 enumerator (a struct whose base types
+    // lack IDisposable) satisfies EnumeratorTypeCanNeverBeDisposable.
+    auto listVariable = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local, fixture.TypePtr(TS::KnownTypeCode::Object));
+    listVariable->Name = "list";
+    auto enumVariable = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local, fixture.TypePtr(TS::KnownTypeCode::Int32));
+    enumVariable->Name = "e";
+    auto foreachVariable = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local, fixture.TypePtr(TS::KnownTypeCode::Int32));
+    foreachVariable->Name = "item";
+    auto getEnumerator = std::make_shared<Impl::FakeMethod>(
+        fixture.compilation, TS::SymbolKind::Method);
+    getEnumerator->SetName("GetEnumerator");
+    getEnumerator->SetDeclaringType(fixture.TypePtr(TS::KnownTypeCode::Object));
+    getEnumerator->SetReturnType(enumVariable->Type);
+    auto moveNext = std::make_shared<Impl::FakeMethod>(
+        fixture.compilation, TS::SymbolKind::Method);
+    moveNext->SetName("MoveNext");
+    moveNext->SetDeclaringType(enumVariable->Type);
+    moveNext->SetReturnType(fixture.TypePtr(TS::KnownTypeCode::Boolean));
+    auto currentProperty = std::make_shared<Impl::FakeProperty>(
+        fixture.compilation);
+    currentProperty->SetName("Current");
+    currentProperty->SetDeclaringType(enumVariable->Type);
+    currentProperty->SetReturnType(foreachVariable->Type);
+    auto getCurrent = std::make_shared<Impl::FakeMethod>(
+        fixture.compilation, TS::SymbolKind::Method);
+    getCurrent->SetName("get_Current");
+    getCurrent->SetDeclaringType(enumVariable->Type);
+    getCurrent->SetAccessorOwner(
+        static_cast<const TS::IProperty*>(currentProperty.get()));
+    getCurrent->SetAccessorKind(
+        ::ILSpy::Decompiler::TypeSystem::MethodSemanticsAttributes::Getter);
+    getCurrent->SetReturnType(foreachVariable->Type);
+    // The resource call: callvirt GetEnumerator(ldloc list).
+    auto resourceCall =
+        std::make_unique<IL::Call>(std::static_pointer_cast<TS::IMethod>(getEnumerator));
+    resourceCall->IsInstanceCall = true;
+    resourceCall->ReturnIType = enumVariable->Type;
+    resourceCall->AddArg(std::make_unique<IL::LdLoc>(listVariable));
+    // The condition call: call MoveNext(ldloca e) -- the struct enumerator's
+    // realistic IL shape (the receiver is the enumerator's address).
+    auto moveNextCall =
+        std::make_unique<IL::Call>(std::static_pointer_cast<TS::IMethod>(moveNext));
+    moveNextCall->IsInstanceCall = true;
+    moveNextCall->ReturnIType = fixture.TypePtr(TS::KnownTypeCode::Boolean);
+    moveNextCall->AddArg(std::make_unique<IL::LdLoca>(enumVariable));
+    // The body store: stloc item(call get_Current(ldloca e)).
+    auto currentCall =
+        std::make_unique<IL::Call>(std::static_pointer_cast<TS::IMethod>(getCurrent));
+    currentCall->IsInstanceCall = true;
+    currentCall->ReturnIType = foreachVariable->Type;
+    currentCall->AddArg(std::make_unique<IL::LdLoca>(enumVariable));
+    // The while container: the entry is the condition if; the body block stores
+    // the Current result and branches back.
+    auto whileContainer = std::make_unique<IL::BlockContainer>();
+    whileContainer->Kind = IL::ContainerKind::While;
+    auto conditionBlock = std::make_unique<IL::Block>();
+    conditionBlock->Label = "IL_0000";
+    IL::Block* conditionPtr = conditionBlock.get();
+    auto bodyBlock = std::make_unique<IL::Block>();
+    bodyBlock->Label = "IL_0010";
+    IL::Block* bodyPtr = bodyBlock.get();
+    bodyBlock->Add(std::make_unique<IL::StLoc>(
+        foreachVariable, std::move(currentCall)));
+    whileContainer->AddBlock(std::move(conditionBlock));
+    whileContainer->AddBlock(std::move(bodyBlock));
+    auto* entryIf = new IL::IfInstruction(
+        std::move(moveNextCall), std::make_unique<IL::Branch>(bodyPtr),
+        std::unique_ptr<IL::Leave>(new IL::Leave(whileContainer.get())));
+    conditionPtr->SetFinal(std::unique_ptr<IL::ILInstruction>(entryIf));
+    bodyPtr->SetFinal(std::make_unique<IL::Branch>(conditionPtr));
+    conditionPtr->IncomingEdgeCount = 2;  // loop dispatch + the body back edge
+    bodyPtr->IncomingEdgeCount = 1;       // the condition's true arm
+    // The bare shape: a ControlFlow block of [stloc e(GetEnumerator), while].
+    auto outerBlock = std::make_unique<IL::Block>();
+    outerBlock->Kind = IL::BlockKind::ControlFlow;
+    IL::Block* outerPtr = outerBlock.get();
+    outerBlock->Add(std::make_unique<IL::StLoc>(
+        enumVariable, std::move(resourceCall)));
+    outerBlock->Add(std::move(whileContainer));
+    outerPtr->SetFinal(std::make_unique<IL::Nop>());
+    // Attach the block as the function body (the on-demand use-site walk starts
+    // at the function body; see the design note).
+    fixture.function.Body = std::make_unique<IL::BlockContainer>();
+    fixture.function.Body->Kind = IL::ContainerKind::Normal;
+    fixture.function.Body->AddBlock(std::move(outerBlock));
+    auto result = builder.Convert(outerPtr);
+    auto* resultBlock = dynamic_cast<Syntax::BlockStatement*>(result.Statement());
+    ASSERT_TRUE(resultBlock != nullptr);
+    ASSERT_TRUE(resultBlock->Statements().Count() >= 1);
+    auto* foreachStatement = dynamic_cast<Syntax::ForeachStatement*>(
+        resultBlock->Statements().At(0));
+    ASSERT_TRUE(foreachStatement != nullptr);
+    EXPECT_FALSE(foreachStatement->IsAsync());
+    EXPECT_TRUE(foreachStatement->InExpression() != nullptr);
     auto* designation =
         dynamic_cast<Syntax::SingleVariableDesignation*>(foreachStatement->VariableDesignation());
     ASSERT_TRUE(designation != nullptr);

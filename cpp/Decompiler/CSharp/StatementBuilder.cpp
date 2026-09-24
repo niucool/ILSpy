@@ -658,8 +658,17 @@ TranslatedStatement StatementBuilder::VisitBlock(IL::Block* block) {
         return Default(block);
     // Block without container
     auto* blockStatement = new Syntax::BlockStatement();
-    for (auto& instruction : block->Instructions)
-        blockStatement->Statements().Add(Convert(instruction.get()).Statement());
+    for (int i = 0; i < static_cast<int>(block->Instructions.size()); i++) {
+        // The C# `if (TransformToForeachWithoutDispose(block, ref i) is Statement
+        // foreachStmt) { blockStatement.Add(foreachStmt); continue; }` -- a
+        // success also advanced `i` past the loop container (the statement was
+        // wrapped with WithILInstruction(loopContainer) inside the transform).
+        if (Syntax::Statement* foreachStmt = TransformToForeachWithoutDispose(block, i)) {
+            blockStatement->Statements().Add(foreachStmt);
+            continue;
+        }
+        blockStatement->Statements().Add(Convert(block->Instructions[i].get()).Statement());
+    }
     if (block->FinalInstruction != nullptr
         && block->FinalInstruction->Op != IL::OpCode::Nop)
         blockStatement->Statements().Add(Convert(block->FinalInstruction.get()).Statement());
@@ -969,18 +978,128 @@ Syntax::Statement* StatementBuilder::TransformToForeach(IL::UsingInstruction* in
     if (isAsync != inst->IsAsync) {
         return nullptr;
     }
+    return TransformToForeachTail(container, container, nullptr,
+                                  inst->Variable.get(), isAsync, m,
+                                  inst->ResourceExpression.get());
+}
+
+// The file-local forward for the never-disposable probe (defined below).
+bool StatementBuilderEnumeratorTypeCanNeverBeDisposable(const TS::IType& type);
+
+// The use-site walk's return type (defined further below; forward-declared here
+// for the without-dispose gates above its definition).
+struct VariableUseSites;
+VariableUseSites CollectVariableUseSites(IL::ILFunction* function,
+                                         const IL::ILVariable* variable);
+
+// The C# `Statement TransformToForeachWithoutDispose(Block block, ref int i)`
+// (StatementBuilder.cs lines 669-682): the bare 'stloc e(GetEnumerator);
+// while (e.MoveNext())' shape spanning two consecutive instructions; on
+// success `i` is advanced past the loop container.
+Syntax::Statement* StatementBuilder::TransformToForeachWithoutDispose(
+    IL::Block* block, int& i) {
+    auto* storeInst = dynamic_cast<IL::StLoc*>(block->Instructions[i].get());
+    if (storeInst == nullptr)
+        return nullptr;
+    const bool hasNext =
+        i + 1 < static_cast<int>(block->Instructions.size());
+    if (!hasNext)
+        return nullptr;
+    auto* loopContainer =
+        dynamic_cast<IL::BlockContainer*>(block->Instructions[i + 1].get());
+    if (loopContainer == nullptr || loopContainer->Kind != IL::ContainerKind::While)
+        return nullptr;
+    Syntax::Statement* transformed =
+        TransformToForeachWithoutDispose(storeInst, loopContainer);
+    if (transformed == nullptr)
+        return nullptr;
+    i++;
+    return WithILInstruction(*transformed, loopContainer).Statement();
+}
+
+// The C# `Statement TransformToForeachWithoutDispose(StLoc storeInst,
+// BlockContainer loopContainer)` (StatementBuilder.cs lines 684-703): the
+// never-disposable-enumerator gates, then the shared transform tail.
+Syntax::Statement* StatementBuilder::TransformToForeachWithoutDispose(
+    IL::StLoc* storeInst, IL::BlockContainer* loopContainer) {
+    if (!exprBuilder->settings->ForEachStatement()) {
+        return nullptr;
+    }
+    IL::ILVariable* enumeratorVar = storeInst->Variable.get();
+    if (enumeratorVar == nullptr
+        || !(enumeratorVar->Kind == IL::VariableKind::Local
+             || enumeratorVar->Kind == IL::VariableKind::StackSlot)) {
+        return nullptr;
+    }
+    if (!StatementBuilderEnumeratorTypeCanNeverBeDisposable(*enumeratorVar->Type))
+        return nullptr;
+    // The enumerator variable must not be used outside of the loop.
+    if (!VariableIsOnlyUsedInBlock(storeInst, loopContainer, loopContainer))
+        return nullptr;
+    Syntax::Expression* resource =
+        exprBuilder->Translate(storeInst->Value.get()).Expression();
+    PatternMatching::Match m;
+    bool isAsync = false;
+    if (!MatchGetEnumeratorPattern(resource, m, isAsync))
+        return nullptr;
+    // Async enumerators always implement IAsyncDisposable, so they cannot occur
+    // in this pattern.
+    if (isAsync)
+        return nullptr;
+    return TransformToForeachTail(loopContainer, loopContainer, nullptr,
+                                  enumeratorVar, isAsync, m,
+                                  storeInst->Value.get());
+}
+
+// The C# `Statement TransformToForeach(BlockContainer container, BlockContainer
+// loopContainer, Leave? optionalLeaveAfterLoop, ILVariable enumeratorVar, bool
+// isAsync, Match m, ILInstruction resourceExpression)` (StatementBuilder.cs lines
+// 729-742 head): the shared tail of the two entry points -- the container/isAsync
+// gates, the nested-container unwrap, and the full transform.
+Syntax::Statement* StatementBuilder::TransformToForeachTail(
+    IL::BlockContainer* container, IL::BlockContainer* loopContainer,
+    IL::Leave* optionalLeaveAfterLoop, IL::ILVariable* enumeratorVar, bool isAsync,
+    PatternMatching::Match m, IL::ILInstruction* resourceExpression) {
+    if (container == nullptr)
+        return nullptr;
     // If there's another BlockContainer nested in this container and it only has
     // one child block, unwrap it. If there's an extra leave inside the block,
-    // extract it into optionalReturnAfterLoop.
-    IL::Leave* optionalLeaveAfterLoop = nullptr;
-    IL::BlockContainer* loopContainer =
-        UnwrapNestedContainerIfPossible(container, optionalLeaveAfterLoop);
-    Syntax::Statement* result =
-        TransformToForeachCore(container, loopContainer, optionalLeaveAfterLoop,
-                               inst->Variable.get(), isAsync, m,
-                               inst->ResourceExpression.get());
-    (void)result;
-    return result;
+    // extract it into optionalReturnAfterLoop (the C# TransformToForeach head;
+    // both entry points run it).
+    IL::BlockContainer* unwrapped =
+        UnwrapNestedContainerIfPossible(loopContainer, optionalLeaveAfterLoop);
+    return TransformToForeachCore(container, unwrapped, optionalLeaveAfterLoop,
+                                  enumeratorVar, isAsync, m, resourceExpression);
+}
+
+// The C# `bool EnumeratorTypeCanNeverBeDisposable(IType type)` (StatementBuilder.cs
+// lines 705-727): a struct (non-by-ref-like) or a sealed class whose base types
+// never list IDisposable. Stateless, so a file-local free function per the port's
+// probe convention.
+bool StatementBuilderEnumeratorTypeCanNeverBeDisposable(const TS::IType& type) {
+    const TS::ITypeDefinition* typeDef = type.GetDefinition();
+    if (typeDef == nullptr)
+        return false;
+    switch (typeDef->Kind()) {
+        case TS::TypeKind::Struct:
+            // A ref struct may use pattern-based disposal via a Dispose method.
+            if (typeDef->IsByRefLike())
+                return false;
+            break;
+        case TS::TypeKind::Class:
+            // A non-sealed class would be enumerated with a
+            // 'finally { (enumerator as IDisposable)?.Dispose(); }' block instead.
+            if (!typeDef->IsSealed())
+                return false;
+            break;
+        default:
+            return false;
+    }
+    for (const TS::IType* baseType : TS::GetAllBaseTypes(&type)) {
+        if (TS::IsKnownType(*baseType, TS::KnownTypeCode::IDisposable))
+            return false;
+    }
+    return true;
 }
 
 // The C# `BlockContainer UnwrapNestedContainerIfPossible(BlockContainer container,

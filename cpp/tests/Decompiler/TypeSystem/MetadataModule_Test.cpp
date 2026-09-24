@@ -396,13 +396,22 @@ TEST(MetadataNamespaceTest, RootChildrenOrderMatchesGold)
     // System -- the synthesized virtual intermediates first).
     EXPECT_EQ(Join(f.module.RootNamespace().ChildNamespaces()),
               "Microsoft,Windows,System");
-    // The root's own GetChildNamespace lookups.
-    EXPECT_EQ(f.module.RootNamespace().GetChildNamespace("Microsoft")->FullName(),
-              "Microsoft");
-    EXPECT_EQ(f.module.RootNamespace().GetChildNamespace("Windows")->FullName(),
-              "Windows");
-    EXPECT_EQ(f.module.RootNamespace().GetChildNamespace("System")->FullName(),
-              "System");
+    // The root's own GetChildNamespace lookups. The lookups are asserted
+    // non-null before the FullName derefs (the .NET Framework corlib the gold
+    // pins target has all three; a substitute corlib fails the asserts above
+    // and must not crash the process on the deref).
+    const TS::INamespace* microsoft =
+        f.module.RootNamespace().GetChildNamespace("Microsoft");
+    ASSERT_NE(microsoft, nullptr);
+    EXPECT_EQ(microsoft->FullName(), "Microsoft");
+    const TS::INamespace* windows =
+        f.module.RootNamespace().GetChildNamespace("Windows");
+    ASSERT_NE(windows, nullptr);
+    EXPECT_EQ(windows->FullName(), "Windows");
+    const TS::INamespace* system =
+        f.module.RootNamespace().GetChildNamespace("System");
+    ASSERT_NE(system, nullptr);
+    EXPECT_EQ(system->FullName(), "System");
     EXPECT_EQ(f.module.RootNamespace().GetChildNamespace("NoSuchNamespace"),
               nullptr);
 }

@@ -281,6 +281,27 @@ private:
     // The C# `Statement TransformToForeach(BlockContainer container, BlockContainer
     // loopContainer, Leave? optionalLeaveAfterLoop, ILVariable enumeratorVar, bool
     // isAsync, Match m, ILInstruction resourceExpression)` (StatementBuilder.cs
+    // line 729): the shared tail of the two entry points (the container/isAsync
+    // gates, the nested-container unwrap, and the full transform).
+    Syntax::Statement* TransformToForeachTail(
+        IL::BlockContainer* container, IL::BlockContainer* loopContainer,
+        IL::Leave* optionalLeaveAfterLoop, IL::ILVariable* enumeratorVar, bool isAsync,
+        PatternMatching::Match m, IL::ILInstruction* resourceExpression);
+
+    // The C# `Statement TransformToForeachWithoutDispose(Block block, ref int i)`
+    // (StatementBuilder.cs line 669): the bare 'stloc e(GetEnumerator);
+    // while (e.MoveNext())' shape; on success `i` is advanced past the loop.
+    Syntax::Statement* TransformToForeachWithoutDispose(IL::Block* block, int& i);
+
+    // The C# `Statement TransformToForeachWithoutDispose(StLoc storeInst,
+    // BlockContainer loopContainer)` (StatementBuilder.cs line 684): the
+    // never-disposable-enumerator gates and the shared tail dispatch.
+    Syntax::Statement* TransformToForeachWithoutDispose(
+        IL::StLoc* storeInst, IL::BlockContainer* loopContainer);
+
+    // The C# `Statement TransformToForeach(BlockContainer container, BlockContainer
+    // loopContainer, Leave? optionalLeaveAfterLoop, ILVariable enumeratorVar, bool
+    // isAsync, Match m, ILInstruction resourceExpression)` (StatementBuilder.cs
     // line 729): the MoveNext condition match, the get_Current transformation
     // detection, the designation, and the ForeachStatement construction with the
     // optional leave / trailing statements block.
