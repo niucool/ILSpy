@@ -112,6 +112,21 @@ bool CSharpDecompiler::DecompileTypeToString(
     const Metadata::PartialTypeInfo* partialType =
         FindPartialTypeInfo(typeToken);
     bool rendered = false;
+    // The field declarations (the C# DecompileType's field members): the
+    // `Type name;` shape from GetFields + GetFieldSignature (the C#
+    // AstBuilder renders the modifiers and the initializer from the IL --
+    // the declaration-only stand-in renders the type and the name).
+    for (const auto& f : file.GetFields(typeToken)) {
+        auto fieldType = file.GetFieldSignature(f.Token);
+        std::string fieldTypeName =
+            fieldType ? IL::CSharpTypeName(fieldType)
+                      : std::string("var");
+        out += fieldTypeName;
+        out += ' ';
+        out += f.Name;
+        out += ";\n";
+        rendered = true;
+    }
     for (const auto& m : file.GetMethods(typeToken)) {
         if (m.RVA == 0) continue;
         if (partialType != nullptr &&
