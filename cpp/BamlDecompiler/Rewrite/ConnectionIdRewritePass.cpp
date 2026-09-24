@@ -255,12 +255,11 @@ bool MatchFieldAssignmentToken(const IL::ILInstruction* inst, std::uint32_t* fie
     if (!ldloc || !ldloc->Variable)
         return false;
     // The C# `t.Kind == VariableKind.Parameter && t.Index == 1` -- the
-    // second declared parameter (the target), whose C# index counts the
-    // declared params from 0 with `this` at -1. The port's ILVariable::Index
-    // counts `this` at 0 (the port convention; synthetic slots -1), so the
-    // second declared parameter of an instance method is index 2 here.
+    // second declared parameter (the target). The reader's ILVariable::Index
+    // counts the declared params from 0 with `this` at -1 (the gnhf 121
+    // alignment), so the target of an instance method is index 1 here too.
     if (ldloc->Variable->Kind != IL::VariableKind::Parameter
-        || ldloc->Variable->Index != 2)
+        || ldloc->Variable->Index != 1)
         return false;
     *fieldToken = ldflda->FieldToken;
     return true;
@@ -451,7 +450,7 @@ bool MatchEventSetterCreation(const ICompilation& typeSystem, const IL::Block* b
     auto* target = dynamic_cast<const IL::LdLoc*>(cast->Argument.get());
     if (!target || !target->Variable
         || target->Variable->Kind != IL::VariableKind::Parameter
-        || target->Variable->Index != 2)  // the C# Index == 1; see above
+        || target->Variable->Index != 1)  // the C# Index == 1; see above
         return false;
     auto* storedValue = dynamic_cast<const IL::LdLoc*>(addCall->Arguments[1].get());
     if (!storedValue || storedValue->Variable != stloc->Variable)
