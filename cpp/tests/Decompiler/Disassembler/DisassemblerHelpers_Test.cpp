@@ -232,6 +232,32 @@ TEST(DisassemblerHelpersEscapeTest, EscapeQuotesSingleQuotesWithBackslash) {
 	EXPECT_EQ(Escape("a'b"), "'a\\'b'");
 }
 
+TEST(DisassemblerHelpersEscapeTest, IsValidIdentifierChecksTheFirstCharacter) {
+	// The C# `identifier.All(IsValidIdentifierCharacter)` validates every
+	// character, the first one included: '~' (the C# destructor-name
+	// prefix) is not in _validNonLetterIdentifierCharacter, so "~X" is an
+	// invalid identifier even though it starts with a non-digit.
+	EXPECT_FALSE(IsValidIdentifier("~X"));
+	EXPECT_FALSE(IsValidIdentifier("~"));
+	EXPECT_FALSE(IsValidIdentifier("!X"));
+	// The valid non-letter starters stay valid (the C# char array:
+	// _ $ @ ? ` .).
+	EXPECT_TRUE(IsValidIdentifier("_X"));
+	EXPECT_TRUE(IsValidIdentifier("$X"));
+	EXPECT_TRUE(IsValidIdentifier("@X"));
+	EXPECT_TRUE(IsValidIdentifier("?X"));
+	EXPECT_TRUE(IsValidIdentifier("`X"));
+}
+
+TEST(DisassemblerHelpersEscapeTest, EscapeQuotesNamesStartingWithInvalidCharacters) {
+	// The STLCLR-style destructor names (`~X`1`) quote like the C#
+	// ILDasm spelling ('~X`1'); the sweep's Microsoft.VisualC.STLCLR.dll
+	// diff pinned the unquoted rendering.
+	EXPECT_EQ(Escape("~X"), "'~X'");
+	EXPECT_EQ(Escape("~"), "'~'");
+	EXPECT_EQ(Escape("~DequeEnumerator`1"), "'~DequeEnumerator`1'");
+}
+
 // ---------------------------------------------------------------------------
 // EscapeString
 // ---------------------------------------------------------------------------
