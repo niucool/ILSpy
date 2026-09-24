@@ -1071,9 +1071,13 @@ void MetadataMethod::DecodeSignature() const
         auto signature = decoder.DecodeMethodSignature(
             blob ? blob->data() : nullptr,
             blob ? blob->size() : 0, genericContext);
+        // GetParameters returns by value: materialize the row vector so the
+        // parameterHandles pointer stays valid for the whole DecodeSignature
+        // call (a pointer into the call temporary would dangle).
+        const auto parameterHandles = metadata->GetParameters(handle_);
         DecodedSignature decoded = DecodeSignature(
             module_, this, signature,
-            &metadata->GetParameters(handle_),
+            &parameterHandles,
             NullableContext(), module_.OptionsForEntity(this));
         returnType = std::move(decoded.ReturnType);
         parameters = std::move(decoded.Parameters);

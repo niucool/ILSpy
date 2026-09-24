@@ -122,7 +122,8 @@ ITypePtr ApplyAttributeTypeVisitor::ApplyAttributesToType(
                 if (const auto* values = FixedArgArray(argValue)) {
                     bool all = true;
                     for (const auto& v : *values) {
-                        if (std::any_cast<bool>(&v.Value()) == nullptr) {
+                        const std::any elementValue = v.Value();
+                        if (std::any_cast<bool>(&elementValue) == nullptr) {
                             all = false;
                             break;
                         }
@@ -157,7 +158,8 @@ ITypePtr ApplyAttributeTypeVisitor::ApplyAttributesToType(
                 if (const auto* values = FixedArgArray(argValue)) {
                     bool all = true;
                     for (const auto& v : *values) {
-                        if (std::any_cast<bool>(&v.Value()) == nullptr) {
+                        const std::any elementValue = v.Value();
+                        if (std::any_cast<bool>(&elementValue) == nullptr) {
                             all = false;
                             break;
                         }
@@ -238,7 +240,8 @@ ITypePtr ApplyAttributeTypeVisitor::ApplyAttributesToType(
                 if (const auto* values = FixedArgArray(argValue)) {
                     bool all = true;
                     for (const auto& v : *values) {
-                        const auto* b = std::any_cast<std::uint8_t>(&v.Value());
+                        const std::any elementValue = v.Value();
+                        const auto* b = std::any_cast<std::uint8_t>(&elementValue);
                         if (b == nullptr || *b > 2) {
                             all = false;
                             break;

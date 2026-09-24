@@ -1817,7 +1817,7 @@ MethodGroupConversion(const ICompilation& compilation, const CSharpConversions* 
 	// The C# `conversions: this` ports to the nullable pointer threaded from the dispatch (the
 	// per-compilation `CSharpConversions::Get` singleton there; the `OverloadResolution` ctor lazily
 	// resolves a null via `Get` itself).
-	auto or = rr.PerformOverloadResolution(
+	auto resolution = rr.PerformOverloadResolution(
 		compilation, args,
 		/*argumentNames*/ std::nullopt,
 		/*allowExtensionMethods*/ true,
@@ -1829,7 +1829,7 @@ MethodGroupConversion(const ICompilation& compilation, const CSharpConversions* 
 
 	// C# `if (or.FoundApplicableCandidate) { ... } else { return Conversion.None; }` -- the
 	// applicability gate: a resolution with no applicable candidate yields no conversion.
-	if (!or->FoundApplicableCandidate())
+	if (!resolution->FoundApplicableCandidate())
 		return Conversions::None();
 
 	// C# `IMethod method = (IMethod)or.GetBestCandidateWithSubstitutedTypeArguments();` -- the chosen
@@ -1838,7 +1838,7 @@ MethodGroupConversion(const ICompilation& compilation, const CSharpConversions* 
 	// is impossible for a real method group (the method lists hold methods), so a null result is
 	// the degenerate-stub shape whose documented safe fallback is `None` (the D516 convention).
 	const IMethod* method =
-		dynamic_cast<const IMethod*>(or->GetBestCandidateWithSubstitutedTypeArguments());
+		dynamic_cast<const IMethod*>(resolution->GetBestCandidateWithSubstitutedTypeArguments());
 	if (method == nullptr)
 		return Conversions::None();
 
@@ -1856,13 +1856,13 @@ MethodGroupConversion(const ICompilation& compilation, const CSharpConversions* 
 	// reported as the INVALID conversion carrying the chosen method, and so is a resolution whose
 	// chosen method is not delegate-compatible (the 3-arg private overload D531; the
 	// extension-method flag skips the chosen method's first `this` parameter).
-	bool isValid = !or->IsAmbiguous()
-	    && IsDelegateCompatible(compilation, *method, *invoke, or->IsExtensionMethodInvocation());
+	bool isValid = !resolution->IsAmbiguous()
+	    && IsDelegateCompatible(compilation, *method, *invoke, resolution->IsExtensionMethodInvocation());
 
 	// C# `bool delegateCapturesFirstArgument = or.IsExtensionMethodInvocation || !method.IsStatic;`
 	// -- the delegate-capture flag: an extension-method invocation captures the receiver as the
 	// delegate's first argument, and so does an instance method.
-	bool delegateCapturesFirstArgument = or->IsExtensionMethodInvocation() || !method->IsStatic();
+	bool delegateCapturesFirstArgument = resolution->IsExtensionMethodInvocation() || !method->IsStatic();
 
 	// C# `if (isValid) return Conversion.MethodGroupConversion(method, isVirtual,
 	// delegateCapturesFirstArgument); else return Conversion.InvalidMethodGroupConversion(method,

@@ -374,7 +374,11 @@ CustomAttributeDecoder::DecodeFixedArgumentType(Reader& signatureReader,
                 SkipType(genericContextReader);
                 num--;
             }
-            return DecodeFixedArgumentType(genericContextReader, Reader{},
+            // A fresh empty generic context: a nested generic-parameter
+            // decode throws BadImageFormatException rather than re-reading
+            // the outer context (the C# passes a default BlobReader here).
+            Reader emptyContext;
+            return DecodeFixedArgumentType(genericContextReader, emptyContext,
                 true);
         }
         default:

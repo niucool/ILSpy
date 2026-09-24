@@ -485,7 +485,7 @@ public:
 
     // The C# `private bool ShouldDisplayAsHex(long value, IType type)`: the
     // binary-numeric hex-literal gate.
-    bool ShouldDisplayAsHex(long long value, const TS::IType& type) const;
+    bool ShouldDisplayAsHex(std::int64_t value, const TS::IType& type) const;
 
     // The C# `private ResolveResult AdjustConstantToType(ResolveResult rr, IType
     // typeHint)`: the lossless constant re-typing (the 0/1 boolean, enum/char/

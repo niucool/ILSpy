@@ -275,8 +275,9 @@ TEST(SpecializedEventTest, CtorWiresSubstitution) {
     auto ev = std::make_shared<TestBaseEvent>("x", Int32(), nullptr, Compilation());
     SpecializedEvent se(ev, TypeParameterSubstitution(List({String()}), std::nullopt));
     EXPECT_FALSE(se.Substitution()->Equals(&TypeParameterSubstitution::Identity()));
-    EXPECT_TRUE(se.Substitution()->Equals(
-        &TypeParameterSubstitution(List({String()}), std::nullopt)));
+    const TypeParameterSubstitution sameArguments(
+        List({String()}), std::nullopt);
+    EXPECT_TRUE(se.Substitution()->Equals(&sameArguments));
 }
 
 // ---------------------------------------------------------------------------

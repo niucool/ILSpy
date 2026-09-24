@@ -289,8 +289,9 @@ TEST(SpecializedFieldTest, CtorWiresSubstitution) {
     SpecializedField sf(field,
                         TypeParameterSubstitution(List({String()}), std::nullopt));
     EXPECT_FALSE(sf.Substitution()->Equals(&TypeParameterSubstitution::Identity()));
-    EXPECT_TRUE(sf.Substitution()->Equals(
-        &TypeParameterSubstitution(List({String()}), std::nullopt)));
+    const TypeParameterSubstitution sameArguments(
+        List({String()}), std::nullopt);
+    EXPECT_TRUE(sf.Substitution()->Equals(&sameArguments));
 }
 
 // ---------------------------------------------------------------------------

@@ -189,7 +189,8 @@ TEST(DefaultParameterTest, FullCtorStoresEveryField)
     EXPECT_TRUE(p.IsParams());
     EXPECT_TRUE(p.IsOptional());
     EXPECT_TRUE(p.GetAttributes().empty());
-    const std::int32_t* value = std::any_cast<std::int32_t>(&p.GetConstantValue(false));
+    const std::any constantValue = p.GetConstantValue(false);
+    const std::int32_t* value = std::any_cast<std::int32_t>(&constantValue);
     ASSERT_NE(value, nullptr);
     EXPECT_EQ(*value, 42);
 }

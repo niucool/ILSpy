@@ -21,6 +21,8 @@
 
 #include "Decompiler/Util/StringComparers.hpp"
 
+#include <cstdint>
+
 namespace ILSpy::Decompiler::Util {
 namespace {
 

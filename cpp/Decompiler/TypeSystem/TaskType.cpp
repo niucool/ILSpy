@@ -82,7 +82,8 @@ bool IsCustomTask(const IType& type, ITypePtr& builderType)
 	// The pointer-form `std::any_cast` returns null on a type mismatch (the safe faithful
 	// fallback for a divergent state the C# would `InvalidCastException` on); the guard
 	// then returns false with `builderType` already null above.
-	const ITypePtr* builderPtr = std::any_cast<ITypePtr>(&arg.Value());
+	const std::any argValue = arg.Value();
+	const ITypePtr* builderPtr = std::any_cast<ITypePtr>(&argValue);
 	if (builderPtr == nullptr || *builderPtr == nullptr)
 		return false;
 	builderType = *builderPtr;

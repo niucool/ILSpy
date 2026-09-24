@@ -99,6 +99,7 @@ TEST(DebugDirectoryTest, MscorlibDebugDirectory) {
 #if defined(_WIN32)
     std::string path = MscorlibPath();
 #else
+    std::string path;
     GTEST_SKIP() << "exact debug-directory bytes are Windows-build-specific";
 #endif
     MetadataFile file(path);
@@ -120,6 +121,7 @@ TEST(DebugDirectoryTest, MscorlibCodeViewData) {
 #if defined(_WIN32)
     std::string path = MscorlibPath();
 #else
+    std::string path;
     GTEST_SKIP() << "exact debug-directory bytes are Windows-build-specific";
 #endif
     MetadataFile file(path);
@@ -143,6 +145,7 @@ TEST(DebugDirectoryTest, SystemDllDebugDirectoryAndCodeView) {
 #if defined(_WIN32)
     std::string path = SystemPath();
 #else
+    std::string path;
     GTEST_SKIP() << "exact debug-directory bytes are Windows-build-specific";
 #endif
     MetadataFile file(path);

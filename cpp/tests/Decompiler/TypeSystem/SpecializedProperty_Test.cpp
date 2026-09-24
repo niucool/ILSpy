@@ -319,8 +319,9 @@ TEST(SpecializedPropertyTest, CtorWiresSubstitution) {
     auto prop = std::make_shared<TestBaseProperty>("x", Int32(), nullptr, Compilation());
     SpecializedProperty sp(prop, TypeParameterSubstitution(List({String()}), std::nullopt));
     EXPECT_FALSE(sp.Substitution()->Equals(&TypeParameterSubstitution::Identity()));
-    EXPECT_TRUE(sp.Substitution()->Equals(
-        &TypeParameterSubstitution(List({String()}), std::nullopt)));
+    const TypeParameterSubstitution sameArguments(
+        List({String()}), std::nullopt);
+    EXPECT_TRUE(sp.Substitution()->Equals(&sameArguments));
 }
 
 // ---------------------------------------------------------------------------

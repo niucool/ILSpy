@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <iterator>
 
 namespace ILSpy::Decompiler::Util {
 namespace {

@@ -303,9 +303,9 @@ TEST(CallBuilderStaticsTest, IsNullConditionalMatrix)
     EXPECT_TRUE(CSharp::CallBuilder::IsNullConditional(conditional));
 
     auto* otherIdent = new Syntax::IdentifierExpression("x");
-    auto* not = new Syntax::UnaryOperatorExpression(otherIdent,
+    auto* notOp = new Syntax::UnaryOperatorExpression(otherIdent,
                                                     Syntax::UnaryOperatorType::Not);
-    EXPECT_FALSE(CSharp::CallBuilder::IsNullConditional(not));
+    EXPECT_FALSE(CSharp::CallBuilder::IsNullConditional(notOp));
 
     auto* plain = new Syntax::IdentifierExpression("x");
     EXPECT_FALSE(CSharp::CallBuilder::IsNullConditional(plain));

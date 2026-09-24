@@ -352,7 +352,7 @@ private:
     // semantics -- the C# SignatureDecoder reads the modifiers into a list
     // and folds them in reverse).
     TType FoldModifiers(
-        std::vector<std::pair<TType, bool>>& modifiers,
+        std::vector<std::pair<TType, bool>>&& modifiers,
         TType base);
 };
 
@@ -558,7 +558,7 @@ SignatureTypeProviderDecoder<TProvider>::DecodeTypeOrByRef() {
 template <typename TProvider>
 typename SignatureTypeProviderDecoder<TProvider>::TType
 SignatureTypeProviderDecoder<TProvider>::FoldModifiers(
-        std::vector<std::pair<TType, bool>>& modifiers,
+        std::vector<std::pair<TType, bool>>&& modifiers,
         TType base) {
     for (auto it = modifiers.rbegin(); it != modifiers.rend(); ++it) {
         base = provider_.GetModifiedType(std::move(it->first), std::move(base),

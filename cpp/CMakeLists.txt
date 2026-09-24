@@ -48,6 +48,15 @@ else()
     message(FATAL_ERROR "ilspy: miniz target not found after find_package succeeded")
 endif()
 
+# GCC 15 enables -Wchanges-meaning as an error by default. The port's
+# accessor-named-after-its-enum-type convention (the C# property shape,
+# e.g. ISymbol::SymbolKind()) trips it in every TU that includes the
+# TypeSystem headers, so disable it for every target; older GCC and Clang
+# silently ignore the unknown negative form.
+if(NOT MSVC)
+    add_compile_options(-Wno-changes-meaning)
+endif()
+
 # The single aggregate static library. Subdirectories attach sources to it.
 add_library(ilspy STATIC)
 add_library(ILSpy::ilspy ALIAS ilspy)

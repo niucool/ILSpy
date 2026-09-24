@@ -142,7 +142,8 @@ TEST(XContainerTest, EmptyStringContentDeepEquals)
 	Xml::XDocument withEmptyString;
 	withEmptyString.Add(std::string(""));
 	EXPECT_FALSE(Xml::XNode::DeepEquals(&empty, &withEmptyString));
-	EXPECT_TRUE(Xml::XNode::DeepEquals(&empty, &Xml::XDocument()));
+	Xml::XDocument emptyOther;
+	EXPECT_TRUE(Xml::XNode::DeepEquals(&empty, &emptyOther));
 
 	// A whitespace-string-content document equals one with a materialized
 	// XText of the same text.

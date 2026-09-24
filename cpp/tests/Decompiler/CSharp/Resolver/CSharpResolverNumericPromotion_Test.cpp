@@ -265,7 +265,8 @@ TEST(CSharpResolverNumericPromotionTest, MinusUInt32ConstantFoldsToLongConstant)
     const ConstantResolveResult* constant = AsConstant(result);
     ASSERT_NE(constant, nullptr);
     EXPECT_EQ(GetTypeCode(result->Type()), TypeCode::Int64);
-    const std::int64_t* value = std::any_cast<std::int64_t>(&constant->ConstantValue());
+    const std::any constantValue = constant->ConstantValue();
+    const std::int64_t* value = std::any_cast<std::int64_t>(&constantValue);
     ASSERT_NE(value, nullptr);
     EXPECT_EQ(*value, std::int64_t{5});
 }
@@ -409,7 +410,8 @@ TEST(CSharpResolverNumericPromotionTest, CastToFoldableConstantFoldsOverTarget) 
     const ConstantResolveResult* constant = AsConstant(result);
     ASSERT_NE(constant, nullptr);
     EXPECT_EQ(GetTypeCode(result->Type()), TypeCode::Int64);
-    const std::int64_t* value = std::any_cast<std::int64_t>(&constant->ConstantValue());
+    const std::any castConstantValue = constant->ConstantValue();
+    const std::int64_t* value = std::any_cast<std::int64_t>(&castConstantValue);
     ASSERT_NE(value, nullptr);
     EXPECT_EQ(*value, std::int64_t{5});
 }

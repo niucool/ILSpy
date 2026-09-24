@@ -1776,7 +1776,7 @@ ExpressionWithResolveResult ExpressionBuilder::GetDefaultValueExpression(TS::ITy
     }
 }
 
-bool ExpressionBuilder::ShouldDisplayAsHex(long long value, const TS::IType& type) const
+bool ExpressionBuilder::ShouldDisplayAsHex(std::int64_t value, const TS::IType& type) const
 {
     if (value >= 0 && value <= 9)
         return false;
@@ -2717,7 +2717,7 @@ std::optional<TranslatedExpression> ExpressionBuilder::HandlePointerSubtraction(
         return std::nullopt;
     // First, attempt to parse the 'sizeof' on the RHS
     const TS::IType* elementType = nullptr;
-    long long elementSize = 0;
+    std::int64_t elementSize = 0;
     if (MatchLdcI(inst.Right.get(), elementSize))
     {
         // OK, might be pointer subtraction if the element size matches
@@ -2895,7 +2895,7 @@ TranslatedExpression ExpressionBuilder::HandleBinaryNumeric(
         if (left.ResolveResult() != nullptr
             && left.ResolveResult()->ConstantValue().has_value())
         {
-            long long value = std::any_cast<long long>(::ILSpy::Decompiler::Util::Cast(
+            std::int64_t value = std::any_cast<std::int64_t>(::ILSpy::Decompiler::Util::Cast(
                 TS::TypeCode::Int64, left.ResolveResult()->ConstantValue(), false));
             left = WithILInstruction(
                 ConvertConstantValue(SharedResolveResultAnnotation(*left.Expression()),
@@ -2905,7 +2905,7 @@ TranslatedExpression ExpressionBuilder::HandleBinaryNumeric(
         if (right.ResolveResult() != nullptr
             && right.ResolveResult()->ConstantValue().has_value())
         {
-            long long value = std::any_cast<long long>(::ILSpy::Decompiler::Util::Cast(
+            std::int64_t value = std::any_cast<std::int64_t>(::ILSpy::Decompiler::Util::Cast(
                 TS::TypeCode::Int64, right.ResolveResult()->ConstantValue(), false));
             right = WithILInstruction(
                 ConvertConstantValue(SharedResolveResultAnnotation(*right.Expression()),

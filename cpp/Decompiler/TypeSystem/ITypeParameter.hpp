@@ -234,8 +234,13 @@ public:
     // semantics) and `Nullability` (virtual; the final overrider must live here so
     // unqualified lookup does not see both paths). Declaring a member in this
     // class stops the lookup from reaching EITHER base copy (the D381 diamond
-    // precedent applied to inherited members).
-    using NullabilityAnnotatedType::Equals;
+    // precedent applied to inherited members). `Equals` is a REAL member (not a
+    // using-declaration) because the member call site's implicit object must
+    // convert to `const IType&`, which is ambiguous through the two `IType`
+    // subobjects for a member inherited from `IType` itself.
+    bool Equals(const IType& other) const {
+        return NullabilityAnnotatedType::Equals(other);
+    }
     ::ILSpy::Decompiler::TypeSystem::Nullability Nullability() const noexcept override {
         return NullabilityAnnotatedType::Nullability();
     }

@@ -255,7 +255,7 @@ inline constexpr const char* kConnIdGoldXamlLines[] = {
 
 
 // The gold render with the CRLF line endings the XElement.ToString render
-// uses (the raw-string form would lose the  in translation phase 1).
+// uses (the raw-string form would lose the \r in translation phase 1).
 inline std::string ConnIdGoldXaml() {
     std::string result;
     for (const char* const* line = kConnIdGoldXamlLines; *line; ++line) {

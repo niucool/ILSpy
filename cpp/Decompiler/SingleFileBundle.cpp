@@ -21,6 +21,7 @@
 
 #include "Decompiler/SingleFileBundle.hpp"
 
+#include <cstring>
 #include <stdexcept>
 #include <string>
 

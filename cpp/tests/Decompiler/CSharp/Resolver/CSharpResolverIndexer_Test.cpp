@@ -626,7 +626,8 @@ TEST(CSharpResolverIndexerTest, AdjustArrayAccessArgumentsConstantFolds)
     auto* constant = dynamic_cast<const ConstantResolveResult*>(arguments[0].get());
     ASSERT_NE(constant, nullptr);
     EXPECT_EQ(&constant->Type(), f.int32.get());
-    const std::int32_t* value = std::any_cast<std::int32_t>(&constant->ConstantValue());
+    const std::any constantValue = constant->ConstantValue();
+    const std::int32_t* value = std::any_cast<std::int32_t>(&constantValue);
     ASSERT_NE(value, nullptr);
     EXPECT_EQ(*value, 5);
 }

@@ -2241,7 +2241,8 @@ bool CSharpResolver::IsSigned(
                 // (nullptr on a held-type mismatch or an empty box, the safe faithful
                 // fallback for a shape the C# would throw InvalidCastException on: the
                 // mismatched or null box counts as signed).
-                const std::int32_t* v = std::any_cast<std::int32_t>(&rr->ConstantValue());
+                const std::any constantValue = rr->ConstantValue();
+                const std::int32_t* v = std::any_cast<std::int32_t>(&constantValue);
                 if (v != nullptr && *v >= 0)
                     return false;
             }
@@ -2250,7 +2251,8 @@ bool CSharpResolver::IsSigned(
             // for long, consider implicit constant expression conversion
             if (rr->IsCompileTimeConstant())
             {
-                const std::int64_t* v = std::any_cast<std::int64_t>(&rr->ConstantValue());
+                const std::any constantValue = rr->ConstantValue();
+                const std::int64_t* v = std::any_cast<std::int64_t>(&constantValue);
                 if (v != nullptr && *v >= 0)
                     return false;
             }
@@ -2621,12 +2623,12 @@ std::unique_ptr<OverloadResolution> CSharpResolver::CreateOverloadResolution(
     // conversions)` -- the resolver's `conversions` field is never null (both ctors
     // resolve it through `CSharpConversions::Get`), so the port passes the instance's
     // reference directly (no `?? Get(compilation)` fallback needed here).
-    auto or = std::make_unique<OverloadResolution>(
+    auto resolution = std::make_unique<OverloadResolution>(
         compilation_, std::move(arguments), std::move(argumentNames),
         std::move(typeArguments), &conversions_);
     // The C# `or.CheckForOverflow = checkForOverflow`.
-    or->CheckForOverflow() = checkForOverflow_;
-    return or;
+    resolution->CheckForOverflow() = checkForOverflow_;
+    return resolution;
 }
 
 // ---- ResolveUnaryOperator region (CSharpResolver.cs lines 326-530) ------------------------
@@ -3971,7 +3973,8 @@ CSharpResolver::ResolveConditional(
             // The C# `bool? val = condition.ConstantValue as bool?` -- the pointer-form
             // `any_cast` yields null for an empty any or a non-bool held type (the C#
             // `as` yields null), so neither branch fires.
-            const bool* val = std::any_cast<bool>(&condition->ConstantValue());
+            const std::any conditionValue = condition->ConstantValue();
+            const bool* val = std::any_cast<bool>(&conditionValue);
             if (val != nullptr && *val)
                 return trueExpression;
             else if (val != nullptr && !*val)

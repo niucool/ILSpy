@@ -3314,11 +3314,11 @@ TEST(ExpressionTransforms, RunIfNullableLiftRejectsTwoNullableBitAndCondition) {
     auto fallback = MakeLocal("fallback", MakeNullableOf(KnownTypeCode::Boolean));
     auto result = MakeLocal("result", MakeNullableOf(KnownTypeCode::Boolean));
     // condition: v1.HasValue & v2.HasValue (a BitAnd(I4) of two HasValue calls)
-    auto bitand = std::make_unique<BinaryNumericInstruction>(
+    auto bitAnd = std::make_unique<BinaryNumericInstruction>(
         MakeHasValueCall(v1), MakeHasValueCall(v2),
         BinaryNumericOperator::BitAnd, StackType::I4);
     auto iff = std::make_unique<IfInstruction>(
-        std::move(bitand),
+        std::move(bitAnd),
         std::make_unique<LdLoc>(v1),            // true arm: ldloc v1
         std::make_unique<LdLoc>(fallback));    // false arm: ldloc fallback
     auto fn = MakeFnWithBlock({result, v1, v2, fallback});
