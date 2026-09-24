@@ -167,6 +167,8 @@ std::unique_ptr<SwitchSection> MakeSection(Util::LongSet labels,
 // Forward declarations (the arms are defined after Run in this file).
 bool SimplifyCascadingIfStatements(Block& block, int& i,
                                    ILTransformContext& context);
+bool SimplifyCSharp1CascadingIfStatements(Block& block, int& i,
+                                          ILTransformContext& context);
 bool MatchRoslynSwitchOnString(Block& block, int& i, ILTransformContext& context);
 bool MatchStringEqualityComparisonFor(ILInstruction* condition,
                                       ILVariable* variable,
@@ -187,6 +189,10 @@ void SwitchOnStringTransform::Run(ILFunction& function,
         if (block->IncomingEdgeCount == 0) continue;
         bool changed = false;
         for (int i = static_cast<int>(block->Instructions.size()) - 1; i >= 0; i--) {
+            if (SimplifyCSharp1CascadingIfStatements(*block, i, context)) {
+                changed = true;
+                continue;
+            }
             if (SimplifyCascadingIfStatements(*block, i, context)) {
                 changed = true;
                 continue;
@@ -863,6 +869,8 @@ bool MatchRoslynSwitchOnString(Block& block, int& i, ILTransformContext& context
 
 bool SimplifyCascadingIfStatements(Block& block, int& i,
                                    ILTransformContext& context);
+bool SimplifyCSharp1CascadingIfStatements(Block& block, int& i,
+                                          ILTransformContext& context);
 
 // Port of SimplifyCascadingIfStatements: the Roslyn cascading-if shape
 //   if (op_Equality(ldloc switchValueVar, ldstr value)) br firstBlock
@@ -1173,6 +1181,217 @@ bool SimplifyCascadingIfStatementsImpl(Block& block, int& i,
 bool SimplifyCascadingIfStatements(Block& block, int& i,
                                    ILTransformContext& context) {
     return SimplifyCascadingIfStatementsImpl(block, i, context);
+}
+
+
+// ---- The C#1 string.IsInterned cascading-if arm ---------------------------
+
+
+// The C# `context.TypeSystem.FindType(code)`: the non-null const IType& is
+// wrapped via shared_from_this (the compilation-owned-reference convention).
+// Returns null when the context carries no type system.
+namespace {
+TypeSystem::ITypePtr FindType(TypeSystem::ICompilation* compilation,
+                              TypeSystem::KnownTypeCode code) {
+    if (compilation == nullptr) return nullptr;
+    return const_cast<TypeSystem::IType&>(compilation->FindType(code))
+        .shared_from_this();
+}
+} // namespace
+
+// The C# IsIsInternedCall: call String::IsInterned(arg) (the resolved-Method
+// form or the reader's stand-in).
+bool IsIsInternedCall(ILInstruction* inst, ILInstruction*& argument) {
+    argument = nullptr;
+    auto* call = dynamic_cast<Call*>(inst);
+    if (call == nullptr || call->Arguments.size() != 1) return false;
+    if (call->Method != nullptr) {
+        TS::ITypePtr declaring = call->Method->DeclaringType();
+        if (!call->Method->IsStatic() || declaring == nullptr ||
+            !(declaring->Namespace() == "System" &&
+              declaring->Name() == "String") ||
+            call->Method->Name() != "IsInterned") {
+            return false;
+        }
+    } else if (call->MethodName != "System.String::IsInterned") {
+        return false;
+    }
+    argument = call->Arguments[0].get();
+    return true;
+}
+
+// The C# SimplifyCSharp1CascadingIfStatements: the C# 2.0 compiler's shape
+//   stloc switchValueVar(ldloc temp)
+//   if (comp(ldloc temp == ldnull)) br defaultOrNullBlock
+//   br isInternedBlock
+//   isInternedBlock: stloc switchValueVarCopy(call IsInterned(ldloc switchValueVar));
+//                    if (comp(copy == ldstr caseN)) br caseBlockN; br next
+// folded into a SwitchInstruction over the interned-copy variable.
+bool SimplifyCSharp1CascadingIfStatementsImpl(Block& block, int& i,
+                                              ILTransformContext& context) {
+    auto& instructions = block.Instructions;
+    if (i < 1) return false;
+    if (i + 1 >= static_cast<int>(instructions.size())) return false;
+    ILInstruction* condition = nullptr;
+    ILInstruction* defaultBlockJump = nullptr;
+    if (!MatchIfInstruction(instructions[i].get(), condition,
+                            defaultBlockJump)) {
+        return false;
+    }
+    Block* isInternedBlock = nullptr;
+    if (!MatchBranch(instructions[i + 1].get(), isInternedBlock)) return false;
+    Block* defaultOrNullBlock = nullptr;
+    if (!MatchBranch(defaultBlockJump, defaultOrNullBlock)) return false;
+    ILInstruction* tempLoad = nullptr;
+    if (!MatchCompEqualsNull(condition, tempLoad)) return false;
+    ILVariable* temp = nullptr;
+    if (!MatchLdLoc(tempLoad, temp)) return false;
+    if (!(temp->Kind == VariableKind::StackSlot && temp->LoadCount == 2)) {
+        return false;
+    }
+    ILVariable* switchValueVar = nullptr;
+    ILInstruction* switchValue = nullptr;
+    StLoc* switchValueOwner = nullptr;
+    if (!MatchStLoc(instructions[i - 1].get(), switchValueVar, switchValue)) {
+        return false;
+    }
+    switchValueOwner = dynamic_cast<StLoc*>(instructions[i - 1].get());
+    {
+        ILVariable* loaded = nullptr;
+        if (!(switchValue != nullptr && MatchLdLoc(switchValue, loaded) &&
+              loaded == temp)) {
+            return false;
+        }
+    }
+    // match isInternedBlock:
+    // stloc switchValueVarCopy(call IsInterned(ldloc switchValueVar))
+    if (isInternedBlock->IncomingEdgeCount != 1 ||
+        static_cast<int>(isInternedBlock->Instructions.size()) != 3) {
+        return false;
+    }
+    ILVariable* switchValueVarCopy = nullptr;
+    ILInstruction* internedArg = nullptr;
+    {
+        ILInstruction* arg = nullptr;
+        if (!MatchStLoc(isInternedBlock->Instructions[0].get(),
+                        switchValueVarCopy, arg)) {
+            return false;
+        }
+        if (!IsIsInternedCall(arg, internedArg)) return false;
+        ILVariable* loaded = nullptr;
+        if (!MatchLdLoc(internedArg, loaded) || loaded != switchValueVar) {
+            return false;
+        }
+    }
+    switchValueVar = switchValueVarCopy;
+    int conditionOffset = 1;
+    Block* currentCaseBlock = isInternedBlock;
+    struct Value {
+        std::string value;
+        ILInstruction* inst = nullptr;
+    };
+    std::vector<Value> values;
+    // Each case starts with:
+    // if (comp(ldloc switchValueVar == ldstr "case label")) br caseBlock
+    // br currentCaseBlock
+    while (true) {
+        if (conditionOffset >=
+            static_cast<int>(currentCaseBlock->Instructions.size())) {
+            break;
+        }
+        ILInstruction* caseCondition = nullptr;
+        ILInstruction* caseBlockJump = nullptr;
+        if (!MatchIfInstruction(
+                currentCaseBlock->Instructions[conditionOffset].get(),
+                caseCondition, caseBlockJump)) {
+            break;
+        }
+        if (static_cast<int>(currentCaseBlock->Instructions.size()) !=
+            conditionOffset + 2) {
+            break;
+        }
+        // The C# MatchCompEquals: a comp(left == right) equality comparison.
+        auto* comp = dynamic_cast<Comp*>(caseCondition);
+        if (comp == nullptr || comp->Kind != ComparisonKind::Equality) break;
+        ILInstruction* left = comp->Left.get();
+        ILInstruction* right = comp->Right.get();
+        ILVariable* leftVar = nullptr;
+        std::string value;
+        if (!MatchLdLoc(left, leftVar) || leftVar != switchValueVar) break;
+        if (!MatchLdStr(right, value)) break;
+        Block* caseBlock = nullptr;
+        BlockContainer* leaveTarget = nullptr;
+        bool jumpHandled =
+            MatchBranch(caseBlockJump, caseBlock) ||
+            (MatchLeave(caseBlockJump, leaveTarget) &&
+             leaveTarget ==
+                 dynamic_cast<BlockContainer*>(currentCaseBlock->Parent));
+        if (!jumpHandled) break;
+        std::unique_ptr<ILInstruction> jumpCloneOwned = caseBlockJump->Clone();
+        ILInstruction* jumpClone = jumpCloneOwned.release();
+        Block* nextBlock = nullptr;
+        if (!MatchBranch(
+                currentCaseBlock->Instructions[conditionOffset + 1].get(),
+                nextBlock)) {
+            break;
+        }
+        conditionOffset = 0;
+        values.push_back({value, jumpClone});
+        currentCaseBlock = nextBlock;
+    }
+    if (static_cast<int>(values.size()) != switchValueVarCopy->LoadCount) {
+        return false;
+    }
+    context.StepOnce("SimplifyCSharp1CascadingIfStatements");
+    // switch contains case null:
+    if (currentCaseBlock != defaultOrNullBlock) {
+        values.push_back({std::string(), new Branch(defaultOrNullBlock)});
+    }
+    // The sections: one label per value; the default is the inverted
+    // complement of the used labels, branching to currentCaseBlock. The
+    // StringToInt argument OWNS the stloc's value: the C# passes the
+    // MatchStLoc out-value (a reference to the stloc's child) and the stloc
+    // is removed right after; the port MOVES the child out of the stloc
+    // (releasing the unique_ptr) before the RemoveRange destroys it.
+    std::unique_ptr<ILInstruction> argument;
+    if (switchValueOwner != nullptr && switchValueOwner->Value != nullptr) {
+        argument = std::move(switchValueOwner->Value);
+    }
+    // The C# `new StringToInt(switchValue, values.SelectArray(...),
+    // context.TypeSystem.FindType(KnownTypeCode.String))` -- the StringToInt
+    // node wraps the switch value; the map is (key, index) pairs.
+    auto stringToInt = std::make_unique<StringToInt>(
+        std::move(argument),
+        FindType(context.TypeSystem, TS::KnownTypeCode::String));
+    for (std::size_t idx = 0; idx < values.size(); idx++) {
+        stringToInt->Map.emplace_back(values[idx].value,
+                                      static_cast<int>(idx));
+    }
+    auto newSwitch = std::make_unique<SwitchInstruction>(std::move(stringToInt));
+    for (std::size_t idx = 0; idx < values.size(); idx++) {
+        newSwitch->Sections.push_back(
+            MakeSection(Util::LongSet(static_cast<long long>(idx)),
+                        std::unique_ptr<ILInstruction>(values[idx].inst)));
+    }
+    {
+        Util::LongSet labels(
+            Util::LongInterval(0, static_cast<long long>(values.size())));
+        newSwitch->Sections.push_back(
+            MakeSection(labels.Invert(),
+                        std::make_unique<Branch>(currentCaseBlock)));
+    }
+    // Emit: replace the if at i; remove the br at i+1 and the stloc at i-1.
+    newSwitch->StartILOffset = instructions[i]->StartILOffset;
+    ReplaceAt(block, i, std::move(newSwitch));
+    RemoveRange(block, i + 1, 1);
+    RemoveRange(block, i - 1, 1);
+    i--;
+    return true;
+}
+
+bool SimplifyCSharp1CascadingIfStatements(Block& block, int& i,
+                                          ILTransformContext& context) {
+    return SimplifyCSharp1CascadingIfStatementsImpl(block, i, context);
 }
 
 } // namespace ILSpy::Decompiler::IL

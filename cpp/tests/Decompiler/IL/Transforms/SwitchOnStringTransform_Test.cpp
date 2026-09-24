@@ -34,6 +34,7 @@
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
@@ -326,6 +327,116 @@ TEST(SwitchOnStringTransformTest, MismatchedCaseVariableIsRejected)
     ASSERT_EQ(fx.head->Instructions.size(), 2u)
         << "the mismatched-variable shape stays untouched";
     EXPECT_EQ(fx.head->Instructions[0]->Op, IL::OpCode::StLoc);
+}
+
+
+// ---- The C#1 string.IsInterned cascading-if arm ---------------------------
+
+TEST(SwitchOnStringTransformTest, CSharp1IsInternedChainConvertsToSwitch)
+{
+    auto stringType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
+    auto temp = std::make_shared<IL::ILVariable>(IL::VariableKind::StackSlot,
+                                                 stringType);
+    temp->Name = "temp";
+    auto switchValueVar = MakeLocal("s", stringType);
+    auto switchValueVarCopy = MakeLocal("s2", stringType);
+    auto fn = std::make_unique<IL::ILFunction>();
+    auto container = std::make_unique<IL::BlockContainer>();
+    fn->Variables.push_back(temp);
+    fn->Variables.push_back(switchValueVar);
+    fn->Variables.push_back(switchValueVarCopy);
+
+    auto exit = std::make_unique<IL::Block>();
+    exit->Kind = IL::BlockKind::ControlFlow;
+    exit->Add(std::make_unique<IL::Leave>(container.get()));
+    IL::Block* exitPtr = exit.get();
+    container->Blocks.push_back(std::move(exit));
+
+    auto bodyA = std::make_unique<IL::Block>();
+    bodyA->Kind = IL::BlockKind::ControlFlow;
+    bodyA->Add(std::make_unique<IL::Leave>(container.get()));
+    IL::Block* bodyAPtr = bodyA.get();
+    container->Blocks.push_back(std::move(bodyA));
+
+    auto bodyB = std::make_unique<IL::Block>();
+    bodyB->Kind = IL::BlockKind::ControlFlow;
+    bodyB->Add(std::make_unique<IL::Leave>(container.get()));
+    IL::Block* bodyBPtr = bodyB.get();
+    container->Blocks.push_back(std::move(bodyB));
+
+    // The IsInterned block: stloc copy(IsInterned(ldloc s));
+    // if (comp(copy == ldstr "a")) br caseA; br caseHeader2.
+    auto isInternedBlock = std::make_unique<IL::Block>();
+    isInternedBlock->Kind = IL::BlockKind::ControlFlow;
+    auto internedCall = std::make_unique<IL::Call>(
+        "System.String::IsInterned");
+    internedCall->Arguments.push_back(std::make_unique<IL::LdLoc>(switchValueVar));
+    isInternedBlock->Add(
+        std::make_unique<IL::StLoc>(switchValueVarCopy, std::move(internedCall)));
+    auto eqA = std::make_unique<IL::Comp>(
+        std::make_unique<IL::LdLoc>(switchValueVarCopy),
+        std::make_unique<IL::LdStr>("a"), IL::ComparisonKind::Equality, false);
+    auto ifA = std::make_unique<IL::IfInstruction>(
+        std::move(eqA), std::make_unique<IL::Branch>(bodyAPtr));
+    isInternedBlock->Add(std::move(ifA));
+    isInternedBlock->Add(std::make_unique<IL::Branch>(nullptr));  // set below
+    IL::Block* isInternedPtr = isInternedBlock.get();
+    container->Blocks.push_back(std::move(isInternedBlock));
+
+    // caseHeader2: if (comp(copy == ldstr "b")) br caseB; br exit.
+    auto caseHeader2 = std::make_unique<IL::Block>();
+    caseHeader2->Kind = IL::BlockKind::ControlFlow;
+    auto eqB = std::make_unique<IL::Comp>(
+        std::make_unique<IL::LdLoc>(switchValueVarCopy),
+        std::make_unique<IL::LdStr>("b"), IL::ComparisonKind::Equality, false);
+    auto ifB = std::make_unique<IL::IfInstruction>(
+        std::move(eqB), std::make_unique<IL::Branch>(bodyBPtr));
+    caseHeader2->Add(std::move(ifB));
+    caseHeader2->Add(std::make_unique<IL::Branch>(exitPtr));
+    IL::Block* caseHeader2Ptr = caseHeader2.get();
+    container->Blocks.push_back(std::move(caseHeader2));
+
+    // The switch block: stloc s(ldloc temp);
+    // if (comp(ldloc temp == ldnull)) br exit; br isInterned.
+    auto head = std::make_unique<IL::Block>();
+    head->Kind = IL::BlockKind::ControlFlow;
+    head->Add(std::make_unique<IL::StLoc>(
+        switchValueVar, std::make_unique<IL::LdLoc>(temp)));
+    auto nullComp = std::make_unique<IL::Comp>(
+        std::make_unique<IL::LdLoc>(temp), std::make_unique<IL::LdNull>(),
+        IL::ComparisonKind::Equality, false);
+    head->Add(std::make_unique<IL::IfInstruction>(
+        std::move(nullComp), std::make_unique<IL::Branch>(exitPtr)));
+    head->Add(std::make_unique<IL::Branch>(isInternedPtr));
+    IL::Block* headPtr = head.get();
+    container->Blocks.push_back(std::move(head));
+
+    // Wire the IsInterned block's trailing branch to caseHeader2.
+    static_cast<IL::Branch*>(isInternedPtr->Instructions[2].get())
+        ->TargetBlock = caseHeader2Ptr;
+    // The default body of the eventual switch: caseHeader2 is the chain's
+    // end target, matching the C# currentCaseBlock.
+
+    fn->Body = std::move(container);
+    IL::RecomputeIncomingEdgeCounts(*fn);
+    // The head is the container entry: the implicit incoming edge is set
+    // AFTER the branch-based recompute (which zeroes it).
+    headPtr->IncomingEdgeCount = 1;
+    IL::ComputeVariableUsage(*fn);
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.SwitchStatementOnString = true;
+    IL::SwitchOnStringTransform transform;
+    transform.Run(*fn, ctx);
+
+    // The head's if folds into a SwitchInstruction over a StringToInt of the
+    // interned copy variable; the stloc and the br are gone.
+    ASSERT_EQ(headPtr->Instructions.size(), 1u);
+    auto* sw = dynamic_cast<IL::SwitchInstruction*>(headPtr->Instructions[0].get());
+    ASSERT_NE(sw, nullptr) << "the IsInterned chain folds into a switch";
+    auto* stringToInt = dynamic_cast<IL::StringToInt*>(sw->Value.get());
+    ASSERT_NE(stringToInt, nullptr);
+    EXPECT_EQ(stringToInt->Map.size(), 2u);
 }
 
 } // namespace
