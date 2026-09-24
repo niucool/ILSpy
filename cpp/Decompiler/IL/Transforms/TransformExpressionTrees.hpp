@@ -183,7 +183,7 @@ public:
     // IMember)`: the ldmembertoken [+ ldtoken type] argument shapes.
     static bool MatchFromHandleParameterList(
         Call* call,
-        std::shared_ptr<const ::ILSpy::Decompiler::TypeSystem::IMethod>&
+        std::shared_ptr<const ::ILSpy::Decompiler::TypeSystem::IMember>&
             member);
 
     // The C# `bool MatchArgumentList(ILInstruction, out IList<ILInstruction>)`:
@@ -201,6 +201,16 @@ public:
         const std::vector<ILInstruction*>& arguments,
         const ::ILSpy::Decompiler::TypeSystem::IMethod& method,
         std::vector<std::function<std::unique_ptr<ILInstruction>()>>& out);
+
+    // The C# `(Func<ILInstruction>, IType) ConvertField(CallInstruction,
+    // IType typeHint)` and its MatchGetFieldFromHandle helper (the
+    // FieldInfo.GetFieldFromHandle(ldmembertoken field) shape -- the token's
+    // member downcasts to IField, a method token is rejected).
+    ConvertResult ConvertField(Call* invocation, TypeSystem::IType* typeHint);
+    static bool MatchGetFieldFromHandle(
+        ILInstruction* inst,
+        std::shared_ptr<const ::ILSpy::Decompiler::TypeSystem::IField>&
+            member);
 
     // The C# `ILInstruction PrepareCallTarget(IType expectedType,
     // ILInstruction target, IType targetType)`: the receiver-shaping for the

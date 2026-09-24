@@ -32,6 +32,7 @@
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/IL/ILTypeExtensions.hpp"
 #include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
+#include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 
 #include "Decompiler/IL/Instructions/Call.hpp"
@@ -491,6 +492,9 @@ TransformExpressionTrees::ConvertInstruction(ILInstruction* instruction,
         if (name == "Call") {
             return ConvertCall(invocation);
         }
+        if (name == "Field") {
+            return ConvertField(invocation, typeHint);
+        }
         return {nullptr, nullptr};
     }
     if (auto* ldloc = dynamic_cast<LdLoc*>(instruction)) {
@@ -528,20 +532,20 @@ bool FullNameIs(const TypeSystem::IMethod* method, const std::string& ns,
 // out IMember member)`: the ldmembertoken [+ ldtoken type] argument shapes.
 bool TransformExpressionTrees::MatchFromHandleParameterList(
     Call* call,
-    std::shared_ptr<const TypeSystem::IMethod>& member) {
+    std::shared_ptr<const TypeSystem::IMember>& member) {
     member = nullptr;
     if (call == nullptr || call->Arguments.empty() ||
         call->Arguments.size() > 2) {
         return false;
     }
     auto* token = dynamic_cast<LdMemberToken*>(call->Arguments[0].get());
-    if (token == nullptr || token->Method == nullptr) return false;
+    if (token == nullptr || token->Member == nullptr) return false;
     if (call->Arguments.size() == 2) {
         if (dynamic_cast<LdTypeToken*>(call->Arguments[1].get()) == nullptr) {
             return false;
         }
     }
-    member = token->Method;
+    member = token->Member;
     return true;
 }
 
@@ -571,7 +575,10 @@ bool TransformExpressionTrees::MatchGetMethodFromHandle(
                     "GetMethodFromHandle")) {
         return false;
     }
-    return MatchFromHandleParameterList(call, member);
+    std::shared_ptr<const TypeSystem::IMember> tokenMember;
+    if (!MatchFromHandleParameterList(call, tokenMember)) return false;
+    member = std::dynamic_pointer_cast<const TypeSystem::IMethod>(tokenMember);
+    return member != nullptr;
 }
 
 // The C# `bool MatchArgumentList(ILInstruction inst, out
@@ -600,6 +607,96 @@ bool TransformExpressionTrees::MatchArgumentList(
         i++;
     }
     return true;
+}
+
+// The C# `bool MatchGetFieldFromHandle(ILInstruction inst, out IMember
+// member)`: the direct FieldInfo.GetFieldFromHandle(ldmembertoken field[,
+// ldtoken type]) shape (no castclass wrapper, unlike the method-handle
+// form). The member downcasts to IField (a method token is rejected).
+bool TransformExpressionTrees::MatchGetFieldFromHandle(
+    ILInstruction* inst,
+    std::shared_ptr<const TypeSystem::IField>& member) {
+    member = nullptr;
+    auto* call = dynamic_cast<Call*>(inst);
+    if (call == nullptr || call->IsNewObj || call->Method == nullptr ||
+        call->Arguments.empty() || call->Arguments.size() > 2) {
+        return false;
+    }
+    if (!FullNameIs(call->Method.get(), "System.Reflection", "FieldInfo",
+                    "GetFieldFromHandle")) {
+        return false;
+    }
+    std::shared_ptr<const TypeSystem::IMember> tokenMember;
+    if (!MatchFromHandleParameterList(call, tokenMember)) return false;
+    member = std::dynamic_pointer_cast<const TypeSystem::IField>(tokenMember);
+    return member != nullptr;
+}
+
+// The C# `(Func<ILInstruction>, IType) ConvertField(CallInstruction
+// invocation, IType typeHint)` -- the `case "Field"` arm. The C#'s
+// `typeHint.SkipModifiers()` dereferences a null hint on the lambda-body
+// path; the port guards it (a null hint skips the by-ref adapter, and the
+// value-type LdObj wrap applies, matching the C# BuildField fall-through).
+// The typeHint by-ref arm (a `ref` field read feeding an expected Ref
+// slot) is deferred with the SkipModifiers surface.
+TransformExpressionTrees::ConvertResult TransformExpressionTrees::ConvertField(
+    Call* invocation, TypeSystem::IType* typeHint) {
+    if (invocation == nullptr || invocation->Arguments.size() != 2) {
+        return {nullptr, nullptr};
+    }
+    std::function<std::unique_ptr<ILInstruction>()> targetConverter;
+    if (!dynamic_cast<LdNull*>(invocation->Arguments[0].get())) {
+        ConvertResult target =
+            ConvertInstruction(invocation->Arguments[0].get());
+        if (!target.thunk) return {nullptr, nullptr};
+        targetConverter = std::move(target.thunk);
+    }
+    std::shared_ptr<const TypeSystem::IField> member;
+    if (!MatchGetFieldFromHandle(invocation->Arguments[1].get(), member)) {
+        return {nullptr, nullptr};
+    }
+    // The C# `IType type = member.ReturnType;`.
+    TypeSystem::ITypePtr fieldType =
+        const_cast<TypeSystem::IType&>(member->ReturnType()).shared_from_this();
+    // The C# BuildField: ldsflda for a null target, ldflda (+ addressof for
+    // a value-type receiver) otherwise; the plain type read wraps in ldobj.
+    return {[member = std::move(member),
+             targetConverter = std::move(targetConverter),
+             typeHintKind = typeHint != nullptr ? typeHint->Kind()
+                                                : TypeSystem::TypeKind::None]() mutable
+                -> std::unique_ptr<ILInstruction> {
+        std::unique_ptr<ILInstruction> inst;
+        if (!targetConverter) {
+            inst = std::make_unique<LdsFlda>(member->Name());
+        } else {
+            std::unique_ptr<ILInstruction> target = targetConverter();
+            TypeSystem::ITypePtr declaring = member->DeclaringType();
+            if (declaring != nullptr &&
+                declaring->IsReferenceType() == std::optional<bool>(true)) {
+                auto ldflda = std::make_unique<LdFlda>(std::move(target),
+                                                       member->Name());
+                ldflda->DelayExceptions = true;
+                inst = std::move(ldflda);
+            } else {
+                inst = std::make_unique<LdFlda>(
+                    std::make_unique<AddressOf>(
+                        std::move(target), std::move(declaring)),
+                    member->Name());
+                dynamic_cast<LdFlda*>(inst.get())->DelayExceptions = true;
+            }
+        }
+        // The C# `if (!(typeHint.SkipModifiers() is ByReferenceType && ...))
+        // inst = new LdObj(inst, member.ReturnType);` -- the port wraps when
+        // no by-ref hint overrides the read (the C# null-hint NRE is guarded).
+        if (typeHintKind != TypeSystem::TypeKind::ByReference) {
+            inst = std::make_unique<LdObj>(std::move(inst),
+                                           const_cast<TypeSystem::IType&>(
+                                               member->ReturnType())
+                                               .shared_from_this());
+        }
+        return inst;
+    },
+            std::move(fieldType)};
 }
 
 // The C# `ILInstruction PrepareCallTarget(IType expectedType, ILInstruction

@@ -34,6 +34,9 @@
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/LdNull.hpp"
+#include "Decompiler/TypeSystem/LookupStubs.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
 #include "Decompiler/IL/Instructions/CastClass.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
@@ -584,4 +587,78 @@ TEST(TransformExpressionTreesTest, ConvertCallConvertsStaticMethodCallBody)
     ASSERT_NE(call->Method, nullptr);
     EXPECT_EQ(call->Method->Name(), "Foo");
     EXPECT_EQ(call->Arguments.size(), 0u);
+}
+
+// The ConvertField arm (the C# `case "Field": ConvertField(invocation,
+// typeHint)`): a static field access --
+//   Expression.Field(null, FieldInfo.GetFieldFromHandle(ldmembertoken field))
+// inside a converted lambda body becomes `ldobj(ldsflda field, fieldType)`
+// (the value-type-style LdObj wrap: the tree reads the field's value, and
+// with no type hint the C# BuildField wraps unconditionally -- the port
+// guards the C#'s null-typeHint dereference). The token carries the IField.
+TEST(TransformExpressionTreesTest, ConvertFieldConvertsStaticFieldAccess)
+{
+    TS::TestSupport::LookupCompilation compilation;
+    auto stringType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
+    auto field = std::make_shared<TS::TestSupport::LookupField>(
+        std::string("Test.C::field"), stringType, compilation);
+    auto fieldInfoType = std::make_shared<TS::SimpleType>(TS::TopLevelTypeName(
+        std::string("System.Reflection"), std::string("FieldInfo")));
+    auto expressionDef = std::make_shared<TS::SimpleType>(TS::TopLevelTypeName(
+        std::string("System.Linq.Expressions"), std::string("Expression")));
+    TS::ITypePtr lambdaMethodReturnType =
+        std::make_shared<TS::ParameterizedType>(
+            expressionDef, std::vector<TS::ITypePtr>{stringType});
+
+    // The field handle: FieldInfo.GetFieldFromHandle(ldmembertoken field).
+    auto getFieldCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Reflection", "FieldInfo", "GetFieldFromHandle"));
+    getFieldCall->Arguments.push_back(
+        std::make_unique<IL::LdMemberToken>(
+            std::static_pointer_cast<const TS::IMember>(field),
+            std::string("Test.C::field")));
+
+    // Expression.Field(null, handle)
+    auto fieldBody = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Field"));
+    fieldBody->Arguments.push_back(std::make_unique<IL::LdNull>());
+    fieldBody->Arguments.push_back(std::move(getFieldCall));
+
+    // Expression.Lambda(fieldBody, Array.Empty<ParameterExpression>())
+    auto lambdaCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Lambda",
+            lambdaMethodReturnType));
+    lambdaCall->Arguments.push_back(std::move(fieldBody));
+    lambdaCall->Arguments.push_back(std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>("System", "Array", "Empty")));
+
+    auto block = std::make_unique<IL::Block>();
+    block->Kind = IL::BlockKind::ControlFlow;
+    block->Add(std::move(lambdaCall));
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.ExpressionTrees = true;
+    IL::StatementTransformContext driverCtx(ctx, block.get());
+    IL::TransformExpressionTrees transform;
+    transform.Run(*block, 0, driverCtx);
+
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* fn = dynamic_cast<IL::ILFunction*>(block->Instructions[0].get());
+    ASSERT_NE(fn, nullptr) << "the Lambda call converts to an ILFunction";
+    ASSERT_NE(fn->Body, nullptr);
+    ASSERT_EQ(fn->Body->Blocks.size(), 1u);
+    ASSERT_EQ(fn->Body->Blocks[0]->Instructions.size(), 1u);
+    auto* leave = dynamic_cast<IL::Leave*>(
+        fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_NE(leave, nullptr);
+    // The value-type-style wrap: ldobj(ldsflda field, string).
+    auto* ldobj = dynamic_cast<IL::LdObj*>(leave->Value.get());
+    ASSERT_NE(ldobj, nullptr)
+        << "the field access reads through an ldobj of the field address";
+    auto* ldsflda = dynamic_cast<IL::LdsFlda*>(ldobj->Target.get());
+    ASSERT_NE(ldsflda, nullptr);
+    EXPECT_EQ(ldsflda->FieldName, "Test.C::field");
 }

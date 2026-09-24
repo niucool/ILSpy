@@ -183,13 +183,16 @@ public:
 // the metadata owns it); TokenName is the display form.
 class LdMemberToken : public SimpleInstruction {
 public:
-    std::shared_ptr<const TypeSystem::IMethod> Method;
+    // The C# `LdMemberToken(IMember member)`: the member handle carries
+    // any member kind (the method-handle shape the call sites build, the
+    // field-handle shape FieldInfo.GetFieldFromHandle consumes).
+    std::shared_ptr<const TypeSystem::IMember> Member;
     std::string TokenName;
     explicit LdMemberToken(std::string name = std::string())
         : SimpleInstruction(OpCode::LdMemberToken), TokenName(std::move(name)) {}
-    LdMemberToken(std::shared_ptr<const TypeSystem::IMethod> method,
+    LdMemberToken(std::shared_ptr<const TypeSystem::IMember> member,
                   std::string name)
-        : SimpleInstruction(OpCode::LdMemberToken), Method(std::move(method)),
+        : SimpleInstruction(OpCode::LdMemberToken), Member(std::move(member)),
           TokenName(std::move(name)) {}
     StackType ResultType() const override { return StackType::O; }
     void WriteTo(std::string& out) const override {
