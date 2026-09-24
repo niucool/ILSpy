@@ -2910,6 +2910,41 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   (44s) with only the known environment GAC-snapshot failure; the standing CLI
   baselines are unchanged (`--csharp mscorlib` 10106366 bytes, `--il` 41246545
   bytes, `-l c` 109438).
+- **CallBuilder core completion (gnhf 133-138)** -- the `CallBuilder` is now
+  functionally complete on its ported surface: the overload-resolution front
+  end (the `CallTransformation` flags, `IsUnambiguousCall` over the ctor /
+  operator-candidate / simple-name / `MemberLookup` arms, and the
+  `GetRequiredTransformationsForCall` fallback cascade), the render arms
+  (`HandleStringInterpolation` + its tokenizer, `IsSpanBasedStringConcat` +
+  `BuildStringConcat`, `HandleAccessorCall` + `IsUnambiguousAccess`,
+  `BuildCollectionInitializerExpression` /
+  `BuildDictionaryInitializerExpression`, `HandleRangeConstruction` with the
+  new `SyntheticRangeIndexAccessor` wrapper, the delegate-reference family
+  (`BuildDelegateReference` / `DisambiguateDelegateReference` /
+  `IsUnambiguousMethodReference` / `HandleDelegateConstruction` /
+  `CanUseDelegateConstruction` / `BuildMethodReference` /
+  `Build(LdVirtDelegate)`), the main `Build(OpCode, IMethod, ...)`
+  integrator with `HandleConstructorCall`, and the `Build(CallInstruction)`
+  dispatch with the tail-comment marker). The FakeMember reference-equality
+  fix (the `dynamic_cast<void*>` most-derived identity) landed with the
+  SyntheticRangeIndexAccessor work. Deferred loudly: the local-function
+  arms (the `ResolveLocalFunction` surface), the named-argument
+  (`argumentToParameterMap`) `BuildArgumentList` path + `CallWithNamedArgs`,
+  the `TupleTransform.MatchTupleConstruction` arm, the InlineArrays arm,
+  and the EmitAsRefReadOnly flag-write (the StatementBuilder port).
+  Verified by **26** new gtest cases across 4 new suites
+  (`CallBuilderTransformations_Test` (13, includes the gnhf-134 initializer
+  + accessor cases), `CallBuilderDelegateReference_Test` (4),
+  `CallBuilderRangeConstruction_Test` (5) + the
+  `SyntheticRangeIndexAccessorTest` surface test, `CallBuilderBuild_Test`
+  (4), `CallBuilderBuildCall_Test` (2)), each crux proven with a
+  neuter-RED round then restored green. Partial-test policy: the standing
+  `*CSharp*:*ExpressionBuilder*:*Resolver*:*OutputVisitor*:*Ambience*:
+  *CallBuilder*:*ILInlining*:*UserDefinedCompoundAssign*` filter (6518
+  tests) green except the 5 known environment failures (the GAC trio + the
+  2 XAML gold-stream cases); the sweep and ASan builds green on their
+  focused runs; the `connid_res` `--csharp` CLI output byte-identical to
+  the standing baseline.
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
