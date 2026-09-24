@@ -112,6 +112,38 @@ bool CSharpDecompiler::DecompileTypeToString(
     const Metadata::PartialTypeInfo* partialType =
         FindPartialTypeInfo(typeToken);
     bool rendered = false;
+    // The type declaration header (the C# DecompileType's
+    // `TypeDeclaration` emission): `public partial class Name` -- the
+    // partial modifier rides the generated-half convention (the XAML
+    // code-behind shape) whenever the type renders members; the
+    // `Kind`-specific keyword (struct/interface) follows the
+    // TypeDef kind.
+    for (const auto& t : file.TypeDefs()) {
+        if (t.Token != typeToken) continue;
+        const char* keyword = "class";
+        switch (t.Kind) {
+            case TypeSystem::TypeKind::Struct:
+            case TypeSystem::TypeKind::Enum:
+                keyword = "struct";
+                break;
+            case TypeSystem::TypeKind::Interface:
+                keyword = "interface";
+                break;
+            default:
+                break;
+        }
+        // The C# nests the type under `namespace ... { ... }`; the port's
+        // flat render carries the namespace in the call-site comment (the
+        // CLI's `// MyApp.Page1` header), so the declaration carries the
+        // bare name.
+        out += "public partial ";
+        out += keyword;
+        out += ' ';
+        out += t.Name;
+        out += "\n{\n";
+        rendered = true;
+        break;
+    }
     // The field declarations (the C# DecompileType's field members): the
     // `Type name;` shape from GetFields + GetFieldSignature (the C#
     // AstBuilder renders the modifiers and the initializer from the IL --
@@ -139,6 +171,9 @@ bool CSharpDecompiler::DecompileTypeToString(
             out += "\n";
             rendered = true;
         }
+    }
+    if (rendered) {
+        out += "}\n";
     }
     return rendered;
 }

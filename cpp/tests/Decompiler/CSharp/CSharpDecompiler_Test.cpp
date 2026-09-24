@@ -332,6 +332,61 @@ TEST(CSharpDecompilerTest, DecompileModuleAndAssemblyAttributesRender)
     }
 }
 
+// The type-level field/property surfaces (the C# DecompileType member
+// iteration covers fields and properties; the port renders a field's
+// `Type name;` declaration from GetFields + GetFieldSignature, and the
+// property accessors ride the method iteration). The connid_res corpus
+// (MyApp.Page1, the XAML code-behind) carries at least one decodable
+// member set.
+TEST(CSharpDecompilerTest, DecompileTypeRendersFieldsAndProperties)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile module(path);
+    ASSERT_TRUE(module.IsValid());
+    // MyApp.Page1 carries the _contentLoaded field (the XAML code-behind's
+    // IComponentConnector pattern).
+    for (const auto& t : module.TypeDefs()) {
+        if (t.Name != "Page1") continue;
+        auto fields = module.GetFields(t.Token);
+        ASSERT_FALSE(fields.empty()) << "Page1 carries its code-behind fields";
+        std::string text;
+        ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
+            module, t.Token, text));
+        // The field surfaces in the rendered members.
+        EXPECT_NE(text.find("_contentLoaded"), std::string::npos)
+            << "the code-behind field renders in the type body";
+        return;
+    }
+    FAIL() << "the connid corpus has no Page1 type";
+}
 
+// The `partial` type-header modifier (the C# DecompileType renders the
+// type declaration with the `partial` modifier when the type carries
+// partial-type info -- CSharpDecompiler.cs DoDecompileType, the
+// `hasPartialTypeDeclaration` gate): the facade's type render emits the
+// `public partial class Name` header over the members.
+TEST(CSharpDecompilerTest, DecompileTypeEmitsPartialHeader)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile module(path);
+    ASSERT_TRUE(module.IsValid());
+    for (const auto& t : module.TypeDefs()) {
+        if (t.Name != "Page1") continue;
+        std::string text;
+        ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
+            module, t.Token, text));
+        // The XAML code-behind is generated as a partial class (the
+        // InitializeComponent half).
+        EXPECT_NE(text.find("public partial class Page1"), std::string::npos)
+            << "the partial type header renders";
+        if (std::getenv("TET_TRACE")) {
+            std::fprintf(stderr, "TET-TYPE: %s\n", text.c_str());
+        }
+        return;
+    }
+    FAIL() << "the connid corpus has no Page1 type";
+}
 
 } // namespace
