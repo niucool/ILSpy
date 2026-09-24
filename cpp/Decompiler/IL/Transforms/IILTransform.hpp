@@ -125,6 +125,9 @@ struct ILTransformSettings {
     // InlineArrays -- default true. Gates InlineArrayTransform (the
     // RunOnExpression folds inside ExpressionTransforms).
     bool InlineArrays = true;
+    // Whether to fold LINQ Expression.Lambda call trees back into
+    // ILFunctions (the C# settings.ExpressionTrees, default false).
+    bool ExpressionTrees = false;
     bool Deconstruction = true;
     // Whether to detect the dictionary-initializer form inside the
     // object-initializer scan (`dict["k"] = v` and the index-variable stloc
