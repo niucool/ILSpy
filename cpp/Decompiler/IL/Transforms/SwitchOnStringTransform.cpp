@@ -41,6 +41,7 @@
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/StringToInt.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
+#include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/UnaryInstruction.hpp"
 #include "Decompiler/IL/ControlFlow/SwitchDetection.hpp"
@@ -213,6 +214,9 @@ bool MatchLegacySwitchOnStringWithHashtableImpl(
 
 std::map<std::string, HashtableInitializerInfo>
 ScanHashtableInitializerBlocks(Block* entryPoint);
+bool MatchRoslynSwitchOnStringUsingLengthAndCharImpl(Block& block, int i,
+                                                     ILTransformContext&
+                                                         context);
 
 void SwitchOnStringTransform::Run(ILFunction& function,
                                   ILTransformContext& context) {
@@ -233,23 +237,34 @@ void SwitchOnStringTransform::Run(ILFunction& function,
         for (int i = static_cast<int>(block->Instructions.size()) - 1; i >= 0; i--) {
             if (SimplifyCSharp1CascadingIfStatements(*block, i, context)) {
                 changed = true;
+                RecomputeIncomingEdgeCounts(function);
                 continue;
             }
             if (MatchLegacySwitchOnStringWithHashtableImpl(
                     *block, i, hashtableInitializers, context)) {
                 changed = true;
+                RecomputeIncomingEdgeCounts(function);
                 continue;
             }
             if (MatchLegacySwitchOnStringWithDictImpl(*block, i, context)) {
                 changed = true;
+                RecomputeIncomingEdgeCounts(function);
                 continue;
             }
             if (SimplifyCascadingIfStatements(*block, i, context)) {
                 changed = true;
+                RecomputeIncomingEdgeCounts(function);
                 continue;
             }
             if (MatchRoslynSwitchOnString(*block, i, context)) {
                 changed = true;
+                RecomputeIncomingEdgeCounts(function);
+                continue;
+            }
+            if (MatchRoslynSwitchOnStringUsingLengthAndCharImpl(*block, i,
+                                                                context)) {
+                changed = true;
+                RecomputeIncomingEdgeCounts(function);
                 continue;
             }
         }
@@ -2269,6 +2284,558 @@ bool MatchLegacySwitchOnStringWithHashtableImpl(
 }
 
 // (the legacy-Hashtable section ends here)
+// The C# MatchSwitchOnCharBlock: the per-length char-level dispatch. The
+// switch's sections map char labels to the case bodies; for length == 1 the
+// targets are the bodies themselves (the values are the 1-char strings),
+// otherwise each target is a case head comparing the full string (the walk
+// collects the (string, body) pairs). Returns false on any unexpected shape.
+// Forward declarations (the C# nested-function scoping flattened to
+// file-local declarations; the definitions follow their callers).
+bool MatchGetChars(ILInstruction* instruction, ILVariable*& switchValueVar,
+                   int& index, bool switchOnReadOnlySpanChar);
+bool MatchLdLoca(ILInstruction* inst, ILVariable*& variable);
+
+bool MatchSwitchOnCharBlock(Block* block, int length, ILVariable* switchValueVar,
+                            std::vector<std::pair<std::string, ILInstruction*>>&
+                                results,
+                            bool switchOnReadOnlySpanChar,
+                            Block* nullCase) {
+    results.clear();
+    if (block == nullptr || block->IncomingEdgeCount != 1) return false;
+    if (block->Instructions.empty()) return false;
+    SwitchInstruction* sw = nullptr;
+    std::vector<std::pair<Util::LongSet, ILInstruction*>> sections;
+    int index = -1;
+    if (block->Instructions.size() == 1) {
+        sw = dynamic_cast<SwitchInstruction*>(block->Instructions[0].get());
+        if (sw == nullptr) return false;
+        if (!MatchGetChars(sw->Value.get(), switchValueVar, index,
+                           switchOnReadOnlySpanChar)) {
+            return false;
+        }
+        for (auto& section : sw->Sections) {
+            sections.emplace_back(section->Labels, section->Body.get());
+        }
+    } else if (block->Instructions.size() == 2) {
+        // stloc charTempVar(get_Chars(ldloc switchValueVar, ...));
+        // switch (ldloc charTempVar)
+        ILVariable* charTempVar = nullptr;
+        ILInstruction* getCharsCall = nullptr;
+        if (!MatchStLoc(block->Instructions[0].get(), charTempVar,
+                        getCharsCall) ||
+            charTempVar == nullptr) {
+            return false;
+        }
+        if (!MatchGetChars(getCharsCall, switchValueVar, index,
+                           switchOnReadOnlySpanChar)) {
+            return false;
+        }
+        sw = dynamic_cast<SwitchInstruction*>(block->Instructions[1].get());
+        if (sw == nullptr) return false;
+        ILVariable* loaded = nullptr;
+        if (!MatchLdLoc(sw->Value.get(), loaded) || loaded != charTempVar) {
+            return false;
+        }
+        for (auto& section : sw->Sections) {
+            sections.emplace_back(section->Labels, section->Body.get());
+        }
+    } else {
+        // The longer shapes need the block analysis (the C# `analysis
+        // .AnalyzeBlock(block)`); deferred with that surface.
+        return false;
+    }
+    if (index >= length) return false;
+    bool hasDefaultSection = false;
+    for (auto& entry : sections) {
+        const Util::LongSet& labels = entry.first;
+        ILInstruction* body = entry.second;
+        if (labels.Count() == 1) {
+            long long value = labels.Intervals().front().Start;
+            char ch = static_cast<char>(value);
+            Block* targetBlock = nullptr;
+            if (!MatchBranch(body, targetBlock)) return false;
+            if (length == 1) {
+                results.emplace_back(std::string(1, ch), body);
+                (void)targetBlock;
+            } else {
+                Block* cursor = targetBlock;
+                while (cursor != nullptr) {
+                    std::string stringValue;
+                    bool emptyStringEqualsNull = false;
+                    ILInstruction* bodyOrLeave = nullptr;
+                    Block* exit = nullptr;
+                    if (!MatchRoslynCaseBlockHead(cursor, switchValueVar,
+                                                  bodyOrLeave, exit,
+                                                  stringValue,
+                                                  emptyStringEqualsNull)) {
+                        return false;
+                    }
+                    if (static_cast<int>(stringValue.size()) != length ||
+                        stringValue[static_cast<std::size_t>(index)] != ch) {
+                        return false;
+                    }
+                    results.emplace_back(stringValue, bodyOrLeave);
+                    if (exit == nullCase) break;
+                    cursor = exit;
+                }
+            }
+        } else if (!hasDefaultSection) {
+            hasDefaultSection = true;
+        } else {
+            return false;
+        }
+    }
+    return !results.empty();
+}
+
+// The C# MatchSwitchOnLengthBlock: the length-level dispatch. Returns the
+// (length, target) pairs; the default section's target is captured into
+// defaultCase. The three accepted shapes: the switch over the get_Length
+// call directly, a stloc'd length, or the 2-length fast path (the if over
+// the length comparison).
+bool MatchSwitchOnLengthBlock(ILVariable*& switchValueVar,
+                              Block* switchOnLengthBlock, int startOffset,
+                              std::vector<std::pair<Util::LongSet,
+                                                    ILInstruction*>>& blocks,
+                              ILInstruction*& defaultCase,
+                              bool& defaultIsCompilerGenerated,
+                              bool switchOnReadOnlySpanChar) {
+    blocks.clear();
+    defaultCase = nullptr;
+    defaultIsCompilerGenerated = false;
+    if (switchOnLengthBlock == nullptr) return false;
+    const int count =
+        static_cast<int>(switchOnLengthBlock->Instructions.size()) - startOffset;
+    SwitchInstruction* sw = nullptr;
+    ILInstruction* getLengthCall = nullptr;
+    ILVariable* lengthVar = nullptr;
+    if (count == 1) {
+        sw = dynamic_cast<SwitchInstruction*>(
+            switchOnLengthBlock->Instructions[static_cast<std::size_t>(
+                                                   startOffset)]
+                .get());
+        if (sw == nullptr) return false;
+        getLengthCall = sw->Value.get();
+    } else if (count == 2) {
+        if (!MatchStLoc(
+                switchOnLengthBlock->Instructions[static_cast<std::size_t>(
+                                                      startOffset)]
+                    .get(),
+                lengthVar, getLengthCall) ||
+            lengthVar == nullptr) {
+            return false;
+        }
+        sw = dynamic_cast<SwitchInstruction*>(
+            switchOnLengthBlock->Instructions[static_cast<std::size_t>(
+                                                  startOffset + 1)]
+                .get());
+        if (sw == nullptr) return false;
+        ILVariable* loaded = nullptr;
+        if (!MatchLdLoc(sw->Value.get(), loaded) || loaded != lengthVar) {
+            return false;
+        }
+    } else if (count == 3) {
+        if (!MatchStLoc(
+                switchOnLengthBlock->Instructions[static_cast<std::size_t>(
+                                                      startOffset)]
+                    .get(),
+                lengthVar, getLengthCall) ||
+            lengthVar == nullptr) {
+            return false;
+        }
+        ILInstruction* cond = nullptr;
+        ILInstruction* gotoLength = nullptr;
+        if (!MatchIfInstruction(
+                switchOnLengthBlock->Instructions[static_cast<std::size_t>(
+                                                      startOffset + 1)]
+                    .get(),
+                cond, gotoLength)) {
+            return false;
+        }
+        Block* target = nullptr;
+        if (!MatchBranch(gotoLength, target)) return false;
+        Block* gotoElse = nullptr;
+        if (!MatchBranch(
+                switchOnLengthBlock->Instructions[static_cast<std::size_t>(
+                                                      startOffset + 2)]
+                    .get(),
+                gotoElse)) {
+            return false;
+        }
+        ILInstruction* lhs = nullptr;
+        ILInstruction* rhs = nullptr;
+        auto* eq = dynamic_cast<Comp*>(cond);
+        if (eq != nullptr && eq->Kind == ComparisonKind::Equality) {
+            lhs = eq->Left.get();
+            rhs = eq->Right.get();
+        } else if (eq != nullptr && eq->Kind == ComparisonKind::Inequality) {
+            lhs = eq->Left.get();
+            rhs = eq->Right.get();
+            Block* swap = target;
+            target = gotoElse;
+            gotoElse = swap;
+        } else {
+            return false;
+        }
+        defaultCase = gotoElse;
+        ILVariable* loaded = nullptr;
+        int length = -1;
+        if (!MatchLdLoc(lhs, loaded) || loaded != lengthVar) return false;
+        auto* lengthConst = dynamic_cast<LdcI4*>(rhs);
+        if (lengthConst == nullptr) return false;
+        length = lengthConst->Value;
+        blocks.emplace_back(Util::LongSet(Util::LongInterval(length, length + 1)),
+                            target);
+        blocks.emplace_back(
+            Util::LongSet(Util::LongInterval(length, length + 1)).Invert(),
+            defaultCase);
+        return true;
+    } else {
+        return false;
+    }
+    // The switch-over-length shape: the get_Length call must be on the
+    // switch-value variable (String) or the span local (gated).
+    auto* call = dynamic_cast<Call*>(getLengthCall);
+    if (call == nullptr || call->Arguments.size() != 1) return false;
+    std::string name;
+    if (call->Method != nullptr) {
+        name = call->Method->Name();
+    } else {
+        const std::string& mn = call->MethodName;
+        name = mn.size() > 2 ? mn.substr(mn.rfind("::") + 2) : mn;
+    }
+    if (name != "get_Length") return false;
+    TS::ITypePtr declaring;
+    if (call->Method != nullptr) {
+        declaring = call->Method->DeclaringType();
+    } else {
+        declaring = call->DeclaringType;
+    }
+    if (declaring == nullptr) return false;
+    if (TS::IsKnownType(*declaring, TS::KnownTypeCode::String)) {
+        ILVariable* loaded = nullptr;
+        if (!MatchLdLoc(call->Arguments[0].get(), loaded)) return false;
+        switchValueVar = loaded;
+    } else if (TS::IsKnownType(*declaring, TS::KnownTypeCode::ReadOnlySpanOfT) ||
+               TS::IsKnownType(*declaring, TS::KnownTypeCode::SpanOfT)) {
+        if (!switchOnReadOnlySpanChar) return false;
+        ILVariable* loaded = nullptr;
+        if (!MatchLdLoca(call->Arguments[0].get(), loaded)) return false;
+        switchValueVar = loaded;
+    } else {
+        return false;
+    }
+    if (sw == nullptr) return true;
+    for (auto& section : sw->Sections) {
+        if (section->HasNullLabel) return false;
+        Block* target = nullptr;
+        BlockContainer* leave = nullptr;
+        if (!MatchBranch(section->Body.get(), target) &&
+            !MatchLeave(section->Body.get(), leave)) {
+            return false;
+        }
+        ILInstruction* targetInst = target != nullptr
+                                        ? static_cast<ILInstruction*>(target)
+                                        : static_cast<ILInstruction*>(leave);
+        if (section->Labels.Count() != 1) {
+            if (defaultCase == nullptr) defaultCase = targetInst;
+            if (defaultCase != targetInst) return false;
+        } else {
+            blocks.emplace_back(section->Labels, targetInst);
+        }
+    }
+    return true;
+}
+
+// The C# `private bool MatchRoslynSwitchOnStringUsingLengthAndChar(Block
+// block, int i)`: the Roslyn 66081 length+char dispatch folded into a
+// switch over a StringToInt of the switch-value variable.
+bool MatchRoslynSwitchOnStringUsingLengthAndCharImpl(Block& block, int i,
+                                                     ILTransformContext&
+                                                         context) {
+    auto& instructions = block.Instructions;
+    Block* switchOnLengthBlock = nullptr;
+    ILVariable* switchValueVar = nullptr;
+    int switchOnLengthBlockStartOffset = 0;
+    Block* nullCase = nullptr;
+    {
+        ILInstruction* condition = nullptr;
+        ILInstruction* exitBlockJump = nullptr;
+        if (i < 0 || i + 1 >= static_cast<int>(instructions.size())) {
+            // The length-block-only shape still needs a valid i.
+            if (i < 0 || i >= static_cast<int>(instructions.size())) {
+                return false;
+            }
+            switchOnLengthBlock = &block;
+            switchValueVar = nullptr;  // extracted in MatchSwitchOnLengthBlock
+            switchOnLengthBlockStartOffset = i;
+        } else if (MatchIfInstruction(instructions[i].get(), condition,
+                                      exitBlockJump)) {
+            // if (comp(ldloc switchValueVar == ldnull)) br nullCase/leave
+            auto* comp = dynamic_cast<Comp*>(condition);
+            ILVariable* testedVar = nullptr;
+            if (comp != nullptr &&
+                comp->Kind == ComparisonKind::Equality &&
+                comp->Right != nullptr &&
+                dynamic_cast<LdNull*>(comp->Right.get()) != nullptr &&
+                MatchLdLoc(comp->Left.get(), testedVar) &&
+                testedVar != nullptr) {
+                switchValueVar = testedVar;
+                Block* nextBlock = nullptr;
+                if (!MatchBranch(instructions[i + 1].get(), nextBlock)) {
+                    return false;
+                }
+                BlockContainer* nullCaseLeave = nullptr;
+                if (!MatchBranch(exitBlockJump, nullCase) &&
+                    !MatchLeave(exitBlockJump, nullCaseLeave)) {
+                    return false;
+                }
+                if (nextBlock->IncomingEdgeCount == 1 &&
+                    !nextBlock->Instructions.empty()) {
+                    ILInstruction* nextCondition = nullptr;
+                    ILInstruction* nextExit = nullptr;
+                    if (MatchIfInstruction(nextBlock->Instructions[0].get(),
+                                           nextCondition, nextExit)) {
+                        auto* nextComp = dynamic_cast<Comp*>(nextCondition);
+                        ILVariable* nextTested = nullptr;
+                        if (nextComp != nullptr &&
+                            nextComp->Kind == ComparisonKind::Equality &&
+                            nextComp->Right != nullptr &&
+                            dynamic_cast<LdNull*>(
+                                nextComp->Right.get()) != nullptr &&
+                            MatchLdLoc(nextComp->Left.get(), nextTested) &&
+                            nextTested == switchValueVar) {
+                            // The span shape: the next block re-checks null.
+                            Block* switchOnLengthBlock2 = nullptr;
+                            if (!MatchBranch(nextBlock->Instructions[1].get(),
+                                             switchOnLengthBlock2)) {
+                                return false;
+                            }
+                            nextBlock = switchOnLengthBlock2;
+                        }
+                    }
+                }
+                if (nextBlock == nullptr || nextBlock->IncomingEdgeCount != 1) {
+                    return false;
+                }
+                switchOnLengthBlock = nextBlock;
+                switchOnLengthBlockStartOffset = 0;
+            } else {
+                switchOnLengthBlock = &block;
+                switchValueVar = nullptr;  // extracted in the length match
+                switchOnLengthBlockStartOffset = i;
+            }
+        } else {
+            switchOnLengthBlock = &block;
+            switchValueVar = nullptr;  // extracted in the length match
+            switchOnLengthBlockStartOffset = i;
+        }
+    }
+    // The length-level dispatch.
+    std::vector<std::pair<Util::LongSet, ILInstruction*>> blocksByLength;
+    ILInstruction* defaultCase = nullptr;
+    bool defaultIsCompilerGenerated = false;
+    if (!MatchSwitchOnLengthBlock(
+            switchValueVar, switchOnLengthBlock,
+            switchOnLengthBlockStartOffset, blocksByLength, defaultCase,
+            defaultIsCompilerGenerated,
+            context.Settings.SwitchOnReadOnlySpanChar)) {
+        return false;
+    }
+    if (switchValueVar == nullptr) return false;
+    // The per-length char walk + the value collection.
+    std::vector<std::pair<std::optional<std::string>, ILInstruction*>>
+        stringValues;
+    for (auto& entry : blocksByLength) {
+        if (entry.first.Count() != 1) {
+            // Multi-label: only the null-case target is acceptable (the C#
+            // `if (b.TargetBlock != nullCase) return false;`).
+            Block* target = nullptr;
+            if (MatchBranch(entry.second, target) && target != nullCase) {
+                return false;
+            }
+            continue;
+        }
+        int length = static_cast<int>(entry.first.Intervals().front().Start);
+        Block* targetBlock = dynamic_cast<Block*>(entry.second);
+        ILInstruction* leave = nullptr;
+        if (targetBlock == nullptr) {
+            leave = entry.second;
+        }
+        (void)leave;
+        std::vector<std::pair<std::string, ILInstruction*>> mapping;
+        if (targetBlock != nullptr &&
+            MatchSwitchOnCharBlock(targetBlock, length, switchValueVar,
+                                   mapping,
+                                   context.Settings.SwitchOnReadOnlySpanChar,
+                                   nullCase)) {
+            for (auto& item : mapping) {
+                bool seen = false;
+                for (auto& existing : stringValues) {
+                    if (existing.first.has_value() &&
+                        *existing.first == item.first) {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (seen) return false;
+                stringValues.emplace_back(item.first, item.second);
+            }
+            continue;
+        }
+        // The direct case-head shape (a string comparison at this length).
+        std::string stringValue;
+        bool emptyStringEqualsNull = false;
+        ILInstruction* bodyOrLeave = nullptr;
+        Block* exit = nullptr;
+        if (targetBlock != nullptr &&
+            MatchRoslynCaseBlockHead(targetBlock, switchValueVar, bodyOrLeave,
+                                     exit, stringValue,
+                                     emptyStringEqualsNull)) {
+            bool seen = false;
+            for (auto& existing : stringValues) {
+                if (existing.first.has_value() &&
+                    *existing.first == stringValue) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (seen) return false;
+            stringValues.emplace_back(stringValue, bodyOrLeave);
+            continue;
+        }
+        if (length == 0 && targetBlock != nullptr) {
+            // The empty-string case: the C# `stringValues.Add(("", target))`.
+            stringValues.emplace_back(std::string(), targetBlock);
+            continue;
+        }
+        return false;
+    }
+    // The null case: the C# `stringValues.Add((null, nullBlock))` via
+    // IsNullCheckInDefaultBlock, or the explicit null case from the head.
+    bool hasNullValue = false;
+    for (auto& entry : stringValues) {
+        if (!entry.first.has_value()) hasNullValue = true;
+    }
+    if (!hasNullValue && nullCase != nullptr && nullCase != defaultCase) {
+        stringValues.emplace_back(std::nullopt, nullCase);
+    }
+    context.StepOnce("MatchRoslynSwitchOnStringUsingLengthAndChar");
+    // The emit: the switch over the StringToInt of the switch-value load.
+    auto stringToInt = std::make_unique<StringToInt>(
+        std::make_unique<LdLoc>(
+            ILVariablePtr(std::shared_ptr<ILVariable>(), switchValueVar)),
+        FindType(context.TypeSystem, TS::KnownTypeCode::String));
+    const std::size_t valueCount = stringValues.size();
+    for (std::size_t idx = 0; idx < valueCount; idx++) {
+        stringToInt->Map.emplace_back(stringValues[idx].first,
+                                      static_cast<int>(idx));
+    }
+    auto newSwitch =
+        std::make_unique<SwitchInstruction>(std::move(stringToInt));
+    for (std::size_t idx = 0; idx < valueCount; idx++) {
+        ILInstruction* body = stringValues[idx].second;
+        std::unique_ptr<ILInstruction> sectionBody;
+        Block* bodyTarget = nullptr;
+        BlockContainer* bodyLeave = nullptr;
+        if (body != nullptr && MatchBranch(body, bodyTarget)) {
+            sectionBody = std::make_unique<Branch>(bodyTarget);
+        } else if (body != nullptr && MatchLeave(body, bodyLeave)) {
+            sectionBody = body->Clone();
+        } else if (body != nullptr) {
+            sectionBody = body->Clone();
+        } else {
+            return false;
+        }
+        auto section = std::make_unique<SwitchSection>(
+            Util::LongSet(Util::LongInterval(
+                static_cast<long long>(idx),
+                static_cast<long long>(idx) + 1)));
+        section->SetBody(std::move(sectionBody));
+        newSwitch->Sections.push_back(std::move(section));
+    }
+    // The default section: the inverted complement of the value labels.
+    auto defaultSection = std::make_unique<SwitchSection>(
+        Util::LongSet(Util::LongInterval(
+                           0, static_cast<long long>(valueCount)))
+            .Invert());
+    defaultSection->SetBody(defaultCase != nullptr
+                                ? defaultCase->Clone()
+                                : nullptr);
+    newSwitch->Sections.push_back(std::move(defaultSection));
+    newSwitch->StartILOffset = instructions[i]->StartILOffset;
+    newSwitch->EndILOffset = instructions[i]->EndILOffset;
+    ReplaceAt(block, i, std::move(newSwitch));
+    // The C# `instructions.RemoveRange(i + 1, instructions.Count - (i+1))`:
+    // the whole rest of the shape is consumed.
+    RemoveRange(block, i + 1,
+                static_cast<int>(instructions.size()) - (i + 1));
+    return true;
+}
+
+// (the length+char section ends here)
+
+// ---- The Roslyn length+char arm (MatchRoslynSwitchOnStringUsingLengthAndChar
+// + MatchSwitchOnLengthBlock + MatchSwitchOnCharBlock + MatchGetChars) ------
+
+// The C# MatchGetChars local function: the char-index load at the switch's
+// head -- the String form `call String::get_Chars(ldloc switchValueVar,
+// ldc.i4 index)` or the span form `ldobj UInt16(call
+// ReadOnlySpan::get_Item(ldloca switchValueVar, ldc.i4 index))` (gated on
+// SwitchOnReadOnlySpanChar). Returns the matched variable via switchValueVar.
+
+// The port's MatchLdLoca (the C# `inst.MatchLdLoca(out var v)`).
+bool MatchLdLoca(ILInstruction* inst, ILVariable*& variable) {
+    variable = nullptr;
+    auto* ldloca = dynamic_cast<LdLoca*>(inst);
+    if (ldloca == nullptr) return false;
+    variable = ldloca->Variable.get();
+    return variable != nullptr;
+}
+
+bool MatchGetChars(ILInstruction* instruction, ILVariable*& switchValueVar,
+                   int& index, bool switchOnReadOnlySpanChar) {
+    index = -1;
+    if (instruction == nullptr) return false;
+    if (auto* ldobj = dynamic_cast<LdObj*>(instruction)) {
+        if (!switchOnReadOnlySpanChar) return false;
+        if (ldobj->Type == nullptr ||
+            !TS::IsKnownType(*ldobj->Type, TS::KnownTypeCode::UInt16)) {
+            return false;
+        }
+        auto* call = dynamic_cast<Call*>(ldobj->Target.get());
+        if (call == nullptr || call->Arguments.size() != 2) return false;
+        const std::string& mn = call->MethodName;
+        const bool isSpanGetItem =
+            mn.size() > 2 && mn.substr(mn.rfind("::") + 2) == "get_Item";
+        if (!isSpanGetItem) return false;
+        ILVariable* loaded = nullptr;
+        if (!MatchLdLoca(call->Arguments[0].get(), loaded)) return false;
+        auto* idx = dynamic_cast<LdcI4*>(call->Arguments[1].get());
+        if (idx == nullptr || idx->Value < 0) return false;
+        index = idx->Value;
+        switchValueVar = loaded;
+        return true;
+    }
+    auto* call = dynamic_cast<Call*>(instruction);
+    if (call == nullptr || call->Arguments.size() != 2) return false;
+    std::string name;
+    if (call->Method != nullptr) {
+        name = call->Method->Name();
+    } else {
+        const std::string& mn = call->MethodName;
+        name = mn.size() > 2 ? mn.substr(mn.rfind("::") + 2) : mn;
+    }
+    if (name != "get_Chars") return false;
+    ILVariable* loaded = nullptr;
+    if (!MatchLdLoc(call->Arguments[0].get(), loaded)) return false;
+    auto* idx = dynamic_cast<LdcI4*>(call->Arguments[1].get());
+    if (idx == nullptr || idx->Value < 0) return false;
+    index = idx->Value;
+    switchValueVar = loaded;
+    return true;
+}
+
 
 
 
