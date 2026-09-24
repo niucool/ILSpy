@@ -19,6 +19,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/EscapeInvalidIdentifiers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/PrettifyAssignments.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/NormalizeBlockStatements.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/RequiredNamespaceCollector.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/AstNode.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/AstType.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/TypeSystemAstBuilder.cpp
