@@ -43,6 +43,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InterpolatedStringExpression.hpp"
 #include "Decompiler/CSharp/Syntax/InterpolatedStringContent.hpp"
@@ -52,6 +53,8 @@
 #include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/IL/Instructions/AddressOf.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
@@ -1768,4 +1771,354 @@ ExpressionWithResolveResult CallBuilder::BuildDictionaryInitializerExpression(
     return assignment;
 }
 
+// ---------------------------------------------------------------------------
+// The delegate-reference family (CallBuilder.cs lines 1936-2203)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The C# `inst.MatchLdNull()` extension: whether the instruction is an
+// `LdNull`. The C# pattern helper (`MatchLdNull` on the instruction) is
+// compiled here as a file-local probe over the OpCode.
+bool CallBuilderMatchLdNull(const IL::ILInstruction* inst) {
+    return inst != nullptr && inst->Op == IL::OpCode::LdNull;
+}
+
+} // namespace
+
+// The C# `private bool CanUseDelegateConstruction(IMethod targetMethod,
+// ILInstruction thisArg, IMethod? invokeMethod)` (CallBuilder.cs lines
+// 1936-1974). Accessors cannot be referenced as a method group in C# (issue
+// #1741); the static branch compares the invoke method's parameter count
+// (a known invoke method pins whether the delegate binds the first argument),
+// and the unknown-invoke fallback accepts `ldnull` or an extension method.
+bool CallBuilder::CanUseDelegateConstruction(const TS::IMethod& targetMethod,
+                                             IL::ILInstruction* thisArg,
+                                             const TS::IMethod* invokeMethod) {
+    if (targetMethod.IsAccessor())
+        return false;
+    if (targetMethod.IsStatic()) {
+        if (invokeMethod != nullptr) {
+            if (invokeMethod->Parameters().size() == targetMethod.Parameters().size())
+                return CallBuilderMatchLdNull(thisArg);
+            if (targetMethod.IsExtensionMethod()
+                && invokeMethod->Parameters().size()
+                       == targetMethod.Parameters().size() - 1)
+                return true;
+            return false;
+        }
+        // delegate type unknown:
+        return CallBuilderMatchLdNull(thisArg) || targetMethod.IsExtensionMethod();
+    }
+    // targetMethod is instance method
+    if (invokeMethod != nullptr
+        && invokeMethod->Parameters().size() != targetMethod.Parameters().size())
+        return false;
+    return true;
+}
+
+// The C# `internal TranslatedExpression Build(LdVirtDelegate inst)` (CallBuilder.cs
+// lines 1976-1979).
+TranslatedExpression CallBuilder::BuildLdVirtDelegate(const IL::LdVirtDelegate& inst) {
+    ExpectedTargetDetails expectedTargetDetails{};
+    expectedTargetDetails.CallOpCode = IL::OpCode::CallVirt;
+    assert(inst.Method && "BuildLdVirtDelegate: the node's resolved method is "
+           "null (the IL reader discards the ldvirtftn target; the CallBuilder "
+           "path requires it)");
+    return HandleDelegateConstruction(*inst.Type, *inst.Method,
+                                      expectedTargetDetails, inst.Argument.get(),
+                                      const_cast<IL::LdVirtDelegate*>(&inst));
+}
+
+// The C# `internal ExpressionWithResolveResult BuildMethodReference(IMethod
+// method, bool isVirtual)` (CallBuilder.cs lines 1981-1985).
+ExpressionWithResolveResult CallBuilder::BuildMethodReference(
+    const TS::IMethod& method, bool isVirtual) {
+    ExpectedTargetDetails expectedTargetDetails{};
+    expectedTargetDetails.CallOpCode = isVirtual ? IL::OpCode::CallVirt : IL::OpCode::Call;
+    ExpressionWithResolveResult expr = BuildDelegateReference(
+        method, /*invokeMethod=*/nullptr, expectedTargetDetails, /*thisArg=*/nullptr);
+    expr.Expression()->RemoveAnnotations<Sem::ResolveResult>();
+    return WithRR(*expr.Expression(),
+                  std::make_shared<Sem::MemberResolveResult>(
+                      std::shared_ptr<Sem::ResolveResult>{}, &method));
+}
+
+// The C# `ExpressionWithResolveResult BuildDelegateReference(IMethod method,
+// IMethod? invokeMethod, ExpectedTargetDetails expectedTargetDetails,
+// ILInstruction? thisArg)` (CallBuilder.cs lines 1987-2007).
+ExpressionWithResolveResult CallBuilder::BuildDelegateReference(
+    const TS::IMethod& method, const TS::IMethod* invokeMethod,
+    const ExpectedTargetDetails& expectedTargetDetails, IL::ILInstruction* thisArg) {
+    DelegateReference disambiguated = DisambiguateDelegateReference(
+        method, invokeMethod, expectedTargetDetails, thisArg);
+    const TranslatedExpression& target = disambiguated.target;
+    const bool addTypeArguments = disambiguated.addTypeArguments;
+    const std::string& methodName = disambiguated.methodName;
+    const std::shared_ptr<Sem::ResolveResult>& result = disambiguated.result;
+    if (target.Expression() != nullptr) {
+        auto* mre = new Syntax::MemberReferenceExpression(target.Expression(), methodName);
+        if (addTypeArguments) {
+            for (const TS::ITypePtr& typeArgument : method.TypeArguments())
+                mre->TypeArguments().Add(expressionBuilder_->ConvertType(*typeArgument));
+        }
+        return WithRR(*mre, result);
+    }
+    auto* ide = new Syntax::IdentifierExpression(methodName);
+    if (addTypeArguments) {
+        for (const TS::ITypePtr& typeArgument : method.TypeArguments())
+            ide->TypeArguments().Add(expressionBuilder_->ConvertType(*typeArgument));
+    }
+    return WithRR(*ide, result);
+}
+
+// The C# `(TranslatedExpression target, bool addTypeArguments, string
+// methodName, ResolveResult result) DisambiguateDelegateReference(IMethod
+// method, IMethod? invokeMethod, ExpectedTargetDetails expectedTargetDetails,
+// ILInstruction? thisArg)` (CallBuilder.cs lines 2009-2138). The
+// local-function arm is deferred with the local-function surface (the C#
+// `expressionBuilder.ResolveLocalFunction(method)`).
+CallBuilder::DelegateReference CallBuilder::DisambiguateDelegateReference(
+    const TS::IMethod& method, const TS::IMethod* invokeMethod,
+    const ExpectedTargetDetails& expectedTargetDetails, IL::ILInstruction* thisArg) {
+    if (method.IsLocalFunction()) {
+        throw std::logic_error(
+            "CallBuilder::DisambiguateDelegateReference: the local-function arm "
+            "is not yet ported (it needs the ResolveLocalFunction surface)");
+    }
+    if (method.IsExtensionMethod()
+        && invokeMethod != nullptr
+        && method.Parameters().size() - 1 == invokeMethod->Parameters().size()) {
+        const TS::IType* targetType = &method.Parameters()[0]->Type();
+        if (targetType->Kind() == TS::TypeKind::ByReference && thisArg != nullptr
+            && thisArg->Op == IL::OpCode::Box) {
+            auto* thisArgBox = static_cast<IL::Box*>(thisArg);
+            targetType = static_cast<const TS::ByReferenceType*>(targetType)
+                             ->Element()
+                             .get();
+            thisArg = thisArgBox->Argument.get();
+        }
+        TranslatedExpression target = expressionBuilder_->Translate(
+            thisArg, targetType);
+        TranslatedExpression currentTarget = target;
+        bool targetCasted = false;
+        bool addTypeArguments = false;
+        // Initial inputs for IsUnambiguousMethodReference:
+        const Sem::ResolveResult* targetResolveResult = target.ResolveResult();
+        std::vector<TS::ITypePtr> typeArguments;
+        if (CallBuilderMatchLdNull(thisArg)) {
+            targetCasted = true;
+            currentTarget = currentTarget.ConvertTo(*const_cast<TS::IType*>(targetType),
+                                                    *expressionBuilder_);
+            targetResolveResult = currentTarget.ResolveResult();
+        }
+        // Find somewhat minimal solution:
+        std::shared_ptr<Sem::ResolveResult> result;
+        while (!IsUnambiguousMethodReference(expectedTargetDetails, method,
+                                             targetResolveResult, typeArguments,
+                                             /*isExtensionMethodReference=*/true,
+                                             result)) {
+            if (!targetCasted) {
+                // try casting target
+                targetCasted = true;
+                currentTarget = currentTarget.ConvertTo(
+                    *const_cast<TS::IType*>(targetType), *expressionBuilder_);
+                targetResolveResult = currentTarget.ResolveResult();
+                continue;
+            }
+            if (!addTypeArguments) {
+                // try adding type arguments
+                addTypeArguments = true;
+                typeArguments = method.TypeArguments();
+                continue;
+            }
+            break;
+        }
+        return DelegateReference{std::move(currentTarget), addTypeArguments,
+                                 method.Name(), std::move(result)};
+    }
+
+    // Prepare call target
+    TS::ITypePtr declaringType = method.DeclaringType();
+    const TS::IType& targetType = *declaringType;
+    IL::ILInstruction* currentThisArg = thisArg;
+    // The rewritten `box T(x)` this-arg node. The C# builds a fresh
+    // AddressOf sharing the box's argument (the ILAst is GC'd); the port
+    // moves the argument into a local node kept alive for the search below
+    // (the box itself is abandoned, mirroring the C# reassignment).
+    std::unique_ptr<IL::ILInstruction> rewrittenThisArg;
+    if (targetType.IsReferenceType() == false && currentThisArg != nullptr
+        && currentThisArg->Op == IL::OpCode::Box) {
+        // Normal struct instance method calls (which TranslateTarget is meant for)
+        // expect a 'ref T', but delegate construction uses a 'box T'.
+        auto* thisArgBox = static_cast<IL::Box*>(currentThisArg);
+        if (thisArgBox->Argument->Op == IL::OpCode::LdObj) {
+            currentThisArg =
+                static_cast<IL::LdObj*>(thisArgBox->Argument.get())->Target.get();
+        } else {
+            rewrittenThisArg = std::make_unique<IL::AddressOf>(
+                std::move(thisArgBox->Argument), thisArgBox->Type);
+            currentThisArg = rewrittenThisArg.get();
+        }
+    }
+    TranslatedExpression target = expressionBuilder_->TranslateTarget(
+        currentThisArg,
+        /*nonVirtualInvocation=*/expectedTargetDetails.CallOpCode == IL::OpCode::Call,
+        /*memberStatic=*/method.IsStatic(),
+        const_cast<TS::IType&>(targetType));
+    // check if target is required
+    bool requireTarget = expressionBuilder_->HidesVariableWithName(method.Name())
+        || (method.IsStatic()
+                ? !expressionBuilder_->IsCurrentOrContainingType(
+                    method.DeclaringTypeDefinition())
+                : dynamic_cast<const Syntax::ThisReferenceExpression*>(
+                      target.Expression())
+                    == nullptr);
+    // Try to find minimal expression
+    // If target is required, include it from the start
+    bool targetAdded = requireTarget;
+    TranslatedExpression currentTarget;
+    if (targetAdded)
+        currentTarget = target;
+    // Remember other decisions:
+    bool targetCasted = false;
+    bool addTypeArguments = false;
+    // Initial inputs for IsUnambiguousMethodReference:
+    const Sem::ResolveResult* targetResolveResult =
+        targetAdded ? target.ResolveResult() : nullptr;
+    std::vector<TS::ITypePtr> typeArguments;
+    // Find somewhat minimal solution:
+    std::shared_ptr<Sem::ResolveResult> result;
+    while (!IsUnambiguousMethodReference(expectedTargetDetails, method,
+                                         targetResolveResult, typeArguments,
+                                         /*isExtensionMethodReference=*/false,
+                                         result)) {
+        if (!addTypeArguments) {
+            // try adding type arguments
+            addTypeArguments = true;
+            typeArguments = method.TypeArguments();
+            continue;
+        }
+        if (!targetAdded) {
+            // try adding target
+            targetAdded = true;
+            currentTarget = target;
+            targetResolveResult = target.ResolveResult();
+            continue;
+        }
+        if (!targetCasted) {
+            // try casting target
+            targetCasted = true;
+            currentTarget = currentTarget.ConvertTo(*const_cast<TS::IType*>(&targetType),
+                                                    *expressionBuilder_);
+            targetResolveResult = currentTarget.ResolveResult();
+            continue;
+        }
+        break;
+    }
+    if (const auto* mgrr =
+            dynamic_cast<const Resolver::MethodGroupResolveResult*>(result.get())) {
+        result = std::shared_ptr<Sem::ResolveResult>(
+            mgrr->WithChosenMethod(&method).release());
+    }
+    return DelegateReference{std::move(currentTarget), addTypeArguments,
+                             method.Name(), std::move(result)};
+}
+
+// The C# `TranslatedExpression HandleDelegateConstruction(IType delegateType,
+// IMethod method, ExpectedTargetDetails expectedTargetDetails, ILInstruction
+// thisArg, ILInstruction inst)` (CallBuilder.cs lines 2140-2155).
+TranslatedExpression CallBuilder::HandleDelegateConstruction(
+    const TS::IType& delegateType, const TS::IMethod& method,
+    const ExpectedTargetDetails& expectedTargetDetails, IL::ILInstruction* thisArg,
+    IL::ILInstruction* inst) {
+    const TS::IMethod* invokeMethod = TS::GetDelegateInvokeMethod(delegateType);
+    ExpressionWithResolveResult targetExpression = BuildDelegateReference(
+        method, invokeMethod, expectedTargetDetails, thisArg);
+    auto* oce = new Syntax::ObjectCreateExpression(
+        expressionBuilder_->ConvertType(const_cast<TS::IType&>(delegateType)));
+    oce->Arguments().Add(targetExpression.Expression());
+    return WithRR(
+        WithILInstruction(*oce, inst),
+        std::make_shared<Sem::ConversionResolveResult>(
+            const_cast<TS::IType&>(delegateType).shared_from_this(),
+            std::shared_ptr<Sem::ResolveResult>(
+                const_cast<Sem::ResolveResult*>(targetExpression.ResolveResult())),
+            Sem::Conversions::MethodGroupConversion(
+                &method,
+                expectedTargetDetails.CallOpCode == IL::OpCode::CallVirt,
+                /*delegateCapturesFirstArgument=*/false)));
+}
+
+// The C# `bool IsUnambiguousMethodReference(ExpectedTargetDetails
+// expectedTargetDetails, IMethod method, ResolveResult? target, IType[]
+// typeArguments, bool isExtensionMethodReference, out ResolveResult? result)`
+// (CallBuilder.cs lines 2157-2190).
+bool CallBuilder::IsUnambiguousMethodReference(
+    const ExpectedTargetDetails& expectedTargetDetails, const TS::IMethod& method,
+    const Sem::ResolveResult* target, const std::vector<TS::ITypePtr>& typeArguments,
+    bool isExtensionMethodReference,
+    std::shared_ptr<Sem::ResolveResult>& result) const {
+    Resolver::Log::WriteLine(
+        "IsUnambiguousMethodReference: Performing overload resolution for {}",
+        method.Name());
+
+    const TS::ITypeDefinition* currentTypeDefinition =
+        expressionBuilder_->resolver->CurrentTypeDefinition();
+    Resolver::MemberLookup lookup(
+        currentTypeDefinition,
+        currentTypeDefinition != nullptr ? currentTypeDefinition->ParentModule()
+                                         : nullptr);
+
+    std::vector<std::shared_ptr<Sem::ResolveResult>> arguments;
+    for (const TS::IParameter* parameter : method.Parameters())
+        arguments.push_back(std::make_shared<Sem::TypeResolveResult>(
+            const_cast<TS::IType&>(parameter->Type()).shared_from_this()));
+
+    if (isExtensionMethodReference) {
+        result = std::dynamic_pointer_cast<Resolver::MethodGroupResolveResult>(
+            expressionBuilder_->resolver->ResolveMemberAccess(
+                std::shared_ptr<Sem::ResolveResult>(
+                    const_cast<Sem::ResolveResult*>(target)),
+                method.Name(), typeArguments, Resolver::NameLookupMode::InvocationTarget));
+        if (result == nullptr)
+            return false;
+        auto overloadResolution = static_cast<const Resolver::MethodGroupResolveResult*>(
+                                      result.get())
+                                      ->PerformOverloadResolution(
+                                          expressionBuilder_->resolver->Compilation(),
+                                          arguments, /*argumentNames=*/std::nullopt,
+                                          /*allowExtensionMethods=*/true);
+        if (overloadResolution == nullptr || overloadResolution->IsAmbiguous())
+            return false;
+    } else {
+        Resolver::OverloadResolution overloadResolution(
+            expressionBuilder_->resolver->Compilation(), arguments, std::nullopt,
+            typeArguments, &expressionBuilder_->resolver->Conversions());
+        if (target == nullptr) {
+            result = expressionBuilder_->resolver->ResolveSimpleName(
+                method.Name(), typeArguments, /*isInvocationTarget=*/false);
+            auto* mgrr =
+                dynamic_cast<const Resolver::MethodGroupResolveResult*>(result.get());
+            if (mgrr == nullptr)
+                return false;
+            overloadResolution.AddMethodLists(mgrr->MethodsGroupedByDeclaringType());
+        } else {
+            result = lookup.Lookup(*target, method.Name(), typeArguments,
+                                   /*isInvocation=*/false);
+            auto* mgrr =
+                dynamic_cast<const Resolver::MethodGroupResolveResult*>(result.get());
+            if (mgrr == nullptr)
+                return false;
+            overloadResolution.AddMethodLists(mgrr->MethodsGroupedByDeclaringType());
+        }
+
+        const TS::IParameterizedMember* foundMethod =
+            overloadResolution.GetBestCandidateWithSubstitutedTypeArguments();
+        if (!IsAppropriateCallTarget(expectedTargetDetails, method, *foundMethod))
+            return false;
+    }
+    return dynamic_cast<const Resolver::MethodGroupResolveResult*>(result.get())
+        != nullptr;
+}
 } // namespace ILSpy::Decompiler::CSharp

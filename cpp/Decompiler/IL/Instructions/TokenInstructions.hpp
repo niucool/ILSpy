@@ -97,10 +97,25 @@ class LdVirtDelegate : public UnaryInstruction {
 public:
     TypeSystem::ITypePtr Type;
     std::string MethodName;
+    // The C# `IMethod Method { get; }` -- the resolved virtual method the
+    // CallBuilder delegate-reference family reads (BuildLdVirtDelegate). The
+    // IL reader discards the ldvirtftn target method (the stand-in
+    // convention), so this field is null on reader-built nodes; the
+    // CallBuilder path asserts it (the C# node is only ever created with a
+    // method).
+    std::shared_ptr<const TypeSystem::IMethod> Method;
     LdVirtDelegate(std::unique_ptr<ILInstruction> argument, TypeSystem::ITypePtr type,
                   std::string method)
         : UnaryInstruction(OpCode::LdVirtDelegate, std::move(argument)),
           Type(std::move(type)), MethodName(std::move(method)) {}
+    // The IMethod-bearing ctor (the C# `new LdVirtDelegate(argument, method)` --
+    // the delegate type/method pair the CallBuilder consumes).
+    LdVirtDelegate(std::unique_ptr<ILInstruction> argument, TypeSystem::ITypePtr type,
+                  std::string methodName,
+                  std::shared_ptr<const TypeSystem::IMethod> resolvedMethod)
+        : UnaryInstruction(OpCode::LdVirtDelegate, std::move(argument)),
+          Type(std::move(type)), MethodName(std::move(methodName)),
+          Method(std::move(resolvedMethod)) {}
     InstructionFlags DirectFlags() const override {
         return InstructionFlags::None | InstructionFlags::MayThrow;
     }

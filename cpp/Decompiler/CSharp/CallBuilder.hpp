@@ -31,6 +31,7 @@
 #pragma once
 
 #include "Decompiler/CSharp/TranslatedExpression.hpp"
+#include "Decompiler/IL/Instructions/TokenInstructions.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
 #include "Decompiler/Semantics/InitializedObjectResolveResult.hpp"
 #include "Decompiler/Semantics/MemberResolveResult.hpp"
@@ -485,6 +486,98 @@ public:
     // ConversionResolveResult. Public for the tests (the port's no-visibility convention).
     ExpressionWithResolveResult HandleImplicitConversion(const TS::IMethod& method,
                                                          TranslatedExpression argument);
+
+    // The C# `private bool CanUseDelegateConstruction(IMethod targetMethod,
+    // ILInstruction thisArg, IMethod? invokeMethod)` (CallBuilder.cs lines
+    // 1936-1974): whether a delegate construction over `targetMethod` can render
+    // as a method group (accessors never can; the static/instance branches
+    // compare the invoke method's parameter count, with the null-invoke
+    // fallback `LdNull || extension`). Public for the tests (the port's
+    // no-visibility convention). Implemented out-of-line.
+    static bool CanUseDelegateConstruction(const TS::IMethod& targetMethod,
+                                           IL::ILInstruction* thisArg,
+                                           const TS::IMethod* invokeMethod);
+
+    // The C# `internal TranslatedExpression Build(LdVirtDelegate inst)`
+    // (CallBuilder.cs lines 1976-1979): the delegate-construction render of a
+    // `ldvirtdelegate` (a `CallVirt`-flavoured HandleDelegateConstruction over
+    // the delegate type and its `Invoke` member). Implemented out-of-line.
+    TranslatedExpression BuildLdVirtDelegate(const IL::LdVirtDelegate& inst);
+
+    // The C# `internal ExpressionWithResolveResult BuildMethodReference(IMethod
+    // method, bool isVirtual)` (CallBuilder.cs lines 1981-1985): the bare
+    // method-group reference (a `BuildDelegateReference` over a null this-arg
+    // whose resolve-result annotations are stripped and re-wrapped as a
+    // `MemberResolveResult` with a null target). Implemented out-of-line.
+    ExpressionWithResolveResult BuildMethodReference(const TS::IMethod& method,
+                                                     bool isVirtual);
+
+    // The C# `ExpressionWithResolveResult BuildDelegateReference(IMethod method,
+    // IMethod? invokeMethod, ExpectedTargetDetails expectedTargetDetails,
+    // ILInstruction? thisArg)` (CallBuilder.cs lines 1987-2007): the method-group
+    // render -- a MemberReferenceExpression over the disambiguated target (or a
+    // bare IdentifierExpression when no target was needed), wrapped with the
+    // resolve result. Implemented out-of-line.
+    ExpressionWithResolveResult BuildDelegateReference(
+        const TS::IMethod& method, const TS::IMethod* invokeMethod,
+        const ExpectedTargetDetails& expectedTargetDetails,
+        IL::ILInstruction* thisArg);
+
+    // The C# `(TranslatedExpression target, bool addTypeArguments, string
+    // methodName, ResolveResult result) DisambiguateDelegateReference(IMethod
+    // method, IMethod? invokeMethod, ExpectedTargetDetails
+    // expectedTargetDetails, ILInstruction? thisArg)` (CallBuilder.cs lines
+    // 2009-2138): the minimal-expression search -- the local-function arm, the
+    // extension-method arm (the `ResolveMemberAccess` loop over the
+    // cast/type-argument fallbacks), and the plain arm (the TranslateTarget
+    // preparation with the struct `Box` unwrap, then the
+    // `IsUnambiguousMethodReference` loop adding type arguments, the target,
+    // and the target cast in that order, closing with `WithChosenMethod`).
+    // The local-function arm is deferred with the local-function surface
+    // (`ResolveLocalFunction` is not ported). Implemented out-of-line.
+    struct DelegateReference {
+        TranslatedExpression target;
+        bool addTypeArguments = false;
+        std::string methodName;
+        std::shared_ptr<Sem::ResolveResult> result;
+    };
+    DelegateReference DisambiguateDelegateReference(
+        const TS::IMethod& method, const TS::IMethod* invokeMethod,
+        const ExpectedTargetDetails& expectedTargetDetails,
+        IL::ILInstruction* thisArg);
+
+    // The C# `TranslatedExpression HandleDelegateConstruction(IType delegateType,
+    // IMethod method, ExpectedTargetDetails expectedTargetDetails, ILInstruction
+    // thisArg, ILInstruction inst)` (CallBuilder.cs lines 2140-2155): the
+    // `new DelegateType(MethodGroup)` render with the
+    // `Conversion.MethodGroupConversion` resolve result. Implemented out-of-line.
+    TranslatedExpression HandleDelegateConstruction(
+        const TS::IType& delegateType, const TS::IMethod& method,
+        const ExpectedTargetDetails& expectedTargetDetails,
+        IL::ILInstruction* thisArg, IL::ILInstruction* inst);
+
+    // The C# `bool IsUnambiguousMethodReference(ExpectedTargetDetails
+    // expectedTargetDetails, IMethod method, ResolveResult? target,
+    // IType[] typeArguments, bool isExtensionMethodReference, out ResolveResult?
+    // result)` (CallBuilder.cs lines 2157-2190): the method-group flavour of
+    // `IsUnambiguousCall` -- the extension arm re-resolves with
+    // `ResolveMemberAccess(InvocationTarget)` + `PerformOverloadResolution`, the
+    // plain arm feeds `ResolveSimpleName` / `MemberLookup.Lookup` method lists
+    // into a fresh `OverloadResolution` over the method's parameter types, and
+    // both close with the `IsAppropriateCallTarget` re-check. Public for the
+    // tests (the port's no-visibility convention). Implemented out-of-line.
+    bool IsUnambiguousMethodReference(
+        const ExpectedTargetDetails& expectedTargetDetails,
+        const TS::IMethod& method, const Sem::ResolveResult* target,
+        const std::vector<TS::ITypePtr>& typeArguments,
+        bool isExtensionMethodReference,
+        std::shared_ptr<Sem::ResolveResult>& result) const;
+
+    // The C# `static MethodGroupResolveResult ToMethodGroup(IMethod method,
+    // ILFunction localFunction)` (CallBuilder.cs lines 2192-2203): the
+    // single-entry method group over a local function's name. DEFERRED with the
+    // local-function surface (its only caller, the
+    // DisambiguateDelegateReference local-function arm, is likewise deferred).
 
 private:
     // The C# `private bool IsPrimitiveValueThatShouldBeNamedArgument(
