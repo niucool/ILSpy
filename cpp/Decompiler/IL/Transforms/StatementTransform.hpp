@@ -118,6 +118,10 @@ public:
     void AddChild(std::unique_ptr<IStatementTransform> child) {
         children_.push_back(std::move(child));
     }
+    // The configured child count (the GetILTransforms list factory's
+    // test surface: the interleaved per-statement children the C# ctor's
+    // params array carries).
+    int ChildCount() const { return static_cast<int>(children_.size()); }
 
     void Run(ILFunction& function, ILTransformContext& context) override;
 
