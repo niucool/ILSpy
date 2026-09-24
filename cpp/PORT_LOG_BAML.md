@@ -362,3 +362,129 @@ installed, after, and with `ILSPY_TEST_MSCORLIB` set (the CLI never reads
 the corpus -- its resolver searches the main assembly's directory, the
 machine GAC, and the dotnet shared framework). The whole-assembly form:
 sha1 `2711ff81c6285112d45bf8aadb6c0e06ee933356`, same three-way match.
+
+---
+
+# Differential validation at corpus scale (Phase 11-style hardening)
+
+The fourth assignment: the C++ port vs the C# oracle, over the
+capa-testfiles corpus and the net48 reference assemblies, in both output
+modes. No product code was touched.
+
+## 1. The oracle
+
+`ilspycmd` 11.0.0.9335-rc installed as a dotnet global tool -- the exact
+version line this tree's C# source tracks (the worktree is at the
+11.0.0-rc commit; DecompilerVersionInfo: 11.0.0 rc). Installing it
+needed the .NET 10 SDK (the tool targets net10.0; the box had only
+8.0.425): installed per-user into /home/jim/.dotnet via dotnet-install
+(no root), and the tool install must run from a directory WITHOUT this
+repo's global.json (it pins SDK 11, which is not installed). Invoke with
+DOTNET_ROOT=/home/jim/.dotnet. The reproducible harness is committed at
+`cpp/tests/tools/differential_harness.sh` (one bash gotcha documented in
+its history: `local a="$1" b="$a"` expands the CALLER's `a` -- the
+declarations must be split).
+
+## 2. The recorded run
+
+49 capa-testfiles BSJB-bearing samples (the cleaned/uncleaned variants
+included) + 15 net48 reference assemblies (mscorlib, System, System.Core,
+System.Xml(.Linq), System.Configuration, System.Runtime.Remoting,
+WindowsBase, System.Xaml, PresentationCore, PresentationFramework, and 4
+facades), both engines, `--il` and `--csharp`, 180-second timeout per
+run (nothing timed out). Outputs under /tmp/diffval/run2/. Line endings
+are CR-stripped before diffing (the port pins CRLF, the oracle uses the
+host's -- a documented convention, not a divergence).
+
+| Mode | IDENTICAL | DIFFERENT | PORT-CRASH | PORT-FAIL | BOTH-FAIL |
+|---|---:|---:|---:|---:|---:|
+| --il  (64) | 42 | 17 | 2 | 0 | 3 |
+| --csharp (64) | 0 | 3 | 43 | 15 | 3 |
+
+The BOTH-FAILs are the three native PEs with no managed metadata
+(kernel32-64 and two crafted images): the oracle throws
+MetadataFileNotSupportedException (rc 70), the port prints "could not
+open ... as a CLI assembly" (rc 1) -- same verdict, different shape; the
+oracle-gap class, nothing to chase.
+
+## 3. The IL mode: near-parity, two real port bugs
+
+All 15 corpus assemblies are byte-identical after line-ending
+normalization -- mscorlib at 369,783 lines, PresentationFramework at
+368,473. All 17 capa DIFFERENT cases decompose into exactly two root
+causes (every diff line is one of these; nothing else diverges across
+the whole corpus):
+
+1. **The truncated invalid-RVA comment** (8 samples). The oracle prints
+   `// RVA 00000000 invalid (not in any section)`; the port truncates to
+   `... (not in any sec`. Root cause: `char buf[40]` at
+   `cpp/Decompiler/Disassembler/ReflectionDisassembler.cpp:1538-1540` --
+   the rendered string needs 44 bytes with the NUL. Minimal repro: any
+   field with HasFieldRVA whose RVA falls outside every section (e.g.
+   `e842958188274d5ffee7fbeffb803b2e-cleaned.dll_`, the
+   `capa47_e84295818827_il` diff).
+2. **The missing `.entrypoint`** (13 samples). `GetEntryPointToken()`
+   returns the token only as a SIDE EFFECT of the lazy `LocateUsHeap()`
+   parse (`PeImage::entryPointToken_` is set inside
+   `cpp/Decompiler/Metadata/MethodBodyReader.hpp:604`; the accessor at
+   :497 reads it without triggering the lazy parse). A module whose
+   disassembly reaches the entry method before anything touches the #US
+   heap (no earlier ldstr) emits no `.entrypoint`; one where an earlier
+   string literal warmed the heap does -- which is why some samples in
+   the same family match and others do not. Minimal repro:
+   `MetadataFile f(<any assembly with an entry point>);
+   f.GetEntryPointToken()` returns 0; compare the disassembly of
+   `039a6336...cleaned-cleaned.exe_` (no `.entrypoint`, capa1) with
+   `0831bb38...cleaned-cleaned.exe_` (has it, capa4). The fix belongs to
+   the disassembler/main-line agent: make the accessor trigger the lazy
+   cor-header parse.
+
+The two --il crashes:
+
+- `capa7_0953cc3b77ed` (0953cc3b77ed29e7...exe_): aborts with
+  `std::out_of_range("Expected a TypeDef, TypeRef or TypeSpec handle!")`
+  from `ReflectionDisassembler.cpp:1909` -- an event-map token whose
+  top byte is neither 0x01/0x02/0x1B. The oracle decompiles it (14,412
+  lines).
+- `capa9_2dae11cc5f86` (2dae11cc5f86...exe_): aborts with
+  `std::logic_error("SignatureTypeProviderDecoder: trailing bytes after
+  the type")` from `SignatureTypeProvider.hpp:603` -- a signature the
+  real SRM accepts (the oracle produces 64,214 lines). Both are
+  strictness divergences in the port's readers, main-line territory.
+
+## 4. The --csharp mode: the known Phase 5 state
+
+- **43 capa crashes, one signature**: SIGABRT on a
+  `std::vector<unique_ptr<ILInstruction>>` out-of-bounds index. ASan
+  pins it to `TransformCollectionAndObjectInitializers::Run` at
+  `cpp/Decompiler/IL/Transforms/TransformCollectionAndObjectInitializers.cpp:771`
+  (a null/garbage instruction dereference after an index past the
+  Arguments vector), reached through StatementTransform's block walk.
+  Eleven of the runs also print `PROBE: ...` litter from
+  `InlineArrayTransform.cpp:221-232` (committed debug prints in the main
+  agent's in-flight transform work -- the abort is not in that file,
+  the prints only co-occur). Minimal repro: `ilspy_cli --csharp
+  039a6336...cleaned-cleaned.exe_` (or almost any capa sample).
+- **3 capa DIFFERENT** (0953cc3b, e842958 both variants): the port's
+  documented Phase 5 SEED output -- bare method signatures without
+  visibility, `// .Type` comment headers instead of declarations, no
+  using directives or assembly attributes, `base()` ctor-call form. The
+  --help text labels this surface itself ("the real resolver back end
+  lands in Phase 5"). Not a bug: the convention gap until Phase 5
+  lands.
+- **15 corpus PORT-FAIL(1)**: `ilspycmd: no method bodies found` -- the
+  port's whole-module --csharp bails on metadata-only assemblies (the
+  reference set has no bodies); the oracle decompiles the full type
+  surface (227,308 lines from mscorlib). A capability gap for the
+  Phase 5 owner: the decompiler should emit declarations for
+  body-less modules rather than failing.
+
+## 5. Summary for the main-line agent
+
+The IL disassembler is effectively at oracle parity: 42/64 byte-exact,
+17/64 explained by two small bugs (both with repros above), 2 strictness
+aborts, 3 shared rejects. The C# surface is the in-flight Phase 5 work:
+one abort to fix (TransformCollectionAndObjectInitializers.cpp:771),
+one metadata-only capability to add, and the known seed-output gap. The
+harness (cpp/tests/tools/differential_harness.sh) reruns the whole
+matrix in ~6 minutes and writes the same summary.tsv.
