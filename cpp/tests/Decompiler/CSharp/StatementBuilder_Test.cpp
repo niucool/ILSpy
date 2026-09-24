@@ -28,6 +28,7 @@
 #include "Decompiler/CSharp/ExpressionBuilder.hpp"
 #include "Decompiler/CSharp/StatementBuilder.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
@@ -1023,6 +1024,47 @@ TEST(StatementBuilderTest, TransformToForeachWithoutDisposeRendersForeachStateme
     ASSERT_TRUE(designation != nullptr);
     EXPECT_EQ(designation->Identifier(), "item");
     EXPECT_TRUE(foreachStatement->EmbeddedStatement() != nullptr);
+}
+
+TEST(StatementBuilderTest, VisitLeaveLambdaDelegateCastRendersExplicitCast)
+{
+    StatementFixture fixture;
+    // The C# VisitLeave lambda/expr-tree arm: a Delegate-kind function whose
+    // return converts with possible loss of type information (the given type
+    // differs from the expected) wraps the returned expression in an explicit
+    // cast so the delegate's inferred return type is honored.
+    fixture.function.Kind = IL::ILFunctionKind::Delegate;
+    // The C# IsPossibleLossOfTypeInformation trigger: the expected type is
+    // `dynamic` (the given string value differs, so the explicit cast is
+    // emitted to honor the delegate's inferred return type).
+    auto returnType = TS::Dynamic();
+    fixture.function.ReturnType = returnType;
+    // The Leave's value: `ldstr "text"` (a string, implicitly convertible to
+    // the object return type) -- the C# renders a plain return for a TopLevel
+    // function but an explicit cast for a Delegate.
+    fixture.function.Body = std::make_unique<IL::BlockContainer>();
+    fixture.function.Body->Kind = IL::ContainerKind::Normal;
+    IL::BlockContainer* bodyPtr = fixture.function.Body.get();
+    // The leave's target is the function body container (the return container).
+    auto leave = std::make_unique<IL::Leave>(
+        bodyPtr, std::make_unique<IL::LdStr>("text"));
+    IL::Leave* rawLeave = leave.get();
+    auto* fnBlock = new IL::Block();
+    fnBlock->Kind = IL::BlockKind::ControlFlow;
+    fnBlock->Add(std::move(leave));
+    bodyPtr->AddBlock(std::unique_ptr<IL::Block>(fnBlock));
+
+    StatementBuilder builder(fixture.compilation, *fixture.context_, &fixture.function,
+                             &fixture.settings, &fixture.run);
+    auto result = builder.Convert(rawLeave);
+    auto* returnStatement = dynamic_cast<Syntax::ReturnStatement*>(result.Statement());
+    ASSERT_TRUE(returnStatement != nullptr);
+    EXPECT_TRUE(returnStatement->Expression() != nullptr);
+    // The Delegate-kind arm wraps the value in an explicit cast to the result
+    // type (dynamic); a TopLevel function renders the bare expression.
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(returnStatement->Expression());
+    ASSERT_TRUE(cast != nullptr);
+    EXPECT_EQ(cast->Type()->ToString(), "dynamic");
 }
 
 } // namespace ILSpy::Tests

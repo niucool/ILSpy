@@ -23,6 +23,7 @@
 #include "Decompiler/CSharp/StatementBuilder.hpp"
 
 #include "Decompiler/CSharp/Annotations.hpp"
+#include "Decompiler/Semantics/ConversionFactories.hpp"
 #include "Decompiler/CSharp/ExpressionBuilder.hpp"
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
 #include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
@@ -476,6 +477,28 @@ TranslatedStatement StatementBuilder::VisitBranch(IL::Branch* inst) {
                              inst);
 }
 
+// The C# `static bool IsPossibleLossOfTypeInformation(IType givenType,
+// IType expectedType)` (StatementBuilder.cs, the VisitLeave local function):
+// whether the delegate's inferred return type conversion needs the explicit
+// cast. The C# `expectedType.ContainsAnonymousType()` arm ports as false (the
+// NRExtensions anonymous-type surface is deferred), and the
+// `NormalizeTypeVisitor.IgnoreNullability.EquivalentTypes` walk ports as the
+// raw type identity comparison (the NormalizeTypeVisitor surface is not
+// ported; nullability-only differences would keep the cast here).
+bool StatementBuilderIsPossibleLossOfTypeInformation(const TS::IType& givenType,
+                                                     const TS::IType& expectedType) {
+    if (&givenType == &expectedType)
+        return false;
+    const TS::TupleType* tuple = dynamic_cast<const TS::TupleType*>(&expectedType);
+    if (tuple != nullptr && !tuple->ElementNames().empty())
+        return true;
+    if (expectedType.Kind() == TS::TypeKind::Dynamic)
+        return true;
+    if (expectedType.Kind() == TS::TypeKind::Null)
+        return true;
+    return false;
+}
+
 // The C# `protected internal override TranslatedStatement VisitLeave(Leave
 // inst)` (StatementBuilder.cs lines 369-423): a `break;` to the break target,
 // a `yield break;`/`return [expr];` when leaving the return container, or a
@@ -487,16 +510,36 @@ TranslatedStatement StatementBuilder::VisitLeave(IL::Leave* inst) {
         if (currentIsIterator)
             return WithILInstruction(*new Syntax::YieldBreakStatement(), inst);
         if (!StatementBuilderMatchNop(inst->Value.get())) {
-            // The C# lambda/expr-tree arm (the IsPossibleLossOfTypeInformation
-            // cast for an ILFunctionKind.ExpressionTree/Delegate function) is
-            // deferred with the ILFunctionKind surface; the plain return with
-            // the implicit conversion is the non-lambda path.
+            // The C# lambda/expr-tree arm: for an ILFunctionKind.ExpressionTree
+            // or Delegate function whose conversion may lose type information,
+            // wrap the value in an explicit cast so the delegate's inferred
+            // return type is honored.
+            const bool isLambdaOrExprTree =
+                currentFunction->Kind == IL::ILFunctionKind::ExpressionTree
+                || currentFunction->Kind == IL::ILFunctionKind::Delegate;
             TranslatedExpression expr =
                 exprBuilder->Translate(inst->Value.get(), currentResultType.get())
                     .ConvertTo(const_cast<TS::IType&>(*currentResultType),
                                *exprBuilder,
                                /*checkForOverflow=*/false,
                                /*allowImplicitConversion=*/true);
+            if (isLambdaOrExprTree
+                && StatementBuilderIsPossibleLossOfTypeInformation(
+                    expr.Type(), *currentResultType)) {
+                auto* castExpr = new Syntax::CastExpression(
+                    exprBuilder->ConvertType(*currentResultType), expr.Expression());
+                std::shared_ptr<Sem::ResolveResult> input =
+                    GetSharedResolveResult(*expr.Expression());
+                if (input == nullptr)
+                    input = std::make_shared<Sem::ResolveResult>(
+                        const_cast<TS::IType&>(expr.Type()).shared_from_this());
+                castExpr->AddAnnotation(
+                    std::make_shared<Sem::ConversionResolveResult>(
+                        currentResultType, std::move(input),
+                        Sem::Conversions::IdentityConversion()));
+                return WithILInstruction(
+                    *new Syntax::ReturnStatement(castExpr), inst);
+            }
             return WithILInstruction(*new Syntax::ReturnStatement(expr.Expression()),
                                      inst);
         }

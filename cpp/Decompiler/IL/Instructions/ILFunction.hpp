@@ -33,9 +33,25 @@
 
 namespace ILSpy::Decompiler::IL {
 
+// The C# `enum ILFunctionKind` (ILFunction.cs lines 466-490): TopLevelFunction /
+// Delegate / ExpressionTree / LocalFunction. Introduced by the decompiler
+// pipeline steps (DelegateConstruction, TransformExpressionTrees,
+// LocalFunctionDecompiler); the IL reader defaults to TopLevelFunction.
+enum class ILFunctionKind {
+    TopLevelFunction,
+    Delegate,
+    ExpressionTree,
+    LocalFunction,
+};
+
 class ILFunction : public ILInstruction {
 public:
     std::unique_ptr<BlockContainer> Body;
+    // The C# `public readonly ILFunctionKind Kind` field. The port's reader and
+    // the tests construct functions directly, so a public field replaces the C#
+    // ctor parameter (the C# `ILFunction(..., ILFunctionKind kind =
+    // ILFunctionKind.TopLevelFunction)` default mirrors the field initializer).
+    ILFunctionKind Kind = ILFunctionKind::TopLevelFunction;
     std::vector<ILVariablePtr> Variables;
 
     // The C# `public readonly IType ReturnType` (ILFunction.cs) -- the declared
