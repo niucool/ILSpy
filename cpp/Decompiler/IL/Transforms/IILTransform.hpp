@@ -188,6 +188,11 @@ struct ILTransformSettings {
     // allowed only when the unsigned-right-shift operator is available (the
     // `signMismatchAllowed` gate).
     bool UnsignedRightShift = true;
+    // Whether to decompile the C# 8 System.Index / System.Range patterns (the
+    // `array[^1]` / `span[a..b]` recovery). DecompilerSettings.Ranges --
+    // default true. Gates IndexRangeTransform (both the Run statement driver
+    // and the HandleLdElema expression hook the ExpressionTransforms call).
+    bool Ranges = true;
     // Whether to use C# 11.0 user-defined checked operators
     // (`op_CheckedIncrement` / `op_CheckedDecrement`). DecompilerSettings.
     // CheckedOperators -- a C# 11.0 setting, default true (false only for the

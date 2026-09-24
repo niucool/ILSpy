@@ -49,7 +49,9 @@
 #include "Decompiler/IL/Transforms/HighLevelLoopTransform.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/Transforms/NamedArgumentTransform.hpp"
+#include "Decompiler/IL/Transforms/IndexRangeTransform.hpp"
 #include "Decompiler/IL/Transforms/TransformArrayInitializers.hpp"
+#include "Decompiler/IL/Transforms/TransformCollectionAndObjectInitializers.hpp"
 #include "Decompiler/IL/Transforms/InlineReturnTransform.hpp"
 #include "Decompiler/IL/Transforms/InterpolatedStringTransform.hpp"
 #include "Decompiler/IL/Transforms/LdLocaDupInitObjTransform.hpp"
@@ -218,6 +220,19 @@ inline void RunGetILTransforms(ILFunction& function, ILTransformContext& context
         // the multi-dim/jagged/blob/span arms are deferred with their
         // surfaces). Gated on the ArrayInitializers setting.
         statementTransform.AddChild(std::make_unique<TransformArrayInitializers>());
+        // TransformCollectionAndObjectInitializers: the collection/object
+        // initializer fold (the next per-statement child in the C#
+        // GetILTransforms() order, after TransformArrayInitializers; the
+        // resolver-dependent arms are deferred with the resolver surface).
+        // Gated on the ObjectOrCollectionInitializers setting.
+        statementTransform.AddChild(
+            std::make_unique<TransformCollectionAndObjectInitializers>());
+        // IndexRangeTransform: the C# 8 System.Index / System.Range recovery
+        // (the next per-statement child in the C# GetILTransforms() order,
+        // after TransformCollectionAndObjectInitializers; the ExtendSlicing
+        // second pass is deferred with its surface). Gated on the Ranges
+        // setting.
+        statementTransform.AddChild(std::make_unique<IndexRangeTransform>());
         // NamedArgumentTransform: the named-argument introduction for the
         // argument whose inlining is blocked by a sibling's side effects (the
         // next per-statement child in the C# GetILTransforms() order, after

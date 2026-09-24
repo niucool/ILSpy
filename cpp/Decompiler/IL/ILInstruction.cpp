@@ -18,6 +18,14 @@
 
 #include "Decompiler/IL/ILInstruction.hpp"
 
+#include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
+
+#include <functional>
+#include <set>
+
 #include <cassert>
 #include <unordered_set>
 #include <utility>
@@ -146,6 +154,89 @@ bool ILInstruction::HasCycle() const {
         stack.push_back({child, 0});
     }
     return false;
+}
+
+} // namespace ILSpy::Decompiler::IL
+
+namespace ILSpy::Decompiler::IL {
+
+// The C# `internal static bool MayReorder(ILInstruction inst1, ILInstruction
+// inst2)` (SemanticHelper.cs): whether the sequence 'inst1; inst2;' may be
+// ordered 'inst2; inst1;'. NOT the pure flag-pair approximation: the C#
+// checks the written variables against the read variables (the C#
+// Inst2MightWriteToVariableReadByInst1), so a store to one local may reorder
+// past a load of another. The flag-level MayReorder(InstructionFlags,
+// InstructionFlags) overload above stays for the flag-only call sites.
+bool MayReorder(ILInstruction* inst1, ILInstruction* inst2) {
+    if (inst1 == nullptr || inst2 == nullptr) return false;
+    const auto isPure = [](const ILInstruction* inst) {
+        const InstructionFlags pureFlags =
+            InstructionFlags::MayReadLocals | InstructionFlags::ControlFlow;
+        return (inst->Flags() & ~pureFlags) == InstructionFlags::None;
+    };
+    if (!isPure(inst1) && !isPure(inst2)) return false;
+    // Inst2MightWriteToVariableReadByInst1: whether writer might write a
+    // variable reader reads (the C# walks the LdLoc reads and the direct
+    // MayWriteLocals writes; indirect writes through address-taken locals
+    // block any reorder when the writer has a side effect).
+    const auto mightWriteToVariableReadBy = [](const ILInstruction* reader,
+                                               const ILInstruction* writer) {
+        if (!HasFlag(reader->Flags(), InstructionFlags::MayReadLocals))
+            return false;
+        std::set<const ILVariable*> variables;
+        std::function<void(const ILInstruction*)> collect =
+            [&](const ILInstruction* inst) {
+                if (!inst) return;
+                if (inst->Op == OpCode::LdLoc) {
+                    if (auto* v = static_cast<const LdLoc*>(inst)->Variable.get())
+                        variables.insert(v);
+                    return;  // LdLoc has no instruction children
+                }
+                for (int i = 0; i < inst->ChildCount(); ++i)
+                    collect(inst->GetChild(i));
+            };
+        collect(reader);
+        if (HasFlag(writer->Flags(), InstructionFlags::SideEffect)) {
+            bool addressTaken = false;
+            std::function<void(const ILInstruction*)> checkAddresses =
+                [&](const ILInstruction* inst) {
+                    if (!inst || addressTaken) return;
+                    if (auto* ldloca = dynamic_cast<const LdLoca*>(inst)) {
+                        if (ldloca->Variable != nullptr &&
+                            variables.count(ldloca->Variable.get()) != 0 &&
+                            ldloca->Variable->AddressCount > 0) {
+                            addressTaken = true;
+                            return;
+                        }
+                    }
+                    for (int i = 0; i < inst->ChildCount(); ++i)
+                        checkAddresses(inst->GetChild(i));
+                };
+            checkAddresses(writer);
+            if (addressTaken) return true;
+        }
+        bool foundWrite = false;
+        std::function<void(const ILInstruction*)> checkWrites =
+            [&](const ILInstruction* inst) {
+                if (!inst || foundWrite) return;
+                if (HasFlag(inst->DirectFlags(), InstructionFlags::MayWriteLocals)) {
+                    if (auto* stloc = dynamic_cast<const StLoc*>(inst)) {
+                        if (stloc->Variable != nullptr &&
+                            variables.count(stloc->Variable.get()) != 0) {
+                            foundWrite = true;
+                            return;
+                        }
+                    }
+                }
+                for (int i = 0; i < inst->ChildCount(); ++i)
+                    checkWrites(inst->GetChild(i));
+            };
+        checkWrites(writer);
+        return foundWrite;
+    };
+    if (mightWriteToVariableReadBy(inst1, inst2)) return false;
+    if (mightWriteToVariableReadBy(inst2, inst1)) return false;
+    return true;
 }
 
 } // namespace ILSpy::Decompiler::IL

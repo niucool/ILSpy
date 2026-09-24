@@ -32,7 +32,9 @@
 #include "Decompiler/IL/StackType.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <set>
 #include <string>
 
 namespace ILSpy::Decompiler::IL {
@@ -155,6 +157,9 @@ public:
     // connectedness). Mirrors ILInstruction.CheckInvariant; a no-op in NDEBUG.
     void CheckInvariant(ILPhase phase) const;
 
+    // (the free-function SemanticHelper::MayReorder overloads live behind the
+    // class; see the bottom of this header.)
+
     // Dump the tree to text (mirrors WriteTo).
     virtual void WriteTo(std::string& out) const = 0;
     std::string ToString() const;
@@ -180,5 +185,14 @@ protected:
     virtual std::unique_ptr<ILInstruction> SetChildRaw(int index,
         std::unique_ptr<ILInstruction> newChild) = 0;
 };
+
+// The C# `internal static bool MayReorder(ILInstruction inst1, ILInstruction
+// inst2)` (SemanticHelper.cs): whether the sequence 'inst1; inst2;' may be
+// ordered 'inst2; inst1;'. NOT the pure flag-pair approximation: the C#
+// checks the written variables against the read variables (the C#
+// Inst2MightWriteToVariableReadByInst1), so a store to one local may reorder
+// past a load of another. Defined out-of-line in ILInstruction.cpp (it needs
+// the ILVariable / LdLoc / LdLoca definitions).
+bool MayReorder(ILInstruction* inst1, ILInstruction* inst2);
 
 } // namespace ILSpy::Decompiler::IL
