@@ -186,3 +186,65 @@ branch) -- the same pinning procedure baml used.
 * The Phase-6 security-declaration machinery ran on every corpus that has
   DeclSecurity rows (the mono-mscorlib staged fixture's rows exercise it in
   the unit tests; no corpus --il crash touched it).
+
+## PD7 -- the sweep-fix batch (T7/T8/T9/T11 + the T10/T12 dispositions, 2026-09-24)
+
+Follow-up to the full-corpus sweep: the triage table's mechanical rows fixed
+RED-first, committed per fix, each verified against the sweep's affected
+rows; the two non-mechanical rows dispositioned by diagnosis.
+
+### The fixes (all RED -> GREEN -> sweep-verified)
+
+| Row | Commit | Fix | RED -> GREEN evidence |
+|---|---|---|---|
+| T7 | df74ccd97 | the `// RVA ... invalid` line composed as a std::string (the fixed `%08X` fragment stays snprintf'd) | RED: the patched-FieldRva fixture rendered `... (not in any sec`; GREEN: the full 45-char line; capa 6c8b/749e/a301 x2 --il now byte-identical |
+| T8 | df74ccd97 | the `// .data ... = <message>` catch line composed as a std::string | RED: the zeroed-SizeOfRawData fixture truncated `could not be fou`; GREEN: the full message; net065's 18 truncation hunks gone |
+| T9 | 6d04a7c58 | `IsValidIdentifier` now validates the FIRST character (the C# `All` semantics) -- the '~'-prefixed names quote | RED: `IsValidIdentifier("~X")` true / `Escape("~X")` unquoted; GREEN: `'~X'`; net017 --il byte-identical (the 20 quote hunks gone) |
+| T11 | 1f89b91a1 | `ClassifyCliOpenFailure`: the C# load-failure arms (missing path -> `File '<path>' does not exist!` + the Specify --help stdout hint, rc 1; non-PE -> `System.BadImageFormatException: <SRM message>`, rc 70; no-managed-metadata -> `MetadataFileNotSupportedException: PE file does not contain any managed metadata.`, rc 70; unparseable metadata -> the documented OverflowException representative) | 3 RED tests against the stub, GREEN after the impl; all four arms' stderr first-lines byte-identical to ilspycmd on the kernel32/text-file/missing/capa08 probes |
+
+Notes:
+* The T9 root cause is the FIRST-CHARACTER escape in IsValidIdentifier (the
+  scan began after the first code point), not the valid-character set as the
+  sweep note first said; the C# `_validNonLetterIdentifierCharacter` set was
+  already faithful.
+* The sweep-verdict columns after the batch: capa 6c8b/749e/a301 --il rows
+  and net017/net065 --il rows re-checked byte-identical (net065's remaining
+  hunks are T12 below, not the fixed rows).
+* Gates: the full ilspy_tests failure set is IDENTICAL before/after (139
+  pre-existing env-pinned failures, timing-only diffs); the mono-mscorlib
+  whole-module --il dump diffs clean against ilspycmd (CR-stripped); ASan
+  clean on the touched paths (27 filtered tests + both T7/T9 samples, 0
+  reports).
+
+### The T10 bisect -- the "silent stop" is disproven; main-line territory
+
+Instrumented the capa07 `--csharp` walk (main.cpp's Phase-5 seed scaffold,
+the `for (const auto& t : file.TypeDefs())` loop): the walk COMPLETES. 310
+methods total, 183 with bodies render; the walk's tail rows
+(`Null.Obfuscator.Null.Obfuscator` 02000091, `.Null.Obfuscator` 020000C1)
+carry zero methods through GetMethods (the obfuscator's extern-only
+members, which the oracle renders as `extern ? ()`), so rc=0 with the
+shorter output is honest for the seed's shape. The 438-vs-3520 delta (and
+the capa47/48 43-line and net016 197-line diffs) is the missing whole-
+project scaffolding -- the usings/assembly-attributes/nested-type and
+property/event member declarations the C# WholeProjectDecompiler emits --
+i.e. the Phase-5/7 back-end shape in cpp/Decompiler/CSharp/ + the seed
+scaffold, which is main-line territory. No fix attempted; STOPPED per the
+assignment. Repro: `ilspy_cli <capa 0953cc3b77...exe_> --csharp` (438 lines,
+rc 0) vs `ilspycmd <same>` (3520 lines); the walk trace via
+`ILSPY_TEST_MSCORLIB`-style MetadataFile iteration shows the walk's
+completeness.
+
+### T12 (new, from the net065 re-check) -- the calli signature fallback
+
+net065's --il diff still carries ~213 `calli` hunks: the port renders
+`calli @11000003 /* signature 2 */` (a token-reference fallback) where the
+C# decodes the standalone signature fully (`calli unmanaged stdcall int32
+modopt([mscorlib]System.Runtime.CompilerServices.IsLong) ...`). The gap is
+the MethodBodyDisassembler calli operand path (the standalone-signature
+decode + the WriteSignature render); the sweep's signature column missed it
+because the `~`/truncation hunks dominated the diff text. NOT fixed in this
+batch -- recorded for the next slice (Disassembler/MethodBodyDisassembler
+territory, the same phase as T7/T8's file family). Repro: `ilspy_cli
+/home/jim/ilspy-test-fixtures/net48/System.EnterpriseServices.Wrapper.dll
+--il` vs the oracle (diff hunks at IL_003c and friends).
