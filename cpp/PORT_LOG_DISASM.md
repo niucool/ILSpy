@@ -376,3 +376,21 @@ catch -- a7ab-style catches already landed on main as the stopgap.
 Commit 5a9ccbc2c (the T6 entry-point capture, already merged) carried two
 DBG stderr fprintfs in LocateUsHeap from the probe round; commit
 8ec8026c0 on this branch removes them -- merge it with the next batch.
+
+### PD9 postscript -- the worktree-stash incident (disclosure)
+
+The pre-T12 baseline's `git stash` round-tripped an OLDER stash entry that
+was sitting in this worktree's stash list: `WIP on port-baml: Add the
+differential validation harness and its corpus-scale results` -- the baml
+agent's LoadedPackage/LoadResult/FileLoaders WIP (the ILSpyX-layer files,
+not touched by this slice). The pop conflicted; the application was
+reverted to the HEAD state, the popped files are preserved at
+/tmp/baml_wip_recovery/ (a snapshot of the 4 files), and the stash entry
+itself remains in this worktree's stash list for the baml agent to
+re-apply on its own branch. Nothing from this slice's commits was
+affected.
+
+The full-suite failure set is byte-identical to the pre-PD7 baseline
+(139 entries, the Windows-gold/env-pinned shapes). The --il miss list
+after this slice: ONLY the capa07/09 decoder throws (T4/T5); net065 is
+byte-identical.
