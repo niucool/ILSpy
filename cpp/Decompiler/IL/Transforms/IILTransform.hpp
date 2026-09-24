@@ -29,6 +29,10 @@
 
 namespace ILSpy::Decompiler::TypeSystem { class ICompilation; }
 
+namespace ILSpy::Decompiler::TypeSystem {
+class ITypeDefinition;
+}
+
 namespace ILSpy::Decompiler::IL {
 
 class ILFunction;
@@ -271,6 +275,14 @@ public:
     // consults it on a use-site's first sighting.
     std::function<std::unique_ptr<ILFunction>(const std::string&)>
         LocalFunctionBodyResolver;
+    // The C# `resolveContext.CurrentTypeDefinition` (the
+    // SimpleTypeResolveContext(function.Method) of LocalFunctionDecompiler.Run):
+    // the declaring type of the function being decompiled -- the current-type
+    // anchor the closure-parameter / potential-closure checks consult. Null in
+    // the minimal construction (the checks then reject: a null current type is
+    // not part of any type tree).
+    const ::ILSpy::Decompiler::TypeSystem::ITypeDefinition* CurrentTypeDefinition
+        = nullptr;
 
     void StepOnce(const char* what) const {
         if (Step) Step(what);

@@ -36,6 +36,22 @@ namespace ILSpy::Decompiler::IL {
 
 class Block : public ILInstruction {
 public:
+    // The C# `public static ILInstruction? GetContainingStatement(ILInstruction
+    // inst)` (Block.cs): the node whose parent is a ControlFlow-kind block --
+    // the C# `curr.Parent is Block { Kind: BlockKind.ControlFlow }` walk.
+    // Null when inst is detached.
+    static ILInstruction* GetContainingStatement(ILInstruction* inst) {
+        ILInstruction* curr = inst;
+        while (curr != nullptr) {
+            if (curr->Parent != nullptr) {
+                if (auto* block = dynamic_cast<Block*>(curr->Parent)) {
+                    if (block->Kind == BlockKind::ControlFlow) return curr;
+                }
+            }
+            curr = curr->Parent;
+        }
+        return nullptr;
+    }
     std::vector<std::unique_ptr<ILInstruction>> Instructions;
     std::unique_ptr<ILInstruction> FinalInstruction;
     // What this block models beyond plain control flow (ControlFlow by default;

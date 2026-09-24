@@ -34,6 +34,8 @@
 
 namespace ILSpy::Decompiler::IL {
 
+class BlockContainer;
+
 class ILVariable {
 public:
     std::string Name;
@@ -64,6 +66,14 @@ public:
     // variable's initial value is read before being overwritten (set by the
     // SROA/initializer paths; RemoveDeadVariableInit resets it).
     bool UsesInitialValue = false;
+
+    // The C# `public BlockContainer? CaptureScope { get; internal set; }`
+    // (ILVariable.cs): the container the variable is captured in -- the
+    // closest container of its first address-taking use or initializer store,
+    // combined over all capture uses (LocalFunctionDecompiler). Null for
+    // variables that are not captured. Non-owning (the container is owned by
+    // the enclosing ILFunction tree).
+    BlockContainer* CaptureScope = nullptr;
 
     // True if the variable is written exactly once and its address is never
     // taken (ILVariable.IsSingleDefinition).

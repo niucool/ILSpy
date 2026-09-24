@@ -543,8 +543,24 @@ public:
     ITypePtr DeclaringType() const override { return {}; }
     const IModule* ParentModule() const override { return parentModule_; }
     std::vector<const IAttribute*> GetAttributes() const override { return attributes_; }
-    bool HasAttribute(KnownAttribute) const override { return false; }
-    const IAttribute* GetAttribute(KnownAttribute) const override { return nullptr; }
+    // Classify a configured attribute by its attribute type's top-level type
+    // name (the GetTypeName identity table); the prior hardcoded-false shape
+    // blocked the CompilerGenerated fixture the LocalFunctionDecompiler
+    // capture tests need.
+    bool HasAttribute(KnownAttribute attribute) const override {
+        return GetAttribute(attribute) != nullptr;
+    }
+    const IAttribute* GetAttribute(KnownAttribute attribute) const override {
+        const TS::TopLevelTypeName& known = GetTypeName(attribute);
+        for (const IAttribute* a : attributes_) {
+            if (a == nullptr) continue;
+            auto* simple =
+                dynamic_cast<const TS::SimpleType*>(&a->AttributeType());
+            if (simple != nullptr && simple->GetTopLevelTypeName() == known)
+                return a;
+        }
+        return nullptr;
+    }
     TS::Accessibility Accessibility() const override { return accessibility_; }
     bool IsStatic() const override { return isStatic_; }
     bool IsAbstract() const override { return isAbstract_; }

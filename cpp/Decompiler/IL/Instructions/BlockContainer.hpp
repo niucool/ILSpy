@@ -48,6 +48,17 @@ public:
     std::vector<std::unique_ptr<Block>> Blocks;
     ContainerKind Kind = ContainerKind::Normal;
 
+    // The C# `public static BlockContainer? FindClosestContainer(ILInstruction?
+    // inst)` (BlockContainer.cs): the closest container ancestor of inst, or
+    // null when inst is detached.
+    static BlockContainer* FindClosestContainer(ILInstruction* inst) {
+        while (inst != nullptr) {
+            if (auto* bc = dynamic_cast<BlockContainer*>(inst)) return bc;
+            inst = inst->Parent;
+        }
+        return nullptr;
+    }
+
     // The C# `public StackType ExpectedResultType { get; set; }` -- the
     // evaluation-stack type the container's `leave` values must produce. The
     // port stores it plain (the C# ctor keeps the set-by-consumer shape); the

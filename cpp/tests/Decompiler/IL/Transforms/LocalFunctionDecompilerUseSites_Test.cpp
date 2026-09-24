@@ -30,10 +30,16 @@
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
 #include "Decompiler/IL/Transforms/LocalFunctionDecompiler.hpp"
+#include "Decompiler/TypeSystem/FullTypeName.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
+#include "Decompiler/TypeSystem/KnownAttribute.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/LookupStubs.hpp"
 
@@ -106,6 +112,101 @@ TEST(LocalFunctionDecompilerUseSitesTest, RewritesDelegateConstructionTargetToLd
     ASSERT_NE(kept, nullptr);
     EXPECT_EQ(kept->Arguments.size(), 1u);
     EXPECT_EQ(kept->MethodName, "Test.C::<M>g__LF|0_0");
+}
+
+// The capture/declaration-scope machinery (the C# DetermineCaptureAndDeclarationScopes):
+// a static local function invoked with `ldloca captured` marks the captured
+// display-struct local as DisplayClassLocal, records its CaptureScope, and
+// assigns the decoded definition's DeclarationScope (the closest container
+// of the captured variable's first address-taking use). The definition's
+// closure parameter is a ByReferenceType to the display struct, and the
+// current-type anchor drives IsPotentialClosure.
+TEST(LocalFunctionDecompilerUseSitesTest, DeterminesCaptureAndDeclarationScopes)
+{
+    TS::TestSupport::LookupCompilation compilation;
+    auto decompiledDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        std::string("C"), std::string("Test"),
+        TS::FullTypeName(TS::TopLevelTypeName(std::string("Test"), std::string("C"))),
+        TS::TypeKind::Class, TS::Accessibility::Public, compilation, nullptr);
+    std::shared_ptr<TS::TestSupport::LookupTypeDefinition> displayDef =
+        std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        std::string("<>c__DisplayClass0"), std::string("Test"),
+        TS::FullTypeName(TS::TopLevelTypeName(
+            std::string("Test"), std::string("<>c__DisplayClass0"))),
+        TS::TypeKind::Struct, TS::Accessibility::Private, compilation, nullptr);
+    displayDef->SetDeclaringTypeDefinition(decompiledDef.get());
+    auto compilerGeneratedType =
+        std::make_shared<TS::SimpleType>(TS::TopLevelTypeName(
+            std::string("System.Runtime.CompilerServices"),
+            std::string("CompilerGeneratedAttribute")));
+    auto compilerGeneratedAttr =
+        std::make_shared<TS::TestSupport::LookupAttribute>(
+            compilerGeneratedType, std::vector<TS::CustomAttributeTypedArgument>{});
+    displayDef->SetAttributes(
+        std::vector<const TS::IAttribute*>{compilerGeneratedAttr.get()});
+
+    auto fn = std::make_unique<IL::ILFunction>();
+    ILVariablePtr captured = fn->RegisterVariable(
+        IL::VariableKind::Local, displayDef, std::string("captured"));
+
+    auto body = std::make_unique<IL::BlockContainer>();
+    fn->Body = std::move(body);
+    auto block = std::make_unique<IL::Block>();
+    block->Kind = IL::BlockKind::ControlFlow;
+    IL::Block* blockPtr = block.get();
+    fn->Body->AddBlock(std::move(block));
+
+    // stloc captured(newobj <>c__DisplayClass0..ctor()) -- the display-struct
+    // initializer, then the use-site `call <M>g__LF|0_0(ldloca captured)`.
+    auto ctor = std::make_unique<IL::Call>(
+        std::string("Test.<>c__DisplayClass0::.ctor"));
+    ctor->IsNewObj = true;
+    auto init = std::make_unique<IL::StLoc>(captured, std::move(ctor));
+    blockPtr->Add(std::move(init));
+    auto plainCall = std::make_unique<IL::Call>(
+        std::string("Test.C::<M>g__LF|0_0"));
+    plainCall->AddArg(std::make_unique<IL::LdLoca>(captured));
+    blockPtr->Add(std::move(plainCall));
+    blockPtr->SetFinal(std::make_unique<IL::LdLoc>(captured));
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.LocalFunctions = true;
+    ctx.CurrentTypeDefinition = decompiledDef.get();
+    // The decoded definition: static, one ByReferenceType closure parameter
+    // over the display struct (the C# IsClosureParameter shape).
+    ctx.LocalFunctionBodyResolver =
+        [displayDef, &captured](const std::string& methodName)
+        -> std::unique_ptr<IL::ILFunction> {
+        if (methodName != "Test.C::<M>g__LF|0_0") return nullptr;
+        auto def = std::make_unique<IL::ILFunction>();
+        def->Name = methodName;
+        def->Kind = IL::ILFunctionKind::LocalFunction;
+        def->IsStatic = true;
+        auto refType =
+            std::make_shared<TS::ByReferenceType>(displayDef);
+        def->Parameters.push_back(
+            std::make_shared<TS::Implementation::DefaultParameter>(
+            refType, std::string("captured")));
+        auto defBody = std::make_unique<IL::BlockContainer>();
+        def->Body = std::move(defBody);
+        auto defBlock = std::make_unique<IL::Block>();
+        defBlock->Kind = IL::BlockKind::ControlFlow;
+        def->Body->AddBlock(std::move(defBlock));
+        return def;
+    };
+
+    IL::LocalFunctionDecompiler transform;
+    transform.Run(*fn, ctx);
+
+    ASSERT_EQ(fn->LocalFunctions.size(), 1u);
+    IL::ILFunction* definition = fn->LocalFunctions[0].get();
+    EXPECT_EQ(definition->DeclarationScope, fn->Body.get())
+        << "the declaration scope is the container of the captured "
+           "variable's first address-taking use";
+    EXPECT_EQ(captured->CaptureScope, fn->Body.get())
+        << "the captured variable's capture scope is the same container";
+    EXPECT_EQ(captured->Kind, IL::VariableKind::DisplayClassLocal)
+        << "the captured local is retargeted to DisplayClassLocal";
 }
 
 // A non-local-function ldftn (not part of a delegate construction) is not a
