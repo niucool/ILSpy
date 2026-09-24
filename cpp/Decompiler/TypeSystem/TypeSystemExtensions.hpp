@@ -524,4 +524,9 @@ bool HasReadonlyModifier(const IMethod& accessor);
 // overload -- this member reads only the result's own fields).
 const ISymbol* GetSymbol(const ILSpy::Decompiler::Semantics::ResolveResult& resolveResult);
 
+// The C# `public static IType UnwrapByRef(this IType type)`
+// (TypeSystemExtensions.cs line 434): strips one `ByReferenceType` wrapper, returning
+// the element type; any other type passes through unchanged (the same object).
+const IType& UnwrapByRef(const IType& type);
+
 } // namespace ILSpy::Decompiler::TypeSystem

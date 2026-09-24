@@ -23,13 +23,23 @@
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/ExpressionBuilder.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"
+#include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
+#include "Decompiler/CSharp/Resolver/Log.hpp"
+#include "Decompiler/CSharp/Resolver/MemberLookup.hpp"
+#include "Decompiler/CSharp/Resolver/MethodGroupResolveResult.hpp"
+#include "Decompiler/CSharp/Resolver/OverloadResolution.hpp"
+#include "Decompiler/CSharp/Resolver/TypeInferenceHelpers.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/BaseReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ThisReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InterpolatedStringExpression.hpp"
 #include "Decompiler/CSharp/Syntax/InterpolatedStringContent.hpp"
@@ -54,6 +64,7 @@
 #include "Decompiler/TypeSystem/IMember.hpp"
 #include "Decompiler/TypeSystem/IParameter.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/NullableType.hpp"
 #include "Decompiler/TypeSystem/InheritanceHelper.hpp"
 #include "Decompiler/TypeSystem/NormalizeTypeVisitor.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
@@ -62,6 +73,7 @@
 #include <any>
 #include <cassert>
 #include <charconv>
+#include <set>
 #include <stdexcept>
 
 namespace ILSpy::Decompiler::CSharp {
@@ -1003,5 +1015,466 @@ void CallBuilder::ArgumentList::CheckNoNamedOrOptionalArguments() const
     assert(!ArgumentToParameterMap.has_value() && !ArgumentNames.has_value()
            && FirstOptionalArgumentIndex < 0);
 }
+
+
+// ---------------------------------------------------------------------------
+// The overload-resolution front end (CallBuilder.cs lines 1138-1556)
+// ---------------------------------------------------------------------------
+
+// The C# `private bool IsPossibleExtensionMethodCallOnNull(IMethod method,
+// IList<TranslatedExpression> arguments)` (CallBuilder.cs lines 1369-1372).
+bool CallBuilder::IsPossibleExtensionMethodCallOnNull(
+    const TS::IMethod& method, const std::vector<TranslatedExpression>& arguments) {
+    return method.IsExtensionMethod() && !arguments.empty()
+        && dynamic_cast<const Syntax::NullReferenceExpression*>(
+               arguments[0].Expression())
+        != nullptr;
+}
+
+// The C# `static bool CanInferTypeArgumentsFromArguments(IMethod method,
+// ArgumentList argumentList, TypeInference typeInference)` (CallBuilder.cs
+// lines 1383-1401). The C# `method.MemberDefinition` cast to IMethod ports as
+// a dynamic_cast of the IMember handle; the port's TypeInference lift is the
+// free InferTypeArguments function over (compilation, conversions,
+// typeParameters, arguments, parameterTypes) -- the conversions surface comes
+// from the builder's resolver (the same CSharpConversions instance the
+// resolver owns). The C# anonymous-type pinning retry is deferred (see the
+// header note); the argument resolve results ride the shared annotation
+// handles (the C# GC references).
+bool CallBuilder::CanInferTypeArgumentsFromArguments(
+    const TS::IMethod& method, const ArgumentList& argumentList,
+    const ExpressionBuilder& expressionBuilder) {
+    if (method.TypeParameters().empty())
+        return true;
+    // always use unspecialized member, otherwise type inference fails
+    const auto* definition =
+        dynamic_cast<const TS::IMethod*>(method.MemberDefinition());
+    if (definition == nullptr)
+        return false;
+    std::vector<TS::ITypePtr> paramTypesInArgumentOrder;
+    if (!argumentList.ArgumentToParameterMap.has_value()) {
+        for (const TS::IParameter* p : definition->Parameters())
+            paramTypesInArgumentOrder.push_back(
+                const_cast<TS::IType&>(p->Type()).shared_from_this());
+    } else {
+        for (int index : *argumentList.ArgumentToParameterMap) {
+            paramTypesInArgumentOrder.push_back(
+                index >= 0
+                    ? const_cast<TS::IType&>(
+                          definition->Parameters()[static_cast<std::size_t>(index)]->Type())
+                          .shared_from_this()
+                    : TS::UnknownType());
+        }
+    }
+    std::vector<std::shared_ptr<Sem::ResolveResult>> argumentResolveResults;
+    argumentResolveResults.reserve(argumentList.Arguments.size());
+    for (const TranslatedExpression& argument : argumentList.Arguments)
+        argumentResolveResults.push_back(
+            GetSharedResolveResult(*argument.Expression()));
+    std::vector<const TS::ITypeParameter*> typeParameters =
+        definition->TypeParameters();
+    bool success = false;
+    Resolver::Detail::InferTypeArguments(
+        *expressionBuilder.compilation, expressionBuilder.resolver->Conversions(),
+        typeParameters, argumentResolveResults, paramTypesInArgumentOrder, success,
+        std::nullopt, expressionBuilder.typeInference.algorithm);
+    return success;
+}
+
+// The C# `private TranslatedExpression WrapInAsRefReadOnly(TranslatedExpression
+// arg)` (CallBuilder.cs lines 1357-1367).
+TranslatedExpression CallBuilder::WrapInAsRefReadOnly(TranslatedExpression arg) {
+    auto* invocation = new Syntax::InvocationExpression();
+    invocation->Target(new Syntax::IdentifierExpression("ILSpyHelper_AsRefReadOnly"));
+    invocation->Arguments().Add(arg.Expression());
+    auto* direction =
+        new Syntax::DirectionExpression(Syntax::FieldDirection::In, invocation);
+    return WithoutILInstruction(WithRR(
+        *direction,
+        std::make_shared<Sem::ByReferenceResolveResult>(
+            const_cast<TS::IType&>(arg.Type()).shared_from_this(),
+            TS::ReferenceKind::In)));
+}
+
+// The C# `private void EnforceExplicitIn(TranslatedExpression[] arguments,
+// IParameter[] expectedParameters)` (CallBuilder.cs lines 1343-1355). The C#
+// `expressionBuilder.statementBuilder.EmitAsRefReadOnly = true` bookkeeping is
+// deferred with the StatementBuilder port (the flag tells the statement stage
+// to emit the helper declaration; the call-builder side of the shape is
+// complete here).
+void CallBuilder::EnforceExplicitIn(
+    std::vector<TranslatedExpression>& arguments,
+    const std::vector<const TS::IParameter*>& expectedParameters) {
+    for (std::size_t i = 0; i < arguments.size(); i++) {
+        if (expectedParameters[i]->ReferenceKind() != TS::ReferenceKind::In)
+            continue;
+        if (dynamic_cast<const Syntax::DirectionExpression*>(
+                arguments[i].Expression())
+            != nullptr)
+            continue;
+
+        arguments[i] = WrapInAsRefReadOnly(arguments[i]);
+        // The C# `expressionBuilder.statementBuilder.EmitAsRefReadOnly = true`
+        // -- deferred with the StatementBuilder port.
+    }
+}
+
+// The C# `private void CastArguments(IList<TranslatedExpression> arguments,
+// IList<IParameter> expectedParameters)` (CallBuilder.cs lines 1446-1483).
+// The C# anonymous-type arm (the lambda return-type rewrite through
+// ModifyReturnTypeOfLambda) is deferred with the anonymous-type surface; the
+// plain cast arm is the path every non-anonymous call takes.
+void CallBuilder::CastArguments(
+    std::vector<TranslatedExpression>& arguments,
+    const std::vector<const TS::IParameter*>& expectedParameters) {
+    for (std::size_t i = 0; i < arguments.size(); i++) {
+        const TS::IParameter* parameter = expectedParameters[i];
+        const TS::IType* parameterType;
+        if (parameter->Type().Kind() == TS::TypeKind::Dynamic) {
+            parameterType = &const_cast<TS::IType&>(
+                expressionBuilder_->compilation->FindType(TS::KnownTypeCode::Object));
+        } else {
+            parameterType = &parameter->Type();
+        }
+
+        auto* parameterByRef =
+            dynamic_cast<const TS::ByReferenceType*>(parameterType);
+        if (parameter->ReferenceKind() == TS::ReferenceKind::In
+            && parameterByRef != nullptr
+            && dynamic_cast<const TS::ByReferenceType*>(&arguments[i].Type())
+                == nullptr) {
+            parameterType = parameterByRef->Element().get();
+        }
+
+        arguments[i] = arguments[i].ConvertTo(
+            *const_cast<TS::IType*>(parameterType), *expressionBuilder_,
+            /*checkForOverflow=*/false, /*allowImplicitConversion=*/false);
+    }
+}
+
+// The C# `OverloadResolutionErrors IsUnambiguousCall(...)` (CallBuilder.cs
+// lines 1554-1663): the four candidate-source arms over the ported
+// OverloadResolution engine. The C# HashSet-based operator-candidate union
+// deduplicates by reference identity preserving first-seen order (the port's
+// pointer-identity seen-set mirrors the C# HashSet<T> enumeration shape
+// closely enough for candidate ordering: the C# HashSet<T> enumerates in
+// insertion order for reference-type elements).
+Resolver::OverloadResolutionErrors CallBuilder::IsUnambiguousCall(
+    const ExpectedTargetDetails& expectedTargetDetails, const TS::IMethod& method,
+    const Sem::ResolveResult* target, const std::vector<TS::ITypePtr>& typeArguments,
+    const std::vector<std::shared_ptr<Sem::ResolveResult>>& arguments,
+    const std::optional<std::vector<std::string>>& argumentNames,
+    int firstOptionalArgumentIndex, const TS::IParameterizedMember*& foundMember,
+    bool& bestCandidateIsExpandedForm) {
+    foundMember = nullptr;
+    bestCandidateIsExpandedForm = false;
+    const TS::ITypeDefinition* currentTypeDefinition =
+        expressionBuilder_->resolver->CurrentTypeDefinition();
+
+    Resolver::Log::WriteLine(
+        "IsUnambiguousCall: Performing overload resolution for {} ({})",
+        method.Name(),
+        expectedTargetDetails.CallOpCode == IL::OpCode::NewObj ? "newobj" : "call");
+
+    Resolver::MemberLookup lookup(
+        currentTypeDefinition,
+        currentTypeDefinition != nullptr ? currentTypeDefinition->ParentModule()
+                                         : nullptr);
+
+    std::optional<std::vector<std::string>> names = argumentNames;
+    if (!(firstOptionalArgumentIndex < 0 || !names.has_value()))
+        names->resize(static_cast<std::size_t>(firstOptionalArgumentIndex));
+
+    Resolver::OverloadResolution overloadResolution(
+        expressionBuilder_->resolver->Compilation(), arguments, names, typeArguments,
+        &expressionBuilder_->resolver->Conversions());
+    if (expectedTargetDetails.CallOpCode == IL::OpCode::NewObj) {
+        bool allowProtectedAccess =
+            currentTypeDefinition == method.DeclaringTypeDefinition();
+        for (const TS::IMethod* ctor : method.DeclaringType()->GetConstructors()) {
+            if (lookup.IsAccessible(*ctor, allowProtectedAccess))
+                overloadResolution.AddCandidate(*ctor);
+        }
+    } else if (method.IsOperator()) {
+        // The C# HashSet<IParameterizedMember> union deduplicates by reference
+        // identity preserving first-seen order; the port mirrors that with a
+        // pointer-identity seen-set over the resolver's candidate vectors (the
+        // candidates are shared IMethod handles).
+        std::vector<std::shared_ptr<const TS::IMethod>> operatorCandidates;
+        std::set<const TS::IMethod*> seenCandidates;
+        auto Collect = [&](const TS::IType& operandType) {
+            for (auto& candidate :
+                 expressionBuilder_->resolver->GetUserDefinedOperatorCandidates(
+                     operandType, method.Name().c_str())) {
+                if (seenCandidates.insert(candidate.get()).second)
+                    operatorCandidates.push_back(std::move(candidate));
+            }
+        };
+        if (arguments.size() == 1) {
+            const TS::IType& argType = TS::GetUnderlyingType(arguments[0]->Type());
+            Collect(argType);
+            if (method.Name() == "op_Explicit") {
+                // For casts, also consider candidates from the target type we
+                // are casting to.
+                const TS::IType& targetType =
+                    TS::GetUnderlyingType(method.ReturnType());
+                Collect(targetType);
+            }
+        } else if (arguments.size() == 2) {
+            const TS::IType& lhsType = TS::GetUnderlyingType(arguments[0]->Type());
+            const TS::IType& rhsType = TS::GetUnderlyingType(arguments[1]->Type());
+            Collect(lhsType);
+            Collect(rhsType);
+        }
+        for (const auto& candidate : operatorCandidates)
+            overloadResolution.AddCandidate(*candidate);
+    } else if (target == nullptr) {
+        auto result = std::dynamic_pointer_cast<const Resolver::MethodGroupResolveResult>(
+            expressionBuilder_->resolver->ResolveSimpleName(
+                method.Name(), typeArguments, /*isInvocationTarget=*/true));
+        if (result == nullptr)
+            return Resolver::OverloadResolutionErrors::AmbiguousMatch;
+        overloadResolution.AddMethodLists(result->MethodsGroupedByDeclaringType());
+    } else {
+        auto result = std::dynamic_pointer_cast<const Resolver::MethodGroupResolveResult>(
+            lookup.Lookup(*target, method.Name(), typeArguments, /*isInvocation=*/true));
+        if (result == nullptr)
+            return Resolver::OverloadResolutionErrors::AmbiguousMatch;
+        overloadResolution.AddMethodLists(result->MethodsGroupedByDeclaringType());
+    }
+    bestCandidateIsExpandedForm = overloadResolution.BestCandidateIsExpandedForm();
+    if (overloadResolution.BestCandidateErrors()
+        != Resolver::OverloadResolutionErrors::None)
+        return overloadResolution.BestCandidateErrors();
+    if (overloadResolution.IsAmbiguous())
+        return Resolver::OverloadResolutionErrors::AmbiguousMatch;
+    foundMember = overloadResolution.GetBestCandidateWithSubstitutedTypeArguments();
+    if (!IsAppropriateCallTarget(expectedTargetDetails, method, *foundMember))
+        return Resolver::OverloadResolutionErrors::AmbiguousMatch;
+    std::optional<std::vector<int>> map = overloadResolution.GetArgumentToParameterMap();
+    for (std::size_t i = 0; i < arguments.size(); i++) {
+        int parameterIndex = (*map)[i];
+        auto* outVar = dynamic_cast<const Sem::OutVarResolveResult*>(arguments[i].get());
+        if (outVar != nullptr && parameterIndex >= 0) {
+            const TS::IParameter* parameter = foundMember->Parameters()[parameterIndex];
+            const TS::IType& paramType = TS::UnwrapByRef(parameter->Type());
+            if (!paramType.Equals(*outVar->OriginalVariableType()))
+                return Resolver::OverloadResolutionErrors::OutVarTypeMismatch;
+        }
+    }
+
+    return Resolver::OverloadResolutionErrors::None;
+}
+
+// The C# `private CallTransformation GetRequiredTransformationsForCall(...)` 
+// (CallBuilder.cs lines 1152-1341). The C# `goto case` chains inside the
+// overload-resolution switch flatten into fall-through if-arms evaluating the
+// same conditions: the WrongNumberOfTypeArguments arm with
+// `requireTypeArguments` already true and the
+// MissingArgumentForRequiredParameter arm with no optional argument both fall
+// into the default arm, exactly as the C# gotos do. The C# anonymous-type
+// pinning arm (the `settings.AnonymousTypes &&
+// method.TypeArguments.Any(ContainsAnonymousType)` retry) is deferred with
+// the anonymous-type surface -- the port takes the else branch (the explicit
+// type-arguments shortcut) unconditionally, which is the C# behavior for
+// every argument shape whose type arguments do not involve anonymous types.
+CallBuilder::CallTransformation CallBuilder::GetRequiredTransformationsForCall(
+    const ExpectedTargetDetails& expectedTargetDetails, const TS::IMethod& method,
+    TranslatedExpression& target, ArgumentList& argumentList,
+    CallTransformation allowedTransforms, const TS::IParameterizedMember*& foundMethod) {
+    CallBuilder::CallTransformation transform = CallTransformation::None;
+
+    // initialize requireTarget flag
+    bool requireTarget;
+    const Sem::ResolveResult* targetResolveResult;
+    if ((allowedTransforms & CallTransformation::RequireTarget)
+        != CallTransformation::None) {
+        if (settings_->AlwaysQualifyMemberReferences()
+            || expressionBuilder_->HidesVariableWithName(method.Name())) {
+            requireTarget = true;
+        } else {
+            if (method.IsLocalFunction())
+                requireTarget = false;
+            else if (method.IsStatic())
+                requireTarget =
+                    !expressionBuilder_->IsCurrentOrContainingType(
+                        method.DeclaringTypeDefinition())
+                    || method.Name() == ".cctor";
+            else if (method.Name() == ".ctor")
+                // always use target for base/this-ctor-call, the constructor
+                // initializer pattern depends on this
+                requireTarget = true;
+            else if (dynamic_cast<const Syntax::BaseReferenceExpression*>(
+                         target.Expression())
+                     != nullptr)
+                requireTarget = (expectedTargetDetails.CallOpCode != IL::OpCode::CallVirt
+                                 && method.IsVirtual());
+            else
+                requireTarget =
+                    dynamic_cast<const Syntax::ThisReferenceExpression*>(
+                        target.Expression())
+                    == nullptr;
+        }
+        targetResolveResult = requireTarget ? target.ResolveResult() : nullptr;
+    } else {
+        // HACK: this is a special case for collection initializer calls, they
+        // do not allow a target to be emitted, but we still need it for
+        // overload resolution.
+        requireTarget = true;
+        targetResolveResult = target.ResolveResult();
+    }
+
+    // initialize requireTypeArguments flag
+    bool requireTypeArguments;
+    std::vector<TS::ITypePtr> typeArguments;
+    bool appliedRequireTypeArgumentsShortcut = false;
+    if (method.TypeParameters().size() > 0
+        && (allowedTransforms & CallTransformation::RequireTypeArguments)
+        != CallTransformation::None
+        && !IsPossibleExtensionMethodCallOnNull(method, argumentList.Arguments)) {
+        // The ambiguity resolution below only adds type arguments as last
+        // resort measure; the CanInferTypeArgumentsFromArguments shortcut
+        // detects the cases that always require them (such as
+        // Enumerable.OfType<TResult>(IEnumerable input)) and lends overload
+        // resolution a hand. The C# anonymous-type pinning retry inside the
+        // failure arm is deferred with the anonymous-type surface.
+        if (!CanInferTypeArgumentsFromArguments(method, argumentList,
+                                                *expressionBuilder_)) {
+            requireTypeArguments = true;
+            typeArguments = method.TypeArguments();
+            appliedRequireTypeArgumentsShortcut = true;
+        } else {
+            requireTypeArguments = false;
+            typeArguments.clear();
+        }
+    } else {
+        requireTypeArguments = false;
+        typeArguments.clear();
+    }
+
+    bool targetCasted = false;
+    bool argumentsCasted = false;
+    bool originalRequireTarget = requireTarget;
+    bool skipTargetCast = method.Accessibility() <= TS::Accessibility::Protected
+        && expressionBuilder_->IsBaseTypeOfCurrentType(
+            method.DeclaringTypeDefinition());
+    Resolver::OverloadResolutionErrors errors;
+    bool bestCandidateIsExpandedForm = false;
+    while ((errors = IsUnambiguousCall(
+                expectedTargetDetails, method, targetResolveResult, typeArguments,
+                argumentList.GetArgumentResolveResults(),
+                argumentList.GetArgumentNames(),
+                argumentList.FirstOptionalArgumentIndex, foundMethod,
+                bestCandidateIsExpandedForm))
+               != Resolver::OverloadResolutionErrors::None
+           || bestCandidateIsExpandedForm != argumentList.IsExpandedForm) {
+        if (errors == Resolver::OverloadResolutionErrors::OutVarTypeMismatch) {
+            assert(argumentList.UseImplicitlyTypedOut);
+            argumentList.UseImplicitlyTypedOut = false;
+            continue;
+        }
+        if (errors == Resolver::OverloadResolutionErrors::TypeInferenceFailed
+            && (allowedTransforms & CallTransformation::RequireTypeArguments)
+            != CallTransformation::None) {
+            // goto case OverloadResolutionErrors.WrongNumberOfTypeArguments
+            errors = Resolver::OverloadResolutionErrors::WrongNumberOfTypeArguments;
+        }
+        if (errors == Resolver::OverloadResolutionErrors::WrongNumberOfTypeArguments) {
+            assert((allowedTransforms & CallTransformation::RequireTypeArguments)
+                   != CallTransformation::None);
+            if (requireTypeArguments) {
+                // goto default
+            } else {
+                requireTypeArguments = true;
+                typeArguments = method.TypeArguments();
+                continue;
+            }
+        }
+        if (errors == Resolver::OverloadResolutionErrors::MissingArgumentForRequiredParameter) {
+            if (argumentList.FirstOptionalArgumentIndex == -1) {
+                // goto default
+            } else {
+                argumentList.FirstOptionalArgumentIndex = -1;
+                continue;
+            }
+        }
+        // default:
+        // TODO : implement some more intelligent algorithm that decides which
+        // of these fixes (cast args, add target, cast target, add type args)
+        // is best in this case. Additionally we should not cast all arguments
+        // at once, but step-by-step try to add only a minimal number of casts.
+        if (argumentList.AddNamesToPrimitiveValues) {
+            argumentList.AddNamesToPrimitiveValues = false;
+        } else if (argumentList.FirstOptionalArgumentIndex >= 0) {
+            argumentList.FirstOptionalArgumentIndex = -1;
+        } else if (!argumentsCasted) {
+            // If we added type arguments beforehand, but that didn't make the
+            // code any better, undo that decision and add casts first.
+            if (appliedRequireTypeArgumentsShortcut) {
+                requireTypeArguments = false;
+                typeArguments.clear();
+                appliedRequireTypeArgumentsShortcut = false;
+            }
+            argumentsCasted = true;
+            argumentList.UseImplicitlyTypedOut = false;
+            CastArguments(argumentList.Arguments, argumentList.ExpectedParameters);
+        } else if ((allowedTransforms & CallTransformation::RequireTarget)
+                   != CallTransformation::None
+            && !requireTarget) {
+            requireTarget = true;
+            targetResolveResult = target.ResolveResult();
+        } else if ((allowedTransforms & CallTransformation::RequireTarget)
+                   != CallTransformation::None
+            && !targetCasted) {
+            if (skipTargetCast && requireTarget != originalRequireTarget) {
+                requireTarget = originalRequireTarget;
+                if (!originalRequireTarget)
+                    targetResolveResult = nullptr;
+                allowedTransforms = allowedTransforms
+                    & ~CallTransformation::RequireTarget;
+            } else {
+                targetCasted = true;
+                target = target.ConvertTo(
+                    const_cast<TS::IType&>(*method.DeclaringType()),
+                    *expressionBuilder_);
+                targetResolveResult = target.ResolveResult();
+            }
+        } else if ((allowedTransforms & CallTransformation::RequireTypeArguments)
+                   != CallTransformation::None
+            && !requireTypeArguments) {
+            requireTypeArguments = true;
+            typeArguments = method.TypeArguments();
+        } else if ((allowedTransforms & CallTransformation::EnforceExplicitIn)
+                   != CallTransformation::None) {
+            EnforceExplicitIn(argumentList.Arguments,
+                              argumentList.ExpectedParameters);
+            allowedTransforms = allowedTransforms
+                & ~CallTransformation::EnforceExplicitIn;
+        } else {
+            break;
+        }
+        continue;
+    }
+    // We've given up (or the loop resolved): foundMethod is assigned by the
+    // IsUnambiguousCall out param each iteration; the C# "We've given up"
+    // path re-assigns `foundMethod = method` before its break.
+    if (errors != Resolver::OverloadResolutionErrors::None
+        || bestCandidateIsExpandedForm != argumentList.IsExpandedForm)
+        foundMethod = &method;
+    if ((allowedTransforms & CallTransformation::RequireTarget)
+        != CallTransformation::None
+        && requireTarget)
+        transform |= CallTransformation::RequireTarget;
+    if ((allowedTransforms & CallTransformation::RequireTypeArguments)
+        != CallTransformation::None
+        && requireTypeArguments)
+        transform |= CallTransformation::RequireTypeArguments;
+    if (argumentList.FirstOptionalArgumentIndex < 0)
+        transform |= CallTransformation::NoOptionalArgumentAllowed;
+    if (!argumentList.AddNamesToPrimitiveValues)
+        transform |= CallTransformation::NoNamedArgsForPrettiness;
+    return transform;
+}
+
 
 } // namespace ILSpy::Decompiler::CSharp

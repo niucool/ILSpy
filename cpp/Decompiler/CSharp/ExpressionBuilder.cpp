@@ -1675,6 +1675,50 @@ bool ExpressionBuilder::HidesVariableWithName(const std::string& name) const
     return currentFunction != nullptr && HidesVariableWithName(*currentFunction, name);
 }
 
+// The C# `internal bool IsCurrentOrContainingType(ITypeDefinition? type)`
+// (ExpressionBuilder.cs lines 2476-2486): the DeclaringTypeDefinition walk
+// from the decompilation context's current type definition. The port answers
+// false when the context carries no current type definition (the C# context
+// always carries one).
+bool ExpressionBuilder::IsCurrentOrContainingType(
+    const TS::ITypeDefinition* type) const
+{
+    const TS::ITypeDefinition* currentTypeDefinition =
+        decompilationContext != nullptr
+            ? decompilationContext->CurrentTypeDefinition()
+            : nullptr;
+    while (currentTypeDefinition != nullptr)
+    {
+        if (type == currentTypeDefinition)
+            return true;
+        currentTypeDefinition = currentTypeDefinition->DeclaringTypeDefinition();
+    }
+    return false;
+}
+
+// The C# `internal bool IsBaseTypeOfCurrentType(ITypeDefinition? type)`
+// (ExpressionBuilder.cs lines 2488-2491): the GetAllBaseTypeDefinitions scan
+// over the decompilation context's current type definition. The C# would NRE
+// on a null current type definition; the port answers false (no current type
+// -> no base-type relation).
+bool ExpressionBuilder::IsBaseTypeOfCurrentType(
+    const TS::ITypeDefinition* type) const
+{
+    const TS::ITypeDefinition* currentTypeDefinition =
+        decompilationContext != nullptr
+            ? decompilationContext->CurrentTypeDefinition()
+            : nullptr;
+    if (currentTypeDefinition == nullptr)
+        return false;
+    for (const TS::ITypeDefinition* candidate :
+         TS::GetAllBaseTypeDefinitions(*currentTypeDefinition))
+    {
+        if (candidate == type)
+            return true;
+    }
+    return false;
+}
+
 bool ExpressionBuilder::HidesVariableWithName(const IL::ILFunction& currentFunctionValue,
                                               const std::string& name)
 {

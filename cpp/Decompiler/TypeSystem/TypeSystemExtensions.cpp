@@ -810,4 +810,14 @@ const ISymbol* GetSymbol(const ILSpy::Decompiler::Semantics::ResolveResult& reso
     return nullptr;
 }
 
+// The C# `public static IType UnwrapByRef(this IType type)`
+// (TypeSystemExtensions.cs line 434): strips one `ByReferenceType` wrapper and
+// returns the element type; any other type passes through unchanged.
+const IType& UnwrapByRef(const IType& type)
+{
+    if (const auto* byRef = dynamic_cast<const ByReferenceType*>(&type))
+        return *byRef->Element();
+    return type;
+}
+
 } // namespace ILSpy::Decompiler::TypeSystem
