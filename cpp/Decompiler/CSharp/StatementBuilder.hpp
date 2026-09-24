@@ -95,6 +95,7 @@ class StLoc;
 class StObj;
 class SwitchInstruction;
 class SwitchSection;
+class UsingInstruction;
 class Throw;
 } // namespace IL
 
@@ -229,6 +230,7 @@ private:
     // TransformToForeachWithoutDispose arm is deferred with the foreach
     // surface; DeclareLocalFunctions throws when it would emit (the
     // local-function declaration machinery is not ported).
+    TranslatedStatement VisitUsingInstruction(IL::UsingInstruction* inst);
     TranslatedStatement VisitBlockContainer(IL::BlockContainer* container);
     Syntax::Statement* ConvertLoop(IL::BlockContainer* container);
     Syntax::BlockStatement* ConvertBlockContainer(IL::BlockContainer* container,

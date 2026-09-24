@@ -30,6 +30,15 @@
 #include "Decompiler/CSharp/Syntax/Expressions/IsExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
+#include "Decompiler/CSharp/Syntax/SimpleType.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AsExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/UsingStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/DoWhileStatement.hpp"
@@ -50,6 +59,7 @@
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/UsingInstruction.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
@@ -160,6 +170,8 @@ TranslatedStatement StatementBuilder::Convert(IL::ILInstruction* inst) {
         return VisitPinnedRegion(pinnedRegion);
     if (auto* switchInstruction = dynamic_cast<IL::SwitchInstruction*>(inst))
         return VisitSwitchInstruction(switchInstruction);
+    if (auto* usingInstruction = dynamic_cast<IL::UsingInstruction*>(inst))
+        return VisitUsingInstruction(usingInstruction);
     if (auto* blockContainer = dynamic_cast<IL::BlockContainer*>(inst))
         return VisitBlockContainer(blockContainer);
     if (auto* block = dynamic_cast<IL::Block*>(inst))
@@ -243,8 +255,6 @@ TranslatedStatement StatementBuilder::VisitNop(IL::Nop* inst) {
     if (!inst->Comment.empty()) {
         stmt->AddTrailingTrivia(new Syntax::Comment(inst->Comment));
     }
-    std::fprintf(stderr, "DBG nop: comment=%d trivia=%zu\n",
-                 (int)!inst->Comment.empty(), stmt->TrailingTrivia().size());
     return WithILInstruction(*stmt, inst);
 }
 
@@ -908,6 +918,121 @@ Syntax::SwitchStatement* StatementBuilder::TranslateSwitch(
     breakTarget = oldBreakTarget;
     caseLabelMapping = oldCaseLabelMapping;
     return stmt;
+}
+
+// The C# `protected internal override TranslatedStatement
+// VisitUsingInstruction(UsingInstruction inst)` (StatementBuilder.cs lines
+// 961-1036): the `using` render with the IDisposable probe (the fallback
+// try/finally render when the type does not implement IDisposable directly)
+// and the resource-acquisition declaration. The TransformToForeach arm is
+// deferred with the foreach surface (the AST pattern nodes -- AnyNode/
+// NamedNode/Choice -- are not ported, so the GetEnumerator/MoveNext patterns
+// cannot match); a foreach-shaped using renders as the plain using statement.
+bool UsingInstructionIsValidInCSharp(StatementBuilder& builder,
+                                     const IL::UsingInstruction* inst,
+                                     TS::KnownTypeCode code) {
+    (void)builder;
+    // The C# `inst.ResourceExpression.MatchLdNull()`.
+    if (inst->ResourceExpression != nullptr
+        && inst->ResourceExpression->Op == IL::OpCode::LdNull)
+        return true;
+    if (inst->IsRefStruct)
+        return true;
+    const IL::ILVariable* var = inst->Variable.get();
+    // The C# `NullableType.GetUnderlyingType(var.Type).GetAllBaseTypes()
+    // .Any(b => b.IsKnownType(code))`.
+    const TS::IType& underlying = TS::GetUnderlyingType(*var->Type);
+    for (const TS::IType* baseType : TS::GetAllBaseTypes(&underlying)) {
+        if (TS::IsKnownType(*baseType, code))
+            return true;
+    }
+    return false;
+}
+
+TranslatedStatement StatementBuilder::VisitUsingInstruction(
+    IL::UsingInstruction* inst) {
+    Syntax::Expression* resource =
+        exprBuilder->Translate(inst->ResourceExpression.get()).Expression();
+    // The C# `var transformed = TransformToForeach(inst, resource); if
+    // (transformed != null) return transformed;` -- deferred with the foreach
+    // surface (see the IsValidInCSharp comment above).
+    const IL::ILVariablePtr& var = inst->Variable;
+    TS::KnownTypeCode knownTypeCode;
+    TS::ITypePtr disposeType;
+    const char* disposeTypeMethodName;
+    if (inst->IsAsync) {
+        knownTypeCode = TS::KnownTypeCode::IAsyncDisposable;
+        disposeType = std::const_pointer_cast<TS::IType>(
+            const_cast<TS::IType&>(exprBuilder->compilation->FindType(
+                TS::KnownTypeCode::IAsyncDisposable))
+                .shared_from_this());
+        disposeTypeMethodName = "DisposeAsync";
+    } else {
+        knownTypeCode = TS::KnownTypeCode::IDisposable;
+        disposeType = std::const_pointer_cast<TS::IType>(
+            const_cast<TS::IType&>(exprBuilder->compilation->FindType(
+                TS::KnownTypeCode::IDisposable))
+                .shared_from_this());
+        disposeTypeMethodName = "Dispose";
+    }
+    if (!UsingInstructionIsValidInCSharp(*this, inst, knownTypeCode)) {
+        assert(var->Kind == IL::VariableKind::UsingLocal
+               || var->Kind == IL::VariableKind::Local);
+        var->Kind = IL::VariableKind::Local;
+        auto disposeVariable = currentFunction->RegisterVariable(
+            IL::VariableKind::Local, disposeType);
+        Syntax::Expression* disposeInvocation = new Syntax::InvocationExpression(
+            new Syntax::MemberReferenceExpression(
+                exprBuilder->ConvertVariable(disposeVariable).Expression(),
+                disposeTypeMethodName));
+        if (inst->IsAsync) {
+            auto* awaitExpr = new Syntax::UnaryOperatorExpression();
+            awaitExpr->Expression(disposeInvocation);
+            awaitExpr->Operator(Syntax::UnaryOperatorType::Await);
+            disposeInvocation = awaitExpr;
+        }
+        auto* block = new Syntax::BlockStatement();
+        block->Statements().Add(new Syntax::ExpressionStatement(
+            new Syntax::AssignmentExpression(
+                exprBuilder->ConvertVariable(var).Expression(),
+                Syntax::Detach(resource))));
+        auto* tryCatch = new Syntax::TryCatchStatement(
+            dynamic_cast<Syntax::BlockStatement*>(
+                ConvertAsBlock(inst->Body.get()).Statement()));
+        auto* finallyBlock = new Syntax::BlockStatement();
+        finallyBlock->Statements().Add(new Syntax::ExpressionStatement(
+            new Syntax::AssignmentExpression(
+                exprBuilder->ConvertVariable(disposeVariable).Expression(),
+                new Syntax::AsExpression(
+                    exprBuilder->ConvertVariable(var).Expression(),
+                    exprBuilder->ConvertType(*disposeType)))));
+        finallyBlock->Statements().Add(new Syntax::IfElseStatement(
+            new Syntax::BinaryOperatorExpression(
+                exprBuilder->ConvertVariable(disposeVariable).Expression(),
+                Syntax::BinaryOperatorType::InEquality,
+                new Syntax::NullReferenceExpression()),
+            new Syntax::ExpressionStatement(disposeInvocation)));
+        tryCatch->FinallyBlock(finallyBlock);
+        block->Statements().Add(tryCatch);
+        return WithILInstruction(*block, inst);
+    }
+    Syntax::AstNode* usingInit = resource;
+    if (var->LoadCount > 0 || var->AddressCount > 0) {
+        // The C# `settings.AnonymousTypes && var.Type.ContainsAnonymousType()`
+        // gate: the anonymous-type detection is not ported (the NRExtensions
+        // surface is deferred), so the gate is the plain type conversion.
+        Syntax::AstType* type = exprBuilder->ConvertType(*var->Type);
+        auto* vds = new Syntax::VariableDeclarationStatement(type, var->Name);
+        vds->Variables().At(0)->AddAnnotation(
+            std::make_shared<ILVariableResolveResult>(var, var->Type));
+        usingInit = vds;
+    }
+    auto* usingStatement = new Syntax::UsingStatement(
+        usingInit,
+        dynamic_cast<Syntax::BlockStatement*>(
+            ConvertAsBlock(inst->Body.get()).Statement()));
+    usingStatement->IsAsync(inst->IsAsync);
+    return WithILInstruction(*usingStatement, inst);
 }
 
 // The C# `protected internal override TranslatedStatement

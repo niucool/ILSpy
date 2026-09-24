@@ -43,6 +43,8 @@
 #include "Decompiler/CSharp/Syntax/Statements/LockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/GotoStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/UsingStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
@@ -64,6 +66,7 @@
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
+#include "Decompiler/IL/Instructions/UsingInstruction.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
@@ -649,6 +652,47 @@ TEST(StatementBuilderTest, VisitBlockContainerRendersWhileLoop)
         dynamic_cast<Syntax::BlockStatement*>(whileStatement->EmbeddedStatement());
     ASSERT_TRUE(embeddedBlock != nullptr);
     ASSERT_EQ(embeddedBlock->Statements().Count(), 1);
+}
+
+
+TEST(StatementBuilderTest, VisitUsingInstructionRendersUsingStatement)
+{
+    StatementFixture fixture;
+    StatementBuilder builder(fixture.compilation, *fixture.context_, &fixture.function,
+                             &fixture.settings, &fixture.run);
+    // `using (IDisposable disposable = ldloc) { nop; }` -- the resource local
+    // has IDisposable as its own type (so the base-type probe passes) and is
+    // loaded, which makes the acquisition a VariableDeclarationStatement.
+    auto variable = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::UsingLocal,
+        fixture.TypePtr(TS::KnownTypeCode::IDisposable));
+    variable->Name = "disposable";
+    variable->StoreCount = 1;
+    variable->LoadCount = 1;
+    auto container = std::make_unique<IL::BlockContainer>();
+    auto body = std::make_unique<IL::Block>();
+    body->Instructions.push_back(std::make_unique<IL::Nop>());
+    body->FinalInstruction = std::make_unique<IL::Nop>();
+    container->AddBlock(std::move(body));
+    IL::UsingInstruction usingInstruction(
+        variable, std::make_unique<IL::LdLoc>(variable), std::move(container));
+    std::fprintf(stderr, "DBG9\n");
+    auto result = builder.Convert(&usingInstruction);
+    std::fprintf(stderr, "DBG10\n");
+
+    auto* usingStatement =
+        dynamic_cast<Syntax::UsingStatement*>(result.Statement());
+    std::fprintf(stderr, "DBG11\n");
+    ASSERT_TRUE(usingStatement != nullptr);
+    ASSERT_FALSE(usingStatement->IsAsync());
+    // The resource is loaded exactly once, so the acquisition is the variable
+    // declaration with the ILVariableResolveResult annotation.
+    auto* vds = dynamic_cast<Syntax::VariableDeclarationStatement*>(
+        usingStatement->ResourceAcquisition());
+    ASSERT_TRUE(vds != nullptr);
+    ASSERT_EQ(vds->Variables().Count(), 1);
+    EXPECT_EQ(vds->Variables().At(0)->Name(), "disposable");
+    EXPECT_TRUE(usingStatement->EmbeddedStatement() != nullptr);
 }
 
 
