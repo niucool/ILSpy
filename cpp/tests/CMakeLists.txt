@@ -410,6 +410,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Syntax/Statements/CheckedUncheckedUnsafeStatement_Test.cpp
     Decompiler/CSharp/Syntax/Statements/LockStatement_Test.cpp
     Decompiler/CSharp/Transforms/FlattenSwitchBlocks_Test.cpp
+    Decompiler/CSharp/Transforms/FixNameCollisions_Test.cpp
     Decompiler/CSharp/Syntax/Statements/UsingStatement_Test.cpp
     Decompiler/CSharp/Syntax/Statements/ForStatement_Test.cpp
     Decompiler/CSharp/Syntax/Statements/ForeachStatement_Test.cpp
