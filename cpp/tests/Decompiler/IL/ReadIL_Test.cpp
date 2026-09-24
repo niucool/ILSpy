@@ -23,6 +23,7 @@
 // that the straight-line reader rejects.
 
 #include "Decompiler/IL/ILReader.hpp"
+#include <cstdlib>
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
@@ -49,6 +50,8 @@ static const char* FixturePath() {
 #if defined(_WIN32)
     return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
 #else
+    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB"); env != nullptr)
+        return env;
     return "/usr/lib/mono/4.5/mscorlib.dll";
 #endif
 }

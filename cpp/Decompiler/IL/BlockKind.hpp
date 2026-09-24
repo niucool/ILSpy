@@ -49,6 +49,13 @@ enum class BlockKind : std::uint8_t {
     // call ToStringAndClear(ldloca v) that yields the string. Constructed by
     // InterpolatedStringTransform.
     InterpolatedString,
+    // ---- The remaining C# BlockKind values (the C# `enum BlockKind`,
+    // Block.cs): the initializer/call-with-named-args kinds are consulted by
+    // `Block.CanInlineIntoSlot` and the transforms that build them.
+    ArrayInitializer,
+    CollectionInitializer,
+    ObjectInitializer,
+    CallInlineAssign,
 };
 
 } // namespace ILSpy::Decompiler::IL

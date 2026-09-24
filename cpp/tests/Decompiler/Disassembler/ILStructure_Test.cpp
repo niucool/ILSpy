@@ -24,6 +24,7 @@
 // synthetic IL streams and EH tables plus a real-mscorlib invariant sweep.
 
 #include "Decompiler/Disassembler/ILStructure.hpp"
+#include <cstdlib>
 #include "Decompiler/Metadata/MetadataFile.hpp"
 
 #include <gtest/gtest.h>
@@ -42,7 +43,11 @@ namespace {
 #if defined(_WIN32)
 const char* MscorlibPath() { return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll"; }
 #else
-const char* MscorlibPath() { return "/usr/lib/mono/4.5/mscorlib.dll"; }
+const char* MscorlibPath() {
+    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB"); env != nullptr)
+        return env;
+    return "/usr/lib/mono/4.5/mscorlib.dll";
+}
 #endif
 
 MD::ExceptionHandlerClause MakeClause(MD::ExceptionHandlerKind kind,

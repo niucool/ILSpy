@@ -26,6 +26,7 @@
 // over the same files.
 
 #include "Decompiler/Disassembler/IEntityProcessor.hpp"
+#include <cstdlib>
 #include "Decompiler/Disassembler/SortByNameProcessor.hpp"
 #include "Decompiler/Disassembler/DisassemblerSignatureTypeProvider.hpp"
 #include "Decompiler/Disassembler/ReflectionDisassembler.hpp"
@@ -61,7 +62,11 @@ const char* SystemDllPath() {
         "v4.0_4.0.0.0__b77a5c561934e089\\System.dll";
 }
 #else
-const char* MscorlibPath() { return "/usr/lib/mono/4.5/mscorlib.dll"; }
+const char* MscorlibPath() {
+    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB"); env != nullptr)
+        return env;
+    return "/usr/lib/mono/4.5/mscorlib.dll";
+}
 const char* SystemDllPath() { return "/usr/lib/mono/4.5/System.dll"; }
 #endif
 

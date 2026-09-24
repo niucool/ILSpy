@@ -25,6 +25,7 @@
 // filter container as their target.
 
 #include "Decompiler/IL/ILReader.hpp"
+#include <cstdlib>
 #include "Decompiler/IL/VariableKind.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
@@ -52,6 +53,8 @@ const char* FixturePath() {
 #if defined(_WIN32)
     return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
 #else
+    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB"); env != nullptr)
+        return env;
     return "/usr/lib/mono/4.5/mscorlib.dll";
 #endif
 }

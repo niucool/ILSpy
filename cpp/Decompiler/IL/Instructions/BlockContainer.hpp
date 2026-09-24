@@ -67,6 +67,16 @@ public:
         return (i >= 0 && i < static_cast<int>(Blocks.size())) ? Blocks[i].get() : nullptr;
     }
 
+    // The C# `internal override bool CanInlineIntoSlot` (BlockContainer.cs
+    // line 259): inlining into the entry-point is allowed as long as we're not
+    // moving code into a loop (a second incoming edge to the entry point would
+    // re-evaluate it).
+    bool CanInlineIntoSlot(int childIndex, ILInstruction* expressionBeingMoved) override {
+        (void)expressionBeingMoved;
+        return childIndex == 0 && EntryPoint() != nullptr
+            && EntryPoint()->IncomingEdgeCount == 1;
+    }
+
     void AddBlock(std::unique_ptr<Block> b) {
         if (b) { b->Parent = this; b->ChildIndex = static_cast<int>(Blocks.size()); }
         Blocks.push_back(std::move(b));

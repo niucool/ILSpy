@@ -49,6 +49,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/UsingStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
@@ -683,13 +684,10 @@ TEST(StatementBuilderTest, VisitUsingInstructionRendersUsingStatement)
     container->AddBlock(std::move(body));
     IL::UsingInstruction usingInstruction(
         variable, std::make_unique<IL::LdLoc>(variable), std::move(container));
-    std::fprintf(stderr, "DBG9\n");
     auto result = builder.Convert(&usingInstruction);
-    std::fprintf(stderr, "DBG10\n");
 
     auto* usingStatement =
         dynamic_cast<Syntax::UsingStatement*>(result.Statement());
-    std::fprintf(stderr, "DBG11\n");
     ASSERT_TRUE(usingStatement != nullptr);
     ASSERT_FALSE(usingStatement->IsAsync());
     // The resource is loaded exactly once, so the acquisition is the variable
@@ -779,5 +777,137 @@ TEST(StatementBuilderTest, VisitCkfiniteRendersIsFiniteThrow)
     EXPECT_TRUE(throwStatement->Expression() != nullptr);
 }
 
+
+TEST(StatementBuilderTest, TransformToForeachRendersForeachStatement)
+{
+    StatementFixture fixture;
+    StatementBuilder builder(fixture.compilation, *fixture.context_, &fixture.function,
+                             &fixture.settings, &fixture.run);
+    // `using (var item = list.GetEnumerator()) { while (item.MoveNext()) { item.Current; } }`
+    // -- the resource is `callvirt GetEnumerator(ldloc list)` stored into the
+    // using-variable; the body container holds the while (the condition if is the
+    // entry's FinalInstruction, the true arm branches to the body block, the
+    // false arm leaves the container); the body block's first instruction is the
+    // `stloc foreachVar(callvirt get_Current(ldloc enumVar))` the transform
+    // un-inlines. The fake accessor methods carry the accessor metadata the
+    // ParentIsCurrentGetter / DetectGetCurrentTransformation probes consult (the
+    // reader's GetEnumerator/MoveNext/get_Current calls carry their IMethod
+    // through the resolved-Call ctor).
+    auto listVariable = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local, fixture.TypePtr(TS::KnownTypeCode::Object));
+    listVariable->Name = "list";
+    auto enumVariable = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::UsingLocal, fixture.TypePtr(TS::KnownTypeCode::Object));
+    enumVariable->Name = "e";
+    auto foreachVariable = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local, fixture.TypePtr(TS::KnownTypeCode::Int32));
+    foreachVariable->Name = "item";
+    auto getEnumerator = std::make_shared<Impl::FakeMethod>(
+        fixture.compilation, TS::SymbolKind::Method);
+    getEnumerator->SetName("GetEnumerator");
+    getEnumerator->SetDeclaringType(fixture.TypePtr(TS::KnownTypeCode::Object));
+    getEnumerator->SetReturnType(enumVariable->Type);
+    auto moveNext = std::make_shared<Impl::FakeMethod>(
+        fixture.compilation, TS::SymbolKind::Method);
+    moveNext->SetName("MoveNext");
+    moveNext->SetDeclaringType(fixture.TypePtr(TS::KnownTypeCode::Object));
+    moveNext->SetReturnType(fixture.TypePtr(TS::KnownTypeCode::Boolean));
+    auto currentProperty = std::make_shared<Impl::FakeProperty>(
+        fixture.compilation);
+    currentProperty->SetName("Current");
+    currentProperty->SetDeclaringType(fixture.TypePtr(TS::KnownTypeCode::Object));
+    currentProperty->SetReturnType(foreachVariable->Type);
+    auto getCurrent = std::make_shared<Impl::FakeMethod>(
+        fixture.compilation, TS::SymbolKind::Method);
+    getCurrent->SetName("get_Current");
+    getCurrent->SetDeclaringType(fixture.TypePtr(TS::KnownTypeCode::Object));
+    getCurrent->SetAccessorOwner(
+        static_cast<const TS::IProperty*>(currentProperty.get()));
+    getCurrent->SetAccessorKind(
+        ::ILSpy::Decompiler::TypeSystem::MethodSemanticsAttributes::Getter);
+    getCurrent->SetReturnType(foreachVariable->Type);
+    // The resource call: callvirt GetEnumerator(ldloc list).
+    auto resourceCall =
+        std::make_unique<IL::Call>(std::static_pointer_cast<TS::IMethod>(getEnumerator));
+    resourceCall->IsInstanceCall = true;
+    resourceCall->ReturnIType = enumVariable->Type;
+    resourceCall->AddArg(std::make_unique<IL::LdLoc>(listVariable));
+    // The condition call: callvirt MoveNext(ldloc e).
+    auto moveNextCall =
+        std::make_unique<IL::Call>(std::static_pointer_cast<TS::IMethod>(moveNext));
+    moveNextCall->IsInstanceCall = true;
+    moveNextCall->ReturnIType = fixture.TypePtr(TS::KnownTypeCode::Boolean);
+    moveNextCall->AddArg(std::make_unique<IL::LdLoc>(enumVariable));
+    // The body store: stloc item(callvirt get_Current(ldloc e)).
+    auto currentCall =
+        std::make_unique<IL::Call>(std::static_pointer_cast<TS::IMethod>(getCurrent));
+    currentCall->IsInstanceCall = true;
+    currentCall->ReturnIType = foreachVariable->Type;
+    currentCall->AddArg(std::make_unique<IL::LdLoc>(enumVariable));
+    IL::Call* rawCurrentCall = currentCall.get();
+    // The while container: the entry is the condition if; the body block stores
+    // the Current result and branches back.
+    auto whileContainer = std::make_unique<IL::BlockContainer>();
+    whileContainer->Kind = IL::ContainerKind::While;
+    auto conditionBlock = std::make_unique<IL::Block>();
+    conditionBlock->Label = "IL_0000";
+    IL::Block* conditionPtr = conditionBlock.get();
+    auto bodyBlock = std::make_unique<IL::Block>();
+    bodyBlock->Label = "IL_0010";
+    IL::Block* bodyPtr = bodyBlock.get();
+    bodyBlock->Add(std::make_unique<IL::StLoc>(
+        foreachVariable, std::move(currentCall)));
+    whileContainer->AddBlock(std::move(conditionBlock));
+    whileContainer->AddBlock(std::move(bodyBlock));
+    auto* entryIf = new IL::IfInstruction(
+        std::move(moveNextCall), std::make_unique<IL::Branch>(bodyPtr),
+        std::unique_ptr<IL::Leave>(new IL::Leave(whileContainer.get())));
+    conditionPtr->FinalInstruction.reset(entryIf);
+    bodyPtr->FinalInstruction = std::make_unique<IL::Branch>(conditionPtr);
+    conditionPtr->IncomingEdgeCount = 2;  // loop dispatch + the body back edge
+    bodyPtr->IncomingEdgeCount = 1;       // the condition's true arm
+    // The using body: a single block holding the while container + a leave.
+    auto bodyContainer = std::make_unique<IL::BlockContainer>();
+    bodyContainer->Kind = IL::ContainerKind::Normal;
+    auto bodyBlockOuter = std::make_unique<IL::Block>();
+    bodyBlockOuter->Label = "IL_0020";
+    IL::Block* outerPtr = bodyBlockOuter.get();
+    IL::BlockContainer* bodyContainerPtr = bodyContainer.get();
+    bodyBlockOuter->Instructions.push_back(std::move(whileContainer));
+    // The C# shape carries the leave inside Instructions (the
+    // `Instructions.Count != 2` gate); the port's Unwrap reads both shapes.
+    bodyBlockOuter->Instructions.push_back(
+        std::unique_ptr<IL::ILInstruction>(new IL::Leave(bodyContainerPtr)));
+    bodyContainer->AddBlock(std::move(bodyBlockOuter));
+    // Attach the using tree as the function body (the on-demand use-site walk
+    // starts at the function body; see the design note).
+    IL::UsingInstruction* rawUsing = new IL::UsingInstruction(
+        enumVariable, std::move(resourceCall), std::move(bodyContainer));
+    fixture.function.Body = std::make_unique<IL::BlockContainer>();
+    fixture.function.Body->Kind = IL::ContainerKind::Normal;
+    auto* fnBlock = new IL::Block();
+    fnBlock->Label = "IL_0030";
+    fnBlock->Instructions.push_back(std::unique_ptr<IL::ILInstruction>(rawUsing));
+    fixture.function.Body->AddBlock(
+        std::unique_ptr<IL::Block>(fnBlock));
+    // The transform wraps the foreach in a trailing block with the goto back to
+    // the loop head (the optional-leave arm).
+    auto result = builder.Convert(rawUsing);
+    auto* resultBlock = dynamic_cast<Syntax::BlockStatement*>(result.Statement());
+    ASSERT_TRUE(resultBlock != nullptr);
+    ASSERT_TRUE(resultBlock->Statements().Count() >= 1);
+    auto* foreachStatement = dynamic_cast<Syntax::ForeachStatement*>(
+        resultBlock->Statements().At(0));
+    ASSERT_TRUE(foreachStatement != nullptr);
+    EXPECT_FALSE(foreachStatement->IsAsync());
+    EXPECT_TRUE(foreachStatement->InExpression() != nullptr);
+    // The foreach variable is the un-inlined store's variable, promoted to
+    // ForeachLocal (the C# UseExistingVariable arm).
+    auto* designation =
+        dynamic_cast<Syntax::SingleVariableDesignation*>(foreachStatement->VariableDesignation());
+    ASSERT_TRUE(designation != nullptr);
+    EXPECT_EQ(designation->Identifier(), "item");
+    EXPECT_TRUE(foreachStatement->EmbeddedStatement() != nullptr);
+}
 
 } // namespace ILSpy::Tests

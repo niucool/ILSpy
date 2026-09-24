@@ -44,6 +44,7 @@
 // dumps byte-for-byte with the gold triples.
 
 #include "TestFixtures/AatVisitorGold.hpp"
+#include <cstdlib>
 
 #include "Decompiler/DebugInfo/IDebugInfoProvider.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
@@ -81,6 +82,8 @@ const char* MscorlibPath() {
 #if defined(_WIN32)
     return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
 #else
+    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB"); env != nullptr)
+        return env;
     return "/usr/lib/mono/4.5/mscorlib.dll";
 #endif
 }

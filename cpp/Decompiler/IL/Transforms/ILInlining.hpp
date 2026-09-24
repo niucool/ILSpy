@@ -52,6 +52,7 @@ class Block;
 class ILFunction;
 class ILInstruction;
 class ILVariable;
+class LdLoca;
 
 // Inline the StLoc at `pos` into the next instruction's load of its variable,
 // or remove it as a dead store. A free function mirroring the C#
@@ -62,6 +63,26 @@ class ILVariable;
 // NullCoalescingTransform) can call it after a fold that opens up an inlining
 // opportunity, matching the C#.
 bool InlineOneIfPossible(Block* block, int pos, ILTransformContext& ctx);
+
+// The C# `public static bool CanMoveInto(ILInstruction expressionBeingMoved,
+// ILInstruction stmt, ILInstruction targetLoad)` (ILInlining.cs line 933): whether
+// `expressionBeingMoved` can be moved from its current position to become the
+// replacement of `targetLoad` inside `stmt` -- every ancestor slot from the target
+// load up to (excluding) the statement must accept the inlining, and the move must
+// not reorder past any of the ancestors' predecessors (the MayReorder check).
+bool CanMoveInto(ILInstruction* expressionBeingMoved, ILInstruction* stmt,
+                 ILInstruction* targetLoad);
+
+// The C# `public static bool CanUninline(ILInstruction arg, ILInstruction stmt)`
+// (ILInlining.cs line 980): moving into and moving out-of are equivalent.
+bool CanUninline(ILInstruction* arg, ILInstruction* stmt);
+
+// The C# `internal static bool IsUsedAsThisPointerInCall(LdLoca ldloca)`
+// (ILInlining.cs line 450): the ldloca is the `this` argument of a call on a
+// value type (the compound-assignment/readonly-struct exclusions follow the
+// C#). The Await/NullableUnwrap/MatchInstruction arms are deferred with those
+// node surfaces.
+bool IsUsedAsThisPointerInCall(IL::LdLoca* ldloca);
 
 // Result of ILInlining::FindLoadInNext -- the search for the single load of a
 // variable inside an instruction subtree, into which an expression can be

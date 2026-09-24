@@ -27,6 +27,7 @@
 // byte-identical C# console output, CRLF line endings included.
 
 #include "ILSpyCmd/IlspyCmdProgram.hpp"
+#include <cstdlib>
 #include "ILSpyCmd/ResourceExtensions.hpp"
 #include "ILSpyX/PdbProvider/PortableDebugInfoProvider.hpp"
 #include "TestFixtures/BamlResFixtures.hpp"
@@ -63,6 +64,8 @@ std::string MscorlibPath() {
 #if defined(_WIN32)
     return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
 #else
+    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB"); env != nullptr)
+        return env;
     return "/usr/lib/mono/4.5/mscorlib.dll";
 #endif
 }

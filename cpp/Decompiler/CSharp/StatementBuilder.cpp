@@ -41,6 +41,22 @@
 #include "Decompiler/CSharp/Syntax/Expressions/AsExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
+#include "Decompiler/CSharp/Syntax/PatternMatching/PatternNodes.hpp"
+#include <typeinfo>
+#include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
+#include "Decompiler/TypeSystem/IProperty.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ForeachStatement.hpp"
+#include "Decompiler/CSharp/Syntax/VariableDesignation.hpp"
+#include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ThisReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/BaseReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/CastClass.hpp"
+#include "Decompiler/IL/Instructions/UnboxAny.hpp"
+#include "Decompiler/IL/Instructions/AddressOf.hpp"
+#include "Decompiler/IL/Transforms/ILInlining.hpp"
+#include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/UsingStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
@@ -65,6 +81,8 @@
 #include "Decompiler/IL/Instructions/UsingInstruction.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
@@ -931,14 +949,694 @@ Syntax::SwitchStatement* StatementBuilder::TranslateSwitch(
     return stmt;
 }
 
+// The C# `Statement TransformToForeach(UsingInstruction inst, Expression resource)`
+// (StatementBuilder.cs line 664): the settings gate, the pattern match, the
+// body-container unwrap, and the dispatch into the full transform.
+Syntax::Statement* StatementBuilder::TransformToForeach(IL::UsingInstruction* inst,
+                                                        Syntax::Expression* resource) {
+    if (!exprBuilder->settings->ForEachStatement()) {
+        return nullptr;
+    }
+    PatternMatching::Match m;
+    bool isAsync = false;
+    if (!MatchGetEnumeratorPattern(resource, m, isAsync)) {
+        return nullptr;
+    }
+    // The using body must be a BlockContainer.
+    auto* container = dynamic_cast<IL::BlockContainer*>(inst->Body.get());
+    if (container == nullptr)
+        return nullptr;
+    if (isAsync != inst->IsAsync) {
+        return nullptr;
+    }
+    // If there's another BlockContainer nested in this container and it only has
+    // one child block, unwrap it. If there's an extra leave inside the block,
+    // extract it into optionalReturnAfterLoop.
+    IL::Leave* optionalLeaveAfterLoop = nullptr;
+    IL::BlockContainer* loopContainer =
+        UnwrapNestedContainerIfPossible(container, optionalLeaveAfterLoop);
+    Syntax::Statement* result =
+        TransformToForeachCore(container, loopContainer, optionalLeaveAfterLoop,
+                               inst->Variable.get(), isAsync, m,
+                               inst->ResourceExpression.get());
+    (void)result;
+    return result;
+}
+
+// The C# `BlockContainer UnwrapNestedContainerIfPossible(BlockContainer container,
+// out Leave? optionalLeaveInst)` (StatementBuilder.cs lines 960-990): unwrap a
+// container holding a single block with a nested container + a Leave; the leave is
+// moved out only when its value is pure (SemanticHelper.IsPure).
+IL::BlockContainer* StatementBuilder::UnwrapNestedContainerIfPossible(
+    IL::BlockContainer* container, IL::Leave*& optionalLeaveInst) {
+    optionalLeaveInst = nullptr;
+    // Check block structure:
+    if (container->Blocks.size() != 1)
+        return container;
+    IL::Block* nestedBlock = container->Blocks[0].get();
+    // The block's [nested-container, leave] pair: the C# shape keeps both in the
+    // instruction list; the port's shape carries the terminator (the leave) in
+    // FinalInstruction. Handle both.
+    IL::ILInstruction* first = nullptr;
+    IL::ILInstruction* second = nullptr;
+    if (nestedBlock->Instructions.size() == 2) {
+        first = nestedBlock->Instructions[0].get();
+        second = nestedBlock->Instructions[1].get();
+    } else if (nestedBlock->Instructions.size() == 1
+               && nestedBlock->FinalInstruction != nullptr) {
+        first = nestedBlock->Instructions[0].get();
+        second = nestedBlock->FinalInstruction.get();
+    } else {
+        return container;
+    }
+    auto* nestedContainer = dynamic_cast<IL::BlockContainer*>(first);
+    auto* leave = dynamic_cast<IL::Leave*>(second);
+    if (nestedContainer == nullptr || leave == nullptr) {
+        return container;
+    }
+    // If the leave has no value, just unwrap the BlockContainer.
+    if (StatementBuilderMatchLeave(leave, container))
+        return nestedContainer;
+    // If the leave is a return/break, we can move it out of the using-block and
+    // put it after the loop (but only if the value doesn't have side-effects).
+    if (leave->Value != nullptr
+        && IL::IsPure(leave->Value->Flags())) {
+        optionalLeaveInst = leave;
+        return nestedContainer;
+    }
+    return container;
+}
+
+// ---- The foreach construction (StatementBuilder.cs lines 512-1230) --------------
+//
+// The design note on the variable-use lists: the C# ILVariable tracks
+// LoadInstructions/StoreInstructions/AddressInstructions incrementally as the tree
+// mutates (ILVariable.cs lines 244/280/298). This port's ILVariable tracks the
+// COUNTS only (maintained by the ComputeVariableUsage transform and the transforms'
+// bookkeeping); adding tracked lists means wiring bookkeeping into every tree
+// mutation site, so the port computes the use lists ON DEMAND -- a full-tree walk
+// over the current function body collects the LdLoc/LdLoca/StLoc sites for one
+// variable. At detection time the tree state IS the ground truth the C# lists
+// would hold (the walk runs synchronously inside the transform), so the two agree
+// by construction; the walk is O(tree) once per `using` statement.
+struct VariableUseSites {
+    std::vector<IL::LdLoc*> loads;
+    std::vector<IL::LdLoca*> addresses;
+    std::vector<IL::StLoc*> stores;
+};
+
+// Walk the whole function body and record `variable`'s use sites (the C#
+// per-variable use lists; see the design note above).
+void CollectVariableUseSitesInto(IL::ILInstruction* inst, const IL::ILVariable* variable,
+                                 VariableUseSites& sites) {
+    if (inst == nullptr)
+        return;
+    if (inst->Op == IL::OpCode::LdLoc) {
+        auto* ld = static_cast<IL::LdLoc*>(inst);
+        if (ld->Variable.get() == variable)
+            sites.loads.push_back(ld);
+    } else if (inst->Op == IL::OpCode::LdLoca) {
+        auto* lda = static_cast<IL::LdLoca*>(inst);
+        if (lda->Variable.get() == variable)
+            sites.addresses.push_back(lda);
+    } else if (inst->Op == IL::OpCode::StLoc) {
+        auto* st = static_cast<IL::StLoc*>(inst);
+        if (st->Variable.get() == variable)
+            sites.stores.push_back(st);
+    }
+    for (int i = 0; i < inst->ChildCount(); i++)
+        CollectVariableUseSitesInto(inst->GetChild(i), variable, sites);
+}
+
+VariableUseSites CollectVariableUseSites(IL::ILFunction* function,
+                                         const IL::ILVariable* variable) {
+    VariableUseSites sites;
+    if (function != nullptr && function->Body != nullptr)
+        CollectVariableUseSitesInto(function->Body.get(), variable, sites);
+    return sites;
+}
+
+// The C# static-readonly pattern ASTs (StatementBuilder.cs lines 515-533) over the
+// converted AST, built lazily as process-lifetime singletons (the C# static
+// readonly convention; the pattern nodes are stateless). The C# embeds the
+// pattern nodes into real AST slots through the generated `implicit operator
+// Expression(Pattern)` conversion -- the port uses the `Expression::ToExpression`
+// / `Statement::ToStatement` wrappers (the PatternPlaceholder).
+struct ForeachPatterns {
+    // -- `collection.GetEnumerator()` / `collection.GetAsyncEnumerator()`.
+    PatternMatching::AnyNode plainCollection{"collection"};
+    Syntax::MemberReferenceExpression* plainGetEnumerator =
+        new Syntax::MemberReferenceExpression(
+            Syntax::Expression::ToExpression(plainCollection), "GetEnumerator");
+    Syntax::MemberReferenceExpression* plainGetAsyncEnumerator =
+        new Syntax::MemberReferenceExpression(
+            Syntax::Expression::ToExpression(plainCollection), "GetAsyncEnumerator");
+    PatternMatching::Choice plainChoice;
+    Syntax::InvocationExpression* getEnumeratorPattern = nullptr;
+
+    // -- `X.GetEnumerator(collection)` -- the extension-method shape.
+    PatternMatching::AnyNode extensionType{"type"};
+    Syntax::MemberReferenceExpression* extensionGetEnumerator =
+        new Syntax::MemberReferenceExpression(
+            Syntax::Expression::ToExpression(extensionType), "GetEnumerator");
+    Syntax::MemberReferenceExpression* extensionGetAsyncEnumerator =
+        new Syntax::MemberReferenceExpression(
+            Syntax::Expression::ToExpression(extensionType), "GetAsyncEnumerator");
+    PatternMatching::Choice extensionChoice;
+    PatternMatching::AnyNode extensionCollection{"collection"};
+    Syntax::InvocationExpression* extensionGetEnumeratorPattern = nullptr;
+
+    // -- `enumerator.MoveNext()` / `await enumerator.MoveNextAsync()`.
+    Syntax::IdentifierExpression moveNextIdentifier{
+        std::string(PatternMatching::Pattern::AnyString)};
+    PatternMatching::NamedNode moveNextEnumerator{"enumerator", moveNextIdentifier};
+    Syntax::MemberReferenceExpression* moveNextMember =
+        new Syntax::MemberReferenceExpression(
+            Syntax::Expression::ToExpression(moveNextEnumerator), "MoveNext");
+    Syntax::InvocationExpression* moveNextInvocation =
+        new Syntax::InvocationExpression(moveNextMember);
+    Syntax::IdentifierExpression moveNextAsyncIdentifier{
+        std::string(PatternMatching::Pattern::AnyString)};
+    PatternMatching::NamedNode moveNextAsyncEnumerator{
+        "enumerator", moveNextAsyncIdentifier};
+    Syntax::MemberReferenceExpression* moveNextAsyncMember =
+        new Syntax::MemberReferenceExpression(
+            Syntax::Expression::ToExpression(moveNextAsyncEnumerator),
+            "MoveNextAsync");
+    Syntax::InvocationExpression* moveNextAsyncInvocation =
+        new Syntax::InvocationExpression(moveNextAsyncMember);
+    Syntax::UnaryOperatorExpression* moveNextAwait =
+        new Syntax::UnaryOperatorExpression(moveNextAsyncInvocation,
+                                            Syntax::UnaryOperatorType::Await);
+    PatternMatching::Choice moveNextChoice;
+    Syntax::InvocationExpression* moveNextConditionPattern = nullptr;
+
+    ForeachPatterns() {
+        plainChoice.Add(*plainGetEnumerator);
+        plainChoice.Add(*plainGetAsyncEnumerator);
+        getEnumeratorPattern = new Syntax::InvocationExpression(
+            Syntax::Expression::ToExpression(plainChoice));
+        extensionChoice.Add(*extensionGetEnumerator);
+        extensionChoice.Add(*extensionGetAsyncEnumerator);
+        extensionGetEnumeratorPattern =
+            new Syntax::InvocationExpression(
+                Syntax::Expression::ToExpression(extensionChoice));
+        extensionGetEnumeratorPattern->Arguments().Add(
+            Syntax::Expression::ToExpression(extensionCollection));
+        moveNextChoice.Add(*moveNextInvocation);
+        moveNextChoice.Add(*moveNextAwait);
+        moveNextConditionPattern = new Syntax::InvocationExpression(
+            Syntax::Expression::ToExpression(moveNextChoice));
+    }
+};
+
+ForeachPatterns& GetForeachPatterns() {
+    static ForeachPatterns patterns;
+    return patterns;
+}
+
+// The C# `bool MatchGetEnumeratorPattern(Expression resource, out Match m,
+// out bool isAsync)` (StatementBuilder.cs lines 612-637): the GetEnumerator /
+// GetAsyncEnumerator pattern over the translated resource, with the
+// extension-method arm gated on the settings and validated through the resolver's
+// CanTransformToExtensionMethodCall; `isAsync` reads the member name the match
+// succeeded on.
+bool StatementBuilder::MatchGetEnumeratorPattern(Syntax::Expression* resource,
+                                                 PatternMatching::Match& m,
+                                                 bool& isAsync) {
+    isAsync = false;
+    ForeachPatterns& patterns = GetForeachPatterns();
+    if (exprBuilder->settings->ExtensionMethods()
+        && exprBuilder->settings->ForEachWithGetEnumeratorExtension()) {
+        m = Syntax::MatchNode(*patterns.getEnumeratorPattern, resource);
+        if (!m.Success())
+        // The plain pattern and the extension pattern are alternatives: the C#
+        // falls through to the extension shape only when the plain shape misses.
+        if (!m.Success()) {
+            m = Syntax::MatchNode(
+                *patterns.extensionGetEnumeratorPattern, resource);
+            if (!m.Success()) {
+                return false;
+            }
+            if (!m.Success())
+                return false;
+            // Validate that the invocation is an extension method invocation.
+            const TS::ISymbol* symbol = GetSymbol(*resource);
+            auto* method = dynamic_cast<const TS::IMethod*>(symbol);
+            if (method == nullptr
+                || !exprBuilder->resolver->CanTransformToExtensionMethodCall(
+                       *method, /*ignoreTypeArguments=*/true))
+                return false;
+        }
+    } else {
+        m = Syntax::MatchNode(
+            *patterns.getEnumeratorPattern, resource);
+        if (!m.Success())
+            return false;
+    }
+    // The C# `isAsync = ((MemberReferenceExpression)((InvocationExpression)resource)
+    // .Target).MemberName == "GetAsyncEnumerator"`.
+    auto* invocation = dynamic_cast<Syntax::InvocationExpression*>(resource);
+    if (invocation == nullptr || invocation->Target() == nullptr)
+        return false;
+    auto* member = dynamic_cast<Syntax::MemberReferenceExpression*>(invocation->Target());
+    isAsync = member != nullptr && member->MemberName() == "GetAsyncEnumerator";
+    return true;
+}
+
+// The C# `RequiredGetCurrentTransformation DetectGetCurrentTransformation(...)
+// ` (StatementBuilder.cs lines 1002-1056): the enumerator load/Current analysis.
+// The C# consults the tracked `LoadInstructions`/`AddressInstructions` lists; this
+// port computes them with the on-demand walk (see the design note above).
+StatementBuilder::RequiredGetCurrentTransformation
+StatementBuilder::DetectGetCurrentTransformation(
+    IL::BlockContainer* usingContainer, IL::Block* loopBody,
+    IL::BlockContainer* loopContainer, IL::ILVariable* enumerator,
+    IL::ILInstruction* moveNextUsage, IL::Call*& singleGetter,
+    IL::ILVariablePtr& foreachVariable) {
+    singleGetter = nullptr;
+    foreachVariable = nullptr;
+    VariableUseSites sites = CollectVariableUseSites(currentFunction, enumerator);
+    // enumerator is used in multiple locations or not in conjunction with
+    // get_Current => no foreach. The loads exclude the ones inside the MoveNext
+    // usage (the C# `Where(ld => !ld.IsDescendantOf(moveNextUsage))`).
+    std::vector<IL::ILInstruction*> loads;
+    for (IL::LdLoc* ld : sites.loads)
+        if (!ld->IsDescendantOf(moveNextUsage))
+            loads.push_back(ld);
+    for (IL::LdLoca* lda : sites.addresses)
+        if (!lda->IsDescendantOf(moveNextUsage))
+            loads.push_back(lda);
+    if (loads.size() != 1) {
+        return RequiredGetCurrentTransformation::NoForeach;
+    }
+    if (!ParentIsCurrentGetter(loads[0])) {
+        return RequiredGetCurrentTransformation::NoForeach;
+    }
+    singleGetter = static_cast<IL::Call*>(loads[0]->Parent);
+    // singleGetter is not part of the first instruction in body or cannot be
+    // uninlined => no foreach.
+    if (!singleGetter->IsDescendantOf(loopBody->Instructions[0].get())) {
+        return RequiredGetCurrentTransformation::NoForeach;
+    }
+    if (!IL::CanUninline(singleGetter, loopBody->Instructions[0].get())) {
+        return RequiredGetCurrentTransformation::NoForeach;
+    }
+    // The C# DeconstructInstruction arm
+    // (`body.Instructions[0] is DeconstructInstruction deconstruction &&
+    // CanBeDeconstructedInForeach(...)`): deferred with the DeconstructInstruction
+    // surface -- a deconstructing foreach keeps the plain shape here.
+    IL::ILInstruction* inst = singleGetter;
+    // In some cases, i.e. foreach variable with explicit type different from the
+    // collection-item-type, the result of call get_Current is casted.
+    while (inst->Parent != nullptr && (inst->Parent->Op == IL::OpCode::UnboxAny
+                                       || inst->Parent->Op == IL::OpCode::CastClass))
+        inst = inst->Parent;
+    // One variable was found.
+    if (auto* stloc = dynamic_cast<IL::StLoc*>(inst->Parent)) {
+        const bool kindOk = stloc->Variable->Kind == IL::VariableKind::Local
+                            || stloc->Variable->Kind == IL::VariableKind::StackSlot;
+        const bool parentOk = stloc->Parent == loopBody;
+        if (kindOk && parentOk
+            && VariableIsOnlyUsedInBlock(stloc, usingContainer, loopContainer)) {
+            foreachVariable = stloc->Variable;
+            return RequiredGetCurrentTransformation::UseExistingVariable;
+        }
+    }
+    // In optimized Roslyn code it can happen that the foreach variable is
+    // referenced via addressof. We only do this unwrapping if we're dealing with a
+    // custom struct type.
+    if (CurrentIsStructSetterTarget(inst, singleGetter))
+        return RequiredGetCurrentTransformation::IntroduceNewVariableAndLocalCopy;
+    // No suitable variable was found: we need a new one.
+    return RequiredGetCurrentTransformation::IntroduceNewVariable;
+}
+
+// The C# `bool VariableIsOnlyUsedInBlock(StLoc storeInst, BlockContainer
+// usingContainer, BlockContainer loopContainer)` (StatementBuilder.cs lines
+// 1142-1160): the store's variable is only assigned once and used only inside the
+// using container (loads by reference only as a this-pointer or an ldobj target).
+bool StatementBuilder::VariableIsOnlyUsedInBlock(IL::StLoc* storeInst,
+                                                 IL::BlockContainer* usingContainer,
+                                                 IL::BlockContainer* loopContainer) {
+    VariableUseSites sites =
+        CollectVariableUseSites(currentFunction, storeInst->Variable.get());
+    for (IL::LdLoc* ld : sites.loads)
+        if (!ld->IsDescendantOf(usingContainer))
+            return false;
+    for (IL::LdLoca* la : sites.addresses) {
+        // The C# `AddressUseAllowed` local function: an ldloca must be inside the
+        // using container and either a this-pointer in a call (or a setter
+        // target) or the ldobj chain's target.
+        if (!la->IsDescendantOf(usingContainer))
+            return false;
+        bool allowed = false;
+        if (IL::IsUsedAsThisPointerInCall(la))
+            allowed = true;
+        IL::ILInstruction* current = la;
+        while (auto* ldflda = dynamic_cast<IL::LdFlda*>(current))
+            current = ldflda;
+        if (dynamic_cast<IL::LdObj*>(current) != nullptr)
+            allowed = true;
+        if (!allowed)
+            return false;
+    }
+    for (IL::StLoc* st : sites.stores)
+        if (st != storeInst)
+            return false;
+    // The C# `storeInst.Variable.CaptureScope == null ||
+    // storeInst.Variable.CaptureScope == loopContainer`: the port's ILVariable
+    // carries no CaptureScope (the captured-variable surface is not ported), so
+    // the check passes trivially.
+    return true;
+}
+
+// The C# `bool CurrentIsStructSetterTarget(ILInstruction inst, CallInstruction
+// singleGetter)` (StatementBuilder.cs line 1161): the get_Current result's
+// address is used as a struct-setter target.
+bool StatementBuilder::CurrentIsStructSetterTarget(IL::ILInstruction* inst,
+                                                   IL::Call* singleGetter) {
+    if (auto* addr = dynamic_cast<IL::AddressOf*>(inst->Parent)) {
+        if (singleGetter->Method == nullptr)
+            return false;
+        return IsTargetOfSetterCall(addr, singleGetter->Method->ReturnType());
+    }
+    return false;
+}
+
+// The C# `bool IsTargetOfSetterCall(ILInstruction inst, IType targetType)`
+// (StatementBuilder.cs lines 1170-1205): the instruction is the first child of a
+// call invoking a setter accessor on a value-type target.
+bool StatementBuilder::IsTargetOfSetterCall(IL::ILInstruction* inst,
+                                            const TS::IType& targetType) {
+    if (inst->ChildIndex != 0)
+        return false;
+    if (targetType.IsReferenceType() == true)
+        return false;
+    auto* parentCall = dynamic_cast<IL::Call*>(inst->Parent);
+    if (parentCall == nullptr || parentCall->Method == nullptr)
+        return false;
+    const TS::IMethod* targetMethod = parentCall->Method.get();
+    if (!targetMethod->IsAccessor() || targetMethod->IsStatic())
+        return false;
+    // The C# `switch (targetMethod.AccessorOwner) { case IProperty p: return
+    // AccessorKind == Setter; default: return true; }` -- an accessor with a
+    // property owner must be the setter.
+    if (targetMethod->AccessorOwner() != nullptr
+        && dynamic_cast<const TS::IProperty*>(targetMethod->AccessorOwner())
+               != nullptr) {
+        return targetMethod->AccessorKind()
+            == TS::MethodSemanticsAttributes::Setter;
+    }
+    return true;
+}
+
+// The C# `bool ParentIsCurrentGetter(ILInstruction inst)` (StatementBuilder.cs
+// line 1206): the instruction's parent is a call invoking a getter accessor.
+bool StatementBuilder::ParentIsCurrentGetter(IL::ILInstruction* inst) {
+    auto* call = dynamic_cast<IL::Call*>(inst->Parent);
+    if (call == nullptr || call->Method == nullptr)
+        return false;
+    const TS::IMethod* method = call->Method.get();
+    return method->IsAccessor()
+        && method->AccessorKind() == TS::MethodSemanticsAttributes::Getter;
+}
+
+// The C# `bool IsDynamicCastToIEnumerable(Expression expr, out Expression
+// dynamicExpr)` (StatementBuilder.cs lines 937-947): the `expr as IEnumerable`
+// shape over a dynamic-typed input.
+bool StatementBuilder::IsDynamicCastToIEnumerable(Syntax::Expression* expr,
+                                                  Syntax::Expression*& dynamicExpr) {
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(expr);
+    if (cast == nullptr) {
+        dynamicExpr = nullptr;
+        return false;
+    }
+    dynamicExpr = cast->Expression();
+    const Sem::ResolveResult* rr = GetResolveResult(*expr);
+    auto* crr = dynamic_cast<const Sem::ConversionResolveResult*>(rr);
+    if (crr == nullptr)
+        return false;
+    if (!TS::IsKnownType(*const_cast<TS::IType*>(&crr->Type()),
+                         TS::KnownTypeCode::IEnumerable))
+        return false;
+    return crr->Input() != nullptr && crr->Input()->Type().Kind() == TS::TypeKind::Dynamic;
+}
+
+// The C# `Statement TransformToForeach(BlockContainer container, BlockContainer
+// loopContainer, Leave? optionalLeaveAfterLoop, ILVariable enumeratorVar, bool
+// isAsync, Match m, ILInstruction resourceExpression)` (StatementBuilder.cs lines
+// 729-890): the MoveNext condition match, the get_Current transformation, the
+// designation, and the ForeachStatement construction.
+Syntax::Statement* StatementBuilder::TransformToForeachCore(
+    IL::BlockContainer* container, IL::BlockContainer* loopContainer,
+    IL::Leave* optionalLeaveAfterLoop, IL::ILVariable* enumeratorVar, bool isAsync,
+    PatternMatching::Match m, IL::ILInstruction* resourceExpression) {
+    // Detect whether we're dealing with a while loop with multiple embedded
+    // statements.
+    if (loopContainer->Kind != IL::ContainerKind::While) {
+        return nullptr;
+    }
+    IL::ILInstruction* conditionInst = nullptr;
+    IL::Block* body = nullptr;
+    if (!StatementBuilderMatchConditionBlock(*loopContainer, loopContainer->EntryPoint(),
+                                             conditionInst, body)) {
+        return nullptr;
+    }
+    // The loop condition must be a call to enumerator.MoveNext()
+    auto condition = exprBuilder->TranslateCondition(conditionInst);
+    auto m2 = Syntax::MatchNode(GetForeachPatterns().moveNextChoice,
+                                condition.Expression());
+    if (!m2.Success())
+        return nullptr;
+    const bool conditionIsAwait =
+        dynamic_cast<Syntax::UnaryOperatorExpression*>(condition.Expression()) != nullptr;
+    if (conditionIsAwait != isAsync)
+        return nullptr;
+    // Check enumerator variable references.
+    const std::vector<Syntax::IdentifierExpression*> enumeratorCaptures =
+        m2.Get<Syntax::IdentifierExpression>("enumerator");
+    assert(!enumeratorCaptures.empty());
+    IL::ILVariable* enumeratorVar2 = GetILVariable(*enumeratorCaptures.front());
+    if (enumeratorVar2 != enumeratorVar)
+        return nullptr;
+    // Detect which foreach-variable transformation is necessary/possible.
+    IL::Call* singleGetter = nullptr;
+    IL::ILVariablePtr foreachVariable;
+    const RequiredGetCurrentTransformation transformation =
+        DetectGetCurrentTransformation(container, body, loopContainer, enumeratorVar,
+                                       conditionInst, singleGetter, foreachVariable);
+    if (transformation == RequiredGetCurrentTransformation::NoForeach)
+        return nullptr;
+    // Extract in-expression
+    const std::vector<Syntax::Expression*> collectionCaptures =
+        m.Get<Syntax::Expression>("collection");
+    assert(!collectionCaptures.empty());
+    Syntax::Expression* collectionExpr = collectionCaptures.front();
+    // Special case: foreach (var item in this) is decompiled as
+    // foreach (var item in base) but a base reference is not valid in this context.
+    if (dynamic_cast<Syntax::BaseReferenceExpression*>(collectionExpr) != nullptr) {
+        auto* thisRef = new Syntax::ThisReferenceExpression();
+        CopyAnnotationsFrom(thisRef, *collectionExpr);
+        collectionExpr = thisRef;
+    } else {
+        Syntax::Expression* dynamicExpr = nullptr;
+        if (IsDynamicCastToIEnumerable(collectionExpr, dynamicExpr)) {
+            // The C# `collectionExpr = dynamicExpr.Detach()`: the dynamic cast's
+            // inner expression replaces the CastExpression wrapper.
+            collectionExpr = Syntax::Detach(dynamicExpr);
+        }
+    }
+    // Handle explicit casts: this is the case if an explicit type different from
+    // the collection-item-type was used (e.g. foreach (ClassA item in
+    // nonGenericEnumerable)).
+    TS::ITypePtr type;
+    {
+        // The C# `var type = singleGetter.Method.ReturnType` -- the port's Call
+        // carries the resolved IType (ReturnIType) when the IMethod ctor was used,
+        // else the reader's resolved type.
+        type = singleGetter->ReturnIType;
+    }
+    IL::ILInstruction* instToReplace = singleGetter;
+    bool useVar = false;
+    if (auto* cc = dynamic_cast<IL::CastClass*>(instToReplace->Parent)) {
+        type = cc->Type;
+        instToReplace = cc;
+    } else if (auto* ua = dynamic_cast<IL::UnboxAny*>(instToReplace->Parent)) {
+        type = ua->Type;
+        instToReplace = ua;
+    } else {
+        // The C# tuple arm (`TupleType.IsTupleCompatible(type, out _)` + the
+        // resolver's ResolveForeach for the inferred element type) is deferred
+        // with the tuple machinery: the arm only fires for get_Current returning
+        // a tuple type, which then renders with the Current type instead of the
+        // `var` inference.
+    }
+
+    Syntax::VariableDesignation* designation = nullptr;
+
+    // Handle the required foreach-variable transformation:
+    switch (transformation) {
+        case RequiredGetCurrentTransformation::UseExistingVariable:
+            if (foreachVariable->Type->Kind() != TS::TypeKind::Dynamic)
+                foreachVariable->Type = type;
+            foreachVariable->Kind = IL::VariableKind::ForeachLocal;
+            // The C# `foreachVariable.Name =
+            // AssignVariableNames.GenerateForeachVariableName(...)`: the port's
+            // name generation (the AssignVariableNames transform + the
+            // RegisterVariable blank-name convention) keeps the existing name.
+            break;
+        case RequiredGetCurrentTransformation::IntroduceNewVariable: {
+            foreachVariable = currentFunction->RegisterVariable(
+                IL::VariableKind::ForeachLocal, type);
+            // `instToReplace.ReplaceWith(new LdLoc(foreachVariable))`: the port's
+            // ReplaceWith destroys the old node (no GC), so take the old subtree
+            // out first -- it becomes the new stloc's value (the C# re-parents it
+            // the same way).
+            IL::ILInstruction* replaceParent = instToReplace->Parent;
+            const int replaceIndex = instToReplace->ChildIndex;
+            std::unique_ptr<IL::ILInstruction> owned =
+                replaceParent->TakeChild(replaceIndex);
+            replaceParent->SetChild(replaceIndex,
+                                    std::make_unique<IL::LdLoc>(foreachVariable));
+            body->Instructions.insert(
+                body->Instructions.begin(),
+                std::make_unique<IL::StLoc>(foreachVariable, std::move(owned)));
+            break;
+        }
+        case RequiredGetCurrentTransformation::IntroduceNewVariableAndLocalCopy: {
+            foreachVariable = currentFunction->RegisterVariable(
+                IL::VariableKind::ForeachLocal, type);
+            IL::ILVariablePtr localCopyVariable = currentFunction->RegisterVariable(
+                IL::VariableKind::Local, type);
+            // `instToReplace.Parent!.ReplaceWith(new LdLoca(localCopyVariable))`:
+            // the parent is the AddressOf over the get_Current call (the struct
+            // setter-target shape CurrentIsStructSetterTarget matched); take the
+            // call out of the address-of first (the port's ReplaceWith destroys),
+            // then replace.
+            IL::ILInstruction* addressOf = instToReplace->Parent;
+            std::unique_ptr<IL::ILInstruction> ownedCall =
+                addressOf->TakeChild(instToReplace->ChildIndex);
+            IL::ILInstruction* addressOfParent = addressOf->Parent;
+            const int addressOfIndex = addressOf->ChildIndex;
+            std::unique_ptr<IL::ILInstruction> ownedAddressOf =
+                addressOfParent->TakeChild(addressOfIndex);
+            addressOfParent->SetChild(
+                addressOfIndex, std::make_unique<IL::LdLoca>(localCopyVariable));
+            body->Instructions.insert(
+                body->Instructions.begin(),
+                std::make_unique<IL::StLoc>(localCopyVariable,
+                                            std::make_unique<IL::LdLoc>(foreachVariable)));
+            body->Instructions.insert(
+                body->Instructions.begin(),
+                std::make_unique<IL::StLoc>(foreachVariable, std::move(ownedCall)));
+            (void)ownedAddressOf;
+            break;
+        }
+        case RequiredGetCurrentTransformation::Deconstruction:
+            // The C# `designation = TranslateDeconstructionDesignation(...)`:
+            // deferred with the DeconstructInstruction surface.
+            throw std::logic_error(
+                "TransformToForeach: the Deconstruction arm is not ported (the "
+                "DeconstructInstruction node is not ported)");
+        case RequiredGetCurrentTransformation::NoForeach:
+            break;
+    }
+
+    if (designation == nullptr) {
+        auto* singleDesignation = new Syntax::SingleVariableDesignation();
+        singleDesignation->Identifier(foreachVariable->Name);
+        designation = singleDesignation;
+        // Add the variable annotation for highlighting.
+        designation->AddAnnotation(
+            std::make_shared<ILVariableResolveResult>(foreachVariable,
+                                                      foreachVariable->Type));
+    }
+
+    // Convert the modified body to C# AST:
+    auto* whileLoopBlock = dynamic_cast<Syntax::BlockStatement*>(
+        ConvertAsBlock(container).Statement());
+    assert(whileLoopBlock != nullptr);
+    auto* whileLoop = dynamic_cast<Syntax::WhileStatement*>(
+        whileLoopBlock->Statements().At(0));
+    assert(whileLoop != nullptr);
+    auto* foreachBody = dynamic_cast<Syntax::BlockStatement*>(
+        Syntax::Detach(whileLoop->EmbeddedStatement()));
+    assert(foreachBody != nullptr);
+
+    // Remove the first statement, as it is the foreachVariable =
+    // enumerator.Current; statement.
+    Syntax::Statement* firstStatement = foreachBody->Statements().At(0);
+    if (dynamic_cast<Syntax::LabelStatement*>(firstStatement) != nullptr) {
+        // skip the entry-point label, if any; the assignment statement always
+        // follows it
+        firstStatement = static_cast<Syntax::Statement*>(firstStatement->NextSibling());
+        assert(firstStatement != nullptr);
+    }
+    assert(dynamic_cast<Syntax::ExpressionStatement*>(firstStatement) != nullptr);
+    firstStatement->Remove();
+
+    // The C# `settings.AnonymousTypes && type.ContainsAnonymousType()` gate: the
+    // anonymous-type detection is not ported (the NRExtensions surface is
+    // deferred), so the gate is the `useVar` already computed.
+    (void)useVar;
+
+    // Construct the foreach loop.
+    Syntax::AstType* foreachType =
+        useVar ? static_cast<Syntax::AstType*>(new Syntax::SimpleType("var"))
+               : exprBuilder->ConvertType(*foreachVariable->Type);
+    auto* foreachStmt = new Syntax::ForeachStatement(
+        foreachType, designation, Syntax::Detach(collectionExpr), foreachBody);
+    foreachStmt->AddAnnotation(std::make_shared<ForeachAnnotation>(
+        resourceExpression, conditionInst, singleGetter));
+    CopyAnnotationsFrom(foreachStmt, *whileLoop);
+    // If there was an optional return statement, return it as well. If there were
+    // labels or any other statements in the whileLoopBlock, move them after the
+    // foreach loop.
+    if (optionalLeaveAfterLoop != nullptr
+        || whileLoopBlock->Statements().Count() > 1) {
+        auto* block = new Syntax::BlockStatement();
+        block->Statements().Add(foreachStmt);
+        if (optionalLeaveAfterLoop != nullptr) {
+            // The C# `optionalLeaveAfterLoop.AcceptVisitor(this)` -- re-visit the
+            // leave through this StatementBuilder.
+            block->Statements().Add(Convert(optionalLeaveAfterLoop).Statement());
+        }
+
+        if (whileLoopBlock->Statements().Count() > 1) {
+            // The C# `Statements.Skip(1).SkipWhile(s => s.Annotations.Any(a => a ==
+            // optionalLeaveAfterLoop)).Select(Detach)`.
+            bool skipping = true;
+            for (int i = 1; i < whileLoopBlock->Statements().Count(); i++) {
+                Syntax::Statement* stmt = whileLoopBlock->Statements().At(i);
+                if (skipping) {
+                    bool isLeaveAnnotated = false;
+                    for (IL::ILInstruction* inst : GetILInstructions(*stmt)) {
+                        if (inst == optionalLeaveAfterLoop) {
+                            isLeaveAnnotated = true;
+                            break;
+                        }
+                    }
+                    if (isLeaveAnnotated)
+                        continue;
+                    skipping = false;
+                }
+                Syntax::Statement* detached =
+                    Syntax::Detach(stmt);
+                block->Statements().Add(detached);
+            }
+        }
+        return block;
+    }
+    return foreachStmt;
+}
+
 // The C# `protected internal override TranslatedStatement
 // VisitUsingInstruction(UsingInstruction inst)` (StatementBuilder.cs lines
 // 961-1036): the `using` render with the IDisposable probe (the fallback
 // try/finally render when the type does not implement IDisposable directly)
-// and the resource-acquisition declaration. The TransformToForeach arm is
-// deferred with the foreach surface (the AST pattern nodes -- AnyNode/
-// NamedNode/Choice -- are not ported, so the GetEnumerator/MoveNext patterns
-// cannot match); a foreach-shaped using renders as the plain using statement.
+// and the resource-acquisition declaration. The TransformToForeach arm runs
+// first (see the foreach-construction block).
 bool UsingInstructionIsValidInCSharp(StatementBuilder& builder,
                                      const IL::UsingInstruction* inst,
                                      TS::KnownTypeCode code) {
@@ -965,8 +1663,11 @@ TranslatedStatement StatementBuilder::VisitUsingInstruction(
     Syntax::Expression* resource =
         exprBuilder->Translate(inst->ResourceExpression.get()).Expression();
     // The C# `var transformed = TransformToForeach(inst, resource); if
-    // (transformed != null) return transformed;` -- deferred with the foreach
-    // surface (see the IsValidInCSharp comment above).
+    // (transformed != null) return transformed.WithILInstruction(inst);` -- the
+    // foreach arm runs before the plain using render.
+    Syntax::Statement* transformed = TransformToForeach(inst, resource);
+    if (transformed != nullptr)
+        return WithILInstruction(*transformed, inst);
     const IL::ILVariablePtr& var = inst->Variable;
     TS::KnownTypeCode knownTypeCode;
     TS::ITypePtr disposeType;

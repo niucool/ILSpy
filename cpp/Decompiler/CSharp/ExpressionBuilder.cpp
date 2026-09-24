@@ -753,6 +753,21 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitRefAnyType(inst, context);
         case IL::OpCode::Block:
             return VisitBlock(inst, context);
+        case IL::OpCode::Call:
+        case IL::OpCode::CallVirt: {
+            // The C# `VisitCall`/`VisitCallVirt` route to the CallBuilder with
+            // the translated arguments (ExpressionBuilder.cs line 1009+); the
+            // instance CallBuilder wraps this ExpressionBuilder (the port's
+            // CallBuilder instance half). The port's reader decodes Call nodes
+            // without a resolved IMethod (only MethodName/ReturnIType); those
+            // fall to the default error render instead of the CallBuilder's
+            // resolved-method assert (the C# reader always resolves).
+            auto* call = static_cast<IL::Call*>(inst);
+            if (call->Method == nullptr)
+                return Default(inst, context);
+            CallBuilder builder(*this, *settings);
+            return builder.BuildCall(*call, context.TypeHint);
+        }
         default:
             return Default(inst, context);
     }

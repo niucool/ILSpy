@@ -32,6 +32,7 @@
 // GetMethodImplementations, GetDeclarativeSecurityAttributes).
 
 #include "Decompiler/Disassembler/MethodBodyDisassembler.hpp"
+#include <cstdlib>
 #include "Decompiler/Disassembler/DisassemblerSignatureTypeProvider.hpp"
 #include "Decompiler/Disassembler/ReflectionDisassembler.hpp"
 #include "TestFixtures/TinyNetModule.hpp"
@@ -64,7 +65,11 @@ namespace {
 #if defined(_WIN32)
 const char* MscorlibPath() { return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll"; }
 #else
-const char* MscorlibPath() { return "/usr/lib/mono/4.5/mscorlib.dll"; }
+const char* MscorlibPath() {
+    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB"); env != nullptr)
+        return env;
+    return "/usr/lib/mono/4.5/mscorlib.dll";
+}
 #endif
 
 // Render through a fresh ReflectionDisassembler over a string stream.
@@ -863,6 +868,8 @@ TEST(ReflectionDisassemblerTest, WriteConstantRealMscorlibFields) {
         EXPECT_NE(field, 0u);
         auto constant = f.GetConstant(field);
         EXPECT_TRUE(constant.has_value());
+        if (!constant.has_value())
+            return std::string("<missing constant>");  // the EXPECT already failed
         return RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
             rd.WriteConstant(*constant);
         });

@@ -129,6 +129,21 @@ public:
     // ILFunction is the tree root; overrides return true.
     virtual bool IsRoot() const { return false; }
 
+    // The C# `internal virtual bool CanInlineIntoSlot(int childIndex,
+    // ILInstruction expressionBeingMoved)` (ILInstruction.cs line 970): whether the
+    // inlining transform may move `expressionBeingMoved` into this node's slot
+    // `childIndex` (or into a descendant of it). The C# default consults the child
+    // slot's `SlotInfo.CanInlineInto`; this port's IL nodes do not carry per-child
+    // SlotInfo (the port's `FindLoadInNext` subset already skips slot restrictions
+    // and gates safety through `MayReorder`), so the default is permissive -- the
+    // per-class overrides that matter (Block, BlockContainer, IsInst, Comp) port
+    // faithfully below.
+    virtual bool CanInlineIntoSlot(int childIndex, ILInstruction* expressionBeingMoved) {
+        (void)childIndex;
+        (void)expressionBeingMoved;
+        return true;
+    }
+
     // True if `ancestor` is a transitive parent of this node (exclusive).
     bool IsDescendantOf(const ILInstruction* ancestor) const {
         for (const ILInstruction* p = Parent; p != nullptr; p = p->Parent)

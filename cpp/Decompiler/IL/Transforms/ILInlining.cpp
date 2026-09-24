@@ -26,6 +26,7 @@
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/TypeSystem/IParameter.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
@@ -78,6 +79,93 @@ FindResult FindLoadInNext(ILInstruction* expr, ILVariable* v,
     if (MayReorder(expressionBeingMoved->Flags(), expr->Flags()))
         return {FindResultType::Continue, nullptr};
     return {FindResultType::Stop, nullptr};
+}
+
+// The C# `static bool IsSafeForInlineOver(ILInstruction expr, ILInstruction
+// expressionBeingMoved)` (ILInlining.cs line 907): safe to move
+// `expressionBeingMoved` past `expr` -- SemanticHelper.MayReorder (the port's
+// flag-level MayReorder).
+static bool IsSafeForInlineOver(const ILInstruction* expr,
+                                const ILInstruction* expressionBeingMoved) {
+    return MayReorder(expressionBeingMoved->Flags(), expr->Flags());
+}
+
+// The C# `public static bool CanMoveInto(...)` (ILInlining.cs line 933). The
+// ancestor chain's slots must accept the inlining and the move must not reorder
+// past any of the ancestors' earlier children. The port's per-node
+// `CanInlineIntoSlot` (the Block/BlockContainer/IsInst overrides ported
+// faithfully; the port's default is permissive -- see the ILInstruction note
+// on the SlotInfo metadata deferral).
+bool CanMoveInto(ILInstruction* expressionBeingMoved, ILInstruction* stmt,
+                 ILInstruction* targetLoad) {
+    assert(targetLoad->IsDescendantOf(stmt));
+    for (ILInstruction* inst = targetLoad; inst != stmt; inst = inst->Parent) {
+        if (!inst->Parent->CanInlineIntoSlot(inst->ChildIndex, expressionBeingMoved))
+            return false;
+        // Check whether re-ordering with predecessors is valid:
+        const int childIndex = inst->ChildIndex;
+        for (int i = 0; i < childIndex; ++i) {
+            ILInstruction* predecessor = inst->Parent->GetChild(i);
+            if (!IsSafeForInlineOver(predecessor, expressionBeingMoved))
+                return false;
+        }
+    }
+    return true;
+}
+
+// The C# `public static bool CanUninline(ILInstruction arg, ILInstruction stmt)`
+// (ILInlining.cs line 980): moving into and moving out-of are equivalent.
+bool CanUninline(ILInstruction* arg, ILInstruction* stmt) {
+    return CanMoveInto(arg, stmt, arg);
+}
+
+// The C# `internal static bool IsUsedAsThisPointerInCall(LdLoca ldloca)`
+// (ILInlining.cs lines 455-503): the ldloca flows into a call's `this` slot on a
+// value type; the property-getter compound-assignment and the setter cases
+// follow the C#. The Await/NullableUnwrap/MatchInstruction parent arms are
+// deferred with those nodes (a nullptr parent chain ends the walk).
+bool IsUsedAsThisPointerInCall(LdLoca* ldloca) {
+    if (ldloca == nullptr || ldloca->Variable == nullptr)
+        return false;
+    if (ldloca->Variable->Type != nullptr
+        && ldloca->Variable->Type->IsReferenceType() == true)
+        return false;
+    ILInstruction* inst = ldloca;
+    // The C# `inst.Parent is LdObjIfRef` arm is deferred with the LdObjIfRef node
+    // (the port's ldobj model folds it at read time); the LdFlda chain walk
+    // follows the C#.
+    while (inst->Parent != nullptr && inst->Parent->Op == OpCode::LdFlda) {
+        inst = inst->Parent;
+    }
+    if (inst->ChildIndex != 0)
+        return false;
+    if (inst->Parent == nullptr)
+        return false;
+    switch (inst->Parent->Op) {
+        case OpCode::Call:
+        case OpCode::CallVirt: {
+            auto* callInst = static_cast<Call*>(inst->Parent);
+            if (callInst->Method == nullptr)
+                return false;
+            const TypeSystem::IMethod* method = callInst->Method.get();
+            if (method->IsAccessor()) {
+                if (method->AccessorKind()
+                    == TypeSystem::MethodSemanticsAttributes::Getter) {
+                    // C# doesn't allow property compound assignments on temporary
+                    // structs: the parent-of-parent shape is a
+                    // CompoundAssignmentInstruction with the property target.
+                    // (The port's compound-assignment node is deferred; the
+                    // getter-over-temporary case returns true here.)
+                    return true;
+                }
+                // C# doesn't allow calling setters on temporary structs.
+                return false;
+            }
+            return !method->IsStatic();
+        }
+        default:
+            return false;
+    }
 }
 
 // The top-level statement containing `inst`: the last ancestor (including inst

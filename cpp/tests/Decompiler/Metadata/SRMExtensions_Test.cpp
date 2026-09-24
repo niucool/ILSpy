@@ -34,6 +34,7 @@
 //     "System.Collections.Generic.Dictionary`2/Enumerator".
 
 #include "Decompiler/Metadata/SRMExtensions.hpp"
+#include <cstdlib>
 #include "Decompiler/Metadata/MetadataExtensions.hpp"
 #include "Decompiler/TypeSystem/FullTypeName.hpp"
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"
@@ -70,6 +71,8 @@ const char* MscorlibPath() {
 #if defined(_WIN32)
     return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
 #else
+    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB"); env != nullptr)
+        return env;
     return "/usr/lib/mono/4.5/mscorlib.dll";
 #endif
 }

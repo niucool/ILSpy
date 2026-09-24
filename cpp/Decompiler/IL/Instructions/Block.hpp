@@ -60,6 +60,29 @@ public:
     std::string Label;
 
     Block() : ILInstruction(OpCode::Block) {}
+
+    // The C# `internal override bool CanInlineIntoSlot(int childIndex,
+    // ILInstruction expressionBeingMoved)` (Block.cs): inlining into the block is
+    // allowed only as the block's first instruction, and only for the block kinds
+    // that permit it (a ControlFlow block inside a container, or an initializer
+    // block); every other kind (and any later position) rejects inlining.
+    bool CanInlineIntoSlot(int childIndex, ILInstruction* expressionBeingMoved) override {
+        (void)expressionBeingMoved;
+        switch (Kind) {
+            case BlockKind::ControlFlow:
+            case BlockKind::ArrayInitializer:
+            case BlockKind::CollectionInitializer:
+            case BlockKind::ObjectInitializer:
+            case BlockKind::CallInlineAssign:
+                // Allow inlining into the first instruction of the block. The C#
+                // gate reads `Parent is BlockContainer` for the ControlFlow case;
+                // the port's blocks always sit in containers (the reader contract),
+                // so the kind alone decides.
+                return childIndex == 0;
+            default:
+                return false;
+        }
+    }
     InstructionFlags DirectFlags() const override { return InstructionFlags::None; }
     StackType ResultType() const override { return StackType::Void; }
 

@@ -25,6 +25,7 @@
 // way Metadata::DecodeOpCode already models it.
 
 #include "Decompiler/Disassembler/ILParser.hpp"
+#include <cstdlib>
 #include "Decompiler/Metadata/ILOpCodes.hpp"
 #include "Decompiler/Metadata/ILDisassembler.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
@@ -49,6 +50,8 @@ const char* FixturePath() {
 #if defined(_WIN32)
     return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
 #else
+    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB"); env != nullptr)
+        return env;
     return "/usr/lib/mono/4.5/mscorlib.dll";
 #endif
 }

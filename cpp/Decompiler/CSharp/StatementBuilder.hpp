@@ -61,6 +61,8 @@
 #include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/Semantics/ResolveResult.hpp"
 #include "Decompiler/IL/ILInstruction.hpp"
+#include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/CSharp/Syntax/PatternMatching/Pattern.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
 #include <map>
@@ -91,8 +93,16 @@ class TryFault;
 class Nop;
 class Rethrow;
 class PinnedRegion;
+class LdLoc;
+class LdLoca;
 class StLoc;
 class StObj;
+class Call;
+namespace PatternMatching {
+class Pattern;  // the Match/Backreference family (PatternNodes.hpp) -- the
+                // StatementBuilder's pattern-match signatures take Match by value
+                // (a shared handle) and the class types by pointer.
+}
 class SwitchInstruction;
 class SwitchSection;
 class UsingInstruction;
@@ -120,6 +130,11 @@ namespace TS = ::ILSpy::Decompiler::TypeSystem;
 // Semantics types appear in the switch-family signatures).
 namespace Syntax = ::ILSpy::Decompiler::CSharp::Syntax;
 namespace Sem = ::ILSpy::Decompiler::Semantics;
+namespace PatternMatching = ::ILSpy::Decompiler::CSharp::Syntax::PatternMatching;
+
+// The ILVariable shared handle (the DetectGetCurrentTransformation out-parameter
+// convention; the C# ILVariable is a GC reference).
+using ILVariablePtr = ::ILSpy::Decompiler::IL::ILVariablePtr;
 
 // Port of the C# `sealed class StatementBuilder : ILVisitor<TranslatedStatement>`
 // (see the header comment). The C# ctor
@@ -234,6 +249,78 @@ private:
     // surface; DeclareLocalFunctions throws when it would emit (the
     // local-function declaration machinery is not ported).
     TranslatedStatement VisitUsingInstruction(IL::UsingInstruction* inst);
+
+    // ---- The foreach construction (StatementBuilder.cs lines 512-1230) -------------
+
+    // The C# `enum RequiredGetCurrentTransformation` (StatementBuilder.cs line 984):
+    // which foreach-variable shape the loop body requires (the C# nested-enum
+    // declaration ports to the namespace scope; the Deconstruction arm is deferred
+    // with the DeconstructInstruction surface).
+    enum class RequiredGetCurrentTransformation {
+        NoForeach,
+        UseExistingVariable,
+        IntroduceNewVariable,
+        IntroduceNewVariableAndLocalCopy,
+        Deconstruction,
+    };
+
+    // The C# `bool MatchGetEnumeratorPattern(Expression resource, out Match m,
+    // out bool isAsync)` (StatementBuilder.cs line 611): the GetEnumerator /
+    // GetAsyncEnumerator pattern over the translated resource, with the
+    // extension-method arm gated on the settings and validated through the
+    // resolver's CanTransformToExtensionMethodCall.
+    bool MatchGetEnumeratorPattern(Syntax::Expression* resource,
+                                   PatternMatching::Match& m, bool& isAsync);
+
+    // The C# `Statement TransformToForeach(UsingInstruction inst, Expression
+    // resource)` (StatementBuilder.cs line 664): the settings gate, the pattern
+    // match, the body-container unwrap, and the dispatch into the full transform.
+    Syntax::Statement* TransformToForeach(IL::UsingInstruction* inst,
+                                          Syntax::Expression* resource);
+
+    // The C# `Statement TransformToForeach(BlockContainer container, BlockContainer
+    // loopContainer, Leave? optionalLeaveAfterLoop, ILVariable enumeratorVar, bool
+    // isAsync, Match m, ILInstruction resourceExpression)` (StatementBuilder.cs
+    // line 729): the MoveNext condition match, the get_Current transformation
+    // detection, the designation, and the ForeachStatement construction with the
+    // optional leave / trailing statements block.
+    Syntax::Statement* TransformToForeachCore(
+        IL::BlockContainer* container, IL::BlockContainer* loopContainer,
+        IL::Leave* optionalLeaveAfterLoop, IL::ILVariable* enumeratorVar, bool isAsync,
+        PatternMatching::Match m, IL::ILInstruction* resourceExpression);
+
+    // The C# `BlockContainer UnwrapNestedContainerIfPossible(BlockContainer
+    // container, out Leave? optionalLeaveInst)` (StatementBuilder.cs line 960):
+    // unwrap a single-block container holding a nested container + a Leave.
+    IL::BlockContainer* UnwrapNestedContainerIfPossible(IL::BlockContainer* container,
+                                                        IL::Leave*& optionalLeaveInst);
+
+    // The C# `RequiredGetCurrentTransformation DetectGetCurrentTransformation(...)`
+    // (StatementBuilder.cs line 1002): the enumerator load/Current analysis. The C#
+    // consults the tracked `LoadInstructions`/`AddressInstructions` lists; this port
+    // computes them with an on-demand tree walk (see the implementation note).
+    RequiredGetCurrentTransformation DetectGetCurrentTransformation(
+        IL::BlockContainer* usingContainer, IL::Block* loopBody,
+        IL::BlockContainer* loopContainer, IL::ILVariable* enumerator,
+        IL::ILInstruction* moveNextUsage, IL::Call*& singleGetter,
+        IL::ILVariablePtr& foreachVariable);
+
+    // The C# `bool VariableIsOnlyUsedInBlock(StLoc storeInst, BlockContainer
+    // usingContainer, BlockContainer loopContainer)` (StatementBuilder.cs line 1142).
+    bool VariableIsOnlyUsedInBlock(IL::StLoc* storeInst,
+                                   IL::BlockContainer* usingContainer,
+                                   IL::BlockContainer* loopContainer);
+
+    // The C# `bool CurrentIsStructSetterTarget(ILInstruction inst, CallInstruction
+    // singleGetter)` (StatementBuilder.cs line 1161) and its helpers
+    // `IsTargetOfSetterCall` (line 1170) and `ParentIsCurrentGetter` (line 1206).
+    bool CurrentIsStructSetterTarget(IL::ILInstruction* inst, IL::Call* singleGetter);
+    bool IsTargetOfSetterCall(IL::ILInstruction* inst, const TS::IType& targetType);
+    bool ParentIsCurrentGetter(IL::ILInstruction* inst);
+
+    // The C# `bool IsDynamicCastToIEnumerable(Expression expr, out Expression
+    // dynamicExpr)` (StatementBuilder.cs line 937).
+    bool IsDynamicCastToIEnumerable(Syntax::Expression* expr, Syntax::Expression*& dynamicExpr);
     // The memory-instruction family (the C# `VisitInitblk`/`VisitCpblk`/
     // `VisitCkfinite`, StatementBuilder.cs lines 1609-1678): the Unsafe
     // intrinsic calls with the leading `IL ... instruction` comments and the
