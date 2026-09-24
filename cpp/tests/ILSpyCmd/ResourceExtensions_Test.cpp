@@ -72,6 +72,14 @@ std::string SystemDllPath() {
 #if defined(_WIN32)
     return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\System.dll";
 #else
+    // The corpus convention (see PORT_LOG_BAML.md): when
+    // ILSPY_TEST_MSCORLIB points into the .NET Framework 4.8
+    // reference-assembly corpus, System.dll is the mscorlib's sibling.
+    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB");
+        env != nullptr && std::filesystem::exists(env)) {
+        std::filesystem::path dir = std::filesystem::path(env).parent_path();
+        return (dir / "System.dll").string();
+    }
     return "/usr/lib/mono/4.5/System.dll";
 #endif
 }

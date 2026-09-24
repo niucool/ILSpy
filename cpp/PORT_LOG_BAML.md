@@ -240,3 +240,125 @@ pre-existing PdbProvider env-gated fixtures). The Phase 9 BAML suites
 - `MetadataFileLoader`'s and `WebCilFileLoader`'s deferrals mean the
   registry has four loaders, not six; files only the deferred two would
   claim (raw metadata blobs, WebCIL modules) fall through to null today.
+
+---
+
+# The .NET Framework 4.8 reference-assembly corpus (fixture provisioning)
+
+The third assignment: un-block the mscorlib-gated verification on hosts
+without a .NET Framework install.
+
+## 1. The corpus
+
+`Microsoft.NETFramework.ReferenceAssemblies.net48` 1.0.3 fetched from
+nuget.org (the nupkg is a zip; sha256
+`8a7e348538e7eb91351696911689f49e3d4f63f8bab517432bbe159b8b1104a2`) and
+installed at `/home/jim/ilspy-test-fixtures/net48/` -- the nupkg's
+`build/.NETFramework/v4.8` content: 133 assemblies (mscorlib, System,
+System.Core, System.Xml, the full WPF set, ...) plus 104 facades under
+`Facades/`. The nupkg copy and a PROVENANCE.txt live beside it. The
+machine's `/usr/lib/mono/4.5/mscorlib.dll` is gone, so the per-file
+platform default is dead on this host; the corpus replaces it.
+
+**What the corpus is and is not**: it is the canonical .NET Framework 4.8
+REFERENCE set -- metadata-only. Its mscorlib carries the right identity
+(`mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=
+b77a5c561934e089`), the full 8-row manifest-resource table with the same
+tokens/offsets/names as the runtime install, the same .nlp File rows, and
+even the mscorlib.resources container (charinfo.nlp is byte-exact at
+36992). But it is NOT the runtime install the Windows probes pinned: it
+has 2993 TypeDefs to the runtime's 3356 (internal types stripped), 5510
+method-semantics rows to 5986, a resources container one entry short
+(3171 to 3172 entries -- System.dll's is 1686 to 1688), and its
+`Facades/System.Runtime.dll` is 4.1.2.0 where the GAC's is 4.0.0.0.
+`PresentationUI.dll` is not in any reference-assembly package at all
+(it is a runtime-only assembly).
+
+## 2. The wiring (test-infra only, this branch)
+
+The repo-wide override is `ILSPY_TEST_MSCORLIB` (a per-file
+`MscorlibPath()` helper: the env var, else the platform default) -- over
+a hundred test files follow it; they needed no change. What did need
+wiring were the three suites whose helpers hard-coded Windows FX paths:
+
+- `BamlDecompilerTypeSystem_Test.cpp`: the Fx/WPF/facade constants
+  became `FxFile`/`WpfFile`/`FacadePath` helpers that derive the corpus
+  layout (assemblies flat beside the mscorlib, facades under `Facades/`)
+  from `ILSPY_TEST_MSCORLIB`'s directory; without the env var the
+  helpers return the (unreachable) Windows constants and the gates skip
+  exactly as before.
+- `ResourceExtensions_Test.cpp`: `SystemDllPath()` derives the sibling
+  System.dll from the corpus.
+- `NamespaceDefinition_Test.cpp`: `SystemDllPath()`/`FacadePath()`
+  derive the sibling and `Facades/System.Runtime.dll`.
+
+The default-host (no env var) state of every touched suite is unchanged
+(same skips, same pre-existing failures); the CLI is untouched by any of
+this (verified below).
+
+## 3. The corpus-run matrix
+
+`ILSPY_TEST_MSCORLIB=/home/jim/ilspy-test-fixtures/net48/mscorlib.dll`:
+
+| Suite | pass | fail | skip |
+|---|---:|---:|---:|
+| ConnectionIdRewritePassTest | 2 | 0 | 0 |
+| XamlDecompilerCtorFamily | 21 | 0 | 1 |
+| BamlDecompilerTypeSystemTest | 5 | 3 | 0 |
+| ResourceExtensionsTest | 11 | 3 | 0 |
+| MethodSemanticsLookupTest | 5 | 2 | 0 |
+| Metadata_Smoke | 2 | 0 | 0 |
+| CustomAttributeDecoderTest | 3 | 2 | 0 |
+| ResourcesFileTest | 16 | 1 | 0 |
+| ResourcesFileValueTest | 5 | 1 | 0 |
+| AssociatedPortablePdbTest | 18 | 0 | 1 |
+| NamespaceDefinitionTest | 9 | 2 | 0 |
+| UniversalAssemblyResolverTest | 4 | 4 | 0 |
+
+**Now green that were gated**: ConnectionIdRewritePass's
+GeneratedMembersRegistered; every XAML gold-stream drive plus
+PEReaderParse (only FileNameSettings stays gated -- see the do-not-chase
+list); BamlDecompilerTypeSystem's S2, the full FileTableRows (the
+mscorlib half now runs and matches -- the .nlp File rows are identical),
+and both WithOptions drives; NamespaceDefinition's FacadeTreeMatchesGold
+(through the corpus Facades/ dir); MethodSemanticsLookup's and
+AssociatedPortablePdb's mscorlib arms.
+
+**Still failing (not gated -- honest reference-vs-runtime divergences)**
+and **do-not-chase** without a real .NET Framework 4.8 runtime install:
+
+1. Anything pinning the runtime mscorlib's type set: the 2696/3356-TypeDef
+   counts (the six mid-suite-abort suites), the NamespaceDefinition
+   MscorlibTree/SystemTree golds, MethodSemanticsLookup's
+   RealFileCorpus census (5986 semantics) and CuratedDrives (a stripped
+   type reads nil), CustomAttributeDecoder's curated-row digests. The
+   reference set strips internal types (2993 TypeDefs, 5510 semantics).
+2. The resource-container content: ResourceExtensions MscorlibPaths
+   (3174-pinned vs 3173 actual), MscorlibManifestResourceReads (the
+   embedded container's offsets 353040-pinned vs 352792 -- one entry
+   short), SystemDllPaths (1688 vs 1686), ResourcesFile/ValueTest's
+   container golds. Only the runtime install carries the exact container.
+3. BamlDecompilerTypeSystem S1 (FullWpfMap: 21 resolve lines vs the 19
+   pinned -- the reference System.XML/System forwarder graphs differ)
+   and S5 (CraftedManifest: 25 vs 24). S4 (FacadeDedups): the corpus
+   facade is System.Runtime 4.1.2.0, the pinned GAC one is 4.0.0.0.
+4. UniversalAssemblyResolverTest's four machine-GAC golds: the GAC's
+   directory layout itself -- no reference package can serve it.
+5. XamlDecompilerCtorFamily.FileNameSettingsCtor: its throwing resolver
+   needs all seven default BAML references resolvable;
+   PresentationUI.dll exists in no reference package (a runtime-only
+   assembly), so the drive stays Windows-only.
+6. The mono-only divergences documented in the Phase 9 log (ILSpyX-type
+   FX-content golds) are superseded by this corpus where present.
+
+ASan over the wired suites with the corpus: zero reports (57 tests, the
+8 known divergences above failing).
+
+## 4. The connid CLI baseline is byte-identical
+
+`ilspy_cli --csharp -t MyApp.Page1 /tmp/ilspy_connid_test.dll`:
+sha1 `2e8a292b8b933782a5099cfb4c8095393b213955` before the corpus was
+installed, after, and with `ILSPY_TEST_MSCORLIB` set (the CLI never reads
+the corpus -- its resolver searches the main assembly's directory, the
+machine GAC, and the dotnet shared framework). The whole-assembly form:
+sha1 `2711ff81c6285112d45bf8aadb6c0e06ee933356`, same three-way match.

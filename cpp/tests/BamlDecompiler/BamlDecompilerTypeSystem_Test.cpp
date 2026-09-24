@@ -82,23 +82,70 @@ namespace TS = ILSpy::Decompiler::TypeSystem;
 using ILSpy::BamlDecompiler::BamlDecompilerTypeSystem;
 using ILSpy::BamlDecompiler::SyntheticWpfModule;
 
-// The .NET Framework 4.8 reference assemblies (the probe's fixed paths).
-constexpr const char* Fx = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319";
-constexpr const char* Wpf = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\WPF";
-constexpr const char* Facade =
-    "C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\System.Runtime\\"
-    "v4.0_4.0.0.0__b03f5f7f11d50a3a\\System.Runtime.dll";
+// The fixture layout this suite runs against: on Windows, the real .NET
+// Framework 4.8 install (the probe's fixed paths); on every host, the
+// .NET Framework 4.8 reference-assembly corpus (the
+// Microsoft.NETFramework.ReferenceAssemblies.net48 nupkg's
+// build/.NETFramework/v4.8 directory -- see PORT_LOG_BAML.md for the
+// provisioning) when ILSPY_TEST_MSCORLIB points into it. The corpus is
+// FLAT (the WPF assemblies sit beside mscorlib, where the Windows install
+// keeps them under the WPF subdirectory) and carries the facades under
+// Facades/. Without either fixture the drives see invalid MetadataFiles
+// and diverge from the golds, so they skip instead (the repo's
+// fixture-skip convention).
+std::string FxFile(const char* name)
+{
+#if defined(_WIN32)
+    return std::string("C:\\Windows\\Microsoft.NET\\Framework64\\")
+        + "v4.0.30319\\" + name;
+#else
+    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB");
+        env != nullptr && std::filesystem::exists(env)) {
+        std::filesystem::path dir = std::filesystem::path(env).parent_path();
+        return (dir / name).string();
+    }
+    // The unreachable Windows path (gates the drive to a skip).
+    return std::string("C:\\Windows\\Microsoft.NET\\Framework64\\")
+        + "v4.0.30319\\" + name;
+#endif
+}
 
-// The S1-S6 golds were captured by the probe against the real .NET
-// Framework 4.8 install this suite was developed on (the fixed paths
-// above); on a host without it the drives see invalid MetadataFiles and
-// diverge from the golds, so they skip instead (the repo's fixture-skip
-// convention).
+// The WPF assemblies (the corpus keeps them flat beside mscorlib).
+std::string WpfFile(const char* name)
+{
+#if defined(_WIN32)
+    return std::string("C:\\Windows\\Microsoft.NET\\Framework64\\")
+        + "v4.0.30319\\WPF\\" + name;
+#else
+    return FxFile(name);
+#endif
+}
+
+// The GAC System.Runtime facade (the corpus keeps the facades under
+// Facades/).
+std::string FacadePath()
+{
+#if defined(_WIN32)
+    return std::string("C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\")
+        + "System.Runtime\\v4.0_4.0.0.0__b03f5f7f11d50a3a\\"
+        + "System.Runtime.dll";
+#else
+    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB");
+        env != nullptr && std::filesystem::exists(env)) {
+        std::filesystem::path dir = std::filesystem::path(env).parent_path();
+        return (dir / "Facades" / "System.Runtime.dll").string();
+    }
+    return std::string("C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\")
+        + "System.Runtime\\v4.0_4.0.0.0__b03f5f7f11d50a3a\\"
+        + "System.Runtime.dll";
+#endif
+}
+
+// The S1-S6 fixture presence gate.
 bool FxInstallPresent()
 {
     namespace fs = std::filesystem;
-    return fs::exists(std::string(Fx) + "\\mscorlib.dll")
-        && fs::exists(std::string(Fx) + "\\System.dll");
+    return fs::exists(FxFile("mscorlib.dll")) && fs::exists(FxFile("System.dll"));
 }
 
 // The mscorlib the WithOptions unit drives use (any mscorlib carrying
@@ -107,7 +154,7 @@ bool FxInstallPresent()
 std::string MscorlibPath()
 {
 #if defined(_WIN32)
-    return std::string(Fx) + "\\mscorlib.dll";
+    return FxFile("mscorlib.dll");
 #else
     if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB"); env != nullptr)
         return env;
@@ -206,18 +253,18 @@ void DriveAndCompare(const std::string& mainPath,
 }
 
 TEST(BamlDecompilerTypeSystemTest, FullWpfMapResolvesAllDefaultsReal) {
-    if (!FxInstallPresent() || !std::filesystem::exists(
-            std::string(Wpf) + "\\PresentationFramework.dll")) {
+    if (!FxInstallPresent()
+        || !std::filesystem::exists(WpfFile("PresentationFramework.dll"))) {
         GTEST_SKIP() << "the .NET Framework 4.8 install (Fx/WPF fixture) "
                      << "not present on this host";
     }
-    DriveAndCompare(std::string(Fx) + "\\mscorlib.dll", [](FixedResolver& r) {
-        r.Add("System", std::string(Fx) + "\\System.dll");
-        r.Add("WindowsBase", std::string(Wpf) + "\\WindowsBase.dll");
-        r.Add("PresentationCore", std::string(Wpf) + "\\PresentationCore.dll");
-        r.Add("PresentationFramework", std::string(Wpf) + "\\PresentationFramework.dll");
-        r.Add("PresentationUI", std::string(Wpf) + "\\PresentationUI.dll");
-        r.Add("System.Xml", std::string(Fx) + "\\System.XML.dll");
+    DriveAndCompare(FxFile("mscorlib.dll"), [](FixedResolver& r) {
+        r.Add("System", FxFile("System.dll"));
+        r.Add("WindowsBase", WpfFile("WindowsBase.dll"));
+        r.Add("PresentationCore", WpfFile("PresentationCore.dll"));
+        r.Add("PresentationFramework", WpfFile("PresentationFramework.dll"));
+        r.Add("PresentationUI", WpfFile("PresentationUI.dll"));
+        r.Add("System.Xml", FxFile("System.XML.dll"));
     }, ILSpy::Tests::kBdtsGold_S1);
 }
 
@@ -226,8 +273,8 @@ TEST(BamlDecompilerTypeSystemTest, SystemOnlyMapSubstitutesWpfSynthetics) {
         GTEST_SKIP() << "the .NET Framework 4.8 install (Fx/WPF fixture) "
                      << "not present on this host";
     }
-    DriveAndCompare(std::string(Fx) + "\\mscorlib.dll", [](FixedResolver& r) {
-        r.Add("System", std::string(Fx) + "\\System.dll");
+    DriveAndCompare(FxFile("mscorlib.dll"), [](FixedResolver& r) {
+        r.Add("System", FxFile("System.dll"));
     }, ILSpy::Tests::kBdtsGold_S2);
 }
 
@@ -237,14 +284,14 @@ TEST(BamlDecompilerTypeSystemTest, EmptyMapFallsBackToMinimalCorlib) {
 }
 
 TEST(BamlDecompilerTypeSystemTest, FacadeDedupsOwnAssemblyRefsWithDefaults) {
-    if (!FxInstallPresent() || !std::filesystem::exists(Facade)) {
+    if (!FxInstallPresent() || !std::filesystem::exists(FacadePath())) {
         GTEST_SKIP() << "the .NET Framework 4.8 install (Fx/WPF/GAC fixture) "
                      << "not present on this host";
     }
-    DriveAndCompare(Facade, [](FixedResolver& r) {
-        r.Add("mscorlib", std::string(Fx) + "\\mscorlib.dll");
-        r.Add("System", std::string(Fx) + "\\System.dll");
-        r.Add("System.Core", std::string(Fx) + "\\System.Core.dll");
+    DriveAndCompare(FacadePath(), [](FixedResolver& r) {
+        r.Add("mscorlib", FxFile("mscorlib.dll"));
+        r.Add("System", FxFile("System.dll"));
+        r.Add("System.Core", FxFile("System.Core.dll"));
     }, ILSpy::Tests::kBdtsGold_S4);
 }
 
@@ -254,10 +301,10 @@ TEST(BamlDecompilerTypeSystemTest, CraftedManifestDrivesEveryQueueArm) {
                      << "not present on this host";
     }
     DriveAndCompare(ILSpy::Tests::WriteBdtsSynthDll(), [](FixedResolver& r) {
-        r.Add("DepOne", std::string(Fx) + "\\System.XML.dll");
+        r.Add("DepOne", FxFile("System.XML.dll"));
         r.Add("DepTwo", ILSpy::Tests::WriteBdtsDepDll());
-        r.Add("sub.mod", std::string(Fx) + "\\System.dll");
-        r.Add("linked.mod", std::string(Fx) + "\\mscorlib.dll");
+        r.Add("sub.mod", FxFile("System.dll"));
+        r.Add("linked.mod", FxFile("mscorlib.dll"));
     }, ILSpy::Tests::kBdtsGold_S5);
 }
 
@@ -268,7 +315,7 @@ TEST(BamlDecompilerTypeSystemTest, FileTableRowsMatchGold) {
     // mscorlib's own File table (the five .nlp rows -- a Windows-NLS
     // fixture the mono profiles do not carry); the crafted-manifest half
     // is fixture-embedded and runs everywhere.
-    const std::string mscorlibFixture = std::string(Fx) + "\\mscorlib.dll";
+    const std::string mscorlibFixture = FxFile("mscorlib.dll");
     if (std::filesystem::exists(mscorlibFixture)) {
         Metadata::MetadataFile mscorlib(mscorlibFixture);
         auto rows = mscorlib.GetAssemblyFiles();
@@ -332,7 +379,7 @@ TEST(BamlDecompilerTypeSystemTest, WithOptionsAdaptersCreateDistinctModules) {
     // Every WithOptions call returns a distinct reference, and each
     // reference constructs its own MetadataModule (the C# `new MetadataModule`
     // per Resolve -- the port's adapter owns every module it creates).
-    Metadata::MetadataFile file(std::string(Fx) + "\\mscorlib.dll");
+    Metadata::MetadataFile file(FxFile("mscorlib.dll"));
     auto referenceA = file.WithOptions(TS::TypeSystemOptions::Default);
     auto referenceB = file.WithOptions(TS::TypeSystemOptions::Default);
     TS::SimpleCompilation compilationA(*referenceA, {});
