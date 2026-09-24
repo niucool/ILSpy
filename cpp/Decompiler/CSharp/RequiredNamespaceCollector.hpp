@@ -25,30 +25,36 @@
 // owns), seeded with every known type's namespace (the C# ctor's
 // KnownTypeReference loop).
 //
-// The C# CollectNamespaces(MetadataModule, ...) / (IEntity, MetadataModule,
-// ...) static entries walk the metadata (MethodDef bodies via CodeMappingInfo,
-// ResolveEntity/ResolveMethod) -- the port defers those two static entries
-// loudly: the metadata walk arm (CollectNamespacesFromMethodBody's IL scan and
-// the CodeMappingInfo plumbing) needs the DecodeLocalSignature /
-// GetStandaloneSignature surfaces not yet ported; the type-reference walk
-// (CollectNamespacesForTypeReference), the attribute handler, the
-// type-parameter handler, and the member-reference collector land now, keyed
-// off the TypeSystem interfaces the port carries.
+// The metadata walk arms: the entity-level CollectNamespaces (the TypeDef /
+// Field / Method / Property / Event dispatch, with the method's
+// CodeMappingInfo parts each walked for attributes / return type / parameters
+// / type parameters / overrides / the IL body), the IL-body scan (the
+// local-signature decode, the exception-handler catch types, and the
+// Field/Method/Sig/Tok/Type operand walk over the decoded tokens), the
+// attribute handler (the attribute type's namespace + the fixed/named
+// argument values), and the member-reference collector. The port's
+// metadata-walk needs the ResolveEntity / ResolveType / ResolveMethod /
+// DecodeLocalSignature surfaces, all landed.
 
 #pragma once
 
+#include <any>
 #include <cstdint>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 namespace ILSpy::Decompiler::Metadata {
 class CodeMappingInfo;
-}
+class MetadataFile;
+} // namespace ILSpy::Decompiler::Metadata
 
 namespace ILSpy::Decompiler::TypeSystem {
+class IEntity;
 class IType;
 class IAttribute;
 class ITypeParameter;
+class MetadataModule;
 } // namespace ILSpy::Decompiler::TypeSystem
 
 namespace ILSpy::Decompiler::CSharp {
@@ -68,11 +74,49 @@ public:
     // (the visitedTypes gate).
     void CollectTypeReference(const TypeSystem::IType* type);
 
+    // The C# `void HandleAttributes(IEnumerable<IAttribute>)` is private; the
+    // port exposes it for the attribute-driven callers (the
+    // GetAssemblyAttributes / GetModuleAttributes consumers walk the
+    // snapshot). Idempotent per attribute-type (the visited gate).
+    void HandleAttributes(
+        const std::vector<const TypeSystem::IAttribute*>& attributes);
+
+    // The C# private members are class-local; the port's free helpers (the
+    // CollectNamespacesEntity walk lives in the .cpp) access the namespace
+    // set through this accessor (the C# `this.namespaces` references).
+    std::unordered_set<std::string>& Namespaces() { return namespaces_; }
+
 private:
+    // The C# `void HandleAttributeValue(IType type, object? value)` -- the
+    // typeof-type values recurse.
+    void HandleAttributeValue(const TypeSystem::IType* type, const std::any& value);
+
     std::unordered_set<std::string>& namespaces_;
     std::unordered_set<const TypeSystem::IType*, std::hash<const void*>,
                        std::equal_to<>>
         visitedTypes_;
 };
+
+// The C# `public static void CollectNamespaces(IEntity entity, MetadataModule
+// module, HashSet<string> namespaces)` (the third overload): the entity-level
+// walk over the given definition. The C# CodeMappingInfo plumbing (the
+// method-body IL scan) runs through the ported Metadata walk.
+void CollectNamespaces(
+    const TypeSystem::IEntity& entity,
+    TypeSystem::MetadataModule& module,
+    std::unordered_set<std::string>& namespaces);
+
+// The C# `public static void CollectAttributeNamespaces(MetadataModule,
+// HashSet<string>)`: the assembly + module attribute sweep only.
+void CollectAttributeNamespaces(
+    TypeSystem::MetadataModule& module,
+    std::unordered_set<std::string>& namespaces);
+
+// The C# `public static void CollectNamespaces(MetadataModule module,
+// HashSet<string> namespaces)` -- the module-wide walk (every type definition
+// plus the assembly/module attribute sweep).
+void CollectNamespaces(
+    TypeSystem::MetadataModule& module,
+    std::unordered_set<std::string>& namespaces);
 
 } // namespace ILSpy::Decompiler::CSharp
