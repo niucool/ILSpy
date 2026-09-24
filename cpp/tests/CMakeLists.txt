@@ -7,6 +7,7 @@ add_executable(ilspy_tests
     Util/Util_Test.cpp
     Util/LongSet_Test.cpp
     Util/BitSet_Test.cpp
+    Util/UnionFind_Test.cpp
     Util/StringComparers_Test.cpp
     Util/ResourcesFile_Test.cpp
     Util/ResourcesFileValue_Test.cpp
