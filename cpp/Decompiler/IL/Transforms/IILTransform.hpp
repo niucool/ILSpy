@@ -120,6 +120,11 @@ struct ILTransformSettings {
     // between TransformCollectionAndObjectInitializers and
     // IndexRangeTransform; the tuple-designation arms are deferred with the
     // TupleType surface).
+    // Whether to detect C# `inline array` types (`[InlineArray(N)]` structs)
+    // accessed through the compiler-generated helpers. DecompilerSettings.
+    // InlineArrays -- default true. Gates InlineArrayTransform (the
+    // RunOnExpression folds inside ExpressionTransforms).
+    bool InlineArrays = true;
     bool Deconstruction = true;
     // Whether to detect the dictionary-initializer form inside the
     // object-initializer scan (`dict["k"] = v` and the index-variable stloc

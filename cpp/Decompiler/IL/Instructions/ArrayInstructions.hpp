@@ -119,4 +119,5 @@ protected:
     }
 };
 
+
 } // namespace ILSpy::Decompiler::IL

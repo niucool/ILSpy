@@ -372,6 +372,9 @@ private:
     // StatementTransformContext as a member). Consulted by IsPatternMatch in
     // FoldMatchTrueFalse; null only between Run calls.
     const ILTransformSettings* settings_ = nullptr;
+    // The context for the duration of a Run (the InlineArrayTransform call
+    // needs the step hook + settings; the C# passes the context argument).
+    StatementTransformContext* context_ = nullptr;
 };
 
 } // namespace ILSpy::Decompiler::IL
