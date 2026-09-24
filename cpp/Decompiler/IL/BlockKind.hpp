@@ -69,6 +69,14 @@ enum class BlockKind : std::uint8_t {
     // is the ldloc v that yields the record. Constructed by the record-clone
     // arm of TransformCollectionAndObjectInitializers.
     WithInitializer,
+    // The conversion-run block of a folded deconstruction assignment (the C#
+    // BlockKind.DeconstructionConversions): the stloc conv(conv(...)) stores
+    // in flat leaf order. Constructed by DeconstructionTransform.
+    DeconstructionConversions,
+    // The assignment-run block of a folded deconstruction assignment (the C#
+    // BlockKind.DeconstructionAssignments): the designator stores in flat
+    // leaf order. Constructed by DeconstructionTransform.
+    DeconstructionAssignments,
 };
 
 } // namespace ILSpy::Decompiler::IL

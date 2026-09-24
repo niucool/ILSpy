@@ -108,20 +108,20 @@ bool IsUsedAsThisPointerInCall(IL::LdLoca* ldloca);
 
 // Result of ILInlining::FindLoadInNext -- the search for the single load of a
 // variable inside an instruction subtree, into which an expression can be
-// inlined. Faithful to the C# ILInlining.FindResultType / FindResult (subset:
-// no NamedArgument / Deconstruction, which need SlotInfo / named-argument and
-// deconstruct infrastructure this port defers).
+// inlined. Faithful to the C# ILInlining.FindResultType / FindResult.
 //
 //   Found    -- a load of the variable was found; inlining is possible (the
 //               caller decides whether the load's slot permits it).
 //   Stop     -- the load was not found and re-ordering is not possible; abort.
 //   Continue -- the load was not found but the expression can be re-ordered
 //               past the tested subtree; keep searching.
-enum class FindResultType { Found, Stop, Continue, NamedArgument };
+enum class FindResultType { Found, Stop, Continue, NamedArgument,
+                            Deconstruction };
 struct FindResult {
     FindResultType type;
     ILInstruction* loadInst;  // the ldloc/ldloca found (valid when type == Found
-                              // or NamedArgument)
+                              // or NamedArgument); the DeconstructInstruction
+                              // found for the Deconstruction arm
     ILInstruction* callArgument = nullptr;  // the call argument promoted to a
                                             // named argument (NamedArgument only)
     FindResult(FindResultType t, ILInstruction* load = nullptr,
@@ -145,6 +145,7 @@ FindResult FindLoadInNext(ILInstruction* expr, ILVariable* v,
 // The C# NamedArgumentTransform hooks (NamedArgumentTransform.hpp defines
 // them; ILInlining.cpp calls the Can* probes from FindLoadInNext's Call arm).
 class Block;
+class DeconstructInstruction;
 FindResult NamedArgumentCanExtend(Block* block, ILVariable* v,
                                   ILInstruction* expressionBeingMoved);
 

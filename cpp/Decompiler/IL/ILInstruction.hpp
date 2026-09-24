@@ -153,6 +153,43 @@ public:
         return false;
     }
 
+    // The C# `public bool IsBefore(ILInstruction other)` (ILInstruction.cs
+    // line 154): the post-order document position of this node versus `other`
+    // -- walk both to their common ancestor, then compare the ChildIndex on
+    // the shared path. The C# implementation levels the two nodes to their
+    // common ancestor depth and compares ChildIndex there.
+    bool IsBefore(const ILInstruction* other) const {
+        if (other == nullptr) return false;
+        const ILInstruction* a = this;
+        const ILInstruction* b = other;
+        int levelA = 0;
+        for (const ILInstruction* p = a; p != nullptr; p = p->Parent) levelA++;
+        int levelB = 0;
+        for (const ILInstruction* p = b; p != nullptr; p = p->Parent) levelB++;
+        const int originalLevelA = levelA;
+        const int originalLevelB = levelB;
+        while (levelA > levelB) {
+            a = a->Parent;
+            levelA--;
+        }
+        while (levelB > levelA) {
+            b = b->Parent;
+            levelB--;
+        }
+        if (a == b) {
+            // A descendant of the other: whichever has the higher ancestor
+            // level comes first in the post-order walk.
+            return originalLevelA > originalLevelB;
+        }
+        while (a->Parent != nullptr && b->Parent != nullptr &&
+               a->Parent != b->Parent) {
+            a = a->Parent;
+            b = b->Parent;
+        }
+        if (a->Parent == nullptr || b->Parent == nullptr) return false;
+        return a->ChildIndex < b->ChildIndex;
+    }
+
     // Debug-only tree invariant (parent/child consistency, flag consistency,
     // connectedness). Mirrors ILInstruction.CheckInvariant; a no-op in NDEBUG.
     void CheckInvariant(ILPhase phase) const;

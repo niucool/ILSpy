@@ -53,6 +53,8 @@
 #include "Decompiler/IL/StackType.hpp"
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/IMethod.hpp"
+#include "Decompiler/TypeSystem/IParameter.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 
 #include <cassert>
@@ -76,13 +78,33 @@ public:
     // produce; populated by the recursive-pattern path (deferred).
     std::vector<std::unique_ptr<ILInstruction>> SubPatterns;
 
-    // Pattern flags (the deconstruct pair is deferred -- see file header).
+    // Pattern flags (the deconstruct pair is consumed by
+    // DeconstructionTransform + the StatementBuilder/ExpressionBuilder
+    // deconstruct rendering).
     bool CheckType = false;     // match.type[T](v = expr)  -- `expr is T v`
     bool CheckNotNull = false;  // match.notnull(v = expr)  -- `expr is {} v`
+    // The C# `bool IsDeconstructCall` / `bool IsDeconstructTuple` -- the
+    // match.deconstruct[Method](v = tested) / match.tuple(v = tested) forms
+    // the DeconstructionTransform builds. The C# MatchInstruction's
+    // `Method` operand backs the deconstruct-call form (the C#
+    // GetDeconstructResultType consults it for the out-parameter types).
+    bool IsDeconstructCall = false;
+    bool IsDeconstructTuple = false;
+    std::shared_ptr<const TypeSystem::IMethod> Method;
 
     MatchInstruction(ILVariablePtr variable, std::unique_ptr<ILInstruction> testedOperand)
         : ILInstruction(OpCode::MatchInstruction), Variable(std::move(variable)),
           TestedOperand(std::move(testedOperand)) {
+        if (TestedOperand) { TestedOperand->Parent = this; TestedOperand->ChildIndex = 0; }
+    }
+
+    // The deconstruct form (the C# `new MatchInstruction(matchVariable,
+    // call.Method, testedOperand) { IsDeconstructCall = true }`): the method
+    // operand backs the deconstruct rendering.
+    MatchInstruction(ILVariablePtr variable, std::shared_ptr<const TypeSystem::IMethod> method,
+                     std::unique_ptr<ILInstruction> testedOperand)
+        : ILInstruction(OpCode::MatchInstruction), Variable(std::move(variable)),
+          TestedOperand(std::move(testedOperand)), Method(std::move(method)) {
         if (TestedOperand) { TestedOperand->Parent = this; TestedOperand->ChildIndex = 0; }
     }
 
@@ -114,9 +136,33 @@ public:
     }
 
     // `expr is var x` -- a plain capture with no type/non-null test and no
-    // sub-patterns. (The C# also requires !IsDeconstructCall && !IsDeconstructTuple;
-    // those are deferred -- see file header.)
+    // sub-patterns. (The C# also requires !IsDeconstructCall &&
+    // !IsDeconstructTuple; those are set by DeconstructionTransform.)
     bool IsVar() const { return !CheckType && !CheckNotNull && SubPatterns.empty(); }
+
+    // The C# `internal static bool IsDeconstructMethod(IMethod? method)`
+    // (MatchInstruction.cs line 242): a void `Deconstruct` whose trailing
+    // parameters are all `out` (an extension method's first parameter is the
+    // receiver, so the scan starts at index 1 for it).
+    static bool IsDeconstructMethod(const TypeSystem::IMethod* method) {
+        if (method == nullptr) return false;
+        if (method->Name() != "Deconstruct") return false;
+        if (method->ReturnType().Kind() != TypeSystem::TypeKind::Void) return false;
+        const std::size_t firstOutParam = method->IsStatic() ? 1 : 0;
+        if (method->IsStatic()) {
+            if (!method->IsExtensionMethod()) return false;
+        } else {
+            if (!method->TypeParameters().empty()) return false;
+        }
+        if (method->Parameters().size() < firstOutParam) return false;
+        for (std::size_t i = firstOutParam; i < method->Parameters().size(); ++i) {
+            if (method->Parameters()[i] == nullptr) return false;
+            if (method->Parameters()[i]->ReferenceKind() !=
+                TypeSystem::ReferenceKind::Out)
+                return false;
+        }
+        return true;
+    }
 
     // Whether the pattern binds a designator variable. A pattern with N
     // sub-patterns only needs a designator if the variable is used beyond the

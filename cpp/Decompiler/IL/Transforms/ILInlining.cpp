@@ -17,6 +17,8 @@
 // DEALINGS IN THE SOFTWARE.
 
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
+
+#include "Decompiler/IL/Instructions/DeconstructInstruction.hpp"
 #include "Decompiler/IL/Transforms/NamedArgumentTransform.hpp"
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
@@ -63,14 +65,14 @@ FindResult FindLoadInNext(ILInstruction* expr, ILVariable* v,
     if (expr->Op == OpCode::LdLoc) {
         auto* ld = static_cast<LdLoc*>(expr);
         if (ld->Variable.get() == v) return {FindResultType::Found, ld};
-        if (MayReorder(expressionBeingMoved->Flags(), expr->Flags()))
+        if (MayReorder(expressionBeingMoved, expr))
             return {FindResultType::Continue};
         return {FindResultType::Stop};
     }
     if (expr->Op == OpCode::LdLoca) {
         auto* lda = static_cast<LdLoca*>(expr);
         if (lda->Variable.get() == v) return {FindResultType::Found, lda};
-        if (MayReorder(expressionBeingMoved->Flags(), expr->Flags()))
+        if (MayReorder(expressionBeingMoved, expr))
             return {FindResultType::Continue};
         return {FindResultType::Stop};
     }
@@ -80,6 +82,15 @@ FindResult FindLoadInNext(ILInstruction* expr, ILVariable* v,
         // a named-argument block can host the load in any of its slots (the
         // C# `NamedArgumentTransform.CanExtendNamedArgument` static).
         return NamedArgumentCanExtend(block, v, expressionBeingMoved);
+    }
+    if ((static_cast<int>(options) & static_cast<int>(InliningOptions::FindDeconstruction)) != 0 &&
+        dynamic_cast<DeconstructInstruction*>(expr) != nullptr) {
+        // The C# `options.HasFlag(InliningOptions.FindDeconstruction) && expr
+        // is DeconstructInstruction di` arm: the walk has REACHED a deconstruct
+        // instruction; the result carries it and the caller (the
+        // InlineDeconstructionInitializer) checks the load's location against
+        // the deconstruct's assignments.
+        return FindResult(FindResultType::Deconstruction, expr);
     }
     for (int i = 0; i < expr->ChildCount(); ++i) {
         FindResult r = FindLoadInNext(expr->GetChild(i), v, expressionBeingMoved,
@@ -95,7 +106,7 @@ FindResult FindLoadInNext(ILInstruction* expr, ILVariable* v,
             return r;
         }
     }
-    if (MayReorder(expressionBeingMoved->Flags(), expr->Flags()))
+    if (MayReorder(expressionBeingMoved, expr))
         return {FindResultType::Continue};
     return {FindResultType::Stop};
 }

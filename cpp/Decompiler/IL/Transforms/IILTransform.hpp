@@ -113,6 +113,14 @@ struct ILTransformSettings {
     // TransformCollectionAndObjectInitializers (the per-statement transform
     // after TransformArrayInitializers) and its IsPartOfInitializer scan.
     bool ObjectOrCollectionInitializers = true;
+    // Whether to fold the deconstruction assignments (the C# 7
+    // `var (a, b) = expr;` / `var (a, b) = o;` recovery into a single
+    // DeconstructInstruction). DecompilerSettings.Deconstruction -- default
+    // true. Gates DeconstructionTransform (the per-statement transform
+    // between TransformCollectionAndObjectInitializers and
+    // IndexRangeTransform; the tuple-designation arms are deferred with the
+    // TupleType surface).
+    bool Deconstruction = true;
     // Whether to detect the dictionary-initializer form inside the
     // object-initializer scan (`dict["k"] = v` and the index-variable stloc
     // entries). DecompilerSettings.DictionaryInitializers -- default true.

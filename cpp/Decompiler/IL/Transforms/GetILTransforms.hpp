@@ -49,6 +49,7 @@
 #include "Decompiler/IL/Transforms/HighLevelLoopTransform.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/Transforms/NamedArgumentTransform.hpp"
+#include "Decompiler/IL/Transforms/DeconstructionTransform.hpp"
 #include "Decompiler/IL/Transforms/IndexRangeTransform.hpp"
 #include "Decompiler/IL/Transforms/TransformArrayInitializers.hpp"
 #include "Decompiler/IL/Transforms/TransformCollectionAndObjectInitializers.hpp"
@@ -227,6 +228,12 @@ inline void RunGetILTransforms(ILFunction& function, ILTransformContext& context
         // Gated on the ObjectOrCollectionInitializers setting.
         statementTransform.AddChild(
             std::make_unique<TransformCollectionAndObjectInitializers>());
+        // DeconstructionTransform: the deconstruction-assignment fold (the
+        // next per-statement child in the C# GetILTransforms() order, after
+        // TransformCollectionAndObjectInitializers; the tuple-designation
+        // arms are deferred with the TupleType surface). Gated on the
+        // Deconstruction setting.
+        statementTransform.AddChild(std::make_unique<DeconstructionTransform>());
         // IndexRangeTransform: the C# 8 System.Index / System.Range recovery
         // (the next per-statement child in the C# GetILTransforms() order,
         // after TransformCollectionAndObjectInitializers; the ExtendSlicing
