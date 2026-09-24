@@ -134,4 +134,15 @@ LoadedAssembly& AssemblyList::OpenAssembly(const std::string& fullPath,
     return ref;
 }
 
+AssemblyListSnapshot AssemblyList::GetSnapshot() const
+{
+    std::lock_guard<std::mutex> lock(lockObj_);
+    std::vector<LoadedAssembly*> snapshot;
+    snapshot.reserve(assemblies_.size());
+    for (const auto& asm_ : assemblies_) {
+        snapshot.push_back(asm_.get());
+    }
+    return AssemblyListSnapshot(std::move(snapshot));
+}
+
 }  // namespace ILSpy::ILSpyX

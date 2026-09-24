@@ -54,6 +54,8 @@
 
 #include "ILSpyX/LoadedAssembly.hpp"
 
+#include "ILSpyX/AssemblyListSnapshot.hpp"
+
 #include <functional>
 #include <map>
 #include <memory>
@@ -62,13 +64,6 @@
 #include <vector>
 
 namespace ILSpy::ILSpyX {
-
-// The StringComparer.OrdinalIgnoreCase key shape of the C# byFilename
-// dictionary: ASCII A-Z lowercased on both sides (the TypeSystem
-// StringComparer convention), then lexicographic.
-struct OrdinalIgnoreCaseLess {
-    bool operator()(const std::string& a, const std::string& b) const;
-};
 
 // The C# `public sealed class AssemblyList`.
 class AssemblyList {
@@ -89,6 +84,10 @@ public:
 
     // The C# `public string ListName { get; }`.
     const std::string& ListName() const { return listName_; }
+
+    // The C# `internal AssemblyListSnapshot GetSnapshot()`: the
+    // point-in-time view the resolver resolves against.
+    AssemblyListSnapshot GetSnapshot() const;
 
     // The C# `public LoadedAssembly? FindAssembly(string file)` -- the
     // byFilename lookup after Path.GetFullPath.

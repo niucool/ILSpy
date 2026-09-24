@@ -19,12 +19,17 @@
 #include "ILSpyX/LoadedAssembly.hpp"
 
 #include "ILSpyX/AssemblyList.hpp"
+
 #include "ILSpyX/FileLoaders/FileLoaderRegistry.hpp"
 #include "ILSpyX/FileLoaders/PEFileLoader.hpp"
+
+#include "Decompiler/Metadata/AssemblyNameReference.hpp"
 #include "Decompiler/Metadata/DotNetCorePathFinderExtensions.hpp"
+#include "Decompiler/Metadata/UniversalAssemblyResolver.hpp"
 
 #include <algorithm>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <unordered_map>
 #include <utility>
@@ -432,6 +437,259 @@ std::string LoadedAssembly::Text() const
         }
     }
     return ShortName();
+}
+
+// ---------------------------------------------------------------------------
+// The resolver integration: MyAssemblyResolver (the C# private nested
+// class), the lazy universal resolver, and the GetAssemblyResolver /
+// GetAssemblyReferenceClassifier factories.
+
+namespace {
+
+// The C# `Path.GetDirectoryName` (null for a bare file name; the drive
+// root keeps its separator).
+std::optional<std::string> GetDirectoryName(const std::string& path)
+{
+    const std::size_t sep = path.find_last_of("\\/");
+    if (sep == std::string::npos) {
+        return std::nullopt;
+    }
+    if (sep == 0) {
+        return std::string(1, path[0]);
+    }
+    return path.substr(0, sep);
+}
+
+// The C# `Path.Combine(directory, moduleName)`: no separator when the
+// directory already ends with one.
+std::string CombinePath(const std::string& directory,
+    const std::string& name)
+{
+    if (!directory.empty() && (directory.back() == '/' ||
+                                  directory.back() == '\\')) {
+        return directory + name;
+    }
+    return directory + "/" + name;
+}
+
+}  // namespace
+
+// The C# `sealed class MyAssemblyResolver : IAssemblyResolver` -- the
+// ResolveCoreAsync step order over the parent, a snapshot, the
+// load-on-demand flag, and the winrt flag.
+class LoadedAssembly::MyAssemblyResolver final :
+    public Decompiler::Metadata::IAssemblyResolver {
+public:
+    MyAssemblyResolver(const LoadedAssembly& parent,
+        AssemblyListSnapshot snapshot, bool loadOnDemand,
+        bool applyWinRTProjections)
+        : parent_(parent), snapshot_(std::move(snapshot)),
+          loadOnDemand_(loadOnDemand),
+          applyWinRTProjections_(applyWinRTProjections)
+    {
+    }
+
+    // The C# `public MetadataFile? Resolve(IAssemblyReference reference)`.
+    const Decompiler::Metadata::MetadataFile* Resolve(
+        const Decompiler::Metadata::IAssemblyReference& reference)
+        const override
+    {
+        // 0) if we're inside a package, look for filename.dll in the
+        // parent directories (the providedAssemblyResolver arm).
+        if (parent_.options_.AssemblyResolver != nullptr) {
+            if (const auto* module =
+                    parent_.options_.AssemblyResolver->Resolve(reference)) {
+                return module;
+            }
+        }
+
+        // The C# captures the TFM task at resolver construction (the
+        // tfmTask); the port's synchronous load runs on first demand
+        // here.
+        const std::string tfm = parent_.GetTargetFrameworkId();
+
+        // 1) try to find an exact match by tfm + full asm name in the
+        // loaded assemblies.
+        if (const auto* module = snapshot_.TryGetModule(reference, tfm)) {
+            parent_.loadedAssemblyReferencesInfo_.AddMessageOnce(
+                reference.FullName(), Decompiler::Metadata::MessageKind::Info,
+                "Success - Found in Assembly List");
+            return module;
+        }
+
+        // 2) try to find a match in the search paths (the universal
+        // resolver: the GAC / framework / deps.json machinery).
+        const auto file =
+            parent_.GetUniversalResolver(applyWinRTProjections_)
+                .FindAssemblyFile(reference);
+        if (file.has_value()) {
+            // Load the assembly from disk.
+            LoadedAssembly* asm_ = nullptr;
+            if (loadOnDemand_) {
+                asm_ = &parent_.assemblyList_->OpenAssembly(*file, true);
+            } else {
+                asm_ = parent_.assemblyList_->FindAssembly(*file);
+            }
+            if (asm_ != nullptr) {
+                parent_.loadedAssemblyReferencesInfo_.AddMessage(
+                    reference.FullName(),
+                    Decompiler::Metadata::MessageKind::Info,
+                    "Success - Loading from: " + *file);
+                return asm_->GetMetadataFileOrNull();
+            }
+            return nullptr;
+        }
+
+        // 9) try to find a match by asm name (no tfm/version) in the
+        // loaded assemblies.
+        if (const auto* module = snapshot_.TryGetSimilarModule(reference)) {
+            parent_.loadedAssemblyReferencesInfo_.AddMessageOnce(
+                reference.FullName(), Decompiler::Metadata::MessageKind::Info,
+                "Success - Found in Assembly List with different TFM or "
+                "version: " +
+                    module->FileName());
+            return module;
+        }
+        parent_.loadedAssemblyReferencesInfo_.AddMessageOnce(
+            reference.FullName(), Decompiler::Metadata::MessageKind::Error,
+            "Could not find reference: " + reference.FullName());
+        return nullptr;
+    }
+
+    // The C# `public MetadataFile? ResolveModule(MetadataFile mainModule,
+    // string moduleName)`.
+    const Decompiler::Metadata::MetadataFile* ResolveModule(
+        const Decompiler::Metadata::MetadataFile& mainModule,
+        const std::string& moduleName) const override
+    {
+        if (parent_.options_.AssemblyResolver != nullptr) {
+            if (const auto* module =
+                    parent_.options_.AssemblyResolver->ResolveModule(
+                        mainModule, moduleName)) {
+                return module;
+            }
+        }
+
+        // Load the module from the main module's directory.
+        if (const auto directory = GetDirectoryName(mainModule.FileName());
+            directory.has_value()) {
+            const std::string file = CombinePath(*directory, moduleName);
+            std::error_code ec;
+            if (std::filesystem::exists(file, ec)) {
+                LoadedAssembly* asm_ = nullptr;
+                if (loadOnDemand_) {
+                    asm_ = &parent_.assemblyList_->OpenAssembly(file, true);
+                } else {
+                    asm_ = parent_.assemblyList_->FindAssembly(file);
+                }
+                if (asm_ != nullptr) {
+                    return asm_->GetMetadataFileOrNull();
+                }
+            }
+        }
+
+        // The module does not exist on disk; look for one with a matching
+        // name in the assembly list (a non-assembly module only).
+        for (LoadedAssembly* loaded : snapshot_.Assemblies()) {
+            const auto* module = loaded->GetMetadataFileOrNull();
+            if (module == nullptr ||
+                module->GetAssemblyDefinition().has_value()) {
+                continue;
+            }
+            const auto moduleDef = module->GetModuleDefinition();
+            if (!moduleDef.has_value()) {
+                continue;
+            }
+            if (OrdinalIgnoreCaseEquals(moduleName, moduleDef->Name)) {
+                parent_.loadedAssemblyReferencesInfo_.AddMessageOnce(
+                    moduleName, Decompiler::Metadata::MessageKind::Info,
+                    "Success - Found in Assembly List");
+                return module;
+            }
+        }
+
+        return nullptr;
+    }
+
+private:
+    // The C# string.Equals(..., StringComparison.OrdinalIgnoreCase).
+    static bool OrdinalIgnoreCaseEquals(const std::string& a,
+        const std::string& b)
+    {
+        if (a.size() != b.size()) {
+            return false;
+        }
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            const auto lower = [](char c) {
+                return c >= 'A' && c <= 'Z'
+                    ? static_cast<char>(c - 'A' + 'a')
+                    : c;
+            };
+            if (lower(a[i]) != lower(b[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    const LoadedAssembly& parent_;
+    AssemblyListSnapshot snapshot_;
+    bool loadOnDemand_;
+    bool applyWinRTProjections_;
+};
+
+std::unique_ptr<Decompiler::Metadata::IAssemblyResolver>
+LoadedAssembly::GetAssemblyResolver(bool loadOnDemand,
+    bool applyWinRTProjections) const
+{
+    return std::make_unique<MyAssemblyResolver>(*this,
+        assemblyList_->GetSnapshot(), loadOnDemand, applyWinRTProjections);
+}
+
+std::unique_ptr<Decompiler::Metadata::IAssemblyResolver>
+LoadedAssembly::GetAssemblyResolver(const AssemblyListSnapshot& snapshot,
+    bool loadOnDemand, bool applyWinRTProjections) const
+{
+    return std::make_unique<MyAssemblyResolver>(*this, snapshot, loadOnDemand,
+        applyWinRTProjections);
+}
+
+const Decompiler::Metadata::UniversalAssemblyResolver&
+LoadedAssembly::GetUniversalResolver(bool applyWinRTProjections) const
+{
+    // The C# LazyInitializer.EnsureInitialized: one resolver per
+    // LoadedAssembly, created with the options of the FIRST call (later
+    // calls with a different winrt flag return the cached one).
+    std::lock_guard<std::mutex> lock(universalResolverMutex_);
+    if (universalResolver_ == nullptr) {
+        const std::string targetFramework = GetTargetFrameworkId();
+        const std::string runtimePack = GetRuntimePack();
+        // The C# `Path.IsPathRooted(this.FileName) ? this.FileName : null`
+        // (the POSIX arm: absolute paths only).
+        std::optional<std::string> rootedPath;
+        {
+            std::error_code ec;
+            if (std::filesystem::path(fileName_).is_absolute()) {
+                rootedPath = fileName_;
+            }
+        }
+        universalResolver_ =
+            std::make_unique<Decompiler::Metadata::UniversalAssemblyResolver>(
+                rootedPath, false, targetFramework, runtimePack,
+                Decompiler::Metadata::PEStreamOptions::PrefetchEntireImage,
+                applyWinRTProjections
+                    ? Decompiler::Metadata::MetadataReaderOptions::
+                          ApplyWindowsRuntimeProjections
+                    : Decompiler::Metadata::MetadataReaderOptions::None);
+    }
+    return *universalResolver_;
+}
+
+const Decompiler::Metadata::IAssemblyReferenceClassifier&
+LoadedAssembly::GetAssemblyReferenceClassifier(
+    bool applyWinRTProjections) const
+{
+    return GetUniversalResolver(applyWinRTProjections);
 }
 
 }  // namespace ILSpy::ILSpyX

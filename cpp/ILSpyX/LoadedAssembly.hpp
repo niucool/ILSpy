@@ -74,8 +74,11 @@
 
 #include "ILSpyX/FileLoaders/LoadResult.hpp"
 
+#include "Decompiler/Metadata/ReferenceLoadInfo.hpp"
+
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -83,11 +86,15 @@
 
 namespace ILSpy::Decompiler::Metadata {
 class IAssemblyResolver;
+class IAssemblyReferenceClassifier;
+class UniversalAssemblyResolver;
 }  // namespace ILSpy::Decompiler::Metadata
 
 namespace ILSpy::ILSpyX {
 
 class AssemblyList;
+
+class AssemblyListSnapshot;
 
 namespace FileLoaders {
 class FileLoaderRegistry;
@@ -221,6 +228,41 @@ public:
     }
     void SetTargetFrameworkIdOverride(std::optional<std::string> value);
 
+    // --- the resolver integration (the MyAssemblyResolver half) ---
+
+    // The C# `public IAssemblyResolver GetAssemblyResolver(bool
+    // loadOnDemand = true, bool applyWinRTProjections = false)`: the
+    // MyAssemblyResolver over a fresh AssemblyList snapshot. Caller-owned
+    // (the C# GC owns the resolver).
+    std::unique_ptr<Decompiler::Metadata::IAssemblyResolver>
+    GetAssemblyResolver(bool loadOnDemand = true,
+        bool applyWinRTProjections = false) const;
+
+    // The C# `internal IAssemblyResolver GetAssemblyResolver(
+    // AssemblyListSnapshot snapshot, bool loadOnDemand = true, bool
+    // applyWinRTProjections = false)`.
+    std::unique_ptr<Decompiler::Metadata::IAssemblyResolver>
+    GetAssemblyResolver(const class AssemblyListSnapshot& snapshot,
+        bool loadOnDemand = true, bool applyWinRTProjections = false) const;
+
+    // The C# `public AssemblyReferenceClassifier
+    // GetAssemblyReferenceClassifier(bool applyWinRTProjections)`: the
+    // lazy universal resolver (created on first demand with the flag the
+    // FIRST call passes -- the C# LazyInitializer caches regardless of
+    // later flags). Non-owning; the LoadedAssembly outlives it.
+    const Decompiler::Metadata::IAssemblyReferenceClassifier&
+    GetAssemblyReferenceClassifier(bool applyWinRTProjections = false) const;
+
+    // The C# `public ReferenceLoadInfo LoadedAssemblyReferencesInfo { get;
+    // }` -- the resolver's per-reference diagnostics. The accessor is
+    // const and returns a mutable reference (the C# property hands out
+    // the shared mutable object; the member is mutable to match).
+    Decompiler::Metadata::ReferenceLoadInfo& LoadedAssemblyReferencesInfo()
+        const
+    {
+        return loadedAssemblyReferencesInfo_;
+    }
+
     // --- the display surface ---
 
     // The C# `public string Text`: "ShortName (version[, TFM])" for an
@@ -234,6 +276,18 @@ private:
     void EnsureLoaded() const;
     FileLoaders::LoadResult LoadCore() const;
     void SetPdbFileName(std::optional<std::string> value);
+
+    // The C# `private UniversalAssemblyResolver GetUniversalResolver(bool
+    // applyWinRTProjections)` -- the lazy resolver construction (the
+    // rooted-file-name / TFM / runtime-pack / reader-options capture).
+    const Decompiler::Metadata::UniversalAssemblyResolver&
+    GetUniversalResolver(bool applyWinRTProjections) const;
+
+    // The C# private nested `sealed class MyAssemblyResolver :
+    // IAssemblyResolver` -- the resolution step order over the parent, a
+    // snapshot, the load-on-demand flag, and the winrt flag. Declared
+    // here (the nested-classes-public convention); defined in the .cpp.
+    class MyAssemblyResolver;
 
     AssemblyList* assemblyList_;
     std::string fileName_;
@@ -268,6 +322,17 @@ private:
     std::optional<std::string> targetFrameworkIdOverride_;
     std::optional<std::string> pdbFileName_;
     bool isAutoLoaded_ = false;
+    // The C# `ReferenceLoadInfo LoadedAssemblyReferencesInfo { get; }`
+    // (mutable: the const accessors hand out the shared mutable object,
+    // the C# shared-mutable-state convention).
+    mutable Decompiler::Metadata::ReferenceLoadInfo
+        loadedAssemblyReferencesInfo_;
+    // The C# `UniversalAssemblyResolver? universalResolver` lazy (created
+    // on first demand; mutable -- the accessor is const, the C#
+    // LazyInitializer is thread-safe).
+    mutable std::mutex universalResolverMutex_;
+    mutable std::unique_ptr<Decompiler::Metadata::UniversalAssemblyResolver>
+        universalResolver_;
 };
 
 }  // namespace ILSpy::ILSpyX
