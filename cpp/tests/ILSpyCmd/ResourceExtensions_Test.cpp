@@ -72,6 +72,14 @@ std::string SystemDllPath() {
 #if defined(_WIN32)
     return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\System.dll";
 #else
+    // The corpus convention (see PORT_LOG_BAML.md): when
+    // ILSPY_TEST_MSCORLIB points into the .NET Framework 4.8
+    // reference-assembly corpus, System.dll is the mscorlib's sibling.
+    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB");
+        env != nullptr && std::filesystem::exists(env)) {
+        std::filesystem::path dir = std::filesystem::path(env).parent_path();
+        return (dir / "System.dll").string();
+    }
     return "/usr/lib/mono/4.5/System.dll";
 #endif
 }
@@ -85,6 +93,12 @@ std::string SystemDllPath() {
 // mscorlib.resources container, charinfo.nlp, codepages.nlp).
 TEST(ResourceExtensionsTest, MscorlibManifestResourceReads)
 {
+    // The row set (the five .nlp files) is the .NET Framework 4.8
+    // mscorlib's own manifest -- a Windows fixture.
+    if (!std::filesystem::exists(MscorlibPath())) {
+        GTEST_SKIP() << "mscorlib fixture " << MscorlibPath()
+                     << " not present on this host";
+    }
     MetadataFile mscorlib(MscorlibPath());
     ASSERT_TRUE(mscorlib.IsValid());
     auto resources = mscorlib.GetManifestResources();
@@ -152,6 +166,12 @@ TEST(ResourceExtensionsTest, MscorlibManifestResourceReads)
 // exact partition the real tool prints (3174 lines).
 TEST(ResourceExtensionsTest, MscorlibPaths)
 {
+    // The 3174-line path list is the .NET Framework 4.8 mscorlib's own
+    // manifest -- a Windows fixture.
+    if (!std::filesystem::exists(MscorlibPath())) {
+        GTEST_SKIP() << "mscorlib fixture " << MscorlibPath()
+                     << " not present on this host";
+    }
     MetadataFile mscorlib(MscorlibPath());
     ASSERT_TRUE(mscorlib.IsValid());
     auto paths = Cmd::EnumerateResourcePaths(mscorlib);
@@ -167,6 +187,12 @@ TEST(ResourceExtensionsTest, MscorlibPaths)
 // System.dll: the container plus the seven raw .bmp names (1688 lines).
 TEST(ResourceExtensionsTest, SystemDllPaths)
 {
+    // The 1688-line path list and the seven toolbox-bitmap rows are the
+    // .NET Framework 4.8 System.dll's own manifest -- a Windows fixture.
+    if (!std::filesystem::exists(SystemDllPath())) {
+        GTEST_SKIP() << "System.dll fixture " << SystemDllPath()
+                     << " not present on this host";
+    }
     MetadataFile systemDll(SystemDllPath());
     ASSERT_TRUE(systemDll.IsValid());
     auto paths = Cmd::EnumerateResourcePaths(systemDll);
@@ -431,6 +457,13 @@ TEST(ResourceExtensionsTest, TryGetResourceNotFound)
 // whole-path arm.
 TEST(ResourceExtensionsTest, TryGetResourceMscorlib)
 {
+    // The pinned entries (the charinfo.nlp blob and the exact resource
+    // strings) are the .NET Framework 4.8 mscorlib's own resources -- a
+    // Windows fixture.
+    if (!std::filesystem::exists(MscorlibPath())) {
+        GTEST_SKIP() << "mscorlib fixture " << MscorlibPath()
+                     << " not present on this host";
+    }
     MetadataFile mscorlib(MscorlibPath());
     ASSERT_TRUE(mscorlib.IsValid());
     {

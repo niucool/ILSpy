@@ -171,18 +171,37 @@ const char* MscorlibPath() {
 #endif
 }
 
-const char* SystemDllPath() {
+// The corpus convention (see PORT_LOG_BAML.md): when ILSPY_TEST_MSCORLIB
+// points into the .NET Framework 4.8 reference-assembly corpus, System.dll
+// is the mscorlib's sibling and the System.Runtime facade lives under its
+// Facades/ subdirectory.
+std::string SystemDllPath() {
 #if defined(_WIN32)
     return "C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\System\\"
            "v4.0_4.0.0.0__b77a5c561934e089\\System.dll";
 #else
+    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB");
+        env != nullptr && std::filesystem::exists(env)) {
+        std::filesystem::path dir = std::filesystem::path(env).parent_path();
+        return (dir / "System.dll").string();
+    }
     return "/usr/lib/mono/4.5/System.dll";
 #endif
 }
 
-const char* FacadePath() {
+std::string FacadePath() {
+#if defined(_WIN32)
     return "C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\System.Runtime\\"
            "v4.0_4.0.0.0__b03f5f7f11d50a3a\\System.Runtime.dll";
+#else
+    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB");
+        env != nullptr && std::filesystem::exists(env)) {
+        std::filesystem::path dir = std::filesystem::path(env).parent_path();
+        return (dir / "Facades" / "System.Runtime.dll").string();
+    }
+    return "C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\System.Runtime\\"
+           "v4.0_4.0.0.0__b03f5f7f11d50a3a\\System.Runtime.dll";
+#endif
 }
 
 #if defined(_WIN32)

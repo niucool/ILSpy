@@ -178,10 +178,36 @@ struct MetadataFile::Impl {
             valid = false;
         }
     }
+
+    // The in-memory form (the file loaders' stream surface -- see the
+    // public ctor's note): the same parse over caller-supplied bytes. The
+    // MZ gate mirrors is_database()'s PE check so a non-PE buffer reports
+    // invalid without constructing the database (which would throw for
+    // garbage and land in the catch anyway -- the gate keeps the failure
+    // deterministic for buffers the caller already screened).
+    explicit Impl(std::string p, std::vector<std::uint8_t> bytes) : path(std::move(p)) {
+        try {
+            if (bytes.size() < 2 || bytes[0] != 'M' || bytes[1] != 'Z') return;
+            auto shared = std::make_shared<const std::vector<std::uint8_t>>(
+                std::move(bytes));
+            std::vector<std::uint8_t> copy(*shared);
+            db = std::make_unique<winmd::reader::database>(std::move(copy));
+            image = std::move(shared);
+            if (image) bodyReader = std::make_unique<MethodBodyReader>(image);
+            valid = true;
+        } catch (const std::exception&) {
+            db.reset();
+            valid = false;
+        }
+    }
 };
 
 MetadataFile::MetadataFile(std::string_view path)
     : impl_(std::make_unique<Impl>(path)) {}
+
+MetadataFile::MetadataFile(std::string fileName,
+    std::vector<std::uint8_t> image)
+    : impl_(std::make_unique<Impl>(std::move(fileName), std::move(image))) {}
 
 MetadataFile::~MetadataFile() = default;
 
