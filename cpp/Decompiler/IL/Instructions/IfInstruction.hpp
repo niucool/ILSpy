@@ -25,6 +25,8 @@
 
 #pragma once
 
+#include "Decompiler/IL/Instructions/LdcI4.hpp"
+
 #include "Decompiler/IL/ILInstruction.hpp"
 
 #include <cassert>
@@ -49,6 +51,26 @@ public:
         if (Condition) { Condition->Parent = this; Condition->ChildIndex = 0; }
         if (TrueInst) { TrueInst->Parent = this; TrueInst->ChildIndex = 1; }
         if (FalseInst) { FalseInst->Parent = this; FalseInst->ChildIndex = 2; }
+    }
+
+    // Port of IfInstruction.LogicAnd(ILInstruction lhs, ILInstruction rhs)
+    // (IfInstruction.cs line 46): the `lhs && rhs` sugar -- if(lhs, rhs,
+    // ldc.i4 0). The false branch falls through to a constant zero.
+    static std::unique_ptr<IfInstruction> LogicAnd(
+        std::unique_ptr<ILInstruction> lhs,
+        std::unique_ptr<ILInstruction> rhs) {
+        return std::make_unique<IfInstruction>(
+            std::move(lhs), std::move(rhs),
+            std::make_unique<LdcI4>(0));
+    }
+
+    // Port of IfInstruction.LogicOr(ILInstruction lhs, ILInstruction? rhs)
+    // (line 51): the `lhs || rhs` sugar -- if(lhs, ldc.i4 1, rhs).
+    static std::unique_ptr<IfInstruction> LogicOr(
+        std::unique_ptr<ILInstruction> lhs,
+        std::unique_ptr<ILInstruction> rhs) {
+        return std::make_unique<IfInstruction>(
+            std::move(lhs), std::make_unique<LdcI4>(1), std::move(rhs));
     }
 
     InstructionFlags DirectFlags() const override { return InstructionFlags::ControlFlow; }

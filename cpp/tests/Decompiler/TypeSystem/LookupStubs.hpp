@@ -379,6 +379,21 @@ public:
     // call the setters are unaffected (the additive-setter convention). The stored
     // `Methods` pointers are non-owning (the caller keeps the `IMethod` stubs alive).
     void SetMethods(std::vector<const IMethod*> methods) { methods_ = std::move(methods); }
+    // The C# `GetMethods(filter, options)` walk over the configured method
+    // table (the C# GetMethodsImpl runs the predicate over the methods; the
+    // stub has no base list, so IgnoreInheritedMembers is a no-op). The
+    // prior default (the IType empty list) made the table unreadable through
+    // the GetMethods surface the delegate-Invoke resolution consults.
+    std::vector<const IMethod*> GetMethods(
+        std::function<bool(const IMethod*)> filter = nullptr,
+        GetMemberOptions options = GetMemberOptions::None) const override {
+        (void)options;
+        if (!filter) return methods_;
+        std::vector<const IMethod*> result;
+        for (const IMethod* m : methods_)
+            if (filter(m)) result.push_back(m);
+        return result;
+    }
     void SetHasExtensions(bool v) { hasExtensions_ = v; }
     // Configurable `Accessibility` for the extension-method scan tests (the namespace
     // scan's `lookup.IsAccessible(c, false)` host filter). The default (the ctor's

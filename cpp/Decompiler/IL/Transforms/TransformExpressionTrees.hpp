@@ -224,6 +224,14 @@ public:
     ConvertResult ConvertArrayLength(Call* invocation);
     ConvertResult ConvertCondition(Call* invocation);
 
+    // The C# `(Func<ILInstruction>, IType) ConvertLogicOperator(
+    // CallInstruction, bool and)` ("AndAlso"/"OrElse" -- the 2-arg
+    // IfInstruction.LogicAnd/LogicOr sugar, the 3/4-arg user-defined forms)
+    // and ConvertInvoke (the delegate-invocation arm over the resolved
+    // Invoke method).
+    ConvertResult ConvertLogicOperator(Call* invocation, bool isAnd);
+    ConvertResult ConvertInvoke(Call* invocation);
+
     // The C# `(Func<ILInstruction>, IType) ConvertField(CallInstruction,
     // IType typeHint)` and its MatchGetFieldFromHandle helper (the
     // FieldInfo.GetFieldFromHandle(ldmembertoken field) shape -- the token's

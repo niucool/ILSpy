@@ -1098,3 +1098,158 @@ TEST(TransformExpressionTreesTest, ConvertConditionConvertsToIfInstruction)
     ASSERT_NE(falseVal, nullptr);
     EXPECT_EQ(falseVal->Value, 8);
 }
+
+// The ConvertLogicOperator arm (the C# `case "AndAlso"`): the 2-arg
+// primitive form builds the IfInstruction.LogicAnd sugar --
+// if(ldc 1, rhs, ldc.i4 0).
+TEST(TransformExpressionTreesTest, ConvertAndAlsoBecomesLogicAnd)
+{
+    TS::TestSupport::LookupCompilation compilation;
+    auto booleanType =
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Boolean);
+    compilation.RegisterKnownType(TS::KnownTypeCode::Boolean,
+                                  booleanType.get());
+    auto boolType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Boolean);
+    auto expressionDef = std::make_shared<TS::SimpleType>(TS::TopLevelTypeName(
+        std::string("System.Linq.Expressions"), std::string("Expression")));
+    TS::ITypePtr lambdaMethodReturnType =
+        std::make_shared<TS::ParameterizedType>(
+            expressionDef, std::vector<TS::ITypePtr>{boolType});
+
+    auto makeTrue = [&boolType]() {
+        auto constantCall = std::make_unique<IL::Call>(
+            std::make_shared<NamedMethodStub>(
+                "System.Linq.Expressions", "Expression", "Constant"));
+        constantCall->Arguments.push_back(std::make_unique<IL::LdcI4>(1));
+        auto typeToken = std::make_unique<IL::LdTypeToken>(
+            boolType, std::string("System.Boolean"));
+        auto inner = std::make_unique<IL::Call>(
+            std::make_shared<GetTypeFromHandleStub>());
+        inner->Arguments.push_back(std::move(typeToken));
+        constantCall->Arguments.push_back(std::move(inner));
+        return constantCall;
+    };
+    auto andCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "AndAlso"));
+    andCall->Arguments.push_back(makeTrue());
+    andCall->Arguments.push_back(makeTrue());
+
+    auto lambdaCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Lambda",
+            lambdaMethodReturnType));
+    lambdaCall->Arguments.push_back(std::move(andCall));
+    lambdaCall->Arguments.push_back(std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>("System", "Array", "Empty")));
+
+    auto block = std::make_unique<IL::Block>();
+    block->Kind = IL::BlockKind::ControlFlow;
+    block->Add(std::move(lambdaCall));
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.ExpressionTrees = true;
+    ctx.TypeSystem = &compilation;
+    IL::StatementTransformContext driverCtx(ctx, block.get());
+    IL::TransformExpressionTrees transform;
+    transform.Run(*block, 0, driverCtx);
+
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* fn = dynamic_cast<IL::ILFunction*>(block->Instructions[0].get());
+    ASSERT_NE(fn, nullptr);
+    ASSERT_EQ(fn->Body->Blocks.size(), 1u);
+    auto* leave = dynamic_cast<IL::Leave*>(
+        fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_NE(leave, nullptr);
+    auto* ifInst = dynamic_cast<IL::IfInstruction*>(leave->Value.get());
+    ASSERT_NE(ifInst, nullptr)
+        << "the AndAlso expression converts to the LogicAnd sugar";
+    auto* cond = dynamic_cast<IL::LdcI4*>(ifInst->Condition.get());
+    ASSERT_NE(cond, nullptr);
+    EXPECT_EQ(cond->Value, 1);
+    auto* trueVal = dynamic_cast<IL::LdcI4*>(ifInst->TrueInst.get());
+    ASSERT_NE(trueVal, nullptr);
+    EXPECT_EQ(trueVal->Value, 1);
+    auto* falseVal = dynamic_cast<IL::LdcI4*>(ifInst->FalseInst.get());
+    ASSERT_NE(falseVal, nullptr);
+    EXPECT_EQ(falseVal->Value, 0);
+}
+
+// The ConvertInvoke arm: a delegate-typed constant invoked with no
+// arguments -- the target converts (the constant keeps the delegate type),
+// the delegate's Invoke method is resolved, and the call re-targets it.
+TEST(TransformExpressionTreesTest, ConvertInvokeResolvesTheInvokeMethod)
+{
+    TS::TestSupport::LookupCompilation compilation;
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto delegateDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        std::string("Dlg"), std::string("Test"),
+        TS::FullTypeName(TS::TopLevelTypeName(std::string("Test"),
+                                              std::string("Dlg"))),
+        TS::TypeKind::Delegate, TS::Accessibility::Public, compilation,
+        nullptr);
+    auto invokeMethod = std::make_shared<NamedMethodStub>(
+        "Test", "Dlg", "Invoke", intType);
+    delegateDef->SetMethods({invokeMethod.get()});
+    auto delegateType = delegateDef;
+    auto expressionDef = std::make_shared<TS::SimpleType>(TS::TopLevelTypeName(
+        std::string("System.Linq.Expressions"), std::string("Expression")));
+    TS::ITypePtr lambdaMethodReturnType =
+        std::make_shared<TS::ParameterizedType>(
+            expressionDef, std::vector<TS::ITypePtr>{intType});
+
+    // Expression.Constant(null, Test.Dlg) -- the delegate-typed operand.
+    auto constantCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Constant"));
+    constantCall->Arguments.push_back(std::make_unique<IL::LdNull>());
+    {
+        auto typeToken = std::make_unique<IL::LdTypeToken>(
+            delegateType, std::string("Test.Dlg"));
+        auto inner = std::make_unique<IL::Call>(
+            std::make_shared<GetTypeFromHandleStub>());
+        inner->Arguments.push_back(std::move(typeToken));
+        constantCall->Arguments.push_back(std::move(inner));
+    }
+    // Expression.Invoke(constant, Array.Empty<ParameterExpression>())
+    auto invokeCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Invoke"));
+    invokeCall->Arguments.push_back(std::move(constantCall));
+    invokeCall->Arguments.push_back(std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>("System", "Array", "Empty")));
+
+    auto lambdaCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Lambda",
+            lambdaMethodReturnType));
+    lambdaCall->Arguments.push_back(std::move(invokeCall));
+    lambdaCall->Arguments.push_back(std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>("System", "Array", "Empty")));
+
+    auto block = std::make_unique<IL::Block>();
+    block->Kind = IL::BlockKind::ControlFlow;
+    block->Add(std::move(lambdaCall));
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.ExpressionTrees = true;
+    IL::StatementTransformContext driverCtx(ctx, block.get());
+    IL::TransformExpressionTrees transform;
+    transform.Run(*block, 0, driverCtx);
+
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* fn = dynamic_cast<IL::ILFunction*>(block->Instructions[0].get());
+    ASSERT_NE(fn, nullptr);
+    ASSERT_EQ(fn->Body->Blocks.size(), 1u);
+    auto* leave = dynamic_cast<IL::Leave*>(
+        fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_NE(leave, nullptr);
+    auto* call = dynamic_cast<IL::Call*>(leave->Value.get());
+    ASSERT_NE(call, nullptr)
+        << "the Invoke expression converts to a direct delegate call";
+    ASSERT_NE(call->Method, nullptr);
+    EXPECT_EQ(call->Method->Name(), "Invoke");
+    ASSERT_EQ(call->Arguments.size(), 1u);
+    auto* target = dynamic_cast<IL::LdNull*>(call->Arguments[0].get());
+    ASSERT_NE(target, nullptr);
+}
