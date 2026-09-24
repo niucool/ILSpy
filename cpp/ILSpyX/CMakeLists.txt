@@ -14,4 +14,8 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/FileLoaders/ArchiveFileLoader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/FileLoaders/XamarinCompressedFileLoader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/FileLoaders/FileLoaderRegistry.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Settings/ILSpySettings.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Settings/MutexProtector.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Settings/SettingsServiceBase.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Settings/DecompilerSettings.cpp
 )
