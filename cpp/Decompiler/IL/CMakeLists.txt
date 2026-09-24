@@ -34,6 +34,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/TransformCollectionAndObjectInitializers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/TransformExpressionTrees.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/SwitchOnStringTransform.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/LocalFunctionDecompiler.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/IndexRangeTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/InlineArrayTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/TupleTransform.cpp

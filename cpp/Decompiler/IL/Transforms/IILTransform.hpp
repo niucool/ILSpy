@@ -96,6 +96,10 @@ struct ILTransformSettings {
     // unconditional (like the NullableLifting helpers), but the transform that
     // consumes it is gated here.
     bool AnonymousMethods = true;
+    // Whether to wire local-function uses into the enclosing function (the C#
+    // settings.LocalFunctions, default true; gates LocalFunctionDecompiler --
+    // not yet in the pipeline, the transform shell lands first).
+    bool LocalFunctions = true;
     // Whether to recover array/collection/object initializers (and the
     // compiler-generated ReadOnlySpan<char> cache Roslyn emits for a
     // multi-byte array literal on frameworks without RuntimeHelpers.
