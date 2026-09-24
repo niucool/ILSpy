@@ -389,4 +389,33 @@ TEST(CSharpDecompilerTest, DecompileTypeEmitsPartialHeader)
     FAIL() << "the connid corpus has no Page1 type";
 }
 
+// The fixed-argument decode (the C# TypeSystemAstBuilder.ConvertAttribute
+// shape -- each positional argument renders as its constant literal, a
+// string in double quotes, a bool as true/false, the numerics as their
+// text): the connid corpus's assembly attributes carry decodable fixed
+// arguments (the CompilationRelaxations(8) int and the AssemblyVersion
+// string).
+TEST(CSharpDecompilerTest, DecompileModuleAttributesRenderFixedArguments)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+    ConnIdCompilation compilation;
+    TS::MetadataModule module{compilation, &file, TS::TypeSystemOptions::Default};
+    compilation.SetMainModule(&module);
+    std::string text =
+        CSharp::CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
+            module);
+    // CompilationRelaxationsAttribute(8): the compiler-emitted relaxation
+    // value renders as the numeric literal.
+    EXPECT_NE(text.find("CompilationRelaxationsAttribute(8)"),
+              std::string::npos)
+        << "the int fixed argument renders: " << text;
+    if (std::getenv("TET_TRACE")) {
+        std::fprintf(stderr, "TET-ATTR: %s\n", text.c_str());
+    }
+}
+
 } // namespace
+

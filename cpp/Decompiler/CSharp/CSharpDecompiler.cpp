@@ -247,6 +247,63 @@ const Metadata::PartialTypeInfo* CSharpDecompiler::FindPartialTypeInfo(
 // surface (the C# renders named arguments for the property setters). The
 // C# `try/catch -> DecompilerException` wrapping is deferred with the
 // exception surface.
+
+std::string RenderNumericAttributeLiteral(const std::any& v) {
+    if (auto i = std::any_cast<std::int8_t>(&v))
+        return std::to_string(static_cast<int>(*i));
+    if (auto i = std::any_cast<std::int16_t>(&v))
+        return std::to_string(static_cast<int>(*i));
+    if (auto i = std::any_cast<std::int32_t>(&v)) return std::to_string(*i);
+    if (auto i = std::any_cast<std::int64_t>(&v)) return std::to_string(*i);
+    if (auto u = std::any_cast<std::uint8_t>(&v))
+        return std::to_string(static_cast<unsigned>(*u));
+    if (auto u = std::any_cast<std::uint16_t>(&v))
+        return std::to_string(static_cast<unsigned>(*u));
+    if (auto u = std::any_cast<std::uint32_t>(&v)) return std::to_string(*u);
+    if (auto u = std::any_cast<std::uint64_t>(&v)) return std::to_string(*u);
+    if (auto f = std::any_cast<float>(&v)) return std::to_string(*f) + "f";
+    if (auto d = std::any_cast<double>(&v)) return std::to_string(*d);
+    return "";
+}
+
+// The C# ConvertAttribute argument render (the constant-literal shapes over
+// the boxed value: a string in double quotes, a bool as true/false, a char
+// quoted, a System.Type as typeof(...), an array in braces; the numerics
+// via RenderNumericAttributeLiteral). The nested-array arm recurses.
+std::string RenderAttributeArgument(
+    const TypeSystem::CustomAttributeTypedArgument& arg);
+
+std::string RenderAttributeArgument(
+    const TypeSystem::CustomAttributeTypedArgument& arg) {
+    const std::any& v = arg.Value();
+    if (!v.has_value()) return "null";
+    if (auto b = std::any_cast<bool>(&v)) return *b ? "true" : "false";
+    if (auto s = std::any_cast<std::string>(&v)) return '"' + *s + '"';
+    if (auto c = std::any_cast<char16_t>(&v)) {
+        return std::string("'") + static_cast<char>(*c) + "'";
+    }
+    if (auto t = std::any_cast<TypeSystem::ITypePtr>(&v)) {
+        return "typeof(" +
+               (*t ? (*t)->ReflectionName() : std::string("null")) + ')';
+    }
+    if (auto arr =
+            std::any_cast<std::vector<TypeSystem::CustomAttributeTypedArgument>>(
+                &v)) {
+        std::string out = "new[] { ";
+        for (std::size_t i = 0; i < arr->size(); ++i) {
+            if (i != 0) out += ", ";
+            out += RenderAttributeArgument((*arr)[i]);
+        }
+        out += " }";
+        return out;
+    }
+    return RenderNumericAttributeLiteral(v);
+}
+
+// The numeric literal shapes (the C# ConvertConstantValue primitive arms):
+// the typed numeric text; an unrecognized box renders empty (the decoder's
+// malformed-blob case).
+
 std::string CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
     const TypeSystem::MetadataModule& module) {
     std::string out;
@@ -261,12 +318,36 @@ std::string CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
             out += a->AttributeType().Name();
             out += '(';
             // The C# TypeSystemAstBuilder.ConvertAttribute renders the
-            // positional (fixed) arguments after the type; the
-            // argument-value decode rides the
-            // CustomAttributeTypedArgument.Value surface (deferred with
-            // that decode -- the name-only render stands in for now).
+            // positional (fixed) arguments after the type: each argument as
+            // its constant literal (a string in double quotes, a bool as
+            // true/false, a char quoted, the numerics as their text, a
+            // System.Type as typeof(...), an array in braces). The enum
+            // arguments render as their numeric text (the C# resolves the
+            // enum member names when the type system can; the port's
+            // arg.Type Kind derivation does not classify enums here yet).
+            bool first = true;
+            auto renderArg = [&out, &first](
+                                 const TypeSystem::CustomAttributeTypedArgument&
+                                     arg) {
+                if (!first) out += ", ";
+                first = false;
+                out += RenderAttributeArgument(arg);
+            };
             for (const auto& fixedArg : a->FixedArguments()) {
-                (void)fixedArg;
+                renderArg(fixedArg);
+            }
+            // The named arguments ride the same surface (the C# renders the
+            // property setters as `Name = value`).
+            for (const auto& named : a->NamedArguments()) {
+                if (!first) out += ", ";
+                first = false;
+                out += named.Name();
+                out += " = ";
+                // The value renders without the pair separator (the C#
+                // CustomAttributeNamedArgument.Name/value split).
+                out += RenderAttributeArgument(
+                    TypeSystem::CustomAttributeTypedArgument(named.Type(),
+                                                             named.Value()));
             }
             out += ')';
             out += "]\n";
