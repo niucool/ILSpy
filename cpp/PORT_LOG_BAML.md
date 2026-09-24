@@ -589,3 +589,107 @@ the two issues ASan caught: the Unload flag-after-erase use-after-free,
 and the Elements()-range mutation hang caught as a live-lock in the
 sweep). Net: 12,391 tests / 818 suites in the filtered sweep, the
 same baseline failure set as the untouched tree.
+
+---
+
+# The Phase 11 broad text-match baseline (the standing exit-criterion artifact)
+
+The sixth assignment: the broad `--csharp` text-match baseline over the
+provisioned corpus plus the capa .NET set, whole-file decompilation on
+both engines, per-assembly pass/fail, and the categorized divergence
+table. The harness is `cpp/tests/tools/textmatch_baseline.sh`
+(reproducible; ~25 min full run).
+
+## 1. The sample set and the ranking metric
+
+The corpus assemblies are ranked by **public-surface size, measured as
+the oracle's own `--csharp` emission** (the line count of the decompiled
+surface the exit criterion compares; the ranking run decompiles every
+corpus .dll with ilspycmd 11.0.0.9335-rc and keeps the counts). The top
+20 range from mscorlib (227,308 lines) down to System.Data.Linq
+(19,150). The capa-testfiles set contributes all 49 BSJB-bearing files
+(46 managed + 3 native PEs that both engines reject). One extra
+body-bearing sample -- `ilspycmd.dll`, the oracle tool's own assembly
+(1,829 lines) -- is included so the matrix exercises real method
+bodies, which the metadata-only reference corpus cannot.
+
+## 2. The matrix (whole-file `--csharp`, 69 samples)
+
+| Category | Count | Samples |
+|---|---:|---|
+| IDENTICAL | 0 | -- |
+| CONVENTION-DIFF (the Phase-5 seed surface) | 3 | capa7/47/48 |
+| REAL-MISMATCH | 0 | -- |
+| PORT-CRASH(134) | 44 | 43 capa + ilspycmd_self |
+| PORT-FAIL(1) | 20 | the top-20 corpus, all |
+| ORACLE-THROWS (both engines reject: native PEs) | 3 | capa8/25/49 |
+
+Per-assembly corpus table (every sample FAIL -- the port cannot emit
+C# text for any of them):
+
+| # | Assembly | Oracle lines | Result |
+|---|---|---:|---|
+| 1 | mscorlib.dll | 227,308 | FAIL (PORT-FAIL(1): "no method bodies found") |
+| 2 | PresentationFramework.dll | 185,327 | FAIL (same) |
+| 3 | PresentationCore.dll | 155,958 | FAIL (same) |
+| 4 | System.dll | 129,814 | FAIL (same) |
+| 5 | System.Data.dll | 86,681 | FAIL (same) |
+| 6 | System.Xml.dll | 73,303 | FAIL (same) |
+| 7 | System.Design.dll | 63,116 | FAIL (same) |
+| 8 | System.Windows.Forms.DataVisualization.dll | 46,110 | FAIL (same) |
+| 9 | System.Web.DataVisualization.dll | 45,787 | FAIL (same) |
+| 10 | WindowsBase.dll | 44,419 | FAIL (same) |
+| 11 | System.IdentityModel.dll | 42,835 | FAIL (same) |
+| 12 | System.Workflow.ComponentModel.dll | 32,593 | FAIL (same) |
+| 13 | Microsoft.VisualBasic.Compatibility.dll | 30,018 | FAIL (same) |
+| 14 | Microsoft.Build.Tasks.v4.0.dll | 29,926 | FAIL (same) |
+| 15 | System.Core.dll | 29,297 | FAIL (same) |
+| 16 | System.Runtime.Serialization.dll | 28,817 | FAIL (same) |
+| 17 | System.Workflow.Activities.dll | 27,930 | FAIL (same) |
+| 18 | System.Drawing.dll | 24,863 | FAIL (same) |
+| 19 | ReachFramework.dll | 23,389 | FAIL (same) |
+| 20 | System.Data.Linq.dll | 19,150 | FAIL (same) |
+
+The capa set (49): 43 PORT-CRASH(134) with one shared abort signature
+(the `std::vector<unique_ptr<ILInstruction>>` OOB assert, ASan-pinned
+in the differential run to
+`TransformCollectionAndObjectInitializers.cpp:771`); 3
+CONVENTION-DIFF; 3 ORACLE-THROWS. The crash hits `ilspycmd.dll` too --
+it is not capa-specific; any body-bearing assembly walks the same
+transform and dies. The 3 CONVENTION-DIFF samples are the only port C#
+text in the run: bare method bodies under `// .Type` headers, no using
+directives, no assembly attributes, no type declarations, no
+visibility modifiers, `base()` form -- the documented Phase-5 seed
+surface; the emitted body text itself matches the oracle's bodies
+modulo those conventions (capa47's `Main` is textually the oracle's
+body).
+
+## 3. What this means for exit criterion 1
+
+Two blockers, both already located, stand between the current state
+and corpus-wide `--csharp` matching:
+
+1. **The metadata-only gap** (all 20 corpus assemblies): the port's
+   C# pipeline requires method bodies -- whole-file, type mode
+   (`-t`), and declarations-only all fail with "no method bodies
+   found (for type)". The reference corpus consists entirely of
+   body-less assemblies, and the oracle emits their full declaration
+   surface (mscorlib alone: 227K lines). Until the pipeline emits
+   declarations for body-less modules, exit criterion 1 cannot score
+   on the corpus at all.
+2. **The IL-transform OOB crash** (43+1 samples): one shared abort in
+   `TransformCollectionAndObjectInitializers.cpp:771` kills every
+   body-bearing assembly tested, including a modern net10.0 real-world
+   one. This is main-line territory (the file carries the committed
+   PROBE litter; the repro is any capa sample or
+   `ilspycmd.dll --csharp`).
+
+The `--il` pipeline, recorded in the differential section above, is at
+near-oracle-parity over the same corpus (42/64 byte-identical, every
+divergence explained by two small bugs with repros) -- the C#-emission
+gap is not a metadata or disassembly problem; it is localized to the
+C# backend's module-level emission and the one crash.
+
+Rerun: `bash cpp/tests/tools/textmatch_baseline.sh /tmp/textmatch`
+(the ranking, per-sample captures, diff.txt files, and summary.tsv all
+land under the output directory).
