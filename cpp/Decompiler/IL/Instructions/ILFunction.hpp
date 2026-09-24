@@ -71,6 +71,12 @@ public:
     // The C# `public bool IsAsync => AsyncReturnType != null` (ILFunction.cs).
     bool IsAsync() const { return AsyncReturnType != nullptr; }
 
+    // The C# `public IType DelegateType { get; set; }` (ILFunction.cs) -- the
+    // delegate type a lambda/delayed-delegate construction was built against;
+    // set by DelegateConstruction and TransformExpressionTrees (the C# reader
+    // leaves it null for the top-level function).
+    TypeSystem::ITypePtr DelegateType;
+
     // The C# `public IReadOnlyList<IParameter> Parameters => method.Parameters`
     // (ILFunction.cs) -- the method's parameter list, the pre-resolved subset of
     // the C# `ILFunction.Method` handle this port carries (the

@@ -30,6 +30,8 @@
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
@@ -78,7 +80,9 @@ public:
     }
     std::vector<const TS::IParameter*> Parameters() const override { return {}; }
     const TS::IMember* MemberDefinition() const override { return this; }
-    const TS::IType& ReturnType() const override { return *voidType_; }
+    const TS::IType& ReturnType() const override {
+        return *voidType_;
+    }
     std::vector<const TS::IMember*>
     ExplicitlyImplementedInterfaceMembers() const override {
         return {};
@@ -198,9 +202,10 @@ TEST(TransformExpressionTreesTest, MatchGetTypeFromHandleRejectsWrongMethod)
 // type name) and the method name are ctor parameters.
 class NamedMethodStub : public TS::IMethod {
 public:
-    NamedMethodStub(std::string ns, std::string typeName, std::string methodName)
+    NamedMethodStub(std::string ns, std::string typeName, std::string methodName,
+                    TS::ITypePtr returnType = nullptr)
         : ns_(std::move(ns)), typeName_(std::move(typeName)),
-          name_(std::move(methodName)) {
+          name_(std::move(methodName)), returnType_(std::move(returnType)) {
         declaringType_ = std::make_shared<TS::SimpleType>(
             TS::TopLevelTypeName(ns_, typeName_));
         voidType_ = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Void);
@@ -216,7 +221,9 @@ public:
     }
     std::vector<const TS::IParameter*> Parameters() const override { return {}; }
     const TS::IMember* MemberDefinition() const override { return this; }
-    const TS::IType& ReturnType() const override { return *voidType_; }
+    const TS::IType& ReturnType() const override {
+        return returnType_ != nullptr ? *returnType_ : *voidType_;
+    }
     std::vector<const TS::IMember*>
     ExplicitlyImplementedInterfaceMembers() const override {
         return {};
@@ -283,6 +290,7 @@ public:
     std::string name_;
     TS::ITypePtr declaringType_;
     TS::ITypePtr voidType_;
+    TS::ITypePtr returnType_;
 };
 
 // The System.Type::GetTypeFromHandle overload of MatchParameterVariableAssignment
@@ -418,6 +426,63 @@ TEST(TransformExpressionTreesTest, MightBeExpressionTreeRejectsWrongArity)
     lambda->Arguments.push_back(std::make_unique<IL::LdStr>("only body"));
     EXPECT_FALSE(IL::TransformExpressionTrees::MightBeExpressionTree(
         lambda.get(), lambda.get()));
+}
+
+TEST(TransformExpressionTreesTest, ConvertLambdaConvertsConstantBody)
+{
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    // The Lambda method's return type: `Expression<Func<int>>` (the C#
+    // `instruction.Method.ReturnType.TypeArguments[0]` delegate-type read).
+    auto expressionDef = std::make_shared<TS::SimpleType>(TS::TopLevelTypeName(
+        std::string("System.Linq.Expressions"), std::string("Expression")));
+    TS::ITypePtr lambdaMethodReturnType =
+        std::make_shared<TS::ParameterizedType>(
+            expressionDef, std::vector<TS::ITypePtr>{intType});
+    // `stloc(v, Expression.Lambda(Expression.Constant(42, Int32),
+    //                             Array.Empty<ParameterExpression>()))`
+    auto lambdaCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Lambda",
+            lambdaMethodReturnType));
+    // The body: Expression.Constant(ldc.i4 42, GetTypeFromHandle(ldtoken Int32))
+    auto constantCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Constant"));
+    constantCall->Arguments.push_back(std::make_unique<IL::LdcI4>(42));
+    // The type argument: `Type::GetTypeFromHandle(ldtoken Int32)` (the same
+    // shape the compiler emits for the typeof() operand).
+    auto innerGetTypeCall = std::make_unique<IL::Call>(
+        std::make_shared<GetTypeFromHandleStub>());
+    innerGetTypeCall->Arguments.push_back(std::make_unique<IL::LdTypeToken>(
+        intType, std::string("System.Int32")));
+    constantCall->Arguments.push_back(std::move(innerGetTypeCall));
+    lambdaCall->Arguments.push_back(std::move(constantCall));
+    lambdaCall->Arguments.push_back(std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>("System", "Array", "Empty")));
+
+    IL::Call* lambdaPtr = lambdaCall.get();
+    auto block = std::make_unique<IL::Block>();
+    block->Kind = IL::BlockKind::ControlFlow;
+    block->Add(std::move(lambdaCall));
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.ExpressionTrees = true;
+    IL::StatementTransformContext driverCtx(ctx, block.get());
+    IL::TransformExpressionTrees transform;
+    transform.Run(*block, 0, driverCtx);
+
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* fn = dynamic_cast<IL::ILFunction*>(block->Instructions[0].get());
+    ASSERT_NE(fn, nullptr) << "the Lambda call converts to an ILFunction";
+    // The C# SetExpressionTreeFlag reads the Lambda method's return type --
+    // `Expression<Func<int>>` IS an Expression<T> ParameterizedType, so the
+    // kind is ExpressionTree (this call shape is literally an expression
+    // tree, the transform's whole purpose).
+    EXPECT_EQ(fn->Kind, IL::ILFunctionKind::ExpressionTree);
+    EXPECT_EQ(fn->DelegateType.get(), lambdaMethodReturnType.get());
+    ASSERT_NE(fn->Body, nullptr);
+    // The converted body leaves the container with the constant.
+    ASSERT_NE(fn->Body->EntryPoint(), nullptr);
 }
 
 // The settings gate: the transform's Run is gated on

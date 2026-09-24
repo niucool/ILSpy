@@ -48,6 +48,12 @@ public:
     std::vector<std::unique_ptr<Block>> Blocks;
     ContainerKind Kind = ContainerKind::Normal;
 
+    // The C# `public StackType ExpectedResultType { get; set; }` -- the
+    // evaluation-stack type the container's `leave` values must produce. The
+    // port stores it plain (the C# ctor keeps the set-by-consumer shape); the
+    // reader leaves it Unknown for containers it builds.
+    StackType ExpectedResultType = StackType::Unknown;
+
     // The C# `public Block EntryPoint { get; }` -- the container's entry block
     // (the C# `entryPoint!` HACK: every container must have one per the
     // invariant, so the accessor returns non-null). The port derives it as the

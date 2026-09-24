@@ -37,13 +37,24 @@
 
 #include "Decompiler/IL/Transforms/StatementTransform.hpp"
 
+#include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include "Decompiler/TypeSystem/IType.hpp"
 
+namespace ILSpy::Decompiler::TypeSystem {
+class IParameter;
+}
+
 namespace ILSpy::Decompiler::IL {
 
+namespace TS = ::ILSpy::Decompiler::TypeSystem;
+
 class ILVariable;
+class StLoc;
+class Call;
+class ILFunction;
 
 class TransformExpressionTrees final : public IStatementTransform {
 public:
@@ -71,6 +82,84 @@ public:
     // `Array.Empty<T>()` / `newarr ParameterExpression` /
     // `newarr Expression` forms.
     static bool IsEmptyParameterList(ILInstruction* inst);
+
+    // The instance state (the C# `this.context/conversions/resolver/
+    // parameters/parameterMapping/instructionsToRemove/lambdaStack` fields).
+    // The conversions/resolver pair is deferred with the resolver-backed arms
+    // (ConvertComparison/ConvertBinaryNumericOperator's user-defined-operator
+    // forms); the parameter maps drive the LdLoc arms below.
+    struct State {
+        // The C# `Dictionary<ILVariable, (IType, string)> parameters`.
+        std::map<ILVariable*, std::pair<::ILSpy::Decompiler::TypeSystem::ITypePtr, std::string>>
+            parameters;
+        // The C# `Dictionary<ILVariable, ILVariable> parameterMapping`.
+        std::map<ILVariable*, std::shared_ptr<ILVariable>> parameterMapping;
+        std::vector<ILInstruction*> instructionsToRemove;
+        std::vector<ILFunction*> lambdaStack;
+        // The storing stloc per recorded parameter (the port's ILVariable does
+        // not track store instructions; the C# reads
+        // `v.StoreInstructions[0]` in ReadParameters).
+        std::map<ILVariable*, StLoc*> parameterStores;
+    };
+
+    // The per-Run state (re-initialized at the top of Run, the C# fields
+    // re-assigned there).
+    State state_;
+    // The enclosing StatementTransformContext (set at the top of Run; the C#
+    // `this.context` field the Convert* arms consult).
+    StatementTransformContext* context_ = nullptr;
+
+    // The C# `bool TryConvertExpressionTree(ILInstruction, ILInstruction)`:
+    // walk the instruction tree for the first MightBeExpressionTree call.
+    bool TryConvertExpressionTree(ILInstruction* instruction,
+                                  ILInstruction* statement);
+
+    // The C# `(Func<ILInstruction>, IType) ConvertLambda(CallInstruction)`:
+    // builds the ILFunction (Kind ExpressionTree/Delegate) over the converted
+    // body; a deferred BuildFunction thunk pattern (the C# local function
+    // captured by the returned Func). Returns {nullptr, null type} on failure.
+    struct ConvertResult {
+        std::function<std::unique_ptr<ILInstruction>()> thunk;
+        ::ILSpy::Decompiler::TypeSystem::ITypePtr type;
+    };
+
+    ConvertResult ConvertLambda(Call* instruction);
+    ConvertResult ConvertInstruction(ILInstruction* instruction,
+                                     TypeSystem::IType* typeHint = nullptr);
+
+    // The C# `bool IsExpressionTree(IType)` / `IType UnwrapExpressionTree(IType)`:
+    // the `Expression<T>` ParameterizedType probe and its element-type unwrap.
+    static bool IsExpressionTree(const TypeSystem::IType& delegateType);
+    static ::ILSpy::Decompiler::TypeSystem::ITypePtr UnwrapExpressionTree(
+        const TypeSystem::IType& delegateType);
+
+    // The C# `void SetExpressionTreeFlag(ILFunction, CallInstruction)`.
+    static void SetExpressionTreeFlag(ILFunction& lambda, const Call& call);
+
+    // The C# `bool ReadParameters(ILInstruction, List<IParameter>,
+    // List<ILVariable>, SimpleTypeResolveContext)`: the initializer-block arm
+    // over the recorded parameter assignments. The C# `context` parameter is
+    // unused there and is dropped (the port carries no dead parameter).
+    bool ReadParameters(ILInstruction* initializer,
+                        std::vector<std::shared_ptr<const ::ILSpy::Decompiler::TypeSystem::IParameter>>&
+                            parameterList,
+                        std::vector<std::shared_ptr<ILVariable>>&
+                            parameterVariables);
+
+    // The C# `(Func<ILInstruction>, IType) ConvertConstant(CallInstruction)`
+    // and its `MatchConstantCall` helper (the value+type pair extraction).
+    ConvertResult ConvertConstant(Call* invocation);
+    bool MatchConstantCall(ILInstruction* inst, ILInstruction*& value,
+                           ::ILSpy::Decompiler::TypeSystem::ITypePtr& type);
+
+    // The C# `ILInstruction ConvertValue(ILInstruction, ILInstruction)`:
+    // clone the constant operand, remapping parameter loads. The closure-
+    // reference arm is deferred with TransformDisplayClassUsage.
+    std::unique_ptr<ILInstruction> ConvertValue(ILInstruction* value,
+                                                ILInstruction* context);
+
+    // The C# `(Func<ILInstruction>, IType) ConvertQuote(CallInstruction)`.
+    ConvertResult ConvertQuote(Call* invocation);
 };
 
 } // namespace ILSpy::Decompiler::IL
