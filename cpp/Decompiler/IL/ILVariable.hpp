@@ -28,6 +28,8 @@
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
 
+#include <vector>
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -35,6 +37,9 @@
 namespace ILSpy::Decompiler::IL {
 
 class BlockContainer;
+class ILInstruction;
+class LdLoc;
+class LdLoca;
 
 class ILVariable {
 public:
@@ -50,6 +55,18 @@ public:
     int LoadCount = 0;
     int StoreCount = 0;
     int AddressCount = 0;
+
+    // The variable's use-site instruction lists (the C# LoadInstructions/
+    // StoreInstructions/AddressInstructions, the IReadOnlyList<...> fields the
+    // transforms enumerate). The C# maintains them through the tree's
+    // Connected/Disconnected protocol; the port fills them in the
+    // ComputeVariableUsage walk (the recompute convention the counts already
+    // follow) -- they are snapshots valid until the next mutation, and a
+    // consumer that mutates the tree must recompute before reading again.
+    // Non-owning raw pointers into the live tree.
+    std::vector<LdLoc*> LoadInstructions;
+    std::vector<ILInstruction*> StoreInstructions;
+    std::vector<LdLoca*> AddressInstructions;
 
     // Set by transforms (e.g. RemoveInfeasiblePathTransform) to mark a variable
     // whose dead stores RemoveDeadVariableInit should drop even when the

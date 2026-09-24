@@ -50,6 +50,7 @@
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/Transforms/LocalFunctionDecompiler.hpp"
 #include "Decompiler/IL/Transforms/DelegateConstruction.hpp"
+#include "Decompiler/IL/Transforms/IntroduceNativeIntTypeOnLocals.hpp"
 #include "Decompiler/IL/Transforms/TransformDisplayClassUsage.hpp"
 #include "Decompiler/IL/Transforms/NamedArgumentTransform.hpp"
 #include "Decompiler/IL/Transforms/DeconstructionTransform.hpp"
@@ -192,9 +193,13 @@ inline std::vector<std::unique_ptr<IILTransform>> GetILTransforms() {
     transforms.push_back(std::make_unique<ReduceNestingTransform>());
     transforms.push_back(std::make_unique<RemoveUnreachableBlocks>());
     transforms.push_back(std::make_unique<RemoveRedundantReturn>());
-    // The C# tail ends with AssignVariableNames (after
-    // IntroduceDynamicTypeOnLocals / IntroduceNativeIntTypeOnLocals,
-    // neither ported yet).
+    // The C# slot between RemoveRedundantReturn and AssignVariableNames
+    // (CSharpDecompiler.cs lines 185-186): IntroduceDynamicTypeOnLocals
+    // stays deferred with the DynamicInstruction argument-info surface;
+    // the native-integer introduction is ported.
+    // transforms.push_back(std::make_unique<IntroduceDynamicTypeOnLocals>());
+    transforms.push_back(std::make_unique<IntroduceNativeIntTypeOnLocals>());
+    // The C# tail ends with AssignVariableNames.
     transforms.push_back(std::make_unique<AssignVariableNames>());
     return transforms;
 }
