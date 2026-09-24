@@ -260,6 +260,17 @@ bool WinIsDeviceUnc(std::string_view path) {
 }
 
 std::size_t WinGetRootLength(std::string_view path) {
+#if !defined(_WIN32)
+    // .NET on a POSIX host (the Unix PathInternal.GetRootLength): the only
+    // root form is a single leading '/', and every other path is relative
+    // (no UNC or device roots, no DOS drives). The Windows build below is
+    // the decompiled Windows engine the gold pins were captured against,
+    // where a leading-separator path parses as a UNC root -- which leaves a
+    // POSIX '/dir/file' with no directory name and made the
+    // DotNetCorePathFinder ctor throw the Path.Combine ArgumentNullException
+    // on this host, so the POSIX build keeps its own root model.
+    return (!path.empty() && path[0] == '/') ? 1 : 0;
+#else
     std::size_t length = path.size();
     std::size_t i = 0;
     bool isDevice = WinIsDevice(path);
@@ -297,6 +308,7 @@ std::size_t WinGetRootLength(std::string_view path) {
         i = 1;
     }
     return i;
+#endif
 }
 
 // The decompiled System.IO.PathInternal.NormalizeDirectorySeparators: the
@@ -304,6 +316,13 @@ std::size_t WinGetRootLength(std::string_view path) {
 // it), then the rebuild -- one leading backslash and every separator run
 // collapsed to its last member, forward slashes replaced.
 std::string NormalizeDirectorySeparators(const std::string& path) {
+#if !defined(_WIN32)
+    // The Unix build does not rewrite separators: the directory separator
+    // is already '/' and a '\' is an ordinary filename character (the
+    // Windows rebuild below would turn every '/' into a '\', which does
+    // not name a file on this host).
+    return path;
+#else
     if (path.empty()) return path;
     bool needsNormalization = false;
     for (std::size_t i = 0; i < path.size(); i++) {
@@ -334,6 +353,7 @@ std::string NormalizeDirectorySeparators(const std::string& path) {
         result += c;
     }
     return result;
+#endif
 }
 
 // The .NET `Path.IsPathRooted(string)` (the `JoinPaths` rooted-second rule).
@@ -353,7 +373,12 @@ std::string JoinPaths(const std::string& first, std::string_view second) {
     if (IsPathRooted(second)) return std::string(second);
     char last = first[first.size() - 1];
     if (last == '\\' || last == '/') return first + std::string(second);
+#if !defined(_WIN32)
+    // The Unix Path.DirectorySeparatorChar.
+    return first + "/" + std::string(second);
+#else
     return first + "\\" + std::string(second);
+#endif
 }
 
 // The .NET `Path.GetDirectoryName(string)` (gold-pinned): null for the empty

@@ -47,6 +47,9 @@
 #include <string_view>
 #include <vector>
 
+#include <cstdio>
+#include <filesystem>
+
 namespace {
 
 namespace TM = ILSpy::Decompiler::Metadata;
@@ -379,6 +382,68 @@ TEST(GacFolderNameRegexTest, CraftedMatrixMatchesTheDotNetRegex) {
         }
         EXPECT_EQ(rendered, expected) << "folder name: " << folderName;
     }
+}
+
+// A name-parameterizable reference (the file-local StubReference above has a
+// fixed name; this one drives the search-directory machinery).
+class NamedReference : public TM::IAssemblyReference {
+public:
+    explicit NamedReference(std::string name) : name_(std::move(name)) {}
+
+    std::string Name() const override { return name_; }
+    std::string FullName() const override { return name_; }
+    std::optional<TS::Version> Version() const override
+    {
+        return TS::Version(1, 0);
+    }
+    std::optional<std::string> Culture() const override { return std::nullopt; }
+    std::optional<std::vector<std::uint8_t>> PublicKeyToken() const override
+    {
+        return std::nullopt;
+    }
+    bool IsWindowsRuntime() const override { return false; }
+    bool IsRetargetable() const override { return false; }
+
+private:
+    std::string name_;
+};
+
+// A POSIX-shaped main-assembly path (a .NETCoreApp-targeting resolver on a
+// Linux host): the DotNetCorePathFinder ctor takes Path.GetDirectoryName of
+// the main file and Path.Combine's the .deps.json probe against it, so a
+// leading-'/' path must parse as a rooted path with a real directory
+// name -- not as a UNC-style whole-path root, whose null directory name
+// made the ctor throw the Path.Combine ArgumentNullException
+// ("Value cannot be null. (Parameter 'path1')") on every
+// UniversalAssemblyResolver-driven BAML decompilation.
+TEST(UniversalAssemblyResolverTest, PosixMainPathDrivesTheNetCoreFinderWithoutThrowing) {
+    namespace fs = std::filesystem;
+    fs::path dir = fs::temp_directory_path() / "ilspy_uar_posix";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    ASSERT_FALSE(ec) << "cannot create " << dir;
+    const std::string main = (dir / "main.dll").string();
+    const std::string sideBySide = (dir / "SideBySide.dll").string();
+    for (const std::string& file : { main, sideBySide }) {
+        std::FILE* out = std::fopen(file.c_str(), "wb");
+        ASSERT_NE(out, nullptr) << "cannot write " << file;
+        std::fputs("MZ placeholder bytes", out);
+        std::fclose(out);
+    }
+
+    TM::UniversalAssemblyResolver resolver(
+        main, /*throwOnError=*/false, ".NETCoreApp,Version=v8.0");
+
+    // Resolving an assembly that exists nowhere must come back empty, not
+    // throw from the finder construction (the deps.json probe arm).
+    EXPECT_EQ(resolver.FindAssemblyFile(NamedReference("NowhereToBeFound")),
+        std::nullopt);
+
+    // A side-by-side file must be located through the POSIX join: the
+    // composed candidate path is the main file's directory + '/' + the
+    // assembly name (a '\\' join does not name a file on a POSIX host).
+    EXPECT_EQ(resolver.FindAssemblyFile(NamedReference("SideBySide")),
+        std::optional<std::string>(sideBySide));
 }
 
 }  // namespace
