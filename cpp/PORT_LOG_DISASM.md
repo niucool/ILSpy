@@ -322,3 +322,57 @@ is the largest remaining --il miss (1 row, ~213 hunks) and is
 Disassembler territory; (c) T4/T5 root causes are pinned
 (SignatureTypeProviderDecoder Fail sites) and a6ab1e60b's catch already
 matches the C# shape for them.
+
+## PD9 -- the T12 calli slice + the pinvoke/HasBody gate (2026-09-24)
+
+### T12 -- the calli standalone-signature decode (RED -> GREEN -> net065 byte-identical)
+
+The sweep's net065 diff: the port rendered `calli @11000003 /* signature 2 */`
+where the C# decoded the full `unmanaged stdcall int32 modopt(...)` -- 213
+hunks. Root cause: SRM's `SignatureHeader.Kind` collapses every low-nibble
+calling convention (<= 5) to SignatureKind.Method, so the C# Method arm
+decodes the unmanaged-stdlib signatures; the port's `rawKind == 0x00` test
+sent them to the fallback. Fix: the gate widens to `<= 0x05` (committed
+05a66b012, RED = the SsSynth 0x01/0x05 rows rendering the fallback).
+Byte-identical to the oracle on net065 post-fix.
+
+### The T12 companion -- the pinvokeimpl body gate (3376d877f)
+
+The net065 rows also carried pinvokeimpl thunks whose native-stub bodies the
+port rendered as garbage-decoded IL: the C# DisassembleMethodBlock gates the
+body on the SRMExtensions HasBody extension (Abstract and PinvokeImpl
+attributes plus InternalCall/Native/Unmanaged/Runtime impl attributes carry
+no body); the port's gate was RelativeVirtualAddress-only. RED: the
+embedded-netmodule Tiny.Add Flags patched with the PinvokeImpl bit
+(DisassembleMethodPinvokeImplWithRvaHasNoBody); GREEN post-fix.
+
+### The T13 rider -- the cmod-before-pinned modifier fold (dde1dc19d)
+
+The net065 locals render `uint8& pinned modopt(IsExplicitlyDereferenced)`;
+the decoder's pinned arm returned early discarding the collected cmods
+(the blob: cmods, 0x45 pinned, 0x10 byref, 0x05 u1). The pinned arm now
+folds the modifiers around the pinned element (the C# SRM decode shape).
+net065's 5 modopt hunks gone; the whole-module diff = 0 lines.
+
+### The --il tallies after the slice (this branch's build)
+
+| mode | IDENTICAL | DIFFERENT | PORT-CRASH | PORT-FAIL | BOTH-FAIL |
+|---|---|---|---|---|---|
+| --il (286) | 280 | 0 | 2 (capa07/09, the T4/T5 decoder throws) | 0 | 4 |
+| --cs (286) | 0* | 4 | 45* | 222 | 15 |
+
+(* the --cs rows reflect THIS branch's pre-merge state: the 45 crash rows
+are already fixed on the merged main by ilspy's crash guards; the 222
+metadata-only PORT-FAILs and the 4-scaffold DIFFERENTs are the T3/T10
+main-line shapes.)
+
+The --il miss list after the slice: ONLY the 2 capa07/09 decoder throws
+(T4/T5) -- the C# degrades past them and ilspycmd renders the full module
+(capa07: 14k lines, rc 0), so the fix is the decode-side fidelity, not a
+catch -- a7ab-style catches already landed on main as the stopgap.
+
+### Hygiene flag for the controller
+
+Commit 5a9ccbc2c (the T6 entry-point capture, already merged) carried two
+DBG stderr fprintfs in LocateUsHeap from the probe round; commit
+8ec8026c0 on this branch removes them -- merge it with the next batch.
