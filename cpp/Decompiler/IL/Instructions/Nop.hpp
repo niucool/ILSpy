@@ -29,6 +29,11 @@ namespace ILSpy::Decompiler::IL {
 
 class Nop : public ILInstruction {
 public:
+    // The C# `public string? Comment` (Nop.cs) -- the diagnostic comment the
+    // pipeline attaches (e.g. the `InitializeArray` folds); the
+    // StatementBuilder's VisitNop renders it as a trailing comment. Null by
+    // default (the C# nullable reference).
+    std::string Comment;
     Nop() : ILInstruction(OpCode::Nop) {}
     InstructionFlags DirectFlags() const override { return InstructionFlags::None; }
     StackType ResultType() const override { return StackType::Void; }

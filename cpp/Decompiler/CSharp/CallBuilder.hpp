@@ -356,10 +356,10 @@ public:
     // IParameter[] expectedParameters)` (CallBuilder.cs lines 1343-1355):
     // wraps every argument passed to an `in` parameter that is not already a
     // DirectionExpression in the AsRefReadOnly invocation (WrapInAsRefReadOnly
-    // below). The C# `expressionBuilder.statementBuilder.EmitAsRefReadOnly =
-    // true` bookkeeping is DEFERRED with the StatementBuilder port (the port's
-    // ExpressionBuilder holds the builder as an opaque pointer; the flag-write
-    // lands with the StatementBuilder slice). Implemented out-of-line.
+    // below). The `expressionBuilder.statementBuilder.EmitAsRefReadOnly =
+    // true` write lands with the StatementBuilder slice (the flag tells the
+    // statement stage to emit the helper declaration). Implemented
+    // out-of-line.
     void EnforceExplicitIn(std::vector<TranslatedExpression>& arguments,
                            const std::vector<const TS::IParameter*>& expectedParameters);
 

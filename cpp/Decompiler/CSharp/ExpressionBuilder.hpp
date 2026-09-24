@@ -139,7 +139,7 @@ public:
     // interface, so the FindType consumption routes through
     // TypeSystemExtensions over the compilation); the CancellationToken is the
     // documented deferral.
-    explicit ExpressionBuilder(const StatementBuilder* statementBuilder,
+    explicit ExpressionBuilder(StatementBuilder* statementBuilder,
                                const TS::ICompilation& typeSystem,
                                const TS::ITypeResolveContext& decompilationContext,
                                IL::ILFunction* currentFunction,
@@ -783,7 +783,11 @@ public:
 
     // -- The field surface (the C# `internal readonly` fields) ------------------------
 
-    const StatementBuilder* statementBuilder = nullptr;
+    // The C# `internal readonly ExpressionBuilder exprBuilder` holds the
+    // StatementBuilder as a GC reference the CallBuilder writes the
+    // EmitAsRefReadOnly flag through (the EnforceExplicitIn arm); the port
+    // keeps the non-owning pointer NON-CONST for that write.
+    StatementBuilder* statementBuilder = nullptr;
     const TS::ITypeResolveContext* decompilationContext = nullptr;
     IL::ILFunction* currentFunction = nullptr;
     const TS::ICompilation* compilation = nullptr;

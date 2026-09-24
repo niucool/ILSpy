@@ -19,6 +19,7 @@
 // SOFTWARE.
 
 #include "Decompiler/CSharp/CallBuilder.hpp"
+#include "Decompiler/CSharp/StatementBuilder.hpp"
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/TypeSystem/VarArgInstanceMethod.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UndocumentedExpression.hpp"
@@ -1112,11 +1113,10 @@ TranslatedExpression CallBuilder::WrapInAsRefReadOnly(TranslatedExpression arg) 
 }
 
 // The C# `private void EnforceExplicitIn(TranslatedExpression[] arguments,
-// IParameter[] expectedParameters)` (CallBuilder.cs lines 1343-1355). The C#
-// `expressionBuilder.statementBuilder.EmitAsRefReadOnly = true` bookkeeping is
-// deferred with the StatementBuilder port (the flag tells the statement stage
-// to emit the helper declaration; the call-builder side of the shape is
-// complete here).
+// IParameter[] expectedParameters)` (CallBuilder.cs lines 1343-1355). The
+// `expressionBuilder.statementBuilder.EmitAsRefReadOnly = true` write tells
+// the statement stage to emit the `ILSpyHelper.AsRefReadOnly` helper; the
+// port's StatementBuilder skeleton carries the flag.
 void CallBuilder::EnforceExplicitIn(
     std::vector<TranslatedExpression>& arguments,
     const std::vector<const TS::IParameter*>& expectedParameters) {
@@ -1130,7 +1130,14 @@ void CallBuilder::EnforceExplicitIn(
 
         arguments[i] = WrapInAsRefReadOnly(arguments[i]);
         // The C# `expressionBuilder.statementBuilder.EmitAsRefReadOnly = true`
-        // -- deferred with the StatementBuilder port.
+        // -- the flag the StatementBuilder's using-statement arm consults. The
+        // C# `statementBuilder` is never null on a live CallBuilder (the
+        // StatementBuilder constructs it); the port's standalone tests pass
+        // null, so the write is skipped there (the C# would dereference-null;
+        // the D-gnf null-answer convention).
+        if (expressionBuilder_->statementBuilder != nullptr) {
+            expressionBuilder_->statementBuilder->EmitAsRefReadOnly = true;
+        }
     }
 }
 

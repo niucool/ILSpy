@@ -1,0 +1,150 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of
+// this software and associated documentation files (the "Software"), to deal in the
+// Software without restriction, including without limitation the rights to use, copy,
+// modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
+// and to permit persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies
+// or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+// PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+// HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+// CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+// OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+// Port of ICSharpCode.Decompiler/CSharp/StatementBuilder.cs -- `sealed class
+// StatementBuilder : ILVisitor<TranslatedStatement>`: the statement-level walk of
+// the ILAst to the C# AST, the twin of the ExpressionBuilder (which it constructs
+// and owns, passing `this`). This file is the FIRST SLICE: the class skeleton
+// (ctor + state), `Convert`/`ConvertAsBlock`/`Default`, and the leaf statement
+// visitors (`VisitIsInst`, `VisitStLoc`, `VisitStObj`, `VisitNop`, `VisitThrow`,
+// `VisitRethrow`). Later slices land the branch state machine
+// (`VisitBranch`/`VisitLeave`/the break/continue/label bookkeeping), the
+// structured-control-flow visitors (`VisitIfInstruction`, `VisitSwitchInstruction`
+// + `TranslateSwitchValue`, `VisitTryCatch`/`TryFinally`/`TryFault`,
+// `VisitLockInstruction`, `VisitUsingInstruction`, `VisitBlock`/
+// `VisitBlockContainer`, `VisitPinnedRegion`, `VisitInitblk`), and the
+// `EnforceExplicitIn` flag consumer (`EmitAsRefReadOnly`).
+//
+// KEY PORT CONVENTIONS:
+//  (a) The C# `internal readonly ExpressionBuilder exprBuilder` ports to a
+//      non-owning `unique_ptr` member the ctor allocates, passing `this` (the
+//      C# GC reference convention; the ExpressionBuilder ctor takes the
+//      non-owning pointer). The pointer is NON-CONST because the CallBuilder's
+//      `EnforceExplicitIn` arm writes `EmitAsRefReadOnly` through it (the C#
+//      writes through the GC reference).
+//  (b) The C# ILVisitor double dispatch (`inst.AcceptVisitor(this)`) ports to a
+//      dynamic_cast chain in `Convert` (the port's IL instruction nodes have no
+//      visitor infrastructure; the ExpressionBuilder dispatch precedent).
+//  (c) The C# `internal` members are widened to public for direct TDD (the
+//      internal-widening convention); the per-instruction visitors stay in the
+//      .cpp (the C# `protected internal override` surface).
+//  (d) `currentReturnContainer` is a non-owning `BlockContainer*` over the
+//      function body (the C# downcast of `currentFunction.Body`).
+//  (e) The CancellationToken is a no-op in the port (the DecompileRun
+//      convention).
+//  (f) `currentResultType` is an owning `ITypePtr` (the C# `IType` GC
+//      reference; `IsAsync ? AsyncReturnType : ReturnType`).
+
+#pragma once
+
+#include "Decompiler/CSharp/TranslatedStatement.hpp"
+#include "Decompiler/CSharp/TranslatedExpression.hpp"
+#include "Decompiler/DecompilerSettings.hpp"
+#include "Decompiler/IL/ILInstruction.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
+
+#include <memory>
+#include <vector>
+
+namespace ILSpy::Decompiler {
+
+class DecompileRun;
+class ExpressionBuilder;
+
+namespace IL {
+class BlockContainer;
+class ILFunction;
+class IsInst;
+class Nop;
+class Rethrow;
+class StLoc;
+class StObj;
+class Throw;
+} // namespace IL
+
+} // namespace ILSpy::Decompiler
+
+namespace ILSpy::Decompiler::TypeSystem {
+class ICompilation;
+class ITypeResolveContext;
+} // namespace ILSpy::Decompiler::TypeSystem
+
+namespace ILSpy::Decompiler::CSharp {
+
+class ExpressionBuilder;
+
+// The TS alias (the CallBuilder TS:: convention).
+namespace TS = ::ILSpy::Decompiler::TypeSystem;
+
+// Port of the C# `sealed class StatementBuilder : ILVisitor<TranslatedStatement>`
+// (see the header comment). The C# ctor
+// `StatementBuilder(IDecompilerTypeSystem typeSystem, ITypeResolveContext
+// decompilationContext, ILFunction currentFunction, DecompilerSettings settings,
+// DecompileRun decompileRun, CancellationToken cancellationToken)` ports to the
+// 5-parameter form (the cancellation token dropped, convention (e)).
+class StatementBuilder {
+public:
+    // The C# `internal readonly ExpressionBuilder exprBuilder` (convention (a)).
+    std::unique_ptr<ExpressionBuilder> exprBuilder;
+    // The C# `internal bool EmitAsRefReadOnly` -- the flag the CallBuilder's
+    // `EnforceExplicitIn` arm sets for every `in T` argument it wraps; the
+    // `VisitUsingInstruction` arm consults it.
+    bool EmitAsRefReadOnly = false;
+
+    // The C# ctor fields (conventions (d)/(f)); the currentFunction,
+    // settings, and decompileRun handles ride the ExpressionBuilder's own
+    // slots (the C# stores them on both builders; the port forwards).
+    IL::BlockContainer* currentReturnContainer = nullptr;
+    TS::ITypePtr currentResultType;
+    bool currentIsIterator = false;
+
+    StatementBuilder(const ::ILSpy::Decompiler::TypeSystem::ICompilation& typeSystem,
+                     const ::ILSpy::Decompiler::TypeSystem::ITypeResolveContext& decompilationContext,
+                     IL::ILFunction* currentFunction,
+                     const DecompilerSettings* settings,
+                     const DecompileRun* decompileRun);
+
+    // The C# `public Statement Convert(ILInstruction inst)`: the ILVisitor
+    // dispatch (convention (b)).
+    TranslatedStatement Convert(IL::ILInstruction* inst);
+
+    // The C# `public BlockStatement ConvertAsBlock(ILInstruction inst)`:
+    // `Convert(inst).WithILInstruction(inst)`, then the `as BlockStatement ??
+    // new BlockStatement { stmt }` wrap.
+    TranslatedStatement ConvertAsBlock(IL::ILInstruction* inst);
+
+private:
+    // The C# `protected internal override` leaf visitors this slice ports; the
+    // private members are the C# `protected internal` surface (the port keeps
+    // them out-of-line, declared here for the dynamic_cast dispatch).
+    TranslatedStatement VisitIsInst(IL::IsInst* inst);
+    TranslatedStatement VisitStLoc(IL::StLoc* inst);
+    TranslatedStatement VisitStObj(IL::StObj* inst);
+    TranslatedStatement VisitNop(IL::Nop* inst);
+    TranslatedStatement VisitThrow(IL::Throw* inst);
+    TranslatedStatement VisitRethrow(IL::Rethrow* inst);
+
+private:
+    // The C# `protected override TranslatedStatement Default(ILInstruction
+    // inst)`: `new ExpressionStatement(exprBuilder.Translate(inst))` wrapped
+    // with the IL instruction.
+    TranslatedStatement Default(IL::ILInstruction* inst);
+};
+
+} // namespace ILSpy::Decompiler::CSharp

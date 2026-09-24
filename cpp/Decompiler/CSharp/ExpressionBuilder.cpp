@@ -383,7 +383,7 @@ std::shared_ptr<Sem::ResolveResult> WithSharedResolveResult(const Expression& ex
 // ---------------------------------------------------------------------------
 // ctor
 
-ExpressionBuilder::ExpressionBuilder(const StatementBuilder* statementBuilderValue,
+ExpressionBuilder::ExpressionBuilder(StatementBuilder* statementBuilderValue,
                                      const TS::ICompilation& typeSystem,
                                      const TS::ITypeResolveContext& decompilationContext,
                                      IL::ILFunction* currentFunctionValue,

@@ -38,6 +38,19 @@ public:
     std::unique_ptr<BlockContainer> Body;
     std::vector<ILVariablePtr> Variables;
 
+    // The C# `public readonly IType ReturnType` (ILFunction.cs) -- the declared
+    // return type; set by the IL reader from the method signature (the port's
+    // consumer sets it at visit time when resolving, or leaves it null for
+    // void). Null means void (the C# `void` methods carry null too).
+    TypeSystem::ITypePtr ReturnType;
+    // The C# `public bool IsIterator` (ILFunction.cs) -- set by the
+    // YieldReturnDecompiler; makes `return;` render as `yield break;`.
+    bool IsIterator = false;
+    // The C# `public IType? AsyncReturnType` (ILFunction.cs) -- the Task{T}
+    // element type for async methods (the C# `IsAsync => AsyncReturnType !=
+    // null` derives from it). Null for non-async functions.
+    TypeSystem::ITypePtr AsyncReturnType;
+
     // The C# `public string Name` (a get/set field the local-function decoders
     // assign): the source-side name of this function. Empty for functions whose
     // producer did not set one (the ExpressionBuilder's HidesVariableWithName
