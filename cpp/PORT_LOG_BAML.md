@@ -729,3 +729,77 @@ C# backend's module-level emission and the one crash.
 Rerun: `bash cpp/tests/tools/textmatch_baseline.sh /tmp/textmatch`
 (the ranking, per-sample captures, diff.txt files, and summary.tsv all
 land under the output directory).
+
+---
+
+# The post-merge re-run (the OOB crash is dead; the matrix updates)
+
+## 1. The sync
+
+`git merge cpp` fast-forwarded port-baml onto the integrated tip
+(58 mainline commits, including `40f94679e` "Fix the remaining corpus
+crash sites the harness sweep exposed" -- the fix for the pinned
+`TransformCollectionAndObjectInitializers.cpp:771` OOB -- plus the T6
+`--il` truncation fix and the `.entrypoint` fix from the differential
+report). The pipeline's 52 LoadedAssembly tests pass unchanged; the
+build is clean.
+
+## 2. The updated matrix (whole-file `--csharp`, 69 samples)
+
+| Category | Before the merge | After the merge |
+|---|---:|---:|
+| IDENTICAL | 0 | 0 |
+| CONVENTION-DIFF (the seed surface) | 3 | **33** |
+| REAL-MISMATCH | 0 | 0 |
+| PORT-CRASH | 44 | **14** |
+| PORT-FAIL(1) -- the metadata-only gap | 20 | 20 (**still open; main-line fix required**) |
+| ORACLE-THROWS (native PEs, both reject) | 3 | 3 |
+
+Post-fix per-sample: every body-bearing capa sample that previously
+aborted now decompiles to the seed surface (33 text-producing samples,
+the largest 1,891 lines). The 14 remaining crashes re-pinned by ASan
+to a NEW unguarded site:
+`IndexRangeTransform::TransformIndexing(IL::IndexRangeState&)` -- the
+same `ILInstruction`-vector OOB family, a different transform (the
+previous fix also hardened IndexRange's `pos = -1` sentinel, but this
+path overflows on the `2fd45662...cleaned-cleaned.exe_` corpus). The
+minimal repro: `ilspy_cli --csharp 2fd45662...cleaned-cleaned.exe_`.
+The IL-mode strictness aborts from the differential run (capa7's
+TypeDef/TypeRef/TypeSpec throw, capa9's trailing-bytes) now exit
+cleanly with rc 70 and their messages instead of SIGABRT.
+
+Also verified on the merged tree: the differential report's IL fixes
+landed -- the `.entrypoint` now emits for capa1, the InlineArray
+`PROBE:` litter is removed. Note the mainline's own diagnostics
+(`DBG LocateUsHeap enter` / `DBG cor20 captured` in
+`MethodBodyReader.hpp:591-614`) are committed stderr litter of the
+PROBE kind -- flagged for cleanup.
+
+## 3. The convention classes the 33 producing samples expose
+
+The emitted bodies are the oracle's code modulo these recurring
+token-level conventions (each a candidate for the Phase 5 Emitter):
+
+* fully-qualified type names (`new System.Text.StringBuilder(...)` vs
+  `new StringBuilder(...)`; `System.String.IsNullOrEmpty` vs
+  `string.IsNullOrEmpty`);
+* a spurious `ref` on field stores (`ref cREDUI_INFO.pszMessageText =
+  message;`);
+* the local-naming scheme (`stringBuilder_1`, `cREDUI_INFO` -- the
+  SNAKE-cased splitting of `CREDUI_INFO` vs the C# `credinfo`);
+* enum constants rendered as bare ints (`CREDUI_FLAGS cREDUI_FLAGS =
+  2;` vs the cast form);
+* indentation: 4 spaces vs the oracle's tabs;
+* the missing declarations half of each file: usings, namespace, type
+  declarations, visibility modifiers, assembly attributes.
+
+## 4. The standing blockers (unchanged in substance)
+
+1. **The metadata-only gap** -- still the corpus-wide blocker: the
+   whole-file, `-t`, and declarations-only paths all fail with "no
+   method bodies found (for type)" on every reference assembly. Until
+   the pipeline emits declarations for body-less modules, exit
+   criterion 1 scores zero on the corpus.
+2. **The residual IL-transform OOB** -- now one site
+   (`IndexRangeTransform::TransformIndexing`), 14/46 capa samples
+   still abort; the remaining 33 produce text.
