@@ -209,11 +209,16 @@ public:
     std::string Namespace() const override;
 
     // The C# `bool IMember.Equals(IMember obj, TypeVisitor typeNormalization)
-    // => Equals(obj)` -- the DEFAULT reference equality (convention (e)).
+    // => Equals(obj)` -- the DEFAULT reference equality (convention (e)). The
+    // C# reference identity is path-independent; the C++ subobject pointers
+    // are not (the FakeMethod/FakeEvent/... diamonds give every
+    // `IMember`-converting path a different address), so the comparison runs
+    // on the most-derived object address (the `dynamic_cast<void*>` identity)
+    // instead of the incoming subobject pointer.
     bool Equals(const IMember* obj, const TypeVisitor* typeNormalization)
         const override {
         (void)typeNormalization;
-        return obj == this;
+        return dynamic_cast<const void*>(obj) == dynamic_cast<const void*>(this);
     }
 
     // The C# `public override int GetHashCode()` (convention (e)): the

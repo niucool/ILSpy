@@ -19,6 +19,7 @@
 // SOFTWARE.
 
 #include "Decompiler/CSharp/CallBuilder.hpp"
+#include "Decompiler/TypeSystem/Implementation/SyntheticRangeIndexAccessor.hpp"
 
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/ExpressionBuilder.hpp"
@@ -2121,4 +2122,102 @@ bool CallBuilder::IsUnambiguousMethodReference(
     return dynamic_cast<const Resolver::MethodGroupResolveResult*>(result.get())
         != nullptr;
 }
+
+// ---------------------------------------------------------------------------
+// The range-construction render (CallBuilder.cs lines 2245-2310)
+// ---------------------------------------------------------------------------
+
+// The C# `private bool HandleRangeConstruction(out ExpressionWithResolveResult
+// result, OpCode callOpCode, IMethod method, TranslatedExpression target,
+// ArgumentList argumentList)` (CallBuilder.cs lines 2245-2310).
+bool CallBuilder::HandleRangeConstruction(
+    ExpressionWithResolveResult& result, IL::OpCode callOpCode,
+    const TS::IMethod& method, const TranslatedExpression& target,
+    ArgumentList& argumentList)
+{
+    result = ExpressionWithResolveResult();
+    if (argumentList.ArgumentNames.has_value()) {
+        return false; // range syntax doesn't support named arguments
+    }
+    const TS::IType& declaringType = *method.DeclaringType();
+    if (TS::IsKnownType(declaringType, TS::KnownTypeCode::Range)) {
+        if (callOpCode == IL::OpCode::NewObj && argumentList.Length() == 2) {
+            result = WithRR(
+                *new Syntax::BinaryOperatorExpression(argumentList.Arguments[0].Expression(),
+                                                      Syntax::BinaryOperatorType::Range,
+                                                      argumentList.Arguments[1].Expression()),
+                std::make_shared<Sem::MemberResolveResult>(
+                    std::shared_ptr<Sem::ResolveResult>{}, &method));
+            return true;
+        }
+        if (callOpCode == IL::OpCode::Call && method.Name() == "get_All"
+            && argumentList.Length() == 0) {
+            result = WithRR(
+                *new Syntax::BinaryOperatorExpression(nullptr,
+                                                      Syntax::BinaryOperatorType::Range,
+                                                      nullptr),
+                std::make_shared<Sem::MemberResolveResult>(
+                    std::shared_ptr<Sem::ResolveResult>{},
+                    method.AccessorOwner() != nullptr ? method.AccessorOwner()
+                                                      : &method));
+            return true;
+        }
+        if (callOpCode == IL::OpCode::Call && method.Name() == "StartAt"
+            && argumentList.Length() == 1) {
+            result = WithRR(
+                *new Syntax::BinaryOperatorExpression(
+                    argumentList.Arguments[0].Expression(),
+                    Syntax::BinaryOperatorType::Range, nullptr),
+                std::make_shared<Sem::MemberResolveResult>(
+                    std::shared_ptr<Sem::ResolveResult>{}, &method));
+            return true;
+        }
+        if (callOpCode == IL::OpCode::Call && method.Name() == "EndAt"
+            && argumentList.Length() == 1) {
+            result = WithRR(
+                *new Syntax::BinaryOperatorExpression(
+                    nullptr, Syntax::BinaryOperatorType::Range,
+                    argumentList.Arguments[0].Expression()),
+                std::make_shared<Sem::MemberResolveResult>(
+                    std::shared_ptr<Sem::ResolveResult>{}, &method));
+            return true;
+        }
+    } else if (callOpCode == IL::OpCode::NewObj
+               && TS::IsKnownType(declaringType, TS::KnownTypeCode::Index)) {
+        if (argumentList.Length() != 2)
+            return false;
+        auto* pe = dynamic_cast<Syntax::PrimitiveExpression*>(
+            argumentList.Arguments[1].Expression());
+        if (pe == nullptr
+            || !std::holds_alternative<bool>(pe->Value())
+            || !std::get<bool>(pe->Value()))
+            return false;
+        result = WithRR(
+            *new Syntax::UnaryOperatorExpression(
+                argumentList.Arguments[0].Expression(),
+                Syntax::UnaryOperatorType::IndexFromEnd),
+            std::make_shared<Sem::MemberResolveResult>(
+                std::shared_ptr<Sem::ResolveResult>{}, &method));
+        return true;
+    } else if (const auto* rangeIndexAccessor =
+                   dynamic_cast<const TS::Implementation::SyntheticRangeIndexAccessor*>(
+                       &method)) {
+        if (rangeIndexAccessor->IsSlicing()) {
+            // For slicing the method is called Slice()/Substring(), but we still
+            // need to output indexer notation. So special-case range-based
+            // slicing here.
+            auto* indexer = new Syntax::IndexerExpression(target.Expression());
+            for (const TranslatedExpression& a : argumentList.Arguments)
+                indexer->Arguments().Add(a.Expression());
+            result = WithRR(*indexer,
+                            std::make_shared<Sem::MemberResolveResult>(
+                                std::shared_ptr<Sem::ResolveResult>(
+                                    const_cast<Sem::ResolveResult*>(target.ResolveResult())),
+                                &method));
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace ILSpy::Decompiler::CSharp

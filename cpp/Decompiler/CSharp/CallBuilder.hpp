@@ -579,6 +579,22 @@ public:
     // local-function surface (its only caller, the
     // DisambiguateDelegateReference local-function arm, is likewise deferred).
 
+    // The C# `private bool HandleRangeConstruction(out
+    // ExpressionWithResolveResult result, OpCode callOpCode, IMethod method,
+    // TranslatedExpression target, ArgumentList argumentList)` (CallBuilder.cs
+    // lines 2245-2310): the C# 8 range/index render -- the `Range` constructor
+    // and `get_All`/`StartAt`/`EndAt` arms (the `..`/`x..`/`..y` operators),
+    // the `Index` from-end constructor (`^x`), and the
+    // `SyntheticRangeIndexAccessor` slicing arm (the `x[a..b]` indexer
+    // notation over a compiler-generated range accessor). The named-argument
+    // gate mirrors the C# (range syntax does not support named arguments).
+    // Public for the tests (the port's no-visibility convention). Implemented
+    // out-of-line.
+    bool HandleRangeConstruction(ExpressionWithResolveResult& result,
+                                 IL::OpCode callOpCode, const TS::IMethod& method,
+                                 const TranslatedExpression& target,
+                                 ArgumentList& argumentList);
+
 private:
     // The C# `private bool IsPrimitiveValueThatShouldBeNamedArgument(
     // TranslatedExpression arg, IMethod method, IParameter p)` (CallBuilder.cs
