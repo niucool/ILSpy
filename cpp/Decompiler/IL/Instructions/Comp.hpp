@@ -24,6 +24,7 @@
 #pragma once
 
 #include "Decompiler/IL/Instructions/BinaryInstruction.hpp"
+#include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/StackType.hpp"
 #include "Decompiler/TypeSystem/Sign.hpp"
 
@@ -133,6 +134,23 @@ public:
         : BinaryInstruction(OpCode::Comp, std::move(left), std::move(right)),
           Kind(kind), Sign(sign), Unsigned(sign == TypeSystem::Sign::Unsigned),
           LiftingKind(lifting), InputType(inputType) {}
+
+    // Port of Comp.LogicNot(ILInstruction arg) (Comp.cs line 222): the
+    // `!expr` sugar shape -- comp(arg == ldc.i4 0). The three-argument form
+    // (a plain None-lifted comparison) and the isLifted overload (the
+    // ThreeValuedLogic lifting kind for a lifted boolean negation) mirror
+    // the C# static factories.
+    static std::unique_ptr<Comp> LogicNot(std::unique_ptr<ILInstruction> arg) {
+        return LogicNot(std::move(arg), false);
+    }
+    static std::unique_ptr<Comp> LogicNot(std::unique_ptr<ILInstruction> arg,
+                                          bool isLifted) {
+        return std::make_unique<Comp>(
+            std::move(arg), std::make_unique<LdcI4>(0), ComparisonKind::Equality,
+            isLifted ? ComparisonLiftingKind::ThreeValuedLogic
+                     : ComparisonLiftingKind::None,
+            StackType::I4);
+    }
 
     // Port of Comp.IsLifted: a non-None LiftingKind marks a lifted comparison.
     bool IsLifted() const { return LiftingKind != ComparisonLiftingKind::None; }

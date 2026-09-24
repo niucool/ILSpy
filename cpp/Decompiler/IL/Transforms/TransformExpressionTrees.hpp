@@ -37,6 +37,8 @@
 
 #include "Decompiler/IL/Transforms/StatementTransform.hpp"
 
+#include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
+
 #include <functional>
 #include <map>
 #include <memory>
@@ -209,6 +211,18 @@ public:
     // `is T` arm -- `comp(isinst(T, operand) != ldnull)`, result Boolean.
     ConvertResult ConvertTypeAs(Call* invocation);
     ConvertResult ConvertTypeIs(Call* invocation);
+
+    // The C# `(Func<ILInstruction>, IType) ConvertCast(CallInstruction,
+    // bool isChecked)` (the "Convert"/"ConvertChecked" names),
+    // ConvertNotOperator ("Not"/"OnesComplement"),
+    // ConvertBinaryNumericOperator (the primitive binary names),
+    // ConvertArrayLength, and ConvertCondition.
+    ConvertResult ConvertCast(Call* invocation, bool isChecked);
+    ConvertResult ConvertNotOperator(Call* invocation);
+    ConvertResult ConvertBinaryNumericOperator(
+        Call* invocation, BinaryNumericOperator op, bool isChecked);
+    ConvertResult ConvertArrayLength(Call* invocation);
+    ConvertResult ConvertCondition(Call* invocation);
 
     // The C# `(Func<ILInstruction>, IType) ConvertField(CallInstruction,
     // IType typeHint)` and its MatchGetFieldFromHandle helper (the
