@@ -29,6 +29,7 @@ add_executable(ilspy_tests
     Decompiler/Metadata/MetadataAttributes_Test.cpp
     Decompiler/Metadata/MethodBody_Test.cpp
     Decompiler/Metadata/MethodSemanticsLookup_Test.cpp
+    Decompiler/Metadata/CodeMappingInfo_Test.cpp
     Decompiler/Metadata/ILDisassembler_Test.cpp
     Decompiler/Metadata/EntitySurface_Test.cpp
     Decompiler/Metadata/CustomAttributes_Test.cpp
