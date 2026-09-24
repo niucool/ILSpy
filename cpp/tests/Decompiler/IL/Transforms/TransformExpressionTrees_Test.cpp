@@ -191,6 +191,235 @@ TEST(TransformExpressionTreesTest, MatchGetTypeFromHandleRejectsWrongMethod)
     (void)stub;
 }
 
+// ---- The Run-scan matchers (C# MatchParameterVariableAssignment /
+// MightBeExpressionTree / IsEmptyParameterList) ----------------------------
+
+// A configurable IMethod stub: the declaring type full name (namespace +
+// type name) and the method name are ctor parameters.
+class NamedMethodStub : public TS::IMethod {
+public:
+    NamedMethodStub(std::string ns, std::string typeName, std::string methodName)
+        : ns_(std::move(ns)), typeName_(std::move(typeName)),
+          name_(std::move(methodName)) {
+        declaringType_ = std::make_shared<TS::SimpleType>(
+            TS::TopLevelTypeName(ns_, typeName_));
+        voidType_ = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Void);
+    }
+
+    TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Method; }
+    std::string Name() const override { return name_; }
+    std::string FullName() const override { return ns_ + "." + typeName_ + "." + name_; }
+    std::string ReflectionName() const override { return name_; }
+    std::string Namespace() const override { return ns_; }
+    const TS::ICompilation& Compilation() const override {
+        throw std::logic_error("NamedMethodStub::Compilation");
+    }
+    std::vector<const TS::IParameter*> Parameters() const override { return {}; }
+    const TS::IMember* MemberDefinition() const override { return this; }
+    const TS::IType& ReturnType() const override { return *voidType_; }
+    std::vector<const TS::IMember*>
+    ExplicitlyImplementedInterfaceMembers() const override {
+        return {};
+    }
+    bool IsExplicitInterfaceImplementation() const override { return false; }
+    bool IsVirtual() const override { return false; }
+    bool IsOverride() const override { return false; }
+    bool IsOverridable() const override { return false; }
+    const TS::TypeParameterSubstitution* Substitution() const override {
+        return &TS::TypeParameterSubstitution::Identity();
+    }
+    const TS::IMethod* Specialize(
+        const TS::TypeParameterSubstitution* substitution) const override {
+        (void)substitution;
+        return this;
+    }
+    bool Equals(const TS::IMember* obj,
+                const TS::TypeVisitor* typeNormalization) const override {
+        (void)typeNormalization;
+        return obj == this;
+    }
+    std::vector<const TS::IAttribute*> GetAttributes() const override { return {}; }
+    bool HasAttribute(TS::KnownAttribute) const override { return false; }
+    const TS::IAttribute* GetAttribute(TS::KnownAttribute) const override {
+        return nullptr;
+    }
+    TS::Accessibility Accessibility() const override {
+        return TS::Accessibility::Public;
+    }
+    bool IsStatic() const override { return true; }
+    bool IsAbstract() const override { return false; }
+    bool IsSealed() const override { return false; }
+    std::uint32_t MetadataToken() const override { return 0; }
+    const TS::ITypeDefinition* DeclaringTypeDefinition() const override {
+        return nullptr;
+    }
+    TS::ITypePtr DeclaringType() const override { return declaringType_; }
+    const TS::IModule* ParentModule() const override { return nullptr; }
+    std::vector<const TS::IAttribute*> GetReturnTypeAttributes() const override {
+        return {};
+    }
+    bool ReturnTypeIsRefReadOnly() const override { return false; }
+    bool ThisIsRefReadOnly() const override { return false; }
+    bool IsInitOnly() const override { return false; }
+    std::vector<const TS::ITypeParameter*> TypeParameters() const override {
+        return {};
+    }
+    std::vector<TS::ITypePtr> TypeArguments() const override { return {}; }
+    bool IsExtensionMethod() const override { return false; }
+    bool IsLocalFunction() const override { return false; }
+    bool IsConstructor() const override { return false; }
+    bool IsDestructor() const override { return false; }
+    bool IsOperator() const override { return false; }
+    bool HasBody() const override { return true; }
+    bool IsAccessor() const override { return false; }
+    const TS::IMember* AccessorOwner() const override { return nullptr; }
+    TS::MethodSemanticsAttributes AccessorKind() const override {
+        return TS::MethodSemanticsAttributes::None;
+    }
+    const TS::IMethod* ReducedFrom() const override { return nullptr; }
+
+    std::string ns_;
+    std::string typeName_;
+    std::string name_;
+    TS::ITypePtr declaringType_;
+    TS::ITypePtr voidType_;
+};
+
+// The System.Type::GetTypeFromHandle overload of MatchParameterVariableAssignment
+// used inside the parameter match (a `call GetTypeFromHandle(ldtoken T)`).
+// Reuses the hardcoded GetTypeFromHandleStub above.
+
+// A non-parameter instruction (a plain string store) for the "break" arm.
+TEST(TransformExpressionTreesTest, MatchParameterVariableAssignmentAcceptsTheFullShape)
+{
+    auto parameterType = std::make_shared<TS::SimpleType>(TS::TopLevelTypeName(
+        std::string("System.Linq.Expressions"),
+        std::string("ParameterExpression")));
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto v = MakeLocal("param", parameterType);
+    v->StoreCount = 1;  // IsSingleDefinition
+
+    auto parameterCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Parameter"));
+    // The shape the compiler emits: Expression.Parameter(
+    // Type::GetTypeFromHandle(ldtoken T), "name") -- the token sits inside
+    // the inner GetTypeFromHandle call.
+    auto innerGetTypeCall = std::make_unique<IL::Call>(
+        std::make_shared<GetTypeFromHandleStub>());
+    auto typeToken = std::make_unique<IL::LdTypeToken>(
+        intType, std::string("System.Int32"));
+    TS::IType* tokenTypePtr = typeToken->Type.get();
+    innerGetTypeCall->Arguments.push_back(std::move(typeToken));
+    parameterCall->Arguments.push_back(std::move(innerGetTypeCall));
+    parameterCall->Arguments.push_back(std::make_unique<IL::LdStr>("p"));
+
+    TS::ITypePtr matchedType;
+    std::string matchedName;
+    ILVariablePtr matchedVar;
+    bool ok = IL::TransformExpressionTrees::MatchParameterVariableAssignment(
+        std::make_unique<IL::StLoc>(v, std::move(parameterCall)).get(),
+        matchedVar, matchedType, matchedName);
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(matchedVar.get(), v.get());
+    EXPECT_EQ(matchedType.get(), tokenTypePtr);
+    EXPECT_EQ(matchedName, "p");
+}
+
+// A variable written more than once is rejected (the C# IsSingleDefinition gate).
+TEST(TransformExpressionTreesTest, MatchParameterVariableAssignmentRejectsMultiStore)
+{
+    auto parameterType = std::make_shared<TS::SimpleType>(TS::TopLevelTypeName(
+        std::string("System.Linq.Expressions"),
+        std::string("ParameterExpression")));
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto v = MakeLocal("param", parameterType);
+    v->StoreCount = 2;  // NOT IsSingleDefinition
+
+    auto parameterCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Parameter"));
+    auto innerGetTypeCall = std::make_unique<IL::Call>(
+        std::make_shared<GetTypeFromHandleStub>());
+    innerGetTypeCall->Arguments.push_back(std::make_unique<IL::LdTypeToken>(
+        intType, std::string("System.Int32")));
+    parameterCall->Arguments.push_back(std::move(innerGetTypeCall));
+    parameterCall->Arguments.push_back(std::make_unique<IL::LdStr>("p"));
+
+    TS::ITypePtr matchedType;
+    std::string matchedName;
+    ILVariablePtr matchedVar;
+    bool ok = IL::TransformExpressionTrees::MatchParameterVariableAssignment(
+        std::make_unique<IL::StLoc>(v, std::move(parameterCall)).get(),
+        matchedVar, matchedType, matchedName);
+    EXPECT_FALSE(ok);
+}
+
+// The variable's type must be System.Linq.Expressions.ParameterExpression.
+TEST(TransformExpressionTreesTest,
+     MatchParameterVariableAssignmentRejectsWrongVariableType)
+{
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto v = MakeLocal("param", intType);
+    v->StoreCount = 1;
+
+    auto parameterCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Parameter"));
+    auto innerGetTypeCall = std::make_unique<IL::Call>(
+        std::make_shared<GetTypeFromHandleStub>());
+    innerGetTypeCall->Arguments.push_back(std::make_unique<IL::LdTypeToken>(
+        intType, std::string("System.Int32")));
+    parameterCall->Arguments.push_back(std::move(innerGetTypeCall));
+    parameterCall->Arguments.push_back(std::make_unique<IL::LdStr>("p"));
+
+    TS::ITypePtr matchedType;
+    std::string matchedName;
+    ILVariablePtr matchedVar;
+    bool ok = IL::TransformExpressionTrees::MatchParameterVariableAssignment(
+        std::make_unique<IL::StLoc>(v, std::move(parameterCall)).get(),
+        matchedVar, matchedType, matchedName);
+    EXPECT_FALSE(ok);
+}
+
+// `MightBeExpressionTree`: an `Expression.Lambda(body, args)` call with an
+// empty parameter list.
+TEST(TransformExpressionTreesTest, MightBeExpressionTreeAcceptsLambdaWithEmptyList)
+{
+    auto body = std::make_unique<IL::LdStr>("body");
+    auto lambda = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Lambda"));
+    lambda->Arguments.push_back(std::move(body));
+    // Empty parameter list: `System.Array::Empty<ParameterExpression>()`.
+    lambda->Arguments.push_back(std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>("System", "Array", "Empty")));
+
+    EXPECT_TRUE(IL::TransformExpressionTrees::MightBeExpressionTree(
+        lambda.get(), lambda.get()));
+}
+
+// A non-Lambda call is rejected.
+TEST(TransformExpressionTreesTest, MightBeExpressionTreeRejectsOtherCalls)
+{
+    auto lambda = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Parameter"));
+    EXPECT_FALSE(IL::TransformExpressionTrees::MightBeExpressionTree(
+        lambda.get(), lambda.get()));
+}
+
+// A Lambda call whose argument count differs from 2 is rejected.
+TEST(TransformExpressionTreesTest, MightBeExpressionTreeRejectsWrongArity)
+{
+    auto lambda = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Lambda"));
+    lambda->Arguments.push_back(std::make_unique<IL::LdStr>("only body"));
+    EXPECT_FALSE(IL::TransformExpressionTrees::MightBeExpressionTree(
+        lambda.get(), lambda.get()));
+}
+
 // The settings gate: the transform's Run is gated on
 // `context.Settings.ExpressionTrees` (default false), so a default-context run
 // leaves the block untouched.

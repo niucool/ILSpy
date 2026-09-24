@@ -36,9 +36,14 @@
 #pragma once
 
 #include "Decompiler/IL/Transforms/StatementTransform.hpp"
+
+#include <memory>
+#include <string>
 #include "Decompiler/TypeSystem/IType.hpp"
 
 namespace ILSpy::Decompiler::IL {
+
+class ILVariable;
 
 class TransformExpressionTrees final : public IStatementTransform {
 public:
@@ -48,6 +53,24 @@ public:
                                        ::ILSpy::Decompiler::TypeSystem::ITypePtr& type);
 
     void Run(Block& block, int pos, StatementTransformContext& context) override;
+
+    // The C# `bool MatchParameterVariableAssignment(ILInstruction expr,
+    // out ILVariable, out IType, out string)`: match the
+    // `stloc(v, Expression.Parameter(GetTypeFromHandle(ldtoken T), "name"))`
+    // assignment shape the compiler emits for each lambda parameter.
+    static bool MatchParameterVariableAssignment(
+        ILInstruction* expr, std::shared_ptr<ILVariable>& parameterReferenceVar,
+        ::ILSpy::Decompiler::TypeSystem::ITypePtr& type, std::string& name);
+
+    // The C# `static bool MightBeExpressionTree(ILInstruction inst,
+    // ILInstruction stmt)`: a candidate `Expression.Lambda(body, args)` call
+    // (2 arguments; the second an empty parameter-list expression).
+    static bool MightBeExpressionTree(ILInstruction* inst, ILInstruction* stmt);
+
+    // The C# `static bool IsEmptyParameterList(ILInstruction)`: the
+    // `Array.Empty<T>()` / `newarr ParameterExpression` /
+    // `newarr Expression` forms.
+    static bool IsEmptyParameterList(ILInstruction* inst);
 };
 
 } // namespace ILSpy::Decompiler::IL
