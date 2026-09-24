@@ -46,14 +46,14 @@
 //  * The C# InvalidDataException arms of the bundle decode (the
 //    corrupted-entry size mismatch) port as std::out_of_range with the
 //    exact .NET message (the same convention).
-//  * NOT PORTED (documented deferrals, all of the LoadedAssembly
-//    pipeline): the `internal LoadedAssembly LoadedAssembly` property,
-//    PackageFolder's IAssemblyResolver surface (Resolve / ResolveModule /
-//    ResolveFileName / the async pair) and the assemblies cache -- they
-//    build LoadedAssembly instances, which belongs to the GUI tree model
-//    (out of the Phase 8 core subset; PORT_PLAN.md's ILSpyX sub-scoping
-//    drops it). The folder MODEL (Name, Parent, Folders, Entries) is the
-//    part the loaders and the package tree need.
+//  * The `internal LoadedAssembly? LoadedAssembly` property ports as the
+//    `SetLoadedAssembly` / `GetLoadedAssembly` pair (set-once by the
+//    LoadedAssembly that produced the package, immediately after the
+//    load; non-owning -- the C# GC back-reference). The
+//    `PackageFolder` IAssemblyResolver half (Resolve / ResolveModule /
+//    ResolveFileName and the assemblies cache) arrives with the
+//    resolver slice; the folder MODEL (Name, Parent, Folders, Entries)
+//    is the part the loaders and the package tree need.
 //  * ILSpyXEventSource.Log calls do not port (ETW instrumentation; see
 //    the Instrumentation deferral in PORT_LOG_BAML.md).
 
@@ -69,6 +69,10 @@
 #include <vector>
 
 namespace ILSpy::ILSpyX {
+
+// The C# `LoadedAssembly` (LoadedAssembly.hpp) -- forward-declared: the
+// package carries the back-reference to the wrapper that loaded it.
+class LoadedAssembly;
 
 // The C# `public enum ResourceType` (Resource.cs): the port reuses the
 // MetadataFile kind enum, which carries the same members (Linked,
@@ -161,6 +165,19 @@ private:
 // The C# `public class LoadedPackage`.
 class LoadedPackage {
 public:
+    // The C# `internal LoadedAssembly? LoadedAssembly { get; set; }`:
+    // set once, immediately after the load, by the LoadedAssembly that
+    // produced this package. Non-owning: the C# GC back-reference -- the
+    // wrapper owning the load result outlives the package in every
+    // ported flow (the package is reachable only through that result).
+    void SetLoadedAssembly(const LoadedAssembly& loadedAssembly)
+    {
+        loadedAssembly_ = &loadedAssembly;
+    }
+    const LoadedAssembly* GetLoadedAssembly() const
+    {
+        return loadedAssembly_;
+    }
     // The C# `public enum PackageKind`.
     enum class PackageKind {
         Zip,
@@ -207,6 +224,7 @@ private:
     std::vector<std::shared_ptr<PackageEntry>> entries_;
     std::shared_ptr<PackageFolder> rootFolder_;
     std::optional<Decompiler::SingleFileBundle::Header> bundleHeader_;
+    const LoadedAssembly* loadedAssembly_ = nullptr;
 };
 
 }  // namespace ILSpy::ILSpyX

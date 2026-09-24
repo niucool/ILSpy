@@ -70,6 +70,8 @@ add_executable(ilspy_tests
     ILSpyX/Util/GuessFileType_Test.cpp
     ILSpyX/Extensions/CollectionExtensions_Test.cpp
     ILSpyX/LoadedPackage_Test.cpp
+    ILSpyX/LoadedAssembly_Test.cpp
+    ILSpyX/AssemblyList_Test.cpp
     ILSpyX/FileLoaders/FileLoaders_Test.cpp
     ILSpyX/Abstractions/ILanguage_Test.cpp
     ILSpyX/Settings/Settings_Test.cpp
