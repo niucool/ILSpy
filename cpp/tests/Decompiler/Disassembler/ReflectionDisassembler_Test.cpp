@@ -47,6 +47,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -3834,5 +3835,156 @@ TEST(ReflectionDisassemblerTest, WriteModuleContentsEmptyModuleRendersNothing)
     std::string actual = RenderWithDisassembler(
         [&](DA::ReflectionDisassembler& rd) { rd.WriteModuleContents(f); });
     EXPECT_TRUE(actual.empty());
+}
+
+// ---------------------------------------------------------------------------
+// The FieldRVA comment lines (the C# `// RVA {rva:X8} invalid (not in any
+// section)` and the `// .data {prefix}_{rva:X8} = {message}` catch arm --
+// SRMExtensions.GetInitialValue lines 673-692). The C# renders both through
+// unbounded string interpolation; the fixtures below walk DisassembleField
+// into each branch deterministically over the ILSPY_TEST_MSCORLIB fixture
+// (its 146 FieldRva rows), so the full-length rendering is pinned.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::string ReadAllBytes(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)),
+        std::istreambuf_iterator<char>());
+}
+
+std::string WriteBytes(const std::string& bytes, const char* name) {
+    namespace fs = std::filesystem;
+    fs::path path = fs::temp_directory_path() / name;
+    std::FILE* out = std::fopen(path.string().c_str(), "wb");
+    if (out == nullptr) return "";
+    std::fwrite(bytes.data(), 1, bytes.size(), out);
+    std::fclose(out);
+    return path.string();
+}
+
+std::uint32_t Le32(const std::string& bytes, std::size_t at) {
+    return static_cast<std::uint8_t>(bytes[at])
+        | (static_cast<std::uint8_t>(bytes[at + 1]) << 8)
+        | (static_cast<std::uint8_t>(bytes[at + 2]) << 16)
+        | (static_cast<std::uint8_t>(bytes[at + 3]) << 24);
+}
+
+void PutLe32(std::string& bytes, std::size_t at, std::uint32_t value) {
+    bytes[at] = static_cast<char>(value & 0xFF);
+    bytes[at + 1] = static_cast<char>((value >> 8) & 0xFF);
+    bytes[at + 2] = static_cast<char>((value >> 16) & 0xFF);
+    bytes[at + 3] = static_cast<char>((value >> 24) & 0xFF);
+}
+
+std::size_t PeSectionTableOffset(const std::string& bytes) {
+    std::uint32_t peOffset = Le32(bytes, 0x3C);
+    std::uint16_t optionalHeaderSize
+        = static_cast<std::uint8_t>(bytes[peOffset + 20])
+        | (static_cast<std::uint8_t>(bytes[peOffset + 21]) << 8);
+    return peOffset + 4 + 20 + optionalHeaderSize;
+}
+
+// Copies the fixture mscorlib and rewrites the first FieldRva row's RVA
+// column to `newRva` (the row located by its exact little-endian
+// (RVA, field-rid) six-byte pattern, asserted unique). The section headers
+// stay intact, so the module opens normally; the RVA simply no longer maps
+// into any section, which is the C# `sectionIndex < 0` arm's shape.
+std::string WriteMscorlibWithFirstFieldRvaRva(std::uint32_t newRva) {
+    MD::MetadataFile f(MscorlibPath());
+    if (!f.IsValid()) return "";
+    std::uint32_t rid = f.CorTableColumnValue(MD::CorTableIndex::FieldRva, 1, 1);
+    if (rid == 0) return "";
+    std::uint32_t rva = f.GetFieldRVA(0x04000000u | rid);
+    if (rva == 0) return "";
+    std::uint8_t pattern[6] = {
+        static_cast<std::uint8_t>(rva), static_cast<std::uint8_t>(rva >> 8),
+        static_cast<std::uint8_t>(rva >> 16), static_cast<std::uint8_t>(rva >> 24),
+        static_cast<std::uint8_t>(rid), static_cast<std::uint8_t>(rid >> 8)};
+    std::string bytes = ReadAllBytes(MscorlibPath());
+    std::size_t found = 0;
+    int matches = 0;
+    for (std::size_t i = 0; i + sizeof(pattern) <= bytes.size(); ++i) {
+        if (std::memcmp(bytes.data() + i, pattern, sizeof(pattern)) == 0) {
+            ++matches;
+            found = i;
+        }
+    }
+    if (matches != 1) return "";
+    PutLe32(bytes, found, newRva);
+    return WriteBytes(bytes, "ilspy_mscorlib_fieldrva_patch.dll");
+}
+
+// Copies the fixture mscorlib and zeroes section 0's SizeOfRawData: the RVA
+// still maps (GetContainingSectionIndex matches on VirtualSize), but the
+// initial-value read finds no raw bytes -- the shape behind the net065
+// sweep rows (`Field data (rva=...) could not be found in any section!`).
+std::string WriteMscorlibWithTextRawSizeZeroed() {
+    std::string bytes = ReadAllBytes(MscorlibPath());
+    if (bytes.size() < 0x200) return "";
+    std::size_t sectionTable = PeSectionTableOffset(bytes);
+    if (bytes.compare(sectionTable, 5, ".text") != 0) return "";
+    PutLe32(bytes, sectionTable + 16, 0);
+    return WriteBytes(bytes, "ilspy_mscorlib_rawsize_patch.dll");
+}
+
+} // namespace
+
+TEST(ReflectionDisassemblerTest, DisassembleFieldInvalidRvaCommentIsComplete)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    ASSERT_GE(f.CorTableRowCount(MD::CorTableIndex::FieldRva), 1u)
+        << "the fixture mscorlib must carry FieldRva rows";
+    std::uint32_t rid = f.CorTableColumnValue(MD::CorTableIndex::FieldRva, 1, 1);
+    ASSERT_NE(rid, 0u);
+    std::uint32_t fieldToken = 0x04000000u | rid;
+    std::uint32_t rva = f.GetFieldRVA(fieldToken);
+    ASSERT_NE(rva, 0u);
+
+    std::string path = WriteMscorlibWithFirstFieldRvaRva(0xDEADBEEFu);
+    ASSERT_FALSE(path.empty());
+    MD::MetadataFile patched(path);
+    ASSERT_TRUE(patched.IsValid());
+    EXPECT_EQ(patched.GetFieldRVA(fieldToken), 0xDEADBEEFu);
+    EXPECT_LT(patched.GetContainingSectionIndex(0xDEADBEEFu), 0);
+
+    std::string actual = RenderWithDisassembler(
+        [&](DA::ReflectionDisassembler& rd) { rd.DisassembleField(patched, fieldToken); });
+    std::string expected = "// RVA DEADBEEF invalid (not in any section)";
+    EXPECT_NE(actual.find(expected), std::string::npos)
+        << "the invalid-RVA comment must render complete; got:\n" << actual;
+}
+
+TEST(ReflectionDisassemblerTest, DisassembleFieldUnreadableFieldDataCommentIsComplete)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    ASSERT_GE(f.CorTableRowCount(MD::CorTableIndex::FieldRva), 1u)
+        << "the fixture mscorlib must carry FieldRva rows";
+    std::uint32_t rid = f.CorTableColumnValue(MD::CorTableIndex::FieldRva, 1, 1);
+    ASSERT_NE(rid, 0u);
+    std::uint32_t fieldToken = 0x04000000u | rid;
+    std::uint32_t rva = f.GetFieldRVA(fieldToken);
+    ASSERT_NE(rva, 0u);
+
+    std::string path = WriteMscorlibWithTextRawSizeZeroed();
+    ASSERT_FALSE(path.empty());
+    MD::MetadataFile patched(path);
+    ASSERT_TRUE(patched.IsValid());
+    // The catch arm's precondition: the section still contains the RVA by
+    // VirtualSize, but the initial-value read throws the C# message.
+    EXPECT_GE(patched.GetContainingSectionIndex(rva), 0);
+    EXPECT_THROW(patched.GetFieldInitialValue(fieldToken), std::runtime_error);
+
+    std::string actual = RenderWithDisassembler(
+        [&](DA::ReflectionDisassembler& rd) { rd.DisassembleField(patched, fieldToken); });
+    char rvaText[16];
+    std::snprintf(rvaText, sizeof(rvaText), "%x", rva);
+    std::string expected = std::string("Field data (rva=0x") + rvaText
+        + ") could not be found in any section!";
+    EXPECT_NE(actual.find(expected), std::string::npos)
+        << "the .data catch message must render complete; got:\n" << actual;
 }
 
