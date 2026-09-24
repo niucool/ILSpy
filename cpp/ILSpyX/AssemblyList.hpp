@@ -46,17 +46,19 @@
 //    the PackageFolder.ResolveFileName path passes a deferred provider,
 //    exactly like the C# `stream: Task.Run(entry.TryOpenStream)` arm
 //    constructing LoadedAssembly directly.
-//  * DEFERRED to their own slices: the Reload / HotReplace / Move / Sort /
-//    Unload / Clear mutators, GetSnapshot + AssemblyListSnapshot, and the
-//    GetAllAssemblies recursion.
+//  * DEFERRED: the GetAllAssemblies recursion (it builds LoadedAssembly
+//    instances through PackageFolder.ResolveFileName -- the resolver
+//    slice); GetSnapshot is present (the resolver takes it).
 
 #pragma once
 
 #include "ILSpyX/LoadedAssembly.hpp"
 
 #include "ILSpyX/AssemblyListSnapshot.hpp"
+#include "Decompiler/Xml/XElement.hpp"
 
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -65,15 +67,29 @@
 
 namespace ILSpy::ILSpyX {
 
+class AssemblyListManager;
+
 // The C# `public sealed class AssemblyList`.
 class AssemblyList {
 public:
     // The C# internal parameterless ctor ("exists for testing only";
-    // ListName "Testing Only").
+    // ListName "Testing Only"). The manager stays null, so the list has
+    // no save wiring (the C# testing ctor skips the CollectionChanged
+    // subscription for the same reason).
     AssemblyList()
         : listName_("Testing Only")
     {
     }
+
+    // The C# internal ctor (AssemblyListManager manager, string listName):
+    // the manager carries the save wiring and the loader/flag defaults.
+    AssemblyList(AssemblyListManager& manager, std::string listName);
+
+    // The C# internal ctor (AssemblyListManager manager, XElement
+    // listElement): loads the stored assemblies (OpenAssembly + the
+    // TargetFramework attribute) and resets the dirty flag afterwards.
+    AssemblyList(AssemblyListManager& manager,
+        const Decompiler::Xml::XElement& listElement);
 
     // The C# `public LoadedAssembly[] GetAssemblies()`: thread-safe
     // snapshot of the list.
@@ -91,6 +107,63 @@ public:
 
     // The C# `public LoadedAssembly? FindAssembly(string file)` -- the
     // byFilename lookup after Path.GetFullPath.
+
+    // --- the mutation surface ---
+
+    // The C# `public void Unload(LoadedAssembly assembly)`: removed from
+    // the list and the byFilename map, NOT disposed (the C# comment: open
+    // tabs may still hold the metadata; shared ownership stands in for the
+    // GC).
+    void Unload(LoadedAssembly& assembly);
+
+    // The C# `public void Clear()`.
+    void Clear();
+
+    // The C# `public void Move(LoadedAssembly[] assembliesToMove, int
+    // index)`: removes the assemblies, then re-inserts them at the
+    // adjusted index (the nodeIndex < index decrement rule).
+    void Move(const std::vector<LoadedAssembly*>& assembliesToMove,
+        int index);
+
+    // The C# `public void Sort(IComparer<LoadedAssembly> comparer)` /
+    // `Sort(int index, int count, comparer)`. The comparer is a
+    // two-argument compare function (negative/zero/positive).
+    void Sort(int index, int count,
+        const std::function<int(const LoadedAssembly&,
+            const LoadedAssembly&)>& comparer);
+    void Sort(const std::function<int(const LoadedAssembly&,
+        const LoadedAssembly&)>& comparer)
+    {
+        Sort(0, std::numeric_limits<int>::max(), comparer);
+    }
+
+    // The C# `public LoadedAssembly? ReloadAssembly(string file)` / the
+    // LoadedAssembly overload: a fresh instance at the same position,
+    // carrying PdbFileName, the auto-loaded flag, and the framework
+    // override; the old instance is dropped (not disposed -- the C#
+    // comment).
+    LoadedAssembly* ReloadAssembly(const std::string& file);
+    LoadedAssembly* ReloadAssembly(LoadedAssembly& target);
+
+    // The C# `public LoadedAssembly? HotReplaceAssembly(string file,
+    // Stream stream)`: swaps the object model from a crafted stream
+    // without disk I/O; null when the file is not loaded.
+    LoadedAssembly* HotReplaceAssembly(const std::string& file,
+        std::function<std::optional<std::vector<std::uint8_t>>()> stream);
+
+    // The C# `internal XElement SaveAsXml()`: the <List> element with the
+    // non-auto-loaded assemblies (the TargetFramework attribute carried).
+    std::shared_ptr<Decompiler::Xml::XElement> SaveAsXml() const;
+
+    // The C# `public void RefreshSave()`: marks the list dirty and saves
+    // it through the manager (inline -- the port has no
+    // SynchronizationContext; the C# BeginInvoke deferral collapses).
+    void RefreshSave();
+
+    // The flags the manager seeded (the C# properties).
+    bool ApplyWinRTProjections() const { return applyWinRTProjections_; }
+    bool UseDebugSymbols() const { return useDebugSymbols_; }
+
     LoadedAssembly* FindAssembly(const std::string& file) const;
 
     // The C# `public LoadedAssembly Open(string assemblyUri, bool
@@ -116,12 +189,31 @@ private:
     LoadedAssembly& OpenAssembly(const std::string& fullPath,
         const std::function<std::unique_ptr<LoadedAssembly>()>& load);
 
+    // The C# `AssemblyList(AssemblyList list, string newName)` body: the
+    // source's assemblies are adopted SHARED (the same instances); the
+    // byFilename map is NOT copied (the C# copies only the assemblies
+    // collection -- FindAssembly on a cloned list misses).
+    void AdoptAssembliesFrom(AssemblyList& source);
+
+    // The C# `CollectionChangeHasEffectOnSave` filter: an Add/Remove only
+    // marks the list dirty when the touched assembly is not auto-loaded.
+    void OnCollectionChanged(LoadedAssembly& touched, bool added);
+
     std::string listName_;
     // The C# `ApplyWinRTProjections` / `UseDebugSymbols` flags arrive with
     // the manager-driven ctor; the testing-only ctor leaves them false
     // (the C# does too).
     bool applyWinRTProjections_ = false;
     bool useDebugSymbols_ = false;
+    // The owning manager (null for the testing-only list; the save wiring
+    // exists only when set). The manager holds the list, so the pointer is
+    // non-owning.
+    AssemblyListManager* manager_ = nullptr;
+    // The C# dirty flag (RefreshSave).
+    bool dirty_ = false;
+    FileLoaders::FileLoaderRegistry* loaderRegistry_ = nullptr;
+
+    friend class AssemblyListManager;
     // The assemblies (shared ownership -- the C# GC stand-in for the
     // "dropped but not disposed" removals), guarded by lockObj_.
     mutable std::mutex lockObj_;
