@@ -76,6 +76,7 @@ private:
     // inside Run. The shared state (the captured variables of the C# local
     // functions) is the IndexRangeState struct defined in the .cpp.
     void TransformIndexing(struct IndexRangeState& state);
+    void ExtendSlicing(struct IndexRangeState& state);
     void TransformSlicing(struct IndexRangeState& state,
                           bool sliceLengthWasMisdetectedAsStartOffset = false);
 };

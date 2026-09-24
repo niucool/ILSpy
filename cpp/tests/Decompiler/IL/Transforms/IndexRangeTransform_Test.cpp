@@ -26,6 +26,8 @@
 // int-parameter indexer the CSharpWillGenerateIndexer gate scans.
 
 #include "Decompiler/IL/Transforms/IndexRangeTransform.hpp"
+#include "Decompiler/TypeSystem/Implementation/SyntheticRangeIndexAccessor.hpp"
+#include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
 
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
@@ -364,4 +366,91 @@ TEST(IndexRangeTransformTest, RunFoldsGetOffsetIntoSyntheticIndexer)
     EXPECT_EQ(value->Value, 1);
     // The consumed len/off stores are gone: the block keeps only the result
     // store.
+}
+
+// ---- ExtendSlicing (the second-pass extension) ----------------------------
+// A partially-transformed slicing pattern: the block's statement at pos is a
+// bare expression instruction (not a stloc), so the primary pattern bails and
+// ExtendSlicing merges the NewObj Range(GetOffset(len), GetOffset(len))
+// inside the SyntheticRangeIndexAccessor call into a direct range
+// construction.
+
+TEST(IndexRangeTransformTest, ExtendSlicingMergesThePartialPattern)
+{
+    IndexRangeFixture fixture;
+    // The slicing wrapper asserts a 2-parameter underlying method (the C#
+    // `get_Item(this, index)` shape); the fixture's getItemMethod carries the
+    // index parameter only, so the test builds a container-parameter twin.
+    auto sliceItem = std::make_shared<Impl_::FakeMethod>(
+        fixture.compilation, TS::SymbolKind::Method);
+    sliceItem->SetName("get_Item");
+    sliceItem->SetDeclaringType(fixture.containerDef);
+    sliceItem->SetReturnType(fixture.int32Def);
+    sliceItem->SetParameters(
+        {std::make_shared<const Impl_::DefaultParameter>(fixture.containerDef, "this"),
+         std::make_shared<const Impl_::DefaultParameter>(fixture.int32Def, "index")});
+    auto synthetic =
+        std::make_shared<Impl_::SyntheticRangeIndexAccessor>(
+            sliceItem, fixture.rangeDef, true);
+    auto len2 = std::make_shared<IL::ILVariable>(IL::VariableKind::Local,
+                                                 fixture.int32Def);
+    len2->Name = "len";
+    auto fn = std::make_unique<IL::ILFunction>();
+    fn->Body = std::make_unique<IL::BlockContainer>();
+    auto block = std::make_unique<IL::Block>();
+    block->Kind = IL::BlockKind::ControlFlow;
+    block->Parent = fn->Body.get();
+
+    // stloc len(call get_Length(ldloc arr))
+    {
+        auto getLength = std::make_unique<IL::Call>(fixture.lengthGetter);
+        getLength->IsInstanceCall = true;
+        getLength->AddArg(std::make_unique<IL::LdLoc>(fixture.arr));
+        block->Add(std::make_unique<IL::StLoc>(len2, std::move(getLength)));
+    }
+    // The Range ctor arguments: op_Implicit(GetOffset(n, ldloc len)) x2.
+    auto makeArg = [&](int index) {
+        auto getOffset = std::make_unique<IL::Call>(fixture.getOffsetMethod);
+        getOffset->AddArg(std::make_unique<IL::LdcI4>(index));
+        getOffset->AddArg(std::make_unique<IL::LdLoc>(len2));
+        auto implicitConv =
+            std::make_unique<IL::Call>(fixture.indexImplicitConv);
+        implicitConv->AddArg(std::move(getOffset));
+        return implicitConv;
+    };
+    auto rangeCtor = std::make_unique<IL::Call>(fixture.rangeCtor, true);
+    rangeCtor->AddArg(makeArg(1));
+    rangeCtor->AddArg(makeArg(2));
+    // The synthetic slicing call (a bare expression instruction at pos 1).
+    auto sliceCall = std::make_unique<IL::Call>(synthetic);
+    sliceCall->AddArg(std::make_unique<IL::LdLoc>(fixture.arr));
+    sliceCall->AddArg(std::move(rangeCtor));
+    block->Add(std::move(sliceCall));
+    block->SetFinal(std::make_unique<IL::Nop>());
+    IL::Block* blockPtr = block.get();
+    fn->Body->AddBlock(std::move(block));
+    // The usage counts the transform consults (len: stored once, loaded by
+    // the two GetOffset calls).
+    len2->StoreCount = 1;
+    len2->LoadCount = 2;
+    IL::ComputeVariableUsage(*fn);
+
+    IL::ILTransformContext ctx;
+    ctx.TypeSystem = &fixture.compilation;
+    ctx.Settings.Ranges = true;
+    IL::IndexRangeTransform transform;
+    IL::StatementTransformContext driverCtx(ctx, blockPtr);
+    transform.Run(*blockPtr, 1, driverCtx);
+
+    // The ExtendSlicing pass replaced the NewObj Range(...) inside the
+    // synthetic call: the block's shape is intact and the Range ctor's
+    // arguments no longer carry the GetOffset/len indirection (the merged
+    // range construction reads the offset loads directly).
+    ASSERT_EQ(blockPtr->Instructions.size(), 2u);
+    auto* slice = dynamic_cast<IL::Call*>(blockPtr->Instructions[1].get());
+    ASSERT_NE(slice, nullptr);
+    ASSERT_EQ(slice->Arguments.size(), 2u);
+    auto* newRange = dynamic_cast<IL::Call*>(slice->Arguments[1].get());
+    ASSERT_NE(newRange, nullptr) << "the Range ctor survives the merge";
+    EXPECT_EQ(newRange->Arguments.size(), 2u);
 }

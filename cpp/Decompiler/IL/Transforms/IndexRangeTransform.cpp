@@ -638,8 +638,8 @@ void IndexRangeTransform::Run(Block& block, int pos, StatementTransformContext& 
           startOffsetStore->Variable->StackType() == StackType::I4)) {
         // Not our primary indexing/slicing pattern. However, we might be
         // dealing with a partially-transformed pattern that needs to be
-        // extended. (The C# ExtendSlicing pass is deferred on this port; the
-        // statement driver re-enters here once the pattern is complete.)
+        // extended (the C# ExtendSlicing pass).
+        ExtendSlicing(state);
         return;
     }
     state.startOffsetVar = startOffsetStore->Variable.get();
@@ -916,6 +916,139 @@ bool IndexRangeTransform::HandleLdElema(LdElema& ldelema, ILTransformContext& co
         return true;
     }
     return false;
+}
+
+
+// The C# `void ExtendSlicing()` local function (IndexRangeTransform.cs lines
+// 397-458): the second-pass extension. A previous Run may have executed
+// TransformSlicing on a partial pattern (slicing-from-end mis-detected as
+// slicing-from-start); the merged range construction
+// `newobj Range(GetOffset(...), GetOffset(...))` inside a
+// SyntheticRangeIndexAccessor call is re-merged into a direct range
+// construction when the container length is available. The C# reads
+// `containerLengthVar.LoadInstructions[0]` (the whole-function load list);
+// the port's ILVariable does not track load lists, so the walk starts at the
+// block's first instruction (the container-length store lives in this
+// block, so its loads do too).
+void IndexRangeTransform::ExtendSlicing(IndexRangeState& state) {
+    if (state.containerLengthVar == nullptr) {
+        return;  // need a container length to extend with
+    }
+    assert(state.containerLengthVar->IsSingleDefinition());
+    std::vector<ILInstruction*> loadSites;
+    if (!state.block.Instructions.empty()) {
+        CollectLoadSitesOf(state.block.Instructions[0].get(),
+                           state.containerLengthVar, loadSites);
+    }
+    if (loadSites.empty()) return;
+    // Walk the first load's ancestors up to (and including) the block,
+    // looking for the NewObj Range-ctor call (the C# `inst.Ancestors` walk
+    // with the `inst == block` stop).
+    Call* rangeCtorCall = nullptr;
+    for (ILInstruction* inst = loadSites[0]; inst != nullptr;
+         inst = inst->Parent) {
+        if (inst == &state.block) break;
+        if (auto* call = dynamic_cast<Call*>(inst);
+            call != nullptr && call->IsNewObj &&
+            IndexMethods::IsRangeCtor(call->Method.get())) {
+            rangeCtorCall = call;
+            break;
+        }
+    }
+    if (rangeCtorCall == nullptr) return;
+    // Now match the pattern that TransformSlicing() generated in the
+    // IndexKind.FromStart case: the NewObj's parent must be the
+    // SyntheticRangeIndexAccessor slicing call.
+    auto* slicingCall = dynamic_cast<Call*>(rangeCtorCall->Parent);
+    if (slicingCall == nullptr || slicingCall->IsNewObj ||
+        slicingCall->Method == nullptr) {
+        return;
+    }
+    if (dynamic_cast<const TypeSystem::Implementation::SyntheticRangeIndexAccessor*>(
+            slicingCall->Method.get()) == nullptr) {
+        return;
+    }
+    if (slicingCall->Arguments.empty()) return;
+    if (!MatchContainerVar(slicingCall->Arguments[0].get(),
+                           state.containerVar)) {
+        return;
+    }
+    if (!slicingCall->IsDescendantOf(
+            state.block.Instructions[static_cast<std::size_t>(state.pos)].get())) {
+        return;
+    }
+    assert(rangeCtorCall->Arguments.size() == 2);
+    if (rangeCtorCall->Arguments.size() != 2) return;
+    ILInstruction* startOffsetInst = nullptr;
+    ILInstruction* endOffsetInst = nullptr;
+    if (!MatchIndexImplicitConv(rangeCtorCall->Arguments[0].get(),
+                                startOffsetInst)) {
+        return;
+    }
+    if (!MatchIndexImplicitConv(rangeCtorCall->Arguments[1].get(),
+                                endOffsetInst)) {
+        return;
+    }
+    IndexLoadSite startSite;
+    IndexLoadSite endIndex;
+    IndexKind startIndexKind = MatchGetOffset(
+        startOffsetInst, startSite, state.containerLengthVar,
+        state.containerVar);
+    IndexKind endIndexKind = MatchGetOffset(
+        endOffsetInst, endIndex, state.containerLengthVar,
+        state.containerVar);
+    if (!state.CheckContainerLengthVariableUseCount(
+            state.containerLengthVar, startIndexKind, endIndexKind)) {
+        return;
+    }
+    // holds because we've used containerLengthVar at least once
+    assert(startIndexKind != IndexKind::FromStart ||
+           endIndexKind != IndexKind::FromStart);
+    // The port's MakeRange consumes the state's start fields (the C# passes
+    // them as parameters); install the matched start for the duration.
+    // The port's MakeRange consumes the state's start fields (the C# passes
+    // them as parameters); install the matched start for the duration (the
+    // state object is the per-Run holder and dies right after, so no restore
+    // is needed).
+    state.startIndex = std::move(startSite);
+    state.startIndexKind = startIndexKind;
+    if (state.rangeVar != nullptr) {
+        if (state.rangeVarInit == nullptr) return;
+        if (!CanMoveInto(state.rangeVarInit,
+                         state.block.Instructions[static_cast<std::size_t>(state.pos)].get(),
+                         state.startIndex.load)) {
+            return;
+        }
+        if (!MatchIndexFromRange(startIndexKind, state.startIndex.load,
+                                 state.rangeVar, "get_Start")) {
+            return;
+        }
+        if (!MatchIndexFromRange(endIndexKind, endIndex.load,
+                                 state.rangeVar, "get_End")) {
+            return;
+        }
+    }
+    IndexMethods specialMethods(state.context.TypeSystem);
+    if (!specialMethods.IsValid()) return;
+    state.context.StepOnce("Merge containerLengthVar into slicing");
+    std::unique_ptr<ILInstruction> merged =
+        state.MakeRange(endIndexKind, endIndex, specialMethods);
+    rangeCtorCall->ReplaceWith(std::move(merged));
+    // The C# adds the removed instructions' IL spans to the slicing call
+    // (`slicingCall.AddILRange(...)`); the port's IL ranges are the
+    // [StartILOffset, EndILOffset) spans -- fold the removed range's start.
+    for (int i = state.startPos; i < state.pos; i++) {
+        ILInstruction* removed =
+            state.block.Instructions[static_cast<std::size_t>(i)].get();
+        if (removed != nullptr && removed->StartILOffset != 0 &&
+            slicingCall->StartILOffset == 0) {
+            slicingCall->StartILOffset = removed->StartILOffset;
+        }
+    }
+    state.block.Instructions.erase(
+        state.block.Instructions.begin() + state.startPos,
+        state.block.Instructions.begin() + state.pos);
+    state.block.RenumberChildren();
 }
 
 } // namespace ILSpy::Decompiler::IL

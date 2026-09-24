@@ -321,6 +321,7 @@ bool MatchBox(ILInstruction* inst, ILInstruction*& argument,
 // convention; the aliasing ctor keeps the ICompilation alive). Returns null
 // when the transform context carries no type system (the degenerate
 // construction the tests build).
+namespace {
 TypeSystem::ITypePtr FindType(TypeSystem::ICompilation* compilation,
                               TypeSystem::KnownTypeCode code) {
     if (compilation == nullptr) return nullptr;
@@ -329,6 +330,7 @@ TypeSystem::ITypePtr FindType(TypeSystem::ICompilation* compilation,
     return const_cast<TypeSystem::IType&>(compilation->FindType(code))
         .shared_from_this();
 }
+} // namespace
 
 TransformExpressionTrees::ConvertResult
 TransformExpressionTrees::ConvertConstant(Call* invocation) {
