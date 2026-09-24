@@ -37,6 +37,7 @@
 #include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/EmptyStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/FixedStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/GotoCaseStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/LockStatement.hpp"
@@ -55,7 +56,9 @@
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
+#include "Decompiler/IL/Instructions/PinnedRegion.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
@@ -502,6 +505,53 @@ TEST(StatementBuilderTest, VisitLockInstructionRendersLock)
     ASSERT_TRUE(text != nullptr);
     ASSERT_TRUE(std::holds_alternative<std::string>(text->Value()));
     EXPECT_EQ(std::get<std::string>(text->Value()), "gate");
+}
+
+
+TEST(StatementBuilderTest, VisitPinnedRegionRendersFixed)
+{
+    StatementFixture fixture;
+    StatementBuilder builder(fixture.compilation, *fixture.context_, &fixture.function,
+                             &fixture.settings, &fixture.run);
+    // `fixed (int* p = &refLocal) { nop; }` -- the init is a by-ref LOAD
+    // (`ldloc refLocal` over a ByReferenceType-typed local): the port's by-ref
+    // LdLoc arm renders `ref refLocal` (a DirectionExpression), which the C#
+    // unwrap turns into the `&refLocal` address-of (the else branch -- the
+    // value is not a dereference).
+    auto variable = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local,
+        std::make_shared<TS::PointerType>(fixture.TypePtr(TS::KnownTypeCode::Int32)));
+    variable->Name = "p";
+    auto refLocal = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Parameter,
+        std::make_shared<TS::ByReferenceType>(fixture.TypePtr(TS::KnownTypeCode::Int32)));
+    refLocal->Name = "refLocal";
+    // A real parameter slot (Index >= 0): the ConvertVariable this-reference
+    // arm keys on `Index < 0`.
+    refLocal->Index = 0;
+    auto body = std::make_unique<IL::Block>();
+    body->FinalInstruction = std::make_unique<IL::Nop>();
+    IL::PinnedRegion pinned(variable, std::make_unique<IL::LdLoc>(refLocal),
+                            std::move(body));
+    auto result = builder.Convert(&pinned);
+
+    auto* fixedStatement = dynamic_cast<Syntax::FixedStatement*>(result.Statement());
+    ASSERT_TRUE(fixedStatement != nullptr);
+    ASSERT_TRUE(fixedStatement->Type() != nullptr);
+    ASSERT_EQ(fixedStatement->Variables().Count(), 1);
+    auto* initializer = fixedStatement->Variables().At(0);
+    ASSERT_TRUE(initializer != nullptr);
+    EXPECT_EQ(initializer->Name(), "p");
+    // The initializer's variable annotation rides the ILVariable channel.
+    EXPECT_EQ(::ILSpy::Decompiler::CSharp::GetILVariable(*initializer),
+              variable.get());
+    // The DirectionExpression unwrap: the init renders as the `&refLocal`
+    // address-of (not the raw `ref refLocal`).
+    auto* addressOf = dynamic_cast<Syntax::UnaryOperatorExpression*>(
+        initializer->Initializer());
+    ASSERT_TRUE(addressOf != nullptr);
+    EXPECT_EQ(addressOf->Operator(), Syntax::UnaryOperatorType::AddressOf);
+    EXPECT_TRUE(fixedStatement->EmbeddedStatement() != nullptr);
 }
 
 

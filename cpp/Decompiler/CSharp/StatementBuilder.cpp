@@ -25,6 +25,7 @@
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/ExpressionBuilder.hpp"
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
+#include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IsExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
@@ -34,6 +35,8 @@
 #include "Decompiler/CSharp/Syntax/Statements/GotoDefaultStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/GotoStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/FixedStatement.hpp"
+#include "Decompiler/CSharp/Syntax/VariableInitializer.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/EmptyStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
@@ -46,6 +49,7 @@
 #include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/PinnedRegion.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/CSharp/Syntax/CatchClause.hpp"
@@ -137,6 +141,8 @@ TranslatedStatement StatementBuilder::Convert(IL::ILInstruction* inst) {
         return VisitTryFault(tryFault);
     if (auto* lockInstruction = dynamic_cast<IL::LockInstruction*>(inst))
         return VisitLockInstruction(lockInstruction);
+    if (auto* pinnedRegion = dynamic_cast<IL::PinnedRegion*>(inst))
+        return VisitPinnedRegion(pinnedRegion);
     if (auto* block = dynamic_cast<IL::Block*>(inst))
         return VisitBlock(block);
     return Default(inst);
@@ -490,6 +496,54 @@ TranslatedStatement StatementBuilder::VisitBlock(IL::Block* block) {
         && block->FinalInstruction->Op != IL::OpCode::Nop)
         blockStatement->Statements().Add(Convert(block->FinalInstruction.get()).Statement());
     return WithILInstruction(*blockStatement, block);
+}
+
+
+// The C# `protected internal override TranslatedStatement VisitPinnedRegion
+// (PinnedRegion inst)` (StatementBuilder.cs lines 1201-1263): the `fixed`
+// statement render. The GetPinnableReference arm is deferred with the
+// GetPinnableReference IL node (the port's ILAst does not carry it); the
+// pointer-pinning workaround (the IsAddressOfMoveableVar/IsFixedSizeBuffer
+// probes + the `Unsafe.AsRef` re-pin) is deferred with the
+// PointerArithmeticOffset.IsFixedVariable/IsFixedField consumer surface --
+// the plain path (the type conversion with the DirectionExpression
+// dereference/addressof unwrap) is what every non-deferred case takes.
+TranslatedStatement StatementBuilder::VisitPinnedRegion(IL::PinnedRegion* inst) {
+    auto* fixedStmt = new Syntax::FixedStatement();
+    fixedStmt->Type(exprBuilder->ConvertType(*inst->Variable->Type));
+    IL::ILInstruction* init = inst->Init.get();
+    TS::ITypePtr refType = inst->Variable->Type;
+    if (auto* pointerType = dynamic_cast<TS::PointerType*>(const_cast<TS::IType*>(refType.get()))) {
+        refType = std::make_shared<TS::ByReferenceType>(pointerType->Element());
+    }
+    TranslatedExpression initExpr = exprBuilder->Translate(init, refType.get());
+    initExpr = initExpr.ConvertTo(const_cast<TS::IType&>(*refType), *exprBuilder,
+                                  /*checkForOverflow=*/false,
+                                  /*allowImplicitConversion=*/false);
+    if (auto* dirExpr =
+            dynamic_cast<Syntax::DirectionExpression*>(initExpr.Expression())) {
+        if (auto* uoe = dynamic_cast<Syntax::UnaryOperatorExpression*>(
+                dirExpr->Expression());
+            uoe != nullptr
+            && uoe->Operator() == Syntax::UnaryOperatorType::Dereference) {
+            // The C# `initExpr = uoe.Expression.Detach()` -- the detached node
+            // keeps its own annotations (the C# TranslatedExpression ctor
+            // reads them).
+            initExpr = TranslatedExpression(Syntax::Detach(uoe->Expression()));
+        } else {
+            initExpr = WithRR(
+                WithoutILInstruction(*new Syntax::UnaryOperatorExpression(
+                    Syntax::Detach(dirExpr->Expression()),
+                    Syntax::UnaryOperatorType::AddressOf)),
+                std::make_shared<Sem::ResolveResult>(refType));
+        }
+    }
+    auto* initializer = new Syntax::VariableInitializer(inst->Variable->Name,
+                                                        initExpr.Expression());
+    WithILVariable(*initializer, inst->Variable);
+    fixedStmt->Variables().Add(initializer);
+    fixedStmt->EmbeddedStatement(Convert(inst->Body.get()).Statement());
+    return WithILInstruction(*fixedStmt, inst);
 }
 
 } // namespace ILSpy::Decompiler::CSharp

@@ -87,6 +87,7 @@ class TryFinally;
 class TryFault;
 class Nop;
 class Rethrow;
+class PinnedRegion;
 class StLoc;
 class StObj;
 class Throw;
@@ -184,6 +185,7 @@ private:
     TranslatedStatement VisitTryFault(IL::TryFault* inst);
     TranslatedStatement VisitLockInstruction(IL::LockInstruction* inst);
     TranslatedStatement VisitBlock(IL::Block* inst);
+    TranslatedStatement VisitPinnedRegion(IL::PinnedRegion* inst);
     // The C# `TryCatchStatement MakeTryCatch(ILInstruction tryBlock)`: the
     // try-block conversion with the extend-existing-try-catch reuse.
     TranslatedStatement MakeTryCatch(IL::ILInstruction* tryBlock);
