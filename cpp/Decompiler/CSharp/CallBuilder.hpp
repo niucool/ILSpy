@@ -579,6 +579,40 @@ public:
     // local-function surface (its only caller, the
     // DisambiguateDelegateReference local-function arm, is likewise deferred).
 
+    // The C# `public ExpressionWithResolveResult Build(OpCode callOpCode, IMethod
+    // method, IReadOnlyList<ILInstruction> callArguments, IReadOnlyList<int>?
+    // argumentToParameterMap = null, IType? constrainedTo = null)` (CallBuilder.cs
+    // lines 332-566): the main integrator -- the explicit-interface-implementation
+    // remap (the sealed-class interface-member substitution), the target
+    // computation (TranslateTarget + the boxing unwrap), BuildArgumentList, the
+    // vararg rewrite, the Ranges/NewObj/Invoke/interpolation/accessor/
+    // delegate-equality/op_Implicit/InlineArrays/LiftNullables arms in C# order,
+    // and the GetRequiredTransformationsForCall tail rendering the
+    // InvocationExpression. The local-function arms throw loudly (the
+    // ResolveLocalFunction surface is not ported); the InlineArrays arm is
+    // deferred loudly pending its TypeSystemExtensions checks. Implemented
+    // out-of-line.
+    ExpressionWithResolveResult Build(
+        IL::OpCode callOpCode, const TS::IMethod& method,
+        const std::vector<IL::ILInstruction*>& callArguments,
+        const std::optional<std::vector<int>>& argumentToParameterMap = std::nullopt,
+        const TS::IType* constrainedTo = nullptr);
+
+    // The C# `ExpressionWithResolveResult HandleConstructorCall(ExpectedTargetDetails
+    // expectedTargetDetails, ResolveResult? target, IMethod method, ArgumentList
+    // argumentList)` (CallBuilder.cs lines 1836-1905): the object-creation
+    // render -- the disambiguation loop over IsUnambiguousCall (the
+    // named-primitives/optional/cast fallbacks), the
+    // NativeIntegersWithoutAttribute nint/nuint return-type override, and the
+    // ObjectCreateExpression with the CSharpInvocationResolveResult. The C#
+    // anonymous-type arm is deferred with the anonymous-type surface (the
+    // NRExtensions.IsAnonymousType detection is not ported, so its gate cannot
+    // fire yet). Implemented out-of-line.
+    ExpressionWithResolveResult HandleConstructorCall(
+        const ExpectedTargetDetails& expectedTargetDetails,
+        const Sem::ResolveResult* target, const TS::IMethod& method,
+        ArgumentList& argumentList);
+
     // The C# `private bool HandleRangeConstruction(out
     // ExpressionWithResolveResult result, OpCode callOpCode, IMethod method,
     // TranslatedExpression target, ArgumentList argumentList)` (CallBuilder.cs

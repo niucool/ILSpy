@@ -19,6 +19,9 @@
 // SOFTWARE.
 
 #include "Decompiler/CSharp/CallBuilder.hpp"
+#include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
+#include "Decompiler/TypeSystem/VarArgInstanceMethod.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UndocumentedExpression.hpp"
 #include "Decompiler/TypeSystem/Implementation/SyntheticRangeIndexAccessor.hpp"
 
 #include "Decompiler/CSharp/Annotations.hpp"
@@ -2218,6 +2221,404 @@ bool CallBuilder::HandleRangeConstruction(
         }
     }
     return false;
+}
+
+// The C# `ExpressionWithResolveResult HandleConstructorCall(ExpectedTargetDetails
+// expectedTargetDetails, ResolveResult? target, IMethod method, ArgumentList
+// argumentList)` (CallBuilder.cs lines 1836-1905). The AnonymousTypes arm is
+// deferred loudly (the AnonymousTypeCreateExpression node and the
+// anonymous-type surface are not ported).
+ExpressionWithResolveResult CallBuilder::HandleConstructorCall(
+    const ExpectedTargetDetails& expectedTargetDetails,
+    const Sem::ResolveResult* target, const TS::IMethod& method,
+    ArgumentList& argumentList)
+{
+    // The C# `settings.AnonymousTypes && method.DeclaringType.IsAnonymousType()`
+    // arm: the anonymous-type detection (NRExtensions.IsAnonymousType) is not
+    // ported, so the gate cannot fire yet; the arm lands with the
+    // anonymous-type surface (the AnonymousTypeCreateExpression node and the
+    // detection helper).
+    const TS::IParameterizedMember* foundMethod = nullptr;
+    bool bestCandidateIsExpandedForm = false;
+    while (IsUnambiguousCall(expectedTargetDetails, method, nullptr, {},
+                             argumentList.GetArgumentResolveResults(),
+                             argumentList.GetArgumentNames(),
+                             argumentList.FirstOptionalArgumentIndex, foundMethod,
+                             bestCandidateIsExpandedForm)
+           != Resolver::OverloadResolutionErrors::None
+           || bestCandidateIsExpandedForm != argumentList.IsExpandedForm) {
+        if (argumentList.AddNamesToPrimitiveValues) {
+            argumentList.AddNamesToPrimitiveValues = false;
+            continue;
+        }
+        if (argumentList.FirstOptionalArgumentIndex >= 0) {
+            argumentList.FirstOptionalArgumentIndex = -1;
+            continue;
+        }
+        CastArguments(argumentList.Arguments, argumentList.ExpectedParameters);
+        break; // make sure that we don't not end up in an infinite loop
+    }
+    TS::ITypePtr returnTypeOverride;
+    if ((expressionBuilder_->compilation->TypeSystemOptions()
+         & TS::TypeSystemOptions::NativeIntegersWithoutAttribute)
+        != TS::TypeSystemOptions::None) {
+        // For DeclaringType, we don't use nint/nuint (so that
+        // DeclaringType.GetConstructors etc. works), but in
+        // NativeIntegersWithoutAttribute mode we must use nint/nuint for
+        // expression types, so that the appropriate set of conversions is used
+        // for further overload resolution.
+        if (TS::IsKnownType(*method.DeclaringType(), TS::KnownTypeCode::IntPtr))
+            returnTypeOverride = TS::NInt();
+        else if (TS::IsKnownType(*method.DeclaringType(), TS::KnownTypeCode::UIntPtr))
+            returnTypeOverride = TS::NUInt();
+    }
+    auto* objectCreate = new Syntax::ObjectCreateExpression(
+        expressionBuilder_->ConvertType(*method.DeclaringType()));
+    for (Syntax::Expression* arg : argumentList.GetArgumentExpressions())
+        objectCreate->Arguments().Add(arg);
+    return WithRR(*objectCreate,
+                  std::make_shared<Resolver::CSharpInvocationResolveResult>(
+                      std::shared_ptr<Sem::ResolveResult>(
+                          const_cast<Sem::ResolveResult*>(target)),
+                      &method, argumentList.GetArgumentResolveResults(),
+                      Resolver::OverloadResolutionErrors::None,
+                      /*isExtensionMethodInvocation=*/false,
+                      /*isExpandedForm=*/argumentList.IsExpandedForm,
+                      /*isDelegateInvocation=*/false,
+                      argumentList.ArgumentToParameterMap,
+                      std::vector<std::shared_ptr<Sem::ResolveResult>>{},
+                      returnTypeOverride));
+}
+
+// The C# `public ExpressionWithResolveResult Build(OpCode callOpCode, IMethod
+// method, IReadOnlyList<ILInstruction> callArguments, IReadOnlyList<int>?
+// argumentToParameterMap = null, IType? constrainedTo = null)` (CallBuilder.cs
+// lines 332-566). The local-function target arms throw loudly (the
+// `ResolveLocalFunction` surface is not ported) and the InlineArrays arm is
+// deferred loudly pending its TypeSystemExtensions checks; every other arm
+// follows the C# order.
+ExpressionWithResolveResult CallBuilder::Build(
+    IL::OpCode callOpCode, const TS::IMethod& method,
+    const std::vector<IL::ILInstruction*>& callArguments,
+    const std::optional<std::vector<int>>& argumentToParameterMap,
+    const TS::IType* constrainedTo)
+{
+    const TS::IMethod* currentMethod = &method;
+    IL::OpCode currentCallOpCode = callOpCode;
+    if (method.IsExplicitInterfaceImplementation() && callOpCode == IL::OpCode::Call) {
+        // Direct non-virtual call to explicit interface implementation.
+        // This can't really be represented in C#, but at least in the case
+        // where the class is sealed, we can equivalently call the interface
+        // member instead:
+        const std::vector<const TS::IMember*> interfaceMembers =
+            method.ExplicitlyImplementedInterfaceMembers();
+        const TS::ITypeDefinition* declaringTypeDefinition =
+            method.DeclaringTypeDefinition();
+        if (declaringTypeDefinition != nullptr
+            && declaringTypeDefinition->Kind() == TS::TypeKind::Class
+            && declaringTypeDefinition->IsSealed()
+            && interfaceMembers.size() == 1) {
+            currentMethod =
+                dynamic_cast<const TS::IMethod*>(interfaceMembers.front());
+            currentCallOpCode = IL::OpCode::CallVirt;
+        }
+    }
+    // Used for Call, CallVirt and NewObj
+    ExpectedTargetDetails expectedTargetDetails{};
+    expectedTargetDetails.CallOpCode = currentCallOpCode;
+    if (currentMethod->IsLocalFunction()) {
+        throw std::logic_error(
+            "CallBuilder::Build: the local-function target arm is not yet "
+            "ported (it needs the ResolveLocalFunction surface)");
+    }
+    TranslatedExpression target;
+    if (currentCallOpCode != IL::OpCode::NewObj) {
+        IL::ILInstruction* thisArg =
+            callArguments.empty() ? nullptr : callArguments.front();
+        if (thisArg != nullptr && thisArg->Op == IL::OpCode::LdObjIfRef) {
+            assert(constrainedTo != nullptr
+                   && "Build: an ldobj-if-ref this-arg requires a constrainedTo");
+            throw std::logic_error(
+                "CallBuilder::Build: the LdObjIfRef this-arg unwrap is not yet "
+                "ported (the port's ILAst has no LdObjIfRef node class)");
+        }
+        target = expressionBuilder_->TranslateTarget(
+            thisArg,
+            /*nonVirtualInvocation=*/currentCallOpCode == IL::OpCode::Call
+                || currentMethod->IsConstructor(),
+            /*memberStatic=*/currentMethod->IsStatic(),
+            const_cast<TS::IType&>(*currentMethod->DeclaringType()),
+            constrainedTo);
+        if (constrainedTo == nullptr
+            && dynamic_cast<const Syntax::CastExpression*>(target.Expression())
+                != nullptr) {
+            auto* cast = static_cast<Syntax::CastExpression*>(target.Expression());
+            const auto* conversion =
+                dynamic_cast<const Sem::ConversionResolveResult*>(
+                    target.ResolveResult());
+            if (conversion != nullptr
+                && TS::IsKnownType(target.Type(), TS::KnownTypeCode::Object)
+                && conversion->ConversionProperty()->IsBoxingConversion()) {
+                // boxing conversion on call target?
+                // let's see if we can make that implicit:
+                target = target.UnwrapChild(cast->Expression());
+                // we'll need to make sure the boxing effect is preserved
+                expectedTargetDetails.NeedsBoxingConversion = true;
+            }
+        }
+    }
+
+    int firstParamIndex =
+        (currentMethod->IsStatic() || currentCallOpCode == IL::OpCode::NewObj)
+            ? 0
+            : 1;
+    assert(firstParamIndex == 0 || !argumentToParameterMap.has_value()
+           || (*argumentToParameterMap)[0] == -1);
+
+    ArgumentList argumentList = BuildArgumentList(
+        expectedTargetDetails, target.ResolveResult(), *currentMethod,
+        firstParamIndex, callArguments, argumentToParameterMap);
+
+    if (dynamic_cast<const TS::VarArgInstanceMethod*>(currentMethod) != nullptr) {
+        argumentList.FirstOptionalArgumentIndex = -1;
+        argumentList.AddNamesToPrimitiveValues = false;
+        argumentList.UseImplicitlyTypedOut = false;
+        auto* varArg = static_cast<const TS::VarArgInstanceMethod*>(currentMethod);
+        int regularParameterCount = varArg->RegularParameterCount();
+        auto* argListArg = new Syntax::UndocumentedExpression();
+        argListArg->UndocumentedExpressionType(
+            Syntax::UndocumentedExpressionType::ArgList);
+        int paramIndex = regularParameterCount;
+        for (std::size_t i = static_cast<std::size_t>(regularParameterCount);
+             i < argumentList.Arguments.size(); i++) {
+            TranslatedExpression& arg = argumentList.Arguments[i];
+            const TS::IType& expectedType =
+                argumentList.ExpectedParameters[static_cast<std::size_t>(
+                                                    paramIndex++)]
+                    ->Type();
+            argListArg->Arguments().Add(
+                arg.ConvertTo(const_cast<TS::IType&>(expectedType),
+                              *expressionBuilder_)
+                    .Expression());
+        }
+        std::vector<TranslatedExpression> trimmedArguments(
+            argumentList.Arguments.begin(),
+            argumentList.Arguments.begin() + regularParameterCount);
+        trimmedArguments.push_back(
+            WithRR(WithoutILInstruction(*argListArg),
+                   std::make_shared<Sem::ResolveResult>(TS::ArgList())));
+        argumentList.Arguments = std::move(trimmedArguments);
+        currentMethod = varArg->BaseMethod();
+        const std::vector<const TS::IParameter*> baseParameters =
+            currentMethod->Parameters();
+        argumentList.ExpectedParameters.assign(baseParameters.begin(),
+                                               baseParameters.end());
+    }
+
+    if (settings_->Ranges()) {
+        ExpressionWithResolveResult rangeResult;
+        if (HandleRangeConstruction(rangeResult, currentCallOpCode, *currentMethod,
+                                    target, argumentList)) {
+            return rangeResult;
+        }
+    }
+
+    if (currentCallOpCode == IL::OpCode::NewObj) {
+        return HandleConstructorCall(expectedTargetDetails, target.ResolveResult(),
+                                     *currentMethod, argumentList);
+    }
+
+    if (currentMethod->Name() == "Invoke"
+        && currentMethod->DeclaringType()->Kind() == TS::TypeKind::Delegate
+        && !IsNullConditional(target.Expression())) {
+        auto* invocation = new Syntax::InvocationExpression(target.Expression());
+        for (Syntax::Expression* arg : argumentList.GetArgumentExpressions())
+            invocation->Arguments().Add(arg);
+        return WithRR(*invocation,
+                      std::make_shared<Resolver::CSharpInvocationResolveResult>(
+                          std::shared_ptr<Sem::ResolveResult>(
+                              const_cast<Sem::ResolveResult*>(target.ResolveResult())),
+                          currentMethod, argumentList.GetArgumentResolveResults(),
+                          Resolver::OverloadResolutionErrors::None,
+                          /*isExtensionMethodInvocation=*/false,
+                          /*isExpandedForm=*/argumentList.IsExpandedForm,
+                          /*isDelegateInvocation=*/true));
+    }
+
+    if (settings_->StringInterpolation()
+        && IsInterpolatedStringCreation(*currentMethod, argumentList)) {
+        ExpressionWithResolveResult result =
+            HandleStringInterpolation(*currentMethod, argumentList);
+        if (result.Expression() != nullptr)
+            return result;
+    }
+
+    int allowedParamCount =
+        (TS::IsKnownType(currentMethod->ReturnType(), TS::KnownTypeCode::Void) ? 1
+                                                                              : 0);
+    if (currentMethod->IsAccessor()
+        && (currentMethod->AccessorOwner() != nullptr
+            && currentMethod->AccessorOwner()->SymbolKind() == TS::SymbolKind::Indexer
+            || static_cast<int>(argumentList.ExpectedParameters.size())
+                == allowedParamCount)) {
+        argumentList.CheckNoNamedOrOptionalArguments();
+        return HandleAccessorCall(expectedTargetDetails, *currentMethod,
+                                  std::move(target), argumentList.Arguments,
+                                  argumentList.ArgumentNames);
+    }
+
+    if (IsDelegateEqualityComparison(*currentMethod, argumentList.Arguments)) {
+        argumentList.CheckNoNamedOrOptionalArguments();
+        return WithRR(
+            *HandleDelegateEqualityComparison(*currentMethod, argumentList.Arguments),
+            std::make_shared<Resolver::CSharpInvocationResolveResult>(
+                std::shared_ptr<Sem::ResolveResult>(
+                    const_cast<Sem::ResolveResult*>(target.ResolveResult())),
+                currentMethod, argumentList.GetArgumentResolveResults(),
+                Resolver::OverloadResolutionErrors::None,
+                /*isExtensionMethodInvocation=*/false,
+                /*isExpandedForm=*/argumentList.IsExpandedForm));
+    }
+
+    if (currentMethod->IsOperator() && currentMethod->Name() == "op_Implicit"
+        && argumentList.Length() == 1) {
+        argumentList.CheckNoNamedOrOptionalArguments();
+        return HandleImplicitConversion(*currentMethod, argumentList.Arguments[0]);
+    }
+
+    if (settings_->InlineArrays()
+        && currentMethod->DeclaringType()->GetDefinition() != nullptr
+        && currentMethod->DeclaringType()->GetDefinition()->FullName()
+            == "<PrivateImplementationDetails>"
+        && (currentMethod->Name() == "InlineArrayAsSpan"
+            || currentMethod->Name() == "InlineArrayAsReadOnlySpan")
+        && argumentList.Length() == 2) {
+        argumentList.CheckNoNamedOrOptionalArguments();
+        throw std::logic_error(
+            "CallBuilder::Build: the InlineArrays arm is not yet ported (it needs "
+            "the GetInlineArrayLength / GetInlineArrayElementType checks wired "
+            "over the known-type surface)");
+    }
+
+    if (settings_->LiftNullables() && currentMethod->Name() == "GetValueOrDefault"
+        && TS::IsKnownType(*currentMethod->DeclaringType(),
+                           TS::KnownTypeCode::NullableOfT)
+        && argumentList.Length() == 0) {
+        argumentList.CheckNoNamedOrOptionalArguments();
+        auto* binary = new Syntax::BinaryOperatorExpression(
+            target.Expression(), Syntax::BinaryOperatorType::Equality,
+            new Syntax::PrimitiveExpression(true));
+        return WithRR(*binary,
+                      std::make_shared<Resolver::CSharpInvocationResolveResult>(
+                          std::shared_ptr<Sem::ResolveResult>(
+                              const_cast<Sem::ResolveResult*>(target.ResolveResult())),
+                          currentMethod, argumentList.GetArgumentResolveResults(),
+                          Resolver::OverloadResolutionErrors::None,
+                          /*isExtensionMethodInvocation=*/false,
+                          /*isExpandedForm=*/argumentList.IsExpandedForm));
+    }
+
+    const TS::IParameterizedMember* foundMethod = nullptr;
+    CallTransformation transform = GetRequiredTransformationsForCall(
+        expectedTargetDetails, *currentMethod, target, argumentList,
+        CallTransformation::All, foundMethod);
+    // GetRequiredTransformationsForCall always assigns foundMethod (the
+    // resolved overload or 'method').
+    assert(foundMethod != nullptr);
+
+    // Note: after this, 'method' and 'foundMethod' may differ,
+    // but as far as allowed by IsAppropriateCallTarget().
+
+    // Need to update list of parameter names, because foundMethod is different
+    // and thus might use different names.
+    if (!currentMethod->Equals(foundMethod, nullptr)
+        && static_cast<int>(argumentList.ParameterNames.size())
+            >= static_cast<int>(foundMethod->Parameters().size())) {
+        const std::vector<const TS::IParameter*> foundParameters =
+            foundMethod->Parameters();
+        for (std::size_t i = 0; i < foundParameters.size(); i++) {
+            argumentList.ParameterNames[i] = foundParameters[i]->Name();
+        }
+    }
+
+    Syntax::Expression* targetExpr;
+    std::string methodName = currentMethod->Name();
+    if ((transform & CallTransformation::NoNamedArgsForPrettiness)
+        != CallTransformation::None) {
+        argumentList.AddNamesToPrimitiveValues = false;
+    }
+    if ((transform & CallTransformation::NoOptionalArgumentAllowed)
+        != CallTransformation::None) {
+        argumentList.FirstOptionalArgumentIndex = -1;
+    }
+    if ((transform & CallTransformation::RequireTarget)
+        != CallTransformation::None) {
+        auto* mre =
+            new Syntax::MemberReferenceExpression(target.Expression(), methodName);
+        targetExpr = mre;
+
+        // HACK : convert this.Dispose() to ((IDisposable)this).Dispose(), if
+        // Dispose is an explicitly implemented interface method.
+        // settings.AlwaysCastTargetsOfExplicitInterfaceImplementationCalls ==
+        // true is used in Windows Forms' InitializeComponent methods.
+        if (currentMethod->IsExplicitInterfaceImplementation()
+            && (dynamic_cast<const Syntax::ThisReferenceExpression*>(
+                    target.Expression())
+                    != nullptr
+                || settings_->AlwaysCastTargetsOfExplicitInterfaceImplementationCalls())) {
+            const TS::IMember* interfaceMember =
+                currentMethod->ExplicitlyImplementedInterfaceMembers().front();
+            auto* castExpression = new Syntax::CastExpression(
+                expressionBuilder_->ConvertType(*interfaceMember->DeclaringType()),
+                Syntax::Detach(target.Expression()));
+            methodName = interfaceMember->Name();
+            targetExpr =
+                new Syntax::MemberReferenceExpression(castExpression, methodName);
+        }
+        if (constrainedTo != nullptr
+            && dynamic_cast<const Syntax::MemberReferenceExpression*>(targetExpr)
+                    != nullptr
+            && dynamic_cast<const Syntax::CastExpression*>(
+                   static_cast<const Syntax::MemberReferenceExpression*>(targetExpr)
+                       ->Target())
+                != nullptr) {
+            // The C# attaches a trailing `/*cast due to constrained. prefix*/`
+            // comment to the cast. The port's Comment node carries no
+            // location, and the trivia is cosmetic; skipped (the D410
+            // cosmetic-trivia convention).
+        }
+    } else {
+        targetExpr = new Syntax::IdentifierExpression(methodName);
+    }
+
+    if ((transform & CallTransformation::RequireTypeArguments)
+        != CallTransformation::None) {
+        // The C# `!method.TypeArguments.Any(a => a.ContainsAnonymousType())`
+        // gate: the port has no anonymous types yet, so the guard's anonymous
+        // arm cannot fire and the type arguments are always added.
+        if (auto* typedMemberReference =
+                dynamic_cast<Syntax::MemberReferenceExpression*>(targetExpr)) {
+            for (const TS::ITypePtr& typeArgument : currentMethod->TypeArguments())
+                typedMemberReference->TypeArguments().Add(
+                    expressionBuilder_->ConvertType(*typeArgument));
+        } else if (auto* typedIdentifier =
+                       dynamic_cast<Syntax::IdentifierExpression*>(targetExpr)) {
+            for (const TS::ITypePtr& typeArgument : currentMethod->TypeArguments())
+                typedIdentifier->TypeArguments().Add(
+                    expressionBuilder_->ConvertType(*typeArgument));
+        }
+    }
+    auto* invocation = new Syntax::InvocationExpression(targetExpr);
+    for (Syntax::Expression* arg : argumentList.GetArgumentExpressions())
+        invocation->Arguments().Add(arg);
+    return WithRR(*invocation,
+                  std::make_shared<Resolver::CSharpInvocationResolveResult>(
+                      std::shared_ptr<Sem::ResolveResult>(
+                          const_cast<Sem::ResolveResult*>(target.ResolveResult())),
+                      foundMethod, argumentList.GetArgumentResolveResultsDirect(),
+                      Resolver::OverloadResolutionErrors::None,
+                      /*isExtensionMethodInvocation=*/false,
+                      /*isExpandedForm=*/argumentList.IsExpandedForm));
 }
 
 } // namespace ILSpy::Decompiler::CSharp
