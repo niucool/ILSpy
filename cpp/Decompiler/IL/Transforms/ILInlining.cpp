@@ -27,6 +27,8 @@
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/TypeSystem/IParameter.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
 #include <algorithm>
 #include <functional>
@@ -113,6 +115,33 @@ bool MethodRequiresCopyForReadonlyLValue(const TypeSystem::IMethod* method,
     if (method->ThisIsRefReadOnly())
         return false;
     return true;
+}
+
+// The C# `internal static bool IsReadOnlySpanCharCtor(IMethod method)`
+// (IL/Transforms/ILInlining.cs lines 541-550). See the header comment for the
+// TypeArguments/ByReferenceType read notes.
+bool IsReadOnlySpanCharCtor(const TypeSystem::IMethod& method) {
+    if (!method.IsConstructor()) return false;
+    const std::vector<const TypeSystem::IParameter*> parameters = method.Parameters();
+    if (parameters.size() != 1 || parameters[0] == nullptr) return false;
+    TypeSystem::ITypePtr declaringType = method.DeclaringType();
+    if (!declaringType
+        || !TypeSystem::IsKnownType(*declaringType,
+                                    TypeSystem::KnownTypeCode::ReadOnlySpanOfT)) {
+        return false;
+    }
+    auto* parameterized =
+        dynamic_cast<const TypeSystem::ParameterizedType*>(declaringType.get());
+    if (parameterized == nullptr || parameterized->TypeArguments().size() != 1
+        || !TypeSystem::IsKnownType(*parameterized->TypeArguments()[0],
+                                    TypeSystem::KnownTypeCode::Char)) {
+        return false;
+    }
+    auto* parameterType =
+        dynamic_cast<const TypeSystem::ByReferenceType*>(&parameters[0]->Type());
+    return parameterType != nullptr && parameterType->Element() != nullptr
+        && TypeSystem::IsKnownType(*parameterType->Element(),
+                                   TypeSystem::KnownTypeCode::Char);
 }
 
 // True when `inst` sits in the constructor initializer (before the chained

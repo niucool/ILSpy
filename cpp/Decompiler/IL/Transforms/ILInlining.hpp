@@ -123,6 +123,18 @@ ILInstruction* TopLevelStatement(const ILInstruction* inst);
 bool MethodRequiresCopyForReadonlyLValue(const TypeSystem::IMethod* method,
                                          const TypeSystem::IType* constrainedTo = nullptr);
 
+// The C# `internal static bool IsReadOnlySpanCharCtor(IMethod method)`
+// (IL/Transforms/ILInlining.cs lines 541-550): whether `method` is the
+// `ReadOnlySpan<char>` constructor the span-based string-concat shapes
+// construct (`newobj ReadOnlySpan<char>(addressof(char value))`). The check
+// reads the declaring type's element through the `ParameterizedType`
+// instantiation (the IType base carries no TypeArguments accessor, so an open
+// generic definition fails the arm -- the same inputs that matter answer false
+// in the C# too, where `TypeArguments[0]` of a definition is the type
+// parameter T) and the single parameter's type through the `ByReferenceType`
+// wrapper (the C# `brt.ElementType.IsKnownType(Char)`).
+bool IsReadOnlySpanCharCtor(const TypeSystem::IMethod& method);
+
 class ILInlining : public IILTransform, public IStatementTransform {
 public:
     // IILTransform: the whole-function inlining pass (runs early in the

@@ -51,6 +51,7 @@ namespace ILSpy::Decompiler {
 class DecompilerSettings;
 namespace IL {
 class ILInstruction;
+class Call;
 }
 }
 
@@ -157,6 +158,41 @@ public:
     // `op_Implicit` operator converting a `string` to a `ReadOnlySpan<char>` --
     // the span-based string.Concat operand shape. Implemented out-of-line.
     static bool IsStringToReadOnlySpanCharImplicitConversion(const TS::IMethod& method);
+
+    // The C# `List<(ILInstruction Instruction, KnownTypeCode TypeCode)>` element
+    // the operand-extraction overload fills (a plain pair struct; the C# tuple
+    // element names carry over as the member names).
+    struct SpanConcatOperand {
+        IL::ILInstruction* Instruction = nullptr;
+        TS::KnownTypeCode TypeCode = TS::KnownTypeCode::None;
+    };
+
+    // The C# `static bool IsSpanBasedStringConcat(CallInstruction call,
+    // [NotNullWhen(true)] out List<(ILInstruction, KnownTypeCode)>? operands)`
+    // (CallBuilder.cs lines 268-298): the operand-extraction overload of the
+    // span-based string-concat shape. Every call argument must be either an
+    // `op_Implicit(string -> ReadOnlySpan<char>)` call (operand = its single
+    // argument, typed string -- the C# `opImplicit.Arguments.Single()`, with a
+    // non-single-arity argument list failing the shape where the C# would
+    // throw) or a `newobj ReadOnlySpan<char>(addressOf(charValue))` (operand =
+    // the AddressOf's value, typed char). The shape holds when there are at
+    // least two arguments and the first string-typed operand appears at index
+    // 0 or 1 (`firstStringArgumentIndex <= 1`, false when no argument took the
+    // string arm). The NewObj arm needs the `AddressOf` node and the
+    // `ILInlining.IsReadOnlySpanCharCtor` helper. Implemented out-of-line.
+    static bool IsSpanBasedStringConcat(const IL::Call& call,
+                                        std::vector<SpanConcatOperand>& operands);
+
+    // The C# `private ExpressionWithResolveResult BuildStringConcat(IMethod
+    // method, List<(ILInstruction, KnownTypeCode)> operands)` (CallBuilder.cs
+    // lines 252-266): the `s + "literal"` render for the span-based
+    // string.Concat shape -- translates each operand to its element type,
+    // folds them left-associatively with `+` over a shared MemberResolveResult
+    // on the Concat method. Public for the tests (the port's no-visibility
+    // convention). Implemented out-of-line.
+    ExpressionWithResolveResult BuildStringConcat(
+        const TS::IMethod& method,
+        const std::vector<SpanConcatOperand>& operands);
 
     // The C# `static bool IsNullConditional(Expression expr)` (CallBuilder.cs
     // lines 1480-1483): whether the expression is the `?.` null-conditional

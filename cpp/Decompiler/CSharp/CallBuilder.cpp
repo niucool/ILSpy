@@ -32,7 +32,11 @@
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
+#include "Decompiler/IL/Instructions/AddressOf.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
+#include "Decompiler/Semantics/MemberResolveResult.hpp"
 #include "Decompiler/Semantics/Conversion.hpp"
 #include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/Semantics/OutVarResolveResult.hpp"
@@ -148,6 +152,88 @@ bool CallBuilder::IsNullConditional(const Syntax::Expression* expr) {
     auto* unary = dynamic_cast<const Syntax::UnaryOperatorExpression*>(expr);
     return unary != nullptr
         && unary->Operator() == Syntax::UnaryOperatorType::NullConditional;
+}
+
+// The C# `private ExpressionWithResolveResult BuildStringConcat(IMethod method,
+// List<(ILInstruction Instruction, KnownTypeCode TypeCode)> operands)`
+// (CallBuilder.cs lines 252-266). The first operand translates to its element
+// type and seeds the chain; each further operand translates and folds in with
+// a left-associative `+` over the single shared MemberResolveResult (the C#
+// binds every BinaryOperatorExpression to the same `rr`). The caller (the
+// Build wrapper) attaches the IL-instruction annotation.
+ExpressionWithResolveResult CallBuilder::BuildStringConcat(
+    const TS::IMethod& method,
+    const std::vector<SpanConcatOperand>& operands) {
+    assert(!operands.empty());
+    TS::IType& firstType = const_cast<TS::IType&>(
+        expressionBuilder_->compilation->FindType(operands[0].TypeCode));
+    TranslatedExpression first =
+        expressionBuilder_->Translate(operands[0].Instruction, &firstType)
+            .ConvertTo(firstType, *expressionBuilder_);
+    ExpressionWithResolveResult result(first.Expression(), first.ResolveResult());
+    auto rr = std::make_shared<Sem::MemberResolveResult>(
+        std::shared_ptr<Sem::ResolveResult>(), &method);
+
+    for (std::size_t i = 1; i < operands.size(); ++i) {
+        TS::IType& type = const_cast<TS::IType&>(
+            expressionBuilder_->compilation->FindType(operands[i].TypeCode));
+        TranslatedExpression expr =
+            expressionBuilder_->Translate(operands[i].Instruction, &type)
+                .ConvertTo(type, *expressionBuilder_);
+        result = WithRR(*new Syntax::BinaryOperatorExpression(
+                            result.Expression(), Syntax::BinaryOperatorType::Add,
+                            expr.Expression()),
+                        rr);
+    }
+
+    return result;
+}
+
+// The C# `static bool IsSpanBasedStringConcat(CallInstruction call,
+// [NotNullWhen(true)] out List<(ILInstruction, KnownTypeCode)>? operands)`
+// (CallBuilder.cs lines 268-298). Each argument is matched in turn; the first
+// string-typed operand's `ChildIndex` (its argument position -- the port's
+// Call::AddArg wires ChildIndex to the argument index, the same value the C#
+// reads) is captured on the first string arm (`??=`) and the shape holds when
+// at least two arguments matched and that index is 0 or 1.
+bool CallBuilder::IsSpanBasedStringConcat(const IL::Call& call,
+                                          std::vector<SpanConcatOperand>& operands) {
+    operands.clear();
+
+    if (call.Method == nullptr || !IsSpanBasedStringConcat(*call.Method)) {
+        return false;
+    }
+
+    std::optional<int> firstStringArgumentIndex;
+
+    for (const std::unique_ptr<IL::ILInstruction>& arg : call.Arguments) {
+        if (auto* opImplicit = dynamic_cast<const IL::Call*>(arg.get());
+            opImplicit != nullptr && opImplicit->Method != nullptr
+            && IsStringToReadOnlySpanCharImplicitConversion(*opImplicit->Method)) {
+            if (!firstStringArgumentIndex)
+                firstStringArgumentIndex = arg->ChildIndex;
+            if (opImplicit->Arguments.size() != 1 || !opImplicit->Arguments[0])
+                return false;
+            operands.push_back({opImplicit->Arguments[0].get(),
+                                TS::KnownTypeCode::String});
+        } else if (auto* newObj = dynamic_cast<const IL::Call*>(arg.get());
+                   newObj != nullptr && newObj->IsNewObj
+                   && newObj->Arguments.size() == 1
+                   && newObj->Arguments[0] != nullptr) {
+            auto* addressOf =
+                dynamic_cast<const IL::AddressOf*>(newObj->Arguments[0].get());
+            if (addressOf == nullptr || !newObj->Method
+                || !IL::IsReadOnlySpanCharCtor(*newObj->Method)) {
+                return false;
+            }
+            operands.push_back({addressOf->Value.get(), TS::KnownTypeCode::Char});
+        } else {
+            return false;
+        }
+    }
+
+    return call.Arguments.size() >= 2 && firstStringArgumentIndex.has_value()
+        && *firstStringArgumentIndex <= 1;
 }
 
 // The C# `private bool IsDelegateEqualityComparison(IMethod method,
