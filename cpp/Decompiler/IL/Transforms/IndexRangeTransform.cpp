@@ -602,6 +602,9 @@ struct IndexRangeState {
 // StatementTransformContext context)` (IndexRangeTransform.cs lines 102-152).
 void IndexRangeTransform::Run(Block& block, int pos, StatementTransformContext& context) {
     if (!context.Base.Settings.Ranges) return;
+    // The sentinel pos = -1 (an if-final-only block) has no statements to
+    // match; guard it together with the upper bound.
+    if (pos < 0 || pos >= static_cast<int>(block.Instructions.size())) return;
     IndexRangeState state{block, pos, context.Base};
     state.pos = pos;
     // The container length access may be a separate instruction, or it may be

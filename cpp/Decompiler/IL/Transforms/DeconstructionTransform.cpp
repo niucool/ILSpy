@@ -176,7 +176,9 @@ struct DeconstructionMatcher {
     // call.
     bool MatchDeconstruction(Block& block, int& pos, DeconstructionCall*& rootCall) {
         ILInstruction* testedOperand = nullptr;
-        if (pos >= static_cast<int>(block.Instructions.size())) return false;
+        // The sentinel pos = -1 (an if-final-only block) has no statements to
+        // match; guard it together with the upper bound.
+        if (pos < 0 || pos >= static_cast<int>(block.Instructions.size())) return false;
         rootCall = MatchDeconstructionCall(
             block.Instructions[static_cast<std::size_t>(pos)].get(), testedOperand);
         if (rootCall == nullptr) return false;
@@ -503,7 +505,9 @@ bool IsConsumableByEnclosingDeconstruction(Block& block, int pos) {
 
 bool TryFindEnclosingDeconstructionCall(Block& block, int pos, int& enclosingPos) {
     enclosingPos = -1;
-    if (pos >= static_cast<int>(block.Instructions.size())) return false;
+    // The sentinel pos = -1 (an if-final-only block) has no statements to
+    // match; guard it together with the upper bound.
+    if (pos < 0 || pos >= static_cast<int>(block.Instructions.size())) return false;
     auto* call = dynamic_cast<Call*>(block.Instructions[static_cast<std::size_t>(pos)].get());
     if (call == nullptr || call->Arguments.empty() || call->Method == nullptr)
         return false;

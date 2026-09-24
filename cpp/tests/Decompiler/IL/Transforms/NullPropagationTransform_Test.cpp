@@ -863,7 +863,7 @@ TEST(NullPropagationTransform, WiredFoldsThroughExpressionTransforms) {
     auto iff = std::make_unique<IfInstruction>(
         std::move(cond), std::move(call), std::make_unique<LdNull>());
     auto stloc = std::make_unique<StLoc>(result, std::move(iff));
-    block->Instructions.push_back(std::move(stloc));
+    block->Add(std::move(stloc));
     RunExpressionTransforms(*fn);
     ASSERT_FALSE(block->Instructions.empty());
     auto& st = block->Instructions[0];

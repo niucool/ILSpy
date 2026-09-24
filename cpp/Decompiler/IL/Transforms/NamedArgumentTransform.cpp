@@ -212,11 +212,11 @@ void NamedArgumentIntroduce(ILInstruction* arg, ILTransformContext& context)
                         .shared_from_this()));
             ILVariablePtr thisArgVar = function->RegisterVariable(
                 VariableKind::NamedArgument, thisType, "this_arg");
-            namedArgBlock->Instructions.push_back(std::make_unique<StLoc>(
+            namedArgBlock->Add(std::make_unique<StLoc>(
                 thisArgVar, call->TakeChild(0)));
             call->SetChild(0, std::make_unique<LdLoc>(thisArgVar));
         }
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        }
+    }
     else {
         namedArgBlock = dynamic_cast<Block*>(call->Parent);
     }
@@ -224,10 +224,13 @@ void NamedArgumentIntroduce(ILInstruction* arg, ILTransformContext& context)
     assert(call->Arguments[static_cast<std::size_t>(argIndex)].get() == arg);
     auto newInst = std::make_unique<StLoc>(v, call->TakeChild(argIndex));
     const std::size_t insertPos = call->IsInstanceCall ? 1 : 0;
+    newInst->Parent = namedArgBlock;
+    newInst->ChildIndex = static_cast<int>(insertPos);
     namedArgBlock->Instructions.insert(
         namedArgBlock->Instructions.begin()
             + static_cast<std::ptrdiff_t>(insertPos),
         std::move(newInst));
+    namedArgBlock->RenumberChildren();
     call->SetChild(argIndex, std::make_unique<LdLoc>(v));
 }
 

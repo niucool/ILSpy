@@ -103,6 +103,9 @@ void StatementTransform::RunBlock(Block* block, ILTransformContext& context) {
         }
         for (auto& child : children_) {
             child->Run(*block, pos, ctx);
+#ifndef NDEBUG
+            block->CheckInvariant(ILPhase::Normal);
+#endif
             if (ctx.HasRerunCurrentPosition()) {
                 ctx.ClearRerunCurrentPosition();
                 ctx.RequestRerun(pos);

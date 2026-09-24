@@ -51,7 +51,7 @@ namespace {
 
 // The port's array-instruction nodes live in ArrayInstructions.hpp (the NewArr
 // / LdElema pair the reader decodes); stelem decodes as
-// StObj(LdElema(type, array, indices), value, type) — the C# has no separate
+// StObj(LdElema(type, array, indices), value, type) -- the C# has no separate
 // StElem node (ILReader.cs StElem(IType), line 1655).
 
 // The C# `bool MatchNewArr(ILInstruction instruction, out IType arrayType,
@@ -281,7 +281,7 @@ bool TransformArrayInitializersHandleSimple(
     }
     // The empty-slot defaults: fill the values list up to the array length.
     while (static_cast<int>(elements.size()) < length) {
-        // `CalculateNextIndices(null, out _)` — the gap slots carry no value
+        // `CalculateNextIndices(null, out _)` -- the gap slots carry no value
         // shell (the caller default-fills them).
         elements.push_back({std::vector<int>{nextMinimumIndex}, nullptr, 0});
         nextMinimumIndex++;
@@ -306,7 +306,7 @@ std::unique_ptr<Block> TransformArrayInitializersBuildBlock(
     lengths.reserve(arrayLength.size());
     for (int l : arrayLength)
         lengths.push_back(std::make_unique<LdcI4>(l));
-    block->Instructions.push_back(std::make_unique<StLoc>(
+    block->Add(std::make_unique<StLoc>(
         ILVariablePtr(v), std::make_unique<NewArr>(elementType, std::move(lengths))));
     for (auto& entry : values) {
         std::vector<std::unique_ptr<ILInstruction>> indices;
@@ -321,9 +321,8 @@ std::unique_ptr<Block> TransformArrayInitializersBuildBlock(
             // The empty-slot default (the C# GetNullExpression(elementType)).
             value = std::make_unique<DefaultValue>(elementType);
         }
-        block->Instructions.push_back(
-            std::make_unique<StObj>(std::move(ldelem), std::move(value),
-                                    elementType));
+        block->Add(std::make_unique<StObj>(std::move(ldelem), std::move(value),
+                                           elementType));
     }
     block->SetFinal(std::make_unique<LdLoc>(v));
     return block;
@@ -392,14 +391,14 @@ void TransformArrayInitializers::Run(Block& block, int pos,
     // Replace the stloc's value with the initializer block and drop the
     // consumed stelem instructions (the C# `body.Instructions[pos] =
     // newStore; body.Instructions.RemoveRange(pos + 1, instructionsToRemove);`
-    // — the removal walks from the end so the earlier indices stay stable).
+    // -- the removal walks from the end so the earlier indices stay stable).
     for (int removed = 0; removed < instructionsToRemove; ++removed) {
         block.RemoveInstructionAt(
             static_cast<std::size_t>(pos) + 1
             + static_cast<std::size_t>(instructionsToRemove - 1 - removed));
     }
-    block.Instructions[static_cast<std::size_t>(pos)] = std::make_unique<StLoc>(
-        stloc->Variable, std::move(initializerBlock));
+    block.SetChild(static_cast<int>(pos), std::make_unique<StLoc>(
+        stloc->Variable, std::move(initializerBlock)));
     // The C# ILVariable maintains its LoadInstructions/StoreCount lists on
     // every tree mutation, so after the RemoveRange the consumed ldelema
     // loads are gone and InlineIfPossible sees the live counts. The port's
@@ -407,10 +406,13 @@ void TransformArrayInitializers::Run(Block& block, int pos,
     // same recompute ILInlining::Run performs before its inline passes).
     ComputeVariableUsage(*function);
     context.Base.StepOnce("TransformArrayInitializers done");
-    // The C# `ILInlining.InlineIfPossible(body, pos, context)` — the port's
+    // The C# `ILInlining.InlineIfPossible(body, pos, context)` -- the port's
     // InlineOneIfPossible (the C# InlineIfPossible wraps the aggressive
     // options).
     InlineOneIfPossible(&block, pos, context.Base);
+#ifndef NDEBUG
+    block.CheckInvariant(ILPhase::Normal);
+#endif
 }
 
 } // namespace ILSpy::Decompiler::IL

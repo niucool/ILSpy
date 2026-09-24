@@ -938,14 +938,15 @@ void TransformCollectionAndObjectInitializers::Run(
     }
     // Do not convert the statements into an initializer if there's an
     // incompatible usage of the initializer variable directly after the
-    // possible initializer. The IStatementTransform invariant (the last
-    // instruction always has EndPointUnreachable) keeps pos + count + 1 in
-    // bounds -- the C# relies on the same bound-free access.
+    // possible initializer (the C# `block.Instructions[pos + count + 1]`).
+    // The C# reads this index unguarded; the port bounds-checks it (a
+    // boundary hit means there is no following use to reject on).
+    const int usageIndex = pos + initializerItemsCount + 1;
     if (!initializerContainsInitOnlyItems &&
+        usageIndex >= 0 &&
+        usageIndex < static_cast<int>(block.Instructions.size()) &&
         IsMethodCallOnVariable(
-            block.Instructions[static_cast<std::size_t>(
-                                   pos + initializerItemsCount + 1)]
-                .get(),
+            block.Instructions[static_cast<std::size_t>(usageIndex)].get(),
             v))
         return;
     // Calculate the correct number of statements inside the initializer:
