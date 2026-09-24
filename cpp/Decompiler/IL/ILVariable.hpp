@@ -60,6 +60,11 @@ public:
     // the catch variable. Mirrors ILVariable.HasGeneratedName.
     bool HasGeneratedName = false;
 
+    // The C# `public bool UsesInitialValue` (ILVariable.cs): whether the
+    // variable's initial value is read before being overwritten (set by the
+    // SROA/initializer paths; RemoveDeadVariableInit resets it).
+    bool UsesInitialValue = false;
+
     // True if the variable is written exactly once and its address is never
     // taken (ILVariable.IsSingleDefinition).
     bool IsSingleDefinition() const noexcept {

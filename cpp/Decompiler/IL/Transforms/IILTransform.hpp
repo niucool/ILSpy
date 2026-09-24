@@ -100,6 +100,12 @@ struct ILTransformSettings {
     // settings.LocalFunctions, default true; gates LocalFunctionDecompiler --
     // not yet in the pipeline, the transform shell lands first).
     bool LocalFunctions = true;
+    // Whether scalar replacement of aggregates may drop the display-class
+    // gates (the C# settings.AggressiveScalarReplacementOfAggregates,
+    // default false) -- with it on, any struct/class-kind local is a SROA
+    // candidate; with it off, only compiler-generated display classes in the
+    // decompiled type's own nesting tree qualify.
+    bool AggressiveScalarReplacementOfAggregates = false;
     // Whether to recover array/collection/object initializers (and the
     // compiler-generated ReadOnlySpan<char> cache Roslyn emits for a
     // multi-byte array literal on frameworks without RuntimeHelpers.
