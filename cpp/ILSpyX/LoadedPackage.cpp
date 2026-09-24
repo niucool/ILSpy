@@ -22,6 +22,10 @@
 
 #include "ILSpyX/LoadedPackage.hpp"
 
+#include "ILSpyX/AssemblyList.hpp"
+#include "ILSpyX/LoadedAssemblyExtensions.hpp"
+#include "Decompiler/Metadata/AssemblyNameReference.hpp"
+
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
@@ -37,6 +41,23 @@ namespace ILSpy::ILSpyX {
 namespace Sfb = ILSpy::Decompiler::SingleFileBundle;
 
 namespace {
+
+// The C# string.Equals(..., StringComparison.OrdinalIgnoreCase).
+bool OrdinalIgnoreCaseEquals(const std::string& a, const std::string& b)
+{
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        const auto lower = [](char c) {
+            return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+        };
+        if (lower(a[i]) != lower(b[i])) {
+            return false;
+        }
+    }
+    return true;
+}
 
 // The C# `SplitName`: the (directory, file-name) split on the LAST
 // separator of either kind.
@@ -288,21 +309,20 @@ LoadedPackage::LoadedPackage(PackageKind kind,
     std::vector<std::shared_ptr<PackageEntry>> entries)
     : kind_(kind), entries_(std::move(entries))
 {
-    auto rootFolder = std::make_shared<PackageFolder>("");
+    auto rootFolder = std::make_shared<PackageFolder>(*this, nullptr, "");
     std::map<std::string, PackageFolder*> folders;
     folders.emplace("", rootFolder.get());
 
     // The C# local function GetFolder(name): recursively materialize the
     // parent chain, then register the folder.
-    auto getFolder = [&folders](const std::string& name,
+    auto getFolder = [this, &folders](const std::string& name,
                              const auto& self) -> PackageFolder* {
         auto it = folders.find(name);
         if (it != folders.end())
             return it->second;
         auto [dirname, basename] = SplitName(name);
         PackageFolder* parent = self(dirname, self);
-        auto folder = std::make_shared<PackageFolder>(basename);
-        folder->parent_ = parent;
+        auto folder = std::make_shared<PackageFolder>(*this, parent, basename);
         PackageFolder* result = folder.get();
         parent->folders_.push_back(std::move(folder));
         folders.emplace(name, result);
@@ -375,6 +395,87 @@ std::shared_ptr<LoadedPackage> LoadedPackage::FromBundle(
         // std::runtime_error (see SingleFileBundle.hpp); the same catch.
         return nullptr;
     }
+}
+
+// ---------------------------------------------------------------------------
+// The PackageFolder IAssemblyResolver half (the C# PackageFolder's
+// Resolve / ResolveModule / ResolveFileName).
+
+PackageFolder::PackageFolder(LoadedPackage& package, PackageFolder* parent,
+    std::string name)
+    : name_(std::move(name)), parent_(parent), package_(&package)
+{
+}
+
+// The out-of-line dtor: the entry cache owns LoadedAssembly instances
+// (complete only here).
+PackageFolder::~PackageFolder() = default;
+
+const Decompiler::Metadata::MetadataFile* PackageFolder::Resolve(
+    const Decompiler::Metadata::IAssemblyReference& reference) const
+{
+    if (LoadedAssembly* asm_ = ResolveFileName(reference.Name() + ".dll")) {
+        return asm_->GetMetadataFileOrNull();
+    }
+    return parent_ != nullptr ? parent_->Resolve(reference) : nullptr;
+}
+
+const Decompiler::Metadata::MetadataFile* PackageFolder::ResolveModule(
+    const Decompiler::Metadata::MetadataFile& mainModule,
+    const std::string& moduleName) const
+{
+    (void)mainModule;
+    if (LoadedAssembly* asm_ = ResolveFileName(moduleName + ".dll")) {
+        return asm_->GetMetadataFileOrNull();
+    }
+    return parent_ != nullptr ? parent_->ResolveModule(mainModule, moduleName)
+                              : nullptr;
+}
+
+LoadedAssembly* PackageFolder::ResolveFileName(const std::string& name) const
+{
+    if (package_->GetLoadedAssembly() == nullptr) {
+        return nullptr;
+    }
+    const LoadedAssembly& wrapper = *package_->GetLoadedAssembly();
+    std::lock_guard<std::mutex> lock(assembliesMutex_);
+    // The C# cache stores the misses too (the null values are cached).
+    const auto cached = resolvedAssemblies_.find(name);
+    if (cached != resolvedAssemblies_.end()) {
+        return cached->second.get();
+    }
+    LoadedAssembly* result = nullptr;
+    for (const auto& entry : entries_) {
+        // The C# Entries.FirstOrDefault(OrdinalIgnoreCase name match).
+        if (OrdinalIgnoreCaseEquals(name, entry->Name())) {
+            // The C# constructs the wrapper with the entry's stream (the
+            // deferred TryOpenStream task), the list's loader registry,
+            // this folder as the resolver, and the list flags.
+            LoadedAssembly::Options options;
+            options.FileLoaders = wrapper.GetAssemblyList().LoaderRegistry();
+            options.AssemblyResolver = this;
+            options.Stream = [entry] { return entry->TryOpenStream(); };
+            options.ApplyWinRTProjections =
+                wrapper.GetAssemblyList().ApplyWinRTProjections();
+            options.UseDebugSymbols =
+                wrapper.GetAssemblyList().UseDebugSymbols();
+            // The C# constructs through the LoadedAssembly bundle ctor
+            // (`new LoadedAssembly(package.LoadedAssembly, entry.Name,
+            // ...)`); the instance is NOT added to the list (the C#
+            // constructs it directly, not through OpenAssembly). The
+            // cache owns it -- the C# GC does.
+            auto owned = std::make_shared<LoadedAssembly>(
+                const_cast<LoadedAssembly&>(wrapper), entry->Name(),
+                std::move(options));
+            result = owned.get();
+            resolvedAssemblies_.emplace(name, std::move(owned));
+            break;
+        }
+    }
+    if (result == nullptr) {
+        resolvedAssemblies_.emplace(name, nullptr);
+    }
+    return result;
 }
 
 }  // namespace ILSpy::ILSpyX

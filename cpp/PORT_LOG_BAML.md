@@ -525,3 +525,103 @@ after the crash fixes on branch `cpp`:
   produce output; the Phase 5 seed-shape and capability gaps account for
   them), 15 PORT-FAIL(1) (the metadata-only-module gap, unchanged), 3
   BOTH-FAIL-IDENTICAL.
+---
+
+# The LoadedAssembly pipeline (the Phase 8 deferral)
+
+The fifth assignment: the LoadedAssembly pipeline -- LoadedAssembly,
+AssemblyList (+ manager), AssemblyListSnapshot, the resolver
+integration, and the LoadedPackage resolver half. Four commits, TDD
+per slice, sweep + ASan per slice, no product code outside the new
+surface.
+
+## Slices
+
+1. **LoadedAssembly core + AssemblyList open/find** (`e37ff8b77`): the
+   lazy load pipeline (the C# `Lazy<Task<LoadResult>>` + `Task.Run`
+   collapses to a synchronous guarded-once load -- the port has no Task
+   analogue), the status surface (IsLoaded / IsLoadedAsValidAssembly /
+   HasLoadError -- polling never triggers, the Lazy.IsValueCreated
+   contract), the display Text, the TFM detection + override
+   normalization, the Loaded event (once, not retroactive), and the
+   ConditionalWeakTable reverse map (a process-wide registry whose
+   entries the destructor erases -- the C# weak-key cleanup).
+   **The failure-message mapping**: the port's never-throwing
+   MetadataFile (IsValid() instead of the PEFile ctor throw) maps back
+   to the C# BadImageFormatException ladder inside the load core,
+   re-derived from the image bytes in PEReader's stage order -- the
+   messages pinned by probing the oracle with ilspycmd: a non-PE blob
+   -> "Unknown file format."; a short/garbage-offset MZ blob -> "Image
+   is either too small or contains an invalid byte offset or count.";
+   an in-range e_lfanew without the PE signature -> "Invalid PE
+   signature."; and a metadata-less PE -> "PE file does not contain any
+   managed metadata." (the MetadataFileNotSupportedException default;
+   the corrupt-metadata stage merges into this one -- the port cannot
+   distinguish a missing CLR directory from corrupt metadata bytes).
+   FileLoadContext.ParentBundle now carries the C# LoadedAssembly
+   wrapper (the loaders read the nullness only).
+2. **The resolver integration** (`975d1a760`): MyAssemblyResolver with
+   the C# ResolveCoreAsync step order (the provided resolver, the
+   tfm+full-name snapshot match, the universal-resolver search arm with
+   OpenAssembly/FindAssembly, the similar-name fallback) and the exact
+   ReferenceLoadInfo messages; the lazy universal resolver (one
+   instance, the first call's winrt flag); AssemblyListSnapshot with
+   the tfm-normalized exact-match lookup (the v4.x collapse) and the
+   version-ordered short-name groups.
+3. **The mutators + manager** (`acdbab5f5`): Unload/Clear/Move (the
+   index-decrement rule)/Sort/Reload/HotReplace, RefreshSave ->
+   SaveList through the manager, the AssemblyListManager registry over
+   ISettingsProvider (the stored-XML ctor, replace-or-append saves,
+   Clone/Rename via the C# copy-ctor semantics -- the assemblies
+   adopted shared, byFilename deliberately not copied), and the
+   framework-directory filter (the DiaSymReader/_cor3 exclusions, the
+   upper-case-first rule). Two C# mechanics mapped explicitly: the
+   BeginInvoke deferral becomes "run the save after the list lock
+   scope" (SaveAsXml takes the same non-reentrant lock), and mutating
+   a <List> element inside its live Elements() range hangs the lazy
+   sequence (locate first, mutate after).
+4. **The package half + extensions** (`ed16ceec3`): PackageFolder's
+   ResolveFileName (the on-demand entry wrappers through the bundle
+   ctor + the deferred stream provider, the OrdinalIgnoreCase cache
+   with misses cached), Resolve/ResolveModule, the snapshot
+   GetAllAssemblies recursion (package wrappers excluded, .dll/.exe
+   entries on their containing folders, faulted loads included), the
+   deferred debug-info half (FromFile-then-LoadSymbols under
+   useDebugSymbols), GetTypeSystemOrNull (the uncached
+   SimpleCompilation over MinimalCorlib, cached, options-keyed), and
+   the LoadedAssemblyExtensions free functions (GetLoadedAssembly
+   throwing the C# message, the resolver pair, GetDebugInfoOrNull,
+   GetTypeSystemOrNull).
+
+## Documented divergences
+
+* The async surface (Task/Lazy<Task>/ContinueWith) ports as a
+  synchronous lazy load; IsLoaded loses the in-flight window, the
+  Loaded event fires inline after the load, and the ResolveAsync /
+  ResolveModuleAsync pair stays deferred (the AssemblyNameReference
+  precedent).
+* The universal resolver's FindAssemblyFile arm is exercised only
+  indirectly in the tests (nothing on this host's GAC/dotnet layout
+  resolves the fixtures); the OpenAssembly/FindAssembly split behind
+  it is pinned through ResolveModule.
+* GetTypeSystemWithDecompilerSettingsOrNull is deferred (needs
+  DecompilerTypeSystem.GetOptions, a Phase 5 piece);
+  CreateCecilObjectModel is dropped with the Mono.Cecil bridge.
+* The C# testing-only AssemblyList ctor leaves the manager null, so a
+  testing list cannot load zip/bundle entries through the registry --
+  the port preserves this (the zip tests use manager-based lists).
+* Thread affinity (ownerThread/VerifyAccess), the
+  SynchronizationContext dispatch, and the ETW instrumentation do not
+  port; the list stays internally locked.
+* IsIncludedFrameworkFile reads fileName[0] unguarded in the C# (an
+  empty name would throw); the port guards it to false.
+
+## Verification
+
+Each slice: compile-fail RED, then GREEN, then the full-suite sweep
+(the baseline failure set byte-identical before/after; +59 tests / +7
+suites total) and an ASan run of the new surface (clean after fixing
+the two issues ASan caught: the Unload flag-after-erase use-after-free,
+and the Elements()-range mutation hang caught as a live-lock in the
+sweep). Net: 12,391 tests / 818 suites in the filtered sweep, the
+same baseline failure set as the untouched tree.

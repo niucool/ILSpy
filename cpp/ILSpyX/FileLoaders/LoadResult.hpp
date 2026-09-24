@@ -35,9 +35,9 @@
 //    bundle and archive loaders) read the name, exactly as the C# does
 //    with its streams.
 //  * The C# `FileLoadContext.ParentBundle` carries the LoadedAssembly
-//    wrapping the bundle; the loaders only read its nullness, so the port
-//    carries the LoadedPackage itself (the LoadedAssembly wrapper is a
-//    documented deferral -- see LoadedPackage.hpp).
+//    wrapping the bundle; the port carries the same wrapper (raw pointer
+//    -- the loaders only read its nullness, and the wrapper is owned by
+//    the caller's AssemblyList).
 //  * DEFERRED: WebCilFileLoader (WebCilFile.FromFile -- the WebCIL
 //    container reader is a Phase 1 gap the port has not filled) and
 //    MetadataFileLoader (MetadataReaderProvider.FromMetadataStream -- the
@@ -57,6 +57,14 @@
 #include <optional>
 #include <string>
 
+namespace ILSpy::ILSpyX {
+
+// The C# `LoadedAssembly` (LoadedAssembly.hpp) -- forward-declared: the
+// load context carries the wrapper the bundle entry loads belong to.
+class LoadedAssembly;
+
+}  // namespace ILSpy::ILSpyX
+
 namespace ILSpy::ILSpyX::FileLoaders {
 
 // The C# `public sealed class LoadResult`.
@@ -75,7 +83,10 @@ struct LoadResult {
 // LoadedAssembly? ParentBundle)`.
 struct FileLoadContext {
     bool ApplyWinRTProjections = false;
-    std::shared_ptr<LoadedPackage> ParentBundle;
+    // The bundle wrapper (null outside a bundle); the loaders read the
+    // nullness only. Raw pointer: the wrapper is owned by the caller's
+    // AssemblyList, which outlives every load it drives.
+    const LoadedAssembly* ParentBundle = nullptr;
 };
 
 // The C# `public interface IFileLoader`.

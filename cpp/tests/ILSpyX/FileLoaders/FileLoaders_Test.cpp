@@ -20,6 +20,7 @@
 // registry's default population and precedence, each ported loader's
 // claim/gate contract, and the XALZ header-validation matrix.
 
+#include "ILSpyX/AssemblyList.hpp"
 #include "ILSpyX/FileLoaders/ArchiveFileLoader.hpp"
 #include "ILSpyX/FileLoaders/BundleFileLoader.hpp"
 #include "ILSpyX/FileLoaders/FileLoaderRegistry.hpp"
@@ -312,9 +313,13 @@ TEST(BundleFileLoaderTest, ClaimsBundlesByFileNameAndHonorsParentBundle)
     EXPECT_EQ(result->Package->Entries()[0]->Name(), "app.dll");
 
     // The ParentBundle guard: a loader invoked from inside a bundle
-    // declines.
+    // declines. The guard reads the LoadedAssembly wrapper (the C#
+    // FileLoadContext.ParentBundle), so load the bundle through a list to
+    // obtain one.
+    ILSpy::ILSpyX::AssemblyList list;
+    auto& bundleAsm = list.OpenAssembly(bundlePath);
     FileLoadContext inside;
-    inside.ParentBundle = result->Package;
+    inside.ParentBundle = &bundleAsm;
     EXPECT_EQ(loader.Load(bundlePath, image.data(), image.size(), inside),
         std::nullopt);
 }
@@ -353,9 +358,11 @@ TEST(ArchiveFileLoaderTest, ClaimsZipsAndHonorsParentBundle)
                    context),
         std::nullopt);
 
-    // The ParentBundle guard.
+    // The ParentBundle guard (the wrapper the zip was loaded through).
+    ILSpy::ILSpyX::AssemblyList list;
+    auto& zipAsm = list.OpenAssembly(zipPath);
     FileLoadContext inside;
-    inside.ParentBundle = result->Package;
+    inside.ParentBundle = &zipAsm;
     EXPECT_EQ(loader.Load(zipPath, placeholder.data(), placeholder.size(), inside),
         std::nullopt);
 }
