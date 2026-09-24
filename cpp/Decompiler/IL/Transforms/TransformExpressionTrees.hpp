@@ -232,6 +232,22 @@ public:
     ConvertResult ConvertLogicOperator(Call* invocation, bool isAnd);
     ConvertResult ConvertInvoke(Call* invocation);
 
+    // The C# `(Func<ILInstruction>, IType) ConvertUnaryNumericOperator(
+    // CallInstruction, BinaryNumericOperator op, bool? isChecked)` (the
+    // "Negate"/"NegateChecked" names -- the zero-operand fold over the
+    // operand's underlying stack type) and ConvertNewObject (the "New" arm:
+    // the 1-arg type-token scan, the 1-arg ctor token, and the 2-arg
+    // ctor-token + argument-list forms) with its
+    // MatchGetConstructorFromHandle helper (the castclass ConstructorInfo
+    // shape).
+    ConvertResult ConvertUnaryNumericOperator(
+        Call* invocation, BinaryNumericOperator op, bool isChecked);
+    ConvertResult ConvertNewObject(Call* invocation);
+    static bool MatchGetConstructorFromHandle(
+        ILInstruction* inst,
+        std::shared_ptr<const ::ILSpy::Decompiler::TypeSystem::IMethod>&
+            member);
+
     // The C# `(Func<ILInstruction>, IType) ConvertField(CallInstruction,
     // IType typeHint)` and its MatchGetFieldFromHandle helper (the
     // FieldInfo.GetFieldFromHandle(ldmembertoken field) shape -- the token's

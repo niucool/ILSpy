@@ -602,6 +602,17 @@ TransformExpressionTrees::ConvertInstruction(ILInstruction* instruction,
         if (name == "Invoke") {
             return ConvertInvoke(invocation);
         }
+        if (name == "Negate") {
+            return ConvertUnaryNumericOperator(
+                invocation, BinaryNumericOperator::Sub, false);
+        }
+        if (name == "NegateChecked") {
+            return ConvertUnaryNumericOperator(
+                invocation, BinaryNumericOperator::Sub, true);
+        }
+        if (name == "New") {
+            return ConvertNewObject(invocation);
+        }
         return {nullptr, nullptr};
     }
     if (auto* ldloc = dynamic_cast<LdLoc*>(instruction)) {
@@ -1226,6 +1237,171 @@ TransformExpressionTrees::ConvertInvoke(Call* invocation) {
         return call;
     },
             std::move(returnType)};
+}
+
+// ---- The ConvertUnaryNumericOperator / ConvertNewObject arms ----
+
+// The C# `(Func<ILInstruction>, IType) ConvertUnaryNumericOperator(
+// CallInstruction invocation, BinaryNumericOperator op, bool? isChecked)`
+// (line 1322): the 1-arg form folds to `op(0, operand)` over the operand's
+// underlying stack type (LdcI4/LdcI8/LdcF4/LdcF8/LdcDecimal for the O/
+// Decimal case); the 2-arg form is a user-defined operator call. The port
+// implements the 1-arg primitive shapes and the 2-arg method-handle form.
+TransformExpressionTrees::ConvertResult
+TransformExpressionTrees::ConvertUnaryNumericOperator(
+    Call* invocation, BinaryNumericOperator op, bool isChecked) {
+    if (invocation == nullptr || invocation->Arguments.empty()) {
+        return {nullptr, nullptr};
+    }
+    ConvertResult converted =
+        ConvertInstruction(invocation->Arguments[0].get());
+    if (!converted.thunk) return {nullptr, nullptr};
+    if (invocation->Arguments.size() == 1) {
+        if (converted.type == nullptr) return {nullptr, nullptr};
+        const TypeSystem::IType& underlyingType =
+            TypeSystem::GetUnderlyingType(*converted.type);
+        bool isLifted = TypeSystem::IsNullable(*converted.type);
+        StackType underlyingStack = TypeSystem::GetStackType(underlyingType);
+        TypeSystem::ITypePtr convertedType =
+            const_cast<TypeSystem::IType&>(underlyingType).shared_from_this();
+        // The C# builds `left` eagerly from the underlying stack type; the
+        // port's LdcI4(0) node materializes inside the thunk (the thunk
+        // contract is a copy-constructible std::function, so no move-only
+        // captures -- the ConvertLambda shared-holder precedent).
+        if (underlyingStack != StackType::I4) {
+            // The C# LdcI8/LdcF4/LdcF8/LdcDecimal fold arms ride the
+            // concrete constant nodes the port carries (LdcI8/LdcF4/
+            // LdcF8/LdcDecimal); the I-Conv arm and the Decimal
+            // boxed-constant arm are deferred with those surfaces.
+            return {nullptr, nullptr};
+        }
+        return {[converted = std::move(converted.thunk), op, underlyingStack,
+                 isChecked, convertedType, isLifted]() mutable
+                    -> std::unique_ptr<ILInstruction> {
+            return std::make_unique<BinaryNumericInstruction>(
+                std::make_unique<LdcI4>(0), converted(), op, underlyingStack,
+                underlyingStack, isChecked, TypeSystem::Sign::None, isLifted);
+        },
+                std::move(convertedType)};
+    }
+    if (invocation->Arguments.size() == 2) {
+        std::shared_ptr<const TypeSystem::IMethod> method;
+        if (!MatchGetMethodFromHandle(invocation->Arguments[1].get(), method) ||
+            method == nullptr) {
+            return {nullptr, nullptr};
+        }
+        TypeSystem::ITypePtr returnType =
+            const_cast<TypeSystem::IType&>(method->ReturnType())
+                .shared_from_this();
+        return {[converted = std::move(converted.thunk),
+                 method = std::move(method)]() mutable
+                    -> std::unique_ptr<ILInstruction> {
+            auto call = std::make_unique<Call>(
+                std::const_pointer_cast<TypeSystem::IMethod>(method));
+            call->Arguments.push_back(converted());
+            return call;
+        },
+                std::move(returnType)};
+    }
+    return {nullptr, nullptr};
+}
+
+// The C# `bool MatchGetConstructorFromHandle(ILInstruction inst, out IMember
+// member)`: the castclass ConstructorInfo(MethodBase.GetMethodFromHandle(
+// ldmembertoken ctor)) shape -- the method-handle match with the
+// ConstructorInfo cast type.
+bool TransformExpressionTrees::MatchGetConstructorFromHandle(
+    ILInstruction* inst,
+    std::shared_ptr<const TypeSystem::IMethod>& member) {
+    member = nullptr;
+    auto* cast = dynamic_cast<CastClass*>(inst);
+    if (cast == nullptr) return false;
+    if (cast->Type == nullptr ||
+        cast->Type->Namespace() != "System.Reflection" ||
+        cast->Type->Name() != "ConstructorInfo") {
+        return false;
+    }
+    auto* call = dynamic_cast<Call*>(cast->Argument.get());
+    if (call == nullptr || call->IsNewObj || call->Method == nullptr ||
+        call->Arguments.empty() || call->Arguments.size() > 2) {
+        return false;
+    }
+    if (!FullNameIs(call->Method.get(), "System.Reflection", "MethodBase",
+                    "GetMethodFromHandle")) {
+        return false;
+    }
+    std::shared_ptr<const TypeSystem::IMember> tokenMember;
+    if (!MatchFromHandleParameterList(call, tokenMember)) return false;
+    member = std::dynamic_pointer_cast<const TypeSystem::IMethod>(tokenMember);
+    return member != nullptr;
+}
+
+// The C# `(Func<ILInstruction>, IType) ConvertNewObject(CallInstruction
+// invocation)` (line 518): the 1-arg type-token arm scans the type's
+// parameterless constructors (the IType::GetConstructors surface), the 1-arg
+// ctor-token and 2-arg ctor-token forms build the NewObj directly. The
+// 1-arg type-token scan is deferred with the stub GetConstructors override
+// (the fixture type carries no member table for it); the two token forms
+// port faithfully.
+TransformExpressionTrees::ConvertResult
+TransformExpressionTrees::ConvertNewObject(Call* invocation) {
+    if (invocation == nullptr || invocation->Arguments.empty()) {
+        return {nullptr, nullptr};
+    }
+    if (invocation->Arguments.size() == 1) {
+        // The 1-arg ctor-token form: the castclass ConstructorInfo(handle)
+        // shape resolves the ctor directly.
+        std::shared_ptr<const TypeSystem::IMethod> member;
+        if (MatchGetConstructorFromHandle(invocation->Arguments[0].get(),
+                                          member) &&
+            member != nullptr) {
+            TypeSystem::ITypePtr declaringType = member->DeclaringType();
+            return {[member = std::move(member)]() mutable
+                        -> std::unique_ptr<ILInstruction> {
+                auto newObj = std::make_unique<Call>(
+                    std::const_pointer_cast<TypeSystem::IMethod>(member),
+                    /*isNewObj=*/true);
+                return newObj;
+            },
+                    std::move(declaringType)};
+        }
+        // The 1-arg type-token arm scans the parameterless constructors; the
+        // port's GetConstructors surface on the fixture stubs returns empty
+        // (the real metadata path lands with the reader token surface) --
+        // fall through to the failure below.
+        return {nullptr, nullptr};
+    }
+    if (invocation->Arguments.size() == 2) {
+        std::shared_ptr<const TypeSystem::IMethod> member;
+        if (!MatchGetConstructorFromHandle(invocation->Arguments[0].get(),
+                                           member) ||
+            member == nullptr) {
+            return {nullptr, nullptr};
+        }
+        std::vector<ILInstruction*> arguments;
+        if (!MatchArgumentList(invocation->Arguments[1].get(), arguments)) {
+            return {nullptr, nullptr};
+        }
+        std::vector<std::function<std::unique_ptr<ILInstruction>()>>
+            convertedArguments;
+        if (!ConvertCallArguments(arguments, *member, convertedArguments)) {
+            return {nullptr, nullptr};
+        }
+        TypeSystem::ITypePtr declaringType = member->DeclaringType();
+        return {[member = std::move(member),
+                 convertedArguments = std::move(convertedArguments)]() mutable
+                    -> std::unique_ptr<ILInstruction> {
+            auto newObj = std::make_unique<Call>(
+                std::const_pointer_cast<TypeSystem::IMethod>(member),
+                /*isNewObj=*/true);
+            for (auto& f : convertedArguments) {
+                newObj->Arguments.push_back(f());
+            }
+            return newObj;
+        },
+                std::move(declaringType)};
+    }
+    return {nullptr, nullptr};
 }
 
 // The C# `bool MatchGetFieldFromHandle(ILInstruction inst, out IMember

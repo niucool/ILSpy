@@ -40,6 +40,7 @@
 #include "Decompiler/IL/Instructions/IsInst.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
+#include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ExpressionTreeCast.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
@@ -1252,4 +1253,173 @@ TEST(TransformExpressionTreesTest, ConvertInvokeResolvesTheInvokeMethod)
     ASSERT_EQ(call->Arguments.size(), 1u);
     auto* target = dynamic_cast<IL::LdNull*>(call->Arguments[0].get());
     ASSERT_NE(target, nullptr);
+}
+
+// The unary-numeric arm (the C# `case "Negate"`): the operand converts, and
+// the fold builds BinaryNumericInstruction(Sub, ldc 0, operand) over the
+// underlying type -- the C# `new BinaryNumericInstruction(op, left,
+// argument(), underlying stack types, checked, sign, isLifted)` shape.
+TEST(TransformExpressionTreesTest, ConvertNegateBuildsUnarySub)
+{
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto expressionDef = std::make_shared<TS::SimpleType>(TS::TopLevelTypeName(
+        std::string("System.Linq.Expressions"), std::string("Expression")));
+    TS::ITypePtr lambdaMethodReturnType =
+        std::make_shared<TS::ParameterizedType>(
+            expressionDef, std::vector<TS::ITypePtr>{intType});
+
+    auto constantCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Constant"));
+    constantCall->Arguments.push_back(std::make_unique<IL::LdcI4>(5));
+    {
+        auto typeToken = std::make_unique<IL::LdTypeToken>(
+            intType, std::string("System.Int32"));
+        auto inner = std::make_unique<IL::Call>(
+            std::make_shared<GetTypeFromHandleStub>());
+        inner->Arguments.push_back(std::move(typeToken));
+        constantCall->Arguments.push_back(std::move(inner));
+    }
+    auto negateCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Negate"));
+    negateCall->Arguments.push_back(std::move(constantCall));
+
+    auto lambdaCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Lambda",
+            lambdaMethodReturnType));
+    lambdaCall->Arguments.push_back(std::move(negateCall));
+    lambdaCall->Arguments.push_back(std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>("System", "Array", "Empty")));
+
+    auto block = std::make_unique<IL::Block>();
+    block->Kind = IL::BlockKind::ControlFlow;
+    block->Add(std::move(lambdaCall));
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.ExpressionTrees = true;
+    IL::StatementTransformContext driverCtx(ctx, block.get());
+    IL::TransformExpressionTrees transform;
+    transform.Run(*block, 0, driverCtx);
+
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* fn = dynamic_cast<IL::ILFunction*>(block->Instructions[0].get());
+    ASSERT_NE(fn, nullptr);
+    ASSERT_EQ(fn->Body->Blocks.size(), 1u);
+    auto* leave = dynamic_cast<IL::Leave*>(
+        fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_NE(leave, nullptr);
+    auto* binary = dynamic_cast<IL::BinaryNumericInstruction*>(
+        leave->Value.get());
+    ASSERT_NE(binary, nullptr)
+        << "the Negate expression becomes a Sub-over-zero binary";
+    EXPECT_EQ(binary->Operator, IL::BinaryNumericOperator::Sub);
+    EXPECT_FALSE(binary->CheckForOverflow);
+    EXPECT_FALSE(binary->IsLifted);
+    auto* zero = dynamic_cast<IL::LdcI4*>(binary->Left.get());
+    ASSERT_NE(zero, nullptr);
+    EXPECT_EQ(zero->Value, 0);
+    auto* operand = dynamic_cast<IL::LdcI4*>(binary->Right.get());
+    ASSERT_NE(operand, nullptr);
+    EXPECT_EQ(operand->Value, 5);
+}
+
+// The ConvertNewObject arm (the C# `case "New"`, the 2-arg ctor-token
+// form): `Expression.New(castclass ConstructorInfo(
+// MethodBase.GetMethodFromHandle(ldmembertoken ctor)), { args })` becomes a
+// NewObj over the converted arguments.
+TEST(TransformExpressionTreesTest, ConvertNewObjectBuildsNewObjFromCtorToken)
+{
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto constructorInfoType = std::make_shared<TS::SimpleType>(
+        TS::TopLevelTypeName(std::string("System.Reflection"),
+                             std::string("ConstructorInfo")));
+    auto expressionDef = std::make_shared<TS::SimpleType>(TS::TopLevelTypeName(
+        std::string("System.Linq.Expressions"), std::string("Expression")));
+    TS::ITypePtr lambdaMethodReturnType =
+        std::make_shared<TS::ParameterizedType>(
+            expressionDef, std::vector<TS::ITypePtr>{intType});
+    auto ctorMethod = std::make_shared<NamedMethodStub>(
+        "Test", "Widget", ".ctor", intType);
+
+    // The ctor handle: castclass ConstructorInfo(
+    //     MethodBase.GetMethodFromHandle(ldmembertoken ctor))
+    auto getMethodCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Reflection", "MethodBase", "GetMethodFromHandle"));
+    getMethodCall->Arguments.push_back(
+        std::make_unique<IL::LdMemberToken>(
+            ctorMethod, std::string("Test.Widget::.ctor")));
+    auto ctorHandle = std::make_unique<IL::CastClass>(
+        constructorInfoType, std::move(getMethodCall));
+
+    // The argument list: one converted int constant.
+    auto argConstant = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Constant"));
+    argConstant->Arguments.push_back(std::make_unique<IL::LdcI4>(7));
+    {
+        auto typeToken = std::make_unique<IL::LdTypeToken>(
+            intType, std::string("System.Int32"));
+        auto inner = std::make_unique<IL::Call>(
+            std::make_shared<GetTypeFromHandleStub>());
+        inner->Arguments.push_back(std::move(typeToken));
+        argConstant->Arguments.push_back(std::move(inner));
+    }
+    auto argListBlock = std::make_unique<IL::Block>();
+    argListBlock->Kind = IL::BlockKind::ArrayInitializer;
+    {
+        auto arrayType = intType;
+        auto ldnull = std::make_unique<IL::LdNull>();
+        auto index = std::make_unique<IL::LdcI4>(0);
+        std::vector<std::unique_ptr<IL::ILInstruction>> indices;
+        indices.push_back(std::move(index));
+        auto ldelema = std::make_unique<IL::LdElema>(
+            arrayType, std::move(ldnull), std::move(indices));
+        argListBlock->Add(std::make_unique<IL::StObj>(
+            std::move(ldelema), std::move(argConstant), intType));
+    }
+
+    auto newCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "New"));
+    newCall->Arguments.push_back(std::move(ctorHandle));
+    newCall->Arguments.push_back(std::move(argListBlock));
+
+    auto lambdaCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Lambda",
+            lambdaMethodReturnType));
+    lambdaCall->Arguments.push_back(std::move(newCall));
+    lambdaCall->Arguments.push_back(std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>("System", "Array", "Empty")));
+
+    auto block = std::make_unique<IL::Block>();
+    block->Kind = IL::BlockKind::ControlFlow;
+    block->Add(std::move(lambdaCall));
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.ExpressionTrees = true;
+    IL::StatementTransformContext driverCtx(ctx, block.get());
+    IL::TransformExpressionTrees transform;
+    transform.Run(*block, 0, driverCtx);
+
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* fn = dynamic_cast<IL::ILFunction*>(block->Instructions[0].get());
+    ASSERT_NE(fn, nullptr);
+    ASSERT_EQ(fn->Body->Blocks.size(), 1u);
+    auto* leave = dynamic_cast<IL::Leave*>(
+        fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_NE(leave, nullptr);
+    auto* newObj = dynamic_cast<IL::Call*>(leave->Value.get());
+    ASSERT_NE(newObj, nullptr)
+        << "the New expression converts to a NewObj";
+    EXPECT_TRUE(newObj->IsNewObj);
+    ASSERT_NE(newObj->Method, nullptr);
+    EXPECT_EQ(newObj->Method->Name(), ".ctor");
+    ASSERT_EQ(newObj->Arguments.size(), 1u);
+    auto* arg = dynamic_cast<IL::LdcI4*>(newObj->Arguments[0].get());
+    ASSERT_NE(arg, nullptr);
+    EXPECT_EQ(arg->Value, 7);
 }

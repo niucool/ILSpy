@@ -412,6 +412,37 @@ inline IL::StackType GetStackType(const IType& type) {
         default:
             break;
     }
+    // The KnownType stand-in (the reader/fixture type carrying its
+    // KnownTypeCode directly, with no ITypeDefinition behind it) resolves
+    // through its Code() -- the same answer the IsKnownType helper gives for
+    // the reader stand-in.
+    if (auto* known = dynamic_cast<const KnownType*>(&type)) {
+        switch (known->Code()) {
+            case KnownTypeCode::Boolean:
+            case KnownTypeCode::Char:
+            case KnownTypeCode::SByte:
+            case KnownTypeCode::Byte:
+            case KnownTypeCode::Int16:
+            case KnownTypeCode::UInt16:
+            case KnownTypeCode::Int32:
+            case KnownTypeCode::UInt32:
+                return StackType::I4;
+            case KnownTypeCode::Int64:
+            case KnownTypeCode::UInt64:
+                return StackType::I8;
+            case KnownTypeCode::Single:
+                return StackType::F4;
+            case KnownTypeCode::Double:
+                return StackType::F8;
+            case KnownTypeCode::Void:
+                return StackType::Void;
+            case KnownTypeCode::IntPtr:
+            case KnownTypeCode::UIntPtr:
+                return StackType::I;
+            default:
+                return StackType::O;
+        }
+    }
     const ITypeDefinition* typeDef = nullptr;
     if (const IType* underlying = GetEnumUnderlyingType(&type))
         typeDef = underlying->GetDefinition();
