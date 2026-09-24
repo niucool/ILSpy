@@ -591,6 +591,7 @@ add_executable(ilspy_tests
     Decompiler/IL/Transforms/IndexRangeTransform_Test.cpp
     Decompiler/IL/Transforms/TransformExpressionTrees_Test.cpp
     Decompiler/IL/Transforms/SwitchOnStringTransform_Test.cpp
+    Decompiler/IL/Transforms/SwitchOnStringHashtable_Test.cpp
     Decompiler/IL/Transforms/TransformDisplayClassUsage_Test.cpp
     Decompiler/IL/Transforms/LocalFunctionDecompiler_Test.cpp
     Decompiler/CSharp/Transforms/RemoveCompilerGeneratedAssemblyAttributes_Test.cpp

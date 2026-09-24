@@ -40,6 +40,7 @@
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/StringToInt.hpp"
+#include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/UnaryInstruction.hpp"
 #include "Decompiler/IL/ControlFlow/SwitchDetection.hpp"
@@ -49,6 +50,7 @@
 #include "Decompiler/Util/LongSet.hpp"
 
 #include <cassert>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -185,14 +187,44 @@ bool MatchStringEqualityComparisonFor(ILInstruction* condition,
                                       std::string& stringValue,
                                       bool& isVBCompareString);
 
+// The C# HashtableInitializer entry: the scanned init-block info for one
+// compiler-generated Hashtable field (keyed by the port's LdsFlda field
+// name; the C# keys by IField).
+struct HashtableInitializerInfo {
+    // The C# `List<(string, int)> Labels` -- the scan-extracted pairs.
+    std::vector<std::pair<std::optional<std::string>, int>> labels;
+    // The C# `IfInstruction JumpToNext` -- the init block's trailing
+    // second-to-last if (the next hashtable's null check), null when this
+    // is the last init block.
+    IfInstruction* jumpToNext = nullptr;
+    // The C# `Block ContainingBlock` -- the init block itself.
+    Block* containingBlock = nullptr;
+    // The C# `Block Previous` / `Block Next`.
+    Block* previous = nullptr;
+    Block* next = nullptr;
+    // The C# `bool Transformed` -- set once the arm folds the switch.
+    bool transformed = false;
+};
+
+bool MatchLegacySwitchOnStringWithHashtableImpl(
+    Block& block, int& i,
+    std::map<std::string, HashtableInitializerInfo>& hashtableInitializers,
+    ILTransformContext& context);
+
+std::map<std::string, HashtableInitializerInfo>
+ScanHashtableInitializerBlocks(Block* entryPoint);
+
 void SwitchOnStringTransform::Run(ILFunction& function,
                                   ILTransformContext& context) {
     if (!context.Settings.SwitchStatementOnString) return;
     auto* body = dynamic_cast<BlockContainer*>(function.Body.get());
     if (body == nullptr) return;
-    // The C# hashtable-initializer scan (ScanHashtableInitializerBlocks) and
-    // the legacy Dictionary/Hashtable arms are deferred with those shapes'
-    // surfaces; the Roslyn arms drive this slice.
+    // The C# ScanHashtableInitializerBlocks pre-scan: the entry block's
+    // null-check/init shape is walked once and the extracted (string, index)
+    // pairs are keyed by the compiler-generated field name so the Hashtable
+    // arm can consume them.
+    std::map<std::string, HashtableInitializerInfo> hashtableInitializers =
+        ScanHashtableInitializerBlocks(body->EntryPoint());
     std::vector<Block*> blocks;
     CollectBlocks(body, blocks);
     for (Block* block : blocks) {
@@ -200,6 +232,11 @@ void SwitchOnStringTransform::Run(ILFunction& function,
         bool changed = false;
         for (int i = static_cast<int>(block->Instructions.size()) - 1; i >= 0; i--) {
             if (SimplifyCSharp1CascadingIfStatements(*block, i, context)) {
+                changed = true;
+                continue;
+            }
+            if (MatchLegacySwitchOnStringWithHashtableImpl(
+                    *block, i, hashtableInitializers, context)) {
                 changed = true;
                 continue;
             }
@@ -1862,6 +1899,377 @@ bool MatchLegacySwitchOnStringWithDictImpl(Block& block, int& i,
 }
 
 // (the legacy-Dictionary section ends here)
+// ---- The legacy Hashtable arm (ScanHashtableInitializerBlocks +
+// MatchLegacySwitchOnStringWithHashtable) -----------------------------------
+
+// The C# `HashtableInitializer ScanHashtableInitializerBlocks(Block
+// entryPoint)`: walk the entry block's null-check/init chain and record the
+// extracted (string, index) pairs per compiler-generated Hashtable field.
+// The chain continues through each init block's second-to-last if (the next
+// hashtable's null check branching to the same switch head); the map is
+// keyed by the port's LdsFlda field name (the C# keys by IField).
+std::map<std::string, HashtableInitializerInfo>
+ScanHashtableInitializerBlocks(Block* entryPoint) {
+    std::map<std::string, HashtableInitializerInfo> hashtables;
+    if (entryPoint == nullptr || entryPoint->Instructions.size() != 2) {
+        return hashtables;
+    }
+    ILInstruction* condition = nullptr;
+    ILInstruction* branchToSwitchHead = nullptr;
+    if (!MatchIfInstruction(entryPoint->Instructions[0].get(), condition,
+                            branchToSwitchHead)) {
+        return hashtables;
+    }
+    Block* tableInitBlock = nullptr;
+    if (!MatchBranch(entryPoint->Instructions[1].get(), tableInitBlock)) {
+        return hashtables;
+    }
+    // comp-not-equals(ldobj Hashtable(ldsflda field), ldnull)
+    auto* comp = dynamic_cast<Comp*>(condition);
+    if (comp == nullptr || comp->Kind != ComparisonKind::Inequality) {
+        return hashtables;
+    }
+    ILInstruction* left = comp->Left.get();
+    ILInstruction* right = comp->Right.get();
+    if (right == nullptr || !MatchLdNull(right)) return hashtables;
+    std::string dictFieldName;
+    TS::ITypePtr dictionaryType;
+    if (!MatchDictionaryFieldLoad(
+            left,
+            [](const TS::IType& t) { return IsNonGenericHashtable(t); },
+            dictFieldName, dictionaryType)) {
+        return hashtables;
+    }
+    Block* switchHead = nullptr;
+    if (!MatchBranch(branchToSwitchHead, switchHead)) return hashtables;
+    Block* previousBlock = entryPoint;
+    while (tableInitBlock != nullptr) {
+        if (tableInitBlock->IncomingEdgeCount != 1 ||
+            tableInitBlock->Instructions.size() < 3) {
+            break;
+        }
+        std::vector<std::pair<std::optional<std::string>, int>> stringValues;
+        Block* blockAfterThisInitBlock = nullptr;
+        std::string extractError;
+        if (!SwitchOnStringProbes::ExtractStringValuesFromInitBlock(
+                tableInitBlock, stringValues, blockAfterThisInitBlock,
+                [](const TS::IType& t) { return IsNonGenericHashtable(t); },
+                dictionaryType.get(), true, extractError)) {
+            break;
+        }
+        // The second-to-last instruction may be the next hashtable's null
+        // check (the multi-hashtable chain); the C# `SecondToLastOrDefault`.
+        IfInstruction* nextHashtableInitHead = nullptr;
+        if (tableInitBlock->Instructions.size() >= 2) {
+            nextHashtableInitHead = dynamic_cast<IfInstruction*>(
+                tableInitBlock
+                    ->Instructions[tableInitBlock->Instructions.size() - 2]
+                    .get());
+        }
+        HashtableInitializerInfo info;
+        info.labels = std::move(stringValues);
+        info.jumpToNext = nextHashtableInitHead;
+        info.containingBlock = tableInitBlock;
+        info.previous = previousBlock;
+        info.next = blockAfterThisInitBlock;
+        info.transformed = false;
+        hashtables[dictFieldName] = std::move(info);
+        previousBlock = tableInitBlock;
+        if (nextHashtableInitHead == nullptr) break;
+        // The chained init: the next field's null check must branch to the
+        // same switch head; continue the walk with the next init block.
+        ILInstruction* nextCondition = nullptr;
+        ILInstruction* nextBranch = nullptr;
+        if (!MatchIfInstruction(nextHashtableInitHead, nextCondition,
+                                nextBranch)) {
+            break;
+        }
+        auto* nextComp = dynamic_cast<Comp*>(nextCondition);
+        if (nextComp == nullptr ||
+            nextComp->Kind != ComparisonKind::Inequality ||
+            nextComp->Right == nullptr || !MatchLdNull(nextComp->Right.get())) {
+            break;
+        }
+        std::string nextFieldName;
+        TS::ITypePtr nextDictionaryType;
+        if (!MatchDictionaryFieldLoad(
+                nextComp->Left.get(),
+                [](const TS::IType& t) { return IsNonGenericHashtable(t); },
+                nextFieldName, nextDictionaryType)) {
+            break;
+        }
+        Block* nextSwitchHead = nullptr;
+        if (!MatchBranch(nextBranch, nextSwitchHead) ||
+            nextSwitchHead != switchHead) {
+            break;
+        }
+        tableInitBlock = blockAfterThisInitBlock;
+        dictFieldName = nextFieldName;
+        dictionaryType = nextDictionaryType;
+    }
+    return hashtables;
+}
+
+// The port-side AddNullSection over the fold's section list: the null-case
+// label sits after the highest scanned index; conflicting single-label
+// sections are rejected like the C# `possibleConflicts` arms.
+bool HashtableArmAddNullSection(
+    std::vector<std::unique_ptr<SwitchSection>>& sections,
+    const std::vector<std::pair<std::optional<std::string>, int>>&
+        stringValues,
+    std::unique_ptr<ILInstruction> body) {
+    int maxIndex = -1;
+    for (const auto& entry : stringValues) {
+        if (entry.second > maxIndex) maxIndex = entry.second;
+    }
+    Util::LongSet label(
+        Util::LongInterval(static_cast<long long>(maxIndex) + 1,
+                           static_cast<long long>(maxIndex) + 2));
+    std::vector<SwitchSection*> conflicts;
+    for (auto& section : sections) {
+        if (section->Labels.Overlaps(label)) conflicts.push_back(section.get());
+    }
+    if (conflicts.size() > 1) return false;
+    if (conflicts.size() == 1) {
+        if (conflicts[0]->Labels.Intervals().empty() ||
+            conflicts[0]->Labels.Count() == 1) {
+            return false;  // cannot remove the only label
+        }
+        conflicts[0]->Labels = conflicts[0]->Labels.ExceptWith(label);
+    }
+    sections.push_back(
+        MakeSection(std::move(label), std::move(body)));
+    return true;
+}
+
+// The C# `bool MatchLegacySwitchOnStringWithHashtable(Block block,
+// HashtableInitializers hashtableInitializers, ref int i)`: the 4-instruction
+// head + get_Item block + switch block fold, keyed by the scanned init-block
+// info.
+bool MatchLegacySwitchOnStringWithHashtableImpl(
+    Block& block, int& i,
+    std::map<std::string, HashtableInitializerInfo>& hashtableInitializers,
+    ILTransformContext& context) {
+    auto& instructions = block.Instructions;
+    // The C# `block.Instructions.Count != i + 4` -- the 4-shape must end the
+    // block's non-terminal instructions.
+    if (i < 0 || i + 4 != static_cast<int>(instructions.size())) {
+        return false;
+    }
+    // stloc tmp(ldloc switchValue); stloc switchVariable(ldloc tmp)
+    ILVariable* tmp = nullptr;
+    ILInstruction* switchValue = nullptr;
+    if (!MatchStLoc(instructions[i].get(), tmp, switchValue) || tmp == nullptr) {
+        return false;
+    }
+    ILVariable* switchVariable = nullptr;
+    ILInstruction* tmpLoad = nullptr;
+    if (!MatchStLoc(instructions[i + 1].get(), switchVariable, tmpLoad) ||
+        switchVariable == nullptr || tmpLoad == nullptr) {
+        return false;
+    }
+    {
+        auto* ld = dynamic_cast<LdLoc*>(tmpLoad);
+        if (ld == nullptr || ld->Variable.get() != tmp) return false;
+    }
+    // if (comp(ldloc tmp == ldnull)) br nullCaseBlock
+    ILInstruction* condition = nullptr;
+    ILInstruction* nullCaseBlockBranch = nullptr;
+    if (!MatchIfInstruction(instructions[i + 2].get(), condition,
+                            nullCaseBlockBranch)) {
+        return false;
+    }
+    auto* comp = dynamic_cast<Comp*>(condition);
+    if (comp == nullptr || comp->Kind != ComparisonKind::Equality ||
+        comp->Right == nullptr || !MatchLdNull(comp->Right.get())) {
+        return false;
+    }
+    {
+        ILVariable* loaded = nullptr;
+        if (!MatchLdLoc(comp->Left.get(), loaded) || loaded != tmp) {
+            return false;
+        }
+    }
+    if (i + 1 >= static_cast<int>(instructions.size())) return false;
+    Block* getItemBlock = nullptr;
+    if (!MatchBranch(instructions[i + 3].get(), getItemBlock)) return false;
+    Block* nullCaseBlock = nullptr;
+    BlockContainer* nullCaseLeave = nullptr;
+    const bool nullCaseIsLeave =
+        MatchLeave(nullCaseBlockBranch, nullCaseLeave);
+    if (!nullCaseIsLeave &&
+        !MatchBranch(nullCaseBlockBranch, nullCaseBlock)) {
+        return false;
+    }
+    // match second block: get_Item on the compiler-generated Hashtable
+    if (getItemBlock == nullptr || getItemBlock->IncomingEdgeCount != 1 ||
+        getItemBlock->Instructions.size() != 4) {
+        return false;
+    }
+    ILInstruction* getItem = nullptr;
+    {
+        ILVariable* tmp2 = nullptr;
+        if (!MatchStLoc(getItemBlock->Instructions[0].get(), tmp2, getItem) ||
+            tmp2 == nullptr) {
+            return false;
+        }
+        auto* getItemCall = dynamic_cast<Call*>(getItem);
+        if (getItemCall == nullptr) return false;
+        bool isGetItem = false;
+        if (getItemCall->Method != nullptr) {
+            isGetItem = getItemCall->Method->Name() == "get_Item";
+        } else {
+            const std::string& mn = getItemCall->MethodName;
+            isGetItem =
+                mn.size() > 2 && mn.substr(mn.rfind("::") + 2) == "get_Item";
+        }
+        if (!isGetItem) return false;
+        // The get_Item arguments: the field load + the switch variable load.
+        if (getItemCall->Arguments.size() != 2) return false;
+        std::string dictFieldName;
+        TS::ITypePtr dictionaryType;
+        if (!MatchDictionaryFieldLoad(
+                getItemCall->Arguments[0].get(),
+                [](const TS::IType& t) { return IsNonGenericHashtable(t); },
+                dictFieldName, dictionaryType)) {
+            return false;
+        }
+        auto found = hashtableInitializers.find(dictFieldName);
+        if (found == hashtableInitializers.end() || found->second.transformed) {
+            return false;
+        }
+        {
+            ILVariable* loaded = nullptr;
+            if (!MatchLdLoc(getItemCall->Arguments[1].get(), loaded) ||
+                loaded != switchVariable) {
+                return false;
+            }
+        }
+        // instructions[1]: stloc switchVariable2(ldloc tmp2)
+        ILVariable* switchVariable2 = nullptr;
+        ILInstruction* tmp2Load = nullptr;
+        if (!MatchStLoc(getItemBlock->Instructions[1].get(), switchVariable2,
+                        tmp2Load) ||
+            switchVariable2 == nullptr) {
+            return false;
+        }
+        {
+            auto* ld = dynamic_cast<LdLoc*>(tmp2Load);
+            if (ld == nullptr || ld->Variable.get() != tmp2) return false;
+        }
+        // instructions[2]: if (comp(ldloc tmp2 == ldnull)) br defaultBlock
+        ILInstruction* getItemCondition = nullptr;
+        ILInstruction* defaultBlockBranch = nullptr;
+        if (!MatchIfInstruction(getItemBlock->Instructions[2].get(),
+                                getItemCondition, defaultBlockBranch)) {
+            return false;
+        }
+        auto* getItemComp = dynamic_cast<Comp*>(getItemCondition);
+        if (getItemComp == nullptr ||
+            getItemComp->Kind != ComparisonKind::Equality ||
+            getItemComp->Right == nullptr ||
+            !MatchLdNull(getItemComp->Right.get())) {
+            return false;
+        }
+        {
+            ILVariable* loaded = nullptr;
+            if (!MatchLdLoc(getItemComp->Left.get(), loaded) ||
+                loaded != tmp2) {
+                return false;
+            }
+        }
+        // The C# `defaultBlockBranch.MatchBranch(out var defaultBlock) ||
+        // defaultBlockBranch is Leave`.
+        Block* defaultBlock = nullptr;
+        BlockContainer* defaultBlockLeave = nullptr;
+        if (!MatchBranch(defaultBlockBranch, defaultBlock) &&
+            !MatchLeave(defaultBlockBranch, defaultBlockLeave)) {
+            return false;
+        }
+        // instructions[3]: br switchBlock
+        Block* switchBlock = nullptr;
+        if (!MatchBranch(getItemBlock->Instructions[3].get(), switchBlock)) {
+            return false;
+        }
+        // match third block: the switch over the unboxed get_Item result
+        if (switchBlock == nullptr || switchBlock->IncomingEdgeCount != 1 ||
+            switchBlock->Instructions.size() != 1) {
+            return false;
+        }
+        auto* switchInst = dynamic_cast<SwitchInstruction*>(
+            switchBlock->Instructions[0].get());
+        if (switchInst == nullptr) {
+            return false;
+        }
+        auto* ldobj = dynamic_cast<LdObj*>(switchInst->Value.get());
+        if (ldobj == nullptr || ldobj->Type == nullptr) {
+            return false;
+        }
+        auto* unbox = dynamic_cast<UnboxAny*>(ldobj->Target.get());
+        if (unbox == nullptr || unbox->Type == nullptr ||
+            !unbox->Type->Equals(*ldobj->Type)) {
+            return false;
+        }
+        ILVariable* unboxed = nullptr;
+        if (!MatchLdLoc(unbox->Argument.get(), unboxed) ||
+            unboxed != switchVariable2) {
+            return false;
+        }
+        if (!TS::IsKnownType(*ldobj->Type, TS::KnownTypeCode::Int32)) {
+            return false;
+        }
+        // The fold: the StringToInt argument is tmp's value (moved out of the
+        // tmp store before the consumed range is erased); the map comes from
+        // the scan-extracted pairs.
+        std::unique_ptr<ILInstruction> argument;
+        if (switchValue != nullptr) {
+            auto* tmpStore = dynamic_cast<StLoc*>(instructions[i].get());
+            if (tmpStore != nullptr && tmpStore->Value.get() == switchValue) {
+                argument = tmpStore->TakeChild(0);
+            }
+        }
+        if (argument == nullptr && switchValue != nullptr) {
+            // The value could not be taken from the store (an unexpected
+            // shape); clone it instead (the C# GC reuses the raw reference).
+            argument = switchValue->Clone();
+        }
+        auto stringToInt = std::make_unique<StringToInt>(
+            std::move(argument),
+            FindType(context.TypeSystem, TS::KnownTypeCode::String));
+        for (const auto& entry : found->second.labels) {
+            stringToInt->Map.emplace_back(entry.first, entry.second);
+        }
+        auto newSwitch =
+            std::make_unique<SwitchInstruction>(std::move(stringToInt));
+        std::vector<std::unique_ptr<SwitchSection>> sections;
+        for (auto& section : switchInst->Sections) {
+            sections.push_back(std::move(section));
+        }
+        // The switch contains the null case: the C# `nullCaseBlock != null &&
+        // nullCaseBlock != defaultBlock` (the Leave form has no null block).
+        if (!nullCaseIsLeave && nullCaseBlock != nullptr &&
+            nullCaseBlock != defaultBlock) {
+            if (!HashtableArmAddNullSection(
+                    sections, found->second.labels,
+                    std::make_unique<Branch>(nullCaseBlock))) {
+                return false;
+            }
+        }
+        context.StepOnce("MatchLegacySwitchOnStringWithHashtable");
+        for (auto& section : sections) {
+            newSwitch->Sections.push_back(std::move(section));
+        }
+        newSwitch->StartILOffset = instructions[i]->StartILOffset;
+        newSwitch->EndILOffset = instructions[i]->EndILOffset;
+        ReplaceAt(block, i, std::move(newSwitch));
+        RemoveRange(block, i + 1, 3);
+        found->second.transformed = true;
+        return true;
+    }
+}
+
+// (the legacy-Hashtable section ends here)
+
 
 
 bool SwitchOnStringProbes::MatchLegacySwitchOnStringWithDict(
