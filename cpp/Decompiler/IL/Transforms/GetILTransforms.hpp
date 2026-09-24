@@ -49,6 +49,7 @@
 #include "Decompiler/IL/Transforms/HighLevelLoopTransform.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/Transforms/NamedArgumentTransform.hpp"
+#include "Decompiler/IL/Transforms/TransformArrayInitializers.hpp"
 #include "Decompiler/IL/Transforms/InlineReturnTransform.hpp"
 #include "Decompiler/IL/Transforms/InterpolatedStringTransform.hpp"
 #include "Decompiler/IL/Transforms/LdLocaDupInitObjTransform.hpp"
@@ -211,6 +212,12 @@ inline void RunGetILTransforms(ILFunction& function, ILTransformContext& context
         // UserDefinedLogicTransform: the lifted user-defined &&/||/
         // ?? operators on nullable operands (a later per-statement
         // child in the C# GetILTransforms() order).
+        // TransformArrayInitializers: the simple single-dim array
+        // initializer (the next per-statement child in the C#
+        // GetILTransforms() order, after NullPropagationStatementTransform;
+        // the multi-dim/jagged/blob/span arms are deferred with their
+        // surfaces). Gated on the ArrayInitializers setting.
+        statementTransform.AddChild(std::make_unique<TransformArrayInitializers>());
         // NamedArgumentTransform: the named-argument introduction for the
         // argument whose inlining is blocked by a sibling's side effects (the
         // next per-statement child in the C# GetILTransforms() order, after
