@@ -31,6 +31,8 @@
 #include "Decompiler/TypeSystem/ICompilation.hpp"
 #include "Decompiler/TypeSystem/INamespace.hpp"
 #include "Decompiler/TypeSystem/StringComparer.hpp"
+#include "Decompiler/TypeSystem/TypeProvider.hpp"
+#include "Decompiler/Metadata/CustomAttributeDecoder.hpp"
 #include "Decompiler/Util/CacheManager.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
@@ -338,6 +340,35 @@ TEST(CSharpDecompilerTest, DecompileModuleAndAssemblyAttributesRender)
 // property accessors ride the method iteration). The connid_res corpus
 // (MyApp.Page1, the XAML code-behind) carries at least one decodable
 // member set.
+// The decode-error shape (the C# TypeSystemAstBuilder.ConvertAttribute's
+// `HasDecodeErrors` arm: `HasArgumentList = true` plus the
+// `ErrorExpression("Could not decode attribute arguments.")`, which renders
+// purely as its comment): an attribute whose blob fails to decode (the
+// connid Debuggable row's enum argument resolves through a referenced core
+// library the connid-only compilation does not carry) renders as
+// `Name(/* Could not decode attribute arguments. */)` and sorts first in
+// its section.
+TEST(CSharpDecompilerTest,
+     DecompileModuleAttributesRenderDecodeErrorsAsComments)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+    ConnIdCompilation compilation;
+    TS::MetadataModule module{compilation, &file, TS::TypeSystemOptions::Default};
+    compilation.SetMainModule(&module);
+    std::string text =
+        CSharp::CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
+            module);
+    EXPECT_NE(
+        text.find("DebuggableAttribute(/* Could not decode attribute "
+                  "arguments. */)"),
+        std::string::npos)
+        << "the decode-error attribute renders as the C# comment form: "
+        << text;
+}
+
 TEST(CSharpDecompilerTest, DecompileTypeRendersFieldsAndProperties)
 {
     std::string path = ILSpy::Tests::WriteConnIdResDll();

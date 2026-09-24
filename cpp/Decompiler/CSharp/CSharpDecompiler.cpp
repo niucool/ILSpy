@@ -317,6 +317,15 @@ std::string CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
             out += ": ";
             out += a->AttributeType().Name();
             out += '(';
+            // The C# `HasDecodeErrors` arm: `HasArgumentList = true` plus
+            // the ErrorExpression("Could not decode attribute arguments."),
+            // which renders purely as its comment -- the argument list is
+            // the comment, nothing else.
+            if (a->HasDecodeErrors()) {
+                out += "/* Could not decode attribute arguments. */)";
+                out += "]\n";
+                continue;
+            }
             // The C# TypeSystemAstBuilder.ConvertAttribute renders the
             // positional (fixed) arguments after the type: each argument as
             // its constant literal (a string in double quotes, a bool as
