@@ -43,6 +43,12 @@
 #include "Decompiler/CSharp/Syntax/Statements/LockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/GotoStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/UsingStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
@@ -66,6 +72,7 @@
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/UsingInstruction.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
@@ -693,6 +700,83 @@ TEST(StatementBuilderTest, VisitUsingInstructionRendersUsingStatement)
     ASSERT_EQ(vds->Variables().Count(), 1);
     EXPECT_EQ(vds->Variables().At(0)->Name(), "disposable");
     EXPECT_TRUE(usingStatement->EmbeddedStatement() != nullptr);
+}
+
+
+TEST(StatementBuilderTest, VisitInitblkRendersUnsafeInitBlock)
+{
+    StatementFixture fixture;
+    StatementBuilder builder(fixture.compilation, *fixture.context_, &fixture.function,
+                             &fixture.settings, &fixture.run);
+    // `Unsafe.InitBlock(address, value, size)` over the hand-built Initblk --
+    // the three children are LdLoc loads of pointer/byte locals.
+    auto address = fixture.MakeLocal(TS::KnownTypeCode::IntPtr, "addr");
+    auto value = fixture.MakeLocal(TS::KnownTypeCode::Byte, "value");
+    auto size = fixture.MakeLocal(TS::KnownTypeCode::Int32, "size");
+    IL::Initblk initblk(std::make_unique<IL::LdLoc>(address),
+                        std::make_unique<IL::LdLoc>(value),
+                        std::make_unique<IL::LdLoc>(size));
+    auto result = builder.Convert(&initblk);
+
+    auto* expressionStatement =
+        dynamic_cast<Syntax::ExpressionStatement*>(result.Statement());
+    ASSERT_TRUE(expressionStatement != nullptr);
+    auto* invocation =
+        dynamic_cast<Syntax::InvocationExpression*>(expressionStatement->Expression());
+    ASSERT_TRUE(invocation != nullptr);
+    auto* member = dynamic_cast<Syntax::MemberReferenceExpression*>(invocation->Target());
+    ASSERT_TRUE(member != nullptr);
+    EXPECT_EQ(member->MemberName(), "InitBlock");
+    ASSERT_EQ(invocation->Arguments().Count(), 3);
+}
+
+TEST(StatementBuilderTest, VisitCpblkRendersUnsafeCopyBlock)
+{
+    StatementFixture fixture;
+    StatementBuilder builder(fixture.compilation, *fixture.context_, &fixture.function,
+                             &fixture.settings, &fixture.run);
+    // `Unsafe.CopyBlock(dest, source, size)` over the hand-built Cpblk; the
+    // UnalignedPrefix arm flips the intrinsic name.
+    auto dest = fixture.MakeLocal(TS::KnownTypeCode::IntPtr, "dest");
+    auto source = fixture.MakeLocal(TS::KnownTypeCode::IntPtr, "source");
+    auto size = fixture.MakeLocal(TS::KnownTypeCode::Int32, "size");
+    IL::Cpblk cpblk(std::make_unique<IL::LdLoc>(dest),
+                    std::make_unique<IL::LdLoc>(source),
+                    std::make_unique<IL::LdLoc>(size));
+    cpblk.UnalignedPrefix = 1;
+    auto result = builder.Convert(&cpblk);
+
+    auto* expressionStatement =
+        dynamic_cast<Syntax::ExpressionStatement*>(result.Statement());
+    ASSERT_TRUE(expressionStatement != nullptr);
+    auto* invocation =
+        dynamic_cast<Syntax::InvocationExpression*>(expressionStatement->Expression());
+    ASSERT_TRUE(invocation != nullptr);
+    auto* member = dynamic_cast<Syntax::MemberReferenceExpression*>(invocation->Target());
+    ASSERT_TRUE(member != nullptr);
+    EXPECT_EQ(member->MemberName(), "CopyBlockUnaligned");
+    ASSERT_EQ(invocation->Arguments().Count(), 3);
+}
+
+TEST(StatementBuilderTest, VisitCkfiniteRendersIsFiniteThrow)
+{
+    StatementFixture fixture;
+    StatementBuilder builder(fixture.compilation, *fixture.context_, &fixture.function,
+                             &fixture.settings, &fixture.run);
+    // `if (!float.IsFinite(ldloc)) throw new ArithmeticException();` over the
+    // hand-built Ckfinite.
+    auto value = fixture.MakeLocal(TS::KnownTypeCode::Single, "value");
+    IL::Ckfinite ckfinite(std::make_unique<IL::LdLoc>(value));
+    auto result = builder.Convert(&ckfinite);
+
+    auto* ifElse = dynamic_cast<Syntax::IfElseStatement*>(result.Statement());
+    ASSERT_TRUE(ifElse != nullptr);
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(ifElse->Condition());
+    ASSERT_TRUE(unary != nullptr);
+    EXPECT_EQ(unary->Operator(), Syntax::UnaryOperatorType::Not);
+    auto* throwStatement = dynamic_cast<Syntax::ThrowStatement*>(ifElse->TrueStatement());
+    ASSERT_TRUE(throwStatement != nullptr);
+    EXPECT_TRUE(throwStatement->Expression() != nullptr);
 }
 
 

@@ -96,6 +96,9 @@ class StObj;
 class SwitchInstruction;
 class SwitchSection;
 class UsingInstruction;
+class Initblk;
+class Cpblk;
+class Ckfinite;
 class Throw;
 } // namespace IL
 
@@ -231,6 +234,13 @@ private:
     // surface; DeclareLocalFunctions throws when it would emit (the
     // local-function declaration machinery is not ported).
     TranslatedStatement VisitUsingInstruction(IL::UsingInstruction* inst);
+    // The memory-instruction family (the C# `VisitInitblk`/`VisitCpblk`/
+    // `VisitCkfinite`, StatementBuilder.cs lines 1609-1678): the Unsafe
+    // intrinsic calls with the leading `IL ... instruction` comments and the
+    // `float.IsFinite` throw-guard render.
+    TranslatedStatement VisitInitblk(IL::Initblk* inst);
+    TranslatedStatement VisitCpblk(IL::Cpblk* inst);
+    TranslatedStatement VisitCkfinite(IL::Ckfinite* inst);
     TranslatedStatement VisitBlockContainer(IL::BlockContainer* container);
     Syntax::Statement* ConvertLoop(IL::BlockContainer* container);
     Syntax::BlockStatement* ConvertBlockContainer(IL::BlockContainer* container,

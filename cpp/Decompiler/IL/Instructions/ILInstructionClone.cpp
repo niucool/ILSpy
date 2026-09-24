@@ -361,6 +361,33 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
                 s.Type);
             break;
         }
+        case OpCode::Ckfinite: {
+            const auto& s = static_cast<const Ckfinite&>(*this);
+            c = std::make_unique<Ckfinite>(s.Argument ? s.Argument->Clone() : nullptr);
+            break;
+        }
+        case OpCode::Cpblk: {
+            const auto& s = static_cast<const Cpblk&>(*this);
+            auto clone = std::make_unique<Cpblk>(
+                s.DestAddress ? s.DestAddress->Clone() : nullptr,
+                s.SourceAddress ? s.SourceAddress->Clone() : nullptr,
+                s.Size ? s.Size->Clone() : nullptr);
+            clone->IsVolatile = s.IsVolatile;
+            clone->UnalignedPrefix = s.UnalignedPrefix;
+            c = std::move(clone);
+            break;
+        }
+        case OpCode::Initblk: {
+            const auto& s = static_cast<const Initblk&>(*this);
+            auto clone = std::make_unique<Initblk>(
+                s.Address ? s.Address->Clone() : nullptr,
+                s.Value ? s.Value->Clone() : nullptr,
+                s.Size ? s.Size->Clone() : nullptr);
+            clone->IsVolatile = s.IsVolatile;
+            clone->UnalignedPrefix = s.UnalignedPrefix;
+            c = std::move(clone);
+            break;
+        }
         case OpCode::StObj: {
             const auto& s = static_cast<const StObj&>(*this);
             c = std::make_unique<StObj>(s.Target ? s.Target->Clone() : nullptr,

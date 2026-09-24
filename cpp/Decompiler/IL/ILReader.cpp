@@ -1165,12 +1165,47 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             break;
         }
 
-        // ---- ckfinite: a unary op on the top of stack (in-place) ----
+        // ---- ckfinite: validate the top-of-stack float in place ----
         case ILOpCode::Ckfinite: {
-            // ckfinite operates on the top of stack in-place; pop and re-push.
-            auto v = s.Pop(); if (!v) return DecodeOutcome::Bail;
-            // Model as a no-op wrapper for now (the full ILAst has a Ckfinite node).
-            if (!s.Push(std::move(v))) return DecodeOutcome::Bail;
+            // ckfinite does not consume its argument (the value stays on the
+            // evaluation stack). The C# reader flushes the expression stack
+            // and builds `ckfinite(ldloc v)` over the top slot variable as a
+            // statement (ILReader.cs line 892: `new Ckfinite(Peek())` where
+            // Peek is FlushExpressionStack + LdLoc).
+            FlushExpressionStack(s, block);
+            if (s.currentStack.size() <= s.stackBase)
+                return DecodeOutcome::Bail;
+            block->Add(std::make_unique<Ckfinite>(
+                std::make_unique<LdLoc>(s.currentStack.back())));
+            break;
+        }
+
+        // ---- cpblk / initblk: the block-memory statements ----
+        case ILOpCode::Cpblk: {
+            // The pops preserve the evaluation order the ILAst stores the
+            // children in (dest; source; size) -- ILReader.cs line 960 pops
+            // size, source, dest.
+            auto size = s.Pop();
+            if (!size) return DecodeOutcome::Bail;
+            auto source = s.Pop();
+            if (!source) return DecodeOutcome::Bail;
+            auto dest = s.Pop();
+            if (!dest) return DecodeOutcome::Bail;
+            block->Add(std::make_unique<Cpblk>(std::move(dest), std::move(source),
+                                               std::move(size)));
+            break;
+        }
+        case ILOpCode::Initblk: {
+            // The pops preserve the address; value; size evaluation order
+            // (ILReader.cs line 974 pops size, value, address).
+            auto size = s.Pop();
+            if (!size) return DecodeOutcome::Bail;
+            auto value = s.Pop();
+            if (!value) return DecodeOutcome::Bail;
+            auto address = s.Pop();
+            if (!address) return DecodeOutcome::Bail;
+            block->Add(std::make_unique<Initblk>(std::move(address), std::move(value),
+                                                 std::move(size)));
             break;
         }
 
