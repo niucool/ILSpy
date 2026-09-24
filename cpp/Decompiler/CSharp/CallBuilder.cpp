@@ -23,6 +23,7 @@
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/ExpressionBuilder.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"
+#include "Decompiler/CSharp/Resolver/CSharpInvocationResolveResult.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
 #include "Decompiler/CSharp/Resolver/Log.hpp"
 #include "Decompiler/CSharp/Resolver/MemberLookup.hpp"
@@ -38,6 +39,8 @@
 #include "Decompiler/CSharp/Syntax/Expressions/ThisReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
@@ -50,8 +53,11 @@
 #include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/IL/Instructions/AddressOf.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/LdNull.hpp"
+#include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
+#include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
 #include "Decompiler/Semantics/ConstantResolveResult.hpp"
 #include "Decompiler/Semantics/InterpolatedStringResolveResult.hpp"
@@ -1476,5 +1482,290 @@ CallBuilder::CallTransformation CallBuilder::GetRequiredTransformationsForCall(
     return transform;
 }
 
+
+
+// ---------------------------------------------------------------------------
+// The accessor-access and initializer renders (CallBuilder.cs lines
+// 667-754, 1665-1808)
+// ---------------------------------------------------------------------------
+
+// The C# `bool IsUnambiguousAccess(...)` (CallBuilder.cs lines 1665-1710).
+bool CallBuilder::IsUnambiguousAccess(
+    const ExpectedTargetDetails& expectedTargetDetails, const Sem::ResolveResult* target,
+    const TS::IMethod& method, const std::vector<TranslatedExpression>& arguments,
+    const std::optional<std::vector<std::string>>& argumentNames,
+    const TS::IMember*& foundMember) {
+    foundMember = nullptr;
+    const TS::IMember* accessorOwner = method.AccessorOwner();
+    if (accessorOwner == nullptr)
+        return false;
+    if (target == nullptr) {
+        auto result = std::dynamic_pointer_cast<const Sem::MemberResolveResult>(
+            expressionBuilder_->resolver->ResolveSimpleName(
+                accessorOwner->Name(), {}, /*isInvocationTarget=*/false));
+        if (result == nullptr || result->IsError())
+            return false;
+        foundMember = result->Member();
+    } else {
+        const TS::ITypeDefinition* currentTypeDefinition =
+            expressionBuilder_->resolver->CurrentTypeDefinition();
+        Resolver::MemberLookup lookup(
+            currentTypeDefinition,
+            currentTypeDefinition != nullptr ? currentTypeDefinition->ParentModule()
+                                             : nullptr);
+        if (accessorOwner->SymbolKind() == TS::SymbolKind::Indexer) {
+            Resolver::OverloadResolution overloadResolution(
+                expressionBuilder_->resolver->Compilation(),
+                std::vector<std::shared_ptr<Sem::ResolveResult>>{},
+                std::nullopt, std::nullopt,
+                &expressionBuilder_->resolver->Conversions());
+            overloadResolution.AddMethodLists(lookup.LookupIndexers(*target));
+            if (overloadResolution.BestCandidateErrors()
+                != Resolver::OverloadResolutionErrors::None)
+                return false;
+            if (overloadResolution.IsAmbiguous())
+                return false;
+            foundMember = overloadResolution.GetBestCandidateWithSubstitutedTypeArguments();
+        } else {
+            auto result = std::dynamic_pointer_cast<const Sem::MemberResolveResult>(
+                lookup.Lookup(*target, accessorOwner->Name(), {},
+                              /*isInvocation=*/false));
+            if (result == nullptr || result->IsError())
+                return false;
+            foundMember = result->Member();
+        }
+    }
+    return foundMember != nullptr
+        && IsAppropriateCallTarget(expectedTargetDetails, *accessorOwner, *foundMember);
+}
+
+// The C# `ExpressionWithResolveResult HandleAccessorCall(...)` (CallBuilder.cs
+// lines 1712-1808). The C# `method.AccessorOwner!` non-null assertion ports to
+// the assert (the accessor-call shapes always carry an accessor owner).
+ExpressionWithResolveResult CallBuilder::HandleAccessorCall(
+    const ExpectedTargetDetails& expectedTargetDetails, const TS::IMethod& method,
+    TranslatedExpression target, std::vector<TranslatedExpression> arguments,
+    const std::optional<std::vector<std::string>>& argumentNames) {
+    const TS::IMember* accessorOwner = method.AccessorOwner();
+    assert(accessorOwner != nullptr
+           && "HandleAccessorCall: the method must be an accessor");
+    bool requireTarget;
+    if (settings_->AlwaysQualifyMemberReferences()
+        || accessorOwner->SymbolKind() == TS::SymbolKind::Indexer
+        || expressionBuilder_->HidesVariableWithName(accessorOwner->Name()))
+        requireTarget = true;
+    else if (method.IsStatic())
+        requireTarget = !expressionBuilder_->IsCurrentOrContainingType(
+            method.DeclaringTypeDefinition());
+    else
+        requireTarget = dynamic_cast<const Syntax::ThisReferenceExpression*>(
+                            target.Expression())
+                        == nullptr;
+    bool targetCasted = false;
+    bool isSetter = TS::IsKnownType(method.ReturnType(), TS::KnownTypeCode::Void);
+    bool argumentsCasted =
+        (isSetter && method.Parameters().size() == 1)
+        || (!isSetter && method.Parameters().empty());
+    const Sem::ResolveResult* targetResolveResult =
+        requireTarget ? target.ResolveResult() : nullptr;
+
+    TranslatedExpression value;
+    if (isSetter) {
+        value = arguments.back();
+        arguments.pop_back();
+    }
+
+    const TS::IMember* foundMember = nullptr;
+    while (!IsUnambiguousAccess(expectedTargetDetails, targetResolveResult, method,
+                                arguments, argumentNames, foundMember)) {
+        if (!argumentsCasted) {
+            argumentsCasted = true;
+            CastArguments(arguments, method.Parameters());
+        } else if (!requireTarget) {
+            requireTarget = true;
+            targetResolveResult = target.ResolveResult();
+        } else if (!targetCasted) {
+            targetCasted = true;
+            target = target.ConvertTo(
+                const_cast<TS::IType&>(*accessorOwner->DeclaringType()),
+                *expressionBuilder_);
+            targetResolveResult = target.ResolveResult();
+        } else {
+            foundMember = accessorOwner;
+            break;
+        }
+    }
+
+    auto rr = std::make_shared<Sem::MemberResolveResult>(
+        std::shared_ptr<Sem::ResolveResult>(
+            const_cast<Sem::ResolveResult*>(target.ResolveResult())),
+        foundMember);
+
+    if (isSetter) {
+        TranslatedExpression expr;
+        if (!arguments.empty()) {
+            auto* indexer = new Syntax::IndexerExpression(
+                dynamic_cast<const Sem::InitializedObjectResolveResult*>(
+                    target.ResolveResult())
+                    ? nullptr
+                    : target.Expression());
+            for (TranslatedExpression& a : arguments)
+                indexer->Arguments().Add(a.Expression());
+            expr = WithoutILInstruction(WithRR(*indexer, std::move(rr)));
+        } else if (requireTarget) {
+            expr = WithoutILInstruction(WithRR(
+                *new Syntax::MemberReferenceExpression(target.Expression(),
+                                                       accessorOwner->Name()),
+                std::move(rr)));
+        } else {
+            expr = WithoutILInstruction(WithRR(
+                *new Syntax::IdentifierExpression(accessorOwner->Name()),
+                std::move(rr)));
+        }
+
+
+        Syntax::AssignmentOperatorType op = Syntax::AssignmentOperatorType::Assign;
+        if (const auto* parentEvent =
+                dynamic_cast<const TS::IEvent*>(accessorOwner)) {
+            if (method.Equals(parentEvent->AddAccessor(),
+                              &TS::NormalizeTypeVisitor::TypeErasure()))
+                op = Syntax::AssignmentOperatorType::Add;
+            if (method.Equals(parentEvent->RemoveAccessor(),
+                              &TS::NormalizeTypeVisitor::TypeErasure()))
+                op = Syntax::AssignmentOperatorType::Subtract;
+        }
+        return WithRR(
+            *new Syntax::AssignmentExpression(
+                expr.Expression(), op,
+                value.Expression() != nullptr ? value.Expression() : nullptr),
+            std::make_shared<Sem::TypeResolveResult>(
+                const_cast<TS::IType&>(accessorOwner->ReturnType())
+                    .shared_from_this()));
+    } else {
+        if (!arguments.empty()) {
+            auto* indexer = new Syntax::IndexerExpression(target.Expression());
+            for (TranslatedExpression& a : arguments)
+                indexer->Arguments().Add(a.Expression());
+            return WithRR(*indexer, std::move(rr));
+        } else if (requireTarget) {
+            return WithRR(*new Syntax::MemberReferenceExpression(
+                              target.Expression(), accessorOwner->Name()),
+                          std::move(rr));
+        } else {
+            return WithRR(*new Syntax::IdentifierExpression(accessorOwner->Name()),
+                          std::move(rr));
+        }
+    }
+}
+
+// The C# `public ExpressionWithResolveResult BuildCollectionInitializerExpression(...)`
+// (CallBuilder.cs lines 667-727). The C# `argumentList.ArgumentNames = null`
+// assignments are direct field writes (the port's ArgumentList fields are
+// public -- the no-visibility convention).
+ExpressionWithResolveResult CallBuilder::BuildCollectionInitializerExpression(
+    IL::OpCode callOpCode, const TS::IMethod& method,
+    std::shared_ptr<Sem::InitializedObjectResolveResult> target,
+    const std::vector<IL::ILInstruction*>& callArguments) {
+    ExpectedTargetDetails expectedTargetDetails{callOpCode, false};
+    TranslatedExpression unused = WithoutILInstruction(WithRR(
+        *new Syntax::IdentifierExpression("initializedObject"), target));
+    std::vector<IL::ILInstruction*> args = callArguments;
+    if (method.IsExtensionMethod())
+        args.insert(args.begin(), new IL::Nop());
+
+    ArgumentList argumentList =
+        BuildArgumentList(expectedTargetDetails, target.get(), method,
+                          /*firstParamIndex=*/0, args, std::nullopt);
+    argumentList.ArgumentNames = std::nullopt;
+    argumentList.AddNamesToPrimitiveValues = false;
+    argumentList.UseImplicitlyTypedOut = false;
+    const TS::IParameterizedMember* unusedFoundMember = nullptr;
+    CallTransformation transform = GetRequiredTransformationsForCall(
+        expectedTargetDetails, method, unused, argumentList,
+        CallTransformation::None, unusedFoundMember);
+    assert((static_cast<std::uint32_t>(transform)
+            & ~static_cast<std::uint32_t>(
+                CallTransformation::NoOptionalArgumentAllowed
+                | CallTransformation::NoNamedArgsForPrettiness))
+           == 0);
+
+    // Calls with only one argument do not need an array initializer
+    // expression to wrap them. Any special cases are handled by the caller
+    // (i.e., ExpressionBuilder.TranslateObjectAndCollectionInitializer).
+    // Note: we intentionally ignore the firstOptionalArgumentIndex in this
+    // case.
+    int skipCount;
+    if (method.IsExtensionMethod()) {
+        if (argumentList.Arguments.size() == 2)
+            return ExpressionWithResolveResult(argumentList.Arguments[1].Expression(),
+                                               argumentList.Arguments[1].ResolveResult());
+        skipCount = 1;
+    } else {
+        if (argumentList.Arguments.size() == 1)
+            return ExpressionWithResolveResult(argumentList.Arguments[0].Expression(),
+                                               argumentList.Arguments[0].ResolveResult());
+        skipCount = 0;
+    }
+
+    if ((transform & CallTransformation::NoOptionalArgumentAllowed)
+        != CallTransformation::None)
+        argumentList.FirstOptionalArgumentIndex = -1;
+
+    auto* initializer = new Syntax::ArrayInitializerExpression();
+    for (Syntax::Expression* element :
+         argumentList.GetArgumentExpressions(skipCount))
+        initializer->Elements().Add(element);
+    auto collectionRR = std::make_shared<Resolver::CSharpInvocationResolveResult>(
+        target, &method, argumentList.GetArgumentResolveResults(skipCount),
+        Resolver::OverloadResolutionErrors::None,
+        /*isExtensionMethodInvocation=*/method.IsExtensionMethod(),
+        /*isExpandedForm=*/argumentList.IsExpandedForm);
+    // The C# `.WithRR(...)` attaches the resolve result as the node's
+    // annotation; the wrapper ctor asserts that exact pairing.
+    WithRR(*initializer, collectionRR);
+    return ExpressionWithResolveResult(initializer, collectionRR.get());
+}
+
+// The C# `public ExpressionWithResolveResult BuildDictionaryInitializerExpression(...)`
+// (CallBuilder.cs lines 728-754).
+ExpressionWithResolveResult CallBuilder::BuildDictionaryInitializerExpression(
+    IL::OpCode callOpCode, const TS::IMethod& method,
+    std::shared_ptr<Sem::InitializedObjectResolveResult> target,
+    const std::vector<IL::ILInstruction*>& indices, IL::ILInstruction* value) {
+    ExpectedTargetDetails expectedTargetDetails{callOpCode, false};
+
+    std::vector<IL::ILInstruction*> callArguments;
+    callArguments.push_back(new IL::LdNull());
+    for (IL::ILInstruction* index : indices)
+        callArguments.push_back(index);
+    callArguments.push_back(value != nullptr ? value : new IL::Nop());
+
+    ArgumentList argumentList =
+        BuildArgumentList(expectedTargetDetails, target.get(), method,
+                          /*firstParamIndex=*/1, callArguments, std::nullopt);
+    TranslatedExpression unused = WithoutILInstruction(WithRR(
+        *new Syntax::IdentifierExpression("initializedObject"), target));
+
+    ExpressionWithResolveResult assignment = HandleAccessorCall(
+        expectedTargetDetails, method, std::move(unused),
+        std::move(argumentList.Arguments), argumentList.ArgumentNames);
+
+    auto* assignmentNode =
+        dynamic_cast<Syntax::AssignmentExpression*>(assignment.Expression());
+    if (assignmentNode != nullptr) {
+        auto* indexer = dynamic_cast<Syntax::IndexerExpression*>(
+            assignmentNode->Left());
+        if (indexer != nullptr && indexer->Target() != nullptr)
+            Syntax::Detach(indexer->Target());
+    }
+
+    if (value != nullptr)
+        return assignment;
+
+    auto* left = dynamic_cast<Syntax::AssignmentExpression*>(assignment.Expression());
+    if (left != nullptr && left->Left() != nullptr)
+        return ExpressionWithResolveResult(Syntax::Detach(left->Left()));
+    return assignment;
+}
 
 } // namespace ILSpy::Decompiler::CSharp

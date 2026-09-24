@@ -33,12 +33,20 @@
 #include "Decompiler/CSharp/ExpressionBuilder.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ArrayInitializerExpression.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
+#include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
 #include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
+#include "Decompiler/Semantics/InitializedObjectResolveResult.hpp"
+#include "Decompiler/Semantics/TypeResolveResult.hpp"
+#include "Decompiler/CSharp/Resolver/CSharpInvocationResolveResult.hpp"
 #include "Decompiler/TypeSystem/LookupStubs.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
 
@@ -63,6 +71,7 @@ namespace Sem = ::ILSpy::Decompiler::Semantics;
 namespace Syntax = ::ILSpy::Decompiler::CSharp::Syntax;
 namespace TS = ::ILSpy::Decompiler::TypeSystem;
 namespace CSharp = ::ILSpy::Decompiler::CSharp;
+namespace Resolver = ::ILSpy::Decompiler::CSharp::Resolver;
 
 struct Fixture {
     TS::SimpleCompilation compilation;
@@ -458,6 +467,144 @@ TEST(CallBuilderTransformationsTest,
         dynamic_cast<Syntax::DirectionExpression*>(list.Arguments[0].Expression());
     EXPECT_TRUE(direction != nullptr)
         << "the cascade's EnforceExplicitIn arm wraps the `in` argument";
+}
+
+
+TEST(CallBuilderTransformationsTest, BuildCollectionInitializerTwoArguments)
+{
+    Fixture fixture;
+    auto builder = fixture.MakeBuilder();
+    CallBuilder callBuilder(builder, fixture.settings);
+    // The Add-method shape: `void Add(string a, string b)` over the
+    // InitializedObjectResolveResult target; the arguments are LdStr nodes.
+    auto add = fixture.MakeMethod("Add",
+                                  {fixture.TypePtr(TS::KnownTypeCode::String),
+                                   fixture.TypePtr(TS::KnownTypeCode::String)});
+    auto target = std::make_shared<Sem::InitializedObjectResolveResult>(
+        fixture.TypePtr(TS::KnownTypeCode::String));
+    std::vector<IL::ILInstruction*> arguments{new IL::LdStr("x"), new IL::LdStr("y")};
+
+    auto result = callBuilder.BuildCollectionInitializerExpression(
+        IL::OpCode::CallVirt, *add, target, arguments);
+
+    auto* initializer =
+        dynamic_cast<Syntax::ArrayInitializerExpression*>(result.Expression());
+    ASSERT_TRUE(initializer != nullptr);
+    ASSERT_EQ(initializer->Elements().Count(), 2);
+    auto* first = dynamic_cast<Syntax::PrimitiveExpression*>(initializer->Elements().At(0));
+    ASSERT_TRUE(first != nullptr);
+    ASSERT_TRUE(std::holds_alternative<std::string>(first->Value()));
+    EXPECT_EQ(std::get<std::string>(first->Value()), "x");
+    const auto* rr = dynamic_cast<const Resolver::CSharpInvocationResolveResult*>(
+        CSharp::GetResolveResult(*initializer));
+    ASSERT_TRUE(rr != nullptr);
+    EXPECT_EQ(rr->Member()->Name(), "Add");
+}
+
+TEST(CallBuilderTransformationsTest, BuildCollectionInitializerSingleArgumentReturnsIt)
+{
+    Fixture fixture;
+    auto builder = fixture.MakeBuilder();
+    CallBuilder callBuilder(builder, fixture.settings);
+    auto add = fixture.MakeMethod("Add", {fixture.TypePtr(TS::KnownTypeCode::String)});
+    auto target = std::make_shared<Sem::InitializedObjectResolveResult>(
+        fixture.TypePtr(TS::KnownTypeCode::String));
+    auto* first = new IL::LdStr("only");
+    std::vector<IL::ILInstruction*> arguments{first};
+
+    auto result = callBuilder.BuildCollectionInitializerExpression(
+        IL::OpCode::CallVirt, *add, target, arguments);
+
+    // A single-element collection initializer renders the element bare (the
+    // C# early-return arm); the result is the translated element itself.
+    auto* primitive = dynamic_cast<Syntax::PrimitiveExpression*>(result.Expression());
+    ASSERT_TRUE(primitive != nullptr);
+    ASSERT_TRUE(std::holds_alternative<std::string>(primitive->Value()));
+    EXPECT_EQ(std::get<std::string>(primitive->Value()), "only");
+}
+
+TEST(CallBuilderTransformationsTest, HandleAccessorCallGetterRendersIdentifier)
+{
+    Fixture fixture;
+    auto builder = fixture.MakeBuilder();
+    CallBuilder callBuilder(builder, fixture.settings);
+    // A getter accessor over a named member; the accessor-owner name is what
+    // the IdentifierExpression renders.
+    auto owner = std::make_shared<Impl::FakeMethod>(fixture.compilation,
+                                                    TS::SymbolKind::Method);
+    owner->SetName("Item");
+    owner->SetDeclaringType(fixture.TypePtr(TS::KnownTypeCode::String));
+    owner->SetReturnType(fixture.TypePtr(TS::KnownTypeCode::String));
+    auto getter = std::make_shared<Impl::FakeMethod>(fixture.compilation,
+                                                     TS::SymbolKind::Method);
+    getter->SetName("get_Item");
+    getter->SetIsStatic(false);
+    getter->SetDeclaringType(fixture.TypePtr(TS::KnownTypeCode::String));
+    getter->SetParameters({});
+    getter->SetReturnType(fixture.TypePtr(TS::KnownTypeCode::String));
+    getter->SetAccessorOwner(static_cast<const TS::IMember*>(
+        static_cast<const TS::IParameterizedMember*>(owner.get())));
+
+    CSharp::TranslatedExpression target = fixture.MakeArg(TS::KnownTypeCode::String, "this");
+
+    auto result = callBuilder.HandleAccessorCall(
+        CallBuilder::ExpectedTargetDetails{}, *getter, std::move(target), {},
+        std::nullopt);
+
+    // The C# renders `target.MemberName` when the target is not a
+    // ThisReferenceExpression (requireTarget = !(target.Expression is
+    // ThisReferenceExpression)).
+    auto* memberRef = dynamic_cast<Syntax::MemberReferenceExpression*>(result.Expression());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "Item");
+    const auto* rr = dynamic_cast<const Sem::MemberResolveResult*>(
+        CSharp::GetResolveResult(*memberRef));
+    ASSERT_TRUE(rr != nullptr);
+    EXPECT_EQ(rr->Member()->Name(), "Item");
+}
+
+TEST(CallBuilderTransformationsTest, BuildDictionaryInitializerRendersAssignment)
+{
+    Fixture fixture;
+    auto builder = fixture.MakeBuilder();
+    CallBuilder callBuilder(builder, fixture.settings);
+    // The indexer setter shape: `set_Item(int index, string value)` over the
+    // InitializedObjectResolveResult target; the last argument is the value.
+    auto setItem = std::make_shared<Impl::FakeMethod>(fixture.compilation,
+                                                      TS::SymbolKind::Method);
+    setItem->SetName("set_Item");
+    setItem->SetIsStatic(false);
+    setItem->SetDeclaringType(fixture.TypePtr(TS::KnownTypeCode::String));
+    setItem->SetParameters(
+        {std::make_shared<Impl::DefaultParameter>(fixture.TypePtr(TS::KnownTypeCode::Int32),
+                                                  "index"),
+         std::make_shared<Impl::DefaultParameter>(fixture.TypePtr(TS::KnownTypeCode::String),
+                                                  "value")});
+    setItem->SetReturnType(fixture.TypePtr(TS::KnownTypeCode::Void));
+    auto indexerOwner = std::make_shared<Impl::FakeMethod>(fixture.compilation,
+                                                           TS::SymbolKind::Indexer);
+    indexerOwner->SetName("Item");
+    indexerOwner->SetDeclaringType(fixture.TypePtr(TS::KnownTypeCode::String));
+    setItem->SetAccessorOwner(static_cast<const TS::IMember*>(
+        static_cast<const TS::IParameterizedMember*>(indexerOwner.get())));
+
+    auto target = std::make_shared<Sem::InitializedObjectResolveResult>(
+        fixture.TypePtr(TS::KnownTypeCode::String));
+    std::vector<IL::ILInstruction*> indices{new IL::LdcI4(0)};
+    auto* value = new IL::LdStr("x");
+
+    auto result = callBuilder.BuildDictionaryInitializerExpression(
+        IL::OpCode::CallVirt, *setItem, target, indices, value);
+
+    auto* assignment = dynamic_cast<Syntax::AssignmentExpression*>(result.Expression());
+    ASSERT_TRUE(assignment != nullptr);
+    auto* indexer = dynamic_cast<Syntax::IndexerExpression*>(assignment->Left());
+    ASSERT_TRUE(indexer != nullptr);
+    // The dictionary-initializer shape drops the indexer's target (the C#
+    // `indexer.Target.Remove()`), nesting the entry under the initialized
+    // object.
+    EXPECT_EQ(indexer->Target(), nullptr);
+    EXPECT_EQ(assignment->Operator(), Syntax::AssignmentOperatorType::Assign);
 }
 
 } // namespace ILSpy::Tests

@@ -32,6 +32,10 @@
 
 #include "Decompiler/CSharp/TranslatedExpression.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
+#include "Decompiler/Semantics/InitializedObjectResolveResult.hpp"
+#include "Decompiler/Semantics/MemberResolveResult.hpp"
+#include "Decompiler/Semantics/TypeResolveResult.hpp"
+#include "Decompiler/TypeSystem/IEvent.hpp"
 #include "Decompiler/Util/BitSet.hpp"
 
 #include <memory>
@@ -373,6 +377,63 @@ public:
     // DEFERRED with the anonymous-type surface. Implemented out-of-line.
     void CastArguments(std::vector<TranslatedExpression>& arguments,
                        const std::vector<const TS::IParameter*>& expectedParameters);
+
+    // The C# `bool IsUnambiguousAccess(ExpectedTargetDetails
+    // expectedTargetDetails, ResolveResult? target, IMethod method,
+    // IList<TranslatedExpression> arguments, string[]? argumentNames, out
+    // IMember? foundMember)` (CallBuilder.cs lines 1665-1710): the
+    // accessor-access resolution driver -- the target-less ResolveSimpleName
+    // arm, the indexer arm (MemberLookup.LookupIndexers over the ported
+    // OverloadResolution), and the plain member-name Lookup arm. Public for
+    // the tests (the port's no-visibility convention). Implemented
+    // out-of-line.
+    bool IsUnambiguousAccess(const ExpectedTargetDetails& expectedTargetDetails,
+                             const Sem::ResolveResult* target,
+                             const TS::IMethod& method,
+                             const std::vector<TranslatedExpression>& arguments,
+                             const std::optional<std::vector<std::string>>& argumentNames,
+                             const TS::IMember*& foundMember);
+
+    // The C# `ExpressionWithResolveResult HandleAccessorCall(ExpectedTargetDetails
+    // expectedTargetDetails, IMethod method, TranslatedExpression target,
+    // List<TranslatedExpression> arguments, string[]? argumentNames)`
+    // (CallBuilder.cs lines 1712-1808): the accessor-access render -- the
+    // IndexerExpression/MemberReferenceExpression/IdentifierExpression arms
+    // for getters, and the AssignmentExpression render for setters (with the
+    // event add/remove operator mapping). Public for the tests (the port's
+    // no-visibility convention). Implemented out-of-line.
+    ExpressionWithResolveResult HandleAccessorCall(
+        const ExpectedTargetDetails& expectedTargetDetails,
+        const TS::IMethod& method, TranslatedExpression target,
+        std::vector<TranslatedExpression> arguments,
+        const std::optional<std::vector<std::string>>& argumentNames);
+
+    // The C# `public ExpressionWithResolveResult
+    // BuildCollectionInitializerExpression(OpCode callOpCode, IMethod method,
+    // InitializedObjectResolveResult target, IReadOnlyList<ILInstruction>
+    // callArguments)` (CallBuilder.cs lines 667-727): renders the Add-call
+    // argument list as an ArrayInitializerExpression (the collection-
+    // initializer element list), consulting the overload-resolution front end
+    // with CallTransformation.None (the C# HACK branch -- the target is
+    // needed for resolution but never emitted). Public for the tests (the
+    // port's no-visibility convention). Implemented out-of-line.
+    ExpressionWithResolveResult BuildCollectionInitializerExpression(
+        IL::OpCode callOpCode, const TS::IMethod& method,
+        std::shared_ptr<Sem::InitializedObjectResolveResult> target,
+        const std::vector<IL::ILInstruction*>& callArguments);
+
+    // The C# `public ExpressionWithResolveResult
+    // BuildDictionaryInitializerExpression(OpCode callOpCode, IMethod method,
+    // InitializedObjectResolveResult target, IReadOnlyList<ILInstruction>
+    // indices, ILInstruction? value = null)` (CallBuilder.cs lines 728-754):
+    // renders the indexer access as an assignment (the dictionary-
+    // initializer entry shape), through HandleAccessorCall. Public for the
+    // tests (the port's no-visibility convention). Implemented out-of-line.
+    ExpressionWithResolveResult BuildDictionaryInitializerExpression(
+        IL::OpCode callOpCode, const TS::IMethod& method,
+        std::shared_ptr<Sem::InitializedObjectResolveResult> target,
+        const std::vector<IL::ILInstruction*>& indices,
+        IL::ILInstruction* value = nullptr);
 
     // The C# `static bool IsNullConditional(Expression expr)` (CallBuilder.cs
     // lines 1480-1483): whether the expression is the `?.` null-conditional
