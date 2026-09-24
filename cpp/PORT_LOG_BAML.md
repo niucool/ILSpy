@@ -820,3 +820,30 @@ variants, which need `ILSPY_TEST_MSCORLIB` set to a corpus mscorlib --
 they pass with `ILSPY_TEST_MSCORLIB=/home/jim/ilspy-test-fixtures/net48/mscorlib.dll`
 and pre-date this cleanup; flagging rather than editing the mainline's
 gating).
+
+## 6. The ILSpyX remainder: the GetOptions mapping (slice E)
+
+The LoadedAssemblyExtensions surface is now complete: the deferred
+`GetTypeSystemWithDecompilerSettingsOrNull` lands, backed by the port of
+the C# `DecompilerTypeSystem.GetOptions` mapping (the 18 settings flags
+onto their TypeSystemOptions bits, starting from None) as a static on
+the ILSpyX `DecompilerSettings` subclass -- the mapping consumes only
+the settings surface, so it stays in this lane. The extension takes the
+base `Decompiler.DecompilerSettings` parameter, as in the C#, and
+routes through the options-keyed `GetTypeSystemOrNull` cache (same
+settings -> the cached compilation, different settings -> a rebuild;
+both pinned).
+
+`ApiVisibility` and `LanguageVersion` (the two remaining root-file
+trivia) stay unported: their only C# consumers are the deferred
+Search/GUI surfaces, and porting them now would be consumer-less
+churn.
+
+Sweep note: the post-cleanup sweep (12,517 tests / 844 suites) is
+failure-set-identical to the pre-cleanup merged tree. The two
+`ReflectionDisassemblerTest.DisassembleFieldInvalidRvaCommentIsComplete`
+variants are the only NEW failures relative to the pre-merge baseline,
+and they are fixture-gated, not code: they pass with
+`ILSPY_TEST_MSCORLIB=/home/jim/ilspy-test-fixtures/net48/mscorlib.dll`
+(the test asserts a parseable mscorlib and the mainline gate predates
+this cleanup -- flagged for the main line, not edited here).
