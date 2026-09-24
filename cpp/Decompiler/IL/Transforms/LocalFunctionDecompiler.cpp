@@ -44,6 +44,11 @@ struct LocalFunctionInfo {
     std::vector<ILInstruction*> UseSites;
     // The full method name (the map key repeated; the C# `info.Method`).
     std::string MethodName;
+    // The C# `ILFunction Definition` -- the decoded body (owned by the
+    // root function's LocalFunctions list; non-owning here). Null when the
+    // resolver had no decodable body (the C# `ReadLocalFunctionDefinition`
+    // null return, which the C# scope step reports as a warning).
+    ILFunction* Definition = nullptr;
 };
 
 using LocalFunctionsMap = std::map<std::string, LocalFunctionInfo>;
@@ -58,6 +63,7 @@ std::string ShortMethodName(const std::string& fullMethodName) {
 }
 
 void HandleUseSite(const std::string& methodName, ILInstruction* inst,
+                   ILFunction& rootFunction, ILTransformContext& context,
                    LocalFunctionsMap& localFunctions);
 
 // The C# FindUseSites walk: the call/ldftn arms per the C# -- a Call (not a
@@ -69,7 +75,8 @@ void HandleUseSite(const std::string& methodName, ILInstruction* inst,
 // reader factory), so first-sightings record the info without a definition
 // and are not recursed into.
 void FindUseSitesWalk(ILInstruction* inst, ILTransformContext& context,
-                      LocalFunctionsMap& localFunctions) {
+                      LocalFunctionsMap& localFunctions,
+                      ILFunction& rootFunction) {
     if (inst == nullptr) return;
     if (auto* call = dynamic_cast<Call*>(inst)) {
         std::string callerName, functionName;
@@ -77,7 +84,8 @@ void FindUseSitesWalk(ILInstruction* inst, ILTransformContext& context,
             LocalFunctionDecompiler::ParseLocalFunctionName(
                 ShortMethodName(call->MethodName), callerName,
                 functionName)) {
-            HandleUseSite(call->MethodName, call, localFunctions);
+            HandleUseSite(call->MethodName, call, rootFunction, context,
+                          localFunctions);
             return;
         }
     } else if (auto* ldftn = dynamic_cast<LdFtn*>(inst)) {
@@ -90,27 +98,52 @@ void FindUseSitesWalk(ILInstruction* inst, ILTransformContext& context,
             bool matched = newObj != nullptr &&
                 DelegateConstruction::MatchDelegateConstruction(newObj, match);
             if (matched) {
-                HandleUseSite(ldftn->MethodName, newObj, localFunctions);
+                HandleUseSite(ldftn->MethodName, newObj, rootFunction, context,
+                              localFunctions);
             } else {
-                HandleUseSite(ldftn->MethodName, ldftn, localFunctions);
+                HandleUseSite(ldftn->MethodName, ldftn, rootFunction, context,
+                              localFunctions);
             }
             return;
         }
     }
     for (int i = 0; i < inst->ChildCount(); i++) {
-        FindUseSitesWalk(inst->GetChild(i), context, localFunctions);
+        FindUseSitesWalk(inst->GetChild(i), context, localFunctions,
+                         rootFunction);
     }
 }
 
-// The C# HandleUseSite: the first sighting creates the info and (in the C#)
-// reads the local-function definition; later sightings append the use-site.
+// The C# HandleUseSite: the first sighting creates the info, reads the
+// local-function definition through the context's resolver hook (the C#
+// ReadLocalFunctionDefinition; the decoded body embeds into the root
+// function's LocalFunctions -- the C# flat embedding, every decoded
+// definition lands on context.Function regardless of nesting), and
+// recurses the walk into the new body so nested use-sites are found; later
+// sightings append the use-site.
 void HandleUseSite(const std::string& methodName, ILInstruction* inst,
+                   ILFunction& rootFunction, ILTransformContext& context,
                    LocalFunctionsMap& localFunctions) {
     auto it = localFunctions.find(methodName);
     if (it == localFunctions.end()) {
         LocalFunctionInfo info;
         info.UseSites.push_back(inst);
         info.MethodName = methodName;
+        if (context.LocalFunctionBodyResolver) {
+            std::unique_ptr<ILFunction> definition =
+                context.LocalFunctionBodyResolver(methodName);
+            if (definition != nullptr) {
+                // The C# sets Kind at the ILFunction ctor; the hook returns
+                // the function, so the port stamps the kind here (the hook's
+                // contract: a non-null return is a local-function body).
+                definition->Kind = ILFunctionKind::LocalFunction;
+                info.Definition = definition.get();
+                rootFunction.LocalFunctions.push_back(std::move(definition));
+                // The C# recurses with info.Definition as the walk root; the
+                // embedding root stays the top-level function.
+                FindUseSitesWalk(info.Definition, context, localFunctions,
+                                 rootFunction);
+            }
+        }
         localFunctions.emplace(methodName, std::move(info));
     } else {
         it->second.UseSites.push_back(inst);
@@ -150,7 +183,7 @@ void LocalFunctionDecompiler::Run(ILFunction& function,
     // metadata handle the port's ILFunction does not carry; deferred with
     // the reader surface.
     LocalFunctionsMap localFunctions;
-    FindUseSitesWalk(&function, context, localFunctions);
+    FindUseSitesWalk(&function, context, localFunctions, function);
     // The C# ReplaceReferencesToDisplayClassThis /
     // DetermineCaptureAndDeclarationScopes / PropagateClosureParameterArguments
     // steps need the per-variable use-site lists and the definition bodies

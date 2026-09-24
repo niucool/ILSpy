@@ -139,4 +139,79 @@ TEST(LocalFunctionDecompilerUseSitesTest, IgnoresNonLocalFunctionLdFtn)
         << "the non-local-function ldftn node is untouched";
 }
 
+// The deep-decode entry (the C# ReadLocalFunctionDefinition): a first
+// sighting resolves the local function's body through the context's
+// resolver hook, embeds it into the top-level function's LocalFunctions
+// (the C# flat embedding -- every decoded definition lands on
+// context.Function regardless of nesting), and recurses the use-site walk
+// into the new body so nested use-sites are found.
+TEST(LocalFunctionDecompilerUseSitesTest, ResolvesAndEmbedsLocalFunctionDefinition)
+{
+    auto fn = std::make_unique<IL::ILFunction>();
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    ILVariablePtr captured = fn->RegisterVariable(
+        IL::VariableKind::Local, intType, std::string("captured"));
+
+    auto body = std::make_unique<IL::BlockContainer>();
+    fn->Body = std::move(body);
+    auto block = std::make_unique<IL::Block>();
+    block->Kind = IL::BlockKind::ControlFlow;
+    IL::Block* blockPtr = block.get();
+    fn->Body->AddBlock(std::move(block));
+
+    // call Test.C::<M>g__LF|0_0(ldloc captured) -- a plain local-function call
+    // whose body the resolver supplies.
+    auto plainCall = std::make_unique<IL::Call>("Test.C::<M>g__LF|0_0");
+    plainCall->AddArg(std::make_unique<IL::LdLoc>(captured));
+    blockPtr->Add(std::move(plainCall));
+    blockPtr->SetFinal(std::make_unique<IL::LdLoc>(captured));
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.LocalFunctions = true;
+    // The resolver: Test.C::<M>g__LF|0_0 decodes to a body that itself calls
+    // Test.C::<M>g__LF2|0_1 -- the nested use-site is only reachable through
+    // the decoded body (the C# FindUseSites(info.Definition, ...) recursion).
+    ctx.LocalFunctionBodyResolver =
+        [&captured](const std::string& methodName)
+        -> std::unique_ptr<IL::ILFunction> {
+        if (methodName != "Test.C::<M>g__LF|0_0" &&
+            methodName != "Test.C::<M>g__LF2|0_1") {
+            return nullptr;
+        }
+        auto def = std::make_unique<IL::ILFunction>();
+        def->Name = methodName;
+        def->Kind = IL::ILFunctionKind::LocalFunction;
+        auto defBody = std::make_unique<IL::BlockContainer>();
+        def->Body = std::move(defBody);
+        auto defBlock = std::make_unique<IL::Block>();
+        defBlock->Kind = IL::BlockKind::ControlFlow;
+        IL::Block* defBlockPtr = defBlock.get();
+        def->Body->AddBlock(std::move(defBlock));
+        if (methodName == "Test.C::<M>g__LF|0_0") {
+            // The nested use-site inside the decoded body.
+            auto nested = std::make_unique<IL::Call>(
+                std::string("Test.C::<M>g__LF2|0_1"));
+            nested->AddArg(std::make_unique<IL::LdLoc>(captured));
+            defBlockPtr->Add(std::move(nested));
+        }
+        defBlockPtr->SetFinal(
+            std::make_unique<IL::LdLoc>(captured));
+        (void)defBlockPtr;
+        return def;
+    };
+
+    IL::LocalFunctionDecompiler transform;
+    transform.Run(*fn, ctx);
+
+    // Both definitions are embedded (the C# flat embedding into
+    // context.Function.LocalFunctions), in discovery order.
+    ASSERT_EQ(fn->LocalFunctions.size(), 2u);
+    EXPECT_EQ(fn->LocalFunctions[0]->Name, "Test.C::<M>g__LF|0_0");
+    EXPECT_EQ(fn->LocalFunctions[0]->Kind, IL::ILFunctionKind::LocalFunction);
+    EXPECT_EQ(fn->LocalFunctions[1]->Name, "Test.C::<M>g__LF2|0_1");
+    // The plain call's use-site was rewritten (its ldnull target shape is
+    // not exercised here; the call stays a call).
+    ASSERT_EQ(blockPtr->Instructions.size(), 1u);
+}
+
 } // namespace

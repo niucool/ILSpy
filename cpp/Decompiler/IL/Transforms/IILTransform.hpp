@@ -25,6 +25,7 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 
 namespace ILSpy::Decompiler::TypeSystem { class ICompilation; }
 
@@ -259,6 +260,17 @@ public:
     // SimpleCompilation-derived interface). Null in the minimal construction;
     // the transforms that need it (NamedArgumentIntroduce's FindType) assert.
     ::ILSpy::Decompiler::TypeSystem::ICompilation* TypeSystem = nullptr;
+    // The C# `ReadLocalFunctionDefinition` deep-decode entry
+    // (LocalFunctionDecompiler.cs): resolves a local function's decoded body
+    // from the metadata (the C# path reads the method body through
+    // context.CreateILReader(); the production wiring lands with the
+    // reader's token surface). The hook takes the full method name (the
+    // "Namespace.Type::<caller>g__fn|n" identity the IL reader records) and
+    // returns the decoded ILFunction, or null when the method has no
+    // decodable body. Unset by default; the LocalFunctionDecompiler walk
+    // consults it on a use-site's first sighting.
+    std::function<std::unique_ptr<ILFunction>(const std::string&)>
+        LocalFunctionBodyResolver;
 
     void StepOnce(const char* what) const {
         if (Step) Step(what);
