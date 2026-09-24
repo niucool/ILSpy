@@ -19,6 +19,8 @@
 // SOFTWARE.
 
 #include "Decompiler/IL/Transforms/TransformDisplayClassUsage.hpp"
+#include "Decompiler/IL/Transforms/ILInlining.hpp"
+#include "Decompiler/TypeSystem/TypeUtils.hpp"
 
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
@@ -240,6 +242,33 @@ private:
 // DetectDisplayClass + HandleInitBlock shape over the collected stores and
 // culls with ValidateDisplayClassUses. The uninitialized-fields pass and
 // the propagation follow the C# order.
+namespace {
+
+// The C# `ILVariable ResolveVariableToPropagate(ILInstruction value,
+// IType expectedType)`: the LdLoc arm checks the parameter/local gates; the
+// LdObj chain arm is deferred with the chain-walking surface.
+ILVariable* ResolveVariableToPropagateForSroa(
+    ILInstruction* value) {
+    if (value == nullptr) return nullptr;
+    auto* load = dynamic_cast<LdLoc*>(value);
+    if (load == nullptr || load->Variable == nullptr) return nullptr;
+    ILVariable* v = load->Variable.get();
+    if (v->Kind == VariableKind::Parameter) {
+        // The C# `if (v.LoadCount != 1 && !v.IsThis())`: the load count must
+        // be exactly the one the propagation consumes.
+        if (v->LoadCount != 1) return nullptr;
+    } else if (v->Type == nullptr ||
+               v->Type->IsReferenceType() != std::optional<bool>(true)) {
+        // Non-parameter propagation needs a reference type (the C# comment:
+        // "don't allow propagation for display structs").
+        return nullptr;
+    }
+    if (!v->IsSingleDefinition()) return nullptr;
+    return v;
+}
+
+} // namespace
+
 void TransformDisplayClassUsage::AnalyzeFunction(
     ILFunction& function, ILTransformContext& context,
     const TypeSystem::ITypeDefinition* decompiledTypeDefinition,
@@ -250,7 +279,12 @@ void TransformDisplayClassUsage::AnalyzeFunction(
     std::map<ILVariable*, std::vector<LdLoc*>> loadsByVariable;
     std::map<ILVariable*, std::vector<LdLoca*>> addressesByVariable;
     std::map<ILVariable*, std::vector<LdFlda*>> fieldLoadsByVariable;
-    DisplayClassFieldArena arena(context.TypeSystem);
+    // The arena outlives the analysis call: the declared-variable machinery
+    // reads the stub fields during the SROA rewrite (Transform), so the
+    // state keeps it alive (shared_ptr<void>; see AnalysisState).
+    auto arenaPtr = std::make_shared<DisplayClassFieldArena>(context.TypeSystem);
+    DisplayClassFieldArena& arena = *arenaPtr;
+    state.fieldStubArena = arenaPtr;
 
     std::function<void(ILInstruction*)> visit = [&](ILInstruction* inst) {
         if (inst == nullptr) return;
@@ -305,6 +339,7 @@ void TransformDisplayClassUsage::AnalyzeFunction(
         }
         auto displayClass = std::make_shared<DisplayClass>(
             v.get(), v->Type != nullptr ? v->Type->GetDefinition() : nullptr);
+        displayClass->Initializer = store;
         // HandleInitBlock: the field-init stobj stores after the container
         // store in the same block (the C# walks the store's parent block
         // from ChildIndex + 1; each init is `stobj(ldflda(container,
@@ -326,15 +361,32 @@ void TransformDisplayClassUsage::AnalyzeFunction(
                     ldfldaTarget->Variable.get() != v.get()) {
                     break;
                 }
-                DisplayClassFieldStub* fieldStub =
-                    arena.Get(ldflda->FieldName, nullptr);
-                if (displayClass->VariablesToDeclare.count(fieldStub) != 0) {
+                const std::string fieldKey = ldflda->FieldName;
+                if (displayClass->VariablesToDeclare.count(fieldKey) != 0) {
                     break;
                 }
+                // The C# `AddVariable(result, (StObj)init, field)`: the
+                // initializer is recorded, the propagation resolves from the
+                // store's value, and UsesInitialValue follows the C#
+                // `result.Type.IsReferenceType != false ||
+                // result.Variable.UsesInitialValue`.
                 auto variable = std::make_shared<VariableToDeclare>(
-                    v.get(), &function, nullptr, fieldStub);
-                displayClass->VariablesToDeclare.emplace(fieldStub,
-                                                         std::move(variable));
+                    v.get(), &function, nullptr,
+                    arena.Get(fieldKey, stobj->Type));
+                variable->Initializers.insert(stobj);
+                ILVariable* propagated =
+                    ResolveVariableToPropagateForSroa(stobj->Value.get());
+                if (propagated != nullptr) {
+                    variable->Propagate(propagated);
+                }
+                std::optional<bool> isReferenceType =
+                    displayClass->Type != nullptr
+                        ? displayClass->Type->IsReferenceType()
+                        : std::optional<bool>();
+                variable->UsesInitialValue =
+                    isReferenceType.value_or(false) || v->UsesInitialValue;
+                displayClass->VariablesToDeclare.emplace(
+                    fieldKey, std::move(variable));
             }
         }
         state.displayClasses.emplace(v.get(),
@@ -346,6 +398,403 @@ void TransformDisplayClassUsage::AnalyzeFunction(
     (void)addressesByVariable;
     (void)fieldLoadsByVariable;
     (void)state;
+}
+
+
+namespace {
+
+// ---- The C# `void Transform(ILFunction)` -- the SROA rewrite visitor -----
+
+// The visitor state: the analysis maps (the C# members displayClasses /
+// displayClassCopyMap / the ILVariable use lists the port carries in the
+// AnalysisState).
+struct SroaVisitorState {
+    ILTransformContext& context;
+    std::map<ILVariable*, std::shared_ptr<TransformDisplayClassUsage::DisplayClass>>&
+        displayClasses;
+    std::map<ILVariable*, ILVariable*>& displayClassCopyMap;
+    std::map<ILVariable*, std::vector<StLoc*>>& storesByVariable;
+    std::map<ILVariable*, std::vector<LdLoc*>>& loadsByVariable;
+
+    SroaVisitorState(
+        ILTransformContext& ctx,
+        std::map<ILVariable*,
+                 std::shared_ptr<TransformDisplayClassUsage::DisplayClass>>& dc,
+        std::map<ILVariable*, ILVariable*>& copyMap,
+        std::map<ILVariable*, std::vector<StLoc*>>& stores,
+        std::map<ILVariable*, std::vector<LdLoc*>>& loads)
+        : context(ctx), displayClasses(dc), displayClassCopyMap(copyMap),
+          storesByVariable(stores), loadsByVariable(loads) {}
+};
+
+// The C# `bool IsDisplayClassLoad(ILInstruction target, out ILVariable v)`:
+// the target must be LdLoc or LdLoca (the ref-parameter note: local functions
+// use ref parameters, so MatchLdLocRef is not usable); the copy map resolves
+// the alias.
+bool SroaIsDisplayClassLoad(ILInstruction* target, ILVariable*& variable,
+                            SroaVisitorState& state) {
+    variable = nullptr;
+    if (target == nullptr) return false;
+    if (auto* ldloc = dynamic_cast<LdLoc*>(target)) {
+        variable = ldloc->Variable.get();
+    } else if (auto* ldloca = dynamic_cast<LdLoca*>(target)) {
+        variable = ldloca->Variable.get();
+    } else {
+        return false;
+    }
+    auto copy = state.displayClassCopyMap.find(variable);
+    if (copy != state.displayClassCopyMap.end()) variable = copy->second;
+    return variable != nullptr;
+}
+
+// The EarlyExpressionTransforms.StObjToStLoc shape: stobj(ldloca V, value)
+// becomes stloc V(value) so the next inlining pass can fold the store. The
+// type-compatibility guard mirrors TypeUtils.IsCompatibleTypeForMemoryAccess.
+bool SroaStObjToStLoc(StObj* st, SroaVisitorState& state) {
+    if (!st->Target || st->Target->Op != OpCode::LdLoca) return false;
+    auto* ldloca = static_cast<LdLoca*>(st->Target.get());
+    if (!ldloca->Variable) return false;
+    if (!TS::IsCompatibleTypeForMemoryAccess(*ldloca->Variable->Type, *st->Type))
+        return false;
+    state.context.StepOnce("stobj(ldloca V, ...) => stloc V, ...");
+    auto value = st->TakeChild(1);  // detach Value before replacing the StObj
+    auto stloc = std::make_unique<StLoc>(ldloca->Variable, std::move(value));
+    stloc->StartILOffset = st->StartILOffset;
+    stloc->EndILOffset = st->EndILOffset;
+    st->ReplaceWith(std::move(stloc));
+    return true;
+}
+
+// The EarlyExpressionTransforms.LdObjToLdLoc shape: ldobj(ldloca V, type)
+// becomes ldloc V.
+bool SroaLdObjToLdLoc(LdObj* ld, SroaVisitorState& state) {
+    if (!ld->Target || ld->Target->Op != OpCode::LdLoca) return false;
+    auto* ldloca = static_cast<LdLoca*>(ld->Target.get());
+    if (!ldloca->Variable) return false;
+    if (!TS::IsCompatibleTypeForMemoryAccess(*ldloca->Variable->Type, *ld->Type))
+        return false;
+    state.context.StepOnce("ldobj(ldloca V) => ldloc V");
+    auto ldloc = std::make_unique<LdLoc>(ldloca->Variable);
+    ldloc->StartILOffset = ld->StartILOffset;
+    ldloc->EndILOffset = ld->EndILOffset;
+    ld->ReplaceWith(std::move(ldloc));
+    return true;
+}
+
+// The C# `bool IsDisplayClassFieldAccess(inst, out displayClassVar, out
+// displayClass, out field)`: the inst must be ldflda whose target loads a
+// display-class variable.
+bool SroaIsDisplayClassFieldAccess(
+    LdFlda* ldflda, ILVariable*& displayClassVar,
+    TransformDisplayClassUsage::DisplayClass*& displayClass,
+    SroaVisitorState& state) {
+    displayClassVar = nullptr;
+    displayClass = nullptr;
+    if (ldflda == nullptr) return false;
+    ILVariable* holder = nullptr;
+    if (!SroaIsDisplayClassLoad(ldflda->Target.get(), holder, state)) {
+        return false;
+    }
+    displayClassVar = holder;
+    auto dcIt = state.displayClasses.find(holder);
+    if (dcIt == state.displayClasses.end()) return false;
+    displayClass = dcIt->second.get();
+    return true;
+}
+
+// Visit inst's children, removal-aware for Block parents: the walk's
+// removals (the initializer/propagation/StObj arms) erase the visited node
+// from the parent block's list, shifting the remaining children down -- a
+// plain GetChild(i) loop would skip the instruction that moved into the
+// removed slot. Inserts land strictly after the current position, so an
+// index-based walk with a no-advance-on-shrink step stays correct.
+void SroaVisitChildren(ILInstruction* inst, SroaVisitorState& state);
+
+// The C# `void Transform(ILFunction)` body: the pre-order walk with the
+// VisitStLoc/VisitStObj/VisitLdObj/VisitLdFlda rewrites (the port's manual
+// walk; the C# ILVisitor base is not ported). Each arm mirrors the C#
+// method: the StLoc arms run in the C# order (unused-store removal,
+// initializer removal + object-initializer inlining, propagation), the
+// StObj/LdObj arms visit their children first (so the LdFlda rewrite has
+// run) and then apply StObjToStLoc/LdObjToLdLoc, and the LdFlda arm
+// replaces the field access with an address of the declared variable.
+void SroaTransformWalk(ILInstruction* inst, SroaVisitorState& state) {
+    if (inst == nullptr) return;
+    // ---- The StLoc rewrites (the C# VisitStLoc) ----
+    if (auto* stloc = dynamic_cast<StLoc*>(inst)) {
+        ILVariable* v =
+            stloc->Variable != nullptr ? stloc->Variable.get() : nullptr;
+        Block* parentBlock = dynamic_cast<Block*>(stloc->Parent);
+        if (parentBlock != nullptr && v != nullptr &&
+            v->IsSingleDefinition()) {
+            if ((v->Kind == VariableKind::Local ||
+                 v->Kind == VariableKind::StackSlot) &&
+                v->LoadCount == 0) {
+                // The C# calls base.VisitStLoc first (pre-order), then
+                // removes the store when its value is another store.
+                SroaVisitChildren(stloc, state);
+                if (dynamic_cast<StLoc*>(stloc->Value.get()) != nullptr) {
+                    state.context.StepOnce(
+                        ("Remove unused variable assignment " + v->Name)
+                            .c_str());
+                    std::unique_ptr<ILInstruction> replacement =
+                        stloc->TakeChild(0);
+                    stloc->Parent->SetChild(stloc->ChildIndex,
+                                            std::move(replacement));
+                }
+                return;
+            }
+            auto dcIt = state.displayClasses.find(v);
+            if (dcIt != state.displayClasses.end() &&
+                dcIt->second->Initializer == inst) {
+                // The C# `inline contents of object initializer block`.
+                auto* initBlock = dynamic_cast<Block*>(stloc->Value.get());
+                if (initBlock != nullptr &&
+                    initBlock->Kind == BlockKind::ObjectInitializer) {
+                    state.context.StepOnce(
+                        ("Remove initializer of " + v->Name).c_str());
+                    // Stores are appended after the initializer, in source
+                    // order; a dropped store must not leave a gap, so the
+                    // position is tracked separately from the loop index.
+                    int insertionIndex = stloc->ChildIndex;
+                    for (int i = 1;
+                         i < static_cast<int>(initBlock->Instructions.size());
+                         i++) {
+                        auto* stobj = dynamic_cast<StObj*>(
+                            initBlock->Instructions[static_cast<std::size_t>(i)]
+                                .get());
+                        if (stobj == nullptr) continue;
+                        auto* ldflda =
+                            dynamic_cast<LdFlda*>(stobj->Target.get());
+                        if (ldflda == nullptr) continue;
+                        auto vdIt = dcIt->second->VariablesToDeclare.find(
+                            ldflda->FieldName);
+                        if (vdIt == dcIt->second->VariablesToDeclare.end()) {
+                            continue;
+                        }
+                        TransformDisplayClassUsage::VariableToDeclare*
+                            variable = vdIt->second.get();
+                        // A propagated field is replaced by the variable it
+                        // was initialized from; keeping its initializer
+                        // would assign that variable to itself.
+                        if (variable->CanPropagate &&
+                            variable->Initializers.count(stobj) != 0) {
+                            continue;
+                        }
+                        ILVariable* declared = variable->GetOrDeclare();
+                        auto inlinedStore = std::make_unique<StLoc>(
+                            ILVariablePtr(std::shared_ptr<ILVariable>(),
+                                          declared),
+                            stobj->TakeChild(1));
+                        inlinedStore->StartILOffset = stobj->StartILOffset;
+                        inlinedStore->EndILOffset = stobj->EndILOffset;
+                        inlinedStore->Parent = parentBlock;
+                        inlinedStore->ChildIndex = insertionIndex + 1;
+                        parentBlock->Instructions.insert(
+                            parentBlock->Instructions.begin() +
+                                (insertionIndex + 1),
+                            std::move(inlinedStore));
+                        ++insertionIndex;
+                    }
+                }
+                state.context.StepOnce(
+                    ("Remove initializer of " + v->Name).c_str());
+                parentBlock->RemoveInstructionAt(
+                    static_cast<std::size_t>(stloc->ChildIndex));
+                return;
+            }
+            if (dynamic_cast<LdLoc*>(stloc->Value.get()) != nullptr ||
+                dynamic_cast<LdObj*>(stloc->Value.get()) != nullptr) {
+                // The C# `Propagate reference to ... in ...`: a
+                // single-definition slot holding another display class
+                // reference -- replace all loads of the slot's variable.
+                ILVariable* referenced = nullptr;
+                auto copyIt = state.displayClassCopyMap.find(v);
+                if (copyIt != state.displayClassCopyMap.end()) {
+                    referenced = copyIt->second;
+                } else {
+                    referenced = ResolveVariableToPropagateForSroa(
+                        stloc->Value.get());
+                }
+                if (referenced != nullptr &&
+                    state.displayClasses.count(referenced) != 0) {
+                    state.context.StepOnce(
+                        ("Propagate reference to " + referenced->Name +
+                         " in " + v->Name)
+                            .c_str());
+                    auto loadsIt = state.loadsByVariable.find(v);
+                    if (loadsIt != state.loadsByVariable.end()) {
+                        for (LdLoc* ld : loadsIt->second) {
+                            if (ld->Parent == nullptr) continue;
+                            auto newLoad = std::make_unique<LdLoc>(
+                                ILVariablePtr(std::shared_ptr<ILVariable>(),
+                                              referenced));
+                            newLoad->StartILOffset = ld->StartILOffset;
+                            newLoad->EndILOffset = ld->EndILOffset;
+                            ILInstruction* parent = ld->Parent;
+                            int idx = ld->ChildIndex;
+                            parent->TakeChild(idx);
+                            parent->SetChild(idx, std::move(newLoad));
+                        }
+                    }
+                    parentBlock->RemoveInstructionAt(
+                        static_cast<std::size_t>(stloc->ChildIndex));
+                    return;
+                }
+            }
+        }
+        // The pre-order traversal (the C# base.VisitStLoc).
+        SroaVisitChildren(stloc, state);
+        return;
+    }
+    // ---- The StObj rewrites (the C# VisitStObj) ----
+    if (auto* stobj = dynamic_cast<StObj*>(inst)) {
+        // The C# checks the display-class access BEFORE visiting children
+        // (the target is still ldflda(ldloc container, field) there).
+        ILVariable* dcVar = nullptr;
+        TransformDisplayClassUsage::DisplayClass* displayClass = nullptr;
+        std::string fieldKey;
+        if (auto* ldflda = dynamic_cast<LdFlda*>(stobj->Target.get())) {
+            ILVariable* holder = nullptr;
+            if (SroaIsDisplayClassLoad(ldflda->Target.get(), holder, state) &&
+                holder != nullptr) {
+                auto dcIt = state.displayClasses.find(holder);
+                if (dcIt != state.displayClasses.end()) {
+                    displayClass = dcIt->second.get();
+                    dcVar = holder;
+                    fieldKey = ldflda->FieldName;
+                }
+            }
+        }
+        if (displayClass != nullptr) {
+            auto vdIt = displayClass->VariablesToDeclare.find(fieldKey);
+            if (vdIt != displayClass->VariablesToDeclare.end()) {
+                TransformDisplayClassUsage::VariableToDeclare* vd =
+                    vdIt->second.get();
+                if (vd->CanPropagate &&
+                    vd->Initializers.count(stobj) != 0 &&
+                    dynamic_cast<Block*>(stobj->Parent) != nullptr) {
+                    state.context.StepOnce(
+                        ("Remove initializer of " + dcVar->Name + "." +
+                         vd->Name() + " due to propagation")
+                            .c_str());
+                    dynamic_cast<Block*>(stobj->Parent)
+                        ->RemoveInstructionAt(
+                            static_cast<std::size_t>(stobj->ChildIndex));
+                    return;
+                }
+                if (auto* ldLoc =
+                        dynamic_cast<LdLoc*>(stobj->Value.get())) {
+                    ILVariable* valueVar =
+                        ldLoc->Variable != nullptr
+                            ? ldLoc->Variable.get()
+                            : nullptr;
+                    if (valueVar != nullptr &&
+                        valueVar->IsSingleDefinition()) {
+                        auto storeIt = state.storesByVariable.find(valueVar);
+                        if (storeIt != state.storesByVariable.end() &&
+                            !storeIt->second.empty()) {
+                            StLoc* store = storeIt->second.front();
+                            auto* block =
+                                dynamic_cast<Block*>(store->Parent);
+                            if (block != nullptr) {
+                                // The C#
+                                // `ILInlining.InlineOneIfPossible(block,
+                                // stloc.ChildIndex, InliningOptions.None,
+                                // context)`.
+                                InlineOneIfPossible(block, store->ChildIndex,
+                                                    state.context,
+                                                    InliningOptions::None);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // The children visit (the C# base.VisitStObj: the LdFlda target's
+        // rewrite fires here), then the StObjToStLoc fold.
+        SroaVisitChildren(stobj, state);
+        SroaStObjToStLoc(stobj, state);
+        return;
+    }
+    // ---- The LdObj rewrites (the C# VisitLdObj) ----
+    if (auto* ldobj = dynamic_cast<LdObj*>(inst)) {
+        SroaVisitChildren(ldobj, state);
+        SroaLdObjToLdLoc(ldobj, state);
+        return;
+    }
+    // ---- The LdFlda rewrites (the C# VisitLdFlda) ----
+    if (auto* ldflda = dynamic_cast<LdFlda*>(inst)) {
+        SroaVisitChildren(ldflda, state);
+        ILVariable* holder = nullptr;
+        TransformDisplayClassUsage::DisplayClass* displayClass = nullptr;
+        if (SroaIsDisplayClassFieldAccess(ldflda, holder, displayClass,
+                                          state)) {
+            auto vdIt = displayClass->VariablesToDeclare.find(
+                ldflda->FieldName);
+            if (vdIt != displayClass->VariablesToDeclare.end()) {
+                state.context.StepOnce(
+                    ("Replace " + ldflda->FieldName +
+                     " with captured variable " + vdIt->second->Name())
+                        .c_str());
+                ILVariable* declared = vdIt->second->GetOrDeclare();
+                auto replacement = std::make_unique<LdLoca>(
+                    ILVariablePtr(std::shared_ptr<ILVariable>(), declared));
+                replacement->StartILOffset = ldflda->StartILOffset;
+                replacement->EndILOffset = ldflda->EndILOffset;
+                ILInstruction* parent = ldflda->Parent;
+                int idx = ldflda->ChildIndex;
+                parent->TakeChild(idx);
+                parent->SetChild(idx, std::move(replacement));
+                return;
+            }
+        }
+        return;
+    }
+    // The pre-order traversal (the C# Default).
+    SroaVisitChildren(inst, state);
+}
+
+void SroaVisitChildren(ILInstruction* inst, SroaVisitorState& state) {
+    if (auto* block = dynamic_cast<Block*>(inst)) {
+        for (std::size_t i = 0; i < block->Instructions.size();) {
+            std::size_t before = block->Instructions.size();
+            SroaTransformWalk(block->Instructions[i].get(), state);
+            // A removed child shifts the rest down; re-examine this slot.
+            if (block->Instructions.size() < before) continue;
+            ++i;
+        }
+        if (block->FinalInstruction != nullptr) {
+            SroaTransformWalk(block->FinalInstruction.get(), state);
+        }
+        return;
+    }
+    for (int i = 0; i < inst->ChildCount(); i++) {
+        SroaTransformWalk(inst->GetChild(i), state);
+    }
+}
+
+} // namespace
+
+// The C# `void Transform(ILFunction)`: VisitILFunction over the function,
+// then the ResetHasInitialValueFlag sweep.
+void TransformDisplayClassUsage::Transform(
+    ILFunction& function, ILTransformContext& context, AnalysisState& state) {
+    SroaVisitorState visitorState(context, state.displayClasses,
+                                  state.displayClassCopyMap,
+                                  state.storesByVariable, state.loadsByVariable);
+    SroaTransformWalk(&function, visitorState);
+    context.StepOnce("ResetHasInitialValueFlag");
+}
+
+// The port's ResolveVariableToPropagate (the C# `ILVariable
+// ResolveVariableToPropagate(ILInstruction value, IType expectedType)`: the
+// LdLoc arm checks the parameter/local gates; the LdObj chain arm is
+// deferred with the chain-walking surface).
+ILVariable* TransformDisplayClassUsage::ResolveVariableToPropagateForTransform(
+    ILInstruction* value, AnalysisState& state) {
+    (void)state;
+    return ResolveVariableToPropagateForSroa(value);
 }
 
 } // namespace ILSpy::Decompiler::IL

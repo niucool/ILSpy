@@ -59,6 +59,9 @@ namespace ILSpy::Decompiler::IL {
 class ILVariable;
 class BlockContainer;
 struct ILInstruction;
+class StLoc;
+class LdLoc;
+class LdLoca;
 
 class TransformDisplayClassUsage final : public IILTransform {
 public:
@@ -123,7 +126,10 @@ public:
     struct DisplayClass {
         ILVariable* Variable = nullptr;
         const TypeSystem::ITypeDefinition* Type = nullptr;
-        std::map<const TypeSystem::IField*, std::shared_ptr<VariableToDeclare>>
+        // The C# `Dictionary<IField, VariableToDeclare>` keyed on the field's
+        // member definition; the port keys on the field-access stand-in's
+        // "Namespace.Type::Field" name (the identity the IL walk collects).
+        std::map<std::string, std::shared_ptr<VariableToDeclare>>
             VariablesToDeclare;
         BlockContainer* CaptureScope = nullptr;
         ILInstruction* Initializer = nullptr;
@@ -167,6 +173,18 @@ public:
     struct AnalysisState {
         std::map<ILVariable*, std::shared_ptr<DisplayClass>> displayClasses;
         std::map<ILVariable*, ILVariable*> displayClassCopyMap;
+        // The walk-collected uses (the C# ILVariable maintains the
+        // StoreInstructions/LoadInstructions/AddressInstructions lists
+        // incrementally; the port collects them during the analysis walk
+        // and the SROA visitor consumes the same maps).
+        std::map<ILVariable*, std::vector<StLoc*>> storesByVariable;
+        std::map<ILVariable*, std::vector<LdLoc*>> loadsByVariable;
+        std::map<ILVariable*, std::vector<LdLoca*>> addressesByVariable;
+        // Keeps the display-class field stubs alive for as long as the
+        // analysis results are consumed (the VariablesToDeclare maps hold
+        // non-owning IField pointers into the stub arena; the arena type is
+        // defined in the .cpp, so the shared_ptr is type-erased here).
+        std::shared_ptr<void> fieldStubArena;
     };
     static void AnalyzeFunction(ILFunction& function,
                                 ILTransformContext& context,
@@ -174,8 +192,17 @@ public:
                                     decompiledTypeDefinition,
                                 AnalysisState& state);
 
+    // The C# `void Transform(ILFunction)` -- the SROA rewrite visitor (the
+    // VisitStLoc/VisitStObj/VisitLdFlda rewrites over the analysis maps).
+    // The port runs it as a manual pre-order walk (no ILVisitor base).
+    static void Transform(ILFunction& function, ILTransformContext& context,
+                          AnalysisState& state);
+
     // The probes/test surface: AnalyzeFunction with the state exposed (the
     // file-local-probe convention).
+    static ILVariable* ResolveVariableToPropagateForTransform(
+        ILInstruction* value, AnalysisState& state);
+
     static void AnalyzeFunctionForTests(
         ILFunction& function, ILTransformContext& context,
         std::map<ILVariable*, std::shared_ptr<DisplayClass>>& displayClasses) {
