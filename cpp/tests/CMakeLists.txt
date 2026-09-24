@@ -41,6 +41,7 @@ add_executable(ilspy_tests
     Decompiler/Metadata/AssemblyIdentity_Test.cpp
     Decompiler/Metadata/MetadataFileLookups_Test.cpp
     Decompiler/Metadata/NamespaceDefinition_Test.cpp
+    Decompiler/Metadata/CustomAttributeDecoderPair_Test.cpp
     Decompiler/Metadata/CustomAttributeDecoder_Test.cpp
     Decompiler/Metadata/DotNetCorePathFinderExtensions_Test.cpp
     Decompiler/Metadata/DotNetCorePathFinder_Test.cpp
@@ -63,7 +64,11 @@ add_executable(ilspy_tests
     Decompiler/Disassembler/ILStructure_Test.cpp
     Decompiler/Disassembler/MethodBodyDisassembler_Test.cpp
     Decompiler/Disassembler/ReflectionDisassembler_Test.cpp
+    Decompiler/Disassembler/SecurityDeclarationDecoder_Test.cpp
     Decompiler/Disassembler/SortByNameProcessor_Test.cpp
+    Decompiler/Disassembler/WriteValue_Test.cpp
+    Decompiler/Disassembler/WriteDecodedCustomAttributeBlob_Test.cpp
+    Decompiler/Disassembler/TryDecodeSecurityDeclaration_Test.cpp
     Decompiler/DebugInfo/IDebugInfoProvider_Test.cpp
     ILSpyX/PdbProvider/PortableDebugInfoProvider_Test.cpp
     ILSpyX/PdbProvider/DebugInfoUtils_Test.cpp

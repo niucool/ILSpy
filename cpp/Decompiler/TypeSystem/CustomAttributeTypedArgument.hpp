@@ -29,23 +29,23 @@
 //
 // KEY PORT CONVENTIONS:
 //  (a) The BCL struct is generic (`CustomAttributeTypedArgument<TType>`); the ILSpy type
-//      system uses only the `IType` instantiation (the C# `CustomAttributeDecoder<TType>`
-//      in the Metadata layer is generic, but its ported half -- the
-//      `Metadata/CustomAttributeDecoder` -- absorbs the `<IType>` instantiation the same
-//      way, and the TypeSystem surface -- `IAttribute` and its consumers -- needs only
-//      `IType`). The faithful port
-//      therefore absorbs the `<IType>` instantiation into the `TypeSystem` namespace as a
-//      concrete (non-template) struct, the same convention the D384 `MethodSemanticsAttributes`
-//      / D381 `IEntity.MetadataToken` ports followed for BCL helper types, and the concrete-
-//      struct convention the `TypeConstraint` (D383) / `LifetimeAnnotation` (D382) /
-//      `FullTypeName` / `TopLevelTypeName` TypeSystem value types established. A future
-//      port of the generic decoder (the SecurityDeclarationDecoder's tuple instantiation)
-//      can refactor or add a template then.
-//  (b) The C# `TType Type` (non-null for a decoded argument) ports to `ITypePtr` (the D271
-//      `std::shared_ptr<IType>` shared, cached handle -- the `TypeConstraint.Type` D383
-//      precedent); a null `shared_ptr` is the faithful representation of an argument whose
-//      type could not be decoded (the default-constructed value, the
-//      `ImmutableArray.CreateBuilder` zero-initialization the decoder overwrites).
+//      system uses the `IType` instantiation (the C# `CustomAttributeDecoder<TType>`
+//      in the Metadata layer is generic, and the ReflectionDisassembler's
+//      SecurityDeclarationDecoder instantiates it with a `(PrimitiveTypeCode, string)`
+//      tuple). The port therefore carries the template
+//      (`CustomAttributeTypedArgumentT<TType>`) plus the `CustomAttributeTypedArgument`
+//      alias for the `ITypePtr` instantiation the TypeSystem surface (`IAttribute` and
+//      its consumers) uses, the `...T`-suffix-plus-alias convention (the C# generic
+//      with an absorbed concrete instantiation, the CSharpSlotInfoT precedent). The
+//      alias keeps every existing `TypeSystem::CustomAttributeTypedArgument` spelling
+//      (a plain `using` of a full specialization -- the alias is not a class template,
+//      so no CTAD or template-argument spelling changes for the existing users).
+//  (b) The C# `TType Type` (non-null for a decoded argument) ports to the `TType`
+//      template parameter (the `ITypePtr` shared, cached handle for the IType
+//      instantiation -- the `TypeConstraint.Type` D383 precedent); a null `shared_ptr`
+//      is the faithful representation of an argument whose type could not be decoded
+//      (the default-constructed value, the `ImmutableArray.CreateBuilder`
+//      zero-initialization the decoder overwrites).
 //  (c) The C# `object? Value` ports to `std::any` (the D374 `IVariable::GetConstantValue`
 //      precedent -- `std::any` is the type-erased boxed value, empty for `null`). A
 //      `std::any` holds any copy-constructible value, so it models the full BCL `object?`
@@ -78,23 +78,27 @@ namespace ILSpy::Decompiler::TypeSystem {
 // One positional (fixed) argument of a custom attribute: the decoded `Type` (non-null for a
 // decoded argument) and the boxed `Value` (a primitive / string / type / enum / boxed nested
 // argument / array, or empty for `null`). A value type (the C# `readonly struct`); default
-// construction gives a null type and an empty value (the decoder's zero-fill sentinel).
-struct CustomAttributeTypedArgument {
+// construction gives a default-constructed type and an empty value (the decoder's
+// zero-fill sentinel).
+template <typename TType>
+struct CustomAttributeTypedArgumentT {
     // The C# `CustomAttributeTypedArgument(TType type, object? value)`. The type may be a
     // null `shared_ptr` for an argument whose type could not be decoded (the decoder does
     // not throw on a null type -- it records it); the value may be empty (the C# `null`).
-    CustomAttributeTypedArgument(ITypePtr type, std::any value)
+    CustomAttributeTypedArgumentT(TType type, std::any value)
         : type_(std::move(type)), value_(std::move(value))
     {
     }
 
-    // The C# implicit parameterless struct ctor (zeroes the fields). A null `ITypePtr` and
-    // an empty `std::any` (the decoder's zero-fill sentinel, overwritten before use).
-    CustomAttributeTypedArgument() = default;
+    // The C# implicit parameterless struct ctor (zeroes the fields). A default-constructed
+    // `TType` (a null `ITypePtr` for the IType instantiation) and an empty `std::any` (the
+    // decoder's zero-fill sentinel, overwritten before use).
+    CustomAttributeTypedArgumentT() = default;
 
     // The C# `TType Type { get; }` -- the decoded argument type. A nullable `ITypePtr` (the
-    // shared, cached `IType` handle); null for an argument whose type could not be decoded.
-    ITypePtr Type() const { return type_; }
+    // shared, cached `IType` handle) for the IType instantiation; null for an argument
+    // whose type could not be decoded.
+    TType Type() const { return type_; }
 
     // The C# `object? Value { get; }` -- the boxed argument value. A `std::any` (the
     // type-erased boxed value); empty for `null`. Retrieve with `std::any_cast`, test with
@@ -102,8 +106,11 @@ struct CustomAttributeTypedArgument {
     std::any Value() const { return value_; }
 
 private:
-    ITypePtr type_;
+    TType type_{};
     std::any value_;
 };
+
+// The `ITypePtr` instantiation the TypeSystem surface uses (convention (a)).
+using CustomAttributeTypedArgument = CustomAttributeTypedArgumentT<ITypePtr>;
 
 } // namespace ILSpy::Decompiler::TypeSystem

@@ -163,8 +163,15 @@ public:
     // value; throws EnumUnderlyingTypeResolveException when the underlying
     // type has no resolvable definition.
     Metadata::PrimitiveTypeCode GetUnderlyingEnumType(const IType& type) const;
+    // The `ITypePtr`-taking overload: the CustomAttributeDecoderT template
+    // passes the provider's `TType` through unchanged (the C# receives the
+    // TType by value), so the IType instantiation needs the handle form.
+    Metadata::PrimitiveTypeCode GetUnderlyingEnumType(ITypePtr type) const;
     // The C# `bool IsSystemType(IType type) => type.IsKnownType(KnownTypeCode.Type)`.
     bool IsSystemType(const IType& type) const;
+    // The `ITypePtr`-taking overload (the GetUnderlyingEnumType handle-form
+    // convention: the decoder template passes the `TType` by value).
+    bool IsSystemType(ITypePtr type) const;
 
     // The C# `GetTypeFromDefinition(SRM.MetadataReader reader,
     // TypeDefinitionHandle handle, byte rawTypeKind)` -- the

@@ -22,6 +22,9 @@
 #include "Decompiler/Disassembler/ReflectionDisassembler.hpp"
 
 #include "Decompiler/Disassembler/DisassemblerHelpers.hpp"
+#include "Decompiler/Metadata/CustomAttributeDecoder.hpp"
+#include "Decompiler/Metadata/EnumUnderlyingTypeResolveException.hpp"
+#include "Decompiler/TypeSystem/CustomAttributeTypedArgument.hpp"
 #include "Decompiler/Disassembler/DisassemblerSignatureTypeProvider.hpp"
 #include "Decompiler/Disassembler/EnumNameCollection.hpp"
 #include "Decompiler/Disassembler/ReflectionAttributes.hpp"
@@ -945,6 +948,282 @@ void ReflectionDisassembler::EntityProcessor(IEntityProcessor* value) {
     entityProcessor_ = value;
 }
 
+// The C# `public IAssemblyResolver AssemblyResolver { get; set; }` -- the
+// port's pointer getter/setter over the caller-owned resolver.
+Metadata::IAssemblyResolver* ReflectionDisassembler::AssemblyResolver() const {
+    return assemblyResolver_;
+}
+
+void ReflectionDisassembler::AssemblyResolver(
+    Metadata::IAssemblyResolver* value) {
+    assemblyResolver_ = value;
+}
+
+// The C# `void WriteValue(ITextOutput output, (PrimitiveTypeCode Code,
+// string Name) type, object value)` -- see the header comment.
+void ReflectionDisassembler::WriteValue(Output::ITextOutput& output,
+    const SecurityDeclarationType& type, const std::any& value) {
+    using TypedArgument = TypeSystem::CustomAttributeTypedArgumentT<
+        SecurityDeclarationType>;
+    if (const auto* boxedValue = std::any_cast<TypedArgument>(&value)) {
+        output.Write("object(");
+        WriteValue(output, boxedValue->Type(), boxedValue->Value());
+        output.Write(")");
+        return;
+    }
+    if (const auto* arrayValue =
+            std::any_cast<std::vector<TypedArgument>>(&value)) {
+        // The C# `type.Name != null && !type.Name.StartsWith("enum ",
+        // StringComparison.Ordinal) ? type.Name.Remove(type.Name.Length -
+        // 2) : PrimitiveTypeCodeToString(type.Code)`.
+        std::string elementType;
+        if (type.Name && type.Name->rfind("enum ", 0) != 0
+            && type.Name->size() >= 2) {
+            elementType = type.Name->substr(0, type.Name->size() - 2);
+        } else {
+            elementType = PrimitiveTypeCodeToString(type.Code);
+        }
+
+        output.Write(elementType);
+        output.Write("[");
+        output.Write(std::to_string(arrayValue->size()));
+        output.Write("](");
+        bool first = true;
+        for (const auto& item : *arrayValue) {
+            if (!first)
+                output.Write(" ");
+            // `Value()` returns the std::any BY VALUE: materialize it
+            // before taking its address (a pointer into the call temporary
+            // dangles at the end of the condition's full expression).
+            const std::any itemValue = item.Value();
+            if (const auto* boxedItem =
+                    std::any_cast<TypedArgument>(&itemValue)) {
+                WriteValue(output, boxedItem->Type(), boxedItem->Value());
+            } else {
+                WriteSimpleValue(output, itemValue, elementType);
+            }
+            first = false;
+        }
+        output.Write(")");
+        return;
+    }
+    // The C# `type.Name != null && !type.Name.StartsWith("enum ", ...) ?
+    // type.Name : PrimitiveTypeCodeToString(type.Code)`.
+    std::string typeName;
+    if (type.Name && type.Name->rfind("enum ", 0) != 0) {
+        typeName = *type.Name;
+    } else {
+        typeName = PrimitiveTypeCodeToString(type.Code);
+    }
+
+    output.Write(typeName);
+    output.Write("(");
+    WriteSimpleValue(output, value, typeName);
+    output.Write(")");
+}
+
+// The C# `private static void WriteSimpleValue(ITextOutput output, object
+// value, string typeName)` -- see the header comment.
+void ReflectionDisassembler::WriteSimpleValue(Output::ITextOutput& output,
+    const std::any& value, const std::string& typeName) {
+    if (typeName == "string") {
+        // The C# "'" + EscapeString(value.ToString()).Replace("'", "\\'")
+        // + "'": the escaped text with every embedded single quote
+        // backslash-escaped.
+        std::string text = std::any_cast<std::string>(value);
+        std::string escaped = EscapeString(text);
+        std::string withQuotes;
+        for (char ch : escaped) {
+            if (ch == '\'') {
+                withQuotes += "\\";
+            }
+            withQuotes += ch;
+        }
+        output.Write("'");
+        output.Write(withQuotes);
+        output.Write("'");
+        return;
+    }
+    if (typeName == "type") {
+        // The value is the (Code, Name) pair; an "enum "-prefixed name
+        // renders without the prefix.
+        SecurityDeclarationType info =
+            std::any_cast<SecurityDeclarationType>(value);
+        if (info.Name) {
+            if (info.Name->rfind("enum ", 0) == 0)
+                output.Write(info.Name->substr(5));
+            else
+                output.Write(*info.Name);
+        }
+        return;
+    }
+    WriteOperand(output, value);
+}
+
+// The C# `void WriteDecodedCustomAttributeBlob(CustomAttribute attr,
+// MetadataFile module)` -- see the header comment.
+void ReflectionDisassembler::WriteDecodedCustomAttributeBlob(
+    const Metadata::MetadataFile& module,
+    const Metadata::CustomAttributeRowInfo& attr) {
+    Metadata::CustomAttributeValueT<SecurityDeclarationType> value;
+    try {
+        // The C# `var provider = new SecurityDeclarationDecoder(output,
+        // AssemblyResolver, module); value = attr.DecodeValue(provider);`
+        // -- one decoder per row over the resolver-backed provider.
+        SecurityDeclarationDecoder provider(output_, AssemblyResolver(),
+            module);
+        Metadata::CustomAttributeDecoderT<SecurityDeclarationDecoder> decoder(module,
+            provider);
+        value = decoder.DecodeValue(attr.ConstructorToken,
+            attr.ValueBlob ? attr.ValueBlob->data() : nullptr,
+            attr.ValueBlob ? attr.ValueBlob->size() : 0);
+    } catch (const std::invalid_argument&) {
+        // The C# catch (BadImageFormatException): the comment plus the raw
+        // blob dump. (The C# catches ONLY BadImageFormatException -- the
+        // EnumUnderlyingTypeResolveException and any other failure
+        // propagate.)
+        output_.Write("/* Could not decode attribute value */ ");
+        WriteBlob(attr.ValueBlob ? attr.ValueBlob->data() : nullptr,
+            attr.ValueBlob ? attr.ValueBlob->size() : 0);
+        return;
+    }
+
+    output_.Write("{");
+    output_.Indent();
+
+    for (const auto& arg : value.FixedArguments) {
+        output_.WriteLine();
+        WriteValue(output_, arg.Type(), arg.Value());
+    }
+
+    for (const auto& arg : value.NamedArguments) {
+        output_.WriteLine();
+        switch (arg.Kind()) {
+            case TypeSystem::CustomAttributeNamedArgumentKind::Field:
+                output_.Write("field ");
+                break;
+            case TypeSystem::CustomAttributeNamedArgumentKind::Property:
+                output_.Write("property ");
+                break;
+        }
+
+        // The C# `arg.Type.Name ?? PrimitiveTypeCodeToString(arg.Type.Code)`.
+        output_.Write(arg.Type().Name
+                ? *arg.Type().Name
+                : PrimitiveTypeCodeToString(arg.Type().Code));
+        output_.Write(" " + Escape(arg.Name()) + " = ");
+        WriteValue(output_, arg.Type(), arg.Value());
+    }
+
+    output_.WriteLine();
+    output_.Unindent();
+    output_.Write("}");
+}
+
+// The C# `void TryDecodeSecurityDeclaration(TextOutputWithRollback output,
+// BlobReader blob, MetadataFile module)` -- see the header comment.
+void ReflectionDisassembler::TryDecodeSecurityDeclaration(
+    Output::TextOutputWithRollback& output, Metadata::BlobReader blob,
+    const Metadata::MetadataFile& module) {
+    output.Write(" = {");
+    output.WriteLine();
+    output.Indent();
+
+    std::string currentAssemblyName;
+    std::string currentFullAssemblyName;
+    if (auto assemblyDefinition = module.GetAssemblyDefinition()) {
+        currentAssemblyName = assemblyDefinition->Name;
+    } else {
+        // The C# `catch (BadImageFormatException)` arm of the
+        // GetAssemblyDefinition().Name read (the port's read never throws;
+        // the malformed-assembly arm renders the same fallback).
+        currentAssemblyName = "<ERR: invalid assembly name>";
+    }
+    if (auto full = Metadata::TryGetFullAssemblyName(module)) {
+        currentFullAssemblyName = *full;
+    } else {
+        currentFullAssemblyName = "<ERR: invalid assembly name>";
+    }
+    int count = blob.ReadCompressedInteger();
+    for (int i = 0; i < count; i++) {
+        std::optional<std::string> fullTypeNameOpt = blob.ReadSerializedString();
+        // The C# `fullTypeName.Split(new[] { ", " },
+        // StringSplitOptions.None)` -- every part (not a max-2 split, the
+        // ResolveType shape).
+        std::string fullTypeName = fullTypeNameOpt.value_or("");
+        std::vector<std::string> nameParts;
+        std::size_t start = 0;
+        while (true) {
+            std::size_t comma = fullTypeName.find(", ", start);
+            if (comma == std::string::npos) {
+                nameParts.push_back(fullTypeName.substr(start));
+                break;
+            }
+            nameParts.push_back(fullTypeName.substr(start, comma - start));
+            start = comma + 2;
+        }
+        if (nameParts.size() < 2 || nameParts[1] == currentAssemblyName) {
+            output.Write("class ");
+            output.Write(Escape(fullTypeName));
+        } else {
+            output.Write('[');
+            output.Write(nameParts[1]);
+            output.Write(']');
+            output.Write(nameParts[0]);
+        }
+        output.Write(" = {");
+        blob.ReadCompressedInteger();  // ?
+        // The specification seems to be incorrect here, so I'm using the
+        // logic from Cecil instead.
+        int argCount = blob.ReadCompressedInteger();
+
+        SecurityDeclarationDecoder provider(output_, AssemblyResolver(),
+            module);
+        Metadata::CustomAttributeDecoderT<SecurityDeclarationDecoder> decoder(
+            module, provider, /*provideBoxingTypeInfo=*/true);
+        auto arguments = decoder.DecodeNamedArguments(blob.data, blob.size,
+            blob.pos, argCount);
+
+        if (argCount > 0) {
+            output.WriteLine();
+            output.Indent();
+        }
+
+        for (const auto& argument : arguments) {
+            switch (argument.Kind()) {
+                case TypeSystem::CustomAttributeNamedArgumentKind::Field:
+                    output.Write("field ");
+                    break;
+                case TypeSystem::CustomAttributeNamedArgumentKind::Property:
+                    output.Write("property ");
+                    break;
+            }
+
+            output.Write(argument.Type().Name
+                    ? *argument.Type().Name
+                    : PrimitiveTypeCodeToString(argument.Type().Code));
+            output.Write(" " + Escape(argument.Name()) + " = ");
+
+            WriteValue(output, argument.Type(), argument.Value());
+            output.WriteLine();
+        }
+
+        if (argCount > 0) {
+            output.Unindent();
+        }
+
+        output.Write('}');
+
+        if (i + 1 < count)
+            output.Write(',');
+        output.WriteLine();
+    }
+
+    output.Unindent();
+    output.Write("}");
+    output.WriteLine();
+}
+
 // The C# private `Process` overloads (`EntityProcessor?.Process(module,
 // items) ?? items`): the unprocessed collection when no processor is set.
 std::vector<std::uint32_t> ReflectionDisassembler::Process(
@@ -982,13 +1261,10 @@ void ReflectionDisassembler::WriteAttributes(const Metadata::MetadataFile& modul
         if (attr->ValueBlob.has_value()) {
             output_.Write(" = ");
             if (DecodeCustomAttributeBlobs) {
-                // WriteDecodedCustomAttributeBlob (the SecurityDeclarationDecoder
-                // custom-attribute-value decode) is not yet ported -- loud
-                // rather than wrong.
-                throw std::logic_error(
-                    "WriteDecodedCustomAttributeBlob is not yet ported");
+                WriteDecodedCustomAttributeBlob(module, *attr);
+            } else {
+                WriteBlob(attr->ValueBlob->data(), attr->ValueBlob->size());
             }
-            WriteBlob(attr->ValueBlob->data(), attr->ValueBlob->size());
         }
         output_.WriteLine();
     }
@@ -1431,12 +1707,50 @@ void ReflectionDisassembler::WriteSecurityDeclarations(Metadata::MetadataFile& m
                         static_cast<std::int16_t>(secdecl.Action)));
                 break;
         }
-        // The C# AssemblyResolver == null path: the raw blob dump. The
-        // resolver's "bytearray"/decoded alternatives defer with the
-        // resolver type (the CLI never sets one).
-        output_.Write(" = ");
-        WriteBlob(secdecl.PermissionSet.data(), secdecl.PermissionSet.size());
-        output_.WriteLine();
+        const std::uint8_t* blobData = secdecl.PermissionSet.data();
+        std::size_t blobSize = secdecl.PermissionSet.size();
+        Metadata::BlobReader blob{blobData, blobSize, 0};
+        if (AssemblyResolver() == nullptr) {
+            // The C# AssemblyResolver == null path: the raw blob dump (the
+            // CLI's shape -- the CLI never sets a resolver).
+            output_.Write(" = ");
+            WriteBlob(blobData, blobSize);
+            output_.WriteLine();
+        } else if (static_cast<char>(blob.ReadByte()) != '.') {
+            // The C# `else if ((char)blob.ReadByte() != '.')`: the
+            // indented "bytearray" + raw dump (an XML-form permission set
+            // -- the pre-.NET-2.0 form). The marker byte is read OUTSIDE
+            // the try below: an empty blob with a resolver set throws the
+            // BadImageFormatException family out of this method, exactly
+            // as in the C#.
+            output_.WriteLine();
+            output_.Indent();
+            output_.Write("bytearray");
+            WriteBlob(blobData, blobSize);
+            output_.WriteLine();
+            output_.Unindent();
+        } else {
+            Output::TextOutputWithRollback outputWithRollback(output_);
+            try {
+                // The C# passes the blob reader positioned AFTER the '.'
+                // marker (the gate's ReadByte advanced it; the by-value
+                // copy starts at the entry count).
+                TryDecodeSecurityDeclaration(outputWithRollback, blob,
+                    module);
+                outputWithRollback.Commit();
+            } catch (const std::invalid_argument&) {
+                // The C# `catch (Exception ex) when (ex is
+                // BadImageFormatException || ex is
+                // EnumUnderlyingTypeResolveException)`: the raw dump.
+                output_.Write(" = ");
+                WriteBlob(blobData, blobSize);
+                output_.WriteLine();
+            } catch (const Metadata::EnumUnderlyingTypeResolveException&) {
+                output_.Write(" = ");
+                WriteBlob(blobData, blobSize);
+                output_.WriteLine();
+            }
+        }
     }
 }
 
