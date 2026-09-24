@@ -28,6 +28,7 @@
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
@@ -144,7 +145,13 @@ void CollectBlocks(ILInstruction* inst, std::vector<Block*>& out) {
 } // namespace
 
 
-// The C# MatchIfInstruction over the port's IfInstruction node.
+// Forward declaration (the definition is in the legacy-Dictionary section below).
+bool MatchLegacySwitchOnStringWithDictImpl(Block& block, int& i,
+                                           ILTransformContext& context);
+// The C# `bool MatchLegacySwitchOnStringWithDict(...)` -- the Impl is
+// defined in the legacy-Dictionary section below (inside an anon ns whose
+// names are visible here via the implicit using-directive).
+
 ILInstruction* MatchCaseBlock(Block* currentBlock, ILVariable* switchVariable,
                               std::string& value, bool& emptyStringEqualsNull,
                               ILInstruction*& caseBlockOrLeave);
@@ -193,6 +200,10 @@ void SwitchOnStringTransform::Run(ILFunction& function,
         bool changed = false;
         for (int i = static_cast<int>(block->Instructions.size()) - 1; i >= 0; i--) {
             if (SimplifyCSharp1CascadingIfStatements(*block, i, context)) {
+                changed = true;
+                continue;
+            }
+            if (MatchLegacySwitchOnStringWithDictImpl(*block, i, context)) {
                 changed = true;
                 continue;
             }
@@ -307,9 +318,7 @@ bool MatchStringEqualityComparison(ILInstruction* condition, ILVariable*& variab
                 return asSpan->MethodName ==
                        std::string("System.MemoryExtensions::") + name;
             };
-            if (!spanIdentity("AsSpan") || asSpan->Arguments.size() != 1) {
-                return false;
-            }
+            if (!spanIdentity("AsSpan") || asSpan->Arguments.size() != 1) return false;
             right = asSpan->Arguments[0].get();
         } else {
             return false;
@@ -472,9 +481,7 @@ bool MatchRoslynEmptyStringCaseBlockHead(Block* target, ILVariable* switchValueV
                                          Block*& defaultOrExitBlock) {
     bodyOrLeave = nullptr;
     defaultOrExitBlock = nullptr;
-    if (target->Instructions.size() != 2 || target->IncomingEdgeCount != 1) {
-        return false;
-    }
+    if (target->Instructions.size() != 2 || target->IncomingEdgeCount != 1) return false;
     ILInstruction* nullCondition = nullptr;
     ILInstruction* exitBranch = nullptr;
     if (!MatchIfInstruction(target->Instructions[0].get(), nullCondition,
@@ -484,13 +491,9 @@ bool MatchRoslynEmptyStringCaseBlockHead(Block* target, ILVariable* switchValueV
     ILInstruction* arg = nullptr;
     if (!MatchCompEqualsNull(nullCondition, arg)) return false;
     ILVariable* nullCheckVar = nullptr;
-    if (!MatchLdLoc(arg, nullCheckVar) || nullCheckVar != switchValueVar) {
-        return false;
-    }
+    if (!MatchLdLoc(arg, nullCheckVar) || nullCheckVar != switchValueVar) return false;
     Block* lengthCheckBlock = nullptr;
-    if (!MatchBranch(target->Instructions[1].get(), lengthCheckBlock)) {
-        return false;
-    }
+    if (!MatchBranch(target->Instructions[1].get(), lengthCheckBlock)) return false;
     if (lengthCheckBlock->Instructions.size() != 2 ||
         lengthCheckBlock->IncomingEdgeCount != 1) {
         return false;
@@ -523,9 +526,7 @@ bool MatchRoslynEmptyStringCaseBlockHead(Block* target, ILVariable* switchValueV
     // target the same block.
     if (exit2Target != nullptr && exitBranch != nullptr) {
         Block* exitTarget = nullptr;
-        if (MatchBranch(exitBranch, exitTarget) && exitTarget != exit2Target) {
-            return false;
-        }
+        if (MatchBranch(exitBranch, exitTarget) && exitTarget != exit2Target) return false;
     }
     Block* bodyTarget = nullptr;
     if (dynamic_cast<Leave*>(bodyBranch) != nullptr) {
@@ -563,9 +564,7 @@ bool IsNullCheckInDefaultBlock(ILInstruction*& exitOrDefault, ILVariable* switch
     if (nullValueCaseBlock->Parent != exitOrDefaultBlock->Parent) return false;
     if (exitOrDefaultBlock->Instructions.size() < 2) return false;
     Block* elseBlock = nullptr;
-    if (!MatchBranch(exitOrDefaultBlock->Instructions[1].get(), elseBlock)) {
-        return false;
-    }
+    if (!MatchBranch(exitOrDefaultBlock->Instructions[1].get(), elseBlock)) return false;
     if (elseBlock->Parent != exitOrDefaultBlock->Parent) return false;
     exitOrDefault = elseBlock;
     return true;
@@ -599,9 +598,7 @@ bool MatchRoslynSwitchOnString(Block& block, int& i, ILTransformContext& context
     }
     // stloc switchValueVar(call ComputeStringHash(switchValueLoad))
     // switch (ldloc switchValueVar) { ... }
-    if (!(static_cast<int>(instructionsPtr->size()) > switchBlockInstructionsOffset + 1)) {
-        return false;
-    }
+    if (!(static_cast<int>(instructionsPtr->size()) > switchBlockInstructionsOffset + 1)) return false;
     auto* switchInst = dynamic_cast<SwitchInstruction*>(
         (*instructionsPtr)[switchBlockInstructionsOffset + 1].get());
     ILVariable* switchValueVar = nullptr;
@@ -984,9 +981,7 @@ bool SimplifyCascadingIfStatementsImpl(Block& block, int& i,
     caseBlocks.erase(nullptr);
     auto addSwitchSection = [&](const std::optional<std::string>& value,
                                 ILInstruction* inst) {
-        if (value.has_value() && !uniqueValues.insert(*value).second) {
-            return false;
-        }
+        if (value.has_value() && !uniqueValues.insert(*value).second) return false;
         numberOfUniqueMatches++;
         values.push_back({value, inst});
         return true;
@@ -1016,7 +1011,6 @@ bool SimplifyCascadingIfStatementsImpl(Block& block, int& i,
     bool removeExtraLoad = false;
     bool keepAssignmentBefore = false;
     ILInstruction* switchValueTmp = nullptr;
-    ILInstruction* newSwitchValue = nullptr;
     ILVariable* stlocVar = nullptr;
     if (i >= 1 && MatchStLoc(instructions[i - 1].get(), stlocVar,
                              switchValueTmp) &&
@@ -1107,9 +1101,7 @@ bool SimplifyCascadingIfStatementsImpl(Block& block, int& i,
     // a compiler-generated throw helper (the
     // SwitchDetection.IsSwitchExpressionThrowHelperBlock gate); that check is
     // deferred with the throw-helper surface.
-    if (static_cast<int>(values.size()) < 3) {
-        return false;
-    }
+    if (static_cast<int>(values.size()) < 3) return false;
     context.StepOnce("SimplifyCascadingIfStatements");
     // If the switchValueVar is used elsewhere too, keep the store. The C#
     // also validates that every load lives inside the case blocks
@@ -1216,9 +1208,7 @@ bool IsIsInternedCall(ILInstruction* inst, ILInstruction*& argument) {
             call->Method->Name() != "IsInterned") {
             return false;
         }
-    } else if (call->MethodName != "System.String::IsInterned") {
-        return false;
-    }
+    } else if (call->MethodName != "System.String::IsInterned") return false;
     argument = call->Arguments[0].get();
     return true;
 }
@@ -1249,15 +1239,11 @@ bool SimplifyCSharp1CascadingIfStatementsImpl(Block& block, int& i,
     if (!MatchCompEqualsNull(condition, tempLoad)) return false;
     ILVariable* temp = nullptr;
     if (!MatchLdLoc(tempLoad, temp)) return false;
-    if (!(temp->Kind == VariableKind::StackSlot && temp->LoadCount == 2)) {
-        return false;
-    }
+    if (!(temp->Kind == VariableKind::StackSlot && temp->LoadCount == 2)) return false;
     ILVariable* switchValueVar = nullptr;
     ILInstruction* switchValue = nullptr;
     StLoc* switchValueOwner = nullptr;
-    if (!MatchStLoc(instructions[i - 1].get(), switchValueVar, switchValue)) {
-        return false;
-    }
+    if (!MatchStLoc(instructions[i - 1].get(), switchValueVar, switchValue)) return false;
     switchValueOwner = dynamic_cast<StLoc*>(instructions[i - 1].get());
     {
         ILVariable* loaded = nullptr;
@@ -1282,9 +1268,7 @@ bool SimplifyCSharp1CascadingIfStatementsImpl(Block& block, int& i,
         }
         if (!IsIsInternedCall(arg, internedArg)) return false;
         ILVariable* loaded = nullptr;
-        if (!MatchLdLoc(internedArg, loaded) || loaded != switchValueVar) {
-            return false;
-        }
+        if (!MatchLdLoc(internedArg, loaded) || loaded != switchValueVar) return false;
     }
     switchValueVar = switchValueVarCopy;
     int conditionOffset = 1;
@@ -1342,9 +1326,7 @@ bool SimplifyCSharp1CascadingIfStatementsImpl(Block& block, int& i,
         values.push_back({value, jumpClone});
         currentCaseBlock = nextBlock;
     }
-    if (static_cast<int>(values.size()) != switchValueVarCopy->LoadCount) {
-        return false;
-    }
+    if (static_cast<int>(values.size()) != switchValueVarCopy->LoadCount) return false;
     context.StepOnce("SimplifyCSharp1CascadingIfStatements");
     // switch contains case null:
     if (currentCaseBlock != defaultOrNullBlock) {
@@ -1402,12 +1384,14 @@ bool SimplifyCSharp1CascadingIfStatements(Block& block, int& i,
 
 // The C# `bool IsStringToIntDictionary(IType dictionaryType)`: a
 // `System.Collections.Generic.Dictionary` with exactly the (String, Int32)
-// type arguments.
+// type arguments. The C# compares `type.FullName` (arity-free); the port's
+// `Name()` keeps the metadata arity suffix ("Dictionary`1"), so strip it.
 bool IsStringToIntDictionary(const TS::IType& type) {
-    if (!(type.Namespace() == "System.Collections.Generic" &&
-          type.Name() == "Dictionary")) {
-        return false;
-    }
+    if (type.Namespace() != "System.Collections.Generic") return false;
+    std::string name = type.Name();
+    std::size_t arity = name.find('`');
+    if (arity != std::string::npos) name.resize(arity);
+    if (name != "Dictionary") return false;
     auto* pt = dynamic_cast<const TS::ParameterizedType*>(&type);
     if (pt == nullptr || pt->TypeArguments().size() != 2) return false;
     const auto& args = pt->TypeArguments();
@@ -1456,9 +1440,7 @@ bool MatchAddCall(const TS::IType& dictionaryType, ILInstruction* inst,
     value.clear();
     index = -1;
     auto* call = dynamic_cast<Call*>(inst);
-    if (call == nullptr || call->Method == nullptr && call->MethodName.empty()) {
-        return false;
-    }
+    if (call == nullptr || (call->Method == nullptr && call->MethodName.empty())) return false;
     // The method identity: the resolved-Method form (Name == "Add",
     // DeclaringType matches) or the reader's stand-in (the MethodName suffix).
     bool isAdd = false;
@@ -1511,7 +1493,7 @@ bool MatchAddCall(const TS::IType& dictionaryType, ILInstruction* inst,
     return false;
 }
 
-} // namespace
+} // namespace ILSpy::Decompiler::IL
 
 namespace ILSpy::Decompiler::IL {
 
@@ -1538,8 +1520,8 @@ bool SwitchOnStringProbes::ExtractStringValuesFromInitBlock(
         return false;
     }
     auto* newObj = dynamic_cast<Call*>(newObjDict);
-    if (newObj == nullptr || !newObj->IsNewObj || newObj->Method == nullptr &&
-        newObj->MethodName.empty()) {
+    if (newObj == nullptr || !newObj->IsNewObj ||
+        (newObj->Method == nullptr && newObj->MethodName.empty())) {
         errorMessage = "the init value is not a newobj";
         return false;
     }
@@ -1656,6 +1638,235 @@ bool SwitchOnStringProbes::ExtractStringValuesFromInitBlock(
         return false;
     }
     return true;
+}
+
+
+// The C# `bool MatchLegacySwitchOnStringWithDict(InstructionCollection
+// instructions, ref int i)`: the 5-block compiler-generated
+// Dictionary<string,int> switch shape, folded into a SwitchInstruction over a
+// StringToInt dispatch.
+bool MatchLegacySwitchOnStringWithDictImpl(Block& block, int& i,
+                                           ILTransformContext& context) {
+    auto& instructions = block.Instructions;
+    if (i < 1 || i + 1 >= static_cast<int>(instructions.size())) return false;
+    // match first block: checking switch-value for null:
+    // stloc switchValueVar(switchValue)   (optional for a parameter)
+    // if (comp(ldloc switchValueVar == ldnull)) br nullCase
+    // br nextBlock
+    ILInstruction* condition = nullptr;
+    ILInstruction* exitBlockJump = nullptr;
+    if (!MatchIfInstruction(instructions[i].get(), condition, exitBlockJump)) return false;
+    auto* comp = dynamic_cast<Comp*>(condition);
+    if (comp == nullptr || comp->Kind != ComparisonKind::Equality) return false;
+    ILInstruction* left = comp->Left.get();
+    ILInstruction* right = comp->Right.get();
+    if (right == nullptr || !MatchLdNull(right)) return false;
+    ILVariable* switchValueVar = nullptr;
+    if (!MatchLdLoc(left, switchValueVar) ||
+        !switchValueVar->IsSingleDefinition()) {
+            return false;
+    }
+    // If the switchValueVar is a stack slot with an assignment right before,
+    // use the previously assigned variable as switchValueVar.
+    ILInstruction* switchValue = nullptr;
+    if (switchValueVar->Kind == VariableKind::StackSlot && i >= 1) {
+        ILVariable* extraVar = nullptr;
+        ILInstruction* extraValue = nullptr;
+        if (MatchStLoc(instructions[i - 1].get(), extraVar, extraValue)) {
+            ILVariable* loaded = nullptr;
+            if (extraValue != nullptr && MatchLdLoc(extraValue, loaded) &&
+                loaded == switchValueVar) {
+                switchValueVar = extraVar;
+                switchValue = extraValue;
+            }
+        }
+    }
+    if (!IsKnownType(switchValueVar->Type, TS::KnownTypeCode::String)) return false;
+    // either br nullCase or leave container
+    Block* nullValueCaseBlock = nullptr;
+    BlockContainer* leaveContainer = nullptr;
+    if (!MatchBranch(exitBlockJump, nullValueCaseBlock) &&
+        !MatchLeave(exitBlockJump, leaveContainer)) {
+            return false;
+    }
+    if (i + 1 >= static_cast<int>(instructions.size())) return false;
+    auto* nextBlockJump = dynamic_cast<Branch*>(instructions[i + 1].get());
+    if (nextBlockJump == nullptr || nextBlockJump->TargetBlock == nullptr ||
+        nextBlockJump->TargetBlock->IncomingEdgeCount != 1) {
+            return false;
+    }
+    Block* nextBlock = nextBlockJump->TargetBlock;
+    // match second block: checking the compiler-generated Dictionary for null
+    if (nextBlock->Instructions.size() != 2 ||
+        !MatchIfInstruction(nextBlock->Instructions[0].get(), condition,
+                            exitBlockJump)) {
+        return false;
+    }
+    Block* tryGetValueBlock = nullptr;
+    if (!MatchBranch(exitBlockJump, tryGetValueBlock)) return false;
+    Block* dictInitBlock = nullptr;
+    if (!MatchBranch(nextBlock->Instructions[1].get(), dictInitBlock) ||
+        dictInitBlock->IncomingEdgeCount != 1) {
+            return false;
+    }
+    // comp-not-equals(ldobj dictionaryType(ldsflda dictField), ldnull)
+    auto* neqComp = dynamic_cast<Comp*>(condition);
+    if (neqComp == nullptr || neqComp->Kind != ComparisonKind::Inequality) return false;
+    ILInstruction* neqLeft = neqComp->Left.get();
+    ILInstruction* neqRight = neqComp->Right.get();
+    if (neqRight == nullptr || !MatchLdNull(neqRight)) return false;
+    std::string dictFieldName;
+    TS::ITypePtr dictionaryType;
+    if (!MatchDictionaryFieldLoad(
+            neqLeft,
+            IsStringToIntDictionary,
+            dictFieldName, dictionaryType)) {
+                return false;
+    }
+    // match third block: the dictionary init (the Add-call walk).
+    std::vector<std::pair<std::optional<std::string>, int>> stringValues;
+    Block* blockAfterInit = nullptr;
+    std::string extractError;
+    if (!SwitchOnStringProbes::ExtractStringValuesFromInitBlock(
+            dictInitBlock, stringValues, blockAfterInit,
+            IsStringToIntDictionary,
+            dictionaryType.get(), false, extractError)) {
+                return false;
+    }
+    if (tryGetValueBlock != blockAfterInit) return false;
+    // match fourth block: the TryGetValue check.
+    if (tryGetValueBlock->IncomingEdgeCount != 2 ||
+        tryGetValueBlock->Instructions.size() != 2) {
+            return false;
+    }
+    ILInstruction* tryGetCondition = nullptr;
+    ILInstruction* defaultBlockJump = nullptr;
+    if (!MatchIfInstruction(tryGetValueBlock->Instructions[0].get(),
+                            tryGetCondition, defaultBlockJump)) {
+                                return false;
+    }
+    Block* defaultBlock = nullptr;
+    BlockContainer* defaultLeave = nullptr;
+    bool defaultHandled = MatchBranch(defaultBlockJump, defaultBlock) ||
+                          MatchLeave(defaultBlockJump, defaultLeave);
+    if (!defaultHandled) return false;
+    // logic.not(call TryGetValue(ldobj(ldsflda field2), ldloc s, ldloca idx))
+    ILInstruction* notArg = nullptr;
+    if (!MatchLogicNot(tryGetCondition, notArg)) return false;
+    auto* tryGetCall = dynamic_cast<Call*>(notArg);
+    if (tryGetCall == nullptr || tryGetCall->Arguments.size() != 3) return false;
+    bool isTryGetValue = false;
+    if (tryGetCall->Method != nullptr) {
+        isTryGetValue = tryGetCall->Method->Name() == "TryGetValue";
+    } else {
+        const std::string& mn = tryGetCall->MethodName;
+        isTryGetValue =
+            mn.size() > 2 && mn.substr(mn.rfind("::") + 2) == "TryGetValue";
+    }
+    if (!isTryGetValue) return false;
+    std::string dictField2;
+    TS::ITypePtr dictionaryType2;
+    if (!MatchDictionaryFieldLoad(
+            tryGetCall->Arguments[0].get(),
+            IsStringToIntDictionary,
+            dictField2, dictionaryType2) ||
+        dictField2.empty()) {
+            return false;
+    }
+    {
+        ILVariable* loaded = nullptr;
+        if (!MatchLdLoc(tryGetCall->Arguments[1].get(), loaded) ||
+            loaded != switchValueVar) {
+                return false;
+        }
+    }
+    ILVariable* switchIndexVar = nullptr;
+    {
+        auto* ldloca = dynamic_cast<LdLoca*>(tryGetCall->Arguments[2].get());
+        if (ldloca == nullptr || ldloca->Variable == nullptr) return false;
+        switchIndexVar = ldloca->Variable.get();
+    }
+    Block* switchBlock = nullptr;
+    if (!MatchBranch(tryGetValueBlock->Instructions[1].get(), switchBlock)) return false;
+    // match fifth block: the switch instruction (or the mcs single-case if).
+    if (switchBlock->IncomingEdgeCount != 1 ||
+        switchBlock->Instructions.empty()) {
+            return false;
+    }
+    std::vector<std::unique_ptr<SwitchSection>> sections;
+    if (auto* switchInst =
+            dynamic_cast<SwitchInstruction*>(switchBlock->Instructions[0].get())) {
+        if (switchBlock->Instructions.size() != 1) return false;
+        ILVariable* loaded = nullptr;
+        if (!MatchLdLoc(switchInst->Value.get(), loaded) ||
+            loaded != switchIndexVar) {
+                return false;
+        }
+        for (auto& section : switchInst->Sections) {
+            sections.push_back(std::move(section));
+        }
+    } else if (auto* ifInst = dynamic_cast<IfInstruction*>(
+                   switchBlock->Instructions[0].get())) {
+        // mcs: a single case compiled as a simple if.
+        if (switchBlock->Instructions.size() != 2) return false;
+        auto* eq = dynamic_cast<Comp*>(ifInst->Condition.get());
+        if (eq == nullptr || eq->Kind != ComparisonKind::Equality) return false;
+        ILVariable* loaded = nullptr;
+        if (!MatchLdLoc(eq->Left.get(), loaded) || loaded != switchIndexVar) return false;
+        if (eq->Right == nullptr || eq->Right->Op != OpCode::LdcI4 ||
+            static_cast<LdcI4*>(eq->Right.get())->Value != 0) {
+                return false;
+        }
+        auto section = std::make_unique<SwitchSection>(Util::LongSet(0));
+        section->SetBody(std::move(ifInst->TrueInst));
+        sections.push_back(std::move(section));
+        auto defaultSection =
+            std::make_unique<SwitchSection>(Util::LongSet(0).Invert());
+        defaultSection->SetBody(std::move(switchBlock->Instructions[1]));
+        sections.push_back(std::move(defaultSection));
+    } else {
+        return false;
+    }
+    context.StepOnce("MatchLegacySwitchOnStringWithDict");
+    bool keepAssignmentBefore = false;
+    if (switchValueVar->LoadCount > 2 || switchValue == nullptr) {
+        switchValue = new LdLoc(
+            ILVariablePtr(std::shared_ptr<ILVariable>(), switchValueVar));
+        keepAssignmentBefore = true;
+    }
+    std::unique_ptr<ILInstruction> argument(switchValue);
+    auto stringToInt = std::make_unique<StringToInt>(
+        std::move(argument),
+        FindType(context.TypeSystem, TS::KnownTypeCode::String));
+    for (std::size_t k = 0; k < stringValues.size(); k++) {
+        stringToInt->Map.emplace_back(stringValues[k].first,
+                                      static_cast<int>(stringValues[k].second));
+    }
+    auto newSwitch =
+        std::make_unique<SwitchInstruction>(std::move(stringToInt));
+    for (auto& section : sections) {
+        newSwitch->Sections.push_back(std::move(section));
+    }
+    newSwitch->StartILOffset = instructions[i]->StartILOffset;
+    newSwitch->EndILOffset = instructions[i]->EndILOffset;
+    // Emit: replace the br at i+1 with the switch; remove the if.
+    ReplaceAt(block, i + 1, std::move(newSwitch));
+    if (keepAssignmentBefore) {
+        RemoveRange(block, i, 1);
+        i--;
+    } else {
+        RemoveRange(block, i - 1, 2);
+        i -= 2;
+    }
+    return true;
+}
+
+// (the legacy-Dictionary section ends here)
+
+
+bool SwitchOnStringProbes::MatchLegacySwitchOnStringWithDict(
+    Block& block, int& i, ILTransformContext& context) {
+    return MatchLegacySwitchOnStringWithDictImpl(block, i, context);
 }
 
 } // namespace ILSpy::Decompiler::IL

@@ -35,6 +35,7 @@
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
@@ -546,6 +547,200 @@ TEST(SwitchOnStringTransformTest, ExtractStringValuesRejectsBadFinalStore)
         block.get(), values, after,
         [](const TS::IType& t) { return t.Name() == "Dictionary"; },
         dictType.get(), false, error));
+}
+
+
+// ---- The legacy Dictionary<string,int> full arm ---------------------------
+// The 5-block shape: head [stloc s(...); if (s == null) br nullCase; br
+// dictNullCheck], dictNullCheck [if (dictField != null) br tryGetValue; br
+// dictInit], dictInit [stloc dict(newobj Dictionary(n)); Add...; stobj; br
+// tryGetValue], tryGetValue [if (!TryGetValue(dict, s, out idx)) br default;
+// br switchBlock], switchBlock [switch (ldloc idx)].
+
+TEST(SwitchOnStringTransformTest, LegacyDictionarySwitchFolds)
+{
+    auto stringType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
+    auto dictType = MakeStringIntDictionary();
+    auto s = MakeLocal("s", stringType);
+    auto dict = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, dictType);
+    dict->Name = "dict";
+    auto idx = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local,
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32));
+    idx->Name = "idx";
+
+    auto fn = std::make_unique<IL::ILFunction>();
+    auto container = std::make_unique<IL::BlockContainer>();
+    fn->Variables.push_back(s);
+    fn->Variables.push_back(dict);
+    fn->Variables.push_back(idx);
+
+    auto head = std::make_unique<IL::Block>();
+    head->Kind = IL::BlockKind::ControlFlow;
+    IL::Block* headPtr = head.get();
+    auto nullCase = std::make_unique<IL::Block>();
+    nullCase->Kind = IL::BlockKind::ControlFlow;
+    nullCase->Add(std::make_unique<IL::Leave>(container.get()));
+    IL::Block* nullCasePtr = nullCase.get();
+    container->Blocks.push_back(std::move(nullCase));
+    auto exit = std::make_unique<IL::Block>();
+    exit->Kind = IL::BlockKind::ControlFlow;
+    exit->Add(std::make_unique<IL::Leave>(container.get()));
+    IL::Block* exitPtr = exit.get();
+    container->Blocks.push_back(std::move(exit));
+    auto bodyA = std::make_unique<IL::Block>();
+    bodyA->Kind = IL::BlockKind::ControlFlow;
+    bodyA->Add(std::make_unique<IL::Leave>(container.get()));
+    IL::Block* bodyAPtr = bodyA.get();
+    container->Blocks.push_back(std::move(bodyA));
+    auto bodyB = std::make_unique<IL::Block>();
+    bodyB->Kind = IL::BlockKind::ControlFlow;
+    bodyB->Add(std::make_unique<IL::Leave>(container.get()));
+    IL::Block* bodyBPtr = bodyB.get();
+    container->Blocks.push_back(std::move(bodyB));
+
+    // Block 1: the head.
+    head->Add(std::make_unique<IL::StLoc>(
+        s, std::make_unique<IL::LdStr>("the value")));
+    {
+        auto eq = std::make_unique<IL::Comp>(
+            std::make_unique<IL::LdLoc>(s), std::make_unique<IL::LdNull>(),
+            IL::ComparisonKind::Equality, false);
+        head->Add(std::make_unique<IL::IfInstruction>(
+            std::move(eq), std::make_unique<IL::Branch>(nullCasePtr)));
+    }
+    head->Add(std::make_unique<IL::Branch>(nullptr));
+    container->Blocks.push_back(std::move(head));
+
+    // Block 2: the dictionary null check.
+    auto dictNullCheck = std::make_unique<IL::Block>();
+    dictNullCheck->Kind = IL::BlockKind::ControlFlow;
+    {
+        auto ldsflda = std::make_unique<IL::LdsFlda>(
+            "System.Runtime.CompilerServices.CompilerGenerated::$$method0x600000c-1");
+        ldsflda->IsCompilerGeneratedField = true;
+        auto ldobj = std::make_unique<IL::LdObj>(std::move(ldsflda), dictType);
+        auto neq = std::make_unique<IL::Comp>(
+            std::move(ldobj), std::make_unique<IL::LdNull>(),
+            IL::ComparisonKind::Inequality, false);
+        dictNullCheck->Add(std::make_unique<IL::IfInstruction>(
+            std::move(neq), std::make_unique<IL::Branch>(nullptr)));
+        dictNullCheck->Add(std::make_unique<IL::Branch>(nullptr));
+    }
+    // The TryGetValue block.
+    auto tryGetValue = std::make_unique<IL::Block>();
+    tryGetValue->Kind = IL::BlockKind::ControlFlow;
+    IL::Block* tryGetValuePtr = tryGetValue.get();
+    // The dict-init block.
+    auto dictInit = std::make_unique<IL::Block>();
+    dictInit->Kind = IL::BlockKind::ControlFlow;
+    IL::Block* dictInitPtr = dictInit.get();
+    // The switch block.
+    auto switchBlock = std::make_unique<IL::Block>();
+    switchBlock->Kind = IL::BlockKind::ControlFlow;
+    IL::Block* switchBlockPtr = switchBlock.get();
+
+    // Wire the head's trailing branch and the dict-null-check branches now
+    // that the targets exist.
+    headPtr->Instructions[2].get()->ReplaceWith(
+        std::make_unique<IL::Branch>(dictNullCheck.get()));
+    static_cast<IL::Branch*>(headPtr->Instructions[2].get())->TargetBlock =
+        dictNullCheck.get();
+    static_cast<IL::IfInstruction*>(dictNullCheck->Instructions[0].get())
+        ->TrueInst = std::make_unique<IL::Branch>(tryGetValuePtr);
+    static_cast<IL::Branch*>(dictNullCheck->Instructions[1].get())->TargetBlock =
+        dictInitPtr;
+    container->Blocks.push_back(std::move(dictNullCheck));
+
+    // The dict-init contents.
+    {
+        auto ctor = std::make_unique<IL::Call>(
+            "System.Collections.Generic.Dictionary`1::.ctor");
+        ctor->IsNewObj = true;
+        ctor->DeclaringType = dictType;
+        ctor->AddArg(std::make_unique<IL::LdcI4>(2));
+        dictInit->Add(std::make_unique<IL::StLoc>(dict, std::move(ctor)));
+        auto makeAdd = [&](const char* value, int index) {
+            auto add = std::make_unique<IL::Call>(
+                "System.Collections.Generic.Dictionary`1::Add");
+            add->DeclaringType = dictType;
+            add->AddArg(std::make_unique<IL::LdLoc>(dict));
+            add->AddArg(std::make_unique<IL::LdStr>(value));
+            add->AddArg(std::make_unique<IL::LdcI4>(index));
+            return add;
+        };
+        dictInit->Add(makeAdd("alpha", 0));
+        dictInit->Add(makeAdd("beta", 1));
+        auto tailLdsFlda = std::make_unique<IL::LdsFlda>(
+            "System.Runtime.CompilerServices.CompilerGenerated::$$method0x600000c-1");
+        tailLdsFlda->IsCompilerGeneratedField = true;
+        dictInit->Add(std::make_unique<IL::StObj>(
+            std::move(tailLdsFlda), std::make_unique<IL::LdLoc>(dict), dictType));
+        dictInit->Add(std::make_unique<IL::Branch>(tryGetValuePtr));
+    }
+    container->Blocks.push_back(std::move(dictInit));
+
+    // The TryGetValue block contents.
+    {
+        auto tryGetCall = std::make_unique<IL::Call>(
+            "System.Collections.Generic.Dictionary`1::TryGetValue");
+        tryGetCall->DeclaringType = dictType;
+        auto ldsflda = std::make_unique<IL::LdsFlda>(
+            "System.Runtime.CompilerServices.CompilerGenerated::$$method0x600000c-1");
+        ldsflda->IsCompilerGeneratedField = true;
+        tryGetCall->AddArg(std::make_unique<IL::LdObj>(std::move(ldsflda), dictType));
+        tryGetCall->AddArg(std::make_unique<IL::LdLoc>(s));
+        tryGetCall->AddArg(std::make_unique<IL::LdLoca>(idx));
+        auto notComp = std::make_unique<IL::Comp>(
+            std::move(tryGetCall), std::make_unique<IL::LdcI4>(0),
+            IL::ComparisonKind::Equality, false);
+        tryGetValue->Add(std::make_unique<IL::IfInstruction>(
+            std::move(notComp), std::make_unique<IL::Branch>(exitPtr)));
+        tryGetValue->Add(std::make_unique<IL::Branch>(switchBlockPtr));
+    }
+    container->Blocks.push_back(std::move(tryGetValue));
+
+    // The switch block: switch (ldloc idx).
+    {
+        auto sw = std::make_unique<IL::SwitchInstruction>(
+            std::make_unique<IL::LdLoc>(idx));
+        auto addSection = [&](long long label, IL::Block* target) {
+            auto section = std::make_unique<IL::SwitchSection>(
+                Util::LongSet(Util::LongInterval(label, label + 1)));
+            section->SetBody(std::make_unique<IL::Branch>(target));
+            sw->Sections.push_back(std::move(section));
+        };
+        addSection(0, bodyAPtr);
+        addSection(1, bodyBPtr);
+        auto defaultSection = std::make_unique<IL::SwitchSection>(
+            Util::LongSet(Util::LongInterval(0, 2)).Invert());
+        defaultSection->SetBody(std::make_unique<IL::Branch>(exitPtr));
+        sw->Sections.push_back(std::move(defaultSection));
+        switchBlock->Add(std::move(sw));
+    }
+    container->Blocks.push_back(std::move(switchBlock));
+
+    fn->Body = std::move(container);
+    IL::RecomputeIncomingEdgeCounts(*fn);
+    headPtr->IncomingEdgeCount = 1;
+    IL::ComputeVariableUsage(*fn);
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.SwitchStatementOnString = true;
+    IL::SwitchOnStringTransform transform;
+    transform.Run(*fn, ctx);
+
+    // The if+br pair folds into a SwitchInstruction over a StringToInt of
+    // the switch-value variable; the initial stloc stays (the C# keeps it
+    // when the switch value is a plain local) and the consumed if is gone.
+    ASSERT_EQ(headPtr->Instructions.size(), 2u);
+    auto* sw = dynamic_cast<IL::SwitchInstruction*>(headPtr->Instructions[1].get());
+    ASSERT_NE(sw, nullptr) << "the Dictionary shape folds into a switch";
+    auto* stringToInt = dynamic_cast<IL::StringToInt*>(sw->Value.get());
+    ASSERT_NE(stringToInt, nullptr);
+    EXPECT_EQ(stringToInt->Map.size(), 2u);
+    EXPECT_EQ(stringToInt->Map[0].first.value(), "alpha");
+    EXPECT_EQ(stringToInt->Map[1].first.value(), "beta");
 }
 
 } // namespace

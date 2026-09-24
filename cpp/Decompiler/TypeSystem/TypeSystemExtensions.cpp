@@ -141,6 +141,11 @@ std::vector<const ITypeDefinition*> GetTopLevelTypeDefinitions(const ICompilatio
 }
 
 bool IsKnownType(const IType& type, KnownTypeCode knownType) {
+    // The reader's primitive stand-in (KnownType) carries the known-type code
+    // directly; it has no ITypeDefinition to resolve, so answer via its code.
+    if (auto* known = dynamic_cast<const KnownType*>(&type)) {
+        return known->Code() == knownType;
+    }
     const ITypeDefinition* def = type.GetDefinition();
     return def != nullptr && def->KnownTypeCode() == knownType;
 }

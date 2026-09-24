@@ -78,6 +78,12 @@ struct SwitchOnStringProbes {
         const std::function<bool(const TypeSystem::IType&)>& typeMatcher,
         const TypeSystem::IType* dictionaryType, bool isHashtablePattern,
         std::string& errorMessage);
+
+    // The C# `bool MatchLegacySwitchOnStringWithDict(InstructionCollection,
+    // ref int i)`: the 5-block compiler-generated Dictionary<string,int>
+    // shape, folded into a SwitchInstruction over a StringToInt dispatch.
+    static bool MatchLegacySwitchOnStringWithDict(
+        Block& block, int& i, ILTransformContext& context);
 };
 
 
