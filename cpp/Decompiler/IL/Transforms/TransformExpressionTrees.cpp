@@ -44,6 +44,8 @@
 
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
+#include "Decompiler/IL/Instructions/IsInst.hpp"
+#include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/IL/Instructions/CastClass.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
@@ -495,6 +497,12 @@ TransformExpressionTrees::ConvertInstruction(ILInstruction* instruction,
         if (name == "Field") {
             return ConvertField(invocation, typeHint);
         }
+        if (name == "TypeAs") {
+            return ConvertTypeAs(invocation);
+        }
+        if (name == "TypeIs") {
+            return ConvertTypeIs(invocation);
+        }
         return {nullptr, nullptr};
     }
     if (auto* ldloc = dynamic_cast<LdLoc*>(instruction)) {
@@ -607,6 +615,74 @@ bool TransformExpressionTrees::MatchArgumentList(
         i++;
     }
     return true;
+}
+
+// ---- The ConvertTypeAs / ConvertTypeIs arms ----
+
+// The C# `(Func<ILInstruction>, IType) ConvertTypeAs(CallInstruction
+// invocation)` -- the `case "TypeAs"` arm (TransformExpressionTrees.cs line
+// 1289). The converted operand is a thunk (the C# Func); the isinst node
+// materializes in BuildTypeAs. The ECMA-335 III.4.6 rule: a Nullable<T>
+// typeTok is interpreted as boxed T, so the isinst is followed by
+// `unbox.any(T, ...)`.
+TransformExpressionTrees::ConvertResult TransformExpressionTrees::ConvertTypeAs(
+    Call* invocation) {
+    if (invocation == nullptr || invocation->Arguments.size() != 2) {
+        return {nullptr, nullptr};
+    }
+    ConvertResult converted =
+        ConvertInstruction(invocation->Arguments[0].get());
+    if (!converted.thunk) return {nullptr, nullptr};
+    TypeSystem::ITypePtr type;
+    if (!MatchGetTypeFromHandle(invocation->Arguments[1].get(), type)) {
+        return {nullptr, nullptr};
+    }
+    return {[converted = std::move(converted.thunk), type]() mutable
+                -> std::unique_ptr<ILInstruction> {
+        std::unique_ptr<ILInstruction> inst =
+            std::make_unique<IsInst>(type, converted());
+        // The C# `if (type.IsKnownType(KnownTypeCode.NullableOfT))`.
+        if (type != nullptr && TypeSystem::IsKnownType(
+                                   *type, TypeSystem::KnownTypeCode::NullableOfT)) {
+            inst = std::make_unique<UnboxAny>(type, std::move(inst));
+        }
+        return inst;
+    },
+            std::move(type)};
+}
+
+// The C# `(Func<ILInstruction>, IType) ConvertTypeIs(CallInstruction
+// invocation)` -- the `case "TypeIs"` arm (line 1305): `x is T` becomes
+// comp(isinst(operand, T) != ldnull); the result type is Boolean.
+TransformExpressionTrees::ConvertResult TransformExpressionTrees::ConvertTypeIs(
+    Call* invocation) {
+    if (invocation == nullptr || invocation->Arguments.size() != 2) {
+        return {nullptr, nullptr};
+    }
+    ConvertResult converted =
+        ConvertInstruction(invocation->Arguments[0].get());
+    if (!converted.thunk) return {nullptr, nullptr};
+    TypeSystem::ITypePtr type;
+    if (!MatchGetTypeFromHandle(invocation->Arguments[1].get(), type)) {
+        return {nullptr, nullptr};
+    }
+    // The C# `context.TypeSystem.FindType(KnownTypeCode.Boolean)` -- the
+    // port's file-local FindType helper; a context without a type system
+    // cannot resolve it, so the arm bails (the C# always resolves Boolean).
+    TypeSystem::ITypePtr resultType =
+        FindType(context_ != nullptr ? context_->Base.TypeSystem : nullptr,
+                 TypeSystem::KnownTypeCode::Boolean);
+    if (!resultType) {
+        return {nullptr, nullptr};
+    }
+    return {[converted = std::move(converted.thunk), type]() mutable
+                -> std::unique_ptr<ILInstruction> {
+        auto isinst = std::make_unique<IsInst>(type, converted());
+        return std::make_unique<Comp>(
+            std::move(isinst), std::make_unique<LdNull>(),
+            ComparisonKind::Inequality, TypeSystem::Sign::None);
+    },
+            std::move(resultType)};
 }
 
 // The C# `bool MatchGetFieldFromHandle(ILInstruction inst, out IMember

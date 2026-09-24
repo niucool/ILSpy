@@ -37,6 +37,8 @@
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/TypeSystem/LookupStubs.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/IsInst.hpp"
+#include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
 #include "Decompiler/IL/Instructions/CastClass.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
@@ -661,4 +663,161 @@ TEST(TransformExpressionTreesTest, ConvertFieldConvertsStaticFieldAccess)
     auto* ldsflda = dynamic_cast<IL::LdsFlda*>(ldobj->Target.get());
     ASSERT_NE(ldsflda, nullptr);
     EXPECT_EQ(ldsflda->FieldName, "Test.C::field");
+}
+
+// The ConvertTypeAs arm (the C# `case "TypeAs"`): a `as`-style cast node
+// inside a converted lambda body becomes `isinst(T, operand)` -- with the
+// ECMA-335 Nullable-of-T special case following unbox.any(T, ...) for a
+// Nullable<T> target.
+TEST(TransformExpressionTreesTest, ConvertTypeAsConvertsToIsInst)
+{
+    auto stringType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
+    auto expressionDef = std::make_shared<TS::SimpleType>(TS::TopLevelTypeName(
+        std::string("System.Linq.Expressions"), std::string("Expression")));
+    TS::ITypePtr lambdaMethodReturnType =
+        std::make_shared<TS::ParameterizedType>(
+            expressionDef, std::vector<TS::ITypePtr>{stringType});
+    // Expression.TypeAs(Expression.Constant("x", string), typeof(string))
+    auto constantCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Constant"));
+    constantCall->Arguments.push_back(std::make_unique<IL::LdStr>("x"));
+    {
+        auto typeToken = std::make_unique<IL::LdTypeToken>(
+            stringType, std::string("System.String"));
+        auto innerGetTypeCall = std::make_unique<IL::Call>(
+            std::make_shared<GetTypeFromHandleStub>());
+        innerGetTypeCall->Arguments.push_back(std::move(typeToken));
+        constantCall->Arguments.push_back(std::move(innerGetTypeCall));
+    }
+    auto typeAsCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "TypeAs"));
+    typeAsCall->Arguments.push_back(std::move(constantCall));
+    typeAsCall->Arguments.push_back(std::make_unique<IL::Call>(
+        std::make_shared<GetTypeFromHandleStub>()));
+    typeAsCall->Arguments[1]->Parent = nullptr;
+    {
+        // Build the typeof(string) operand: Type.GetTypeFromHandle(ldtoken
+        // string) -- the same shape MatchGetTypeFromHandle consumes.
+        auto typeToken = std::make_unique<IL::LdTypeToken>(
+            stringType, std::string("System.String"));
+        auto innerGetTypeCall = std::make_unique<IL::Call>(
+            std::make_shared<GetTypeFromHandleStub>());
+        innerGetTypeCall->Arguments.push_back(std::move(typeToken));
+        typeAsCall->Arguments.back() = std::move(innerGetTypeCall);
+    }
+
+    auto lambdaCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Lambda",
+            lambdaMethodReturnType));
+    lambdaCall->Arguments.push_back(std::move(typeAsCall));
+    lambdaCall->Arguments.push_back(std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>("System", "Array", "Empty")));
+
+    auto block = std::make_unique<IL::Block>();
+    block->Kind = IL::BlockKind::ControlFlow;
+    block->Add(std::move(lambdaCall));
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.ExpressionTrees = true;
+    IL::StatementTransformContext driverCtx(ctx, block.get());
+    IL::TransformExpressionTrees transform;
+    transform.Run(*block, 0, driverCtx);
+
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* fn = dynamic_cast<IL::ILFunction*>(block->Instructions[0].get());
+    ASSERT_NE(fn, nullptr);
+    ASSERT_EQ(fn->Body->Blocks.size(), 1u);
+    ASSERT_EQ(fn->Body->Blocks[0]->Instructions.size(), 1u);
+    auto* leave = dynamic_cast<IL::Leave*>(
+        fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_NE(leave, nullptr);
+    auto* isinst = dynamic_cast<IL::IsInst*>(leave->Value.get());
+    ASSERT_NE(isinst, nullptr)
+        << "the TypeAs expression converts to an isinst";
+    EXPECT_EQ(isinst->Type.get(), stringType.get());
+    auto* ldstr = dynamic_cast<IL::LdStr*>(isinst->Argument.get());
+    ASSERT_NE(ldstr, nullptr);
+    EXPECT_EQ(ldstr->Value, "x");
+}
+
+// The ConvertTypeIs arm: `x is T` becomes
+// comp(isinst(operand, T) != ldnull) -- the Inequality-with-ldnull shape,
+// result Boolean.
+TEST(TransformExpressionTreesTest, ConvertTypeIsConvertsToCompNullCheck)
+{
+    TS::TestSupport::LookupCompilation compilation;
+    auto booleanType =
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Boolean);
+    compilation.RegisterKnownType(TS::KnownTypeCode::Boolean,
+                                  booleanType.get());
+    auto stringType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
+    auto expressionDef = std::make_shared<TS::SimpleType>(TS::TopLevelTypeName(
+        std::string("System.Linq.Expressions"), std::string("Expression")));
+    TS::ITypePtr lambdaMethodReturnType =
+        std::make_shared<TS::ParameterizedType>(
+            expressionDef, std::vector<TS::ITypePtr>{stringType});
+    // Expression.TypeIs(Expression.Constant("x", string), typeof(string))
+    auto constantCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Constant"));
+    constantCall->Arguments.push_back(std::make_unique<IL::LdStr>("x"));
+    {
+        auto typeToken = std::make_unique<IL::LdTypeToken>(
+            stringType, std::string("System.String"));
+        auto innerGetTypeCall = std::make_unique<IL::Call>(
+            std::make_shared<GetTypeFromHandleStub>());
+        innerGetTypeCall->Arguments.push_back(std::move(typeToken));
+        constantCall->Arguments.push_back(std::move(innerGetTypeCall));
+    }
+    auto typeIsCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "TypeIs"));
+    typeIsCall->Arguments.push_back(std::move(constantCall));
+    {
+        auto typeToken = std::make_unique<IL::LdTypeToken>(
+            stringType, std::string("System.String"));
+        auto innerGetTypeCall = std::make_unique<IL::Call>(
+            std::make_shared<GetTypeFromHandleStub>());
+        innerGetTypeCall->Arguments.push_back(std::move(typeToken));
+        typeIsCall->Arguments.push_back(std::move(innerGetTypeCall));
+    }
+
+    auto lambdaCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Lambda",
+            lambdaMethodReturnType));
+    lambdaCall->Arguments.push_back(std::move(typeIsCall));
+    lambdaCall->Arguments.push_back(std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>("System", "Array", "Empty")));
+
+    auto block = std::make_unique<IL::Block>();
+    block->Kind = IL::BlockKind::ControlFlow;
+    block->Add(std::move(lambdaCall));
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.ExpressionTrees = true;
+    ctx.TypeSystem = &compilation;
+    IL::StatementTransformContext driverCtx(ctx, block.get());
+    IL::TransformExpressionTrees transform;
+    transform.Run(*block, 0, driverCtx);
+
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* fn = dynamic_cast<IL::ILFunction*>(block->Instructions[0].get());
+    ASSERT_NE(fn, nullptr);
+    ASSERT_EQ(fn->Body->Blocks.size(), 1u);
+    auto* leave = dynamic_cast<IL::Leave*>(
+        fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_NE(leave, nullptr);
+    auto* comp = dynamic_cast<IL::Comp*>(leave->Value.get());
+    ASSERT_NE(comp, nullptr)
+        << "the TypeIs expression converts to a null-check comp";
+    EXPECT_EQ(comp->Kind, IL::ComparisonKind::Inequality);
+    auto* isinst = dynamic_cast<IL::IsInst*>(comp->Left.get());
+    ASSERT_NE(isinst, nullptr);
+    EXPECT_EQ(isinst->Type.get(), stringType.get());
+    auto* ldnull = dynamic_cast<IL::LdNull*>(comp->Right.get());
+    ASSERT_NE(ldnull, nullptr);
 }

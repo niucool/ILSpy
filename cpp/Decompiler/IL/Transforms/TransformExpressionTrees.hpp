@@ -202,6 +202,14 @@ public:
         const ::ILSpy::Decompiler::TypeSystem::IMethod& method,
         std::vector<std::function<std::unique_ptr<ILInstruction>()>>& out);
 
+    // The C# `(Func<ILInstruction>, IType) ConvertTypeAs(CallInstruction)`:
+    // the `as`-cast arm -- `isinst(T, operand)`, with the ECMA-335 III.4.6
+    // Nullable-of-T special case following `unbox.any(T, ...)`; and the C#
+    // `(Func<ILInstruction>, IType) ConvertTypeIs(CallInstruction)`: the
+    // `is T` arm -- `comp(isinst(T, operand) != ldnull)`, result Boolean.
+    ConvertResult ConvertTypeAs(Call* invocation);
+    ConvertResult ConvertTypeIs(Call* invocation);
+
     // The C# `(Func<ILInstruction>, IType) ConvertField(CallInstruction,
     // IType typeHint)` and its MatchGetFieldFromHandle helper (the
     // FieldInfo.GetFieldFromHandle(ldmembertoken field) shape -- the token's
