@@ -768,6 +768,11 @@ void TransformCollectionAndObjectInitializers::Run(
     Block& block, int pos, StatementTransformContext& context) {
     // The C# `if (!context.Settings.ObjectOrCollectionInitializers) return;`.
     if (!context.Base.Settings.ObjectOrCollectionInitializers) return;
+    // A sibling child's fold can shrink the block after the driver captured
+    // its rerun position, so a stale pos past the end reaches the child
+    // entry; treat it as a no-op (the C# folds replace in place and never
+    // sees this).
+    if (pos < 0 || pos >= static_cast<int>(block.Instructions.size())) return;
     ILInstruction* inst = block.Instructions[static_cast<std::size_t>(pos)].get();
     // The C# `if (!inst.MatchStLoc(out var v, out var initInst) || v.Kind !=
     // VariableKind.Local && v.Kind != VariableKind.StackSlot) return;` -- the

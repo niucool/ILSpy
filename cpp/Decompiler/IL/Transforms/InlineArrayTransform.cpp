@@ -84,24 +84,18 @@ bool MatchInlineArrayHelper(const TypeSystem::IMethod* method,
     if (method == nullptr) return false;
     if (!method->IsStatic()) return false;
     if (method->Name() != methodName) {
-        std::fprintf(stderr, "PROBE-H: name '%s' != '%s'\n",
-                     method->Name().c_str(), methodName.c_str());
         return false;
     }
     ITypePtr declaringType = method->DeclaringType();
     if (declaringType == nullptr) {
-        std::fprintf(stderr, "PROBE-H: no declaring type\n");
         return false;
     }
     if (declaringType->Name() != "<PrivateImplementationDetails>") {
-        std::fprintf(stderr, "PROBE-H: decl name '%s'\n",
-                     declaringType->Name().c_str());
         return false;
     }
     if (declaringType->TypeParameterCount() != 0) return false;
     std::vector<ITypePtr> typeArguments = method->TypeArguments();
     if (typeArguments.size() != 2) {
-        std::fprintf(stderr, "PROBE-H: typeargs %zu\n", typeArguments.size());
         return false;
     }
     ITypePtr bufferType = typeArguments[0];
@@ -109,33 +103,27 @@ bool MatchInlineArrayHelper(const TypeSystem::IMethod* method,
     const std::vector<const TypeSystem::IParameter*> parameters = method->Parameters();
     if (methodName.find("FirstElement") != std::string::npos) {
         if (parameters.size() != 1) {
-            std::fprintf(stderr, "PROBE-H: first params %zu\n", parameters.size());
             return false;
         }
         auto* byRef = dynamic_cast<const TypeSystem::ByReferenceType*>(
             &parameters[0]->Type());
         if (byRef == nullptr) {
-            std::fprintf(stderr, "PROBE-H: param0 not byref\n");
             return false;
         }
         if (!byRef->Element()->Equals(*bufferType)) return false;
     } else {
         if (parameters.size() != 2) {
-            std::fprintf(stderr, "PROBE-H: elem params %zu\n", parameters.size());
             return false;
         }
         auto* byRef = dynamic_cast<const TypeSystem::ByReferenceType*>(
             &parameters[0]->Type());
         if (byRef == nullptr) {
-            std::fprintf(stderr, "PROBE-H: param0 not byref\n");
             return false;
         }
         if (!byRef->Element()->Equals(*bufferType)) {
-            std::fprintf(stderr, "PROBE-H: buffer type mismatch\n");
             return false;
         }
         if (!TypeSystem::IsKnownType(parameters[1]->Type(), TypeSystem::KnownTypeCode::Int32)) {
-            std::fprintf(stderr, "PROBE-H: param1 not int32\n");
             return false;
         }
     }
@@ -218,20 +206,15 @@ bool MatchInlineArrayElementRef(Call* inst, ITypePtr& type,
     if (MatchInlineArrayHelper(inst->Method.get(), "InlineArrayElementRef",
                                inlineArrayType)) {
         isReadOnly = false;
-        std::fprintf(stderr, "PROBE: ElementRef matched\n");
     } else if (MatchInlineArrayHelper(inst->Method.get(),
                                       "InlineArrayElementRefReadOnly",
                                       inlineArrayType)) {
         isReadOnly = true;
     } else {
-        std::fprintf(stderr, "PROBE: ElementRef helper mismatch\n");
         return false;
     }
     std::optional<int> arrayLength =
         TypeSystem::GetInlineArrayLength(*inlineArrayType);
-    std::fprintf(stderr, "PROBE: length has_value=%d val=%d index=%d\n",
-                 arrayLength.has_value() ? 1 : 0,
-                 arrayLength.has_value() ? *arrayLength : -1, indexValue->Value);
     if (!arrayLength.has_value()) return false;
     if (indexValue->Value < 0 || indexValue->Value >= *arrayLength) return false;
     type = std::move(inlineArrayType);

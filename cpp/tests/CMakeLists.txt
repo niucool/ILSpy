@@ -584,6 +584,7 @@ add_executable(ilspy_tests
     Decompiler/IL/Transforms/NamedArgumentTransform_Test.cpp
     Decompiler/IL/Transforms/TransformArrayInitializers_Test.cpp
     Decompiler/IL/Transforms/TransformCollectionAndObjectInitializers_Test.cpp
+    Decompiler/IL/Transforms/TransformCollectionAndObjectInitializers_StalePos_Test.cpp
     Decompiler/IL/Transforms/DeconstructionTransform_Test.cpp
     Decompiler/IL/Transforms/InlineArrayTransform_Test.cpp
     Decompiler/IL/Transforms/TupleTransform_Test.cpp

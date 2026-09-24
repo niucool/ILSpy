@@ -92,9 +92,14 @@ void StatementTransform::RunBlock(Block* block, ILTransformContext& context) {
             // A child requested a rerun at an earlier position; jump back. The
             // children only ever request a position <= the current pos (the C#
             // invariant `rerunPosition >= pos`), so this never skips an
-            // unprocessed statement.
+            // unprocessed statement. A folding child can also have shrunk the
+            // block after capturing the position (the C# folds replace in
+            // place), so clamp the jump to the current last instruction.
             pos = ctx.RerunPosition();
             ctx.ClearRerunPosition();
+            if (pos >= static_cast<int>(block->Instructions.size())) {
+                pos = static_cast<int>(block->Instructions.size()) - 1;
+            }
         }
         for (auto& child : children_) {
             child->Run(*block, pos, ctx);
