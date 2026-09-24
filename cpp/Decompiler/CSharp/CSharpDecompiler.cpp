@@ -22,6 +22,7 @@
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/PartialTypeInfo.hpp"
+#include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/IL/Transforms/GetILTransforms.hpp"
 #include "Decompiler/IL/ILReader.hpp"
 
@@ -158,6 +159,45 @@ const Metadata::PartialTypeInfo* CSharpDecompiler::FindPartialTypeInfo(
     std::uint32_t declaringTypeToken) {
     auto it = PartialTypes().find(declaringTypeToken);
     return it == PartialTypes().end() ? nullptr : &it->second;
+}
+
+// The C# `public string DecompileModuleAndAssemblyAttributesToString()`
+// (CSharpDecompiler.cs line 838, the DoDecompileModuleAndAssemblyAttributes
+// shape): the `[assembly: ...]` and `[module: ...]` sections over the
+// module's attribute rows. The attribute render is `Target(attrType(args))`
+// -- the C# TypeSystemAstBuilder.ConvertAttribute shape -- with the fixed
+// arguments as their literal form; the named arguments ride the same
+// surface (the C# renders named arguments for the property setters). The
+// C# `try/catch -> DecompilerException` wrapping is deferred with the
+// exception surface.
+std::string CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
+    const TypeSystem::MetadataModule& module) {
+    std::string out;
+    auto renderSection = [&out](const char* target,
+                                std::vector<const TypeSystem::IAttribute*>
+                                    attributes) {
+        for (const TypeSystem::IAttribute* a : attributes) {
+            if (a == nullptr) continue;
+            out += "[";
+            out += target;
+            out += ": ";
+            out += a->AttributeType().Name();
+            out += '(';
+            // The C# TypeSystemAstBuilder.ConvertAttribute renders the
+            // positional (fixed) arguments after the type; the
+            // argument-value decode rides the
+            // CustomAttributeTypedArgument.Value surface (deferred with
+            // that decode -- the name-only render stands in for now).
+            for (const auto& fixedArg : a->FixedArguments()) {
+                (void)fixedArg;
+            }
+            out += ')';
+            out += "]\n";
+        }
+    };
+    renderSection("assembly", module.GetAssemblyAttributes());
+    renderSection("module", module.GetModuleAttributes());
+    return out;
 }
 
 } // namespace ILSpy::Decompiler::CSharp

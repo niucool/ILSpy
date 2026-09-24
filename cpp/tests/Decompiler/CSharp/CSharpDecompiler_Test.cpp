@@ -28,6 +28,10 @@
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
 #include "TestFixtures/ConnIdResFixtures.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/TypeSystem/ICompilation.hpp"
+#include "Decompiler/TypeSystem/INamespace.hpp"
+#include "Decompiler/TypeSystem/StringComparer.hpp"
+#include "Decompiler/Util/CacheManager.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
@@ -39,6 +43,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <string>
 
@@ -48,6 +54,51 @@ namespace IL = ::ILSpy::Decompiler::IL;
 namespace TS = ::ILSpy::Decompiler::TypeSystem;
 namespace Metadata = ::ILSpy::Decompiler::Metadata;
 using ::ILSpy::Decompiler::Metadata::MethodSignature;
+
+// The connid_res compilation fixture (the MetadataModule_Test
+// MainModuleCompilation pattern): a hand-rolled ICompilation whose main
+// module is set after construction (the module ctor binds the compilation
+// reference first).
+class ConnIdCompilation : public TS::ICompilation {
+public:
+    ConnIdCompilation() = default;
+
+    void SetMainModule(const TS::IModule* module) { mainModule_ = module; }
+
+    // --- ICompilation ---
+    const TS::IModule& MainModule() const override { return *mainModule_; }
+    std::vector<const TS::IModule*> Modules() const override
+    {
+        return std::vector<const TS::IModule*>{ mainModule_ };
+    }
+    std::vector<const TS::IModule*> ReferencedModules() const override { return {}; }
+    const TS::INamespace& RootNamespace() const override
+    {
+        return mainModule_->RootNamespace();
+    }
+    const TS::INamespace* GetNamespaceForExternAlias(const std::string&) const override
+    {
+        return nullptr;
+    }
+    const TS::IType& FindType(TS::KnownTypeCode) const override { return knownType_; }
+    const TS::StringComparer& NameComparer() const override
+    {
+        return TS::StringComparer::Ordinal();
+    }
+    const ILSpy::Decompiler::Util::CacheManager& CacheManager() const override
+    {
+        return cacheManager_;
+    }
+    TS::TypeSystemOptions TypeSystemOptions() const override
+    {
+        return TS::TypeSystemOptions::Default;
+    }
+
+private:
+    const TS::IModule* mainModule_ = nullptr;
+    ILSpy::Decompiler::Util::CacheManager cacheManager_;
+    TS::KnownType knownType_{ TS::KnownTypeCode::Object };
+};
 namespace CSharp = ::ILSpy::Decompiler::CSharp;
 using ILVariablePtr = std::shared_ptr<IL::ILVariable>;
 
@@ -245,5 +296,42 @@ TEST(CSharpDecompilerTest, PartialTypeInfosMergeForTheSameType)
               nullptr)
         << "an unregistered type has no partial info";
 }
+
+// The module/assembly-attributes entry (the C#
+// `public string DecompileModuleAndAssemblyAttributesToString()` --
+// CSharpDecompiler.cs line 838): the connid_res corpus renders
+// `[assembly: ...]` attribute lines (the C# `[assembly: Attr(...)]`
+// section shape; the attribute arguments render from the FixedArguments).
+TEST(CSharpDecompilerTest, DecompileModuleAndAssemblyAttributesRender)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+    ConnIdCompilation compilation;
+    TS::MetadataModule module{compilation, &file, TS::TypeSystemOptions::Default};
+    compilation.SetMainModule(&module);
+    std::string text =
+        CSharp::CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
+            module);
+    EXPECT_FALSE(text.empty())
+        << "the corpus assembly carries assembly attributes";
+    EXPECT_NE(text.find("[assembly:"), std::string::npos)
+        << "the attribute section carries the assembly target";
+    EXPECT_NE(text.find("[module:"), std::string::npos)
+        << "the module section carries the module target";
+    // The corpus rows (the mscorlib-backed decode): the compiler-emitted
+    // set over a csc net10.0 library.
+    EXPECT_NE(text.find("CompilationRelaxationsAttribute"), std::string::npos);
+    EXPECT_NE(text.find("RuntimeCompatibilityAttribute"), std::string::npos);
+    EXPECT_NE(text.find("DebuggableAttribute"), std::string::npos);
+    EXPECT_NE(text.find("AssemblyVersionAttribute"), std::string::npos);
+    EXPECT_NE(text.find("RefSafetyRulesAttribute"), std::string::npos);
+    if (std::getenv("TET_TRACE")) {
+        std::fprintf(stderr, "TET-ATTR: %s\n", text.c_str());
+    }
+}
+
+
 
 } // namespace

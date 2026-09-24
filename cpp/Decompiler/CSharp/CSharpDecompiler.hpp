@@ -34,6 +34,7 @@
 
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
+#include "Decompiler/TypeSystem/MetadataModule.hpp"
 #include "Decompiler/Metadata/PartialTypeInfo.hpp"
 
 #include <memory>
@@ -96,6 +97,12 @@ public:
     static bool DecompileTypeToString(
         const ::ILSpy::Decompiler::Metadata::MetadataFile& file,
         std::uint32_t typeToken, std::string& out);
+
+    // The C# `public string DecompileModuleAndAssemblyAttributesToString()`
+    // (CSharpDecompiler.cs line 838): the `[assembly: ...]` /
+    // `[module: ...]` attribute sections over the module's attribute rows.
+    static std::string DecompileModuleAndAssemblyAttributesToString(
+        const ::ILSpy::Decompiler::TypeSystem::MetadataModule& module);
 
     // The C# `public void AddPartialTypeDefinition(PartialTypeInfo info)`
     // (CSharpDecompiler.cs line 1481): register the partial-type info under
