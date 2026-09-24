@@ -1,0 +1,142 @@
+// Copyright (c) 2026 Jim Hester
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+// Tests for LocalFunctionDecompiler's use-site walk (the C# FindUseSites +
+// TransformUseSites): a call or ldftn whose method name parses as a local
+// function name is a use-site; a delegate construction use-site (the
+// `newobj Delegate(target, ldftn localFunction)` shape) has its capture
+// target replaced with ldnull, and a non-local-function ldftn is left
+// untouched.
+
+#include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdNull.hpp"
+#include "Decompiler/IL/Instructions/TokenInstructions.hpp"
+#include "Decompiler/IL/Transforms/IILTransform.hpp"
+#include "Decompiler/IL/Transforms/LocalFunctionDecompiler.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/TypeSystem/LookupStubs.hpp"
+
+#include <gtest/gtest.h>
+
+#include <memory>
+#include <string>
+
+namespace {
+
+namespace IL = ::ILSpy::Decompiler::IL;
+namespace TS = ::ILSpy::Decompiler::TypeSystem;
+using ILVariablePtr = std::shared_ptr<IL::ILVariable>;
+
+// The use-site walk over a mixed body: one plain call use-site and one
+// delegate-construction use-site. The transform's observable rewrite is the
+// delegate construction's target becoming ldnull (the C#
+// TransformToLocalFunctionReference target arm); the plain call keeps its
+// arguments (the invocation reshape needs the parameter metadata surface).
+TEST(LocalFunctionDecompilerUseSitesTest, RewritesDelegateConstructionTargetToLdNull)
+{
+    auto fn = std::make_unique<IL::ILFunction>();
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    ILVariablePtr captured = fn->RegisterVariable(
+        IL::VariableKind::Local, intType, std::string("captured"));
+
+    auto body = std::make_unique<IL::BlockContainer>();
+    fn->Body = std::move(body);
+    auto block = std::make_unique<IL::Block>();
+    block->Kind = IL::BlockKind::ControlFlow;
+    IL::Block* blockPtr = block.get();
+    fn->Body->AddBlock(std::move(block));
+
+    // call Test.C::<M>g__LF|0_0(ldloc captured) -- a plain local-function call.
+    auto plainCall = std::make_unique<IL::Call>("Test.C::<M>g__LF|0_0");
+    plainCall->AddArg(std::make_unique<IL::LdLoc>(captured));
+    blockPtr->Add(std::move(plainCall));
+
+    // newobj Action(ldloc captured, ldftn Test.C::<M>g__LF2|0_1) -- a
+    // delegate construction use-site (the declaring type must resolve to
+    // Kind == Delegate for MatchDelegateConstruction).
+    auto newobj = std::make_unique<IL::Call>("Test.Action::.ctor");
+    newobj->IsNewObj = true;
+    newobj->DeclaringType = std::make_shared<TS::SimpleType>(
+        TS::TopLevelTypeName(std::string("System"), std::string("Action")),
+        TS::TypeKind::Delegate);
+    newobj->AddArg(std::make_unique<IL::LdLoc>(captured));
+    newobj->AddArg(
+        std::make_unique<IL::LdFtn>(std::string("Test.C::<M>g__LF2|0_1")));
+    IL::Call* newobjPtr = newobj.get();
+    blockPtr->Add(std::move(newobj));
+
+    blockPtr->SetFinal(std::make_unique<IL::LdLoc>(captured));
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.LocalFunctions = true;
+    IL::LocalFunctionDecompiler transform;
+    transform.Run(*fn, ctx);
+
+    // The delegate construction's capture target became ldnull.
+    auto* newTarget = dynamic_cast<IL::LdNull*>(newobjPtr->Arguments[0].get());
+    EXPECT_NE(newTarget, nullptr)
+        << "the delegate construction target is replaced with ldnull";
+    EXPECT_EQ(newobjPtr->Arguments[1]->Op, IL::OpCode::LdFtn)
+        << "the ldftn argument is kept";
+    // The plain call use-site keeps its arguments (the invocation reshape
+    // needs the parameter metadata surface).
+    ASSERT_EQ(blockPtr->Instructions.size(), 2u);
+    auto* kept = dynamic_cast<IL::Call*>(blockPtr->Instructions[0].get());
+    ASSERT_NE(kept, nullptr);
+    EXPECT_EQ(kept->Arguments.size(), 1u);
+    EXPECT_EQ(kept->MethodName, "Test.C::<M>g__LF|0_0");
+}
+
+// A non-local-function ldftn (not part of a delegate construction) is not a
+// use-site and is left untouched.
+TEST(LocalFunctionDecompilerUseSitesTest, IgnoresNonLocalFunctionLdFtn)
+{
+    auto fn = std::make_unique<IL::ILFunction>();
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    ILVariablePtr captured = fn->RegisterVariable(
+        IL::VariableKind::Local, intType, std::string("captured"));
+
+    auto body = std::make_unique<IL::BlockContainer>();
+    fn->Body = std::move(body);
+    auto block = std::make_unique<IL::Block>();
+    block->Kind = IL::BlockKind::ControlFlow;
+    IL::Block* blockPtr = block.get();
+    fn->Body->AddBlock(std::move(block));
+
+    auto ldftn = std::make_unique<IL::LdFtn>(std::string("Test.C::PlainMethod"));
+    IL::LdFtn* ldftnPtr = ldftn.get();
+    blockPtr->Add(std::move(ldftn));
+    blockPtr->SetFinal(std::make_unique<IL::LdLoc>(captured));
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.LocalFunctions = true;
+    IL::LocalFunctionDecompiler transform;
+    transform.Run(*fn, ctx);
+
+    ASSERT_EQ(blockPtr->Instructions.size(), 1u);
+    EXPECT_EQ(blockPtr->Instructions[0].get(), ldftnPtr)
+        << "the non-local-function ldftn node is untouched";
+}
+
+} // namespace

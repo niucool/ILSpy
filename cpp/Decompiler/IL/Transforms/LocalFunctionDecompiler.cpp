@@ -18,18 +18,155 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/IL/Instructions/LdNull.hpp"
+#include "Decompiler/IL/Instructions/TokenInstructions.hpp"
+#include "Decompiler/IL/Transforms/DelegateConstruction.hpp"
+#include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Transforms/LocalFunctionDecompiler.hpp"
 
 #include <cassert>
+#include <map>
+#include <string>
+#include <vector>
 
 namespace ILSpy::Decompiler::IL {
+
+namespace {
+
+// The C# `struct LocalFunctionInfo` (the C# keys the dictionary on the
+// MethodDefinitionHandle; the port's reader-built nodes carry only the
+// method-name string, so the map keys on the full method name -- the
+// "Namespace.Type::<caller>g__fn|n" identity).
+struct LocalFunctionInfo {
+    // The C# `List<ILInstruction> UseSites`: the call/ldftn/newobj nodes.
+    std::vector<ILInstruction*> UseSites;
+    // The full method name (the map key repeated; the C# `info.Method`).
+    std::string MethodName;
+};
+
+using LocalFunctionsMap = std::map<std::string, LocalFunctionInfo>;
+
+// The short method name: the last "::" segment of the reader's
+// "Namespace.Type::Method" full name (ParseLocalFunctionName consumes the
+// short "<caller>g__fn|n" shape).
+std::string ShortMethodName(const std::string& fullMethodName) {
+    const std::size_t sep = fullMethodName.rfind("::");
+    return sep == std::string::npos ? fullMethodName
+                                    : fullMethodName.substr(sep + 2);
+}
+
+void HandleUseSite(const std::string& methodName, ILInstruction* inst,
+                   LocalFunctionsMap& localFunctions);
+
+// The C# FindUseSites walk: the call/ldftn arms per the C# -- a Call (not a
+// newobj) or an LdFtn whose method name parses as a local-function name is a
+// use-site; an ldftn inside a delegate construction records the NewObj as
+// the use-site instead of the ldftn itself. The deep-decode entry (the C#
+// ReadLocalFunctionDefinition through the IL reader with a GenericContext)
+// is deferred with the metadata surfaces (the context carries no PEFile /
+// reader factory), so first-sightings record the info without a definition
+// and are not recursed into.
+void FindUseSitesWalk(ILInstruction* inst, ILTransformContext& context,
+                      LocalFunctionsMap& localFunctions) {
+    if (inst == nullptr) return;
+    if (auto* call = dynamic_cast<Call*>(inst)) {
+        std::string callerName, functionName;
+        if (!call->IsNewObj &&
+            LocalFunctionDecompiler::ParseLocalFunctionName(
+                ShortMethodName(call->MethodName), callerName,
+                functionName)) {
+            HandleUseSite(call->MethodName, call, localFunctions);
+            return;
+        }
+    } else if (auto* ldftn = dynamic_cast<LdFtn*>(inst)) {
+        std::string callerName, functionName;
+        if (LocalFunctionDecompiler::ParseLocalFunctionName(
+                ShortMethodName(ldftn->MethodName), callerName,
+                functionName)) {
+            auto* newObj = dynamic_cast<Call*>(ldftn->Parent);
+            DelegateConstructionMatch match;
+            bool matched = newObj != nullptr &&
+                DelegateConstruction::MatchDelegateConstruction(newObj, match);
+            if (matched) {
+                HandleUseSite(ldftn->MethodName, newObj, localFunctions);
+            } else {
+                HandleUseSite(ldftn->MethodName, ldftn, localFunctions);
+            }
+            return;
+        }
+    }
+    for (int i = 0; i < inst->ChildCount(); i++) {
+        FindUseSitesWalk(inst->GetChild(i), context, localFunctions);
+    }
+}
+
+// The C# HandleUseSite: the first sighting creates the info and (in the C#)
+// reads the local-function definition; later sightings append the use-site.
+void HandleUseSite(const std::string& methodName, ILInstruction* inst,
+                   LocalFunctionsMap& localFunctions) {
+    auto it = localFunctions.find(methodName);
+    if (it == localFunctions.end()) {
+        LocalFunctionInfo info;
+        info.UseSites.push_back(inst);
+        info.MethodName = methodName;
+        localFunctions.emplace(methodName, std::move(info));
+    } else {
+        it->second.UseSites.push_back(inst);
+    }
+}
+
+// The C# TransformToLocalFunctionReference (the NewObj arm of
+// TransformUseSites): the delegate construction's capture target becomes
+// ldnull (the delegate construction rewrite consumes the shape later) and a
+// Local-typed target variable is retargeted to DisplayClassLocal. The
+// ldftn-argument specialization (the C# ReducedMethod.Specialize) is a
+// metadata-level rewrite deferred with the reader surface.
+void TransformToLocalFunctionReference(Call* useSite, ILTransformContext& context) {
+    if (useSite->Arguments.empty()) return;
+    std::unique_ptr<ILInstruction> target = useSite->TakeChild(0);
+    if (auto* withVar = dynamic_cast<LdLoc*>(target.get())) {
+        if (withVar->Variable != nullptr &&
+            withVar->Variable->Kind == VariableKind::Local) {
+            withVar->Variable->Kind = VariableKind::DisplayClassLocal;
+        }
+    }
+    auto ldnull = std::make_unique<LdNull>();
+    ldnull->StartILOffset = target->StartILOffset;
+    ldnull->EndILOffset = target->EndILOffset;
+    (void)target;
+    useSite->SetChild(0, std::move(ldnull));
+    context.StepOnce("TransformToLocalFunctionReference");
+}
+
+} // namespace
 
 void LocalFunctionDecompiler::Run(ILFunction& function,
                                   ILTransformContext& context) {
     if (!context.Settings.LocalFunctions) return;
-    // The C# Run body (FindUseSites + the scope/capture machinery) is deferred
-    // with the surfaces it needs; the shell keeps the settings gate the
-    // pipeline wiring consults.
+    // The C# self-bail guards (IsLocalFunctionMethod /
+    // IsLocalFunctionDisplayClass on function.Method) need the method
+    // metadata handle the port's ILFunction does not carry; deferred with
+    // the reader surface.
+    LocalFunctionsMap localFunctions;
+    FindUseSitesWalk(&function, context, localFunctions);
+    // The C# ReplaceReferencesToDisplayClassThis /
+    // DetermineCaptureAndDeclarationScopes / PropagateClosureParameterArguments
+    // steps need the per-variable use-site lists and the definition bodies
+    // (the deep decode); deferred with those surfaces.
+    for (auto& [name, info] : localFunctions) {
+        (void)name;
+        for (ILInstruction* useSite : info.UseSites) {
+            auto* newObj = dynamic_cast<Call*>(useSite);
+            if (newObj != nullptr && newObj->IsNewObj) {
+                TransformToLocalFunctionReference(newObj, context);
+            }
+            // The call and plain-ldftn arms are metadata-level reshapes
+            // (TransformToLocalFunctionInvocation / the LdFtn
+            // specialization); deferred with the parameter-metadata surface.
+        }
+    }
 }
 
 bool LocalFunctionDecompiler::ParseLocalFunctionName(const std::string& name,
