@@ -160,9 +160,23 @@ public:
     // SynchronizationContext; the C# BeginInvoke deferral collapses).
     void RefreshSave();
 
+    // The C# `public Task<IList<LoadedAssembly>> GetAllAssemblies()`:
+    // every loaded assembly recursively, including the entries found in
+    // bundles or packages (the snapshot recursion).
+    std::vector<LoadedAssembly*> GetAllAssemblies() const;
+
     // The flags the manager seeded (the C# properties).
     bool ApplyWinRTProjections() const { return applyWinRTProjections_; }
     bool UseDebugSymbols() const { return useDebugSymbols_; }
+
+    // The C# `public FileLoaderRegistry LoaderRegistry => this.manager
+    // .LoaderRegistry;` -- null for the testing-only list (the C# testing
+    // ctor leaves the manager null, so the property would NRE; the port
+    // answers nullptr).
+    FileLoaders::FileLoaderRegistry* LoaderRegistry() const
+    {
+        return loaderRegistry_;
+    }
 
     LoadedAssembly* FindAssembly(const std::string& file) const;
 

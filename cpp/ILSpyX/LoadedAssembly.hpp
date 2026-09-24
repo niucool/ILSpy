@@ -72,9 +72,10 @@
 
 #pragma once
 
-#include "ILSpyX/FileLoaders/LoadResult.hpp"
+#include "Decompiler/DebugInfo/IDebugInfoProvider.hpp"
 
 #include "Decompiler/Metadata/ReferenceLoadInfo.hpp"
+#include "ILSpyX/FileLoaders/LoadResult.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -90,6 +91,13 @@ class IAssemblyReferenceClassifier;
 class UniversalAssemblyResolver;
 }  // namespace ILSpy::Decompiler::Metadata
 
+#include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
+
+namespace ILSpy::Decompiler::TypeSystem {
+class ICompilation;
+class IModuleReference;
+}  // namespace ILSpy::Decompiler::TypeSystem
+
 namespace ILSpy::ILSpyX {
 
 class AssemblyList;
@@ -98,6 +106,7 @@ class AssemblyListSnapshot;
 
 namespace FileLoaders {
 class FileLoaderRegistry;
+struct LoadResult;
 }  // namespace ILSpy::ILSpyX::FileLoaders
 
 // The C# `public sealed class LoadedAssembly : IDisposable`.
@@ -228,6 +237,31 @@ public:
     }
     void SetTargetFrameworkIdOverride(std::optional<std::string> value);
 
+    // --- the debug-info and type-system surface (the LoadDebugInfo half
+    // of the C# class) ---
+
+    // The C# `public IDebugInfoProvider? GetDebugInfoOrNull()`: null on
+    // load errors or when no debug info is available.
+    std::shared_ptr<Decompiler::DebugInfo::IDebugInfoProvider>
+    GetDebugInfoOrNull() const;
+
+    // The C# `public async Task<IDebugInfoProvider?> LoadDebugInfo(string
+    // fileName)`: sets the PDB file name and (re)loads the provider.
+    std::shared_ptr<Decompiler::DebugInfo::IDebugInfoProvider> LoadDebugInfo(
+        std::string fileName);
+
+    // The C# `public ICompilation? GetTypeSystemOrNull()`: the uncached
+    // compilation over the module plus the minimal corlib; null on load
+    // errors or for a metadata-only module. Cached (the C# LazyInit).
+    std::shared_ptr<Decompiler::TypeSystem::ICompilation> GetTypeSystemOrNull()
+        const;
+
+    // The C# `public ICompilation? GetTypeSystemOrNull(TypeSystemOptions
+    // options)`: the options-keyed variant (rebuilt when the options
+    // change; the C# lock + currentOptions pair).
+    std::shared_ptr<Decompiler::TypeSystem::ICompilation> GetTypeSystemOrNull(
+        Decompiler::TypeSystem::TypeSystemOptions options) const;
+
     // --- the resolver integration (the MyAssemblyResolver half) ---
 
     // The C# `public IAssemblyResolver GetAssemblyResolver(bool
@@ -276,6 +310,16 @@ private:
     void EnsureLoaded() const;
     FileLoaders::LoadResult LoadCore() const;
     void SetPdbFileName(std::optional<std::string> value);
+
+    // The C# `IDebugInfoProvider? LoadDebugInfo(PEFile? module)` / the
+    // LoadDebugInfoCore core: the FromFile-then-LoadSymbols chain when
+    // useDebugSymbols is set, null otherwise. The exceptions the port's
+    // DebugInfoUtils throws (the std family) collapse into the null
+    // result, like the C# catch set.
+    std::shared_ptr<Decompiler::DebugInfo::IDebugInfoProvider> LoadDebugInfo(
+        const Decompiler::Metadata::MetadataFile* module) const;
+    std::shared_ptr<Decompiler::DebugInfo::IDebugInfoProvider>
+    LoadDebugInfoCore(const Decompiler::Metadata::MetadataFile* module) const;
 
     // The C# `private UniversalAssemblyResolver GetUniversalResolver(bool
     // applyWinRTProjections)` -- the lazy resolver construction (the
@@ -333,6 +377,27 @@ private:
     mutable std::mutex universalResolverMutex_;
     mutable std::unique_ptr<Decompiler::Metadata::UniversalAssemblyResolver>
         universalResolver_;
+    // The debug-info provider (the C# `IDebugInfoProvider?
+    // debugInfoProvider` field; filled during the load when
+    // useDebugSymbols is set, or by the LoadDebugInfo(fileName) call).
+    mutable std::shared_ptr<Decompiler::DebugInfo::IDebugInfoProvider>
+        debugInfoProvider_;
+    // The C# `ICompilation? typeSystem` cache (the default-options
+    // variant) and the options-keyed variant (the C#
+    // typeSystemWithOptions / currentTypeSystemOptions pair under
+    // typeSystemWithOptionsLockObj). Each cache owns the WithOptions
+    // module reference the compilation was built over (the C# GC owns
+    // it).
+    struct CachedTypeSystem {
+        std::unique_ptr<Decompiler::TypeSystem::IModuleReference>
+            moduleReference;
+        std::shared_ptr<Decompiler::TypeSystem::ICompilation> compilation;
+    };
+    mutable std::mutex typeSystemMutex_;
+    mutable std::optional<CachedTypeSystem> typeSystem_;
+    mutable std::optional<CachedTypeSystem> typeSystemWithOptions_;
+    mutable std::optional<Decompiler::TypeSystem::TypeSystemOptions>
+        currentTypeSystemOptions_;
 };
 
 }  // namespace ILSpy::ILSpyX

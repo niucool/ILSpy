@@ -12,6 +12,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/LoadedAssembly.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/AssemblyListSnapshot.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/AssemblyListManager.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/LoadedAssemblyExtensions.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/AssemblyList.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/FileLoaders/PEFileLoader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/FileLoaders/BundleFileLoader.cpp

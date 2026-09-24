@@ -59,11 +59,16 @@
 
 #pragma once
 
+#include "Decompiler/Metadata/AssemblyNameReference.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
+
+#include "ILSpyX/AssemblyListSnapshot.hpp"
 #include "Decompiler/SingleFileBundle.hpp"
 
 #include <cstdint>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -73,6 +78,10 @@ namespace ILSpy::ILSpyX {
 // The C# `LoadedAssembly` (LoadedAssembly.hpp) -- forward-declared: the
 // package carries the back-reference to the wrapper that loaded it.
 class LoadedAssembly;
+class LoadedPackage;
+
+// The OrdinalIgnoreCaseLess comparator lives in AssemblyListSnapshot.hpp
+// (included above).
 
 // The C# `public enum ResourceType` (Resource.cs): the port reuses the
 // MetadataFile kind enum, which carries the same members (Linked,
@@ -133,10 +142,22 @@ public:
     virtual std::string FullName() const = 0;
 };
 
-// The C# `public sealed class PackageFolder` (the model half; see the
-// header note for the deferred IAssemblyResolver half).
-class PackageFolder {
+// The C# `public sealed class PackageFolder` (the model half plus the
+// IAssemblyResolver half -- see the header note for the deferred
+// GetAllAssemblies recursion, which lives on the snapshot).
+class PackageFolder : public Decompiler::Metadata::IAssemblyResolver {
 public:
+    // The C# internal ctor: PackageFolder(LoadedPackage package,
+    // PackageFolder? parent, string name) -- the port takes the package
+    // back-pointer (the C# keeps the non-null reference; the testing
+    // shapes pass a package built in place).
+    PackageFolder(LoadedPackage& package, PackageFolder* parent,
+        std::string name);
+    // The dtor is out-of-line (the entry cache owns LoadedAssembly
+    // instances, complete only in the .cpp; the C# class is never copied).
+    ~PackageFolder();
+    PackageFolder(const PackageFolder&) = delete;
+    PackageFolder& operator=(const PackageFolder&) = delete;
     PackageFolder(std::string name)
         : name_(std::move(name))
     {
@@ -153,13 +174,48 @@ public:
         return entries_;
     }
 
+    // --- the IAssemblyResolver half (the C# PackageFolder :
+    // IAssemblyResolver; the ResolveAsync pair stays deferred -- no Task
+    // analogue in the port) ---
+
+    // The C# `public MetadataFile? Resolve(IAssemblyReference reference)`:
+    // ResolveFileName(reference.Name + ".dll"), else the parent's Resolve.
+    const Decompiler::Metadata::MetadataFile* Resolve(
+        const Decompiler::Metadata::IAssemblyReference& reference)
+        const override;
+
+    // The C# `public MetadataFile? ResolveModule(MetadataFile mainModule,
+    // string moduleName)`: ResolveFileName(moduleName + ".dll"), else the
+    // parent's ResolveModule.
+    const Decompiler::Metadata::MetadataFile* ResolveModule(
+        const Decompiler::Metadata::MetadataFile& mainModule,
+        const std::string& moduleName) const override;
+
+    // The C# `public LoadedAssembly? ResolveFileName(string name)`: the
+    // on-demand entry load, cached per name (including the misses -- the
+    // C# dictionary stores the null results too). Null when the package
+    // has no LoadedAssembly wrapper.
+    LoadedAssembly* ResolveFileName(const std::string& name) const;
+
 private:
     friend class LoadedPackage;
 
     std::string name_;
     PackageFolder* parent_ = nullptr;
+    // The owning package (the C# non-null reference; set by
+    // LoadedPackage's tree build).
+    LoadedPackage* package_ = nullptr;
     std::vector<std::shared_ptr<PackageFolder>> folders_;
     std::vector<std::shared_ptr<PackageEntry>> entries_;
+    // The C# `Dictionary<string, LoadedAssembly?> assemblies` cache (the
+    // C# StringComparer.OrdinalIgnoreCase; misses cached too). The cache
+    // OWNS the wrappers it creates (the C# GC does) -- shared_ptr keeps
+    // the type erased for the header's incomplete declaration; the
+    // returned pointers stay valid while the package lives.
+    mutable std::mutex assembliesMutex_;
+    mutable std::map<std::string, std::shared_ptr<LoadedAssembly>,
+        OrdinalIgnoreCaseLess>
+        resolvedAssemblies_;
 };
 
 // The C# `public class LoadedPackage`.

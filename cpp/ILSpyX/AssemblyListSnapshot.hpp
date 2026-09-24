@@ -32,7 +32,7 @@
 //  * `reader.IsAssembly` ports as GetAssemblyDefinition().has_value()
 //    (the Assembly-table row presence).
 //  * The ILSpyXEventSource ETW instrumentation does not port.
-//  * DEFERRED to the assembly-recursion slice: GetAllAssembliesAsync.
+//  * The ILSpyXEventSource ETW instrumentation does not port.
 
 #pragma once
 
@@ -92,6 +92,12 @@ public:
     // last one.
     const Decompiler::Metadata::MetadataFile* TryGetSimilarModule(
         const Decompiler::Metadata::IAssemblyReference& reference) const;
+
+    // The C# `Task<IList<LoadedAssembly>> GetAllAssembliesAsync()`: every
+    // loaded assembly, recursively through bundle/zip packages (the
+    // .dll/.exe entries resolve through PackageFolder.ResolveFileName).
+    // A faulted load is still included (the C# catch arm).
+    std::vector<LoadedAssembly*> GetAllAssemblies() const;
 
 private:
     // One candidate of a short-name group: the C#

@@ -19,6 +19,13 @@
 #include "ILSpyX/LoadedAssembly.hpp"
 
 #include "ILSpyX/AssemblyList.hpp"
+#include "ILSpyX/FileLoaders/FileLoaderRegistry.hpp"
+#include "ILSpyX/FileLoaders/PEFileLoader.hpp"
+#include "ILSpyX/PdbProvider/DebugInfoUtils.hpp"
+#include "Decompiler/DebugInfo/IDebugInfoProvider.hpp"
+#include "Decompiler/TypeSystem/SimpleCompilation.hpp"
+#include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
+#include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
 
 #include "ILSpyX/FileLoaders/FileLoaderRegistry.hpp"
 #include "ILSpyX/FileLoaders/PEFileLoader.hpp"
@@ -113,6 +120,17 @@ std::string ReplaceAll(std::string text, const std::string& from,
 }
 
 }  // namespace
+
+// The C# `internal static ConditionalWeakTable<MetadataFile,
+// LoadedAssembly> loadedAssemblies` lookup arm (the
+// LoadedAssemblyExtensions backend).
+const LoadedAssembly* FindLoadedAssembly(
+    const Decompiler::Metadata::MetadataFile& file)
+{
+    std::lock_guard<std::mutex> lock(gLoadedAssembliesMutex);
+    const auto it = gLoadedAssemblies.find(&file);
+    return it != gLoadedAssemblies.end() ? it->second : nullptr;
+}
 
 LoadedAssembly::LoadedAssembly(AssemblyList& assemblyList,
     std::string fileName)
@@ -274,6 +292,10 @@ FileLoaders::LoadResult LoadedAssembly::LoadCore() const
     // The C# final arms: register a loaded module, stamp a package, or
     // rethrow the failure (the C# `throw result.FileLoadException;`).
     if (result->MetadataFile != nullptr) {
+        // The C# `if (result.MetadataFile is PEFile module)
+        // debugInfoProvider = LoadDebugInfo(module);` -- the provider is
+        // only attempted for a successfully parsed module.
+        debugInfoProvider_ = LoadDebugInfo(result->MetadataFile.get());
         std::lock_guard<std::mutex> registryLock(gLoadedAssembliesMutex);
         // The C# ConditionalWeakTable.Add throws on a duplicate key; a
         // duplicate is unreachable -- each load constructs a fresh
@@ -437,6 +459,106 @@ std::string LoadedAssembly::Text() const
         }
     }
     return ShortName();
+}
+
+std::shared_ptr<Decompiler::DebugInfo::IDebugInfoProvider>
+LoadedAssembly::LoadDebugInfo(const Decompiler::Metadata::MetadataFile* module)
+    const
+{
+    if (module == nullptr || !options_.UseDebugSymbols) {
+        return LoadDebugInfoCore(module);
+    }
+    // The C# wraps the core in the DebugInfoLoadStart/Stop ETW logging
+    // (not ported).
+    return LoadDebugInfoCore(module);
+}
+
+std::shared_ptr<Decompiler::DebugInfo::IDebugInfoProvider>
+LoadedAssembly::LoadDebugInfoCore(
+    const Decompiler::Metadata::MetadataFile* module) const
+{
+    if (module == nullptr) {
+        return nullptr;
+    }
+    if (options_.UseDebugSymbols) {
+        try {
+            // The C# `(PdbFileName != null ? FromFile(module,
+            // PdbFileName) : null) ?? LoadSymbols(module)`.
+            if (pdbFileName_.has_value()) {
+                if (auto provider = PdbProvider::FromFile(*module,
+                        *pdbFileName_)) {
+                    return provider;
+                }
+            }
+            return PdbProvider::LoadSymbols(*module);
+        } catch (const std::exception&) {
+            // The C# catches IOException / UnauthorizedAccessException /
+            // InvalidOperationException (any error during symbol
+            // loading); the port's DebugInfoUtils throws the std family.
+            return nullptr;
+        }
+    }
+    return nullptr;
+}
+
+std::shared_ptr<Decompiler::DebugInfo::IDebugInfoProvider>
+LoadedAssembly::GetDebugInfoOrNull() const
+{
+    if (GetMetadataFileOrNull() == nullptr) {
+        return nullptr;
+    }
+    return debugInfoProvider_;
+}
+
+std::shared_ptr<Decompiler::DebugInfo::IDebugInfoProvider>
+LoadedAssembly::LoadDebugInfo(std::string fileName)
+{
+    SetPdbFileName(std::move(fileName));
+    const auto& assembly = GetMetadataFile();
+    // The C# recomputes the provider over the loaded module.
+    debugInfoProvider_ = LoadDebugInfo(&assembly);
+    return debugInfoProvider_;
+}
+
+std::shared_ptr<Decompiler::TypeSystem::ICompilation>
+LoadedAssembly::GetTypeSystemOrNull()
+    const
+{
+    // The C# `TypeSystemOptions.Default | Uncached | KeepModifiers`.
+    return GetTypeSystemOrNull(Decompiler::TypeSystem::TypeSystemOptions::Default |
+        Decompiler::TypeSystem::TypeSystemOptions::Uncached |
+        Decompiler::TypeSystem::TypeSystemOptions::KeepModifiers);
+}
+
+std::shared_ptr<Decompiler::TypeSystem::ICompilation>
+LoadedAssembly::GetTypeSystemOrNull(
+    Decompiler::TypeSystem::TypeSystemOptions options) const
+{
+    std::lock_guard<std::mutex> lock(typeSystemMutex_);
+    if (typeSystemWithOptions_.has_value() &&
+        options == currentTypeSystemOptions_) {
+        return typeSystemWithOptions_->compilation;
+    }
+    const auto* module = GetMetadataFileOrNull();
+    // The C# `module == null || module.IsMetadataOnly` guard: the port's
+    // MetadataFile is always the full-PE shape (IsMetadataOnly false).
+    if (module == nullptr) {
+        return nullptr;
+    }
+    // The module reference owns the deferred-resolution view (the C# GC
+    // owns it; the cache holds it beside the compilation).
+    auto moduleReference = module->WithOptions(options |
+        Decompiler::TypeSystem::TypeSystemOptions::Uncached |
+        Decompiler::TypeSystem::TypeSystemOptions::KeepModifiers);
+    std::vector<const Decompiler::TypeSystem::IModuleReference*> references {
+        &Decompiler::TypeSystem::Implementation::MinimalCorlib::Instance()};
+    auto compilation =
+        std::make_shared<Decompiler::TypeSystem::SimpleCompilation>(
+        *moduleReference, std::move(references));
+    typeSystemWithOptions_ = CachedTypeSystem{std::move(moduleReference),
+        compilation};
+    currentTypeSystemOptions_ = options;
+    return compilation;
 }
 
 // ---------------------------------------------------------------------------

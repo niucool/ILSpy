@@ -20,6 +20,9 @@
 
 #include "ILSpyX/AssemblyList.hpp"
 #include "ILSpyX/LoadedAssembly.hpp"
+#include "ILSpyX/LoadedPackage.hpp"
+
+#include <cstring>
 
 #include <algorithm>
 #include <memory>
@@ -27,6 +30,33 @@
 namespace ILSpy::ILSpyX {
 
 namespace {
+
+// The C# `entry.Name.EndsWith(".dll", OrdinalIgnoreCase) ||
+// entry.Name.EndsWith(".exe", OrdinalIgnoreCase)` (the
+// GetAllAssembliesAsync entry filter).
+bool EndsWithExecutableExtension(const std::string& name)
+{
+    const auto endsWith = [&name](const char* suffix) {
+        const std::size_t n = std::strlen(suffix);
+        if (name.size() < n) {
+            return false;
+        }
+        for (std::size_t i = 0; i < n; ++i) {
+            const char c = name[name.size() - n + i];
+            const char s = suffix[i];
+            const auto lower = [](char ch) {
+                return ch >= 'A' && ch <= 'Z'
+                    ? static_cast<char>(ch - 'A' + 'a')
+                    : ch;
+            };
+            if (lower(c) != lower(s)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    return endsWith(".dll") || endsWith(".exe");
+}
 
 // The C# tfm normalization shared by TryGetModuleAsync and the lookup
 // builder: the v4.x Framework identifiers collapse to "v4" so the
@@ -152,6 +182,45 @@ AssemblyListSnapshot::ShortNameGroupLookup() const
         cache_->byShortNameGrouped = std::move(map);
     }
     return *cache_->byShortNameGrouped;
+}
+
+std::vector<LoadedAssembly*> AssemblyListSnapshot::GetAllAssemblies() const
+{
+    std::vector<LoadedAssembly*> results;
+    // The C# local function AddDescendants: the folders first, then the
+    // .dll/.exe entries resolved on their containing folder.
+    const auto addDescendants = [&results](const PackageFolder&
+                                               folder,
+                                      const auto& self) -> void {
+        for (const auto& subFolder : folder.Folders()) {
+            self(*subFolder, self);
+        }
+        for (const auto& entry : folder.Entries()) {
+            if (!EndsWithExecutableExtension(entry->Name())) {
+                continue;
+            }
+            if (LoadedAssembly* asm_ = folder.ResolveFileName(entry->Name())) {
+                results.push_back(asm_);
+            }
+        }
+    };
+
+    results.reserve(assemblies_.size());
+    for (LoadedAssembly* loaded : assemblies_) {
+        try {
+            const auto& result = loaded->GetLoadResult();
+            if (result.Package != nullptr) {
+                // A package wrapper is NOT included; its entries are.
+                addDescendants(result.Package->RootFolder(), addDescendants);
+            } else if (result.MetadataFile != nullptr) {
+                results.push_back(loaded);
+            }
+        } catch (const std::exception&) {
+            // The C# catch arm: a faulted load is added anyway.
+            results.push_back(loaded);
+        }
+    }
+    return results;
 }
 
 const Decompiler::Metadata::MetadataFile*

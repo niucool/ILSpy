@@ -151,6 +151,12 @@ LoadedAssembly& AssemblyList::OpenAssembly(const std::string& fullPath,
     return *opened;
 }
 
+std::vector<LoadedAssembly*> AssemblyList::GetAllAssemblies() const
+{
+    // The C# GetAllAssemblies -> GetSnapshot().GetAllAssembliesAsync().
+    return GetSnapshot().GetAllAssemblies();
+}
+
 AssemblyListSnapshot AssemblyList::GetSnapshot() const
 {
     std::lock_guard<std::mutex> lock(lockObj_);
