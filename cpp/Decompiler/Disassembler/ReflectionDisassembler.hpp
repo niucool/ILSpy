@@ -85,10 +85,12 @@
 #include "Decompiler/Disassembler/MethodBodyDisassembler.hpp"
 #include "Decompiler/Disassembler/IEntityProcessor.hpp"
 #include "Decompiler/Metadata/AssemblyNameReference.hpp"
+#include "Decompiler/Disassembler/SecurityDeclarationDecoder.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/SignatureTypeProvider.hpp"
 #include "Decompiler/Output/ITextOutput.hpp"
 
+#include <any>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -167,6 +169,32 @@ public:
     // one tagged method: `EntityProcessor?.Process(module, items) ?? items`.
     // (The port keeps the private members public so the tests can drive them
     // directly.)
+
+    // The C# `void WriteValue(ITextOutput output, (PrimitiveTypeCode Code,
+    // string Name) type, object value)` (lines 768-807) and the `private
+    // static void WriteSimpleValue(ITextOutput output, object value, string
+    // typeName)` (lines 809-833) -- the security-declaration /
+    // custom-attribute-blob argument renderers:
+    //   * the boxed value (a CustomAttributeTypedArgumentT pair argument)
+    //     renders "object(" + the inner WriteValue + ")";
+    //   * the array (a vector of pair arguments) renders the element type
+    //     (the name with the trailing "[]" stripped -- an "enum "-prefixed
+    //     name falls back to PrimitiveTypeCodeToString(Code)) + "[len](" +
+    //     the space-separated items (a boxed item through WriteValue, any
+    //     other through WriteSimpleValue) + ")";
+    //   * anything else renders "<typeName>(" + WriteSimpleValue + ")" with
+    //     the "enum "-prefixed names falling back to the primitive spelling.
+    // WriteSimpleValue's three arms: the string case (the single-quoted
+    // EscapeString form with the embedded quotes backslash-escaped), the
+    // "type" case (the pair's name with the "enum " prefix stripped), and
+    // the default (DisassemblerHelpers.WriteOperand). The C# keeps both
+    // private (the WriteDecodedCustomAttributeBlob and
+    // TryDecodeSecurityDeclaration paths drive them); the port keeps them
+    // public so the tests can drive them directly.
+    void WriteValue(Output::ITextOutput& output, const SecurityDeclarationType& type,
+        const std::any& value);
+    static void WriteSimpleValue(Output::ITextOutput& output,
+        const std::any& value, const std::string& typeName);
     std::vector<std::uint32_t> Process(const Metadata::MetadataFile& module,
         const std::vector<std::uint32_t>& items,
         ProcessedEntityKind kind) const;

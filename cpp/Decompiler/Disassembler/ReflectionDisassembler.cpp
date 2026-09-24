@@ -22,6 +22,7 @@
 #include "Decompiler/Disassembler/ReflectionDisassembler.hpp"
 
 #include "Decompiler/Disassembler/DisassemblerHelpers.hpp"
+#include "Decompiler/TypeSystem/CustomAttributeTypedArgument.hpp"
 #include "Decompiler/Disassembler/DisassemblerSignatureTypeProvider.hpp"
 #include "Decompiler/Disassembler/EnumNameCollection.hpp"
 #include "Decompiler/Disassembler/ReflectionAttributes.hpp"
@@ -954,6 +955,107 @@ Metadata::IAssemblyResolver* ReflectionDisassembler::AssemblyResolver() const {
 void ReflectionDisassembler::AssemblyResolver(
     Metadata::IAssemblyResolver* value) {
     assemblyResolver_ = value;
+}
+
+// The C# `void WriteValue(ITextOutput output, (PrimitiveTypeCode Code,
+// string Name) type, object value)` -- see the header comment.
+void ReflectionDisassembler::WriteValue(Output::ITextOutput& output,
+    const SecurityDeclarationType& type, const std::any& value) {
+    using TypedArgument = TypeSystem::CustomAttributeTypedArgumentT<
+        SecurityDeclarationType>;
+    if (const auto* boxedValue = std::any_cast<TypedArgument>(&value)) {
+        output.Write("object(");
+        WriteValue(output, boxedValue->Type(), boxedValue->Value());
+        output.Write(")");
+        return;
+    }
+    if (const auto* arrayValue =
+            std::any_cast<std::vector<TypedArgument>>(&value)) {
+        // The C# `type.Name != null && !type.Name.StartsWith("enum ",
+        // StringComparison.Ordinal) ? type.Name.Remove(type.Name.Length -
+        // 2) : PrimitiveTypeCodeToString(type.Code)`.
+        std::string elementType;
+        if (type.Name && type.Name->rfind("enum ", 0) != 0
+            && type.Name->size() >= 2) {
+            elementType = type.Name->substr(0, type.Name->size() - 2);
+        } else {
+            elementType = PrimitiveTypeCodeToString(type.Code);
+        }
+
+        output.Write(elementType);
+        output.Write("[");
+        output.Write(std::to_string(arrayValue->size()));
+        output.Write("](");
+        bool first = true;
+        for (const auto& item : *arrayValue) {
+            if (!first)
+                output.Write(" ");
+            // `Value()` returns the std::any BY VALUE: materialize it
+            // before taking its address (a pointer into the call temporary
+            // dangles at the end of the condition's full expression).
+            const std::any itemValue = item.Value();
+            if (const auto* boxedItem =
+                    std::any_cast<TypedArgument>(&itemValue)) {
+                WriteValue(output, boxedItem->Type(), boxedItem->Value());
+            } else {
+                WriteSimpleValue(output, itemValue, elementType);
+            }
+            first = false;
+        }
+        output.Write(")");
+        return;
+    }
+    // The C# `type.Name != null && !type.Name.StartsWith("enum ", ...) ?
+    // type.Name : PrimitiveTypeCodeToString(type.Code)`.
+    std::string typeName;
+    if (type.Name && type.Name->rfind("enum ", 0) != 0) {
+        typeName = *type.Name;
+    } else {
+        typeName = PrimitiveTypeCodeToString(type.Code);
+    }
+
+    output.Write(typeName);
+    output.Write("(");
+    WriteSimpleValue(output, value, typeName);
+    output.Write(")");
+}
+
+// The C# `private static void WriteSimpleValue(ITextOutput output, object
+// value, string typeName)` -- see the header comment.
+void ReflectionDisassembler::WriteSimpleValue(Output::ITextOutput& output,
+    const std::any& value, const std::string& typeName) {
+    if (typeName == "string") {
+        // The C# "'" + EscapeString(value.ToString()).Replace("'", "\\'")
+        // + "'": the escaped text with every embedded single quote
+        // backslash-escaped.
+        std::string text = std::any_cast<std::string>(value);
+        std::string escaped = EscapeString(text);
+        std::string withQuotes;
+        for (char ch : escaped) {
+            if (ch == '\'') {
+                withQuotes += "\\";
+            }
+            withQuotes += ch;
+        }
+        output.Write("'");
+        output.Write(withQuotes);
+        output.Write("'");
+        return;
+    }
+    if (typeName == "type") {
+        // The value is the (Code, Name) pair; an "enum "-prefixed name
+        // renders without the prefix.
+        SecurityDeclarationType info =
+            std::any_cast<SecurityDeclarationType>(value);
+        if (info.Name) {
+            if (info.Name->rfind("enum ", 0) == 0)
+                output.Write(info.Name->substr(5));
+            else
+                output.Write(*info.Name);
+        }
+        return;
+    }
+    WriteOperand(output, value);
 }
 
 // The C# private `Process` overloads (`EntityProcessor?.Process(module,
