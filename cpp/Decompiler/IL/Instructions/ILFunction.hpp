@@ -24,6 +24,7 @@
 
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/TypeSystem/IParameter.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -66,6 +67,18 @@ public:
     // element type for async methods (the C# `IsAsync => AsyncReturnType !=
     // null` derives from it). Null for non-async functions.
     TypeSystem::ITypePtr AsyncReturnType;
+
+    // The C# `public bool IsAsync => AsyncReturnType != null` (ILFunction.cs).
+    bool IsAsync() const { return AsyncReturnType != nullptr; }
+
+    // The C# `public IReadOnlyList<IParameter> Parameters => method.Parameters`
+    // (ILFunction.cs) -- the method's parameter list, the pre-resolved subset of
+    // the C# `ILFunction.Method` handle this port carries (the
+    // IsConstructor/IsStatic pre-resolved-fields precedent; the port's reader
+    // leaves it empty -- the closure/lambda slices populate it for the
+    // DecompiledLambdaResolveResult consumer). Owned here; the C# GC reference
+    // is a mutable handle.
+    std::vector<std::shared_ptr<const TypeSystem::IParameter>> Parameters;
 
     // The C# `public string Name` (a get/set field the local-function decoders
     // assign): the source-side name of this function. Empty for functions whose
