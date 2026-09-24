@@ -488,3 +488,40 @@ one abort to fix (TransformCollectionAndObjectInitializers.cpp:771),
 one metadata-only capability to add, and the known seed-output gap. The
 harness (cpp/tests/tools/differential_harness.sh) reruns the whole
 matrix in ~6 minutes and writes the same summary.tsv.
+
+## 6. Follow-up run (main-line agent, after the fixes)
+
+The 2026-09-24 follow-up run (`differential_harness.sh /tmp/diffval/fix4`)
+after the crash fixes on branch `cpp`:
+
+- **45 cs PORT-CRASH -> 0.** The pinned
+  `TransformCollectionAndObjectInitializers.cpp:771` abort split into
+  four distinct defects, all fixed (commits `fd2935c10`, `40f94679e`):
+  1. `StatementTransform`'s rerun jump kept a position captured before a
+     sibling fold shrank the block; the next child indexed past the end.
+     Fixed with a clamp at the jump (the C# never sees this because its
+     folds replace in place).
+  2. `TransformCollectionAndObjectInitializers`' post-scan usage check
+     read `block[pos + count + 1]` unguarded (the C# relies on its
+     EndPointUnreachable invariant); bounds-checked.
+  3. `TransformArrayInitializers`' built initializer block pushed its
+     stloc/stelem statements with raw `push_back`, leaving
+     Parent/ChildIndex unset (caught by the newly added per-child
+     debug CheckInvariant); wired via `Block::Add`.
+  4. `NamedArgumentTransform` inserted its this-arg and named-arg stores
+     with raw vector writes; wired.
+  Two enabler fixes alongside: `IsKnownType` answers via
+  `KnownType::Code()` for the reader's primitive stand-in, and
+  `IsStringToIntDictionary` strips the metadata arity suffix before the
+  definition-name comparison.
+- **The committed `PROBE:` litter is gone** from
+  `InlineArrayTransform.cpp`.
+- **2 il PORT-CRASH remain** (different subsystem, not yet fixed):
+  `capa7_0953cc3b` aborts on `std::out_of_range: Expected a TypeDef,
+  TypeRef or TypeSpec handle!` and `capa9_2dae11cc5` on
+  `std::logic_error: SignatureTypeProviderDecoder: trailing bytes after
+  the type` -- both uncaught decoder exceptions in --il mode.
+- The cs tallies now read 32 DIFFERENT (the previously-crashing samples
+  produce output; the Phase 5 seed-shape and capability gaps account for
+  them), 15 PORT-FAIL(1) (the metadata-only-module gap, unchanged), 3
+  BOTH-FAIL-IDENTICAL.
