@@ -39,6 +39,11 @@
 #include <string>
 #include <vector>
 
+namespace ILSpy::Decompiler::Metadata {
+struct MethodSignature;
+class MetadataFile;
+} // namespace ILSpy::Decompiler::Metadata
+
 namespace ILSpy::Decompiler::CSharp {
 
 class CSharpDecompiler {
@@ -63,6 +68,30 @@ public:
     static std::string DecompileFunctionToString(
         IL::ILFunction& function, std::string_view returnType,
         std::string_view methodName, std::string_view paramDecl);
+
+    // The C# Decompile path's parameter-declaration builder (the CLI's
+    // inline block): named parameters carry their metadata name; unnamed
+    // parameters fall back to arg_<base + index> (base 1 for an instance
+    // method -- `this` is the implicit arg_0; base 0 static).
+    static std::string MethodDeclString(
+        const ::ILSpy::Decompiler::Metadata::MethodSignature& signature,
+        const std::vector<std::string>& parameterNames);
+
+    // The per-method decompile entry (the C# Decompile(params handles[])
+    // method-body half): decode the body, run the pipeline, render. False
+    // when the body does not decode (the CLI skips those methods).
+    static bool DecompileMethodToString(
+        const ::ILSpy::Decompiler::Metadata::MetadataFile& file,
+        std::uint32_t methodToken, std::uint32_t methodRva,
+        const std::string& methodName, std::string& out);
+
+    // The type-level entry: the type's decodable method bodies rendered in
+    // sequence. True when at least one body rendered (the C#
+    // DecompileType's member iteration; the field/property surfaces land
+    // with the metadata-slice work).
+    static bool DecompileTypeToString(
+        const ::ILSpy::Decompiler::Metadata::MetadataFile& file,
+        std::uint32_t typeToken, std::string& out);
 };
 
 } // namespace ILSpy::Decompiler::CSharp

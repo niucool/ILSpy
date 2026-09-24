@@ -608,30 +608,14 @@ int RunMain(int argc, char** argv) {
                 // facade's metadata entry derives them in the C#; the port
                 // keeps the reader calls at the call site until the
                 // metadata-surface slice lands).
-                auto fn = ILSpy::Decompiler::IL::ReadIL(file, m.Token, m.RVA);
-                if (!fn) continue;
-                std::string returnType = "void";
-                std::string paramDecl;
-                if (auto sig = file.GetMethodSignature(m.Token)) {
-                    if (sig->ReturnType && sig->ReturnType->ReflectionName() != "System.Void")
-                        returnType = ILSpy::Decompiler::IL::CSharpTypeName(sig->ReturnType);
-                    auto paramNames = file.GetParameterNames(m.Token);
-                    int base_ = sig->IsInstance ? 1 : 0;
-                    for (std::size_t i = 0; i < sig->ParameterTypes.size(); ++i) {
-                        if (i) paramDecl += ", ";
-                        paramDecl += ILSpy::Decompiler::IL::CSharpTypeName(sig->ParameterTypes[i]);
-                        paramDecl += ' ';
-                        if (i < paramNames.size() && !paramNames[i].empty())
-                            paramDecl += paramNames[i];
-                        else
-                            paramDecl += "arg_" + std::to_string(base_ + static_cast<int>(i));
-                    }
+                std::string text;
+                if (ILSpy::Decompiler::CSharp::CSharpDecompiler::
+                        DecompileMethodToString(file, m.Token, m.RVA, m.Name,
+                                                text)) {
+                    std::cout << "// " << t.Namespace << "." << t.Name << "\n"
+                              << text << '\n';
+                    ++methodsPrinted;
                 }
-                std::cout << "// " << t.Namespace << "." << t.Name << "\n"
-                          << ILSpy::Decompiler::CSharp::CSharpDecompiler::DecompileFunctionToString(
-                                 *fn, returnType, m.Name, paramDecl)
-                          << '\n';
-                ++methodsPrinted;
                 continue;
             }
             if (wantIlAstAll) {

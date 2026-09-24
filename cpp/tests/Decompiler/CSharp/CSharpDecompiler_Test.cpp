@@ -26,6 +26,8 @@
 #include "Decompiler/CSharp/CSharpDecompiler.hpp"
 
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
+#include "TestFixtures/ConnIdResFixtures.hpp"
+#include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
@@ -44,6 +46,8 @@ namespace {
 
 namespace IL = ::ILSpy::Decompiler::IL;
 namespace TS = ::ILSpy::Decompiler::TypeSystem;
+namespace Metadata = ::ILSpy::Decompiler::Metadata;
+using ::ILSpy::Decompiler::Metadata::MethodSignature;
 namespace CSharp = ::ILSpy::Decompiler::CSharp;
 using ILVariablePtr = std::shared_ptr<IL::ILVariable>;
 
@@ -90,6 +94,88 @@ TEST(CSharpDecompilerTest, DecompileFunctionToStringRendersThePipelineOutput)
     EXPECT_FALSE(text.empty());
     EXPECT_NE(text.find("42"), std::string::npos)
         << "the rendered method text carries the constant";
+}
+
+// The signature-decl builder (the C# Decompile path's parameter-declaration
+// half, extracted from the CLI's inline block): named parameters carry
+// their name; unnamed parameters fall back to arg_<base + index> (base 1
+// for an instance method -- `this` is the implicit arg_0; base 0 static).
+TEST(CSharpDecompilerTest, MethodDeclStringFallsBackToArgNames)
+{
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto stringType =
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
+    MethodSignature sig;
+    sig.ReturnType = intType;
+    sig.ParameterTypes = {intType, stringType};
+    sig.IsInstance = true;
+    // The first parameter carries a metadata name; the second does not.
+    EXPECT_EQ(CSharp::CSharpDecompiler::MethodDeclString(
+                  sig, std::vector<std::string>{"x"}),
+              "int x, string arg_2");
+}
+
+// The static shape: the fallback base is 0 (no implicit this).
+TEST(CSharpDecompilerTest, MethodDeclStringStaticBaseIsZero)
+{
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    MethodSignature sig;
+    sig.ReturnType = intType;
+    sig.ParameterTypes = {intType, intType};
+    sig.IsInstance = false;
+    EXPECT_EQ(CSharp::CSharpDecompiler::MethodDeclString(
+                  sig, std::vector<std::string>{}),
+              "int arg_0, int arg_1");
+}
+
+// The full per-method entry over the in-repo corpus: the connid_res.dll
+// fixture (a real csc-compiled library) decompiles at least one method
+// body with its method name in the rendered text.
+TEST(CSharpDecompilerTest, DecompileMethodRendersACorpusMethod)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile module(path);
+    ASSERT_TRUE(module.IsValid());
+    bool rendered = false;
+    for (const auto& t : module.TypeDefs()) {
+        if (t.Name == "<Module>") continue;
+        for (const auto& m : module.GetMethods(t.Token)) {
+            if (m.RVA == 0) continue;
+            std::string text;
+            if (CSharp::CSharpDecompiler::DecompileMethodToString(
+                    module, m.Token, m.RVA, m.Name, text)) {
+                EXPECT_NE(text.find(m.Name), std::string::npos)
+                    << "the rendered method carries its name";
+                rendered = true;
+                break;
+            }
+        }
+        if (rendered) break;
+    }
+    EXPECT_TRUE(rendered) << "the corpus yields at least one decodable body";
+}
+
+// The type-level entry: the connid_res corpus type renders with the type
+// header and at least one member body.
+TEST(CSharpDecompilerTest, DecompileTypeRendersTheTypeAndMembers)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile module(path);
+    ASSERT_TRUE(module.IsValid());
+    for (const auto& t : module.TypeDefs()) {
+        if (t.Name == "<Module>") continue;
+        std::string text;
+        if (CSharp::CSharpDecompiler::DecompileTypeToString(module, t.Token,
+                                                            text)) {
+            EXPECT_NE(text.find(t.Name), std::string::npos)
+                << "the rendered type carries its name";
+            SUCCEED();
+            return;
+        }
+    }
+    FAIL() << "no type in the corpus decompiled";
 }
 
 } // namespace
