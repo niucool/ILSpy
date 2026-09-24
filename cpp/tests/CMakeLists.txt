@@ -68,6 +68,7 @@ add_executable(ilspy_tests
     Decompiler/Disassembler/SortByNameProcessor_Test.cpp
     Decompiler/Disassembler/WriteValue_Test.cpp
     Decompiler/Disassembler/WriteDecodedCustomAttributeBlob_Test.cpp
+    Decompiler/Disassembler/TryDecodeSecurityDeclaration_Test.cpp
     Decompiler/DebugInfo/IDebugInfoProvider_Test.cpp
     ILSpyX/PdbProvider/PortableDebugInfoProvider_Test.cpp
     ILSpyX/PdbProvider/DebugInfoUtils_Test.cpp

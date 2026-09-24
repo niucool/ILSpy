@@ -52,9 +52,11 @@
 #include "Decompiler/CSharp/Syntax/TextLocation.hpp"  // TextLocation
 #include "Decompiler/Output/ITextOutput.hpp"           // ITextOutput (+ forward decls)
 
+#include <functional>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace ILSpy::Decompiler::Output {
 
@@ -113,6 +115,142 @@ private:
 	bool needsIndent_ = false;
 	int line_ = 1;
 	int column_ = 1;
+};
+
+// Port of the `internal class TextOutputWithRollback : ITextOutput`
+// (PlainTextOutput.cs lines 168-257) -- the ITextOutput wrapper that
+// records every action and only forwards them to the target on Commit
+// (the WriteSecurityDeclarations decoded-permission-set path: a decode
+// failure leaves the target untouched and the caller renders the raw
+// blob dump instead).
+//
+// C#-to-C++ porting decisions:
+//  * The C# `List<Action<ITextOutput>> actions` ports to a vector of
+//    `std::function<void(ITextOutput&)>`; every recording member appends
+//    a replay lambda exactly as the C# does.
+//  * The C# `IndentationString` is an explicit interface implementation
+//    forwarding to the target DIRECTLY (NOT a recorded action) -- a set
+//    through the rollback is observable on the target immediately.
+//  * The C# lambda quirks are reproduced verbatim: `WriteLocalReference`
+//    drops the `isHoverOnly` parameter and `WriteReference(OpCodeInfo)`
+//    drops the `omitSuffix` parameter (both replay with the parameter
+//    unset); every other reference overload forwards its parameters.
+//  * No destructor action: a rollback that is never committed discards
+//    its actions (the C# lets the list die the same way).
+class TextOutputWithRollback final : public ITextOutput {
+public:
+	explicit TextOutputWithRollback(ITextOutput& target)
+		: target_(target) {}
+
+	// The C# `void Commit()` -- replay every recorded action on the target.
+	void Commit() {
+		for (const auto& action : actions_)
+			action(target_);
+	}
+
+	std::string IndentationString() const override {
+		return target_.IndentationString();
+	}
+	void IndentationString(std::string value) override {
+		target_.IndentationString(std::move(value));
+	}
+
+	void Indent() override {
+		actions_.push_back([](ITextOutput& target) { target.Indent(); });
+	}
+
+	void Unindent() override {
+		actions_.push_back([](ITextOutput& target) { target.Unindent(); });
+	}
+
+	void Write(char ch) override {
+		actions_.push_back([ch](ITextOutput& target) { target.Write(ch); });
+	}
+
+	void Write(std::string_view text) override {
+		actions_.push_back(
+			[text = std::string(text)](ITextOutput& target) {
+				target.Write(text);
+			});
+	}
+
+	void WriteLine() override {
+		actions_.push_back([](ITextOutput& target) { target.WriteLine(); });
+	}
+
+	void WriteReference(const Disassembler::OpCodeInfo& opCode,
+		bool) override {
+		// The C# lambda drops the omitSuffix parameter. The opcode is
+		// captured by reference (the C# closure holds the reference -- the
+		// opcode must outlive the rollback).
+		actions_.push_back(
+			[opCodePtr = &opCode](ITextOutput& target) {
+				target.WriteReference(*opCodePtr);
+			});
+	}
+
+	void WriteReference(const MetadataFile& metadata, std::uint32_t handle,
+		std::string_view text, std::string_view protocol,
+		bool isDefinition) override {
+		// The closure captures the module by reference (the C# closure holds
+		// the reference the same way -- the module must outlive the
+		// rollback).
+		actions_.push_back(
+			[file = &metadata, handle, text = std::string(text),
+			 protocol = std::string(protocol), isDefinition](
+				ITextOutput& target) {
+				target.WriteReference(*file, handle, text, protocol, isDefinition);
+			});
+	}
+
+	void WriteReference(const IType& type, std::string_view text,
+		bool isDefinition) override {
+		actions_.push_back(
+			[typePtr = &type, text = std::string(text),
+			 isDefinition](ITextOutput& target) {
+				target.WriteReference(*typePtr, text, isDefinition);
+			});
+	}
+
+	void WriteReference(const IMember& member, std::string_view text,
+		bool isDefinition) override {
+		actions_.push_back(
+			[memberPtr = &member, text = std::string(text),
+			 isDefinition](ITextOutput& target) {
+				target.WriteReference(*memberPtr, text, isDefinition);
+			});
+	}
+
+	void WriteLocalReference(std::string_view text, const void* reference,
+		bool isDefinition, bool) override {
+		// The C# lambda drops the isHoverOnly parameter.
+		actions_.push_back(
+			[text = std::string(text), reference, isDefinition](
+				ITextOutput& target) {
+				target.WriteLocalReference(text, reference, isDefinition);
+			});
+	}
+
+	void MarkFoldStart(std::string_view collapsedText, bool defaultCollapsed,
+		bool isDefinition) override {
+		actions_.push_back(
+			[collapsedText = std::string(collapsedText), defaultCollapsed,
+			 isDefinition](ITextOutput& target) {
+				target.MarkFoldStart(collapsedText, defaultCollapsed, isDefinition);
+			});
+	}
+
+	void MarkDefinitionStart() override {
+		actions_.push_back([](ITextOutput& target) { target.MarkDefinitionStart(); });
+	}
+
+	void MarkFoldEnd() override {
+		actions_.push_back([](ITextOutput& target) { target.MarkFoldEnd(); });
+	}
+
+private:
+	ITextOutput& target_;
+	std::vector<std::function<void(ITextOutput&)>> actions_;
 };
 
 } // namespace ILSpy::Decompiler::Output

@@ -31,12 +31,12 @@
 // member sections; DisassembleNamespace with the .namespace wrapper block;
 // WriteAssemblyHeader and WriteAssemblyReferences with the manifest
 // blocks; WriteModuleHeader and WriteModuleContents with the module-level
-// chain -- the whole file is now ported apart from the documented
-// deferrals (CancellationToken, the AssemblyResolver-driven
-// permission-set decode inside WriteSecurityDeclarations, and the
-// DecodeCustomAttributeBlobs/WriteDecodedCustomAttributeBlob path; the
-// DebugInfo provider pointer delegates through to the ported
-// MethodBodyDisassembler member).
+// chain -- the whole file is ported (the DecodeCustomAttributeBlobs /
+// WriteDecodedCustomAttributeBlob path and the WriteSecurityDeclarations
+// resolver arms included), apart from the one documented deferral: the
+// CancellationToken (the port's plan section 5.9 -- no cancellation
+// analogue; the CLI is synchronous). The DebugInfo provider pointer
+// delegates through to the ported MethodBodyDisassembler member.
 //
 // C#-to-C++ porting decisions:
 //  * The C# field pair `output`/`cancellationToken`/`isInType`/
@@ -50,7 +50,8 @@
 //    ShowMetadataTokens, ShowMetadataTokensInBase10, ShowRawRVAOffsetAndBytes,
 //    and the DebugInfo provider pointer) port as get/set member pairs
 //    reading/writing the MethodBodyDisassembler members. `AssemblyResolver`
-//    defers with WriteSecurityDeclarations;
+//    ports as the pointer getter/setter pair (the EntityProcessor
+//    convention) gating the WriteSecurityDeclarations resolver arms;
 //    `EntityProcessor` ports as the caller-owned IEntityProcessor pointer
 //    with the Process passthrough (SortByNameProcessor is the ported
 //    implementation). The `CancellationToken` defers
@@ -89,6 +90,8 @@
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/SignatureTypeProvider.hpp"
 #include "Decompiler/Output/ITextOutput.hpp"
+#include "Decompiler/Metadata/CustomAttributeDecoder.hpp"
+#include "Decompiler/Output/PlainTextOutput.hpp"
 
 #include <any>
 #include <cstdint>
@@ -211,6 +214,26 @@ public:
     // the tests can drive it directly.
     void WriteDecodedCustomAttributeBlob(const Metadata::MetadataFile& module,
         const Metadata::CustomAttributeRowInfo& attr);
+
+    // The C# `void TryDecodeSecurityDeclaration(TextOutputWithRollback
+    // output, BlobReader blob, MetadataFile module)` (lines 678-766) --
+    // the decoded permission-set render the WriteSecurityDeclarations
+    // decoded arm drives: the " = {" block over the '.'-prefixed binary
+    // permission-set blob -- per entry the class/[assembly] type line (the
+    // ", "-split: an unqualified name or a second part equal to the
+    // module's own assembly name renders "class <escaped name>", anything
+    // else "[<second part>]<type name>"), the unread compressed integer
+    // (the C#'s "// ?" field), the named arguments through the
+    // CustomAttributeDecoderT<SecurityDeclarationDecoder> instantiation
+    // with provideBoxingTypeInfo=true (the boxing render of object-typed
+    // values), the trailing comma between entries, and the closing "}".
+    // The blob ports as the Metadata::BlobReader cursor (the C# BlobReader
+    // by value); the module's own assembly name (the ""-fallback
+    // "<ERR: invalid assembly name>" forms included) composes the
+    // current-assembly comparison. The C# keeps the member private; the
+    // port keeps it public so the tests can drive it directly.
+    void TryDecodeSecurityDeclaration(Output::TextOutputWithRollback& output,
+        Metadata::BlobReader blob, const Metadata::MetadataFile& module);
     std::vector<std::uint32_t> Process(const Metadata::MetadataFile& module,
         const std::vector<std::uint32_t>& items,
         ProcessedEntityKind kind) const;
@@ -293,9 +316,9 @@ public:
     // as the GetCustomAttributeTokens vector; an out-of-range token throws
     // std::out_of_range (the C# metadata.GetCustomAttribute(handle) throws
     // for an invalid handle -- loud rather than wrong).
-    // WriteDecodedCustomAttributeBlob (the DecodeCustomAttributeBlobs path,
-    // the SecurityDeclarationDecoder custom-attribute-value decode) is not
-    // yet ported: with the flag set this throws std::logic_error.
+    // With DecodeCustomAttributeBlobs set, the value renders through
+    // WriteDecodedCustomAttributeBlob (the decoded argument block);
+    // otherwise the raw WriteBlob dump (the CLI's shape).
     void WriteAttributes(const Metadata::MetadataFile& module,
         const std::vector<std::uint32_t>& attributeTokens);
 
@@ -371,12 +394,14 @@ public:
     // The C# `void WriteSecurityDeclarations(MetadataFile module,
     // DeclarativeSecurityAttributeHandleCollection secDeclProvider)`
     // (lines 390-467): the ".permissionset <action> = " line per DeclSecurity
-    // row with the raw blob hex dump. The AssemblyResolver paths (the
-    // "bytearray" alternative and the SecurityDeclarationDecoder decode)
-    // defer with the resolver type -- with no resolver set the raw dump is
-    // the only path (and the ilspycmd --il output's shape: the CLI never
-    // sets a resolver). The action spellings are the C# switch's fifteen
-    // named values; anything else renders the decimal (the C# enum
+    // row. With no resolver set (the ilspycmd --il shape -- the CLI never
+    // sets one) the raw blob hex dump; with a resolver set, the
+    // "bytearray" alternative for a non-'.' blob (the XML-form permission
+    // set), the TryDecodeSecurityDeclaration decoded block for the '.'
+    // binary form (falling back to the raw dump on the decode failure),
+    // and the raw dump for an empty blob throwing out (the C# marker read
+    // sits outside the try). The action spellings are the C# switch's
+    // fifteen named values; anything else renders the decimal (the C# enum
     // ToString).
     void WriteSecurityDeclarations(Metadata::MetadataFile& module,
         const std::vector<Metadata::MetadataFile::DeclarativeSecurityInfo>&
