@@ -36,6 +36,7 @@
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
@@ -51,6 +52,8 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <optional>
+#include <vector>
 #include <string>
 #include <utility>
 #include <vector>
@@ -437,6 +440,112 @@ TEST(SwitchOnStringTransformTest, CSharp1IsInternedChainConvertsToSwitch)
     auto* stringToInt = dynamic_cast<IL::StringToInt*>(sw->Value.get());
     ASSERT_NE(stringToInt, nullptr);
     EXPECT_EQ(stringToInt->Map.size(), 2u);
+}
+
+
+// ---- The legacy Dictionary<string,int> arm (matchers) ----------------------
+
+// Build the Dictionary<string, int> type (a ParameterizedType over the
+// generic definition, the C# IsStringToIntDictionary shape).
+std::shared_ptr<TS::ParameterizedType> MakeStringIntDictionary()
+{
+    auto genericDef = std::make_shared<TS::SimpleType>(TS::TopLevelTypeName(
+        std::string("System.Collections.Generic"),
+        std::string("Dictionary`1")));
+    std::vector<TS::ITypePtr> args;
+    args.push_back(std::make_shared<TS::KnownType>(TS::KnownTypeCode::String));
+    args.push_back(std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32));
+    return std::make_shared<TS::ParameterizedType>(std::move(genericDef),
+                                                   std::move(args));
+}
+
+TEST(SwitchOnStringTransformTest, ExtractStringValuesFromInitBlockAcceptsAdds)
+{
+    auto dictType = MakeStringIntDictionary();
+    auto dictVar = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local, dictType);
+    dictVar->Name = "dict";
+    auto block = std::make_unique<IL::Block>();
+    block->Kind = IL::BlockKind::ControlFlow;
+    auto ctor = std::make_unique<IL::Call>("System.Collections.Generic.Dictionary`1::.ctor");
+    ctor->IsNewObj = true;
+    ctor->AddArg(std::make_unique<IL::LdcI4>(3));
+    ctor->DeclaringType = dictType;
+    block->Add(std::make_unique<IL::StLoc>(dictVar, std::move(ctor)));
+    auto makeAdd = [&](const char* value, int index) {
+        auto add = std::make_unique<IL::Call>(
+            "System.Collections.Generic.Dictionary`1::Add");
+        add->DeclaringType = dictType;
+        add->AddArg(std::make_unique<IL::LdLoc>(dictVar));
+        add->AddArg(std::make_unique<IL::LdStr>(value));
+        add->AddArg(std::make_unique<IL::LdcI4>(index));
+        return add;
+    };
+    block->Add(makeAdd("alpha", 0));
+    block->Add(makeAdd("beta", 1));
+    // The final store: volatile.stobj dictionaryType(ldsflda $$method0x600000c-1,
+    // ldloc dict)
+    auto ldsflda = std::make_unique<IL::LdsFlda>(
+        "System.Runtime.CompilerServices.CompilerGenerated::$$method0x600000c-1");
+    ldsflda->IsCompilerGeneratedField = true;
+    auto stobj = std::make_unique<IL::StObj>(
+        std::move(ldsflda), std::make_unique<IL::LdLoc>(dictVar), dictType);
+    block->Add(std::move(stobj));
+    // The next block after the init block (the TryGetValue head).
+    auto nextBlock = std::make_unique<IL::Block>();
+    nextBlock->Kind = IL::BlockKind::ControlFlow;
+    IL::Block* nextPtr = nextBlock.get();
+    block->Add(std::make_unique<IL::Branch>(nextPtr));
+    (void)nextBlock.release();
+
+    std::vector<std::pair<std::optional<std::string>, int>> values;
+    IL::Block* after = nullptr;
+    std::string error;
+    bool ok = IL::SwitchOnStringProbes::ExtractStringValuesFromInitBlock(
+        block.get(), values, after,
+        [](const TS::IType& t) { return t.Name() == "Dictionary"; },
+        dictType.get(), false, error);
+    EXPECT_TRUE(ok) << error;
+    ASSERT_EQ(values.size(), 2u);
+    EXPECT_EQ(values[0].first.value(), "alpha");
+    EXPECT_EQ(values[0].second, 0);
+    EXPECT_EQ(values[1].first.value(), "beta");
+    EXPECT_EQ(values[1].second, 1);
+}
+
+TEST(SwitchOnStringTransformTest, ExtractStringValuesRejectsBadFinalStore)
+{
+    auto dictType = MakeStringIntDictionary();
+    auto dictVar = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local, dictType);
+    dictVar->Name = "dict";
+    auto block = std::make_unique<IL::Block>();
+    block->Kind = IL::BlockKind::ControlFlow;
+    auto ctor = std::make_unique<IL::Call>(
+        "System.Collections.Generic.Dictionary`1::.ctor");
+    ctor->IsNewObj = true;
+    ctor->AddArg(std::make_unique<IL::LdcI4>(1));
+    ctor->DeclaringType = dictType;
+    block->Add(std::make_unique<IL::StLoc>(dictVar, std::move(ctor)));
+    auto add = std::make_unique<IL::Call>(
+        "System.Collections.Generic.Dictionary`1::Add");
+    add->DeclaringType = dictType;
+    add->AddArg(std::make_unique<IL::LdLoc>(dictVar));
+    add->AddArg(std::make_unique<IL::LdStr>("alpha"));
+    add->AddArg(std::make_unique<IL::LdcI4>(0));
+    block->Add(std::move(add));
+    // The final store is WRONG: a plain stloc instead of the volatile stobj.
+    block->Add(std::make_unique<IL::StLoc>(
+        dictVar, std::make_unique<IL::LdLoc>(dictVar)));
+    block->Add(std::make_unique<IL::Branch>(nullptr));
+
+    std::vector<std::pair<std::optional<std::string>, int>> values;
+    IL::Block* after = nullptr;
+    std::string error;
+    EXPECT_FALSE(IL::SwitchOnStringProbes::ExtractStringValuesFromInitBlock(
+        block.get(), values, after,
+        [](const TS::IType& t) { return t.Name() == "Dictionary"; },
+        dictType.get(), false, error));
 }
 
 } // namespace

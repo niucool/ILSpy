@@ -25,6 +25,9 @@
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/LdcConstants.hpp"
+#include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
@@ -1392,6 +1395,267 @@ bool SimplifyCSharp1CascadingIfStatementsImpl(Block& block, int& i,
 bool SimplifyCSharp1CascadingIfStatements(Block& block, int& i,
                                           ILTransformContext& context) {
     return SimplifyCSharp1CascadingIfStatementsImpl(block, i, context);
+}
+
+
+// ---- The legacy Dictionary<string,int> arm matchers -----------------------
+
+// The C# `bool IsStringToIntDictionary(IType dictionaryType)`: a
+// `System.Collections.Generic.Dictionary` with exactly the (String, Int32)
+// type arguments.
+bool IsStringToIntDictionary(const TS::IType& type) {
+    if (!(type.Namespace() == "System.Collections.Generic" &&
+          type.Name() == "Dictionary")) {
+        return false;
+    }
+    auto* pt = dynamic_cast<const TS::ParameterizedType*>(&type);
+    if (pt == nullptr || pt->TypeArguments().size() != 2) return false;
+    const auto& args = pt->TypeArguments();
+    return args[0] != nullptr &&
+           TS::IsKnownType(*args[0], TS::KnownTypeCode::String) &&
+           args[1] != nullptr &&
+           TS::IsKnownType(*args[1], TS::KnownTypeCode::Int32);
+}
+
+// The C# `bool IsNonGenericHashtable(IType dictionaryType)`.
+bool IsNonGenericHashtable(const TS::IType& type) {
+    return type.Namespace() == "System.Collections" &&
+           type.Name() == "Hashtable" && type.Kind() != TS::TypeKind::Unknown;
+}
+
+// The C# `bool MatchDictionaryFieldLoad(ILInstruction inst, Func<IType, bool>
+// typeMatcher, out IField, out IType)`: `ldobj dictionaryType(ldsflda
+// dictField)` over the port's LdsFlda stand-in (the FieldName carries the
+// "$$method" compiler-generated prefix or the field is marked
+// CompilerGenerated).
+bool MatchDictionaryFieldLoad(
+    ILInstruction* inst,
+    const std::function<bool(const TS::IType&)>& typeMatcher,
+    std::string& dictFieldName, TS::ITypePtr& dictionaryType) {
+    dictFieldName.clear();
+    dictionaryType = nullptr;
+    auto* ldobj = dynamic_cast<LdObj*>(inst);
+    if (ldobj == nullptr || ldobj->Type == nullptr) return false;
+    if (!typeMatcher(*ldobj->Type)) return false;
+    auto* ldsflda = dynamic_cast<LdsFlda*>(ldobj->Target.get());
+    if (ldsflda == nullptr) return false;
+    if (!ldsflda->IsCompilerGeneratedField &&
+        ldsflda->FieldName.find("$$method") == std::string::npos) {
+        return false;
+    }
+    dictFieldName = ldsflda->FieldName;
+    dictionaryType = ldobj->Type;
+    return true;
+}
+
+// The C# `bool MatchAddCall(IType dictionaryType, ILInstruction inst,
+// ILVariable dictVar, out int index, out string value)`: `call Add(ldloc
+// dictVar, ldstr value, ldc.i4 index)` or the box/String.Empty variants.
+bool MatchAddCall(const TS::IType& dictionaryType, ILInstruction* inst,
+                  ILVariable* dictVar, int& index, std::string& value) {
+    value.clear();
+    index = -1;
+    auto* call = dynamic_cast<Call*>(inst);
+    if (call == nullptr || call->Method == nullptr && call->MethodName.empty()) {
+        return false;
+    }
+    // The method identity: the resolved-Method form (Name == "Add",
+    // DeclaringType matches) or the reader's stand-in (the MethodName suffix).
+    bool isAdd = false;
+    if (call->Method != nullptr) {
+        TS::ITypePtr declaring = call->Method->DeclaringType();
+        isAdd = call->Method->Name() == "Add" && declaring != nullptr &&
+                declaring->Namespace() == dictionaryType.Namespace() &&
+                declaring->Name() == dictionaryType.Name() &&
+                !call->Method->IsStatic();
+    } else {
+        isAdd = call->MethodName ==
+                    dictionaryType.Namespace() + "." + dictionaryType.Name() +
+                        "::Add";
+    }
+    if (!isAdd || call->Arguments.size() != 3) return false;
+    {
+        ILVariable* loaded = nullptr;
+        if (!MatchLdLoc(call->Arguments[0].get(), loaded) ||
+            loaded != dictVar) {
+            return false;
+        }
+    }
+    if (!MatchLdStr(call->Arguments[1].get(), value)) {
+        // The C# `MatchLdsFld(out var field) && field.DeclaringType is String
+        // && field.Name == "Empty"`: the port's shape is
+        // ldobj(ldsflda String::Empty).
+        auto* ldobj = dynamic_cast<LdObj*>(call->Arguments[1].get());
+        LdsFlda* ldsflda =
+            ldobj != nullptr
+                ? dynamic_cast<LdsFlda*>(ldobj->Target.get())
+                : nullptr;
+        if (ldsflda == nullptr ||
+            ldsflda->FieldName.find("System.String::Empty") ==
+                std::string::npos) {
+            return false;
+        }
+        value = "";
+    }
+    // The index: ldc.i4 or box(ldc.i4).
+    if (auto* ldc = dynamic_cast<LdcI4*>(call->Arguments[2].get())) {
+        index = ldc->Value;
+        return true;
+    }
+    if (auto* box = dynamic_cast<Box*>(call->Arguments[2].get())) {
+        if (auto* ldc = dynamic_cast<LdcI4*>(box->Argument.get())) {
+            index = ldc->Value;
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+namespace ILSpy::Decompiler::IL {
+
+bool SwitchOnStringProbes::ExtractStringValuesFromInitBlock(
+    Block* block,
+    std::vector<std::pair<std::optional<std::string>, int>>& values,
+    Block*& blockAfterInit,
+    const std::function<bool(const TS::IType&)>& typeMatcher,
+    const TS::IType* dictionaryType, bool isHashtablePattern,
+    std::string& errorMessage) {
+    values.clear();
+    blockAfterInit = nullptr;
+    errorMessage.clear();
+    if (block == nullptr || block->Instructions.size() < 3) {
+        errorMessage = "the init block needs at least 3 instructions";
+        return false;
+    }
+    // stloc dictVar(newobj Dictionary..ctor(ldc.i4 valuesLength))
+    ILVariable* dictVar = nullptr;
+    ILInstruction* newObjDict = nullptr;
+    if (!MatchStLoc(block->Instructions[0].get(), dictVar, newObjDict) ||
+        dictVar == nullptr) {
+        errorMessage = "the init block does not start with the dictionary store";
+        return false;
+    }
+    auto* newObj = dynamic_cast<Call*>(newObjDict);
+    if (newObj == nullptr || !newObj->IsNewObj || newObj->Method == nullptr &&
+        newObj->MethodName.empty()) {
+        errorMessage = "the init value is not a newobj";
+        return false;
+    }
+    // The C# `newObj.Method.DeclaringType.Equals(dictionaryType)`; the port
+    // compares the declaring type's namespace/name pair.
+    {
+        bool declaringMatches = false;
+        if (newObj->Method != nullptr) {
+            TS::ITypePtr declaring = newObj->Method->DeclaringType();
+            declaringMatches = dictionaryType != nullptr && declaring != nullptr &&
+                               declaring->Namespace() == dictionaryType->Namespace() &&
+                               declaring->Name() == dictionaryType->Name();
+        } else {
+            declaringMatches = newObj->DeclaringType != nullptr &&
+                               dictionaryType != nullptr &&
+                               newObj->DeclaringType->Namespace() ==
+                                   dictionaryType->Namespace() &&
+                               newObj->DeclaringType->Name() ==
+                                   dictionaryType->Name();
+        }
+        if (!declaringMatches) {
+            errorMessage = "the ctor's declaring type does not match";
+            return false;
+        }
+    }
+    int valuesLength = 0;
+    if (newObj->Arguments.size() == 2) {
+        auto* cap = dynamic_cast<LdcI4*>(newObj->Arguments[0].get());
+        auto* loadFactor = dynamic_cast<LdcF4*>(newObj->Arguments[1].get());
+        if (cap == nullptr || loadFactor == nullptr || loadFactor->Value != 0.5f) {
+            errorMessage = "the Hashtable ctor needs (capacity, 0.5f)";
+            return false;
+        }
+        valuesLength = cap->Value;
+    } else if (newObj->Arguments.size() == 1) {
+        auto* cap = dynamic_cast<LdcI4*>(newObj->Arguments[0].get());
+        if (cap == nullptr) {
+            errorMessage = "the Dictionary ctor needs the values length";
+            return false;
+        }
+        valuesLength = cap->Value;
+    } else {
+        errorMessage = "the ctor arity is not 1 or 2";
+        return false;
+    }
+    if (valuesLength < 0) {
+        errorMessage = "a negative values length";
+        return false;
+    }
+    values.reserve(static_cast<std::size_t>(valuesLength));
+    int i = 0;
+    std::string value;
+    int index = -1;
+    while (MatchAddCall(*dictionaryType,
+                        block->Instructions[static_cast<std::size_t>(i + 1)].get(),
+                        dictVar, index, value)) {
+        values.emplace_back(value, index);
+        i++;
+    }
+    if (values.empty()) {
+        errorMessage = "no Add calls found";
+        return false;
+    }
+    // The final store: volatile.stobj dictionaryType(ldsflda dictionaryField,
+    // ldloc dictVar).
+    auto* stobj = dynamic_cast<StObj*>(
+        block->Instructions[static_cast<std::size_t>(i + 1)].get());
+    if (stobj == nullptr || stobj->Type == nullptr) {
+        errorMessage = "the final store is not a stobj";
+        return false;
+    }
+    if (dictionaryType != nullptr &&
+        (stobj->Type->Namespace() != dictionaryType->Namespace() ||
+         stobj->Type->Name() != dictionaryType->Name())) {
+        errorMessage = "the stobj type does not match the dictionary type";
+        return false;
+    }
+    auto* loadField = dynamic_cast<LdsFlda*>(stobj->Target.get());
+    if (loadField == nullptr || !loadField->IsCompilerGeneratedField) {
+        errorMessage = "the stobj target is not the compiler-generated field";
+        return false;
+    }
+    ILVariable* dictVarLoad = nullptr;
+    if (!MatchLdLoc(stobj->Value.get(), dictVarLoad) ||
+        dictVarLoad != dictVar) {
+        errorMessage = "the stobj value does not reload the dictionary local";
+        return false;
+    }
+    const int finalIndex = i + 1;
+    if (isHashtablePattern &&
+        dynamic_cast<IfInstruction*>(
+            block->Instructions[static_cast<std::size_t>(finalIndex + 1)].get()) !=
+            nullptr) {
+        if (finalIndex + 2 >= static_cast<int>(block->Instructions.size())) {
+            errorMessage = "the hashtable pattern ends before the next branch";
+            return false;
+        }
+        if (!MatchBranch(
+                block->Instructions[static_cast<std::size_t>(finalIndex + 2)].get(),
+                blockAfterInit)) {
+            errorMessage = "the init block does not branch to the next block";
+            return false;
+        }
+        return true;
+    }
+    if (finalIndex + 1 >= static_cast<int>(block->Instructions.size())) {
+        errorMessage = "the init block does not end with the next block branch";
+        return false;
+    }
+    if (!MatchBranch(
+            block->Instructions[static_cast<std::size_t>(finalIndex + 1)].get(),
+            blockAfterInit)) {
+        errorMessage = "the init block does not end with a branch";
+        return false;
+    }
+    return true;
 }
 
 } // namespace ILSpy::Decompiler::IL

@@ -40,12 +40,45 @@
 #pragma once
 
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
+#include <string>
+#include <vector>
+#include <optional>
+#include <functional>
 
 namespace ILSpy::Decompiler::IL {
+
 
 class SwitchOnStringTransform final : public IILTransform {
 public:
     void Run(ILFunction& function, ILTransformContext& context) override;
 };
+
+// Forward declaration (the probe signature references the Block node).
+class Block;
+
+
+// The test/transform matcher surface for the legacy Dictionary<string,int>
+// arm (the C# private methods ExtractStringValuesFromInitBlock /
+// MatchAddCall / IsStringToIntDictionary; a probe struct per the
+// file-local-probe convention so the tests can drive the matcher walk).
+struct SwitchOnStringProbes {
+    // The C# `bool ExtractStringValuesFromInitBlock(Block block, out
+    // List<(string, int)> values, out Block blockAfterInit, IType
+    // dictionaryType, IField dictionaryField, bool isHashtablePattern)`: the
+    // Add-call walk over the compiler-generated dictionary initializer block.
+    // `dictionaryField` is the port's LdsFlda stand-in (FieldName +
+    // IsCompilerGeneratedField); `errorMessage` reports the failure arm (the
+    // C# return-false arms are indistinguishable without it). `values` is
+    // the C# (string?, int) pair list (a nullopt key is the C# null).
+    static bool ExtractStringValuesFromInitBlock(
+        Block* block,
+        std::vector<std::pair<std::optional<std::string>, int>>& values,
+        Block*& blockAfterInit,
+        const std::function<bool(const TypeSystem::IType&)>& typeMatcher,
+        const TypeSystem::IType* dictionaryType, bool isHashtablePattern,
+        std::string& errorMessage);
+};
+
 
 } // namespace ILSpy::Decompiler::IL
