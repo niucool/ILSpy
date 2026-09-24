@@ -226,12 +226,18 @@ bool ValidateRoslynTryFinally(TryFinally* tf, ILVariable* flag, ILVariable** obj
 // is the StLoc at [i-2]. Both are raw pointers into the block's Instructions.
 // (Shared by the no-flag MCS/V2 shapes, where the stloc/call/TryFinally sit in
 // one block after CFS merges the EH wrapper.)
-void BuildLockAndRewrite(Block* block, int i, StLoc* objectStore, TryFinally* body) {
+void BuildLockAndRewrite(Block* block, int i, StLoc* objectStore, TryFinally* body,
+                         std::vector<std::unique_ptr<ILInstruction>>& graveyard) {
     // Detach the lock expression (stloc's Value) and the try block (TryFinally's
     // TryBlock) before the old nodes are destroyed by the slot replacements and
     // removals below.
     std::unique_ptr<ILInstruction> onExpr = objectStore->TakeChild(0);
     std::unique_ptr<ILInstruction> tryBlock = body->TakeChild(0);
+    // The finally container is not folded into the LockInstruction; park it in
+    // the graveyard so the shell destruction below cannot free a BlockContainer
+    // that CollectContainers already recorded (the C# keeps the same detached
+    // node alive through its remaining managed references).
+    graveyard.push_back(body->TakeChild(1));
     auto lock = std::make_unique<LockInstruction>(std::move(onExpr), std::move(tryBlock));
     lock->Parent = block;
     lock->ChildIndex = i;
@@ -251,7 +257,8 @@ void BuildLockAndRewrite(Block* block, int i, StLoc* objectStore, TryFinally* bo
 // .try { ... } finally { call Exit(ldloc lockObj); leave }` ->
 // `lock (lockExpression) { ... }`. lockObj is single-definition and loaded at
 // most twice (the Enter arg and the Exit arg).
-bool TransformLockMCS(Block* block, int i) {
+bool TransformLockMCS(Block* block, int i,
+                      std::vector<std::unique_ptr<ILInstruction>>& graveyard) {
     if (i < 2) return false;
     auto* body = dynamic_cast<TryFinally*>(block->Instructions[static_cast<std::size_t>(i)].get());
     if (!body) return false;
@@ -270,7 +277,7 @@ bool TransformLockMCS(Block* block, int i) {
     if (!finallyContainer) return false;
     if (!MatchExitBlockNoFlag(EntryPointOf(finallyContainer), objectStore->Variable.get())) return false;
     if (objectStore->Variable->LoadCount > 2) return false;
-    BuildLockAndRewrite(block, i, objectStore, body);
+    BuildLockAndRewrite(block, i, objectStore, body, graveyard);
     return true;
 }
 
@@ -278,7 +285,8 @@ bool TransformLockMCS(Block* block, int i) {
 // .try { ... } finally { call Exit(ldloc lockObj); leave }` ->
 // `lock (ldloc tempVar) { ... }`. The Enter argument is the temp (not lockObj);
 // lockObj is single-definition and loaded at most once (only the Exit arg).
-bool TransformLockV2(Block* block, int i) {
+bool TransformLockV2(Block* block, int i,
+                     std::vector<std::unique_ptr<ILInstruction>>& graveyard) {
     if (i < 2) return false;
     auto* body = dynamic_cast<TryFinally*>(block->Instructions[static_cast<std::size_t>(i)].get());
     if (!body) return false;
@@ -301,7 +309,7 @@ bool TransformLockV2(Block* block, int i) {
     if (!finallyContainer) return false;
     if (!MatchExitBlockNoFlag(EntryPointOf(finallyContainer), objectStore->Variable.get())) return false;
     if (objectStore->Variable->LoadCount > 1) return false;
-    BuildLockAndRewrite(block, i, objectStore, body);
+    BuildLockAndRewrite(block, i, objectStore, body, graveyard);
     return true;
 }
 
@@ -328,7 +336,7 @@ bool TransformLockV2(Block* block, int i) {
 // iteration stays valid. Sets *droppedBlock when a block was dropped (the
 // caller restarts the container scan).
 bool TransformLockRoslyn(BlockContainer* container, std::size_t bi, Block* block, int i,
-                         std::vector<std::unique_ptr<Block>>& graveyard, bool* droppedBlock) {
+                         std::vector<std::unique_ptr<ILInstruction>>& graveyard, bool* droppedBlock) {
     *droppedBlock = false;
     auto* tf = dynamic_cast<TryFinally*>(block->Instructions[static_cast<std::size_t>(i)].get());
     if (!tf) return false;
@@ -381,6 +389,11 @@ bool TransformLockRoslyn(BlockContainer* container, std::size_t bi, Block* block
     // Detach the lock expression (stloc obj's Value) and the try block.
     std::unique_ptr<ILInstruction> lockExpr = objStore->TakeChild(0);
     std::unique_ptr<ILInstruction> tryBlock = tf->TakeChild(0);
+    // Park the finally container in the graveyard: the shell destruction below
+    // would otherwise free a BlockContainer that CollectContainers already
+    // recorded (the C# keeps the same detached node alive through its remaining
+    // managed references).
+    graveyard.push_back(tf->TakeChild(1));
     auto lock = std::make_unique<LockInstruction>(std::move(lockExpr), std::move(tryBlock));
 
     if (sameBlock) {
@@ -447,9 +460,11 @@ void LockTransform::Run(ILFunction& function, ILTransformContext& context) {
     ComputeVariableUsage(function);
     RecomputeIncomingEdgeCounts(function);
 
-    // Dropped blocks (the preceding-block Roslyn fold) are kept alive here
-    // until Run returns so container iteration over them stays valid.
-    std::vector<std::unique_ptr<Block>> graveyard;
+    // Dropped blocks and the cut-out finally subtrees are kept alive here
+    // until Run returns so the container pointers collected up front -- and
+    // the iteration over them -- stay valid (the C# keeps the same detached
+    // nodes alive through their remaining managed references).
+    std::vector<std::unique_ptr<ILInstruction>> graveyard;
     std::vector<BlockContainer*> containers;
     CollectContainers(function.Body.get(), containers);
     for (BlockContainer* container : containers) {
@@ -469,9 +484,9 @@ void LockTransform::Run(ILFunction& function, ILTransformContext& context) {
                     if (TransformLockRoslyn(container, bi, block, i, graveyard, &dropped)) {
                         changed = true;
                         if (dropped) { restart = true; break; }
-                    } else if (TransformLockMCS(block, i)) {
+                    } else if (TransformLockMCS(block, i, graveyard)) {
                         changed = true;
-                    } else if (TransformLockV2(block, i)) {
+                    } else if (TransformLockV2(block, i, graveyard)) {
                         changed = true;
                     }
                     if (changed && !restart) {
