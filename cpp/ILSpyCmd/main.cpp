@@ -320,8 +320,17 @@ int RunMain(int argc, char** argv) {
 
     ILSpy::Decompiler::Metadata::MetadataFile file(asmPath);
     if (!file.IsValid()) {
-        std::cerr << "ilspycmd: could not open '" << asmPath << "' as a CLI assembly\n";
-        return 1;
+        // The C# IlspyCmdProgram load-failure arms (ClassifyCliOpenFailure):
+        // the exception's first line without the managed stack trace, with
+        // the C# exit code; the missing-file arm adds the stdout usage
+        // hint. The previously rendered "could not open ... as a CLI
+        // assembly" line stays only for the unclassifiable arm.
+        ILSpy::ILSpyCmd::CliOpenFailure failure =
+            ILSpy::ILSpyCmd::ClassifyCliOpenFailure(asmPath);
+        if (!failure.stdoutLine.empty())
+            std::cout << failure.stdoutLine << '\n';
+        std::cerr << failure.errorLine << '\n';
+        return failure.exitCode;
     }
 
     // The C# EntityTypes arm (IlspyCmdProgram.cs PerformPerFileAction, the

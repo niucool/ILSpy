@@ -1848,23 +1848,27 @@ void ReflectionDisassembler::DisassembleField(Metadata::MetadataFile& module,
         std::uint32_t rva = module.GetFieldRVA(fieldToken);
         int sectionIndex = module.GetContainingSectionIndex(rva);
         if (sectionIndex < 0) {
-            // The C# $"// RVA {rva:X8} invalid (not in any section)".
-            char buf[40];
-            std::snprintf(buf, sizeof(buf),
-                "// RVA %08X invalid (not in any section)", rva);
-            Output::WriteLine(output_, buf);
+            // The C# $"// RVA {rva:X8} invalid (not in any section)" --
+            // composed as a string: the C# interpolation is unbounded, so no
+            // fixed snprintf buffer can size it by inspection.
+            char buf[16];
+            std::snprintf(buf, sizeof(buf), "%08X", rva);
+            Output::WriteLine(output_,
+                "// RVA " + std::string(buf) + " invalid (not in any section)");
         } else {
             std::vector<std::uint8_t> initVal;
             try {
                 initVal = module.GetFieldInitialValue(fieldToken);
             } catch (const std::exception& ex) {
                 // The C# `catch (BadImageFormatException ex)`: the
-                // failed-read comment line (the exact message).
+                // failed-read comment line (the exact message), composed as
+                // a string: the exception text is unbounded.
                 initVal.clear();
-                char buf[64];
-                std::snprintf(buf, sizeof(buf), "// .data %c_%08X = %s",
-                    sectionPrefix, rva, ex.what());
-                Output::WriteLine(output_, buf);
+                char prefix[16];
+                std::snprintf(prefix, sizeof(prefix), "%c_%08X",
+                    sectionPrefix, rva);
+                Output::WriteLine(output_,
+                    "// .data " + std::string(prefix) + " = " + ex.what());
             }
             if (!initVal.empty()) {
                 // The C# `module.SectionHeaders[sectionIndex].Name` walk.

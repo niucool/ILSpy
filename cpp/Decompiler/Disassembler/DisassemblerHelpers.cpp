@@ -221,7 +221,6 @@ bool IsValidIdentifier(std::string_view identifier)
 	std::size_t i = 0;
 	const auto first = DecodeUtf8(identifier, 0);
 	const char32_t firstCp = first.first;
-	i = first.second;
 	if (IsDigitStart(firstCp))
 		return false;
 
@@ -235,6 +234,9 @@ bool IsValidIdentifier(std::string_view identifier)
 	if (Metadata::ILKeywords().count(std::string(identifier)) > 0)
 		return false;
 
+	// The C# `identifier.All(IsValidIdentifierCharacter)` validates every
+	// character, the first one included (it only got the digit/dot checks
+	// above) -- so the scan restarts at the identifier's first byte.
 	while (i < identifier.size()) {
 		const auto decoded = DecodeUtf8(identifier, i);
 		const char32_t cp = decoded.first;

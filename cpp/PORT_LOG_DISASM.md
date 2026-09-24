@@ -107,3 +107,144 @@ the ASan-clean runs, all documented per slice above; the byte-identical
 Windows-side verification of the NEW paths (the decoded renders against the
 real engine's `/CAVERBAL`-style output) is the follow-up work for a
 Windows-machine run (the same gold-dump procedure the gnhf iterations used).
+
+## The full-corpus differential sweep (PD6, 2026-09-24)
+
+The baml-style differential harness expanded to the full corpora and run on
+this branch's build (the merged Phase-6 Disassembler + the Phase 1-5 tree):
+the sweep script is `cpp/tests/tools/differential_sweep_full.sh` (the baml
+`cpp/tests/tools/differential_harness.sh` pattern + crash-signature capture),
+results in /tmp/diffval/full (summary.tsv per run; kept for re-analysis).
+
+Corpora and mode coverage: the 133 top-level net48 reference assemblies
+(Microsoft.NETFramework.ReferenceAssemblies.net48 1.0.3), their 104
+Facades/*.dll, and the 49 capa-testfiles .NET samples; `--il` (port) vs
+`-il` (oracle ilspycmd 11.0.0.9335) and `--csharp` (port) vs the default C#
+mode (oracle); 572 runs, TIMEOUT=120 s.
+
+### The verdict tallies (572 runs)
+
+| corpus x mode | IDENTICAL | DIFFERENT | PORT-CRASH | PORT-FAIL | BOTH-FAIL-IDENTICAL |
+|---|---|---|---|---|---|
+| net48 x --il (133) | 130 | 2 | 0 | 0 | 1 |
+| facades x --il (104) | 104 | 0 | 0 | 0 | 0 |
+| capa x --il (49) | 27 | 17 | 2 | 0 | 3 |
+| net48 x --cs (133) | 0 | 1 | 2 | 118 | 12 |
+| facades x --cs (104) | 0 | 0 | 0 | 104 | 0 |
+| capa x --cs (49) | 0 | 3 | 43 | 0 | 3 |
+
+The `--il` mode is 277/286 byte-identical (CR-stripped; the port pins CRLF,
+the oracle emits the host LF -- the harness strips before diffing). The 9
+non-identical --il rows reduce to four deduped signatures (T6-T9 below); the
+5 non-failing --cs rows reduce to two (T3, T10); the 47 crashes reduce to
+four signatures (T1, T2, T4, T5).
+
+### The deduped signatures and the triage table
+
+Prioritization: user-facing crashers first (the --csharp path on real
+binaries), then the wrong-output diffs (the .entrypoint and the truncated
+messages), then the known Phase-5 seed gaps. File:line anchors are from the
+LD_PRELOAD SIGABRT-backtrace runs (bt.so over the linux-ninja build, this
+branch) -- the same pinning procedure baml used.
+
+| # | Sev | Mode | Signature (deduped) | Root cause | Samples | Oracle | Suggested fix |
+|---|---|---|---|---|---|---|---|
+| T1 | HIGH | --cs | `stl_vector.h:1263 operator[] _Tp = unique_ptr<ILInstruction> ... __n < size()` abort | `IL/Transforms/TransformCollectionAndObjectInitializers.cpp:771` -- the vector index out of bounds in the collection-initializers fold; the crash-backtrace cross-confirms the baml pin of the same file:line | 36 capa + net017 + net065 (38 runs) | rc=0, full decompile | the fold's index arithmetic (the .cpp:771 site) needs its bounds guard; repro: any of the 38 samples, `--csharp` |
+| T2 | HIGH | --cs | `ILInstruction.cpp:110 CheckInvariant: child->Parent == this && "ILAst: child Parent mismatch"` abort | the CheckInvariant assert fires after some transform -- the offending pass needs a per-sample bisect (the assert site is the safety net, not the cause; the stack shows only the recursive CheckInvariant frames) | 7 capa (the 3f1f67e214 cluster x3, 749e7becf0, a301eadd2b x3) | rc=0, full decompile | bisect the transform pipeline on one sample with the invariant off to find the pass that breaks the Parent back-pointers |
+| T3 | HIGH | --cs | `ilspycmd: no method bodies found` (rc=1, 1-line output) | the CSharp seed refuses metadata-only assemblies wholesale -- the Phase-5 back end has no signatures-only emission (the C# emits the using/attribute/type/member-signature scaffolding with empty bodies for reference assemblies) | 222 runs = 118 net48 + 104 facades (every metadata-only assembly) | rc=0, the full signatures-only C# | the seed's metadata-only mode: emit the namespace/using + type/member skeleton without bodies (a Phase-5 back-end slice; the largest single-line-count win in the table) |
+| T4 | MED | --il | uncaught `std::out_of_range: Expected a TypeDef, TypeRef or TypeSpec handle!` (terminate; 0-byte output) | `DisassembleFieldHeaderInternal` -> `SignatureTypeProviderDecoder<DisassemblerSignatureTypeProvider>::DecodeType` (SignatureTypeProvider.hpp:604 Fail) -- a malformed/corrupt FIELD signature throws out of the --il walk | 1 (0953cc3b77...) | rc=0 (the C# decompiles past it -- the C# field header catches the BadImageFormatException family and renders the "<bad signature>" degradation) | wrap the field-header signature decode in the C#'s catch arm (the degradation the C# renders) |
+| T5 | MED | --il | uncaught `std::logic_error: SignatureTypeProviderDecoder: trailing bytes after the type` (terminate; 0-byte output) | the same decoder's strict trailing-bytes check (SignatureTypeProvider.hpp) -- a signature with padding bytes throws instead of degrading | 1 (2dae11cc5f...) | rc=0 (the C# tolerates the trailing bytes -- the SRM decode reads them silently) | relax the trailing-bytes check to the C# tolerance (or catch-and-degrade in the --il field path) |
+| T6 | MED | --il | the missing `.entrypoint` line after `.maxstack` | `GetEntryPointToken()` returns 0 for these samples (the cor20 EntryPointTokenOrRVA read yields nothing the Disassemble comparison matches; the raw COR20 parse of the same sample shows the oracle's entry token where the port's API returns 0) | 11 capa runs (each of the 039a/2fd4/354a/e842 triplets' --il) | the .entrypoint line rendered | pin the cor20 EntryPointTokenOrRVA read (the MethodBodyReader union access or the PE parse for these samples) |
+| T7 | LOW | --il | `// RVA %08X invalid (not in any sec` -- the line truncated at 39 chars | ReflectionDisassembler.cpp:1852 `char buf[40]` -- the 44-char format needs 45 with the NUL | 8 capa runs (capa01/02/19/20/26/27/38/39) | the full line | `buf[40]` -> `char buf[48]` (or a std::string) -- a one-line fix |
+| T8 | LOW | --il | `// .data D_xxxx = Field data (rva=...) could not be fou` -- the catch-message line truncated | ReflectionDisassembler.cpp:1864 `char buf[64]` -- the composed message ("// .data " + the exception text) needs ~90 chars | 1 (net065, 400+ truncated lines) | the full message per line | enlarge the buffer or compose into a std::string |
+| T9 | LOW | --il | the `~`-prefixed method names unquoted: `void ~DequeEnumerator`1 ()` vs the oracle's `'~DequeEnumerator`1'` | the method-name render does not route the leading-`~` name through the identifier-escape (the C# Escape quotes any non-identifier name; `~` is not in the C# _validNonLetterIdentifierCharacter set) | net017 (20 lines) + net065 (part of its 818) | the quoted form | add the non-identifier check for `~` to the name-escape path (the Escape call site that renders .method names) |
+| T10 | LOW | --cs | partial decompiles with rc=0: capa07 438/3520 lines; capa47/48 (43-line diffs: the missing using/assembly-attribute header); net016 (197-line diff: the same missing scaffolding) | the seed emits per-type bodies without the usings/attributes scaffolding, and silently stops early on some samples (rc=0 with truncated output -- the worst failure shape: silent) | 4 | full output | the scaffolding is the T3 family (the seed's back-end shape); the silent-stop needs its own bisect (the CLI should fail loudly when a type's decompile aborts) |
+| T11 | INFO | both | BOTH-FAIL-IDENTICAL: both engines refuse | the malformed/corrupt-or-native samples: capa 0da87fccbf / 6f9cb3f56d / kernel32-64.dll_ (a BSJB-stubbed native image), net064 System.EnterpriseServices.Thunk (mixed native), and 11 net48 --cs rows where the ORACLE ITSELF throws mid-decompile (`Error decompiling @02000397 ...`) while the port says "no method bodies found" -- both non-zero, both empty-output | 4 il + 15 cs rows | matches | nothing to do for the malformed set; for the 12 oracle-throws rows, note the C# per-type exceptions are themselves oracle bugs on ref assemblies |
+
+### The two hygiene items the sweep surfaced
+
+* `InlineArrayTransform.cpp:221,227` prints unconditional `PROBE: ElementRef
+  matched/mismatch` lines to stderr in the shipped CLI (visible on every
+  --csharp run that reaches the probe) -- leftover debug instrumentation;
+  remove or gate behind an env var.
+* The port's stderr on the --cs crashes carries the assert text but no
+  backtrace on this box (no gdb); the LD_PRELOAD SIGABRT handler
+  (/tmp/bt.c -- a 15-line execinfo wrapper) is the cheap diagnostic that
+  produced every file:line anchor above; consider vendoring it under
+  cpp/tests/tools/ (bt.c) for future triage.
+
+### What the sweep verified (the clean bill)
+
+* The whole-module `--il` disassembly is byte-identical to ilspycmd 11.0 on
+  277 of 286 runs -- including all 104 facade assemblies and 130 of the 133
+  net48 reference assemblies (the 3 exceptions are T6/T7/T9's
+  metadata-only-text differences, not structural misses).
+* The 4 malformed/native capa samples are refused by both engines
+  identically (the port's refusal message text differs from the C#'s -- the
+  port says "could not open ... as a CLI as..." -- the C#'s message is the
+  BadImageFormatException text -- a cosmetic diff recorded under T11).
+* The Phase-6 security-declaration machinery ran on every corpus that has
+  DeclSecurity rows (the mono-mscorlib staged fixture's rows exercise it in
+  the unit tests; no corpus --il crash touched it).
+
+## PD7 -- the sweep-fix batch (T7/T8/T9/T11 + the T10/T12 dispositions, 2026-09-24)
+
+Follow-up to the full-corpus sweep: the triage table's mechanical rows fixed
+RED-first, committed per fix, each verified against the sweep's affected
+rows; the two non-mechanical rows dispositioned by diagnosis.
+
+### The fixes (all RED -> GREEN -> sweep-verified)
+
+| Row | Commit | Fix | RED -> GREEN evidence |
+|---|---|---|---|
+| T7 | df74ccd97 | the `// RVA ... invalid` line composed as a std::string (the fixed `%08X` fragment stays snprintf'd) | RED: the patched-FieldRva fixture rendered `... (not in any sec`; GREEN: the full 45-char line; capa 6c8b/749e/a301 x2 --il now byte-identical |
+| T8 | df74ccd97 | the `// .data ... = <message>` catch line composed as a std::string | RED: the zeroed-SizeOfRawData fixture truncated `could not be fou`; GREEN: the full message; net065's 18 truncation hunks gone |
+| T9 | 6d04a7c58 | `IsValidIdentifier` now validates the FIRST character (the C# `All` semantics) -- the '~'-prefixed names quote | RED: `IsValidIdentifier("~X")` true / `Escape("~X")` unquoted; GREEN: `'~X'`; net017 --il byte-identical (the 20 quote hunks gone) |
+| T11 | 1f89b91a1 | `ClassifyCliOpenFailure`: the C# load-failure arms (missing path -> `File '<path>' does not exist!` + the Specify --help stdout hint, rc 1; non-PE -> `System.BadImageFormatException: <SRM message>`, rc 70; no-managed-metadata -> `MetadataFileNotSupportedException: PE file does not contain any managed metadata.`, rc 70; unparseable metadata -> the documented OverflowException representative) | 3 RED tests against the stub, GREEN after the impl; all four arms' stderr first-lines byte-identical to ilspycmd on the kernel32/text-file/missing/capa08 probes |
+
+Notes:
+* The T9 root cause is the FIRST-CHARACTER escape in IsValidIdentifier (the
+  scan began after the first code point), not the valid-character set as the
+  sweep note first said; the C# `_validNonLetterIdentifierCharacter` set was
+  already faithful.
+* The sweep-verdict columns after the batch: capa 6c8b/749e/a301 --il rows
+  and net017/net065 --il rows re-checked byte-identical (net065's remaining
+  hunks are T12 below, not the fixed rows).
+* Gates: the full ilspy_tests failure set is IDENTICAL before/after (139
+  pre-existing env-pinned failures, timing-only diffs); the mono-mscorlib
+  whole-module --il dump diffs clean against ilspycmd (CR-stripped); ASan
+  clean on the touched paths (27 filtered tests + both T7/T9 samples, 0
+  reports).
+
+### The T10 bisect -- the "silent stop" is disproven; main-line territory
+
+Instrumented the capa07 `--csharp` walk (main.cpp's Phase-5 seed scaffold,
+the `for (const auto& t : file.TypeDefs())` loop): the walk COMPLETES. 310
+methods total, 183 with bodies render; the walk's tail rows
+(`Null.Obfuscator.Null.Obfuscator` 02000091, `.Null.Obfuscator` 020000C1)
+carry zero methods through GetMethods (the obfuscator's extern-only
+members, which the oracle renders as `extern ? ()`), so rc=0 with the
+shorter output is honest for the seed's shape. The 438-vs-3520 delta (and
+the capa47/48 43-line and net016 197-line diffs) is the missing whole-
+project scaffolding -- the usings/assembly-attributes/nested-type and
+property/event member declarations the C# WholeProjectDecompiler emits --
+i.e. the Phase-5/7 back-end shape in cpp/Decompiler/CSharp/ + the seed
+scaffold, which is main-line territory. No fix attempted; STOPPED per the
+assignment. Repro: `ilspy_cli <capa 0953cc3b77...exe_> --csharp` (438 lines,
+rc 0) vs `ilspycmd <same>` (3520 lines); the walk trace via
+`ILSPY_TEST_MSCORLIB`-style MetadataFile iteration shows the walk's
+completeness.
+
+### T12 (new, from the net065 re-check) -- the calli signature fallback
+
+net065's --il diff still carries ~213 `calli` hunks: the port renders
+`calli @11000003 /* signature 2 */` (a token-reference fallback) where the
+C# decodes the standalone signature fully (`calli unmanaged stdcall int32
+modopt([mscorlib]System.Runtime.CompilerServices.IsLong) ...`). The gap is
+the MethodBodyDisassembler calli operand path (the standalone-signature
+decode + the WriteSignature render); the sweep's signature column missed it
+because the `~`/truncation hunks dominated the diff text. NOT fixed in this
+batch -- recorded for the next slice (Disassembler/MethodBodyDisassembler
+territory, the same phase as T7/T8's file family). Repro: `ilspy_cli
+/home/jim/ilspy-test-fixtures/net48/System.EnterpriseServices.Wrapper.dll
+--il` vs the oracle (diff hunks at IL_003c and friends).

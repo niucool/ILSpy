@@ -959,3 +959,62 @@ TEST(IlspyCmdProgramTest, WriteOutputFileHandlesNonAsciiDirectory)
     Cmd::WriteOutputFile(path, "data\r\n");
     EXPECT_EQ(ReadFileBytes(nonAscii / "tiny.list.txt"), "data\r\n");
 }
+
+// ---------------------------------------------------------------------------
+// The CLI load-failure classification (ClassifyCliOpenFailure): the C#
+// IlspyCmdProgram arms -- the missing-path validation pair, the non-PE
+// BadImageFormatException line, and the valid-PE-without-metadata
+// MetadataFileNotSupportedException line, both exception arms with the
+// EX_SOFTWARE exit code. The sweep's T11 rows (kernel32-64.dll_ and the
+// malformed capa samples) pinned the C# first-line texts.
+// ---------------------------------------------------------------------------
+
+TEST(IlspyCmdProgramTest, CliOpenFailureMissingFileArm)
+{
+    fs::path missing = TempDir("cliopen") / "does_not_exist.dll";
+    Cmd::CliOpenFailure failure = Cmd::ClassifyCliOpenFailure(missing.string());
+    EXPECT_EQ(failure.errorLine,
+        "File '" + missing.string() + "' does not exist!");
+    EXPECT_EQ(failure.stdoutLine,
+        "Specify --help for a list of available options and commands.");
+    EXPECT_EQ(failure.exitCode, 1);
+}
+
+TEST(IlspyCmdProgramTest, CliOpenFailureNotAPeFileArm)
+{
+    fs::path path = TempDir("cliopen") / "not_a_pe.txt";
+    {
+        std::ofstream out(path, std::ios::binary);
+        out << "hello!";
+    }
+    Cmd::CliOpenFailure failure = Cmd::ClassifyCliOpenFailure(path.string());
+    // The SRM message for a six-byte file: "Image is too small.".
+    EXPECT_EQ(failure.errorLine,
+        "System.BadImageFormatException: Image is too small.");
+    EXPECT_EQ(failure.stdoutLine, "");
+    EXPECT_EQ(failure.exitCode, 70);  // ProgramExitCodes.EX_SOFTWARE
+}
+
+TEST(IlspyCmdProgramTest, CliOpenFailurePeWithoutManagedMetadataArm)
+{
+    // The tiny.netmodule with its COM-descriptor data-directory entry
+    // (optional-header data directory 14) zeroed: a valid PE image without
+    // managed metadata -- the shape the sweep's native-PE samples hit.
+    std::string bytes = TinyNetModuleBytes();
+    std::uint32_t peOffset = ILSpy::Tests::Rd32(bytes, 0x3C);
+    std::size_t dataDirs = peOffset + 4 + 20 + 96;  // PE32: optional header
+    ILSpy::Tests::Wr32(bytes, dataDirs + 14 * 8, 0);         // the COM dir RVA
+    ILSpy::Tests::Wr32(bytes, dataDirs + 14 * 8 + 4, 0);     // and size
+    fs::path path = TempDir("cliopen") / "no_metadata.dll";
+    {
+        std::ofstream out(path, std::ios::binary);
+        out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        ASSERT_TRUE(out.good());
+    }
+    Cmd::CliOpenFailure failure = Cmd::ClassifyCliOpenFailure(path.string());
+    EXPECT_EQ(failure.errorLine,
+        "ICSharpCode.Decompiler.Metadata.MetadataFileNotSupportedException"
+        ": PE file does not contain any managed metadata.");
+    EXPECT_EQ(failure.stdoutLine, "");
+    EXPECT_EQ(failure.exitCode, 70);
+}

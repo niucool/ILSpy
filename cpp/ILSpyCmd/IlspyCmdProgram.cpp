@@ -35,6 +35,11 @@
 #include "Decompiler/Util/Utf.hpp"
 #include "ILSpyX/PdbProvider/DebugInfoUtils.hpp"
 #include "ILSpyCmd/ResourceExtensions.hpp"
+#include "Decompiler/Metadata/PEReaderParse.hpp"
+
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
 
 #include <miniz/miniz_tinfl.h>
 
@@ -951,6 +956,53 @@ int DumpPackage(const std::string& packageFileName,
     }
 
     return 0;
+}
+
+CliOpenFailure ClassifyCliOpenFailure(const std::string& path) {
+    // The C# RunAsync's pre-command argument validation: a missing path
+    // prints the usage hint to stdout and the validation error to stderr,
+    // exit code 1.
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) {
+        return {"File '" + path + "' does not exist!",
+            "Specify --help for a list of available options and commands.",
+            1};
+    }
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        // An unreadable existing file: no C# shape is reachable here (the
+        // managed engine would throw its own IO exception); keep the
+        // caller's pre-existing diagnostic and exit code.
+        return {"ilspycmd: could not open '" + path
+                + "' as a CLI assembly",
+            {}, 1};
+    }
+    std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(in)),
+        std::istreambuf_iterator<char>());
+    try {
+        ILSpy::Decompiler::Metadata::MetadataBlock block =
+            ILSpy::Decompiler::Metadata::ParsePEReaderHeaders(bytes);
+        if (block.size == 0) {
+            // The C# MetadataFile constructor's throw for a valid image
+            // without a CLI directory -- the exception that escapes the
+            // PEReader catch arm.
+            return {"ICSharpCode.Decompiler.Metadata."
+                    "MetadataFileNotSupportedException: PE file does not "
+                    "contain any managed metadata.",
+                {}, 70};
+        }
+        // A valid CLI image whose metadata tables the port could not parse:
+        // the PEReaderParse.hpp documented representative (the port cannot
+        // classify the corruption through the never-throwing constructor).
+        return {"System.OverflowException: Arithmetic operation resulted in "
+                "an overflow.",
+            {}, 70};
+    } catch (const std::invalid_argument& ex) {
+        // The C# PEReader eager parse: BadImageFormatException with the SRM
+        // message for every malformed-image arm.
+        return {std::string("System.BadImageFormatException: ") + ex.what(),
+            {}, 70};
+    }
 }
 
 }  // namespace ILSpy::ILSpyCmd

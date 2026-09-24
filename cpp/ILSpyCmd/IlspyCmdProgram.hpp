@@ -220,4 +220,28 @@ int DumpPackage(const std::string& packageFileName,
     const std::optional<std::string>& outputDirectory,
     std::ostringstream& errorOutput);
 
+// The load-failure shape for a file the CLI cannot open as a CLI assembly
+// (IlspyCmdProgram.cs's global catch plus the RunAsync argument
+// validation): a missing path carries the C# pre-command validation pair
+// (the `File '<path>' does not exist!` stderr line and the `Specify --help
+// ...` stdout hint, exit code 1); an existing file classifies the engine
+// throw the C# `new PEFile(...)` would raise -- `System.BadImageFormat
+// Exception: <the SRM message>` for a non-PE image,
+// `ICSharpCode.Decompiler.Metadata.MetadataFileNotSupportedException: PE
+// file does not contain any managed metadata.` for a valid image without a
+// CLI directory, and the representative `System.OverflowException:`
+// `Arithmetic operation resulted in an overflow.` for a metadata root the
+// port cannot parse (the PEReaderParse.hpp documented divergence -- the
+// port cannot classify the corruption through the never-throwing
+// constructor). The exception lines render WITHOUT the managed stack trace
+// (the main.cpp convention) and carry the C# global catch's EX_SOFTWARE
+// exit code; errorLine is never empty for a failure.
+struct CliOpenFailure {
+    std::string errorLine;
+    std::string stdoutLine;
+    int exitCode = 0;
+};
+
+CliOpenFailure ClassifyCliOpenFailure(const std::string& path);
+
 }  // namespace ILSpy::ILSpyCmd
