@@ -270,8 +270,13 @@ TEST(XNodeTest, NodesAfterSelfAndBeforeSelf)
 	for (const auto& node : z1->NodesBeforeSelf())
 		count++;
 	EXPECT_EQ(count, static_cast<std::size_t>(0));
+	// The orphaned-comment probe: the C# drives `new XComment("x").NodesAfterSelf()`.
+	// The node gets a named local here because the C++17 range-for does not
+	// lifetime-extend temporaries nested inside the range expression, and the
+	// sequence keeps the node's address.
+	Xml::XComment orphaned("x");
 	count = 0;
-	for (const auto& node : Xml::XComment("x").NodesAfterSelf())
+	for (const auto& node : orphaned.NodesAfterSelf())
 		count++;
 	EXPECT_EQ(count, static_cast<std::size_t>(0));
 }
