@@ -295,6 +295,14 @@ struct CustomAttributeRowInfo {
 class MetadataFile {
 public:
     explicit MetadataFile(std::string_view path);
+    // The C# `new PEFile(fileName, stream, PEStreamOptions.PrefetchEntireImage
+    // | LeaveOpen, metadataOptions: options)` over an in-memory image: the
+    // file loaders' stream surface (a package entry, a decompressed Xamarin
+    // module). The port parses the same bytes the path ctor reads off disk
+    // -- one image copy more than the path ctor, because the winmd database
+    // owns its buffer and the method-body reader shares another (the C#
+    // memory-maps one view for both).
+    MetadataFile(std::string fileName, std::vector<std::uint8_t> image);
     ~MetadataFile();
 
     MetadataFile(const MetadataFile&) = delete;
