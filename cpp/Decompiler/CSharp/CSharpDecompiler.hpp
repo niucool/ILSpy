@@ -49,7 +49,15 @@ class MetadataFile;
 class PartialTypeInfo;
 } // namespace ILSpy::Decompiler::Metadata
 
+namespace ILSpy::Decompiler { class DecompileRun; }
+
+namespace ILSpy::Decompiler::TypeSystem {
+class ITypeResolveContext;
+} // namespace ILSpy::Decompiler::TypeSystem
+
 namespace ILSpy::Decompiler::CSharp {
+namespace Syntax { class AstNode; }
+namespace Transforms { class IAstTransform; }
 
 class CSharpDecompiler {
 public:
@@ -70,6 +78,23 @@ public:
     static void RunILTransforms(IL::ILFunction& function,
                                 const ::ILSpy::Decompiler::Metadata::
                                     MetadataFile& file);
+
+    // The C# `public static List<IAstTransform> GetAstTransforms()`
+    // (CSharpDecompiler.cs line 237): the C# AST pipeline's transform list
+    // as a fresh-instance vector, the ported entries at their C# positions
+    // (the unported transforms are loud comments at their slots).
+    static std::vector<std::unique_ptr<Transforms::IAstTransform>>
+    GetAstTransforms();
+
+    // The C# `void RunTransforms(AstNode rootNode, DecompileRun
+    // decompileRun, ITypeResolveContext decompilationContext)` (line 778):
+    // the AST pipeline driver -- the transform loop with the invariant
+    // checks between entries, then the InsertParenthesesVisitor (the
+    // readability flag on) and the GenericGrammarAmbiguityVisitor tail.
+    static void RunAstTransforms(
+        Syntax::AstNode& rootNode, ::ILSpy::Decompiler::DecompileRun& decompileRun,
+        const ::ILSpy::Decompiler::TypeSystem::ITypeResolveContext*
+            decompilationContext = nullptr);
 
     // The C# Decompile path's per-body half (the DecodeMethodBody +
     // decompile-body flow the CLI's --csharp block carries inline): runs

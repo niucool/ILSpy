@@ -611,6 +611,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/CSharpDecompiler_Test.cpp
     Decompiler/IL/Transforms/LocalFunctionDecompiler_Test.cpp
     Decompiler/CSharp/Transforms/RemoveCompilerGeneratedAssemblyAttributes_Test.cpp
+    Decompiler/CSharp/CSharpDecompilerAstPipeline_Test.cpp
     Decompiler/IL/Transforms/NullPropagationTransform_Test.cpp
     Decompiler/IL/Transforms/TransformAssignment_Test.cpp
     Decompiler/IL/Transforms/UserDefinedLogicTransform_Test.cpp

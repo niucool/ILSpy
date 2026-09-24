@@ -20,6 +20,16 @@
 #include "Decompiler/CSharp/CSharpDecompiler.hpp"
 
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
+#include "Decompiler/DecompileRun.hpp"
+#include "Decompiler/CSharp/Transforms/TransformContext.hpp"
+#include "Decompiler/CSharp/Transforms/ReplaceMethodCallsWithOperators.hpp"
+#include "Decompiler/CSharp/Transforms/AddCheckedBlocks.hpp"
+#include "Decompiler/CSharp/Transforms/PrettifyAssignments.hpp"
+#include "Decompiler/CSharp/Transforms/NormalizeBlockStatements.hpp"
+#include "Decompiler/CSharp/Transforms/FlattenSwitchBlocks.hpp"
+#include "Decompiler/CSharp/Transforms/FixNameCollisions.hpp"
+#include "Decompiler/CSharp/OutputVisitor/InsertParenthesesVisitor.hpp"
+#include "Decompiler/CSharp/OutputVisitor/GenericGrammarAmbiguityVisitor.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/PartialTypeInfo.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
@@ -149,11 +159,11 @@ bool CSharpDecompiler::DecompileTypeToString(
         if (t.Token != typeToken) continue;
         const char* keyword = "class";
         switch (t.Kind) {
-            case TypeSystem::TypeKind::Struct:
-            case TypeSystem::TypeKind::Enum:
+            case ::ILSpy::Decompiler::TypeSystem::TypeKind::Struct:
+            case ::ILSpy::Decompiler::TypeSystem::TypeKind::Enum:
                 keyword = "struct";
                 break;
-            case TypeSystem::TypeKind::Interface:
+            case ::ILSpy::Decompiler::TypeSystem::TypeKind::Interface:
                 keyword = "interface";
                 break;
             default:
@@ -271,10 +281,10 @@ std::string RenderNumericAttributeLiteral(const std::any& v) {
 // quoted, a System.Type as typeof(...), an array in braces; the numerics
 // via RenderNumericAttributeLiteral). The nested-array arm recurses.
 std::string RenderAttributeArgument(
-    const TypeSystem::CustomAttributeTypedArgument& arg);
+    const ::ILSpy::Decompiler::TypeSystem::CustomAttributeTypedArgument& arg);
 
 std::string RenderAttributeArgument(
-    const TypeSystem::CustomAttributeTypedArgument& arg) {
+    const ::ILSpy::Decompiler::TypeSystem::CustomAttributeTypedArgument& arg) {
     const std::any& v = arg.Value();
     if (!v.has_value()) return "null";
     if (auto b = std::any_cast<bool>(&v)) return *b ? "true" : "false";
@@ -282,12 +292,12 @@ std::string RenderAttributeArgument(
     if (auto c = std::any_cast<char16_t>(&v)) {
         return std::string("'") + static_cast<char>(*c) + "'";
     }
-    if (auto t = std::any_cast<TypeSystem::ITypePtr>(&v)) {
+    if (auto t = std::any_cast<::ILSpy::Decompiler::TypeSystem::ITypePtr>(&v)) {
         return "typeof(" +
                (*t ? (*t)->ReflectionName() : std::string("null")) + ')';
     }
     if (auto arr =
-            std::any_cast<std::vector<TypeSystem::CustomAttributeTypedArgument>>(
+            std::any_cast<std::vector<::ILSpy::Decompiler::TypeSystem::CustomAttributeTypedArgument>>(
                 &v)) {
         std::string out = "new[] { ";
         for (std::size_t i = 0; i < arr->size(); ++i) {
@@ -305,12 +315,12 @@ std::string RenderAttributeArgument(
 // malformed-blob case).
 
 std::string CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
-    const TypeSystem::MetadataModule& module) {
+    const ::ILSpy::Decompiler::TypeSystem::MetadataModule& module) {
     std::string out;
     auto renderSection = [&out](const char* target,
-                                std::vector<const TypeSystem::IAttribute*>
+                                std::vector<const ::ILSpy::Decompiler::TypeSystem::IAttribute*>
                                     attributes) {
-        for (const TypeSystem::IAttribute* a : attributes) {
+        for (const ::ILSpy::Decompiler::TypeSystem::IAttribute* a : attributes) {
             if (a == nullptr) continue;
             out += "[";
             out += target;
@@ -336,7 +346,7 @@ std::string CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
             // arg.Type Kind derivation does not classify enums here yet).
             bool first = true;
             auto renderArg = [&out, &first](
-                                 const TypeSystem::CustomAttributeTypedArgument&
+                                 const ::ILSpy::Decompiler::TypeSystem::CustomAttributeTypedArgument&
                                      arg) {
                 if (!first) out += ", ";
                 first = false;
@@ -355,7 +365,7 @@ std::string CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
                 // The value renders without the pair separator (the C#
                 // CustomAttributeNamedArgument.Name/value split).
                 out += RenderAttributeArgument(
-                    TypeSystem::CustomAttributeTypedArgument(named.Type(),
+                    ::ILSpy::Decompiler::TypeSystem::CustomAttributeTypedArgument(named.Type(),
                                                              named.Value()));
             }
             out += ')';
@@ -365,6 +375,68 @@ std::string CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
     renderSection("assembly", module.GetAssemblyAttributes());
     renderSection("module", module.GetModuleAttributes());
     return out;
+}
+
+std::vector<std::unique_ptr<Transforms::IAstTransform>>
+CSharpDecompiler::GetAstTransforms() {
+    // The C# `public static List<IAstTransform> GetAstTransforms()` list,
+    // the ported entries at their C# positions (CSharpDecompiler.cs lines
+    // 237-255); the unported transforms are loud comments at their slots so
+    // the order is preserved as the ports land.
+    std::vector<std::unique_ptr<Transforms::IAstTransform>> transforms;
+    // transforms.push_back(std::make_unique<Transforms::
+    //                           PatternStatementTransform>());  -- deferred
+    // transforms.push_back(std::make_unique<Transforms::
+    //                           ReplaceMethodCallsWithOperators>());
+    //   -- deferred: the port carries the static half (the
+    //      HasCheckedEquivalent prerequisite), the instance IAstTransform
+    //      machinery lands with that slice.
+    // IntroduceUnsafeModifier -- deferred.
+    // AddCheckedBlocks -- deferred (the port carries the annotation half;
+    // the block-rewriting IAstTransform itself lands with the rest of the
+    // AST-transform layer, at this same slot).
+    // DeclareVariables -- deferred (the FindInsertionPoints machinery).
+    // TransformFieldAndConstructorInitializers -- deferred.
+    transforms.push_back(
+        std::make_unique<Transforms::PrettifyAssignments>());
+    // IntroduceUsingDeclarations / IntroduceExtensionMethods /
+    // IntroduceQueryExpressions / CombineQueryExpressions -- deferred.
+    transforms.push_back(
+        std::make_unique<Transforms::NormalizeBlockStatements>());
+    transforms.push_back(
+        std::make_unique<Transforms::FlattenSwitchBlocks>());
+    // RenameVisualBasicAnonymousTypes -- deferred.
+    transforms.push_back(
+        std::make_unique<Transforms::FixNameCollisions>());
+    // AddXmlDocumentationTransform -- deferred.
+    return transforms;
+}
+
+void CSharpDecompiler::RunAstTransforms(
+    Syntax::AstNode& rootNode, DecompileRun& decompileRun,
+    const ::ILSpy::Decompiler::TypeSystem::ITypeResolveContext* decompilationContext) {
+    (void)decompilationContext;
+    // The C# RunTransforms shape: the context build, the up-front invariant
+    // check, the transform loop with the per-entry step groups and invariant
+    // checks, then the InsertParenthesesVisitor (the readability flag on)
+    // and the GenericGrammarAmbiguityVisitor tail. The C# StepLimitReached /
+    // CancellationToken bookkeeping is deferred with those surfaces.
+    Transforms::TransformContext context;
+    context.DecompileRun = &decompileRun;
+    // The C# TypeSystem slot (the IDecompilerTypeSystem the C# ctor passes)
+    // stays null in the port until the DecompileRun carries the compilation
+    // (the type-system wiring slice).
+    rootNode.CheckInvariant();
+    for (const auto& transform : GetAstTransforms()) {
+        context.StepOnce("AstTransform");
+        transform->Run(rootNode, context);
+        rootNode.CheckInvariant();
+    }
+    OutputVisitor::InsertParenthesesVisitor insertParentheses;
+    insertParentheses.InsertParenthesesForReadability = true;
+    rootNode.AcceptVisitor(insertParentheses);
+    OutputVisitor::GenericGrammarAmbiguityVisitor::ResolveAmbiguities(
+        &rootNode);
 }
 
 } // namespace ILSpy::Decompiler::CSharp
