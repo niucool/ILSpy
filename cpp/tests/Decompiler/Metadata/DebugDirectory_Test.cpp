@@ -248,6 +248,39 @@ TEST(DebugDirectoryTest, NoDebugDirectoryIsEmpty) {
     std::remove(path.c_str());
 }
 
+TEST(DebugDirectoryTest, EntryPointTokenReadsOnFirstQuery) {
+    // The sweep's T6 shape: the cor20 EntryPointToken must read correctly
+    // from a freshly opened module, before anything touches the #US heap
+    // (the cor20 walk is lazy and the entry-point capture rode along with
+    // it, so a token-only first query read the uninitialized 0 and the --il
+    // .entrypoint line went missing on every module whose entry method is
+    // disassembled before any string literal). The embedded netmodule has
+    // no entry point, so the test patches its COM-descriptor union field
+    // to the tiny module's one MethodDef row the way the sweep's capa
+    // fixtures carry theirs.
+    std::string bytes = TinyNetModuleBytes();
+    std::uint32_t peOffset = Rd32(bytes, 0x3C);
+    std::size_t dataDirs = peOffset + 4 + 20 + 96;  // PE32 optional header
+    std::uint32_t corRva = Rd32(bytes, dataDirs + 14 * 8);
+    ASSERT_NE(corRva, 0u);
+    std::uint16_t optSize = Rd16(bytes, peOffset + 20);
+    std::size_t sectionTable = peOffset + 4 + 20 + optSize;
+    std::uint32_t textVa = Rd32(bytes, sectionTable + 12);
+    std::uint32_t textRaw = Rd32(bytes, sectionTable + 20);  // PointerToRawData
+    std::size_t corOff = textRaw + (corRva - textVa);
+    Wr32(bytes, corOff + 20, 0x06000001u);  // the EntryPointToken union arm
+    namespace fs = std::filesystem;
+    fs::path path = fs::temp_directory_path() / "ilspy_tiny_entrypoint.netmodule";
+    std::FILE* out = std::fopen(path.string().c_str(), "wb");
+    ASSERT_NE(out, nullptr);
+    std::fwrite(bytes.data(), 1, bytes.size(), out);
+    std::fclose(out);
+    MetadataFile file(path.string());
+    ASSERT_TRUE(file.IsValid());
+    EXPECT_EQ(file.GetEntryPointToken(), 0x06000001u);
+    std::remove(path.string().c_str());
+}
+
 TEST(DebugDirectoryTest, InvalidFileIsEmptyNoThrow) {
     namespace fs = std::filesystem;
     fs::path path = fs::temp_directory_path() / "ilspy_debugdir_garbage.bin";

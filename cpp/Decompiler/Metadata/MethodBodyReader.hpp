@@ -494,7 +494,15 @@ public:
     // token is captured during the cor-header parse (a const loader path, so
     // the field is mutable).
     mutable std::uint32_t entryPointToken_ = 0;
-    std::uint32_t EntryPointToken() const { return entryPointToken_; }
+    std::uint32_t EntryPointToken() const {
+        // The cor20 capture lives in LocateUsHeap (the shared PE->cor20
+        // walk); a token-only first query must trigger that walk too, or it
+        // reads the never-initialized 0 (the --il .entrypoint lines went
+        // missing for every module whose entry method is disassembled
+        // before any string literal).
+        if (!usLocated_) LocateUsHeap();
+        return entryPointToken_;
+    }
 
     const std::uint8_t* UsBase() const {
         if (!usLocated_) LocateUsHeap();
@@ -580,6 +588,7 @@ public:
     // LocateUsHeap definition).
     void LocateUsHeap() const {
         usLocated_ = true;
+        std::fprintf(stderr, "DBG LocateUsHeap enter (sections=%d)\n", (int)(sections_ != nullptr));
         if (!sections_ || !bytes_) return;
         const std::uint8_t* base = bytes_->data();
         std::size_t size = bytes_->size();
@@ -602,6 +611,7 @@ public:
         const auto* cor = reinterpret_cast<const image_cor20_header*>(RvaToPtr(comRva));
         if (!cor) return;
         entryPointToken_ = cor->dummyunionname.EntryPointToken;
+        std::fprintf(stderr, "DBG cor20 captured: cb=%u ep=%08X\n", cor->cb, entryPointToken_);
         std::uint32_t mdRva = cor->MetaData.VirtualAddress;
         const std::uint8_t* root = RvaToPtr(mdRva);
         if (!root) return;
