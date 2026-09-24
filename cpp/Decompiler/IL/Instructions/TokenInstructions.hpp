@@ -176,4 +176,25 @@ public:
     }
 };
 
+// ldmembertoken <member>: push a runtime member handle (the C#
+// `LdMemberToken : SimpleInstruction` carrying the resolved IMember -- the
+// MethodBase.GetMethodFromHandle argument the expression-tree call sites
+// build). Result O. The member is the resolved-method handle (non-owning:
+// the metadata owns it); TokenName is the display form.
+class LdMemberToken : public SimpleInstruction {
+public:
+    std::shared_ptr<const TypeSystem::IMethod> Method;
+    std::string TokenName;
+    explicit LdMemberToken(std::string name = std::string())
+        : SimpleInstruction(OpCode::LdMemberToken), TokenName(std::move(name)) {}
+    LdMemberToken(std::shared_ptr<const TypeSystem::IMethod> method,
+                  std::string name)
+        : SimpleInstruction(OpCode::LdMemberToken), Method(std::move(method)),
+          TokenName(std::move(name)) {}
+    StackType ResultType() const override { return StackType::O; }
+    void WriteTo(std::string& out) const override {
+        out += "ldtoken "; out += TokenName;
+    }
+};
+
 } // namespace ILSpy::Decompiler::IL

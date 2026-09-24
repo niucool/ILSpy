@@ -22,9 +22,11 @@
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
+#include "Decompiler/IL/Instructions/AddressOf.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
@@ -41,6 +43,7 @@
 
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
+#include "Decompiler/IL/Instructions/CastClass.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
 namespace ILSpy::Decompiler::IL {
@@ -485,6 +488,9 @@ TransformExpressionTrees::ConvertInstruction(ILInstruction* instruction,
         if (name == "Quote") {
             return ConvertQuote(invocation);
         }
+        if (name == "Call") {
+            return ConvertCall(invocation);
+        }
         return {nullptr, nullptr};
     }
     if (auto* ldloc = dynamic_cast<LdLoc*>(instruction)) {
@@ -510,6 +516,240 @@ TransformExpressionTrees::ConvertInstruction(ILInstruction* instruction,
 }
 
 
+
+// ---- The ConvertCall arm (the C# `case "Call"`) ----
+
+// The FullNameIs helper (defined below; the ns/type/name declaring-type
+// pair check the GetMethodFromHandle match consults).
+bool FullNameIs(const TypeSystem::IMethod* method, const std::string& ns,
+                const std::string& typeName, const std::string& name);
+
+// The C# `static bool MatchFromHandleParameterList(CallInstruction call,
+// out IMember member)`: the ldmembertoken [+ ldtoken type] argument shapes.
+bool TransformExpressionTrees::MatchFromHandleParameterList(
+    Call* call,
+    std::shared_ptr<const TypeSystem::IMethod>& member) {
+    member = nullptr;
+    if (call == nullptr || call->Arguments.empty() ||
+        call->Arguments.size() > 2) {
+        return false;
+    }
+    auto* token = dynamic_cast<LdMemberToken*>(call->Arguments[0].get());
+    if (token == nullptr || token->Method == nullptr) return false;
+    if (call->Arguments.size() == 2) {
+        if (dynamic_cast<LdTypeToken*>(call->Arguments[1].get()) == nullptr) {
+            return false;
+        }
+    }
+    member = token->Method;
+    return true;
+}
+
+// The C# `bool MatchGetMethodFromHandle(ILInstruction inst, out IMember
+// member)` (TransformExpressionTrees.cs): the castclass MethodInfo(
+// MethodBase.GetMethodFromHandle(ldmembertoken member[, ldtoken type]))
+// shape. Static (no member state).
+bool TransformExpressionTrees::MatchGetMethodFromHandle(
+    ILInstruction* inst,
+    std::shared_ptr<const TypeSystem::IMethod>& member) {
+    member = nullptr;
+    auto* cast = dynamic_cast<CastClass*>(inst);
+    if (cast == nullptr) return false;
+    // The C# `type.FullName != "System.Reflection.MethodInfo"` -- the
+    // namespace/name pair (the port's SimpleType stand-in).
+    if (cast->Type == nullptr ||
+        cast->Type->Namespace() != "System.Reflection" ||
+        cast->Type->Name() != "MethodInfo") {
+        return false;
+    }
+    auto* call = dynamic_cast<Call*>(cast->Argument.get());
+    if (call == nullptr || call->IsNewObj || call->Method == nullptr ||
+        call->Arguments.empty() || call->Arguments.size() > 2) {
+        return false;
+    }
+    if (!FullNameIs(call->Method.get(), "System.Reflection", "MethodBase",
+                    "GetMethodFromHandle")) {
+        return false;
+    }
+    return MatchFromHandleParameterList(call, member);
+}
+
+// The C# `bool MatchArgumentList(ILInstruction inst, out
+// IList<ILInstruction> arguments)`: the ArrayInitializer block form
+// (StObj(LdElema(ldc.i4 i), value) per slot; non-StObj items skipped, per
+// the C# OfType<StObj>()) or the IsEmptyParameterList form. The returned
+// pointers borrow the tree (the C# IList view); the thunks re-build at
+// materialization time.
+bool TransformExpressionTrees::MatchArgumentList(
+    ILInstruction* inst, std::vector<ILInstruction*>& arguments) {
+    arguments.clear();
+    auto* block = dynamic_cast<Block*>(inst);
+    if (block == nullptr || block->Kind != BlockKind::ArrayInitializer) {
+        return IsEmptyParameterList(inst);
+    }
+    int i = 0;
+    for (auto& item : block->Instructions) {
+        auto* stobj = dynamic_cast<StObj*>(item.get());
+        if (stobj == nullptr) continue;
+        auto* ldelema = dynamic_cast<LdElema*>(stobj->Target.get());
+        if (ldelema == nullptr) return false;
+        if (ldelema->Indices.size() != 1) return false;
+        auto* index = dynamic_cast<LdcI4*>(ldelema->Indices[0].get());
+        if (index == nullptr || index->Value != i) return false;
+        arguments.push_back(stobj->Value.get());
+        i++;
+    }
+    return true;
+}
+
+// The C# `ILInstruction PrepareCallTarget(IType expectedType, ILInstruction
+// target, IType targetType)`: the receiver shaping for the instance-call
+// arm. The expectedType-Unknown / result-Unknown Conv wraps are deferred
+// with the PrimitiveType.Unknown surface.
+std::unique_ptr<ILInstruction> TransformExpressionTrees::PrepareCallTarget(
+    const TypeSystem::IType& expectedType, std::unique_ptr<ILInstruction> target,
+    TypeSystem::ITypePtr targetType) {
+    std::unique_ptr<ILInstruction> result;
+    switch (Call::ExpectedTypeForThisPointer(expectedType, nullptr)) {
+        case StackType::Ref:
+            if (target != nullptr && target->ResultType() == StackType::Ref) {
+                result = std::move(target);
+            } else if (auto* ldloc = dynamic_cast<LdLoc*>(target.get())) {
+                // The C# `new LdLoca(ldloc.Variable).WithILRange(ldloc)`.
+                auto ldloca = std::make_unique<LdLoca>(ldloc->Variable);
+                ldloca->StartILOffset = ldloc->StartILOffset;
+                ldloca->EndILOffset = ldloc->EndILOffset;
+                result = std::move(ldloca);
+            } else {
+                result = std::make_unique<AddressOf>(
+                    std::move(target),
+                    const_cast<TypeSystem::IType&>(expectedType)
+                        .shared_from_this());
+            }
+            break;
+        case StackType::O:
+            if (targetType != nullptr &&
+                targetType->IsReferenceType() == std::optional<bool>(false)) {
+                result = std::make_unique<Box>(std::move(targetType),
+                                               std::move(target));
+            } else {
+                result = std::move(target);
+            }
+            break;
+        default:
+            result = std::move(target);
+            break;
+    }
+    return result;
+}
+
+// The C# `Func<ILInstruction>[] ConvertCallArguments(IList arguments,
+// IMethod method)`: per-argument ConvertInstruction against the expected
+// parameter type. False when an argument fails to convert (the C# null
+// return).
+bool TransformExpressionTrees::ConvertCallArguments(
+    const std::vector<ILInstruction*>& arguments,
+    const TypeSystem::IMethod& method,
+    std::vector<std::function<std::unique_ptr<ILInstruction>()>>& out) {
+    out.clear();
+    out.reserve(arguments.size());
+    std::vector<const TypeSystem::IParameter*> parameters =
+        method.Parameters();
+    for (std::size_t i = 0; i < arguments.size(); i++) {
+        TypeSystem::IType* expectedType = nullptr;
+        if (i < parameters.size() && parameters[i] != nullptr) {
+            expectedType =
+                const_cast<TypeSystem::IType*>(&parameters[i]->Type());
+        }
+        ConvertResult converted =
+            ConvertInstruction(arguments[i], expectedType);
+        if (!converted.thunk) return false;
+        out.push_back(std::move(converted.thunk));
+    }
+    return true;
+}
+
+// The C# `(Func<ILInstruction>, IType) ConvertCall(CallInstruction
+// invocation)` -- the `case "Call"` arm (TransformExpressionTrees.cs line
+// 578). The CreateDelegate special case (rebuilding `newobj(delegateType,
+// value, ldftn targetMethod)` from a closed-generic MethodInfo.CreateDelegate
+// call) is deferred with the constructor-resolution surface (the C#
+// `delegateType.GetConstructors().Single()`).
+TransformExpressionTrees::ConvertResult TransformExpressionTrees::ConvertCall(
+    Call* invocation) {
+    if (invocation == nullptr || invocation->Method == nullptr ||
+        invocation->Arguments.size() < 2) {
+        return {nullptr, nullptr};
+    }
+    std::shared_ptr<const TypeSystem::IMethod> member;
+    std::vector<ILInstruction*> arguments;
+    bool haveArguments = false;
+    std::function<std::unique_ptr<ILInstruction>()> targetConverter;
+    TypeSystem::ITypePtr targetType;
+    if (MatchGetMethodFromHandle(invocation->Arguments[0].get(), member)) {
+        // The static-method form: the handle is the first argument.
+        haveArguments =
+            invocation->Arguments.size() == 2 &&
+            MatchArgumentList(invocation->Arguments[1].get(), arguments);
+        if (!haveArguments) {
+            // The C# `arguments = invocation.Arguments.Skip(1)` -- the raw
+            // arguments when the block form is absent.
+            for (std::size_t i = 1; i < invocation->Arguments.size(); i++) {
+                arguments.push_back(invocation->Arguments[i].get());
+            }
+            haveArguments = true;
+        }
+    } else if (MatchGetMethodFromHandle(invocation->Arguments[1].get(),
+                                        member)) {
+        // The instance form: target, handle, arguments.
+        haveArguments =
+            invocation->Arguments.size() == 3 &&
+            MatchArgumentList(invocation->Arguments[2].get(), arguments);
+        if (!haveArguments) {
+            for (std::size_t i = 2; i < invocation->Arguments.size(); i++) {
+                arguments.push_back(invocation->Arguments[i].get());
+            }
+            haveArguments = true;
+        }
+        if (!dynamic_cast<LdNull*>(invocation->Arguments[0].get())) {
+            ConvertResult target =
+                ConvertInstruction(invocation->Arguments[0].get());
+            if (!target.thunk) return {nullptr, nullptr};
+            targetConverter = std::move(target.thunk);
+            targetType = std::move(target.type);
+        }
+    }
+    if (!haveArguments || member == nullptr) return {nullptr, nullptr};
+    std::vector<std::function<std::unique_ptr<ILInstruction>()>>
+        convertedArguments;
+    if (!ConvertCallArguments(arguments, *member, convertedArguments)) {
+        return {nullptr, nullptr};
+    }
+    // The C# BuildCall: Call for a static method, CallVirt for an instance
+    // one (the port's Call node covers both opcodes; the callvirt
+    // distinction rides the method's IsStatic).
+    TypeSystem::ITypePtr returnType =
+        const_cast<TypeSystem::IType&>(member->ReturnType()).shared_from_this();
+    return {[member = std::move(member),
+             targetConverter = std::move(targetConverter),
+             targetType = std::move(targetType),
+             convertedArguments = std::move(convertedArguments)]() mutable
+                -> std::unique_ptr<ILInstruction> {
+                auto call = std::make_unique<Call>(
+                    std::const_pointer_cast<TypeSystem::IMethod>(member));
+                if (targetConverter) {
+                    call->Arguments.push_back(
+                        PrepareCallTarget(*member->DeclaringType(),
+                                          targetConverter(),
+                                          std::move(targetType)));
+                }
+                for (auto& f : convertedArguments) {
+                    call->Arguments.push_back(f());
+                }
+                return call;
+            },
+            std::move(returnType)};
+}
 
 // The C# `method.FullNameIs(ns, name)` extension: true iff the method's
 // declaring type is the namespace-qualified type `ns.name` and the method's

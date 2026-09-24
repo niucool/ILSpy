@@ -160,6 +160,57 @@ public:
 
     // The C# `(Func<ILInstruction>, IType) ConvertQuote(CallInstruction)`.
     ConvertResult ConvertQuote(Call* invocation);
+
+    // The C# `(Func<ILInstruction>, IType) ConvertCall(CallInstruction)`:
+    // the `case "Call"` arm -- a MethodCallExpression whose method operand is
+    // the `castclass MethodInfo(MethodBase.GetMethodFromHandle(...))` handle
+    // shape. The instance-target arm converts the receiver through
+    // ConvertInstruction; the CreateDelegate special case (a closed generic
+    // `MethodInfo.CreateDelegate` call rebuilding a `newobj` + `ldftn`) is
+    // deferred with the constructor-resolution surface.
+    ConvertResult ConvertCall(Call* invocation);
+
+    // The C# `bool MatchGetMethodFromHandle(ILInstruction, out IMember)`
+    // (TransformExpressionTrees.cs): the castclass MethodInfo(
+    // MethodBase.GetMethodFromHandle(ldmembertoken member[, ldtoken type]))
+    // shape. Static (no member state).
+    static bool MatchGetMethodFromHandle(
+        ILInstruction* inst,
+        std::shared_ptr<const ::ILSpy::Decompiler::TypeSystem::IMethod>&
+            member);
+
+    // The C# `static bool MatchFromHandleParameterList(CallInstruction, out
+    // IMember)`: the ldmembertoken [+ ldtoken type] argument shapes.
+    static bool MatchFromHandleParameterList(
+        Call* call,
+        std::shared_ptr<const ::ILSpy::Decompiler::TypeSystem::IMethod>&
+            member);
+
+    // The C# `bool MatchArgumentList(ILInstruction, out IList<ILInstruction>)`:
+    // the ArrayInitializer block form (StObj(LdElema(ldc.i4 i), value) per
+    // slot) or the IsEmptyParameterList form. Returns the raw argument
+    // pointers (borrowed from the tree; the thunks re-build eagerly at
+    // materialization time, matching the C# Func list).
+    static bool MatchArgumentList(
+        ILInstruction* inst, std::vector<ILInstruction*>& arguments);
+
+    // The C# `Func<ILInstruction>[] ConvertCallArguments(IList, IMethod)`:
+    // per-argument ConvertInstruction against the method's expected
+    // parameter type; false when an argument fails to convert.
+    bool ConvertCallArguments(
+        const std::vector<ILInstruction*>& arguments,
+        const ::ILSpy::Decompiler::TypeSystem::IMethod& method,
+        std::vector<std::function<std::unique_ptr<ILInstruction>()>>& out);
+
+    // The C# `ILInstruction PrepareCallTarget(IType expectedType,
+    // ILInstruction target, IType targetType)`: the receiver-shaping for the
+    // instance-call arm (Ref -> ldloca/addressof, O -> box for value-type
+    // receivers). The expectedType-Unknown / result-Unknown Conv wraps are
+    // deferred with the PrimitiveType.Unknown surface.
+    static std::unique_ptr<ILInstruction> PrepareCallTarget(
+        const ::ILSpy::Decompiler::TypeSystem::IType& expectedType,
+        std::unique_ptr<ILInstruction> target,
+        ::ILSpy::Decompiler::TypeSystem::ITypePtr targetType);
 };
 
 } // namespace ILSpy::Decompiler::IL

@@ -35,6 +35,8 @@
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
+#include "Decompiler/IL/Instructions/CastClass.hpp"
+#include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Transforms/StatementTransform.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
@@ -505,4 +507,81 @@ TEST(TransformExpressionTreesTest, SettingsGateBlocksByDefault)
     ASSERT_EQ(block->Instructions.size(), 1u);
     EXPECT_EQ(block->Instructions[0]->Op, IL::OpCode::StLoc)
         << "the settings gate leaves the block untouched";
+}
+
+// The ConvertCall arm (the C# `case "Call": ConvertCall(invocation)`): a
+// static MethodCallExpression --
+//   Expression.Call(castclass MethodInfo(
+//                       MethodBase.GetMethodFromHandle(ldmembertoken Foo)),
+//                   Array.Empty<Expression>())
+// inside a converted lambda body becomes a direct `call Foo()`. The handle
+// shape is the C# MatchGetMethodFromHandle (castclass + GetMethodFromHandle
+// + ldmembertoken); the argument list rides MatchArgumentList's empty shape.
+TEST(TransformExpressionTreesTest, ConvertCallConvertsStaticMethodCallBody)
+{
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto methodInfoType = std::make_shared<TS::SimpleType>(TS::TopLevelTypeName(
+        std::string("System.Reflection"), std::string("MethodInfo")));
+    auto expressionDef = std::make_shared<TS::SimpleType>(TS::TopLevelTypeName(
+        std::string("System.Linq.Expressions"), std::string("Expression")));
+    TS::ITypePtr lambdaMethodReturnType =
+        std::make_shared<TS::ParameterizedType>(
+            expressionDef, std::vector<TS::ITypePtr>{intType});
+    auto fooMethod = std::make_shared<NamedMethodStub>(
+        "Test", "C", "Foo");
+
+    // The method handle: castclass MethodInfo(
+    //     MethodBase.GetMethodFromHandle(ldmembertoken Foo))
+    auto getMethodCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Reflection", "MethodBase", "GetMethodFromHandle"));
+    getMethodCall->Arguments.push_back(
+        std::make_unique<IL::LdMemberToken>(
+            fooMethod, std::string("Test.C::Foo")));
+    auto methodHandle = std::make_unique<IL::CastClass>(
+        methodInfoType, std::move(getMethodCall));
+
+    // Expression.Call(handle, Array.Empty<Expression>())
+    auto callBody = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Call"));
+    callBody->Arguments.push_back(std::move(methodHandle));
+    callBody->Arguments.push_back(std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>("System", "Array", "Empty")));
+
+    // Expression.Lambda(callBody, Array.Empty<ParameterExpression>())
+    auto lambdaCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Lambda",
+            lambdaMethodReturnType));
+    lambdaCall->Arguments.push_back(std::move(callBody));
+    lambdaCall->Arguments.push_back(std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>("System", "Array", "Empty")));
+
+    auto block = std::make_unique<IL::Block>();
+    block->Kind = IL::BlockKind::ControlFlow;
+    block->Add(std::move(lambdaCall));
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.ExpressionTrees = true;
+    IL::StatementTransformContext driverCtx(ctx, block.get());
+    IL::TransformExpressionTrees transform;
+    transform.Run(*block, 0, driverCtx);
+
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* fn = dynamic_cast<IL::ILFunction*>(block->Instructions[0].get());
+    ASSERT_NE(fn, nullptr) << "the Lambda call converts to an ILFunction";
+    EXPECT_EQ(fn->Kind, IL::ILFunctionKind::ExpressionTree);
+    ASSERT_NE(fn->Body, nullptr);
+    ASSERT_EQ(fn->Body->Blocks.size(), 1u);
+    ASSERT_EQ(fn->Body->Blocks[0]->Instructions.size(), 1u);
+    auto* leave = dynamic_cast<IL::Leave*>(
+        fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_NE(leave, nullptr);
+    auto* call = dynamic_cast<IL::Call*>(leave->Value.get());
+    ASSERT_NE(call, nullptr)
+        << "the MethodCallExpression converts to a direct call";
+    ASSERT_NE(call->Method, nullptr);
+    EXPECT_EQ(call->Method->Name(), "Foo");
+    EXPECT_EQ(call->Arguments.size(), 0u);
 }
