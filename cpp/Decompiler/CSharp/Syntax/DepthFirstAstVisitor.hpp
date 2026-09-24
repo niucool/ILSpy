@@ -601,6 +601,15 @@ public:
     virtual void VisitSyntaxTree(SyntaxTree* node) {
         VisitChildren(node);
     }
+
+    // The C# `public virtual void VisitPatternPlaceholder(AstNode placeholder, Pattern
+    // pattern)` (DepthFirstAstVisitor.cs line 692): the default recurses into the
+    // placeholder's children (the wrapped pattern node is one).
+    virtual void VisitPatternPlaceholder(AstNode* placeholder,
+                                         PatternMatching::Pattern* pattern) {
+        (void)pattern;
+        VisitChildren(placeholder);
+    }
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

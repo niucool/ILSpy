@@ -22,9 +22,11 @@
 // 130 per-node `Visit` methods as THROWING STUBS (each calls `NotImplemented()`); the stubs are
 // replaced with real bodies one node-family at a time in subsequent iterations.
 
+#include <cstdio>
 #include "Decompiler/CSharp/OutputVisitor/CSharpOutputVisitor.hpp"
 
 #include <cassert>
+#include <typeinfo>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -267,6 +269,19 @@ CSharpOutputVisitor::~CSharpOutputVisitor() = default;
 // The throwing-stub body shared by every not-yet-ported `Visit` method.
 [[noreturn]] void CSharpOutputVisitor::NotImplemented() {
 	throw std::logic_error("CSharpOutputVisitor: Visit method not yet implemented");
+}
+
+// The C# `public virtual void VisitPatternPlaceholder(AstNode placeholder, Pattern
+// pattern)` (CSharpOutputVisitor.cs line 2963): the pattern-node rendering (the
+// "Pattern Nodes" region -- AnyNode/NamedNode/Choice/... written as the annotated
+// structure for the PatternStatementTransform diagnostics). Deferred loudly with the
+// pattern-output surface (see the header note): a pattern node never reaches the
+// output path in the ported pipeline.
+void CSharpOutputVisitor::VisitPatternPlaceholder(Syntax::AstNode* placeholder,
+                                                  Syntax::PatternMatching::Pattern* pattern) {
+    (void)placeholder;
+    (void)pattern;
+    NotImplemented();
 }
 
 // ---- StartNode/EndNode ----------------------------------------------------

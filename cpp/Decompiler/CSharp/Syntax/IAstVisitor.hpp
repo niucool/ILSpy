@@ -47,10 +47,19 @@
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
+// The `Pattern` forward declaration the `VisitPatternPlaceholder(AstNode*, Pattern*)`
+// member needs (the concrete pattern classes live in the PatternMatching namespace; the
+// pointer parameter needs only the declaration, the PatternNodes.hpp include lands with
+// the visitors that use the concrete nodes).
+namespace PatternMatching {
+class Pattern;
+}
+
 // Forward declarations of the concrete AST nodes whose `Visit` methods are declared below.
 // A pointer parameter needs only a forward declaration, so this header does not include the
 // concrete node headers (the node's own header includes this one so its `AcceptVisitor`
 // override can call `visitor.Visit<NodeName>(this)`); more are added as the hierarchy lands.
+class AstNode;
 class Identifier;
 class NullReferenceExpression;
 class ThisReferenceExpression;
@@ -961,6 +970,15 @@ public:
     // `SyntaxTree` -- the root compilation_unit node (the class name does not end in "AstType",
     // so the generator's visit-method-name default yields `VisitSyntaxTree`).
     virtual void VisitSyntaxTree(SyntaxTree*) = 0;
+
+    // ---- The pattern-placeholder dispatch ------------------------------------------------
+
+    // The C# generated `void VisitPatternPlaceholder(AstNode placeholder, Pattern pattern)`
+    // (DecompilerSyntaxTreeGenerator.cs: every generated IAstVisitor variant carries the
+    // member; the per-node `PatternPlaceholder` classes' `AcceptVisitor` dispatch here).
+    // The C# DepthFirstAstVisitor defaults it to `VisitChildren(placeholder)`.
+    virtual void VisitPatternPlaceholder(AstNode* placeholder,
+                                         PatternMatching::Pattern* pattern) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

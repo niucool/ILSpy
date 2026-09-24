@@ -25,11 +25,13 @@
 // nodes (Repeat, OptionalNode) push alternative continuations for the
 // backtracking algorithm in `Pattern.DoMatchCollection`.
 //
-// The `PatternExtensions` static class from INode.cs (`Match`, `IsMatch`,
-// `ToType`, `ToExpression`, `ToStatement`, `WithName`) is NOT ported here: those
-// helpers reference the generated AST node types (`AstType`, `Expression`,
-// `Statement`) and `NamedNode`, none of which exist in the port yet. They land
-// with the generated node hierarchy; the core `INode` interface does not need them.
+// The `PatternExtensions` static class from INode.cs: the `Match`/`IsMatch`
+// extension methods port as the `MatchNode`/`IsMatchPattern` free functions in
+// PatternNodes.hpp (the generated node hierarchy exists now, so the AstNode
+// side of the pattern matching works); the `ToType`/`ToExpression`/`ToStatement`/
+// `WithName` casts stay deferred (they exist to feed the C# pattern ASTs --
+// in C++ the concrete pattern nodes ARE the AST types via inheritance, so the
+// upcasts are implicit).
 
 #pragma once
 

@@ -33,10 +33,10 @@
 // class wrapping a `Pattern`) because `hasPatternPlaceholder` is true, and the hand-written
 // part adds a typed `Clone` plus several convenience builders/queries (`IsVar`,
 // `GetNameLookupMode`, `MakePointerType`/`MakeArrayType`/`MakeNullableType`/`MakeRefType`,
-// `MemberType`, `Create`). The pattern placeholder lands when the concrete pattern nodes
-// (`AnyNode`/`NamedNode`/...) and `VisitPatternPlaceholder` on `IAstVisitor` are ported (the
-// D219 deferral), so it is deferred here -- the abstract base and the concrete type nodes do
-// not depend on it.
+// `MemberType`, `Create`). The pattern placeholder (the C# generator's
+// `implicit operator AstType(Pattern)` + the nested `sealed class PatternPlaceholder :
+// AstType, INode`) is ported here (the D219 deferral landing with the pattern-node slice):
+// a Pattern wraps into an AstType slot via `ToType`.
 //
 // The typed `Clone` ports as a covariant pure-virtual override: `AstNode::Clone()` returns
 // `AstNode*` (its base body throws, since C++ has no `MemberwiseClone`); `AstType`
@@ -60,6 +60,8 @@
 #define ILSPY_DECOMPILER_CSHARP_SYNTAX_ASTTYPE_HPP
 
 #include "Decompiler/CSharp/Syntax/AstNode.hpp"
+#include "Decompiler/CSharp/Syntax/IAstVisitorBool.hpp"
+#include "Decompiler/CSharp/Syntax/PatternMatching/Pattern.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -151,7 +153,67 @@ public:
     // both derive `AstType`), and the returned node follows the D223 non-owning leak model
     // (a raw `new`-ed pointer the caller attaches through a slot setter).
     static AstType* Create(const std::string& dottedName);
+    // The C# generator's nested `sealed class PatternPlaceholder : AstType, INode,
+    // IPatternPlaceholder` (DecompilerSyntaxTreeGenerator.cs WritePatternPlaceholder):
+    // wraps a Pattern so it can occupy an AstType slot (the C#
+    // `implicit operator AstType(Pattern)` constructs it). Defined out-of-line
+    // below the class (C++ requires the enclosing class to be complete before a
+    // nested class deriving from it, the C# nested-class shape kept).
+    class PatternPlaceholder;
+
+    // The C# `public static implicit operator AstType(Pattern? pattern)` / the
+    // PatternExtensions `ToType(this Pattern)`: the call-site form (the C#
+    // implicit conversion constructs the placeholder; the port wraps explicitly).
+    static AstType* ToType(PatternMatching::Pattern& pattern);
 };
+
+// The out-of-line nested-class definition (the enclosing AstType must be complete
+// for the nested class deriving from it).
+class AstType::PatternPlaceholder final : public AstType {
+public:
+    explicit PatternPlaceholder(PatternMatching::Pattern& child) : child_(&child) {}
+
+    // See the Expression placeholder note: the shallow-copy Clone over the same
+    // child reference (the C# MemberwiseClone semantics).
+    AstType* Clone() const override { return new PatternPlaceholder(*child_); }
+
+    // The C# `public override void AcceptVisitor(IAstVisitor visitor)`.
+    void AcceptVisitor(IAstVisitor& visitor) override {
+        visitor.VisitPatternPlaceholder(this, child_);
+    }
+
+    // The C# `AcceptVisitor<T>(IAstVisitor<T> visitor)` over S = bool.
+    bool AcceptVisitorBool(IAstVisitorBool& visitor) override {
+        return visitor.VisitPatternPlaceholder(this, child_);
+    }
+
+    // The C# `protected internal override bool DoMatch(AstNode?, Match)` -- the
+    // placeholder delegates the match to the wrapped pattern.
+    bool DoMatch(AstNode* other, PatternMatching::Match match) override {
+        return child_->DoMatch(other, match);
+    }
+
+    // The C# `bool PatternMatching.INode.DoMatchCollection(...)` (explicit
+    // interface): delegates the collection match to the wrapped pattern.
+    bool DoMatchCollection(const std::vector<PatternMatching::INode*>& other, int pos,
+                           PatternMatching::Match match,
+                           PatternMatching::BacktrackingInfo& backtrackingInfo) override {
+        return child_->DoMatchCollection(other, pos, match, backtrackingInfo);
+    }
+
+    // The C# `readonly PatternMatching.Pattern child` (a GC reference; the port
+    // observes the caller-owned pattern).
+    PatternMatching::Pattern& Child() const { return *child_; }
+
+private:
+    PatternMatching::Pattern* child_;
+};
+
+// The C# `public static implicit operator AstType(Pattern? pattern)` / the
+// PatternExtensions `ToType(this Pattern)`: the call-site form.
+inline AstType* AstType::ToType(PatternMatching::Pattern& pattern) {
+    return new PatternPlaceholder(pattern);
+}
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 

@@ -45,6 +45,13 @@
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
+class AstNode;
+
+namespace PatternMatching {
+class Pattern;
+}
+
+
 // The C# `public interface IAstVisitor<out S>` (instantiated `S = bool`). A concrete node's
 // `AcceptVisitorBool` override routes back to the matching `Visit<NodeName>(this)`; the generic
 // `DepthFirstAstVisitor<bool>` base (DepthFirstAstVisitorBool.hpp) supplies the default
@@ -192,6 +199,11 @@ public:
     virtual bool VisitQueryContinuationClause(QueryContinuationClause*) = 0;
     virtual bool VisitQueryJoinClause(QueryJoinClause*) = 0;
     virtual bool VisitSyntaxTree(SyntaxTree*) = 0;
+
+    // The C# generated `S VisitPatternPlaceholder(AstNode placeholder, Pattern pattern)`
+    // over the bool instantiation (see the void IAstVisitor note).
+    virtual bool VisitPatternPlaceholder(AstNode* placeholder,
+                                         PatternMatching::Pattern* pattern) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
