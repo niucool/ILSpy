@@ -558,23 +558,33 @@ Facade instance surface.
   System.Core, System.Configuration -- ~12k rendered lines,
   reference-resolved) byte-identical against the pre-change build, and the
   full 12856-test suite unchanged. The remaining deferred IL transforms
-  (ProxyCallReplacer DONE -- see above; YieldReturnDecompiler IN PROGRESS
-  -- Part 1 landed: LongDict + SymbolicExecution + StateRangeAnalysis, the
-  complete analysis core, with 3 RED-first tests; the next parts are the
-  enumerator-creation matching + the ctor/current/mapping/dispose analyses
-  (PART 2 DONE: the metadata analyses over the DelegateBodyResolver hook
-  -- ReadIL + EarlyILTransforms(true) + a field-resolution pass that fills
-  the decoded bodies' LdFlda::Field from the compilation's main module, the
-  port's reader deferring that surface; the IsMethod walk over the
-  MethodImpl table handles the net48 mscorlib's EXPLICIT interface
-  implementations -- get_Current/Dispose are named
-  "System.Collections.IEnumerator.get_Current"/"System.IDisposable.Dispose"
-  in the metadata, matched through their MethodImpl declaration rows; the
-  tests run over the real net48 mscorlib iterators -- 14 compiler-generated
-  enumerator types; the Mono-vs-legacyVB discriminator is deferred with
-  TransformDisplayClassUsage.ValidateConstructor, the no-arg-ctor shape
-  treated as Mono), then the MoveNext conversion, then the try-finally
-  reconstruction;
+  (ProxyCallReplacer DONE -- see above; YieldReturnDecompiler DONE --
+  all four parts landed: LongDict + SymbolicExecution + StateRangeAnalysis
+  (Part 1); the enumerator-creation matching + the ctor/current/mapping/
+  dispose metadata analyses (Part 2); AnalyzeMoveNext +
+  PropagateCopiesOfFields + ConvertBody + TranslateFieldsToLocalAccess +
+  the driver registration (Part 3); DecompileFinallyBlocks +
+  ReconstructTryFinallyBlocks + BlockContainer::TopologicalSort/SortBlocks
+  (Part 4). The tests ride a LOCALLY COMPILED fixture -- the net48 corpus
+  turned out to be the REFERENCE-assembly set (stripped bodies; the oracle
+  renders "Empty body found"), so
+  /home/jim/ilspy-test-fixtures/yield_fixture/IteratorFixture.dll is built
+  with the box's csc (Numbers/WithParameters/WithFinally iterator shapes;
+  rebuild per IteratorFixture.cs in that directory). Port-surface notes:
+  the out-form matchers stay file-local (MatchLdLocOut joins MatchLdcI4 --
+  the shared MatchLdLoc is the match-against form); the reader leaves
+  Call::Method null, so Call::MethodToken carries the raw token and
+  CreateILAst resolves both fields AND in-module method tokens (the
+  AliasMethod borrow); the terminator-slot conventions are documented at
+  each site. Two engine bugs fixed under the fixture: the reader's branch
+  resolution now walks the branch's enclosing container chain (the C#
+  BlockBuilder.FindBranchTarget shape -- a flat offset->block map bound
+  branches into an EH region's interior, and the branch-chain
+  simplification then bypassed the region); the reaching-definitions walk
+  gained the SwitchInstruction arm (the per-section state restore -- its
+  absence fragmented the per-state return temporaries).
+  The Mono/VB arms (the discriminator + CleanSkipFinallyBodies/
+  CleanDoFinallyBodies/CleanFinallyStateChecks) stay deferred;
   AsyncAwaitDecompiler, DynamicCallSiteTransform,
   IntroduceRefReadOnlyModifierOnLocals) are NOT ported -- genuine port
   projects.
