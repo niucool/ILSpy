@@ -58,6 +58,7 @@
 #include "Decompiler/Metadata/UniversalAssemblyResolver.hpp"
 #include "Decompiler/Metadata/DotNetCorePathFinderExtensions.hpp"
 #include "Decompiler/TypeSystem/DecompilerTypeSystem.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/TypeSystem/SimpleTypeResolveContext.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
@@ -81,9 +82,11 @@ void CSharpDecompiler::RunILTransforms(IL::ILFunction& function,
 // The context wiring the C# ILTransformContext carries natively: the
 // PEFile (the port's Metadata pointer) and the CreateILReader deep-decode
 // entry (the port's DelegateBodyResolver hook over ReadIL).
-static void WireTransformContext(IL::ILTransformContext& context,
-                                 const Metadata::MetadataFile& file) {
+static void WireTransformContext(
+    IL::ILTransformContext& context, const Metadata::MetadataFile& file,
+    TS::DecompilerTypeSystem* typeSystem = nullptr) {
     context.Metadata = const_cast<Metadata::MetadataFile*>(&file);
+    context.TypeSystem = typeSystem;
     context.DelegateBodyResolver =
         [&file](std::uint32_t methodToken,
                 std::uint32_t methodRva) -> std::unique_ptr<IL::ILFunction> {
@@ -140,8 +143,39 @@ bool CSharpDecompiler::DecompileMethodToString(
     const Metadata::MetadataFile& file, std::uint32_t methodToken,
     std::uint32_t methodRva, const std::string& methodName,
     std::string& out, bool isConstructor) {
+    // The C# static Decompile over a PEFile constructs a CSharpDecompiler
+    // -- the reference-loaded type system rides the same shape here: one
+    // per call, kept alive through the render below.
+    Metadata::UniversalAssemblyResolver resolver(
+        file.FileName(), false, Metadata::DetectTargetFrameworkId(file));
+    TS::DecompilerTypeSystem typeSystem(file, resolver);
+    return DecompileMethodToString(file, &typeSystem, methodToken,
+                                   methodRva, methodName, out, isConstructor);
+}
+
+bool CSharpDecompiler::DecompileMethodToString(
+    const Metadata::MetadataFile& file,
+    TS::DecompilerTypeSystem* typeSystem, std::uint32_t methodToken,
+    std::uint32_t methodRva, const std::string& methodName,
+    std::string& out, bool isConstructor) {
     auto fn = IL::ReadIL(file, methodToken, methodRva);
     if (!fn) return false;
+    // The C# ILReader decodes the body through the method definition (the
+    // ILFunction's Method carries the resolved IMethod; the state-machine
+    // transforms read its return type). The port's ReadIL leaves the
+    // slot null; the facade resolves through the wired type system and
+    // keeps the shared_ptr alive past the render (the raw Method points
+    // into it).
+    std::shared_ptr<TS::IMethod> resolvedMethod;
+    if (typeSystem != nullptr) {
+        const auto* module = dynamic_cast<const TS::MetadataModule*>(
+            &typeSystem->MainModule());
+        if (module != nullptr) {
+            resolvedMethod = TS::AliasMethod(
+                module->GetDefinitionMethod(methodToken));
+            fn->Method = resolvedMethod.get();
+        }
+    }
     std::string returnType = "void";
     std::string paramDecl;
     if (auto sig = file.GetMethodSignature(methodToken)) {
@@ -152,9 +186,11 @@ bool CSharpDecompiler::DecompileMethodToString(
         paramDecl = MethodDeclString(*sig, paramNames);
     }
     // The pipeline run rides the metadata-wired overload (the C# context
-    // carries the PEFile for the closure transforms' deep-decode).
+    // carries the PEFile for the closure transforms' deep-decode); the
+    // type system carries the shared one when threaded (the state-machine
+    // and callsite transforms resolve through it).
     IL::ILTransformContext transformContext;
-    WireTransformContext(transformContext, file);
+    WireTransformContext(transformContext, file, typeSystem);
     RunILTransforms(*fn, transformContext);
     fn->CheckInvariant(IL::ILPhase::Normal);
     out = IL::ILAstToCSharp(*fn, returnType, methodName, paramDecl,
@@ -179,8 +215,8 @@ bool CSharpDecompiler::DecompileMethodToString(
 // call; the instance uses its own) and the registry lookup (the static
 // consults the process-global placeholder; the instance its own map).
 bool DecompileTypeToStringBody(
-    const Metadata::MetadataFile& file, TS::MetadataModule& module,
-    const Metadata::PartialTypeInfo* partialType,
+    const Metadata::MetadataFile& file, TS::DecompilerTypeSystem* typeSystem,
+    TS::MetadataModule& module, const Metadata::PartialTypeInfo* partialType,
     std::uint32_t typeToken, std::string& out) {
     // The C# DecompileType member iteration: the partial-type info gates
     // the members (the C# `DoDecompileMember`'s
@@ -345,7 +381,8 @@ bool DecompileTypeToStringBody(
         const std::string& methodName = isConstructor ? typeName : m.Name;
         std::string text;
         if (CSharpDecompiler::DecompileMethodToString(
-                file, m.Token, m.RVA, methodName, text, isConstructor)) {
+                file, typeSystem, m.Token, m.RVA, methodName, text,
+                isConstructor)) {
             out += text;
             out += "\n";
             rendered = true;
@@ -369,7 +406,7 @@ bool CSharpDecompiler::DecompileTypeToString(
         file.FileName(), false, Metadata::DetectTargetFrameworkId(file));
     TS::DecompilerTypeSystem typeSystem(file, resolver);
     return DecompileTypeToStringBody(
-        file, typeSystem.MainMetadataModule(),
+        file, &typeSystem, typeSystem.MainMetadataModule(),
         FindRegisteredPartialType(typeToken), typeToken, out);
 }
 
@@ -474,7 +511,9 @@ std::string CSharpDecompiler::DecompileWholeModuleToString() {
 bool CSharpDecompiler::DecompileTypeToString(
     std::uint32_t typeToken, std::string& out) {
     return DecompileTypeToStringBody(
-        *state_->file, state_->typeSystem->MainMetadataModule(),
+        *state_->file, state_->typeSystem ? &state_->typeSystem.value()
+                                          : nullptr,
+        state_->typeSystem->MainMetadataModule(),
         FindPartialTypeInfo(typeToken), typeToken, out);
 }
 

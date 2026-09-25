@@ -35,6 +35,7 @@
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/YieldReturn.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 
@@ -256,6 +257,66 @@ TEST(ILAstToCSharpAsyncDynamicArmsTest, DynamicSetIndexRenders) {
         std::vector<::ILSpy::Decompiler::IL::CSharpArgumentInfo>(3), std::move(args)));
     std::string text = f.Render();
     EXPECT_NE(text.find("num[1, 6] = 6;"), std::string::npos) << text;
+}
+
+// ---------------------------------------------------------------------------
+// The facade end-to-end: DecompileTypeToString wires the type system into
+// the per-method pipeline context, so the state-machine and callsite
+// transforms fire over real Roslyn-compiled fixtures and the arms above
+// render their C# forms.
+// ---------------------------------------------------------------------------
+
+// The locally-compiled async fixture (the AsyncShapes trio; see the
+// AsyncAwaitDecompiler tests for the build recipe).
+constexpr const char* kAsyncFixture =
+    "/home/jim/ilspy-test-fixtures/async_fixture/AsyncFixture.dll";
+
+// The locally-compiled iterator fixture (the IteratorShapes trio).
+constexpr const char* kIteratorFixture =
+    "/home/jim/ilspy-test-fixtures/yield_fixture/IteratorFixture.dll";
+
+// The locally-compiled dynamic fixture (the DynamicShapes trio).
+constexpr const char* kDynamicFixture =
+    "/home/jim/ilspy-test-fixtures/dynamic_fixture/DynamicFixture.dll";
+
+namespace {
+bool FacadeRenders(const char* fixturePath, const char* typeName,
+                   std::string& text) {
+    ::ILSpy::Decompiler::Metadata::MetadataFile file(fixturePath);
+    if (!file.IsValid()) return false;
+    for (const auto& t : file.TypeDefs()) {
+        if (std::string(t.Name) != typeName) continue;
+        return CSharp::CSharpDecompiler::DecompileTypeToString(file,
+                                                                t.Token, text);
+    }
+    return false;
+}
+} // namespace
+
+TEST(ILAstToCSharpAsyncDynamicArmsTest, FacadeDecompilesAsyncAwait) {
+    std::string text;
+    if (!FacadeRenders(kAsyncFixture, "AsyncShapes", text))
+        GTEST_SKIP() << "the async fixture is not provisioned";
+    EXPECT_NE(text.find("await"), std::string::npos)
+        << "the async method's await renders: " << text;
+}
+
+TEST(ILAstToCSharpAsyncDynamicArmsTest, FacadeDecompilesYieldReturn) {
+    std::string text;
+    if (!FacadeRenders(kIteratorFixture, "IteratorShapes", text))
+        GTEST_SKIP() << "the iterator fixture is not provisioned";
+    EXPECT_NE(text.find("yield return"), std::string::npos)
+        << "the iterator's yields render: " << text;
+}
+
+TEST(ILAstToCSharpAsyncDynamicArmsTest, FacadeDecompilesDynamic) {
+    std::string text;
+    if (!FacadeRenders(kDynamicFixture, "DynamicShapes", text))
+        GTEST_SKIP() << "the dynamic fixture is not provisioned";
+    EXPECT_NE(text.find(".Foo"), std::string::npos)
+        << "the dynamic get-member renders: " << text;
+    EXPECT_NE(text.find(".Bar"), std::string::npos)
+        << "the dynamic invoke-member renders: " << text;
 }
 
 // The dynamic convert renders the cast (explicit) or the operand alone

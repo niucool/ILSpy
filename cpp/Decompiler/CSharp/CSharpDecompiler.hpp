@@ -44,6 +44,12 @@
 #include <string>
 #include <vector>
 
+namespace ILSpy::Decompiler::TypeSystem {
+// The facade-shared reference-loaded type system (the wire target of the
+// type / whole-module entries' per-method calls).
+class DecompilerTypeSystem;
+} // namespace ILSpy::Decompiler::TypeSystem
+
 namespace ILSpy::Decompiler::Metadata {
 struct MethodSignature;
 class MetadataFile;
@@ -148,6 +154,17 @@ public:
     // methodName then carries the type name).
     static bool DecompileMethodToString(
         const ::ILSpy::Decompiler::Metadata::MetadataFile& file,
+        std::uint32_t methodToken, std::uint32_t methodRva,
+        const std::string& methodName, std::string& out,
+        bool isConstructor = false);
+
+    // The type-system-carrying overload (the C# static Decompile over a
+    // PEFile constructs a CSharpDecompiler -- the type system the
+    // state-machine and callsite transforms resolve through; the type /
+    // whole-module entries thread the shared one they already built).
+    static bool DecompileMethodToString(
+        const ::ILSpy::Decompiler::Metadata::MetadataFile& file,
+        ::ILSpy::Decompiler::TypeSystem::DecompilerTypeSystem* typeSystem,
         std::uint32_t methodToken, std::uint32_t methodRva,
         const std::string& methodName, std::string& out,
         bool isConstructor = false);

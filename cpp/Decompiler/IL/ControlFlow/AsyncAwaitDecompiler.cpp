@@ -705,21 +705,57 @@ void AsyncAwaitDecompiler::InlineBodyOfMoveNext(ILFunction& function) {
     // The C# clears moveNextFunction.Variables and takes the body out; the
     // port's unique_ptr ownership transfers the try block to the function
     // and leaves the moveNext function holding the catch handler.
+    // Register the variables the inlined body uses. The registration takes
+    // OWNING copies (the nodes' shared_ptr members): the state machine
+    // function -- the variables' other owner -- dies with the temporary
+    // decompiler when Run returns, and the body's loads/stores can be
+    // deleted by the later inlining passes; the function's own variable
+    // list must keep the transferred variables alive on its own.
+    {
+        std::vector<ILInstruction*> regStack{function.Body.get()};
+        while (!regStack.empty()) {
+            ILInstruction* node = regStack.back();
+            regStack.pop_back();
+            if (auto* stloc = dynamic_cast<StLoc*>(node)) {
+                if (stloc->Variable != nullptr)
+                    function.RegisterExistingVariable(stloc->Variable);
+            } else if (auto* ldloc = dynamic_cast<LdLoc*>(node)) {
+                if (ldloc->Variable != nullptr)
+                    function.RegisterExistingVariable(ldloc->Variable);
+            } else if (auto* ldloca = dynamic_cast<LdLoca*>(node)) {
+                if (ldloca->Variable != nullptr)
+                    function.RegisterExistingVariable(ldloca->Variable);
+            }
+            for (int i = 0; i < node->ChildCount(); i++) {
+                if (ILInstruction* child = node->GetChild(i))
+                    regStack.push_back(child);
+            }
+        }
+    }
     std::vector<ILInstruction*> stack{function.Body.get()};
     while (!stack.empty()) {
         ILInstruction* node = stack.back();
         stack.pop_back();
         if (auto* branch = dynamic_cast<Branch*>(node)) {
             if (branch->TargetBlock == setResultReturnBlock_) {
-                // The result variable stays owned by the state
-                // machine's function; the LdLoc carries a non-owning alias
-                // (an owning shared_ptr over the raw pointer would double
-                // free it when the leave dies).
+                // The result variable's owning handle lives in the
+                // function's registered variables (the registration below
+                // took owning copies of the body's loads/stores); the LdLoc
+                // takes that handle so the function keeps the variable
+                // alive past the state machine function's death.
+                ILVariablePtr resultHandle;
+                if (resultVar_ != nullptr) {
+                    for (const ILVariablePtr& v : function.Variables) {
+                        if (v.get() == resultVar_) {
+                            resultHandle = v;
+                            break;
+                        }
+                    }
+                }
                 std::unique_ptr<ILInstruction> value =
-                    resultVar_ != nullptr
+                    resultHandle != nullptr
                         ? std::unique_ptr<ILInstruction>(
-                              new LdLoc(ILVariablePtr(ILVariablePtr(),
-                                                      resultVar_)))
+                              new LdLoc(std::move(resultHandle)))
                         : nullptr;
                 std::unique_ptr<ILInstruction> replacement(
                     new Leave(dynamic_cast<BlockContainer*>(function.Body.get()),
@@ -755,31 +791,6 @@ void AsyncAwaitDecompiler::InlineBodyOfMoveNext(ILFunction& function) {
                         dynamic_cast<BlockContainer*>(function.Body.get());
                     moveNextLeaves_.insert(leave);
                 }
-            }
-            for (int i = 0; i < node->ChildCount(); i++) {
-                if (ILInstruction* child = node->GetChild(i))
-                    stack.push_back(child);
-            }
-        }
-    }
-    // Register the variables the inlined body uses.
-    if (resultVar_ != nullptr)
-        function.RegisterExistingVariable(
-            ILVariablePtr(ILVariablePtr(), resultVar_));
-    {
-        std::vector<ILInstruction*> stack{function.Body.get()};
-        while (!stack.empty()) {
-            ILInstruction* node = stack.back();
-            stack.pop_back();
-            if (auto* stloc = dynamic_cast<StLoc*>(node)) {
-                if (stloc->Variable != nullptr)
-                    function.RegisterExistingVariable(stloc->Variable);
-            } else if (auto* ldloc = dynamic_cast<LdLoc*>(node)) {
-                if (ldloc->Variable != nullptr)
-                    function.RegisterExistingVariable(ldloc->Variable);
-            } else if (auto* ldloca = dynamic_cast<LdLoca*>(node)) {
-                if (ldloca->Variable != nullptr)
-                    function.RegisterExistingVariable(ldloca->Variable);
             }
             for (int i = 0; i < node->ChildCount(); i++) {
                 if (ILInstruction* child = node->GetChild(i))

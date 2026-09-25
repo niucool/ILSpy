@@ -489,6 +489,13 @@ bool YieldReturnDecompiler::MatchEnumeratorCreationPattern(
     // is first stored in a variable, then the parameters are copied over,
     // then the instance is returned.
 
+    // The C# bails on an empty instruction list (its count includes the
+    // terminator; a Count of 0 is no body at all). The port's list excludes
+    // the final slot, so the equivalent bail is an empty list whose final
+    // is not the return shape above.
+    if (body->Instructions.empty())
+        return false;
+
     std::size_t pos = 0;
 
     // stloc(var_1, newobj(..))
