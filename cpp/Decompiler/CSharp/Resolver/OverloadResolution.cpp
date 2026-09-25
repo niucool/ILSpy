@@ -163,9 +163,10 @@ OverloadResolution::GetArgumentsWithConversions()
     if (bestCandidate_ == nullptr)
         return arguments_;
     return Detail::GetArgumentsWithConversions(
-        /*targetResolveResult*/ nullptr, /*bestCandidateForNamedArguments*/ nullptr,
-        isExtensionMethodInvocation_, checkForOverflow_, arguments_, argumentNames_,
-        bestCandidate_, ArgumentConversions());
+        *compilation_, /*targetResolveResult*/ nullptr,
+        /*bestCandidateForNamedArguments*/ nullptr, isExtensionMethodInvocation_,
+        checkForOverflow_, arguments_, argumentNames_, bestCandidate_,
+        ArgumentConversions());
 }
 
 std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>
@@ -179,7 +180,7 @@ OverloadResolution::GetArgumentsWithConversionsAndNames()
     if (bestCandidate_ == nullptr)
         return arguments_;
     return Detail::GetArgumentsWithConversions(
-        /*targetResolveResult*/ nullptr,
+        *compilation_, /*targetResolveResult*/ nullptr,
         Detail::GetBestCandidateWithSubstitutedTypeArguments(bestCandidate_),
         isExtensionMethodInvocation_, checkForOverflow_, arguments_, argumentNames_,
         bestCandidate_, ArgumentConversions());
@@ -207,8 +208,9 @@ std::shared_ptr<CSharpInvocationResolveResult> OverloadResolution::CreateResolve
     // for the extension-method receiver swap.
     std::vector<std::shared_ptr<ResolveResult>> argumentsWithConversions =
         Detail::GetArgumentsWithConversions(
-            targetResolveResult, member, isExtensionMethodInvocation_, checkForOverflow_,
-            arguments_, argumentNames_, bestCandidate_, ArgumentConversions());
+            *compilation_, targetResolveResult, member, isExtensionMethodInvocation_,
+            checkForOverflow_, arguments_, argumentNames_, bestCandidate_,
+            ArgumentConversions());
 
     // C# `this.IsExtensionMethodInvocation ? new TypeResolveResult(member.DeclaringType ??
     // SpecialType.UnknownType) : targetResolveResult` -- the extension-method shape's target

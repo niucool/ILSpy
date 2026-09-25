@@ -653,13 +653,14 @@ OverloadResolutionErrors BestCandidateErrors(
 //     `TypeKind.Unknown` (the unresolved shape stays unwrapped). The identity-conversion
 //     check is POINTER IDENTITY against the `IdentityConversion` singleton (the C#
 //     `!= Conversion.IdentityConversion` reference comparison, the `CheckApplicability`
-//     convention). DEFERRED: the C# constant arm (`arguments[i].IsCompileTimeConstant &&
+//     convention). The C# constant arm (`arguments[i].IsCompileTimeConstant &&
 //     conversions[i].IsValid && !conversions[i].IsUserDefined` ->
 //     `new CSharpResolver(compilation).WithCheckForOverflow(CheckForOverflow).ResolveCast(...)`
-//     -- re-resolving a compile-time constant through the target type) needs the unported
-//     `CSharpResolver.ResolveCast`; the faithful fallback wraps the constant in the
-//     `ConversionResolveResult` too (the C# else branch), preserving the wrapper structure
-//     (target type + applied conversion) -- only the constant is not re-folded;
+//     -- re-resolving a compile-time constant through the target type, e.g. an int
+//     literal widened to a long constant) is PORTED now that
+//     `CSharpResolver.ResolveCast` has landed; the C# else branch (the
+//     `ConversionResolveResult` wrap) serves the non-constant / invalid /
+//     user-defined shapes;
 //  3. the named wrap: when `bestCandidateForNamedArguments` is non-null and the argument was
 //     passed with an explicit name (the C# `argumentNames[i] != null`; the port normalizes
 //     the null entry to the empty string), the argument is wrapped in a
@@ -667,6 +668,7 @@ OverloadResolutionErrors BestCandidateErrors(
 //     is mapped (`bestCandidateForNamedArguments.Parameters[parameterIndex]`), or the name
 //     only when unmapped.
 std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> GetArgumentsWithConversions(
+    const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
     const std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& targetResolveResult,
     const ILSpy::Decompiler::TypeSystem::IParameterizedMember* bestCandidateForNamedArguments,
     bool isExtensionMethodInvocation,

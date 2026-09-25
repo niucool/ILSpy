@@ -209,6 +209,7 @@ TEST(OutputWrappersTest, ConversionWrapsNonIdentityConvertedArgument)
         &method, {longType}, {0}, {Conversions::ImplicitNumericConversion()});
 
     auto result = GetArgumentsWithConversions(
+            Compilation(),
         /*targetResolveResult*/ nullptr, /*bestCandidateForNamedArguments*/ nullptr,
         /*isExtensionMethodInvocation*/ false, /*checkForOverflow*/ true,
         {original}, {""}, candidate, candidate->ArgumentConversions());
@@ -225,6 +226,67 @@ TEST(OutputWrappersTest, ConversionWrapsNonIdentityConvertedArgument)
     EXPECT_NE(result[0].get(), original.get());
 }
 
+// The C# constant-folding arm of the wrap: a compile-time constant under a
+// valid NON-user-defined conversion re-resolves through
+// `CSharpResolver(compilation).WithCheckForOverflow(...).ResolveCast(...)` --
+// the constant folds to the parameter type (42 -> the folded long constant),
+// not a ConversionResolveResult wrapper.
+TEST(OutputWrappersTest, ConstantArgumentFoldsThroughResolveCast)
+{
+    auto intType = MakeDef(KnownTypeCode::Int32);
+    auto longType = MakeDef(KnownTypeCode::Int64);
+    TestMethod method("M");
+    auto constant =
+        std::make_shared<ConstantResolveResult>(intType, 42);
+    auto candidate = MakeCandidate(
+        &method, {longType}, {0}, {Conversions::ImplicitNumericConversion()});
+
+    auto result = GetArgumentsWithConversions(
+        Compilation(), /*targetResolveResult*/ nullptr,
+        /*bestCandidateForNamedArguments*/ nullptr,
+        /*isExtensionMethodInvocation*/ false, /*checkForOverflow*/ false,
+        {constant}, {""}, candidate, candidate->ArgumentConversions());
+
+    ASSERT_EQ(result.size(), 1u);
+    // The constant is folded to the parameter type (a ConstantResolveResult
+    // over long), NOT a ConversionResolveResult wrapper.
+    const auto* folded =
+        dynamic_cast<const ConstantResolveResult*>(result[0].get());
+    ASSERT_NE(folded, nullptr);
+    EXPECT_EQ(&folded->Type(), longType.get());
+}
+
+// The constant arm's guards: a USER-DEFINED conversion on a constant takes the
+// else branch (the ConversionResolveResult wrapper, as before).
+TEST(OutputWrappersTest, ConstantUnderUserDefinedConversionStaysWrapped)
+{
+    auto intType = MakeDef(KnownTypeCode::Int32);
+    auto longType = MakeDef(KnownTypeCode::Int64);
+    TestMethod method("M");
+    auto constant =
+        std::make_shared<ConstantResolveResult>(intType, 42);
+    // The C# guard reads conversions[i].IsUserDefined -- a user-defined
+    // conversion on a constant takes the else branch (the ConversionFactories
+    // factory shape: before/after identity conversions).
+    TestMethod op_Implicit("op_Implicit");
+    auto before = Conversions::IdentityConversion();
+    auto after = Conversions::IdentityConversion();
+    auto userDefined = Conversions::UserDefinedConversion(
+        &op_Implicit, true, before, after);
+    auto candidate = MakeCandidate(&method, {longType}, {0}, {userDefined});
+
+    auto result = GetArgumentsWithConversions(
+        Compilation(), /*targetResolveResult*/ nullptr,
+        /*bestCandidateForNamedArguments*/ nullptr,
+        /*isExtensionMethodInvocation*/ false, /*checkForOverflow*/ false,
+        {constant}, {""}, candidate, candidate->ArgumentConversions());
+
+    ASSERT_EQ(result.size(), 1u);
+    const auto* wrapped =
+        dynamic_cast<const ConversionResolveResult*>(result[0].get());
+    ASSERT_NE(wrapped, nullptr);
+}
+
 // An IDENTITY conversion leaves the argument unwrapped (pointer identity preserved) -- the
 // `conversions[i] != Conversion.IdentityConversion` guard.
 TEST(OutputWrappersTest, IdentityConversionDoesNotWrap)
@@ -236,6 +298,7 @@ TEST(OutputWrappersTest, IdentityConversionDoesNotWrap)
         &method, {intType}, {0}, {Conversions::IdentityConversion()});
 
     auto result = GetArgumentsWithConversions(
+            Compilation(),
         nullptr, nullptr, false, false, {original}, {""}, candidate,
         candidate->ArgumentConversions());
 
@@ -255,6 +318,7 @@ TEST(OutputWrappersTest, UnmappedArgumentDoesNotWrap)
         &method, {longType}, {-1}, {Conversions::ImplicitNumericConversion()});
 
     auto result = GetArgumentsWithConversions(
+            Compilation(),
         nullptr, nullptr, false, false, {original}, {""}, candidate,
         candidate->ArgumentConversions());
 
@@ -273,6 +337,7 @@ TEST(OutputWrappersTest, UnknownParameterTypeDoesNotWrap)
         &method, {UnknownType()}, {0}, {Conversions::ImplicitNumericConversion()});
 
     auto result = GetArgumentsWithConversions(
+            Compilation(),
         nullptr, nullptr, false, false, {original}, {""}, candidate,
         candidate->ArgumentConversions());
 
@@ -285,7 +350,12 @@ TEST(OutputWrappersTest, UnknownParameterTypeDoesNotWrap)
 // re-resolves the constant through `CSharpResolver.ResolveCast` (not yet ported); the wrap
 // preserves the wrapper structure (target type + the applied conversion), only the constant
 // is not re-folded.
-TEST(OutputWrappersTest, ConstantArgumentWrapsWhileResolveCastDeferred)
+// The landed constant-folding arm: a compile-time constant under a valid
+// non-user-defined conversion re-resolves through
+// `CSharpResolver(compilation).WithCheckForOverflow(...).ResolveCast(...)` --
+// the constant folds to the parameter type (5 -> the long constant), replacing
+// the pre-ResolveCast wrapper fallback.
+TEST(OutputWrappersTest, ConstantArgumentFoldsToTheTargetType)
 {
     auto intType = MakeDef(KnownTypeCode::Int32);
     auto longType = MakeDef(KnownTypeCode::Int64);
@@ -295,14 +365,19 @@ TEST(OutputWrappersTest, ConstantArgumentWrapsWhileResolveCastDeferred)
         &method, {longType}, {0}, {Conversions::ImplicitNumericConversion()});
 
     auto result = GetArgumentsWithConversions(
+            Compilation(),
         nullptr, nullptr, false, false, {constant}, {""}, candidate,
         candidate->ArgumentConversions());
 
     ASSERT_EQ(result.size(), 1u);
-    const auto* wrapped = dynamic_cast<const ConversionResolveResult*>(result[0].get());
-    ASSERT_NE(wrapped, nullptr);
-    EXPECT_EQ(&wrapped->Type(), longType.get());
-    EXPECT_EQ(wrapped->Input(), constant.get());
+    // The folded constant carries the PARAMETER type (long) and the folded
+    // value 5.
+    const auto* folded = dynamic_cast<const ConstantResolveResult*>(result[0].get());
+    ASSERT_NE(folded, nullptr);
+    EXPECT_EQ(&folded->Type(), longType.get());
+    const auto& foldedValue = folded->ConstantValue();
+    ASSERT_TRUE(foldedValue.has_value());
+    EXPECT_EQ(std::any_cast<std::int64_t>(foldedValue), std::int64_t{5});
 }
 
 // ---- Detail::GetArgumentsWithConversions: the named wrap ----
@@ -320,6 +395,7 @@ TEST(OutputWrappersTest, NamedArgumentWrapsWithParameterAndMember)
         &method, {intType}, {0}, {Conversions::IdentityConversion()});
 
     auto result = GetArgumentsWithConversions(
+            Compilation(),
         nullptr, &method, false, false, {original}, {"x"}, candidate,
         candidate->ArgumentConversions());
 
@@ -347,6 +423,7 @@ TEST(OutputWrappersTest, NamedArgumentUnmappedUsesNameOnlyCtor)
         &method, {intType}, {-1}, {Conversions::IdentityConversion()});
 
     auto result = GetArgumentsWithConversions(
+            Compilation(),
         nullptr, &method, false, false, {original}, {"x"}, candidate,
         candidate->ArgumentConversions());
 
@@ -375,6 +452,7 @@ TEST(OutputWrappersTest, NamedWrapSkippedForPositionalAndNullCandidate)
     // A null candidate-for-named-arguments: the name is present but there is no member to
     // resolve the parameter from, so the argument comes back unwrapped.
     auto nullCandidate = GetArgumentsWithConversions(
+            Compilation(),
         nullptr, nullptr, false, false, {original}, {"x"}, candidate,
         candidate->ArgumentConversions());
     ASSERT_EQ(nullCandidate.size(), 1u);
@@ -382,6 +460,7 @@ TEST(OutputWrappersTest, NamedWrapSkippedForPositionalAndNullCandidate)
 
     // A positional argument (the empty name): not named-wrapped.
     auto positional = GetArgumentsWithConversions(
+            Compilation(),
         nullptr, &method, false, false, {original}, {""}, candidate,
         candidate->ArgumentConversions());
     ASSERT_EQ(positional.size(), 1u);
@@ -403,6 +482,7 @@ TEST(OutputWrappersTest, ConversionAndNamedWrapCompose)
         &method, {longType}, {0}, {Conversions::ImplicitNumericConversion()});
 
     auto result = GetArgumentsWithConversions(
+            Compilation(),
         nullptr, &method, false, false, {original}, {"x"}, candidate,
         candidate->ArgumentConversions());
 
@@ -433,6 +513,7 @@ TEST(OutputWrappersTest, ExtensionMethodInvocationSwapsFirstArgumentOnly)
         {Conversions::IdentityConversion(), Conversions::IdentityConversion()});
 
     auto result = GetArgumentsWithConversions(
+            Compilation(),
         receiver, nullptr, /*isExtensionMethodInvocation*/ true, false,
         {first, second}, {"", ""}, candidate, candidate->ArgumentConversions());
 
@@ -452,6 +533,7 @@ TEST(OutputWrappersTest, ExtensionMethodInvocationWithoutTargetKeepsArgument)
         &method, {intType}, {0}, {Conversions::IdentityConversion()});
 
     auto result = GetArgumentsWithConversions(
+            Compilation(),
         nullptr, nullptr, /*isExtensionMethodInvocation*/ true, false,
         {first}, {""}, candidate, candidate->ArgumentConversions());
 
