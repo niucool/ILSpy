@@ -314,6 +314,37 @@ TEST(FacadeMemberModifiersTest, UnnameableBaseListInterfaceDrops)
         << "the unnameable interface drops: " << text;
 }
 
+// The enum keyword: the type-header switch's enum arm (the earlier
+// stand-in rendered `struct`), with the underlying type in the base list
+// when it is not int.
+TEST(FacadeMemberModifiersTest, EnumKeywordAndUnderlyingTypeRender)
+{
+    std::string text;
+    if (!RenderType(kModifierFixture, "Color", text))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    EXPECT_NE(text.find("public enum Color"), std::string::npos) << text;
+    EXPECT_EQ(text.find("struct Color"), std::string::npos) << text;
+    std::string cs;
+    if (!RenderType(kModifierFixture, "CS", cs))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    EXPECT_NE(cs.find("internal enum CS : uint"), std::string::npos) << cs;
+}
+
+// The builtin type keywords in base lists: a generic interface
+// instantiated over a builtin renders the keyword form (`IConsumer<uint>`
+// from the entity-resolved SimpleType, whose reflection name is
+// System.UInt32).
+TEST(FacadeMemberModifiersTest, BuiltinKeywordsInBaseListsRender)
+{
+    std::string text;
+    if (!RenderType(kModifierFixture, "UIntConsumer", text))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    EXPECT_NE(text.find("class UIntConsumer : IConsumer<uint>"),
+              std::string::npos)
+        << text;
+    EXPECT_EQ(text.find("UInt32"), std::string::npos) << text;
+}
+
 // The readonly struct modifier (the C# ConvertTypeDefinition struct arm).
 TEST(FacadeMemberModifiersTest, ReadonlyStructRenders)
 {

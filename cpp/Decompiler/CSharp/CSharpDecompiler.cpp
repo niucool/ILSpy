@@ -329,8 +329,15 @@ bool TypeDefinitionNameableInBaseList(const TS::ITypeDefinition* td,
         if (tdDeclaring != nullptr && tdDeclaring == t)
             return true;
     }
+    // The C# IsInternalAccessible's `module.InternalsVisibleTo(currentModule)`
+    // -- the same-assembly grant plus the [InternalsVisibleTo] friend list
+    // (the WPF assemblies share their internals across the family, so an
+    // internal interface of WindowsBase stays nameable from
+    // PresentationFramework).
     bool internalAccess =
-        td->ParentModule() == currentType.ParentModule();
+        td->ParentModule() != nullptr &&
+        currentType.ParentModule() != nullptr &&
+        td->ParentModule()->InternalsVisibleTo(*currentType.ParentModule());
     auto protectedAccess = [&]() {
         // The C# IsProtectedAccessible's grant for type definitions: some
         // type in the current type's declaring chain derives from the
@@ -507,8 +514,11 @@ bool DecompileTypeToStringBody(
         const char* keyword = "class";
         switch (t.Kind) {
             case ::ILSpy::Decompiler::TypeSystem::TypeKind::Struct:
-            case ::ILSpy::Decompiler::TypeSystem::TypeKind::Enum:
                 keyword = "struct";
+                break;
+            case ::ILSpy::Decompiler::TypeSystem::TypeKind::Enum:
+                // The C# ClassType.Enum arm.
+                keyword = "enum";
                 break;
             case ::ILSpy::Decompiler::TypeSystem::TypeKind::Interface:
                 keyword = "interface";

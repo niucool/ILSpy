@@ -75,8 +75,8 @@
 
 #include <cctype>
 #include <cstdio>
-#include <map>
 #include <cstdlib>
+#include <map>
 #include <set>
 #include <string>
 #include <string_view>
@@ -3042,6 +3042,24 @@ std::string CSharpTypeName(const TypeSystem::ITypePtr& type) {
         return base;
     }
     std::string rn = type->ReflectionName();
+    // The builtin type keywords (the C# UseKeywordsForBuiltinTypes over
+    // any type whose reflection name is a known primitive -- the entity
+    // model resolves System.UInt32 to a SimpleType, not a KnownType, so
+    // the dynamic_cast arm above misses it).
+    static const std::map<std::string, const char*> kBuiltinKeywords = {
+        {"System.Boolean", "bool"},   {"System.Char", "char"},
+        {"System.SByte", "sbyte"},   {"System.Byte", "byte"},
+        {"System.Int16", "short"},   {"System.UInt16", "ushort"},
+        {"System.Int32", "int"},     {"System.UInt32", "uint"},
+        {"System.Int64", "long"},    {"System.UInt64", "ulong"},
+        {"System.Single", "float"},  {"System.Double", "double"},
+        {"System.Decimal", "decimal"}, {"System.String", "string"},
+        {"System.Object", "object"}, {"System.IntPtr", "nint"},
+        {"System.UIntPtr", "nuint"},
+    };
+    auto builtin = kBuiltinKeywords.find(rn);
+    if (builtin != kBuiltinKeywords.end())
+        return builtin->second;
     auto pos = rn.rfind('.');
     return pos != std::string::npos ? rn.substr(pos + 1) : rn;
 }
