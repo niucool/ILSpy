@@ -9,7 +9,8 @@ from per-method comment blocks to the C# ilspycmd shape -- the leading
 [assembly]/[module] sections plus `public partial class` type bodies with
 fields/properties/constructors/method members. The pre-facade hash was
 `8358d5c1d6ff7ad3`, re-baselined deliberately at `164dd1a9b`). Sweep:
-`192 passed + 1 skipped + 1 env-gated skip` (filters below; add
+`193 passed + 2 skipped` (the mscorlib env-gate and the net48-fixture
+skip when unprovisioned; filters below; add
 TypeSystemExtensionsTest.IsAnonymous* and PropertyAndEventBackingFieldLookupTest.*
 to the filter as the families land).
 
@@ -72,20 +73,18 @@ to the filter as the families land).
 
 ## Next steps (in order)
 
-1. **The automatic-events arm completes the events family**: port
-   PatternStatementTransform's `VisitEventDeclaration` (C# lines 128-139)
-   + `IsEventBackingFieldDeclaration` (line 917): the field-decl removal
-   under an EventDeclaration whose symbol is an IEvent, gated on the
-   AutomaticEvents setting. The metadata lookup is LANDED
-   (`a0c5631cc`: MetadataFile::GetPropertyAndEventBackingFieldLookup). The
-   BLOCKER: the local corpora carry no events (connid has none; the
-   mscorlib env-gate skips here) -- the arm's test needs either the
-   mscorlib fixture (an env-gated test) or a synthetic event-carrying
-   module (the MslSynth/TinyNetModule fixture pattern). The rig: an
-   EventDeclaration + the IEvent symbol annotation, a FieldDeclaration +
-   an IField stub whose ParentModule is a TS::MetadataModule over the
-   event-carrying file (Accessibility Private, ReturnType equal on both,
-   MetadataToken the walk-found row).
+1. The facade completion items (PORT_PLAN.md's remaining facade
+   checklist): the event member surface in DecompileTypeToString (the
+   net48 fixtures now provide event rows), the -o file-writer, the
+   instance surface (the per-instance type-system wiring and the
+   partial-types registry lifetime). The PatternStatementTransform
+   family set is COMPLETE (`376a0b299`: the automatic-events arm over
+   the net48 PresentationFramework rig -- the baml-provisioned
+   reference assemblies at /home/jim/ilspy-test-fixtures/net48/, the
+   FrameworkContentElement Loaded/LoadedEvent suffix-convention pair,
+   the field side stubbed to the real private compiler shape because
+   the reference assemblies strip private fields; the tests skip when
+   the directory is absent).
 2. **The facade completion items** (PORT_PLAN.md's remaining facade
    checklist) and the deferred GetAstTransforms slots as their transforms
    land.
