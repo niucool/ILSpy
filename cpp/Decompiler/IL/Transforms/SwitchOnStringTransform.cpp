@@ -794,7 +794,9 @@ bool MatchRoslynSwitchOnString(Block& block, int& i, ILTransformContext& context
             argument = switchValueLdLoc();
         }
         auto stringToInt = std::make_unique<StringToInt>(
-            std::move(argument), nullptr);
+            std::move(argument),
+            std::vector<std::pair<std::optional<std::string>, int>>{},
+            nullptr);
         // Fill the map from the collected values.
         for (std::size_t idx = 0; idx < stringValues.size(); idx++) {
             stringToInt->Map.emplace_back(stringValues[idx].value,
@@ -873,8 +875,10 @@ bool MatchRoslynSwitchOnString(Block& block, int& i, ILTransformContext& context
         } else {
             argument = switchValueLdLoc();
         }
-        auto stringToInt =
-            std::make_unique<StringToInt>(std::move(argument), nullptr);
+        auto stringToInt = std::make_unique<StringToInt>(
+            std::move(argument),
+            std::vector<std::pair<std::optional<std::string>, int>>{},
+            nullptr);
         for (std::size_t idx = 0; idx < stringValues.size(); idx++) {
             stringToInt->Map.emplace_back(stringValues[idx].value,
                                           static_cast<int>(idx));
@@ -1399,6 +1403,7 @@ bool SimplifyCSharp1CascadingIfStatementsImpl(Block& block, int& i,
     // node wraps the switch value; the map is (key, index) pairs.
     auto stringToInt = std::make_unique<StringToInt>(
         std::move(argument),
+        std::vector<std::pair<std::optional<std::string>, int>>{},
         FindType(context.TypeSystem, TS::KnownTypeCode::String));
     for (std::size_t idx = 0; idx < values.size(); idx++) {
         stringToInt->Map.emplace_back(values[idx].value,
@@ -1889,6 +1894,7 @@ bool MatchLegacySwitchOnStringWithDictImpl(Block& block, int& i,
     std::unique_ptr<ILInstruction> argument(switchValue);
     auto stringToInt = std::make_unique<StringToInt>(
         std::move(argument),
+        std::vector<std::pair<std::optional<std::string>, int>>{},
         FindType(context.TypeSystem, TS::KnownTypeCode::String));
     for (std::size_t k = 0; k < stringValues.size(); k++) {
         stringToInt->Map.emplace_back(stringValues[k].first,
@@ -2250,6 +2256,7 @@ bool MatchLegacySwitchOnStringWithHashtableImpl(
         }
         auto stringToInt = std::make_unique<StringToInt>(
             std::move(argument),
+            std::vector<std::pair<std::optional<std::string>, int>>{},
             FindType(context.TypeSystem, TS::KnownTypeCode::String));
         for (const auto& entry : found->second.labels) {
             stringToInt->Map.emplace_back(entry.first, entry.second);
@@ -2725,6 +2732,7 @@ bool MatchRoslynSwitchOnStringUsingLengthAndCharImpl(Block& block, int i,
     auto stringToInt = std::make_unique<StringToInt>(
         std::make_unique<LdLoc>(
             ILVariablePtr(std::shared_ptr<ILVariable>(), switchValueVar)),
+        std::vector<std::pair<std::optional<std::string>, int>>{},
         FindType(context.TypeSystem, TS::KnownTypeCode::String));
     const std::size_t valueCount = stringValues.size();
     for (std::size_t idx = 0; idx < valueCount; idx++) {

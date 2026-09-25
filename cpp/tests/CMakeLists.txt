@@ -493,6 +493,14 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Transforms/IntroduceUnsafeModifier_Test.cpp
     Decompiler/CSharp/Transforms/ContextTrackingVisitor_Test.cpp
     Decompiler/IL/Transforms/ProxyCallReplacer_Test.cpp
+    Decompiler/IL/Transforms/DeconstructionTransform_Test.cpp
+    Decompiler/IL/Transforms/IndexRangeTransform_Test.cpp
+    Decompiler/IL/Transforms/InlineArrayTransform_Test.cpp
+    Decompiler/IL/Transforms/LocalFunctionDecompilerUseSites_Test.cpp
+    Decompiler/IL/Transforms/LocalFunctionDecompiler_Test.cpp
+    Decompiler/IL/Transforms/SwitchOnStringHashtable_Test.cpp
+    Decompiler/IL/Transforms/SwitchOnStringLengthChar_Test.cpp
+    Decompiler/IL/Transforms/TransformArrayInitializers_Test.cpp
     Decompiler/CSharp/Transforms/PatternStatementTransform_Test.cpp
     Decompiler/CSharp/Transforms/PrettifyAssignments_Test.cpp
     Decompiler/CSharp/Transforms/ReplaceMethodCallsWithOperators_Test.cpp

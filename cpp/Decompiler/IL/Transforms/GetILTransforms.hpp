@@ -50,6 +50,12 @@
 #include "Decompiler/IL/Transforms/CombineExitsTransform.hpp"
 #include "Decompiler/IL/Transforms/CopyPropagation.hpp"
 #include "Decompiler/IL/Transforms/DelegateConstruction.hpp"
+#include "Decompiler/IL/Transforms/DeconstructionTransform.hpp"
+#include "Decompiler/IL/Transforms/IndexRangeTransform.hpp"
+#include "Decompiler/IL/Transforms/IntroduceNativeIntTypeOnLocals.hpp"
+#include "Decompiler/IL/Transforms/LocalFunctionDecompiler.hpp"
+#include "Decompiler/IL/Transforms/SwitchOnStringTransform.hpp"
+#include "Decompiler/IL/Transforms/TransformArrayInitializers.hpp"
 #include "Decompiler/IL/Transforms/DetectCatchWhenConditionBlocks.hpp"
 #include "Decompiler/IL/Transforms/EarlyExpressionTransforms.hpp"
 #include "Decompiler/IL/Transforms/ExpressionTransforms.hpp"
@@ -185,6 +191,12 @@ inline void RunILTransformsThroughBlockTransforms(ILFunction& function, ILTransf
     // second CFS and before LoopDetection (per GetILTransforms()), so
     // loops are still flat back-edges the continue/break analysis walks.
     SwitchDetection().Run(function, context);
+    // SwitchOnStringTransform: switch-on-string reconstruction (the
+    // string.GetHashCode dictionary or the Roslyn Length/Char shapes),
+    // after SwitchDetection and before SwitchOnNullableTransform (per
+    // GetILTransforms()). Gated on SwitchStatementOnString (default
+    // true); its Length/Char arm on SwitchOnReadOnlySpanChar.
+    SwitchOnStringTransform().Run(function, context);
     // SwitchOnNullable: fold the C# compiler's switch-on-
     // Nullable<T> shapes (legacy csc and Roslyn) into a lifted
     // SwitchInstruction with an explicit `case null:` arm. Runs
@@ -259,6 +271,22 @@ inline void RunILTransformsThroughBlockTransforms(ILFunction& function, ILTransf
         // `x ?? y` statement lift (the next per-statement child in the
         // C# GetILTransforms() order).
         statementTransform.AddChild(std::make_unique<NullPropagationStatementTransform>());
+        // TransformArrayInitializers: the `new T[] { ... }` and
+        // `stackalloc T[] { ... }` store-sequence folds (the next
+        // per-statement child in the C# GetILTransforms() order, before
+        // the collection-initializer and expression-tree children this
+        // port does not run in the group). Gated on the ArrayInitializers
+        // setting (default true).
+        statementTransform.AddChild(std::make_unique<TransformArrayInitializers>());
+        // IndexRangeTransform: the System.Index / System.Range pattern
+        // folds (the per-statement child between the collection-initializer
+        // and expression-tree children and the deconstruction child in the
+        // C# GetILTransforms() order). Gated on Ranges (default true).
+        statementTransform.AddChild(std::make_unique<IndexRangeTransform>());
+        // DeconstructionTransform: the Deconstruct-call-rooted tuple
+        // deconstruction fold (the next per-statement child in the C#
+        // GetILTransforms() order). Gated on Deconstruction (default true).
+        statementTransform.AddChild(std::make_unique<DeconstructionTransform>());
         // UserDefinedLogicTransform: the lifted user-defined &&/||/
         // ?? operators on nullable operands (a later per-statement
         // child in the C# GetILTransforms() order).
@@ -305,6 +333,17 @@ inline void RunGetILTransforms(ILFunction& function, ILTransformContext& context
     // anonymous method, or when no DelegateBodyResolver hook is wired (the
     // bare CLI path).
     DelegateConstruction().Run(function, context);
+    // LocalFunctionDecompiler: embed the local-function definitions at
+    // their declaration scopes (the C# slot after DelegateConstruction and
+    // before TransformDisplayClassUsage). Gated on LocalFunctions (default
+    // true); no-ops without the LocalFunctionBodyResolver hook (the bare CLI
+    // path).
+    LocalFunctionDecompiler().Run(function, context);
+    // IntroduceNativeIntTypeOnLocals: retype the IntPtr/UIntPtr-typed
+    // locals whose loads and stores are all native-int-shaped to
+    // nint/nuint (the C# slot after IntroduceDynamicTypeOnLocals and
+    // before AssignVariableNames). Gated on NativeIntegers.
+    IntroduceNativeIntTypeOnLocals().Run(function, context);
     AssignVariableNames().Run(function, context);
     // ReduceNestingTransform: EliminateRedundantTryFinally +
     // ImproveILOrdering. Runs after HighLevelLoopTransform (per

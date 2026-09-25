@@ -82,14 +82,14 @@ FindResult FindLoadInNext(ILInstruction* expr, ILVariable* v,
     if (expr->Op == OpCode::LdLoc) {
         auto* ld = static_cast<LdLoc*>(expr);
         if (ld->Variable.get() == v) return FindResult::FoundResult(ld);
-        if (MayReorder(expressionBeingMoved->Flags(), expr->Flags()))
+        if (MayReorder(expressionBeingMoved, expr))
             return FindResult::ContinueResult();
         return FindResult::StopResult();
     }
     if (expr->Op == OpCode::LdLoca) {
         auto* lda = static_cast<LdLoca*>(expr);
         if (lda->Variable.get() == v) return FindResult::FoundResult(lda);
-        if (MayReorder(expressionBeingMoved->Flags(), expr->Flags()))
+        if (MayReorder(expressionBeingMoved, expr))
             return FindResult::ContinueResult();
         return FindResult::StopResult();
     }
@@ -112,9 +112,37 @@ FindResult FindLoadInNext(ILInstruction* expr, ILVariable* v,
             return r;
         }
     }
-    if (MayReorder(expressionBeingMoved->Flags(), expr->Flags()))
+    if (MayReorder(expressionBeingMoved, expr))
         return FindResult::ContinueResult();
     return FindResult::StopResult();
+}
+
+// The C# `public static bool CanMoveInto(...)` (ILInlining.cs line 933). The
+// ancestor chain's slots must accept the inlining and the move must not reorder
+// past any of the ancestors' earlier children. The port's per-node
+// `CanInlineIntoSlot` (the Block/BlockContainer/IsInst overrides ported
+// faithfully; the port's default is permissive -- see the ILInstruction note
+// on the SlotInfo metadata deferral).
+bool CanMoveInto(ILInstruction* expressionBeingMoved, ILInstruction* stmt,
+                 ILInstruction* targetLoad) {
+    assert(targetLoad->IsDescendantOf(stmt));
+    for (ILInstruction* inst = targetLoad; inst != stmt; inst = inst->Parent) {
+        if (!inst->Parent->CanInlineIntoSlot(inst->ChildIndex, expressionBeingMoved))
+            return false;
+        // Check whether re-ordering with predecessors is valid:
+        const int childIndex = inst->ChildIndex;
+        for (int i = 0; i < childIndex; ++i) {
+            ILInstruction* predecessor = inst->Parent->GetChild(i);
+            // The C# IsSafeForInlineOver(predecessor, expressionBeingMoved):
+            // the SEMANTIC SemanticHelper.MayReorder(moved, predecessor) --
+            // the written-variables-vs-read-variables check, not the flag-pair
+            // approximation (a store to one local may reorder past a load of
+            // another).
+            if (!MayReorder(expressionBeingMoved, predecessor))
+                return false;
+        }
+    }
+    return true;
 }
 
 // The top-level statement containing `inst`: the last ancestor (including inst

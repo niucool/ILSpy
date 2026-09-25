@@ -144,6 +144,10 @@ TEST(LocalFunctionDecompilerUseSitesTest, DeterminesCaptureAndDeclarationScopes)
             compilerGeneratedType, std::vector<TS::CustomAttributeTypedArgument>{});
     displayDef->SetAttributes(
         std::vector<const TS::IAttribute*>{compilerGeneratedAttr.get()});
+    // The merged stub's HasAttribute reads the known-attribute list (the
+    // SetKnownAttributes additive setter), not the IAttribute list above.
+    displayDef->SetKnownAttributes(
+        {TS::KnownAttribute::CompilerGenerated});
 
     auto fn = std::make_unique<IL::ILFunction>();
     ILVariablePtr captured = fn->RegisterVariable(
@@ -173,20 +177,24 @@ TEST(LocalFunctionDecompilerUseSitesTest, DeterminesCaptureAndDeclarationScopes)
     ctx.Settings.LocalFunctions = true;
     ctx.CurrentTypeDefinition = decompiledDef.get();
     // The decoded definition: static, one ByReferenceType closure parameter
-    // over the display struct (the C# IsClosureParameter shape).
+    // over the display struct (the C# IsClosureParameter shape). The
+    // parameter stub is held by the test scope -- the merged
+    // ILFunction::Parameters is a raw-pointer list, so the keep-alive must
+    // outlive the transform's read (a make_shared temporary pushed with
+    // .get() would dangle at the statement's end).
+    auto refType = std::make_shared<TS::ByReferenceType>(displayDef);
+    auto refParam =
+        std::make_shared<TS::Implementation::DefaultParameter>(
+            refType, std::string("captured"));
     ctx.LocalFunctionBodyResolver =
-        [displayDef, &captured](const std::string& methodName)
+        [displayDef, &captured, refParam](const std::string& methodName)
         -> std::unique_ptr<IL::ILFunction> {
         if (methodName != "Test.C::<M>g__LF|0_0") return nullptr;
         auto def = std::make_unique<IL::ILFunction>();
         def->Name = methodName;
         def->Kind = IL::ILFunctionKind::LocalFunction;
         def->IsStatic = true;
-        auto refType =
-            std::make_shared<TS::ByReferenceType>(displayDef);
-        def->Parameters.push_back(
-            std::make_shared<TS::Implementation::DefaultParameter>(
-            refType, std::string("captured")));
+        def->Parameters.push_back(refParam.get());
         auto defBody = std::make_unique<IL::BlockContainer>();
         def->Body = std::move(defBody);
         auto defBlock = std::make_unique<IL::Block>();

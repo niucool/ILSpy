@@ -65,6 +65,14 @@ public:
     // consults it over nested local functions).
     std::string Name;
 
+    // The C# `public BlockContainer? DeclarationScope { get; internal set; }`
+    // (ILFunction.cs): the scope the function is declared in -- the closest
+    // container of the captured variables' initializers
+    // (LocalFunctionDecompiler) or the container the lambda was found in
+    // (DelegateConstruction). Null until the scope machinery assigns it.
+    // Non-owning: the scope is a node of the enclosing tree.
+    BlockContainer* DeclarationScope = nullptr;
+
     // The C# `public InstructionCollection<ILFunction> LocalFunctions` (child
     // slot 1): the local functions / lambdas nested in this function. Owned here
     // (the C# tree's parent ownership); appended by the closure-decoder slices.

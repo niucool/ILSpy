@@ -85,6 +85,26 @@ bool IsNativeIntStore(const StLoc* stloc) {
     return false;
 }
 
+// The per-variable use-site collector (the loads and stores of every
+// variable, in tree order): the walk the missing LoadInstructions /
+// StoreInstructions lists replace with.
+void CollectUseSites(
+    ILInstruction* node,
+    std::map<ILVariable*, std::vector<LdLoc*>>& loads,
+    std::map<ILVariable*, std::vector<ILInstruction*>>& stores) {
+    if (auto* ldloc = dynamic_cast<LdLoc*>(node)) {
+        if (ldloc->Variable != nullptr)
+            loads[ldloc->Variable.get()].push_back(ldloc);
+    } else if (auto* stloc = dynamic_cast<StLoc*>(node)) {
+        if (stloc->Variable != nullptr)
+            stores[stloc->Variable.get()].push_back(stloc);
+    }
+    for (int i = 0; i < node->ChildCount(); i++) {
+        if (ILInstruction* child = node->GetChild(i))
+            CollectUseSites(child, loads, stores);
+    }
+}
+
 } // namespace
 
 void IntroduceNativeIntTypeOnLocals::Run(ILFunction& function,
@@ -119,6 +139,13 @@ void IntroduceNativeIntTypeOnLocals::Run(ILFunction& function,
         stack.push_back({child, 0});
     }
     for (ILFunction* nestedFunction : functions) {
+        // The use-site lists (the C# reads the variable's
+        // LoadInstructions/StoreInstructions; the port does not maintain the
+        // per-variable lists, D11/D62/D68, so the loads and stores are
+        // gathered by a walk -- the CachedDelegateInitialization precedent).
+        std::map<ILVariable*, std::vector<LdLoc*>> loads;
+        std::map<ILVariable*, std::vector<ILInstruction*>> stores;
+        CollectUseSites(nestedFunction->Body.get(), loads, stores);
         // The retype pass (the C# first loop): the load/store shape decides.
         std::map<std::int32_t, TypeSystem::ITypePtr> variableTypeMapping;
         for (auto& variable : nestedFunction->Variables) {
@@ -138,18 +165,27 @@ void IntroduceNativeIntTypeOnLocals::Run(ILFunction& function,
                 continue;
             }
             bool isUsedAsNativeInt = false;
-            for (const LdLoc* load : variable->LoadInstructions) {
-                if (IsUsedAsNativeInt(load)) {
-                    isUsedAsNativeInt = true;
-                    break;
+            auto loadIt = loads.find(variable.get());
+            if (loadIt != loads.end()) {
+                for (const LdLoc* load : loadIt->second) {
+                    if (IsUsedAsNativeInt(load)) {
+                        isUsedAsNativeInt = true;
+                        break;
+                    }
                 }
             }
             bool isAssignedNativeInt = false;
-            for (const ILInstruction* store : variable->StoreInstructions) {
-                if (auto* stloc = dynamic_cast<const StLoc*>(store)) {
-                    if (IsNativeIntStore(stloc)) {
-                        isAssignedNativeInt = true;
-                        break;
+            {
+                auto storeIt = stores.find(variable.get());
+                if (storeIt != stores.end()) {
+                    for (const ILInstruction* store : storeIt->second) {
+                        if (auto* stloc =
+                                dynamic_cast<const StLoc*>(store)) {
+                            if (IsNativeIntStore(stloc)) {
+                                isAssignedNativeInt = true;
+                                break;
+                            }
+                        }
                     }
                 }
             }

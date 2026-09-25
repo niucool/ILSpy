@@ -52,6 +52,14 @@ enum class BlockKind : std::uint8_t {
     // argument expressions. Constructed by NamedArgumentTransform when a load
     // cannot be reached by re-ordering the call arguments.
     CallWithNamedArgs,
+    // The conversion stores of a deconstruction pattern (the C#
+    // BlockKind.DeconstructionConversions; see DeconstructInstruction).
+    // Constructed by DeconstructionTransform.
+    DeconstructionConversions,
+    // The assignment stores of a deconstruction pattern (the C#
+    // BlockKind.DeconstructionAssignments; see DeconstructInstruction).
+    // Constructed by DeconstructionTransform.
+    DeconstructionAssignments,
     // An inline assignment to a property or indexer setter, e.g.
     // `Use(this.Property = value);`. Instructions holds the single setter call
     // whose last argument is an `stloc tmp(value)`; the FinalInstruction is the

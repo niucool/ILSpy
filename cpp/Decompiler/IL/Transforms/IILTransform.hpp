@@ -44,6 +44,10 @@ namespace ILSpy::Decompiler::TypeSystem {
 class ICompilation;
 }
 
+namespace ILSpy::Decompiler::TypeSystem {
+class ITypeDefinition;
+}  // namespace ILSpy::Decompiler::TypeSystem
+
 namespace ILSpy::Decompiler::IL {
 
 class ILFunction;
@@ -62,6 +66,28 @@ struct ILTransformSettings {
     // SparseIntegerSwitch -- a C# 1.0 setting, default true. SwitchDetection.Run
     // is a no-op when this is off.
     bool SparseIntegerSwitch = true;
+    // Whether to decompile switch statements over strings using
+    // string.GetHashCode. DecompilerSettings.SwitchStatementOnString
+    // (default true; SwitchOnStringTransform's Run gate).
+    bool SwitchStatementOnString = true;
+    // Whether to use the Length/Char optimization for switches over
+    // ReadOnlySpan<char>. DecompilerSettings.SwitchOnReadOnlySpanChar
+    // (default true; SwitchOnStringTransform's Length/Char arm).
+    bool SwitchOnReadOnlySpanChar = true;
+    // Whether to decompile local functions. DecompilerSettings.LocalFunctions
+    // (default true; LocalFunctionDecompiler's gate).
+    bool LocalFunctions = true;
+    // Whether to use C# 8.0 index/range syntax.
+    // DecompilerSettings.Ranges (default true; IndexRangeTransform's gate).
+    bool Ranges = true;
+    // Whether to deconstruct tuples into separate variables.
+    // DecompilerSettings.Deconstruction (default true;
+    // DeconstructionTransform's gate).
+    bool Deconstruction = true;
+    // Whether to decompile inline arrays (C# 12 stackalloc-shaped
+    // InlineArray structs). DecompilerSettings.InlineArrays (default true;
+    // InlineArrayTransform's gate).
+    bool InlineArrays = true;
     // Whether to delete unreachable blocks left over after a transform.
     // DecompilerSettings.RemoveDeadAndSideEffectFreeCodeUseWithCaution -- an F#
     // decompilation aid, default false. SwitchDetection uses it to choose
@@ -270,6 +296,26 @@ public:
     // stores the ICompilation; the port's DecompilerTypeSystem IS one). Null
     // in the minimal construction; the facade and the tests set it.
     ::ILSpy::Decompiler::TypeSystem::ICompilation* TypeSystem = nullptr;
+    // The C# `ReadLocalFunctionDefinition` deep-decode entry
+    // (LocalFunctionDecompiler.cs): resolves a local function's decoded body
+    // from the metadata (the C# path reads the method body through
+    // context.CreateILReader(); the port's hook is the CreateILReader
+    // bridge, the DelegateBodyResolver convention). The hook takes the full
+    // method name (the "Namespace.Type::<caller>g__fn|n" identity the IL
+    // reader records) and returns the decoded ILFunction, or null when the
+    // method has no decodable body. Unset by default; the
+    // LocalFunctionDecompiler walk consults it on a use-site's first
+    // sighting.
+    std::function<std::unique_ptr<ILFunction>(const std::string&)>
+        LocalFunctionBodyResolver;
+    // The C# `resolveContext.CurrentTypeDefinition` (the
+    // SimpleTypeResolveContext(function.Method) of LocalFunctionDecompiler.Run):
+    // the declaring type of the function being decompiled -- the current-type
+    // anchor the closure-parameter / potential-closure checks consult. Null in
+    // the minimal construction (the checks then reject: a null current type is
+    // not part of any type tree).
+    const ::ILSpy::Decompiler::TypeSystem::ITypeDefinition*
+        CurrentTypeDefinition = nullptr;
 
     void StepOnce(const char* what) const {
         if (Step) Step(what);

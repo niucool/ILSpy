@@ -88,6 +88,13 @@ inline bool HasInliningOption(InliningOptions options, InliningOptions flag) {
 // up an inlining opportunity, matching the C#.
 bool InlineOneIfPossible(Block* block, int pos, ILTransformContext& ctx);
 
+// The C# `public static bool CanMoveInto(...)` (ILInlining.cs line 933):
+// whether an expression can move to the target load's position (the ancestor
+// slots must accept the inlining and the move must not reorder past any
+// earlier sibling). Consumed by IndexRangeTransform's slicing re-merge.
+bool CanMoveInto(ILInstruction* expressionBeingMoved, ILInstruction* stmt,
+                 ILInstruction* targetLoad);
+
 // The options-aware overload (the C# InlineOneIfPossible(block, pos, options,
 // ctx)). NamedArgumentTransform.Run calls it with IntroduceNamedArguments set so
 // a load the search cannot reach by re-ordering is promoted to a named argument.

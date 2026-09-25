@@ -44,6 +44,15 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/NullableLiftingTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/ProxyCallReplacer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/SplitVariables.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Instructions/DeconstructInstruction.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Instructions/UserDefinedLogicOperator.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/DeconstructionTransform.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/IndexRangeTransform.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/InlineArrayTransform.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/IntroduceNativeIntTypeOnLocals.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/LocalFunctionDecompiler.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/SwitchOnStringTransform.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/TransformArrayInitializers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/SwitchOnNullableTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/PatternMatchingTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/LockTransform.cpp

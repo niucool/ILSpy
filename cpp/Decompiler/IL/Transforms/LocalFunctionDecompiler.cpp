@@ -301,7 +301,7 @@ bool DetermineCaptureAndDeclarationScope(
         if (parameterIndex >= static_cast<int>(function->Parameters.size()))
             return false;
         const TS::IParameter* parameter =
-            function->Parameters[static_cast<std::size_t>(parameterIndex)].get();
+            function->Parameters[static_cast<std::size_t>(parameterIndex)];
         if (!TS::IsClosureParameter(parameter, context.CurrentTypeDefinition))
             return false;
     }

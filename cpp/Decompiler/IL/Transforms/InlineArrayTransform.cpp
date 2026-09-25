@@ -146,7 +146,7 @@ bool MatchSpanIndexerWithInlineArrayAsSpan(
         if (inst->Arguments.size() != 2) return false;
         auto* addressOf = dynamic_cast<AddressOf*>(inst->Arguments[0].get());
         if (addressOf == nullptr || !addressOf->Type) return false;
-        auto* targetInst = dynamic_cast<Call*>(addressOf->Value.get());
+        auto* targetInst = dynamic_cast<Call*>(addressOf->Argument.get());
         if (targetInst == nullptr) return false;
         ITypePtr inlineArrayType;
         if (!MatchInlineArrayHelper(targetInst->Method.get(),
@@ -168,7 +168,7 @@ bool MatchSpanIndexerWithInlineArrayAsSpan(
         if (inst->Arguments.size() != 2) return false;
         auto* addressOf = dynamic_cast<AddressOf*>(inst->Arguments[0].get());
         if (addressOf == nullptr || !addressOf->Type) return false;
-        auto* targetInst = dynamic_cast<Call*>(addressOf->Value.get());
+        auto* targetInst = dynamic_cast<Call*>(addressOf->Argument.get());
         if (targetInst == nullptr) return false;
         ITypePtr inlineArrayType;
         if (!MatchInlineArrayHelper(targetInst->Method.get(), "InlineArrayAsSpan",

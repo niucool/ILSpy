@@ -100,6 +100,13 @@ public:
           MethodName(std::move(methodName)),
           MethodDeclaringType(std::move(methodDeclaringType)) {}
 
+    // The C# ctor form over the resolved method (the IMethod populates the
+    // dump stand-ins; the VisitUserDefinedLogicOperator arm builds this
+    // form). Defined out-of-line (UserDefinedLogicOperator.cpp).
+    UserDefinedLogicOperator(std::shared_ptr<TypeSystem::IMethod> method,
+                             std::unique_ptr<ILInstruction> left,
+                             std::unique_ptr<ILInstruction> right);
+
     // Faithful to the C# `public override StackType ResultType => StackType.O`.
     // A user-defined `&&` / `||` evaluates to the operand type (a reference
     // type on the eval stack), so the result is always O.

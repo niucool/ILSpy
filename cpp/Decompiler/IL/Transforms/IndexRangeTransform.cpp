@@ -334,7 +334,7 @@ bool MatchIndexFromRange(IndexKind indexKind, ILInstruction* indexLoad,
         !TypeSystem::IsKnownType(*addressOf->Type,
                                  TypeSystem::KnownTypeCode::Index))
         return false;
-    auto* call = dynamic_cast<Call*>(addressOf->Value.get());
+    auto* call = dynamic_cast<Call*>(addressOf->Argument.get());
     if (call == nullptr || call->Method == nullptr) return false;
     if (call->Method->Name() != accessorName) return false;
     if (call->Method->DeclaringType() == nullptr ||
@@ -708,11 +708,11 @@ void IndexRangeTransform::TransformIndexing(IndexRangeState& state) {
     // startOffsetVar might be used deep inside a complex statement, ensure we
     // can inline up to that point:
     for (int i = state.startPos; i < state.pos; i++) {
-        if (FindLoadInNext(
-                state.block.Instructions[static_cast<std::size_t>(state.pos)].get(),
-                state.startOffsetVar,
-                state.block.Instructions[static_cast<std::size_t>(i)].get())
-                .type != FindResultType::Found) {
+        auto fr = FindLoadInNext(
+            state.block.Instructions[static_cast<std::size_t>(state.pos)].get(),
+            state.startOffsetVar,
+            state.block.Instructions[static_cast<std::size_t>(i)].get());
+        if (fr.type != FindResultType::Found) {
             return;
         }
     }

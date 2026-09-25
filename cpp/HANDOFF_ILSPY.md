@@ -470,15 +470,45 @@ Facade instance surface.
   LocalFunctionDecompiler, SwitchOnStringTransform,
   TransformArrayInitializers, DeconstructInstruction,
   UserDefinedLogicOperator -- all .cpp + their tests + their driver calls)
-  are STILL ORPHANED: the repair is one slice per the
-  TransformExpressionTrees-restoration pattern (re-register, re-graft the
-  dropped surfaces, re-add the driver calls at the C# slots, re-pin the
-  connid baseline and the affected golds -- the connid 16-line merge diff
-  suggests most are render-no-ops on that corpus but SplitVariables in the
-  MAIN driver may rename variables). NOTE: the deliberately-dropped
-  RunTransforms_Test.cpp / GetILTransforms_Test.cpp are NOT part of this
-  (they test pre-merge surfaces the merge removed; leave their
-  registrations dropped).
+  are FULLY REPAIRED (the dedicated slice): all nine re-registered, their
+  eight test files re-registered (22 restored tests, all green), and their
+  driver calls re-added at the C# slots (SwitchOnStringTransform after
+  SwitchDetection; TransformArrayInitializers/IndexRangeTransform/
+  DeconstructionTransform in the per-statement group after
+  NullPropagationStatementTransform; LocalFunctionDecompiler after
+  DelegateConstruction; IntroduceNativeIntTypeOnLocals before
+  AssignVariableNames). The re-grafted surfaces: five ILTransformSettings
+  flags (SwitchStatementOnString, SwitchOnReadOnlySpanChar, LocalFunctions,
+  Ranges, InlineArrays, Deconstruction -- all C# defaults true), the
+  ILTransformContext LocalFunctionBodyResolver hook + CurrentTypeDefinition
+  (the pre-merge shape, the DelegateBodyResolver convention),
+  ILFunction::DeclarationScope, Block::GetContainingStatement, the two
+  Deconstruction BlockKind values, ILInlining::CanMoveInto (re-exported in
+  the header for IndexRangeTransform), the UserDefinedLogicOperator
+  method-based ctor declaration, and the StringToInt 3-arg-ctor call-site
+  updates. TWO REAL MERGED-TREE BUGS THE RESTORED TESTS EXPOSED, both
+  fixed: (1) the merged ILInlining called the FLAG-PAIR MayReorder overload
+  where the C# (and the pre-merge port) use the SEMANTIC
+  SemanticHelper.MayReorder(inst, inst) -- the flag approximation rejects
+  a store-to-one-local moving past a load-of-another, which broke
+  IndexRangeTransform's fold (FindLoadInNext returned Stop); all of
+  ILInlining's MayReorder calls now use the semantic overload; (2) the
+  merged LookupTypeDefinition::HasAttribute reads the SetKnownAttributes
+  list, not the SetAttributes IAttribute list (the pre-merge stub derived
+  it) -- the local-function tests now set both. The IntroduceNativeInt /
+  StoreInstructions-List adaptation: the per-variable use lists the
+  pre-merge ILVariable carried are still gone (the D11/D62/D68 walk
+  convention covers them); SplitVariables' GetAddressLoadForRefLocalUse
+  walks the tree (the CachedDelegateInitialization precedent).
+  INTRODUCE-NATIVE-INT AND USER-DEFINED-LOGIC-OPERATOR carry no dedicated
+  test suites (their coverage is the driver-level families). GATES: the
+  connid render is BYTE-IDENTICAL (the corpus has none of the nine shapes
+  -- no re-pin needed); the full env-excluded suite 12908 ran with the same
+  30 mono-profile failures; the audit command over
+  `git ls-files 'Decompiler/**/*.cpp'` reports ZERO orphans. NOTE: the
+  deliberately-dropped RunTransforms_Test.cpp / GetILTransforms_Test.cpp
+  are NOT part of this (they test pre-merge surfaces the merge removed;
+  leave their registrations dropped).
 - IntroduceDynamicTypeOnLocals -- deferred on
   `DynamicInstruction.GetArgumentInfoOfChild`.
 - ~~Attribute enum-argument decode (DebuggableAttribute's `DebuggingModes`)~~
