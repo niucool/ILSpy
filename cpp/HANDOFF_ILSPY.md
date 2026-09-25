@@ -3,12 +3,16 @@
 Read this + `PORT_PLAN.md` + `cpp/README.md` (and the sibling
 `cpp/PORT_LOG_BAML.md` / `cpp/PORT_LOG_DISASM.md` logs) at the start of a
 fresh session.
-Standing baseline: **connid_csharp sha256 `b2a7f7cfc3d5a7f5`** (re-pinned
-DELIBERATELY at the implicit-base-call elision -- the constructor bodies
-no longer carry the spurious `base();`; see the member/type-modifier
-slices below for the surrounding re-pins. Prior pins: `51ae0b55e6017c2e`
-(the type modifiers + base types), `af05cf1b7861f69b` (the member
-modifiers), `abf6a844eba7c0b3` (the facade-transform wiring): the type-level render now
+Standing baseline: **connid_csharp sha256 `185df866d5551fd8`** (re-pinned
+DELIBERATELY across the facade-gap batch: the explicit-impl interface
+qualifier (`d4149f89...`), the member/type attributes (`65650637...`), and
+the accessor visibility/body forms (`185df866...` -- the getter-only
+properties with real bodies render their blocks instead of the stub).
+The unnameable-base-list filter and the const initializer did not move
+it. Prior pins: `b2a7f7cfc3d5a7f5` (the implicit-base-call elision),
+`51ae0b55e6017c2e` (the type modifiers + base types),
+`af05cf1b7861f69b` (the member modifiers), `abf6a844eba7c0b3` (the
+facade-transform wiring): the type-level render now
 carries the member declaration modifiers -- the oracle's `public Button
 _okButton;` / `private void OKButton_Click(...)` -- the body-less
 abstract/interface method declarations that previously vanished, and the
@@ -415,6 +419,52 @@ over the module entities (GetDefinitionField/Method/Property/Event):
   the struct's ValueType, the enum's Enum replaced by the underlying
   type when not int). The C#'s BaseTypeAccessibleFrom filter stays
   deferred with the MemberLookup resolver surface.
+
+### The facade-gap batch (commits 52e915582/a9285994e/25dd73412/545a47fb1)
+
+The four recorded facade gaps, one commit each:
+- **The explicit-impl interface qualifier** (`52e915582`): the dotted
+  metadata name (`ModifierFixture.IShape.Area`) renders as the C# form
+  (`IShape.Area`) -- the name after the last dot, qualified by the first
+  ExplicitlyImplementedInterfaceMembers entry's declaring type.
+- **The member and type attributes** (`a9285994e`): the entity's
+  attributes render as the leading `[...]` sections through the ported
+  ConvertAttribute over the output visitor (the CreateAstBuilder
+  configuration -- AlwaysUseShortTypeNames, so `GeneratedCode` not
+  `System.CodeDom.Compiler.GeneratedCode`). The CleanUpMethodDeclaration
+  state machine attribute removals ride with it: AsyncStateMachine /
+  IteratorStateMachine drop when the corresponding de-sugar succeeded
+  (the async/iterator outcomes thread out of DecompileMethodToString;
+  without it the state machine types leaked back through the attribute
+  text -- the hidden-state-machines test caught it).
+- **The accessor visibility and bodies** (`25dd73412`): the stub form
+  (`{ get; protected set; }`) applies when the property has its
+  compiler-generated `<Name>k__BackingField` field (only the compiler
+  emits the angle-bracket names) or its accessors carry no bodies (an
+  interface member); a real accessor body renders as its block (the
+  statements extracted from the flat method render). The old stub-only
+  form dropped real bodies on the floor.
+- **The unnameable base-list filter** (`545a47fb1`): the C# f41b12c01
+  fix -- the nested exemption over the declaring chain, then the
+  MemberLookup.IsAccessible shape for type definitions (private nested
+  only through the exemption; internal same-module; protected through
+  the IsDerivedFrom chain walk; the declaring-type recursion). The
+  generic type-argument walk stays deferred with the resolver surface.
+  Fixture: `/home/jim/ilspy-test-fixtures/baselist_fixture/
+  BaseListSynth.dll` -- a crafted assembly (the MetadataBuilder recipe,
+  built with the box's dotnet 10) whose Unrelated implements the public
+  control interface plus a private nested interface of an unrelated
+  type. The corpus scan found zero droppable rows (the net48 reference
+  set has none), so the filter is fixture-tested only.
+
+17 gtest cases in FacadeMemberModifiers_Test.cpp across the batch. The
+corpus scan over PresentationFramework (the whole-module render diffed
+against the oracle) surfaced the NEXT facade gaps: the `enum` keyword
+(the port renders `internal struct CS : UInt32` where the oracle renders
+`internal enum CS : uint` -- the enum arm of the type-keyword switch is
+the stand-in `struct`) and the builtin type keywords in base lists
+(`uint`/`ushort` vs `UInt32`/`UInt16` -- the CSharpTypeName full names).
+125 base-list diffs over the corpus, all these two shapes.
 
 The const field initializer rides here too (`af35644b9`): the literal
 from the field entity's decoded constant (the integer family with the
