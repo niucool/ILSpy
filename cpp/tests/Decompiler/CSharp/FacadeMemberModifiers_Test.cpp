@@ -330,6 +330,25 @@ TEST(FacadeMemberModifiersTest, EnumKeywordAndUnderlyingTypeRender)
     EXPECT_NE(cs.find("internal enum CS : uint"), std::string::npos) << cs;
 }
 
+// The enum members render as the C# enum member list (the bare names for
+// the consecutive-from-zero display mode; the first-only mode for a
+// non-zero start; the special value__ field never renders).
+TEST(FacadeMemberModifiersTest, EnumMembersRenderAsNames)
+{
+    std::string text;
+    if (!RenderType(kModifierFixture, "Color", text))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    EXPECT_NE(text.find("Red,"), std::string::npos) << text;
+    EXPECT_NE(text.find("Blue"), std::string::npos) << text;
+    EXPECT_EQ(text.find("value__"), std::string::npos) << text;
+    EXPECT_EQ(text.find("const Color Red"), std::string::npos) << text;
+    std::string cs;
+    if (!RenderType(kModifierFixture, "CS", cs))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    EXPECT_NE(cs.find("A = 1"), std::string::npos) << cs;
+    EXPECT_EQ(cs.find("value__"), std::string::npos) << cs;
+}
+
 // The builtin type keywords in base lists: a generic interface
 // instantiated over a builtin renders the keyword form (`IConsumer<uint>`
 // from the entity-resolved SimpleType, whose reflection name is

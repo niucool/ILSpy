@@ -293,11 +293,11 @@ std::string ConstantFieldLiteral(const TS::IField& field) {
         if (auto* i32 = std::any_cast<std::int32_t>(&value))
             return std::to_string(*i32);
         if (auto* u32 = std::any_cast<std::uint32_t>(&value))
-            return std::to_string(*u32) + "U";
+            return std::to_string(*u32) + "u";
         if (auto* i64 = std::any_cast<std::int64_t>(&value))
             return std::to_string(*i64) + "L";
         if (auto* u64 = std::any_cast<std::uint64_t>(&value))
-            return std::to_string(*u64) + "UL";
+            return std::to_string(*u64) + "uL";
         if (auto* str = std::any_cast<std::string>(&value))
             return "\"" + *str + "\"";
         if (auto* ch = std::any_cast<char16_t>(&value))
@@ -766,6 +766,148 @@ bool DecompileTypeToStringBody(
             rendered = true;
         }
     }
+    // The enum member list (the C# DoDecompile's field arm for an enum's
+    // const fields -- the EnumMemberDeclaration with the display mode):
+    // the bare names for the consecutive-from-zero mode, the first-only
+    // mode for a non-zero start, all values or all-hex otherwise. The
+    // special value__ instance field never renders (the C# SpecialName
+    // field the enum member list excludes).
+    bool typeIsEnum = false;
+    for (const auto& t : file.TypeDefs()) {
+        if (t.Token == typeToken) {
+            typeIsEnum = t.Kind == TS::TypeKind::Enum;
+            break;
+        }
+    }
+    if (typeIsEnum) {
+        // The C# DetectBestEnumValueDisplayMode analysis over the const
+        // fields' values.
+        enum class EnumValueDisplayMode { None, FirstOnly, All, AllHex };
+        EnumValueDisplayMode displayMode = EnumValueDisplayMode::None;
+        {
+            bool first = true, allConsecutive = true, allPowersOfTwo = true;
+            std::int64_t firstValue = 0, previousValue = 0;
+            bool outOfOrder = false;
+            for (const auto& f : file.GetFields(typeToken)) {
+                const TS::IField* fieldEntity =
+                    module.GetDefinitionField(f.Token);
+                if (fieldEntity == nullptr || !fieldEntity->IsConst())
+                    continue;
+                std::any constant = fieldEntity->GetConstantValue();
+                std::int64_t currentValue = 0;
+                bool haveValue = false;
+                if (auto* v = std::any_cast<std::int32_t>(&constant)) {
+                    currentValue = *v;
+                    haveValue = true;
+                } else if (auto* v =
+                               std::any_cast<std::uint32_t>(&constant)) {
+                    currentValue = static_cast<std::int64_t>(*v);
+                    haveValue = true;
+                } else if (auto* v =
+                               std::any_cast<std::int64_t>(&constant)) {
+                    currentValue = *v;
+                    haveValue = true;
+                } else if (auto* v =
+                               std::any_cast<std::uint8_t>(&constant)) {
+                    currentValue = *v;
+                    haveValue = true;
+                } else if (auto* v =
+                               std::any_cast<std::int8_t>(&constant)) {
+                    currentValue = *v;
+                    haveValue = true;
+                } else if (auto* v =
+                               std::any_cast<std::int16_t>(&constant)) {
+                    currentValue = *v;
+                    haveValue = true;
+                } else if (auto* v =
+                               std::any_cast<std::uint16_t>(&constant)) {
+                    currentValue = *v;
+                    haveValue = true;
+                }
+                if (!haveValue)
+                    continue;
+                allConsecutive =
+                    allConsecutive && (first || previousValue + 1 ==
+                                                       currentValue);
+                // N & (N - 1) == 0 iff N is a power of 2 (0 counts).
+                std::uint64_t u =
+                    static_cast<std::uint64_t>(currentValue);
+                allPowersOfTwo =
+                    allPowersOfTwo && (u & (u == 0 ? 0 : u - 1)) == 0;
+                if (first) {
+                    firstValue = currentValue;
+                    first = false;
+                } else if (currentValue <= previousValue) {
+                    outOfOrder = true;
+                    break;
+                }
+                previousValue = currentValue;
+            }
+            if (outOfOrder) {
+                displayMode = EnumValueDisplayMode::All;
+            } else if (allPowersOfTwo) {
+                if (previousValue > 8)
+                    displayMode = EnumValueDisplayMode::AllHex;
+                else if (!allConsecutive)
+                    displayMode = EnumValueDisplayMode::All;
+            }
+            if (displayMode == EnumValueDisplayMode::None &&
+                !(!allConsecutive && !allPowersOfTwo)) {
+                displayMode = firstValue == 0
+                                  ? EnumValueDisplayMode::None
+                                  : EnumValueDisplayMode::FirstOnly;
+            }
+        }
+        bool anyMember = false;
+        bool firstMember = true;
+        for (const auto& f : file.GetFields(typeToken)) {
+            const TS::IField* fieldEntity =
+                module.GetDefinitionField(f.Token);
+            if (fieldEntity == nullptr || !fieldEntity->IsConst())
+                continue;
+            out += f.Name;
+            bool withInitializer =
+                displayMode == EnumValueDisplayMode::All ||
+                displayMode == EnumValueDisplayMode::AllHex ||
+                (displayMode == EnumValueDisplayMode::FirstOnly &&
+                 firstMember);
+            if (withInitializer) {
+                std::string literal =
+                    ConstantFieldLiteral(*fieldEntity);
+                if (displayMode == EnumValueDisplayMode::AllHex) {
+                    // The C# AllHex arm: values >= 10 render as 0x + the
+                    // uppercase hex form.
+                    std::any constant = fieldEntity->GetConstantValue();
+                    std::int64_t v = 0;
+                    if (auto* p = std::any_cast<std::int32_t>(&constant))
+                        v = *p;
+                    else if (auto* p =
+                                 std::any_cast<std::uint32_t>(&constant))
+                        v = static_cast<std::int64_t>(*p);
+                    else if (auto* p =
+                                 std::any_cast<std::int64_t>(&constant))
+                        v = *p;
+                    if (v >= 10) {
+                        char buf[32];
+                        std::snprintf(buf, sizeof(buf), "0x%llX",
+                                       static_cast<unsigned long long>(v));
+                        literal = buf;
+                    }
+                }
+                if (!literal.empty())
+                    out += " = " + literal;
+            }
+            out += ",\n";
+            anyMember = true;
+            firstMember = false;
+        }
+        if (anyMember) {
+            // The trailing comma drops (the C# member list's last entry).
+            if (out.size() >= 2 && out.compare(out.size() - 2, 2, ",\n") == 0)
+                out[out.size() - 2] = '\n', out.pop_back();
+            rendered = true;
+        }
+    } else
     // The field declarations (the C# DecompileType's field members): the
     // `Type name;` shape from GetFields + GetFieldSignature (the C#
     // AstBuilder renders the modifiers and the initializer from the IL --
