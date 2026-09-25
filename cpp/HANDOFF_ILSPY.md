@@ -1,18 +1,19 @@
-# ILSpy C++ Port -- Session Handoff (written after `a0c5631cc`)
+# ILSpy C++ Port -- Session Handoff (written after `e70667c46`)
 
 Read this + `PORT_PLAN.md` + `cpp/README.md` (and the sibling
 `cpp/PORT_LOG_BAML.md` / `cpp/PORT_LOG_DISASM.md` logs) at the start of a
 fresh session.
-Standing baseline: **connid_csharp sha256 `7ee1614849b6c8c3`** (re-pinned
-DELIBERATELY at the whole-module-adoption slice: the --csharp output moved
-from per-method comment blocks to the C# ilspycmd shape -- the leading
-[assembly]/[module] sections plus `public partial class` type bodies with
-fields/properties/constructors/method members. The pre-facade hash was
-`8358d5c1d6ff7ad3`, re-baselined deliberately at `164dd1a9b`). Sweep:
-`193 passed + 2 skipped` (the mscorlib env-gate and the net48-fixture
-skip when unprovisioned; filters below; add
-TypeSystemExtensionsTest.IsAnonymous* and PropertyAndEventBackingFieldLookupTest.*
-to the filter as the families land).
+Standing baseline: **connid_csharp sha256 `7c269b8e61993d80`** (re-pinned
+DELIBERATELY at the event-member-surface slice: the --csharp render now
+carries `event RoutedEventHandler Click;` and drops the add_Click/
+remove_Click accessor bodies -- the Button.Click row the corpus held all
+along. Prior re-pin: `7ee1614849b6c8c3` at the whole-module adoption;
+pre-facade `8358d5c1d6ff7ad3` at `164dd1a9b`). Sweep:
+`222 passed + 8 skipped` (the mscorlib/net48 env-gates skip when
+unprovisioned; IlspyCmdProgramTest.* joined the filter with the -o
+slice). Sweep discipline: passed + skipped MUST equal ran, and the exit
+code is the gate -- a `tail -3` of brief output hid a failing
+env-gated test for two slices.
 
 ## Current position
 
@@ -73,32 +74,49 @@ to the filter as the families land).
 
 ## Next steps (in order)
 
-1. The facade completion items (PORT_PLAN.md's remaining facade
-   checklist): the event member surface in DecompileTypeToString (the
-   net48 fixtures now provide event rows), the -o file-writer, the
-   instance surface (the per-instance type-system wiring and the
-   partial-types registry lifetime). The PatternStatementTransform
-   family set is COMPLETE (`376a0b299`: the automatic-events arm over
-   the net48 PresentationFramework rig -- the baml-provisioned
-   reference assemblies at /home/jim/ilspy-test-fixtures/net48/, the
-   FrameworkContentElement Loaded/LoadedEvent suffix-convention pair,
-   the field side stubbed to the real private compiler shape because
-   the reference assemblies strip private fields; the tests skip when
-   the directory is absent).
-2. **The facade completion items** (PORT_PLAN.md's remaining facade
-   checklist) and the deferred GetAstTransforms slots as their transforms
-   land.
-   LANDED earlier: the AST-path DecompileModuleAndAssemblyAttributes
-   (`c24930d38`), the property/constructor member surfaces
-   (`067366fd9`), and the whole-module CLI adoption
-   (`05348dce8` -- the connid re-pin above). The
-   remaining facade gaps: the event member surface in
-   DecompileTypeToString (deferred loudly -- needs the event-carrying
-   fixture above), the -o
-   file-writer, and the instance surface (the per-instance type-system
-   wiring and the partial-types registry lifetime).
+1. The reference-set wiring: the C# DecompilerTypeSystem over a real
+   assembly resolver (the port's SingleModuleCompilation placeholder
+   lives in the CSharpDecompiler instance state now -- the CLI and the
+   instance entries ride it; the next deepening is resolving
+   TypeRefs against the referenced-core-library set so cross-assembly
+   member targets stop falling back to name-only renders).
+2. The deferred GetAstTransforms slots as their transforms land
+   (ReplaceMethodCallsWithOperators, IntroduceUnsafeModifier,
+   AddCheckedBlocks, TransformFieldAndConstructorInitializers,
+   IntroduceUsingDeclarations, ...).
+3. The remaining loud sub-deferrals: UseImplicitlyTypedOutAnnotation,
+   DeclareVariables' InsertDeconstructionVariableDeclarations, the
+   SkipInit forms, IsRefReadOnly.
 
-## LANDED this session (the queued sub-deferrals)
+## LANDED this session (the facade completion + sub-deferrals)
+
+- `5be3dc557` -- the event member surface in DecompileTypeToString:
+  `event Type Name;` via the module's event entity (the C#
+  entity.ReturnType), the add/remove accessor methods folded into the
+  skip set; the connid re-pin above (the corpus's Button.Click).
+- `7b6396247` -- the -o file-writer: DecompiledOutputFilePath (the
+  assembly base name, or the TYPE NAME VERBATIM with -t) +
+  `WriteOutputFile`; the --csharp path renders to a buffer and routes
+  through the per-file output, stdout bytes unchanged.
+- `ab5ed80f0` -- the CSharpDecompiler INSTANCE surface: the ctor wires
+  the type system once (the pimpl InstanceState: compilation + module +
+  the settings copy + the partial-types registry); the instance entries
+  (DecompileWholeModuleToString / DecompileTypeToString /
+  AddPartialTypeDefinition / FindPartialTypeInfo) consult the instance's
+  own map, so one decompiler's registrations are invisible to another.
+  C++ forbids static + non-static members with the same signature, so
+  the static registry shims renamed: RegisterPartialTypeDefinition /
+  FindRegisteredPartialType (the C# names belong to the instance). The
+  render body is shared (DecompileTypeToStringBody). The CLI's --csharp
+  constructs one decompiler per run (byte-identical output).
+- `e70667c46` -- ExtractResourceMscorlib env-gate fix (the sweep
+  filter grew IlspyCmdProgramTest and surfaced the missing
+  fs::exists + GTEST_SKIP guard).
+- Earlier this session (see git log / the previous handoff): the
+  automatic-events arm `376a0b299` completing the
+  PatternStatementTransform family set, AddressUsedForSingleCall
+  `d52d163a8`, the anonymous-type var decision `7060a585b` +
+  `fe5d33413`, PropertyAndEventBackingFieldLookup `a0c5631cc`.
 
 - `d52d163a8` -- AddressUsedForSingleCall: the single-call this-pointer
   address use is acceptable as the foreach item variable (the last
@@ -183,7 +201,7 @@ Facade instance surface.
 cd /home/jim/source/ilspy/cpp
 export PATH=/home/jim/cpp-tools/cmake/bin:/home/jim/cpp-tools/ninja-bin:$PATH
 ninja -C build/linux-ninja ilspy_tests   # + ilspy_cli before harness/connid runs
-./build/linux-ninja/tests/ilspy_tests --gtest_filter='PatternStatementTransformTest.*:AstTransformPipeline.*:TransformExpressionTreesTest.*:RunTransformsTest.*:GetILTransformsTest.*:CSharpDecompilerTest.*:SwitchOnStringTransformTest.*:SwitchOnStringHashtableTest.*:SwitchOnStringLengthCharTest.*:TransformDisplayClassUsageTest.*:TransformDisplayClassUsageSroaTest.*:LocalFunctionDecompilerUseSitesTest.*:StatementTransformTest.*:TransformCollectionAndObjectInitializersTest.*:TransformCollectionAndObjectInitializersStalePosTest.*:IndexRangeTransformTest.*:InlineArrayTransformTest.*:NamedArgumentTransformTest.*:DeconstructionTransformTest.*:TupleTransformTest.*:TransformArrayInitializersTest.*:ExpressionTransformsTest.*:LocalFunctionDecompilerTest.*:DelegateConstructionTest.*:DelegateConstruction.*:CombineExitsTransform.*:VariableUsageLists.*:IntroduceNativeIntTypeOnLocals.*:ReachingDefinitions.*:SplitVariables.*:Util_UnionFind.*' --gtest_brief=1
+./build/linux-ninja/tests/ilspy_tests --gtest_filter='PatternStatementTransformTest.*:AstTransformPipeline.*:TransformExpressionTreesTest.*:RunTransformsTest.*:GetILTransformsTest.*:CSharpDecompilerTest.*:SwitchOnStringTransformTest.*:SwitchOnStringHashtableTest.*:SwitchOnStringLengthCharTest.*:TransformDisplayClassUsageTest.*:TransformDisplayClassUsageSroaTest.*:LocalFunctionDecompilerUseSitesTest.*:StatementTransformTest.*:TransformCollectionAndObjectInitializersTest.*:TransformCollectionAndObjectInitializersStalePosTest.*:IndexRangeTransformTest.*:InlineArrayTransformTest.*:NamedArgumentTransformTest.*:DeconstructionTransformTest.*:TupleTransformTest.*:TransformArrayInitializersTest.*:ExpressionTransformsTest.*:LocalFunctionDecompilerTest.*:DelegateConstructionTest.*:DelegateConstruction.*:CombineExitsTransform.*:VariableUsageLists.*:IntroduceNativeIntTypeOnLocals.*:ReachingDefinitions.*:SplitVariables.*:Util_UnionFind.*:TypeSystemExtensionsTest.IsAnonymous*:PropertyAndEventBackingFieldLookupTest.*:IlspyCmdProgramTest.*' --gtest_brief=1
 ./build/linux-ninja/ILSpyCmd/ilspy_cli /tmp/connid_res.dll --csharp   # vs baseline
 ```
 
