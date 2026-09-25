@@ -53,8 +53,13 @@ namespace {
 
 // Decode one UTF-8 sequence in `str` starting at `index` to a code point;
 // returns the code point and the number of bytes consumed. For an
-// invalid/overlong/surrogate sequence, returns the offending lead byte as a
-// code point and consumes 1 byte (the ILAmbience.cpp DecodeUtf8 shape).
+// invalid/overlong sequence, returns the offending lead byte as a code
+// point and consumes 1 byte (the ILAmbience.cpp DecodeUtf8 shape). The
+// three-byte encodings of the surrogate code points (U+D800..U+DFFF) are
+// NOT rejected here: the port's text convention carries a lone surrogate
+// unit as that encoding (Util::Utf16ToUtf8's lone-unit arm -- the C# keeps
+// the unit in its UTF-16 string), so the escaper must decode it back to
+// the unit and apply the C# `char.IsSurrogate` rule to it.
 std::pair<char32_t, std::size_t> DecodeUtf8(std::string_view str, std::size_t index) {
 	if (index >= str.size())
 		return {char32_t(0), 0};
@@ -78,7 +83,6 @@ std::pair<char32_t, std::size_t> DecodeUtf8(std::string_view str, std::size_t in
 	}
 	if (n == 2 && cp < 0x80) return {char32_t(b0), 1};           // overlong
 	if (n == 3 && cp < 0x800) return {char32_t(b0), 1};          // overlong
-	if (n == 3 && cp >= 0xD800 && cp <= 0xDFFF) return {char32_t(b0), 1};  // surrogate
 	if (n == 4 && (cp < 0x10000 || cp > 0x10FFFF)) return {char32_t(b0), 1};  // out of range
 	return {cp, n};
 }

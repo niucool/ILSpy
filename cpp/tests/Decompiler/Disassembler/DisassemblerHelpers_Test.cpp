@@ -325,6 +325,20 @@ TEST(DisassemblerHelpersEscapeTest, EscapeStringPassesNonAsciiLettersThrough) {
 	EXPECT_EQ(EscapeString("\xc3\xa9"), "\xc3\xa9");
 }
 
+TEST(DisassemblerHelpersEscapeTest, EscapeStringEscapesLoneSurrogates) {
+	// The sweep's capa07 rows: the obfuscated #US-heap strings are built
+	// from lone surrogate code units -- the C# GetUserString keeps them in
+	// the UTF-16 string and `char.IsSurrogate` escapes every unit as its
+	// \uXXXX form. The port's UTF-8 text convention carries a lone
+	// surrogate as its WTF-8 encoding (Util::Utf16ToUtf8), so the escaper
+	// decodes those three-byte sequences back to the unit: U+DC22 and
+	// U+D83D as WTF-8.
+	EXPECT_EQ(EscapeString("\xed\xb0\xa2"), "\\udc22");
+	EXPECT_EQ(EscapeString("\xed\xa0\xbd"), "\\ud83d");
+	// A mixed run: a lone surrogate between two ASCII letters.
+	EXPECT_EQ(EscapeString("a\xed\xb0\xa2" "b"), "a\\udc22b");
+}
+
 // ---------------------------------------------------------------------------
 // WriteOperand
 // ---------------------------------------------------------------------------
@@ -400,6 +414,16 @@ TEST(DisassemblerHelpersTest, WriteOperandDoubleRoundTripFormat) {
 	OUT::PlainTextOutput output3;
 	WriteOperand(output3, 1e-300);
 	EXPECT_EQ(output3.ToString(), "1E-300");
+}
+
+// The ldstr operand render over a #US-heap string built from lone
+// surrogates (the sweep's capa07 rows): the quoted WriteOperand escapes
+// every unit, exactly as the oracle renders the obfuscated strings.
+TEST(DisassemblerHelpersTest, WriteOperandStringEscapesLoneSurrogates) {
+	OUT::PlainTextOutput output;
+	// U+DC22 then U+DC12 as WTF-8 (the Util::Utf16ToUtf8 lone-unit arm).
+	WriteOperand(output, std::string_view("\xed\xb0\xa2\xed\xb0\x92"));
+	EXPECT_EQ(output.ToString(), "\"\\udc22\\udc12\"");
 }
 
 // ---------------------------------------------------------------------------
