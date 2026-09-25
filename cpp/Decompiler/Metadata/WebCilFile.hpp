@@ -23,11 +23,12 @@
 // COFF-style section table.
 //
 // Porting decisions:
-//  * This slice carries the pure static surface only (TryParse /
-//    TryGetSectionDataRange, the counterparts of FromFile's structural
-//    half and the internal TryGetSectionDataRange). The MetadataFile
-//    integration (the metadata-stream reader over the extracted stream
-//    and the loader registration) lands separately.
+//  * The static surface: TryParse / TryGetSectionDataRange (the
+//    counterparts of FromFile's structural half and the internal
+//    TryGetSectionDataRange), plus BuildPeImage -- the port-side adapter
+//    that presents the container to the PE-shaped MetadataFile reader
+//    (the C# instead derives a WebCilFile kind; see BuildPeImage's
+//    note). The WebCilFileLoader (ILSpyX/FileLoaders/) consumes both.
 //  * The C# memory-maps the file and reads through a BinaryReader whose
 //    overrun throws EndOfStreamException; TranslateRVA throws
 //    BadImageFormatException when no section contains an RVA. FromFile

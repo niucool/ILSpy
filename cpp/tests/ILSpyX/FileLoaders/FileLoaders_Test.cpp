@@ -28,7 +28,14 @@
 #include "ILSpyX/FileLoaders/WebCilFileLoader.hpp"
 #include "ILSpyX/FileLoaders/XamarinCompressedFileLoader.hpp"
 
+#include "Decompiler/TypeSystem/ICompilation.hpp"
+#include "Decompiler/TypeSystem/IModule.hpp"
+#include "ILSpyX/AssemblyListManager.hpp"
+#include "ILSpyX/LoadedAssemblyExtensions.hpp"
 #include "TestFixtures/ConnIdResFixtures.hpp"
+#include "TestFixtures/InMemorySettingsProvider.hpp"
+
+#include <cstdlib>
 #include "TestFixtures/TinyNetModule.hpp"
 
 #include <gtest/gtest.h>
@@ -248,6 +255,93 @@ std::vector<std::uint8_t> ExtractMetadataFromConnIdRes()
         }
     }
     return std::vector<std::uint8_t>(metadata, metadata + mdSize);
+}
+
+// Builds the faithful WebCIL container over a WHOLE PE image: the
+// WebCIL header + the PE's own section table (the raw pointers shifted
+// by the payload-header size; the virtual addresses verbatim) + the PE
+// bytes verbatim. The CLI header sits at the PE's own COM-directory RVA,
+// so the metadata, the method bodies, and every other RVA resolve
+// through the WebCIL translation exactly as they would in a real
+// .wasm WebCIL file produced by the toolchain.
+std::vector<std::uint8_t> BuildWebCilContainerOverPe(
+    const std::vector<std::uint8_t>& pe)
+{
+    // The payload layout: the WbIL header (the magic + the four uint16
+    // fields + the four uint32 fields = 28 bytes) followed by the COFF
+    // table, followed by the PE bytes verbatim. The copied section
+    // table's raw pointers are rebased onto the payload: rawBase marks
+    // where the copied raw regions begin (right after the table), and
+    // each pointer is shifted by it.
+    constexpr std::size_t kWbilHeaderSize = 28;
+    std::uint32_t lfanew = GetU32WebCil(pe, 0x3C);
+    std::uint32_t sectionCount = GetU16WebCil(pe, lfanew + 4 + 2);
+    // The optional header: PE32 (magic 0x10B) has a 224-byte header with
+    // the data directory at offset 96; PE32+ (0x20B) is 240 bytes with
+    // the directory at 112. mscorlib (the corpus fixture) is PE32+.
+    std::size_t optionalOffset = lfanew + 4 + 20;
+    std::uint16_t optMagic = GetU16WebCil(pe, optionalOffset);
+    std::size_t dataDirectoryOffset = optMagic == 0x20B ? 112 : 96;
+    std::size_t optionalSize = optMagic == 0x20B ? 240 : 224;
+    std::size_t sectionsOffset = optionalOffset + optionalSize;
+    std::uint32_t comRva = GetU32WebCil(pe,
+        optionalOffset + dataDirectoryOffset + 14 * 8);
+    const std::uint32_t rawBase = static_cast<std::uint32_t>(
+        kWbilHeaderSize + sectionCount * 16);
+
+    std::vector<std::uint8_t> payload;
+    PutU32WebCil(payload, 0x4c496257u);  // "WbIL"
+    PutU16WebCil(payload, 0);            // VersionMajor
+    PutU16WebCil(payload, 0);            // VersionMinor
+    PutU16WebCil(payload, static_cast<std::uint16_t>(sectionCount));
+    PutU16WebCil(payload, 0);            // reserved0
+    PutU32WebCil(payload, comRva);       // PECliHeaderRVA
+    PutU32WebCil(payload, 72);           // PECliHeaderSize
+    PutU32WebCil(payload, 0);            // PEDebugRVA
+    PutU32WebCil(payload, 0);            // PEDebugSize
+    for (std::uint32_t i = 0; i < sectionCount; i++) {
+        std::size_t s = sectionsOffset + i * 40;
+        std::uint32_t virtualSize = GetU32WebCil(pe, s + 8);
+        std::uint32_t virtualAddress = GetU32WebCil(pe, s + 12);
+        std::uint32_t rawDataSize = GetU32WebCil(pe, s + 16);
+        std::uint32_t rawDataPtr = GetU32WebCil(pe, s + 20);
+        PutU32WebCil(payload, virtualSize);
+        PutU32WebCil(payload, virtualAddress);
+        PutU32WebCil(payload, rawDataSize);
+        PutU32WebCil(payload, static_cast<std::uint32_t>(
+            rawBase + rawDataPtr));
+    }
+    // The raw data region starts right after the section table; the PE
+    // bytes land verbatim there (the PE's own headers included, so every
+    // RVA's containing-section walk lands on the copied bytes).
+    payload.insert(payload.end(), pe.begin(), pe.end());
+
+    // The WASM container: the magic + version, one Data section holding
+    // the two segments (the skipped first, the WebCIL blob second).
+    std::vector<std::uint8_t> container;
+    PutU32WebCil(container, 0x6d736100u);  // "\0asm"
+    PutU32WebCil(container, 1);            // the Wasm version
+    container.push_back(11);               // WasmSectionId::Data
+    std::vector<std::uint8_t> content;
+    content.push_back(2);                  // two segments
+    content.push_back(1);                  // segment 1 kind
+    content.push_back(0);                  // segment 1 length
+    content.push_back(1);                  // segment 2 kind
+    std::uint32_t remaining = static_cast<std::uint32_t>(payload.size());
+    while (remaining >= 0x80) {
+        content.push_back(static_cast<std::uint8_t>(remaining) | 0x80);
+        remaining >>= 7;
+    }
+    content.push_back(static_cast<std::uint8_t>(remaining));
+    content.insert(content.end(), payload.begin(), payload.end());
+    std::uint32_t remaining2 = static_cast<std::uint32_t>(content.size());
+    while (remaining2 >= 0x80) {
+        container.push_back(static_cast<std::uint8_t>(remaining2) | 0x80);
+        remaining2 >>= 7;
+    }
+    container.push_back(static_cast<std::uint8_t>(remaining2));
+    container.insert(container.end(), content.begin(), content.end());
+    return container;
 }
 
 }  // namespace
@@ -709,4 +803,126 @@ TEST(WebCilFileLoaderTest, DeclinesInsideABundle)
     EXPECT_FALSE(loader
             .Load(file, nullptr, 0, context)
             .has_value());
+}
+
+// The full pipeline over a faithful container: the whole ConnIdRes PE
+// wrapped verbatim (its own section table, its CLI header at its own
+// COM-directory RVA) loads through the manager-backed AssemblyList (the
+// C# GUI path: the manager carries the default loader registry -- the
+// bare testing AssemblyList ctor has a null registry and would fall
+// through to the PE fallback) -- the registry loop, the loaded-module
+// registration, the metadata surface, the method bodies, and the type
+// system all resolve through the adapter.
+TEST(WebCilFileLoaderTest, FullPipelineOverAFaithfulContainer)
+{
+    std::string pePath = ILSpy::Tests::WriteConnIdResDll();
+    std::ifstream in(pePath, std::ios::binary);
+    std::vector<std::uint8_t> pe(
+        (std::istreambuf_iterator<char>(in)),
+        std::istreambuf_iterator<char>());
+    ASSERT_GE(pe.size(), 512u);
+
+    std::vector<std::uint8_t> container =
+        BuildWebCilContainerOverPe(pe);
+    std::string containerPath = fs::temp_directory_path() /
+        "ilspy_webcil_connid_full.wasm";
+    {
+        std::ofstream out(containerPath, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(container.data()),
+            static_cast<std::streamsize>(container.size()));
+    }
+
+    // The whole LoadedAssembly pipeline: open, demand, inspect. The
+    // manager-backed list carries the default registry (the C# app
+    // path).
+    auto provider = std::make_shared<ILSpy::Tests::InMemorySettingsProvider>();
+    ILSpy::ILSpyX::AssemblyListManager manager(provider);
+    AssemblyList list(manager, "WebCilE2E");
+    LoadedAssembly& asm_ = list.OpenAssembly(containerPath);
+    const auto& loadResult = asm_.GetLoadResult();
+    ASSERT_NE(loadResult.MetadataFile, nullptr);
+    ASSERT_TRUE(loadResult.MetadataFile->IsValid());
+    EXPECT_EQ(asm_.ShortName(), "ilspy_webcil_connid_full");
+    auto asmDef = loadResult.MetadataFile->GetAssemblyDefinition();
+    ASSERT_TRUE(asmDef.has_value());
+    EXPECT_EQ(asmDef->Name, "connid_res");
+
+    // The method bodies resolve through the WebCIL translation (the
+    // ConnIdRes fixture's bodies live at their PE RVAs inside the
+    // wrapped image).
+    auto methods = loadResult.MetadataFile->MethodDefs();
+    int bodiesDecoded = 0;
+    for (const auto& m : methods) {
+        if (m.RVA == 0) continue;
+        auto body = loadResult.MetadataFile->GetMethodBody(m.RVA);
+        if (body.IsValid()) ++bodiesDecoded;
+    }
+    EXPECT_GT(bodiesDecoded, 0) << "no WebCIL method body decoded";
+
+    // The type-system arm (the C# IModuleReference.Resolve): the
+    // compilation over the WebCIL-loaded module resolves its types.
+    auto compilation = ILSpy::ILSpyX::GetTypeSystemOrNull(
+        *loadResult.MetadataFile);
+    ASSERT_NE(compilation, nullptr);
+    EXPECT_EQ(compilation->MainModule().AssemblyName(), "connid_res");
+
+    std::error_code ec;
+    fs::remove(fs::path(containerPath), ec);
+}
+
+// The corpus-anchored proving case: the real net48 mscorlib wrapped in
+// a faithful WebCIL container; its thousands of real method bodies
+// decode through the WebCIL translation identically to the plain PE.
+// Gated on ILSPY_TEST_MSCORLIB (the MethodBody_Test pattern) because
+// the corpus is provisioned out of band.
+TEST(WebCilFileLoaderTest, CorpuMscorlibBodiesDecodeThroughWebCil) {
+    const char* env = std::getenv("ILSPY_TEST_MSCORLIB");
+    if (env == nullptr || !std::filesystem::exists(env)) {
+        GTEST_SKIP() << "corpus not provisioned";
+    }
+    std::ifstream in(env, std::ios::binary);
+    std::vector<std::uint8_t> pe(
+        (std::istreambuf_iterator<char>(in)),
+        std::istreambuf_iterator<char>());
+    ASSERT_GE(pe.size(), 1024u);
+
+    std::vector<std::uint8_t> container =
+        BuildWebCilContainerOverPe(pe);
+    std::string containerPath = fs::temp_directory_path() /
+        "ilspy_webcil_mscorlib.wasm";
+    {
+        std::ofstream out(containerPath, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(container.data()),
+            static_cast<std::streamsize>(container.size()));
+    }
+
+    // The manager-backed list (the C# app path: the manager carries the
+    // default loader registry; the bare testing AssemblyList has none).
+    auto provider = std::make_shared<ILSpy::Tests::InMemorySettingsProvider>();
+    ILSpy::ILSpyX::AssemblyListManager manager(provider);
+    AssemblyList list(manager, "WebCilCorpus");
+    LoadedAssembly& asm_ = list.OpenAssembly(containerPath);
+    const auto& loadResult = asm_.GetLoadResult();
+    ASSERT_NE(loadResult.MetadataFile, nullptr);
+    ASSERT_TRUE(loadResult.MetadataFile->IsValid());
+
+    auto methods = loadResult.MetadataFile->MethodDefs();
+    ASSERT_GT(methods.size(), 1000u);
+    int tiny = 0, fat = 0, decoded = 0;
+    for (const auto& m : methods) {
+        if (m.RVA == 0) continue;  // abstract/extern/pinvoke-only
+        auto body = loadResult.MetadataFile->GetMethodBody(m.RVA);
+        if (!body.IsValid()) continue;
+        // The IL span length must match CodeSize for every decoded body
+        // (the MethodBody_Test invariant, now through the WebCIL path).
+        ASSERT_EQ(body.IL().size(), body.CodeSize());
+        ++decoded;
+        if (body.IsFat()) ++fat; else ++tiny;
+    }
+    EXPECT_GT(decoded, 1000) << "decoded too few WebCIL method bodies";
+    EXPECT_GT(tiny, 0);
+    EXPECT_GT(fat, 0);
+
+    std::error_code ec;
+    fs::remove(fs::path(containerPath), ec);
 }

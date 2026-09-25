@@ -1520,3 +1520,54 @@ updated registry tests all green in the plain and ASan builds; the
 full-suite failure set is identical to the pre-change baseline (251
 pre-existing corpus-gated failures; only a gtest timing field differs
 in the raw output).
+
+---
+
+# The WebCilFileLoader completion slice: the pipeline E2E
+
+The loader was already registered and unit-tested; this slice wires the
+remaining proof: the FULL pipeline (AssemblyList -> LoadedAssembly ->
+the registry loop -> the adapter -> the metadata and the method bodies
+-> the type system) over a FAITHFUL container that embeds a whole real
+PE image, plus the corpus-anchored case.
+
+* **The faithful container builder** (the test helper
+  `BuildWebCilContainerOverPe`): the PE bytes embedded verbatim inside
+  the WebCIL blob; the WebCIL COFF table = the PE's own section table
+  with the raw pointers rebased onto the payload (the WbIL header
+  28 bytes + the table). Every RVA -- the CLI header, the metadata,
+  the method bodies -- resolves through the WebCIL translation exactly
+  as in a toolchain-produced .wasm. The PE32/PE32+ optional-header
+  sizes are branched (the data-directory offset 96 vs 112) so the
+  PE32+ corpus assemblies wrap correctly.
+* **The pipeline E2E** (ConnIdRes): OpenAssembly through the
+  manager-backed AssemblyList (the C# app path; the bare testing
+  AssemblyList has a null registry and would fall through to the PE
+  fallback -- the reason the manager wiring matters) -> the WebCil
+  loader claims -> the metadata parses -> the method bodies decode ->
+  the compilation's MainModule carries the assembly. The debugging
+  journey that shaped this: a 24-vs-28-byte header constant and the
+  un-rebased raw pointers both produced the same "Unknown file
+  format." shim -- the faithful-container shape forced the correct
+  arithmetic on every layer.
+* **The corpus-anchored proof**: the real net48 mscorlib (2.7 MB, its
+  ~30k method bodies, tiny and fat formats) wrapped in the faithful
+  container; every decoded body's IL span matches its CodeSize (the
+  MethodBody_Test invariant, now through the WebCIL path). Gated on
+  ILSPY_TEST_MSCORLIB like the rest of the corpus tests.
+* **The CLI fidelity note**: the port's ilspycmd opens the input via
+  the direct MetadataFile ctor (no loader registry) -- matching the C#
+  CLI, which also constructs `new PEFile(assemblyFileName)` directly;
+  a .wasm input fails in both engines with the same
+  BadImageFormatException shape. The WebCIL routing lives in the
+  ILSpyX loader registry (the LoadedAssembly/AssemblyList path), which
+  is exactly where the C# wires it. No divergence to flag.
+* **No Windows-side material is required**: the format is fully
+  specified by the in-repo C# reader (the container walk + the WbIL
+  header + the COFF table), and the port's reader consumes the same
+  shapes. The Phase 1 loader deferrals are now: MetadataFileLoader
+  only.
+
+Verification: 17 WebCil/registry tests green plain and under ASan
+(the corpus pair green with ILSPY_TEST_MSCORLIB set), the full-suite
+failure set identical to the pre-change baseline.
