@@ -308,6 +308,53 @@ std::string ConstantFieldLiteral(const TS::IField& field) {
     return std::string();
 }
 
+// The C# ConvertAccessor's accessibility modifier: rendered only when the
+// accessor's accessibility differs from the property's.
+std::string AccessorVisibilityText(const TS::IMethod* accessor,
+                                   const TS::IProperty* property) {
+    if (accessor == nullptr || property == nullptr)
+        return std::string();
+    if (accessor->Accessibility() == property->Accessibility())
+        return std::string();
+    SyntaxNS::Modifiers m = SyntaxNS::ModifierFromAccessibility(
+        accessor->Accessibility(), /*usePrivateProtected=*/true);
+    std::string out;
+    for (SyntaxNS::Modifiers modifier :
+         SyntaxNS::CSharpModifiers::AllModifiers) {
+        if (modifier == SyntaxNS::Modifiers::Any)
+            continue;
+        if ((m & modifier) == modifier)
+            out += SyntaxNS::CSharpModifiers::GetModifierName(modifier) +
+                   std::string(" ");
+    }
+    return out;
+}
+
+// The accessor's body statements from the flat method render (the text
+// between the header's opening brace and the closing brace); empty when the
+// accessor has no decodable body.
+std::string AccessorBodyText(const Metadata::MetadataFile& file,
+                             TS::DecompilerTypeSystem* typeSystem,
+                             std::uint32_t accessorToken,
+                             const char* accessorName) {
+    std::uint32_t rva = file.GetMethodRVA(accessorToken);
+    if (rva == 0)
+        return std::string();
+    std::string text;
+    if (!CSharpDecompiler::DecompileMethodToString(
+            file, typeSystem, accessorToken, rva, accessorName, text))
+        return std::string();
+    std::size_t open = text.find("{\n");
+    std::size_t close = text.rfind("\n}");
+    if (open == std::string::npos || close == std::string::npos ||
+        close <= open)
+        return std::string();
+    std::string body = text.substr(open + 2, close - (open + 2));
+    if (!body.empty() && body.back() != '\n')
+        body += '\n';
+    return body;
+}
+
 // The C# ConvertAttributes (the TypeSystemAstBuilder's member form): one
 // AttributeSection per attribute, rendered as the declaration's leading
 // `[...]` lines through the output visitor with the settings' formatting
@@ -537,17 +584,71 @@ bool DecompileTypeToStringBody(
         out += propertyTypeName;
         out += ' ';
         out += p.Name;
-        out += " { ";
+        // The accessor forms (the C# TransformAutomaticProperty's decision
+        // + ConvertAccessor): the stub form (`get; set;`) when the property
+        // has its compiler-generated `<Name>k__BackingField` field (only
+        // the compiler emits the angle-bracket names) or its accessors
+        // carry no bodies (an interface member); a real accessor body
+        // renders as its block.
+        bool hasBackingField = false;
+        const std::string backingName = "<" + p.Name + ">k__BackingField";
+        for (const auto& f : file.GetFields(typeToken)) {
+            if (f.Name == backingName) {
+                hasBackingField = true;
+                break;
+            }
+        }
         bool anyAccessor = false;
-        if (accessors.GetterToken != 0) {
-            out += "get; ";
-            anyAccessor = true;
+        std::string getterBody, setterBody;
+        if (!hasBackingField) {
+            getterBody = AccessorBodyText(file, typeSystem,
+                                          accessors.GetterToken, "get");
+            setterBody = AccessorBodyText(file, typeSystem,
+                                          accessors.SetterToken, "set");
         }
-        if (accessors.SetterToken != 0) {
-            out += "set; ";
-            anyAccessor = true;
+        if (hasBackingField || (getterBody.empty() && setterBody.empty())) {
+            out += " { ";
+            if (accessors.GetterToken != 0) {
+                out += AccessorVisibilityText(
+                           module.GetDefinitionMethod(accessors.GetterToken),
+                           propertyEntity);
+                out += "get; ";
+                anyAccessor = true;
+            }
+            if (accessors.SetterToken != 0) {
+                out += AccessorVisibilityText(
+                           module.GetDefinitionMethod(accessors.SetterToken),
+                           propertyEntity);
+                out += "set; ";
+                anyAccessor = true;
+            }
+            out += "}\n";
+        } else {
+            out += "\n{\n";
+            if (accessors.GetterToken != 0) {
+                out += AccessorVisibilityText(
+                    module.GetDefinitionMethod(accessors.GetterToken),
+                    propertyEntity);
+                if (getterBody.empty()) {
+                    out += "get;\n";
+                } else {
+                    out += "get\n{\n" + getterBody + "}\n";
+                }
+                anyAccessor = true;
+            }
+            if (accessors.SetterToken != 0) {
+                out += AccessorVisibilityText(
+                    module.GetDefinitionMethod(accessors.SetterToken),
+                    propertyEntity);
+                if (setterBody.empty()) {
+                    out += "set;\n";
+                } else {
+                    out += "set\n{\n" + setterBody + "}\n";
+                }
+                anyAccessor = true;
+            }
+            out += "}\n";
         }
-        out += "}\n";
         if (anyAccessor)
             rendered = true;
         accessorTokens.insert(accessors.GetterToken);

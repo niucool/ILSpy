@@ -356,6 +356,50 @@ TEST(FacadeMemberModifiersTest, ConnidMemberAttributesRender)
     EXPECT_LT(attrPos, methodPos) << text;
 }
 
+// The accessor visibility renders when it differs from the property's
+// (the C# ConvertAccessor: `protected set` on a public auto-property).
+TEST(FacadeMemberModifiersTest, AccessorVisibilityRenders)
+{
+    std::string text;
+    if (!RenderType(kModifierFixture, "ModifierShapes", text))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    EXPECT_NE(text.find("public int VirtualProperty { get; protected set; }"),
+              std::string::npos)
+        << text;
+}
+
+// A property whose accessor has a real body renders the body (the C#
+// renders the decompiled accessor as its block): the auto-property stub
+// form only applies when the property has its compiler-generated
+// `<Name>k__BackingField` field.
+TEST(FacadeMemberModifiersTest, AccessorBodyRenders)
+{
+    std::string text;
+    if (!RenderType(kModifierFixture, "ModifierShapes", text))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    // The manual getter body renders its statements.
+    std::size_t propPos = text.find("protected virtual int VirtualPropertyValue");
+    ASSERT_NE(propPos, std::string::npos) << text;
+    std::size_t getPos = text.find("get", propPos);
+    ASSERT_NE(getPos, std::string::npos) << text;
+    std::string accessorRegion = text.substr(propPos);
+    EXPECT_NE(accessorRegion.find("return 5;"), std::string::npos)
+        << "the getter body renders: " << accessorRegion;
+    EXPECT_EQ(text.find("VirtualPropertyValue { get; }"), std::string::npos)
+        << "a real body does not render the stub form: " << text;
+}
+
+// The interface property (no backing field, body-less accessors) keeps the
+// stub form.
+TEST(FacadeMemberModifiersTest, InterfacePropertyKeepsTheStubForm)
+{
+    std::string text;
+    if (!RenderType(kModifierFixture, "IInterface", text))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    EXPECT_NE(text.find("int InterfaceProperty { get; }"), std::string::npos)
+        << text;
+}
+
 // The constructor's implicit no-argument base call does not render (the
 // C# constructor-initializer convention: a base ctor call renders only
 // with arguments; the no-arg form is the implicit default).
