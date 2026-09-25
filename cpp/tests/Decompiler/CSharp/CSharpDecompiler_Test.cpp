@@ -30,6 +30,7 @@
 #include "TestFixtures/ConnIdResFixtures.hpp"
 #include "Decompiler/CSharp/Syntax/Attribute.hpp"
 #include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
+#include "Decompiler/CSharp/Syntax/UsingDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/SyntaxTree.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/DotNetCorePathFinderExtensions.hpp"
@@ -330,11 +331,19 @@ TEST(CSharpDecompilerTest, DecompileModuleAndAssemblyAttributesBuildsTree)
     ASSERT_NE(tree, nullptr);
     int assemblySections = 0;
     int moduleSections = 0;
+    int usingDeclarations = 0;
     for (int i = 0; i < tree->Members().Count(); i++) {
+        // IntroduceUsingDeclarations (the pipeline's eighth transform) puts
+        // the collected namespaces' UsingDeclarations above the sections.
+        if (dynamic_cast<Syntax::UsingDeclaration*>(tree->Members().At(i))
+            != nullptr) {
+            usingDeclarations++;
+            continue;
+        }
         auto* section =
             dynamic_cast<Syntax::AttributeSection*>(tree->Members().At(i));
         ASSERT_NE(section, nullptr)
-            << "every member is an attribute section";
+            << "every non-using member is an attribute section";
         ASSERT_EQ(section->Attributes().Count(), 1)
             << "each section holds exactly one attribute";
         if (section->AttributeTarget() == "assembly")
@@ -467,9 +476,10 @@ TEST(CSharpDecompilerTest, DecompileModuleAndAssemblyAttributesRender)
 // purely as its comment): an attribute whose blob fails to decode (the
 // connid Debuggable row's enum argument resolves through a referenced core
 // library the connid-only compilation does not carry) renders in the
-// output-visitor form: `Debuggable (/*Could not decode attribute
+// output-visitor form: `Debuggable(/*Could not decode attribute
 // arguments.*/)` (the multi-line comment carries no inner padding, the
-// NRefactory trivia-writer shape).
+// NRefactory trivia-writer shape; the settings' Allman-derived policy puts
+// no space before the argument list).
 // The enum-argument decode over the reference set (the C# CLI's actual
 // type-system shape): the connid DebuggableAttribute row's enum argument
 // resolves its DebuggingModes TypeRef through the resolver-loaded
@@ -517,8 +527,15 @@ TEST(CSharpDecompilerTest, AttributeEnumArgumentDecodesOverTheReferenceSet)
     std::string text =
         CSharp::CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
             typeSystem.MainMetadataModule());
-    EXPECT_NE(text.find("IgnoreSymbolStoreSequencePoints"), std::string::npos)
-        << "the enum argument decodes to the member-reference form: " << text;
+    // The real C# reference render for this row (verified against the repo's
+    // ICSharpCode.Decompiler over the identical fixture): the enum argument
+    // decodes AND the pipeline qualifies the nested enum through
+    // IntroduceUsingDeclarations's FullyQualifyAmbiguousTypeNamesVisitor, with
+    // no space between the attribute type and the argument list.
+    EXPECT_NE(text.find("Debuggable(DebuggableAttribute.DebuggingModes."
+                        "IgnoreSymbolStoreSequencePoints)"),
+              std::string::npos)
+        << "the enum argument decodes to the qualified member form: " << text;
     EXPECT_EQ(text.find("Could not decode attribute arguments."),
               std::string::npos)
         << "the decode-error comment form is gone once the reference set "
@@ -540,7 +557,7 @@ TEST(CSharpDecompilerTest,
         CSharp::CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
             module);
     EXPECT_NE(
-        text.find("Debuggable (/*Could not decode attribute arguments.*/)"),
+        text.find("Debuggable(/*Could not decode attribute arguments.*/)"),
         std::string::npos)
         << "the decode-error attribute renders as the C# comment form: "
         << text;
@@ -726,10 +743,10 @@ TEST(CSharpDecompilerTest, DecompileModuleAttributesRenderFixedArguments)
     std::string text =
         CSharp::CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
             module);
-    // CompilationRelaxations (8): the compiler-emitted relaxation value
+    // CompilationRelaxations(8): the compiler-emitted relaxation value
     // renders as the numeric literal (the short-name + the Mono policy's
     // space-before-call-parentheses, the output-visitor form).
-    EXPECT_NE(text.find("CompilationRelaxations (8)"),
+    EXPECT_NE(text.find("CompilationRelaxations(8)"),
               std::string::npos)
         << "the int fixed argument renders: " << text;
     if (std::getenv("TET_TRACE")) {

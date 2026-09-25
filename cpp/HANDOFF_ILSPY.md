@@ -3,13 +3,18 @@
 Read this + `PORT_PLAN.md` + `cpp/README.md` (and the sibling
 `cpp/PORT_LOG_BAML.md` / `cpp/PORT_LOG_DISASM.md` logs) at the start of a
 fresh session.
-Standing baseline: **connid_csharp sha256 `db7d7500a7246958`** (re-pinned
-DELIBERATELY at the master merge: the collision re-targeting in the merged
-DeclareVariables now emits consistent names -- `eventSetter` for the
-declaration AND its uses, where the pre-merge lineage printed the declaration
-as `eventSetter` but the uses as `eventSetter_1/_2/_3`. Prior re-pin:
-`7c269b8e61993d80` at the event-member-surface slice; pre-facade
-`8358d5c1d6ff7ad3` at `164dd1a9b`). Sweep discipline: passed + skipped MUST
+Standing baseline: **connid_csharp sha256 `abf6a844eba7c0b3`** (re-pinned
+DELIBERATELY at the facade-transform-wiring slice: the facade's
+GetAstTransforms now registers the eight merged-but-unwired transforms
+(IntroduceUsingDeclarations among them), so the attribute sections carry the
+`using` lines and the FullyQualifyAmbiguousTypeNamesVisitor qualifies the
+nested enum; the render passes the settings' Allman-derived formatting
+options, so no space precedes the attribute argument lists. The whole
+attribute block now byte-matches the repo C#'s
+DecompileModuleAndAssemblyAttributesAsString over the identical fixture,
+modulo the environment-gated Debuggable decode. Prior re-pin:
+`db7d7500a7246958` at the master merge (the eventSetter collision fix);
+`7c269b8e61993d80` at the event-member-surface slice). Sweep discipline: passed + skipped MUST
 equal ran, and the exit code is the gate.
 
 ## THE MASTER MERGE (read first -- this branch's shape changed)

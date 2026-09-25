@@ -31,6 +31,13 @@
 #include "Decompiler/DecompileRun.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/CSharp/Transforms/ReplaceMethodCallsWithOperators.hpp"
+#include "Decompiler/CSharp/Transforms/TransformFieldAndConstructorInitializers.hpp"
+#include "Decompiler/CSharp/Transforms/IntroduceUsingDeclarations.hpp"
+#include "Decompiler/CSharp/Transforms/IntroduceExtensionMethods.hpp"
+#include "Decompiler/CSharp/Transforms/IntroduceQueryExpressions.hpp"
+#include "Decompiler/CSharp/Transforms/CombineQueryExpressions.hpp"
+#include "Decompiler/CSharp/Transforms/RenameVisualBasicAnonymousTypes.hpp"
+#include "Decompiler/CSharp/Transforms/AddXmlDocumentationTransform.hpp"
 #include "Decompiler/CSharp/Transforms/IntroduceUnsafeModifier.hpp"
 #include "Decompiler/CSharp/Transforms/AddCheckedBlocks.hpp"
 #include "Decompiler/CSharp/Transforms/PatternStatementTransform.hpp"
@@ -43,6 +50,7 @@
 #include "Decompiler/CSharp/Transforms/NormalizeBlockStatements.hpp"
 #include "Decompiler/CSharp/Transforms/FlattenSwitchBlocks.hpp"
 #include "Decompiler/CSharp/Transforms/FixNameCollisions.hpp"
+#include "Decompiler/CSharp/OutputVisitor/FormattingOptionsFactory.hpp"
 #include "Decompiler/CSharp/OutputVisitor/InsertParenthesesVisitor.hpp"
 #include "Decompiler/CSharp/OutputVisitor/GenericGrammarAmbiguityVisitor.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
@@ -596,18 +604,34 @@ void CSharpDecompiler::DoDecompileModuleAndAssemblyAttributes(
     }
 }
 
+// The C# `settings.CSharpFormattingOptions` (DecompilerSettings.cs lines
+// 2406-2418): the Allman factory with the decompiler's three overrides --
+// no switch-body indent, wrap-if-too-long array initializers, single-line
+// auto properties. The C# caches the options per settings instance; the
+// port builds them per render (a handful of option copies, no observable
+// difference -- the options are value semantics either way).
+static OutputVisitor::CSharpFormattingOptions SettingsFormattingOptions() {
+    OutputVisitor::CSharpFormattingOptions options =
+        OutputVisitor::FormattingOptionsFactory::CreateAllman();
+    options.IndentSwitchBody = false;
+    options.ArrayInitializerWrapping = OutputVisitor::Wrapping::WrapIfTooLong;
+    options.AutoPropertyFormatting =
+        OutputVisitor::PropertyFormatting::SingleLine;
+    return options;
+}
+
 // The C# `public string DecompileModuleAndAssemblyAttributesToString()`
 // (CSharpDecompiler.cs line 838): `SyntaxTreeToString(
 // DecompileModuleAndAssemblyAttributes())` -- the tree built by the AST
-// path, rendered through the output visitor (the port's AstNode::ToString
-// with the Mono defaults, the C# `settings.CSharpFormattingOptions`
-// equivalent; the settings-carrying formatting options land with the
-// instance surface).
+// path, rendered through the output visitor with the settings' formatting
+// options (the C# SyntaxTreeToString's `settings.CSharpFormattingOptions`).
 std::string CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
     const ::ILSpy::Decompiler::TypeSystem::MetadataModule& module) {
     std::unique_ptr<Syntax::SyntaxTree> syntaxTree(
         DecompileModuleAndAssemblyAttributes(module));
-    return syntaxTree->ToString(nullptr);
+    OutputVisitor::CSharpFormattingOptions options =
+        SettingsFormattingOptions();
+    return syntaxTree->ToString(&options);
 }
 
 // The C# `public string DecompileWholeModuleAsString()` (line 1220):
@@ -657,23 +681,30 @@ CSharpDecompiler::GetAstTransforms() {
     //      methodof cast pattern stay deferred loudly in the .cpp.
     transforms.push_back(
         std::make_unique<Transforms::IntroduceUnsafeModifier>());
-    // AddCheckedBlocks -- deferred (the port carries the annotation half;
-    // the block-rewriting IAstTransform itself lands with the rest of the
-    // AST-transform layer, at this same slot).
+    transforms.push_back(std::make_unique<Transforms::AddCheckedBlocks>());
     transforms.push_back(std::make_unique<Transforms::DeclareVariables>());
-    // TransformFieldAndConstructorInitializers -- deferred.
+    transforms.push_back(
+        std::make_unique<Transforms::TransformFieldAndConstructorInitializers>());
     transforms.push_back(
         std::make_unique<Transforms::PrettifyAssignments>());
-    // IntroduceUsingDeclarations / IntroduceExtensionMethods /
-    // IntroduceQueryExpressions / CombineQueryExpressions -- deferred.
+    transforms.push_back(
+        std::make_unique<Transforms::IntroduceUsingDeclarations>());
+    transforms.push_back(
+        std::make_unique<Transforms::IntroduceExtensionMethods>());
+    transforms.push_back(
+        std::make_unique<Transforms::IntroduceQueryExpressions>());
+    transforms.push_back(
+        std::make_unique<Transforms::CombineQueryExpressions>());
     transforms.push_back(
         std::make_unique<Transforms::NormalizeBlockStatements>());
     transforms.push_back(
         std::make_unique<Transforms::FlattenSwitchBlocks>());
-    // RenameVisualBasicAnonymousTypes -- deferred.
+    transforms.push_back(
+        std::make_unique<Transforms::RenameVisualBasicAnonymousTypes>());
     transforms.push_back(
         std::make_unique<Transforms::FixNameCollisions>());
-    // AddXmlDocumentationTransform -- deferred.
+    transforms.push_back(
+        std::make_unique<Transforms::AddXmlDocumentationTransform>());
     return transforms;
 }
 
