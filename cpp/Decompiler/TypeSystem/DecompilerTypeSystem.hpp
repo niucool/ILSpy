@@ -24,14 +24,16 @@
 // member targets: a TypeRef scoped to an AssemblyRef resolves through
 // MetadataModule::GetDeclaringModule -> ResolveModule ->
 // FindModuleByReference over Compilation().Modules(), which this
-// compilation fills with the resolved referenced modules (the C#
-// SimpleCompilation.Init the DecompilerTypeSystem ctor drives).
+// compilation fills with the resolved referenced modules.
+//
+// The C# hierarchy: `DecompilerTypeSystem : SimpleCompilation,
+// IDecompilerTypeSystem` -- the reference loading happens in the ctor and
+// feeds the inherited Init (the module-reference list), so the merged
+// root namespace, the KnownTypeCache-backed FindType, and the module
+// snapshots all come from the base class.
 
-#include "Decompiler/TypeSystem/ICompilation.hpp"
-#include "Decompiler/TypeSystem/IModuleReference.hpp"
-#include "Decompiler/TypeSystem/KnownTypeCache.hpp"
+#include "Decompiler/TypeSystem/SimpleCompilation.hpp"
 #include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
-#include "Decompiler/Util/CacheManager.hpp"
 
 #include <map>
 #include <memory>
@@ -46,12 +48,9 @@ class MetadataFile;
 namespace ILSpy::Decompiler::TypeSystem {
 
 class MetadataModule;
-class KnownType;
-namespace Implementation {
-class MinimalCorlib;
-}
+class IModuleReference;
 
-class DecompilerTypeSystem final : public ICompilation {
+class DecompilerTypeSystem final : public SimpleCompilation {
 public:
     // The C# `public DecompilerTypeSystem(MetadataFile mainModule,
     // IAssemblyResolver assemblyResolver, TypeSystemOptions
@@ -59,7 +58,8 @@ public:
     // InitializeCoreAsync -- every row of the main module's AssemblyRef
     // table resolves through the resolver; the null results drop. The
     // same-name-different-version rows deduplicate to the HIGHEST version
-    // (the referenceAssemblyVersionMap arm).
+    // (the referenceAssemblyVersionMap arm), and the missing known types
+    // are filled by the MinimalCorlib net (the IsMissing arm).
     // The resolver OUTLIVES this compilation (the port's resolver owns the
     // loaded files through its keep-alive registry -- the C# GC keeps them
     // alive through the compilation's module list; the port's caller holds
@@ -68,10 +68,9 @@ public:
     // multi-module AssemblyFiles walk), the ExportedTypes breadth-first
     // walk over the loaded assemblies (the .NET Core/PCL facade support),
     // the implicit-references set (System.Runtime.InteropServices et al),
-    // the MinimalCorlib known-types safety net, and GetOptions (the
-    // DecompilerSettings -> TypeSystemOptions mapping -- the Default
-    // placeholder rides until that mapping ports with its own baseline
-    // evaluation).
+    // and GetOptions (the DecompilerSettings -> TypeSystemOptions mapping
+    // -- the Default placeholder rides until that mapping ports with its
+    // own baseline evaluation).
     DecompilerTypeSystem(
         const ::ILSpy::Decompiler::Metadata::MetadataFile& mainModule,
         const ::ILSpy::Decompiler::Metadata::IAssemblyResolver&
@@ -80,53 +79,31 @@ public:
             = ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::Default);
     ~DecompilerTypeSystem() override;
 
-    // The ICompilation surface (the C# SimpleCompilation Init shape): the
-    // main module leads Modules(); ReferencedModules() excludes it.
-    const IModule& MainModule() const override;
-    std::vector<const IModule*> Modules() const override;
-    std::vector<const IModule*> ReferencedModules() const override;
-    const INamespace& RootNamespace() const override;
-    const INamespace* GetNamespaceForExternAlias(
-        const std::string& alias) const override;
-    const IType& FindType(
-        ::ILSpy::Decompiler::TypeSystem::KnownTypeCode typeCode) const
-        override;    const StringComparer& NameComparer() const override;
-    const ::ILSpy::Decompiler::Util::CacheManager& CacheManager()
-        const override;
-    ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions
-    TypeSystemOptions() const override;
-
     // The C# `public new MetadataModule MainModule` -- the typed accessor
     // (the decompiler's entries take the MetadataModule; non-const: the
     // module's entity caches lazily initialize through it).
     MetadataModule& MainMetadataModule();
 
-private:
-    // A loaded referenced assembly: the file the resolver handed out
-    // (non-owning -- the resolver's keep-alive registry owns it; the
-    // resolver outlives this compilation) + its module.
-    struct LoadedModule {
-        const ::ILSpy::Decompiler::Metadata::MetadataFile* file = nullptr;
-        std::unique_ptr<MetadataModule> module;
-    };
+    // The C# `public override TypeSystemOptions TypeSystemOptions` -- the
+    // options the ctor received (the base returns Default).
+    ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions TypeSystemOptions()
+        const override;
 
-    const ::ILSpy::Decompiler::Metadata::MetadataFile* mainFile_ = nullptr;
-    std::unique_ptr<MetadataModule> mainModule_;
-    std::vector<LoadedModule> referenced_;
-    // The Modules()/ReferencedModules() snapshots (the C# Init builds the
-    // lists once; the entity caches and the FindModuleByReference scans
-    // consume them on every resolution).
-    std::vector<const IModule*> modules_;
-    std::vector<const IModule*> referencedModules_;
-    // The MinimalCorlib net (the C# missing-known-types arm): the module
-    // reference owns its resolved module, so the reference lives with the
-    // compilation.
+private:
+    // An `IModuleReference` over a (MetadataFile, options) pair (the C#
+    // `file.WithOptions(options)` -- a MetadataFile IS an
+    // IModuleReference whose Resolve builds the MetadataModule over the
+    // resolving compilation). The adapter owns the module it resolved.
+    class FileModuleReference;
+
+    // The Init-feeding references (the adapters own the MetadataModules).
+    std::unique_ptr<FileModuleReference> mainReference_;
+    std::vector<std::unique_ptr<FileModuleReference>> referencedReferences_;
+    // The MinimalCorlib net (the reference owns its resolved module).
     std::unique_ptr<IModuleReference> minimalCorlib_;
+    // The typed main module (non-owning -- the adapter owns it).
+    MetadataModule* mainMetadataModule_ = nullptr;
     ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions options_;
-    ::ILSpy::Decompiler::Util::CacheManager cacheManager_;
-    // The C# SimpleCompilation's `knownTypeCache` (the FindType backing --
-    // the module scan over Modules() with the UnknownType fallback).
-    KnownTypeCache knownTypeCache_;
 };
 
 } // namespace ILSpy::Decompiler::TypeSystem

@@ -20,14 +20,40 @@
 
 #include "Decompiler/Metadata/AssemblyNameReference.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
-#include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/IModuleReference.hpp"
 #include "Decompiler/TypeSystem/KnownTypeReference.hpp"
 #include "Decompiler/TypeSystem/MetadataModule.hpp"
-#include "Decompiler/TypeSystem/StringComparer.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
-#include "Decompiler/Util/CacheManager.hpp"
 
 namespace ILSpy::Decompiler::TypeSystem {
+
+// The `IModuleReference` over a (MetadataFile, options) pair (the C#
+// `file.WithOptions(options)`: a MetadataFile IS an IModuleReference whose
+// Resolve builds the MetadataModule over the resolving compilation). The
+// adapter owns the module it resolved (the C# GC owns it; the
+// CorlibModuleReference keep-alive convention).
+class DecompilerTypeSystem::FileModuleReference final
+    : public IModuleReference {
+public:
+    FileModuleReference(const ::ILSpy::Decompiler::Metadata::MetadataFile*
+                            file,
+                        ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions
+                            options)
+        : file_(file), options_(options) {}
+
+    const IModule* Resolve(const ITypeResolveContext& context) const override {
+        if (module_ == nullptr) {
+            module_ = std::make_unique<MetadataModule>(
+                context.Compilation(), file_, options_);
+        }
+        return module_.get();
+    }
+
+private:
+    const ::ILSpy::Decompiler::Metadata::MetadataFile* file_;
+    ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions options_;
+    mutable std::unique_ptr<MetadataModule> module_;
+};
 
 namespace {
 
@@ -45,57 +71,27 @@ bool VersionAtLeast(const Metadata::MetadataFile::AssemblyDefinitionInfo& v,
     return v.RevisionNumber >= w.RevisionNumber;
 }
 
-// The C# SimpleCompilation's Init-resolve context: the partially
-// constructed compilation (the `IModuleReference.Resolve` contract -- no
-// user code observes it; the MinimalCorlib resolution is the one consumer).
-class CompilationResolveContext final : public ITypeResolveContext {
-public:
-    explicit CompilationResolveContext(const ICompilation& compilation)
-        : compilation_(&compilation) {}
-
-    const ICompilation& Compilation() const override { return *compilation_; }
-    const IModule* CurrentModule() const override { return nullptr; }
-    const ITypeDefinition* CurrentTypeDefinition() const override {
-        return nullptr;
-    }
-    const IMember* CurrentMember() const override { return nullptr; }
-    // The With* factories are unreachable on the Init-resolve context
-    // (the C# SimpleTypeResolveContext arms); the null-object returns
-    // carry the slots over.
-    std::unique_ptr<ITypeResolveContext> WithCurrentTypeDefinition(
-        const ITypeDefinition*) const override {
-        return std::make_unique<CompilationResolveContext>(*compilation_);
-    }
-    std::unique_ptr<ITypeResolveContext> WithCurrentMember(
-        const IMember*) const override {
-        return std::make_unique<CompilationResolveContext>(*compilation_);
-    }
-
-private:
-    const ICompilation* compilation_;
-};
-
 } // namespace
 
 DecompilerTypeSystem::DecompilerTypeSystem(
     const ::ILSpy::Decompiler::Metadata::MetadataFile& mainModule,
     const ::ILSpy::Decompiler::Metadata::IAssemblyResolver& assemblyResolver,
     ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions typeSystemOptions)
-    : mainFile_(&mainModule), options_(typeSystemOptions),
-      knownTypeCache_(*this) {
+    : options_(typeSystemOptions) {
     // The C# InitializeCoreAsync's main-module seeds: every
     // AssemblyReference row resolves through the resolver (`AddToQueue(true,
     // mainModule, refs)` + the queue drain). The null resolutions drop (the
     // `if (asm != null)` gate); the resolved files deduplicate by assembly
     // name, keeping the HIGHEST version (the referenceAssemblyVersionMap
     // arm -- a same-name lower-version file replaces nothing).
+    std::vector<const Metadata::MetadataFile*> referencedFiles;
     std::map<std::string, std::pair<
         Metadata::MetadataFile::AssemblyDefinitionInfo, std::size_t>>
         referenceAssemblyVersionMap;
-    for (const auto& reference : mainFile_->GetAssemblyReferences()) {
+    for (const auto& reference : mainModule.GetAssemblyReferences()) {
         // The C# `new AssemblyReference(asm, handle)` row wrapper feeding
         // the resolver.
-        Metadata::AssemblyReference asmRef(*mainFile_, reference.Token);
+        Metadata::AssemblyReference asmRef(mainModule, reference.Token);
         const Metadata::MetadataFile* file = assemblyResolver.Resolve(asmRef);
         if (file == nullptr)
             continue;
@@ -106,31 +102,18 @@ DecompilerTypeSystem::DecompilerTypeSystem(
             auto it = referenceAssemblyVersionMap.find(definition->Name);
             if (it != referenceAssemblyVersionMap.end()) {
                 if (VersionAtLeast(*definition, it->second.first)) {
-                    referenced_[it->second.second].file = file;
+                    referencedFiles[it->second.second] = file;
                     it->second.first = *definition;
                 }
                 continue;
             }
             referenceAssemblyVersionMap.emplace(
                 definition->Name, std::make_pair(*definition,
-                                                  referenced_.size()));
+                                                  referencedFiles.size()));
         }
-        referenced_.push_back(LoadedModule{file, nullptr});
+        referencedFiles.push_back(file);
     }
 
-    // The C# Init(mainModuleWithOptions, referencedAssembliesWithOptions):
-    // the main module binds the compilation reference first, then the
-    // referenced modules (the MetadataModule ctor takes the compilation
-    // reference; the Modules() list is built after every module exists).
-    mainModule_ = std::make_unique<MetadataModule>(*this, mainFile_,
-                                                    options_);
-    modules_.push_back(mainModule_.get());
-    for (auto& loaded : referenced_) {
-        loaded.module = std::make_unique<MetadataModule>(
-            *this, loaded.file, options_);
-        modules_.push_back(loaded.module.get());
-        referencedModules_.push_back(loaded.module.get());
-    }
     // The C# missing-known-types arm (InitializeCoreAsync's tail):
     // `KnownTypeReference.AllKnownTypes.Where(IsMissing)` -- a type is
     // missing when neither the main module nor any referenced assembly
@@ -139,17 +122,16 @@ DecompilerTypeSystem::DecompilerTypeSystem(
     // MinimalCorlib.CreateWithTypes(missingKnownTypes) })`) so the known
     // types stay resolvable when the reference set misses them (the
     // attribute literals keep the uncast form -- the resolved Int32 kinds
-    // as Struct rather than the Unknown fallback).
+    // as Struct rather than the Unknown fallback). The C# IsMissing reads
+    // the FILES' GetTypeDefinition (before any module exists).
     std::vector<const KnownTypeReference*> missingKnownTypes;
-    for (const KnownTypeReference* ktr : KnownTypeReference::AllKnownTypes()) {
-        // The C# IsMissing: `!mainModule.GetTypeDefinition(name).IsNil`
-        // over the main file, then every referenced file.
-        if (mainModule_->GetTypeDefinition(ktr->TypeName()) != nullptr)
+    for (const KnownTypeReference* ktr :
+         KnownTypeReference::AllKnownTypes()) {
+        if (mainModule.GetTypeDefinition(ktr->TypeName()) != 0)
             continue;
         bool found = false;
-        for (auto& loaded : referenced_) {
-            if (loaded.module->GetTypeDefinition(ktr->TypeName())
-                    != nullptr) {
+        for (const Metadata::MetadataFile* file : referencedFiles) {
+            if (file->GetTypeDefinition(ktr->TypeName()) != 0) {
                 found = true;
                 break;
             }
@@ -157,75 +139,42 @@ DecompilerTypeSystem::DecompilerTypeSystem(
         if (!found)
             missingKnownTypes.push_back(ktr);
     }
+
+    // The C# Init(mainModuleWithOptions, referencedAssembliesWithOptions):
+    // the file references feed the inherited Init (which resolves each
+    // against this compilation, dedups by module identity, and builds the
+    // merged root namespace), the MinimalCorlib net appended when the
+    // reference set misses known types.
+    mainReference_ = std::make_unique<FileModuleReference>(
+        &mainModule, options_);
+    std::vector<const IModuleReference*> references;
+    for (const Metadata::MetadataFile* file : referencedFiles) {
+        referencedReferences_.push_back(
+            std::make_unique<FileModuleReference>(file, options_));
+        references.push_back(referencedReferences_.back().get());
+    }
     if (!missingKnownTypes.empty()) {
         minimalCorlib_ = Implementation::MinimalCorlib::CreateWithTypes(
             std::move(missingKnownTypes));
-        // The C# Init resolves the module reference against the partially
-        // constructed compilation (the IModuleReference contract; the
-        // reference owns the resolved module -- the CorlibModuleReference
-        // keep-alive vector).
-        CompilationResolveContext resolveContext(*this);
-        const IModule* minimalCorlib = minimalCorlib_->Resolve(resolveContext);
-        modules_.push_back(minimalCorlib);
-        referencedModules_.push_back(minimalCorlib);
+        references.push_back(minimalCorlib_.get());
     }
+    Init(*mainReference_, std::move(references));
+    // The typed main module (the C# `public new MetadataModule MainModule`)
+    // -- the FileModuleReference resolved it; Init stored the non-owning
+    // pointer.
+    mainMetadataModule_ = static_cast<MetadataModule*>(
+        const_cast<IModule*>(mainModule_));
 }
 
 DecompilerTypeSystem::~DecompilerTypeSystem() = default;
 
-const IModule& DecompilerTypeSystem::MainModule() const {
-    return *mainModule_;
-}
-
-std::vector<const IModule*> DecompilerTypeSystem::Modules() const {
-    return modules_;
-}
-
-std::vector<const IModule*> DecompilerTypeSystem::ReferencedModules() const {
-    return referencedModules_;
-}
-
-const INamespace& DecompilerTypeSystem::RootNamespace() const {
-    // The C# SimpleCompilation merges the root namespaces of every module
-    // into one tree; the port's stand-in is the main module's root (the
-    // facade walks -- the namespace collection -- consult the main module
-    // only today; the merged tree rides with the SimpleCompilation port).
-    return mainModule_->RootNamespace();
-}
-
-const INamespace* DecompilerTypeSystem::GetNamespaceForExternAlias(
-    const std::string&) const {
-    // The C# resolves the alias through the module reference set (the
-    // extern-alias metadata); the placeholder carries no aliases.
-    return nullptr;
-}
-
-const IType& DecompilerTypeSystem::FindType(
-    ::ILSpy::Decompiler::TypeSystem::KnownTypeCode typeCode) const {
-    // The C# SimpleCompilation: `knownTypeCache.FindType(typeCode)` -- the
-    // module scan over the compilation's Modules() (the main module + the
-    // reference set this ctor loaded) with the UnknownType fallback (the
-    // C# MinimalCorlib net fills the gaps the reference set leaves; that
-    // arm rides deferred).
-    return knownTypeCache_.FindType(typeCode);
-}
-
-const StringComparer& DecompilerTypeSystem::NameComparer() const {
-    return StringComparer::Ordinal();
-}
-
-const ::ILSpy::Decompiler::Util::CacheManager&
-DecompilerTypeSystem::CacheManager() const {
-    return cacheManager_;
+MetadataModule& DecompilerTypeSystem::MainMetadataModule() {
+    return *mainMetadataModule_;
 }
 
 ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions
 DecompilerTypeSystem::TypeSystemOptions() const {
     return options_;
-}
-
-MetadataModule& DecompilerTypeSystem::MainMetadataModule() {
-    return *mainModule_;
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem
