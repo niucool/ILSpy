@@ -262,8 +262,10 @@ public:
     // AnyNodeOrNull / Repeat) in the typed slots -- the C# pattern-side slots
     // accept INode because the generator's slot storage is INode-typed on the
     // pattern side; the port's typed slot setters require the concrete
-    // Expression/AstType. The bridge (a pattern-side INode slot view) lands
-    // with the PatternStatementTransform family. The two arms are gated on
+    // Expression/AstType, so the pattern children go through the
+    // Expression::ToExpression / Statement::ToStatement wrappers (the
+    // PatternPlaceholder bridge) at the call site. The two arms land with the
+    // automatic-property slice. They are gated on
     // UseExpressionBodyForCalculatedGetterOnlyProperties, which the seed
     // output does not exercise.
     void SimplifyPropertyDeclaration(Syntax::PropertyDeclaration* /*propertyDeclaration*/) {

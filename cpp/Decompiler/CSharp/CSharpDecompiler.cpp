@@ -24,6 +24,7 @@
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/CSharp/Transforms/ReplaceMethodCallsWithOperators.hpp"
 #include "Decompiler/CSharp/Transforms/AddCheckedBlocks.hpp"
+#include "Decompiler/CSharp/Transforms/PatternStatementTransform.hpp"
 #include "Decompiler/CSharp/Transforms/PrettifyAssignments.hpp"
 #include "Decompiler/CSharp/Transforms/NormalizeBlockStatements.hpp"
 #include "Decompiler/CSharp/Transforms/FlattenSwitchBlocks.hpp"
@@ -384,8 +385,8 @@ CSharpDecompiler::GetAstTransforms() {
     // 237-255); the unported transforms are loud comments at their slots so
     // the order is preserved as the ports land.
     std::vector<std::unique_ptr<Transforms::IAstTransform>> transforms;
-    // transforms.push_back(std::make_unique<Transforms::
-    //                           PatternStatementTransform>());  -- deferred
+    transforms.push_back(
+        std::make_unique<Transforms::PatternStatementTransform>());
     // transforms.push_back(std::make_unique<Transforms::
     //                           ReplaceMethodCallsWithOperators>());
     //   -- deferred: the port carries the static half (the

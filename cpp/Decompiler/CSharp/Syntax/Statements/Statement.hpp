@@ -29,9 +29,10 @@
 // so callers get a `Statement` back instead of an `AstNode`). The generator additionally
 // emits a pattern placeholder (the `implicit operator Statement(Pattern)` + a sealed
 // `PatternPlaceholder` nested class wrapping a `Pattern`) because `hasPatternPlaceholder` is
-// true; that lands when the concrete pattern nodes (`AnyNode`/`NamedNode`/...) are ported
-// (the D219 deferral), so it is deferred here -- the abstract base and the concrete statement
-// nodes do not depend on it.
+// true; ported below (the `Expression::PatternPlaceholder` precedent), landed with its first
+// statement-slot consumer -- the PatternStatementTransform cascading-if-else pattern, whose
+// `TrueStatement`/`FalseStatement`/`Statements` slots embed `AnyNode`/`NamedNode`/
+// `OptionalNode` pattern nodes.
 //
 // The typed `Clone` ports as a covariant pure-virtual override: `AstNode::Clone()` returns
 // `AstNode*` (its base body throws, since C++ has no `MemberwiseClone`); `Statement`
@@ -50,6 +51,9 @@
 #define ILSPY_DECOMPILER_CSHARP_SYNTAX_STATEMENTS_STATEMENT_HPP
 
 #include "Decompiler/CSharp/Syntax/AstNode.hpp"
+#include "Decompiler/CSharp/Syntax/IAstVisitor.hpp"
+#include "Decompiler/CSharp/Syntax/IAstVisitorBool.hpp"
+#include "Decompiler/CSharp/Syntax/PatternMatching/Pattern.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -75,8 +79,73 @@ public:
     // Covariant: `Statement*` derives from `AstNode*`, so this is a valid override of
     // `AstNode::Clone()`.
     Statement* Clone() const override = 0;
+
+    // wraps a Pattern so it can occupy a Statement slot (the C#
+    // `implicit operator Statement(Pattern)` constructs it). Defined out-of-line
+    // below the class (C++ requires the enclosing class to be complete before a
+    // nested class deriving from it, the C# nested-class shape kept).
+    class PatternPlaceholder;
+
+    // The C# `public static implicit operator Statement(Pattern? pattern)` -- a
+    // null pattern converts to a null statement. The port's call-site form (the
+    // C# PatternExtensions `ToStatement(this Pattern)` end state after the
+    // implicit conversion): a non-null pattern wraps in the placeholder (the
+    // `Expression::ToExpression` precedent).
+    static Statement* ToStatement(PatternMatching::Pattern& pattern);
 };
+
+// The out-of-line nested-class definition (the enclosing Statement must be
+// complete for the nested class deriving from it -- the C++ rule that keeps the
+// C# generator's nested-class shape but moves the definition past the class).
+class Statement::PatternPlaceholder final : public Statement {
+public:
+    explicit PatternPlaceholder(PatternMatching::Pattern& child) : child_(&child) {}
+
+    // The C# `AstNode.Clone()` is a concrete MemberwiseClone-based method the
+    // placeholder inherits; the port's Clone is a covariant pure virtual on
+    // Statement, so the placeholder supplies the shallow-copy equivalent: a fresh
+    // placeholder over the same child reference (the C# MemberwiseClone copies the
+    // `child` FIELD by reference too).
+    Statement* Clone() const override { return new PatternPlaceholder(*child_); }
+
+    // The C# `public override void AcceptVisitor(IAstVisitor visitor)`.
+    void AcceptVisitor(IAstVisitor& visitor) override {
+        // The C# `visitor.VisitPatternPlaceholder(this, child)`.
+        visitor.VisitPatternPlaceholder(this, child_);
+    }
+
+    // The C# `AcceptVisitor<T>(IAstVisitor<T> visitor)` over S = bool (the port's
+    // IAstVisitorBool instantiation; the C# generated placeholder overrides the
+    // generic dispatch alongside the void one).
+    bool AcceptVisitorBool(IAstVisitorBool& visitor) override {
+        return visitor.VisitPatternPlaceholder(this, child_);
+    }
+
+    bool DoMatch(AstNode* other, PatternMatching::Match match) override {
+        return child_->DoMatch(other, match);
+    }
+
+    bool DoMatchCollection(const std::vector<PatternMatching::INode*>& other, int pos,
+                           PatternMatching::Match match,
+                           PatternMatching::BacktrackingInfo& backtrackingInfo) override {
+        return child_->DoMatchCollection(other, pos, match, backtrackingInfo);
+    }
+
+    // The C# `readonly PatternMatching.Pattern child` (a GC reference; the port
+    // observes the caller-owned pattern).
+    PatternMatching::Pattern& Child() const { return *child_; }
+
+private:
+    PatternMatching::Pattern* child_;
+};
+
+// The C# `public static implicit operator Statement(Pattern? pattern)` / the
+// PatternExtensions `ToStatement(this Pattern)`: the call-site form.
+inline Statement* Statement::ToStatement(PatternMatching::Pattern& pattern) {
+    return new PatternPlaceholder(pattern);
+}
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_STATEMENTS_STATEMENT_HPP
+
