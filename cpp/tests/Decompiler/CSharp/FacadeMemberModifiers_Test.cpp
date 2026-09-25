@@ -296,6 +296,24 @@ TEST(FacadeMemberModifiersTest, BaseTypesRender)
         << page1;
 }
 
+// The base-list nameability filter (the C# f41b12c01 fix for #3230): an
+// interface the base list cannot name drops from the rendered base list
+// (a private nested interface of an unrelated type -- the shape the
+// transitive interface-impl propagation produces); the public control
+// interface stays.
+TEST(FacadeMemberModifiersTest, UnnameableBaseListInterfaceDrops)
+{
+    std::string text;
+    if (!RenderType("/home/jim/ilspy-test-fixtures/baselist_fixture/"
+                    "BaseListSynth.dll",
+                    "Unrelated", text))
+        GTEST_SKIP() << "the base list fixture is not provisioned";
+    EXPECT_NE(text.find("class Unrelated : IReal"), std::string::npos)
+        << text;
+    EXPECT_EQ(text.find("IHidden"), std::string::npos)
+        << "the unnameable interface drops: " << text;
+}
+
 // The readonly struct modifier (the C# ConvertTypeDefinition struct arm).
 TEST(FacadeMemberModifiersTest, ReadonlyStructRenders)
 {

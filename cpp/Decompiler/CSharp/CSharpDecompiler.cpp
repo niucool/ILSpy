@@ -308,6 +308,56 @@ std::string ConstantFieldLiteral(const TS::IField& field) {
     return std::string();
 }
 
+// The C# TypeDefinitionNameableInBaseList (the f41b12c01 fix for #3230):
+// whether a type's base list can NAME the type. A type may name its own
+// nested types (and those of its enclosing types) regardless of
+// accessibility; everything else resolves through the accessibility rules
+// (the MemberLookup.IsAccessible shape for type definitions: private
+// nested only through the exemption; internal within the same module;
+// protected granted through the declaring chain's inheritance (the
+// IsDerivedFrom walk the C# grants type definitions regardless of
+// allowProtectedAccess); public always). Naming `A.I` also requires `A`
+// nameable (the recursion over the declaring type).
+bool TypeDefinitionNameableInBaseList(const TS::ITypeDefinition* td,
+                                      const TS::ITypeDefinition& currentType) {
+    if (td == nullptr)
+        return true;
+    const TS::ITypeDefinition* tdDeclaring = td->DeclaringTypeDefinition();
+    // The nested exemption over the current type's declaring chain.
+    for (const TS::ITypeDefinition* t = &currentType; t != nullptr;
+         t = t->DeclaringTypeDefinition()) {
+        if (tdDeclaring != nullptr && tdDeclaring == t)
+            return true;
+    }
+    bool internalAccess =
+        td->ParentModule() == currentType.ParentModule();
+    auto protectedAccess = [&]() {
+        // The C# IsProtectedAccessible's grant for type definitions: some
+        // type in the current type's declaring chain derives from the
+        // named type's declaring type.
+        for (const TS::ITypeDefinition* t = &currentType; t != nullptr;
+             t = t->DeclaringTypeDefinition()) {
+            if (tdDeclaring != nullptr && TS::IsDerivedFrom(*t, tdDeclaring))
+                return true;
+        }
+        return false;
+    };
+    switch (td->Accessibility()) {
+        case TS::Accessibility::Private:
+            return false;
+        case TS::Accessibility::Internal:
+            return internalAccess;
+        case TS::Accessibility::Protected:
+            return protectedAccess();
+        case TS::Accessibility::ProtectedOrInternal:
+            return internalAccess || protectedAccess();
+        case TS::Accessibility::ProtectedAndInternal:
+            return internalAccess && protectedAccess();
+        default:
+            return true;
+    }
+}
+
 // The C# ConvertAccessor's accessibility modifier: rendered only when the
 // accessor's accessibility differs from the property's.
 std::string AccessorVisibilityText(const TS::IMethod* accessor,
@@ -514,6 +564,17 @@ bool DecompileTypeToStringBody(
                  typeDef->DirectBaseTypes()) {
                 if (baseType == nullptr)
                     continue;
+                // The C# BaseTypeAccessibleFrom: an interface the base list
+                // cannot name drops (the transitive interface-impl
+                // propagation can name shapes valid C# cannot). The
+                // generic type-argument walk (the BaseListNameabilityVisitor
+                // over the whole type) rides with the resolver surface; the
+                // direct definition check covers the corpus shapes.
+                if (baseType->Kind() == TS::TypeKind::Interface &&
+                    !TypeDefinitionNameableInBaseList(baseType->GetDefinition(),
+                                                      *typeDef)) {
+                    continue;
+                }
                 if (t.Kind == TS::TypeKind::Enum &&
                     TS::IsKnownType(*baseType, TS::KnownTypeCode::Enum)) {
                     // the enum's underlying type replaces System.Enum
