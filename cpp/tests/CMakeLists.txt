@@ -61,6 +61,10 @@ add_executable(ilspy_tests
     Decompiler/Disassembler/DisassemblerHelpers_Test.cpp
     Decompiler/Disassembler/ILParser_Test.cpp
     Decompiler/Disassembler/ILStructure_Test.cpp
+    Decompiler/Disassembler/WriteValue_Test.cpp
+    Decompiler/Disassembler/WriteDecodedCustomAttributeBlob_Test.cpp
+    Decompiler/Disassembler/IlParityGolden_Test.cpp
+    Decompiler/Disassembler/TryDecodeSecurityDeclaration_Test.cpp
     Decompiler/Disassembler/MethodBodyDisassembler_Test.cpp
     Decompiler/Disassembler/ReflectionDisassembler_Test.cpp
     Decompiler/Disassembler/SortByNameProcessor_Test.cpp
