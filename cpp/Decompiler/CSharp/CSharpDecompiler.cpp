@@ -46,12 +46,16 @@
 #include "Decompiler/CSharp/OutputVisitor/GenericGrammarAmbiguityVisitor.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/PartialTypeInfo.hpp"
+#include "Decompiler/Metadata/UniversalAssemblyResolver.hpp"
+#include "Decompiler/Metadata/DotNetCorePathFinderExtensions.hpp"
+#include "Decompiler/TypeSystem/DecompilerTypeSystem.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/IL/Transforms/GetILTransforms.hpp"
 #include "Decompiler/IL/ILReader.hpp"
 
 #include <map>
+#include <optional>
 #include <utility>
 
 namespace ILSpy::Decompiler::CSharp {
@@ -153,50 +157,13 @@ bool CSharpDecompiler::DecompileMethodToString(
 
 
 // The C# instance ctor's type-system wiring (`typeSystem = new
-// DecompilerTypeSystem(module, settings)`, CSharpDecompiler.cs line 218):
-// the port's static entries build it per call -- a minimal single-module
-// compilation over the metadata file (the MainModule set after the module
-// binds the compilation reference, the MetadataModule_Test pattern). The
-// hand-rolled shape rides until the instance surface lands (the C#
-// PEFile-as-IModuleReference resolution needs no compilation; the port's
-// MetadataModule ctor takes the compilation reference first).
-class SingleModuleCompilation : public TS::ICompilation {
-public:
-    void SetMainModule(const TS::IModule* module) { mainModule_ = module; }
-
-    const TS::IModule& MainModule() const override { return *mainModule_; }
-    std::vector<const TS::IModule*> Modules() const override {
-        return std::vector<const TS::IModule*>{mainModule_};
-    }
-    std::vector<const TS::IModule*> ReferencedModules() const override {
-        return {};
-    }
-    const TS::INamespace& RootNamespace() const override {
-        return mainModule_->RootNamespace();
-    }
-    const TS::INamespace* GetNamespaceForExternAlias(
-        const std::string&) const override {
-        return nullptr;
-    }
-    const TS::IType& FindType(TS::KnownTypeCode) const override {
-        return knownType_;
-    }
-    const TS::StringComparer& NameComparer() const override {
-        return TS::StringComparer::Ordinal();
-    }
-    const ::ILSpy::Decompiler::Util::CacheManager& CacheManager()
-        const override {
-        return cacheManager_;
-    }
-    TS::TypeSystemOptions TypeSystemOptions() const override {
-        return TS::TypeSystemOptions::Default;
-    }
-
-private:
-    const TS::IModule* mainModule_ = nullptr;
-    ::ILSpy::Decompiler::Util::CacheManager cacheManager_;
-    TS::KnownType knownType_{TS::KnownTypeCode::Object};
-};
+// DecompilerTypeSystem(module, settings)`, CSharpDecompiler.cs line 218)
+// ports as the DecompilerTypeSystem over the referenced-assembly set: the
+// resolver's search directory is the main file's own directory, every
+// AssemblyReference row resolves through it (the plain first-level arm;
+// the facade/implicit-reference arms ride deferred -- the
+// DecompilerTypeSystem.hpp notes), and a TypeRef scoped to an AssemblyRef
+// resolves into the referenced module's real entity.
 
 
 // The render body the static and instance DecompileTypeToString entries
@@ -388,16 +355,14 @@ bool DecompileTypeToStringBody(
 bool CSharpDecompiler::DecompileTypeToString(
     const Metadata::MetadataFile& file, std::uint32_t typeToken,
     std::string& out) {
-    // The static scaffold's per-call wiring (the SingleModuleCompilation
-    // note): each call builds the compilation/module pair the instance
-    // ctor builds once.
-    SingleModuleCompilation compilation;
-    TS::MetadataModule module{compilation, &file,
-                              TS::TypeSystemOptions::Default};
-    compilation.SetMainModule(&module);
+    // The static scaffold's per-call wiring (the note above): the resolver
+    // + the reference-loaded type system, one pair per call.
+    Metadata::UniversalAssemblyResolver resolver(
+        file.FileName(), false, Metadata::DetectTargetFrameworkId(file));
+    TS::DecompilerTypeSystem typeSystem(file, resolver);
     return DecompileTypeToStringBody(
-        file, module, FindRegisteredPartialType(typeToken), typeToken,
-        out);
+        file, typeSystem.MainMetadataModule(),
+        FindRegisteredPartialType(typeToken), typeToken, out);
 }
 
 namespace {
@@ -440,14 +405,17 @@ void CSharpDecompiler::ClearPartialTypes() {
 
 // ---- the instance surface (the C# CSharpDecompiler object) ----
 
-// The per-instance state behind the pimpl: the type-system wiring (the
-// single-module compilation placeholder + the module the instance built
-// once), the partial-types registry (the C# `readonly Dictionary<...>`
-// field -- per-instance, unlike the process-global static above), the
-// settings copy, and the file the wiring was built over.
+// The per-instance state behind the pimpl: the resolver + the
+// reference-loaded type system (the C# typeSystem field; the resolver
+// rides FIRST -- its keep-alive registry owns the loaded referenced files,
+// and the reverse-declaration destruction order tears the type system
+// down before the registry), the partial-types registry (the C#
+// `readonly Dictionary<...>` field -- per-instance, unlike the
+// process-global static above), the settings copy, and the file the wiring
+// was built over.
 struct CSharpDecompiler::InstanceState {
-    SingleModuleCompilation compilation;
-    std::unique_ptr<TS::MetadataModule> module;
+    std::unique_ptr<Metadata::UniversalAssemblyResolver> resolver;
+    std::optional<TS::DecompilerTypeSystem> typeSystem;
     std::map<std::uint32_t, Metadata::PartialTypeInfo> partialTypes;
     // The C# holds the settings REFERENCE (the caller's mutable object);
     // the port copies -- the caller-side mutation between calls lands
@@ -460,15 +428,19 @@ CSharpDecompiler::CSharpDecompiler(
     const Metadata::MetadataFile& file,
     const ::ILSpy::Decompiler::DecompilerSettings& settings)
     : state_(std::make_unique<InstanceState>()) {
-    // The C# ctor's DecompilerTypeSystem wiring: the module binds the
-    // compilation reference first, then the compilation adopts the module
-    // as its main module (the MetadataModule_Test pattern; the
-    // SingleModuleCompilation placeholder note above).
+    // The C# CreateTypeSystemFromFile's resolver shape: the resolver over
+    // the main file's own name (the ctor derives the base directory and
+    // registers it as the FIRST search directory). The CLI's GetDecompiler
+    // passes throwOnError FALSE (an unresolved reference degrades to the
+    // name-only fallbacks, never a ResolutionException); the port adopts
+    // the CLI shape -- the settings.ThrowOnAssemblyResolveErrors arm rides
+    // with the settings-driven resolver ctor.
     state_->settings = settings;
     state_->file = &file;
-    state_->module = std::make_unique<TS::MetadataModule>(
-        state_->compilation, &file, TS::TypeSystemOptions::Default);
-    state_->compilation.SetMainModule(state_->module.get());
+    state_->resolver =
+        std::make_unique<Metadata::UniversalAssemblyResolver>(
+            file.FileName(), false, Metadata::DetectTargetFrameworkId(file));
+    state_->typeSystem.emplace(file, *state_->resolver);
 }
 
 CSharpDecompiler::~CSharpDecompiler() = default;
@@ -479,7 +451,8 @@ std::string CSharpDecompiler::DecompileWholeModuleToString() {
     // metadata order through the instance entries (the registry
     // consults this instance's map).
     std::string out;
-    out += DecompileModuleAndAssemblyAttributesToString(*state_->module);
+    out += DecompileModuleAndAssemblyAttributesToString(
+        state_->typeSystem->MainMetadataModule());
     for (const auto& t : state_->file->TypeDefs()) {
         if (t.Name == "<Module>")
             continue;
@@ -492,9 +465,9 @@ std::string CSharpDecompiler::DecompileWholeModuleToString() {
 
 bool CSharpDecompiler::DecompileTypeToString(
     std::uint32_t typeToken, std::string& out) {
-    return DecompileTypeToStringBody(*state_->file, *state_->module,
-                                     FindPartialTypeInfo(typeToken),
-                                     typeToken, out);
+    return DecompileTypeToStringBody(
+        *state_->file, state_->typeSystem->MainMetadataModule(),
+        FindPartialTypeInfo(typeToken), typeToken, out);
 }
 
 void CSharpDecompiler::AddPartialTypeDefinition(
@@ -641,16 +614,16 @@ std::string CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
 // with the statement-building back end.
 std::string CSharpDecompiler::DecompileWholeModuleToString(
     const ::ILSpy::Decompiler::Metadata::MetadataFile& file) {
-    // The C# instance's type-system wiring (the SingleModuleCompilation
-    // note above).
-    SingleModuleCompilation compilation;
-    TS::MetadataModule module{compilation, &file, TS::TypeSystemOptions::Default};
-    compilation.SetMainModule(&module);
+    // The static scaffold's per-call wiring (the note above).
+    Metadata::UniversalAssemblyResolver resolver(
+        file.FileName(), false, Metadata::DetectTargetFrameworkId(file));
+    TS::DecompilerTypeSystem typeSystem(file, resolver);
 
     std::string out;
     // The leading attribute sections (the whole-module path's
     // DoDecompileModuleAndAssemblyAttributes call at line 917).
-    out += DecompileModuleAndAssemblyAttributesToString(module);
+    out += DecompileModuleAndAssemblyAttributesToString(
+        typeSystem.MainMetadataModule());
     // The types (the C# DoDecompileTypes loop in metadata order).
     for (const auto& t : file.TypeDefs()) {
         if (t.Name == "<Module>")
