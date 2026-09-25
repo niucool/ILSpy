@@ -393,7 +393,8 @@ TEST(CSharpDecompilerTest, InstanceDecompilerOwnsItsPartialTypes)
     CSharp::CSharpDecompiler decompiler(file, settings);
     // The instance renders the whole module.
     std::string whole = decompiler.DecompileWholeModuleToString();
-    EXPECT_NE(whole.find("public partial class Page1"), std::string::npos);
+    EXPECT_NE(whole.find("public class Page1 : Application, IComponentConnector"),
+              std::string::npos);
     // The partial-type registration hides the member in THIS instance's
     // render.
     Metadata::PartialTypeInfo info(page1Token);
@@ -424,7 +425,8 @@ TEST(CSharpDecompilerTest, DecompileWholeModuleRendersAttributesAndTypes)
     EXPECT_NE(text.find("[module:"), std::string::npos);
     // Every type renders (metadata order); the <Module> placeholder is
     // skipped.
-    EXPECT_NE(text.find("public partial class Page1"), std::string::npos);
+    EXPECT_NE(text.find("public class Page1 : Application, IComponentConnector"),
+              std::string::npos);
     EXPECT_EQ(text.find("<Module>"), std::string::npos);
     // The members ride the type bodies (the property surface lands with
     // this same entry's type loop).
@@ -713,10 +715,14 @@ TEST(CSharpDecompilerTest, DecompileTypeEmitsPartialHeader)
         std::string text;
         ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
             module, t.Token, text));
-        // The XAML code-behind is generated as a partial class (the
-        // InitializeComponent half).
-        EXPECT_NE(text.find("public partial class Page1"), std::string::npos)
-            << "the partial type header renders";
+        // A type with no registered partial half carries no partial
+        // modifier (the C# partialTypeInfo != null arm); the faithful
+        // header carries the accessibility and the base types.
+        EXPECT_NE(text.find("public class Page1 : Application, IComponentConnector"),
+                  std::string::npos)
+            << "the type header renders: " << text;
+        EXPECT_EQ(text.find("public partial class Page1"), std::string::npos)
+            << "no partial half is registered: " << text;
         if (std::getenv("TET_TRACE")) {
             std::fprintf(stderr, "TET-TYPE: %s\n", text.c_str());
         }

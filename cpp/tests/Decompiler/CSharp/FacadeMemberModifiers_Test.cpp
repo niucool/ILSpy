@@ -211,6 +211,90 @@ TEST(FacadeMemberModifiersTest, PropertyAndEventModifiersRender)
     EXPECT_NE(text.find("public virtual event"), std::string::npos) << text;
 }
 
+// The type declaration modifiers: the accessibility, static/abstract/
+// sealed, and the kind adjustments (a struct/enum drops sealed, an
+// interface drops abstract), derived from the type entity the same way
+// the members' modifiers are.
+TEST(FacadeMemberModifiersTest, TypeModifiersRender)
+{
+    std::string text;
+    if (!RenderType(kModifierFixture, "ModifierShapes", text))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    EXPECT_TRUE(text.find("public class ModifierShapes") != std::string::npos)
+        << text;
+    EXPECT_TRUE(text.find("public partial class ModifierShapes") ==
+                std::string::npos)
+        << "a type with no registered partial half carries no partial: "
+        << text;
+    std::string derived;
+    if (!RenderType(kModifierFixture, "Derived", derived))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    EXPECT_NE(derived.find("public sealed class Derived"), std::string::npos)
+        << derived;
+    std::string abstractShapes;
+    if (!RenderType(kModifierFixture, "AbstractShapes", abstractShapes))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    EXPECT_NE(abstractShapes.find("public abstract class AbstractShapes"),
+              std::string::npos)
+        << abstractShapes;
+    std::string iface;
+    if (!RenderType(kModifierFixture, "IShape", iface))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    EXPECT_NE(iface.find("public interface IShape"), std::string::npos)
+        << iface;
+    EXPECT_EQ(iface.find("public abstract interface IShape"),
+              std::string::npos)
+        << iface;
+}
+
+// The base-type list: the entity's direct base types minus the elided
+// System.Object, the struct's System.ValueType, and the enum's
+// System.Enum (replaced by the underlying type when not int).
+TEST(FacadeMemberModifiersTest, BaseTypesRender)
+{
+    std::string text;
+    if (!RenderType(kModifierFixture, "ModifierShapes", text))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    EXPECT_NE(text.find("class ModifierShapes : IShape"), std::string::npos)
+        << text;
+    std::string derived;
+    if (!RenderType(kModifierFixture, "Derived", derived))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    EXPECT_NE(derived.find("class Derived : ModifierShapes"),
+              std::string::npos)
+        << derived;
+    // The connid corpus: Page1's Application base and the
+    // IComponentConnector interface.
+    std::string path = ::ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    Metadata::MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+    std::string page1;
+    for (const auto& t : file.TypeDefs()) {
+        if (std::string(t.Name) != "Page1")
+            continue;
+        ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
+            file, t.Token, page1));
+        break;
+    }
+    ASSERT_FALSE(page1.empty());
+    EXPECT_NE(page1.find("class Page1 : Application, IComponentConnector"),
+              std::string::npos)
+        << page1;
+}
+
+// The readonly struct modifier (the C# ConvertTypeDefinition struct arm).
+TEST(FacadeMemberModifiersTest, ReadonlyStructRenders)
+{
+    std::string text;
+    if (!RenderType("/home/jim/ilspy-test-fixtures/refreadonly_fixture/"
+                    "RefReadOnlyFixture.dll",
+                    "Point", text))
+        GTEST_SKIP() << "the refreadonly fixture is not provisioned";
+    EXPECT_NE(text.find("public readonly struct Point"), std::string::npos)
+        << text;
+}
+
 // The static constructor (the .cctor the static readonly field's
 // initializer produces) renders with the static modifier and no
 // accessibility (the C# NeedsAccessibility static-ctor arm), while the

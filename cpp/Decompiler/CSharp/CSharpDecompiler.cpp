@@ -284,11 +284,19 @@ bool DecompileTypeToStringBody(
     // constructor).
     std::string typeName;
     // The type declaration header (the C# DecompileType's
-    // `TypeDeclaration` emission): `public partial class Name` -- the
-    // partial modifier rides the generated-half convention (the XAML
-    // code-behind shape) whenever the type renders members; the
-    // `Kind`-specific keyword (struct/interface) follows the
-    // TypeDef kind.
+    // `TypeDeclaration` emission): the modifiers through
+    // ConvertTypeDefinition's composition (the accessibility, the
+    // static/abstract/sealed else-if chain, the kind adjustments -- a
+    // struct/enum drops sealed, an interface drops abstract, a readonly
+    // struct gains readonly), the partial modifier only when the type has a
+    // registered partial half (the C# `partialTypeInfo != null` arm; the
+    // port's earlier unconditional partial was a stand-in), the
+    // `Kind`-specific keyword (struct/interface), and the base-type list
+    // (the C# ShowBaseTypes iteration: the entity's direct base types with
+    // System.Object elided, the struct's System.ValueType elided, and the
+    // enum's System.Enum replaced by the underlying type when not int;
+    // the C#'s interface-name-accessibility filter (BaseTypeAccessibleFrom)
+    // is deferred with the resolver surface).
     for (const auto& t : file.TypeDefs()) {
         if (t.Token != typeToken) continue;
         typeName = t.Name;
@@ -308,10 +316,79 @@ bool DecompileTypeToStringBody(
         // flat render carries the namespace in the call-site comment (the
         // CLI's `// MyApp.Page1` header), so the declaration carries the
         // bare name.
-        out += "public partial ";
+        SyntaxNS::Modifiers typeModifiers = SyntaxNS::Modifiers::None;
+        const TS::ITypeDefinition* typeDef = module.GetDefinition(t.Token);
+        if (typeDef != nullptr) {
+            typeModifiers = SyntaxNS::ModifierFromAccessibility(
+                typeDef->Accessibility(), /*usePrivateProtected=*/true);
+            if (typeDef->IsStatic())
+                typeModifiers = typeModifiers |
+                                SyntaxNS::Modifiers::Static;
+            else if (typeDef->IsAbstract())
+                typeModifiers = typeModifiers |
+                                SyntaxNS::Modifiers::Abstract;
+            else if (typeDef->IsSealed())
+                typeModifiers = typeModifiers | SyntaxNS::Modifiers::Sealed;
+            if (t.Kind == TS::TypeKind::Struct ||
+                t.Kind == TS::TypeKind::Enum)
+                typeModifiers = typeModifiers &
+                                ~SyntaxNS::Modifiers::Sealed;
+            if (t.Kind == TS::TypeKind::Interface)
+                typeModifiers = typeModifiers &
+                                ~SyntaxNS::Modifiers::Abstract;
+            if (t.Kind == TS::TypeKind::Struct && typeDef->IsReadOnly())
+                typeModifiers = typeModifiers |
+                                SyntaxNS::Modifiers::Readonly;
+        }
+        if (partialType != nullptr)
+            typeModifiers = typeModifiers | SyntaxNS::Modifiers::Partial;
+        for (SyntaxNS::Modifiers modifier :
+             SyntaxNS::CSharpModifiers::AllModifiers) {
+            if (modifier == SyntaxNS::Modifiers::Any)
+                continue;
+            if ((typeModifiers & modifier) == modifier)
+                out += SyntaxNS::CSharpModifiers::GetModifierName(modifier) +
+                       std::string(" ");
+        }
         out += keyword;
         out += ' ';
         out += t.Name;
+        if (typeDef != nullptr) {
+            std::vector<std::string> baseTypeNames;
+            for (const TS::ITypePtr& baseType :
+                 typeDef->DirectBaseTypes()) {
+                if (baseType == nullptr)
+                    continue;
+                if (t.Kind == TS::TypeKind::Enum &&
+                    TS::IsKnownType(*baseType, TS::KnownTypeCode::Enum)) {
+                    // the enum's underlying type replaces System.Enum
+                    // (rendered only when not int)
+                    auto underlying = typeDef->EnumUnderlyingType();
+                    if (underlying != nullptr &&
+                        !TS::IsKnownType(*underlying,
+                                         TS::KnownTypeCode::Int32))
+                        baseTypeNames.push_back(
+                            IL::CSharpTypeName(underlying));
+                    continue;
+                }
+                if ((t.Kind == TS::TypeKind::Struct) &&
+                    TS::IsKnownType(*baseType,
+                                    TS::KnownTypeCode::ValueType)) {
+                    continue;
+                }
+                if (TS::IsKnownType(*baseType, TS::KnownTypeCode::Object)) {
+                    continue;
+                }
+                baseTypeNames.push_back(IL::CSharpTypeName(baseType));
+            }
+            if (!baseTypeNames.empty()) {
+                out += " : ";
+                for (std::size_t i = 0; i < baseTypeNames.size(); ++i) {
+                    if (i != 0) out += ", ";
+                    out += baseTypeNames[i];
+                }
+            }
+        }
         out += "\n{\n";
         rendered = true;
         break;
