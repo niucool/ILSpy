@@ -1533,10 +1533,13 @@ std::uint32_t MetadataFile::GetEventTypeToken(
     std::uint32_t row = eventToken & 0x00FFFFFFu;
     if (table != 0x14 || row == 0 || row > impl_->db->Event.size()) return 0;
     try {
+        // The C# `eventDefinition.Type`: the Event.Type coded index decoded
+        // to its EntityHandle. The tag-0 (TypeDefinition) arm keeps the row
+        // 0 -- the C# `TypeDefinitionHandle(0)` is a NIL handle whose
+        // WriteTo renders `<nil>` -- so a nil Type column is a rendered
+        // `<nil>` event, not a throw (the sweep's capa07 events).
         std::uint32_t v = impl_->db->Event.get_value<std::uint32_t>(row - 1, 2);
-        if (v == 0) return 0;
         std::uint32_t rid = v >> 2;
-        if (rid == 0) return 0;
         switch (v & 0x3u) {
             case 0:  // TypeDef
                 return (0x02u << 24) | rid;
