@@ -68,6 +68,7 @@ add_executable(ilspy_tests
     Decompiler/Disassembler/SortByNameProcessor_Test.cpp
     Decompiler/Disassembler/WriteValue_Test.cpp
     Decompiler/Disassembler/WriteDecodedCustomAttributeBlob_Test.cpp
+    Decompiler/Disassembler/IlParityGolden_Test.cpp
     Decompiler/Disassembler/TryDecodeSecurityDeclaration_Test.cpp
     Decompiler/DebugInfo/IDebugInfoProvider_Test.cpp
     ILSpyX/PdbProvider/PortableDebugInfoProvider_Test.cpp
@@ -591,6 +592,10 @@ add_executable(ilspy_tests
     Decompiler/IL/Transforms/ReduceNestingTransform_Test.cpp
 )
 target_include_directories(ilspy_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# The parity-manifest test reads its committed data file relative to the
+# tests source tree (data files are not on the include path).
+target_compile_definitions(ilspy_tests PRIVATE
+    ILSPY_TESTS_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(ilspy_tests PRIVATE
     ILSpy::ilspy
     GTest::gtest
