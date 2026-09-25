@@ -1119,12 +1119,12 @@ public:
         for (Syntax::Statement* statement : m.Get<Syntax::Statement>("statements"))
             body->Statements().Add(Syntax::Detach(statement));
         auto* foreachStmt = new Syntax::ForeachStatement();
-        // (The C# `context.Settings.AnonymousTypes &&
-        // itemVariable.Type.ContainsAnonymousType()` `var` decision is
-        // DEFERRED with the NRExtensions anonymous-type walk; the explicit
-        // ConvertType form is always used.)
         foreachStmt->VariableType(
-            context->TypeSystemAstBuilder->ConvertType(*itemVariable->Type));
+            context->DecompileRun->Settings().AnonymousTypes() &&
+                    TS::ContainsAnonymousType(*itemVariable->Type)
+                ? static_cast<Syntax::AstType*>(new Syntax::SimpleType("var"))
+                : context->TypeSystemAstBuilder->ConvertType(
+                      *itemVariable->Type));
         auto* designation = new Syntax::SingleVariableDesignation();
         designation->Identifier(itemVariable->Name);
         foreachStmt->VariableDesignation(designation);
@@ -1346,7 +1346,11 @@ public:
             body->Statements().Add(Syntax::Detach(statement));
         auto* foreachStmt = new Syntax::ForeachStatement();
         foreachStmt->VariableType(
-            context->TypeSystemAstBuilder->ConvertType(*itemVariable->Type));
+            context->DecompileRun->Settings().AnonymousTypes() &&
+                    TS::ContainsAnonymousType(*itemVariable->Type)
+                ? static_cast<Syntax::AstType*>(new Syntax::SimpleType("var"))
+                : context->TypeSystemAstBuilder->ConvertType(
+                      *itemVariable->Type));
         auto* designation = new Syntax::SingleVariableDesignation();
         designation->Identifier(itemVariable->Name);
         foreachStmt->VariableDesignation(designation);
@@ -1485,12 +1489,12 @@ public:
         assert(body != nullptr);
         body->Statements().At(0)->Remove();
         auto* foreachStmt = new Syntax::ForeachStatement();
-        // (The C# `context.Settings.AnonymousTypes &&
-        // itemVariable.Type.ContainsAnonymousType()` `var` decision is
-        // DEFERRED with the NRExtensions anonymous-type walk; the explicit
-        // ConvertType form is always used.)
         foreachStmt->VariableType(
-            context->TypeSystemAstBuilder->ConvertType(*itemVariable->Type));
+            context->DecompileRun->Settings().AnonymousTypes() &&
+                    TS::ContainsAnonymousType(*itemVariable->Type)
+                ? static_cast<Syntax::AstType*>(new Syntax::SimpleType("var"))
+                : context->TypeSystemAstBuilder->ConvertType(
+                      *itemVariable->Type));
         auto* designation = new Syntax::SingleVariableDesignation();
         designation->Identifier(itemVariable->Name);
         foreachStmt->VariableDesignation(designation);

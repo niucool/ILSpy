@@ -415,6 +415,30 @@ ITypePtr GetElementTypeFromIEnumerable(const IType& collectionType,
 // guards because it reads raw metadata rows).
 bool IsCompilerGeneratedOrIsInCompilerGeneratedClass(const IEntity* entity);
 
+// The C# `public static bool HasGeneratedName(this IType type)` (NRExtensions.cs
+// line 51, over SRMExtensions' internal IsGeneratedName): whether the type's
+// name carries the mangled prefix the compilers use for declarations with no
+// user-written form (a leading '<' or an embedded '$' -- neither is legal in a
+// C# or VB identifier).
+bool HasGeneratedName(const IType& type);
+
+// The C# `static bool HasOnlyReadOnlyProperties(ITypeDefinition type)`
+// (NRExtensions.cs line 67): every property of the type is read-only (the
+// C# anonymous-type shape -- all members take part in Equals/GetHashCode and
+// are immutable).
+bool HasOnlyReadOnlyProperties(const ITypeDefinition& type);
+
+// The C# `public static bool IsAnonymousType(this IType type)` (NRExtensions.cs
+// line 79): a C# anonymous type -- the compiler-generated, empty-namespace
+// generated-name shape whose properties are all read-only. A settable
+// property (the VB shape) keeps its own declaration.
+bool IsAnonymousType(const IType& type);
+
+// The C# `public static bool ContainsAnonymousType(this IType type)`
+// (NRExtensions.cs line 99): whether any type nested in the composition is an
+// anonymous type (the `var` decision for declarations over such a type).
+bool ContainsAnonymousType(const IType& type);
+
 // The C# `internal static bool IsPotentialClosure(ITypeDefinition
 // decompiledTypeDefinition, ITypeDefinition potentialDisplayClass, bool
 // allowTypeImplementingInterfaces = false)` (TransformDisplayClassUsage.cs) --

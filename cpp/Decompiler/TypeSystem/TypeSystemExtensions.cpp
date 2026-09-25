@@ -38,6 +38,7 @@
 #include "Decompiler/TypeSystem/IProperty.hpp"
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"  // GetTypeName (IsKnownType)
+#include "Decompiler/TypeSystem/TypeVisitor.hpp"
 #include "Decompiler/TypeSystem/StringComparer.hpp"
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"
 
@@ -561,6 +562,74 @@ bool IsCompilerGeneratedOrIsInCompilerGeneratedClass(const IEntity* entity)
     if (entity->HasAttribute(KnownAttribute::CompilerGenerated))
         return true;
     return IsCompilerGeneratedOrIsInCompilerGeneratedClass(entity->DeclaringTypeDefinition());
+}
+
+// The C# `HasGeneratedName(this IType)` (NRExtensions.cs line 51, over
+// SRMExtensions' internal `IsGeneratedName(string)` line 513).
+bool HasGeneratedName(const IType& type)
+{
+    const std::string& name = type.Name();
+    return (!name.empty() && name[0] == '<') || name.find('$') != std::string::npos;
+}
+
+// The C# `HasOnlyReadOnlyProperties` (NRExtensions.cs line 67).
+bool HasOnlyReadOnlyProperties(const ITypeDefinition& type)
+{
+    for (const IProperty* property : type.GetProperties()) {
+        if (property->CanSet())
+            return false;
+    }
+    return true;
+}
+
+// The C# `IsAnonymousType(this IType)` (NRExtensions.cs line 79).
+bool IsAnonymousType(const IType& type)
+{
+    if (type.Namespace().empty() && HasGeneratedName(type)
+        && (type.Name().find("AnonType") != std::string::npos
+            || type.Name().find("AnonymousType") != std::string::npos)) {
+        const ITypeDefinition* td = type.GetDefinition();
+        return td != nullptr
+            && td->HasAttribute(KnownAttribute::CompilerGenerated)
+            && HasOnlyReadOnlyProperties(*td);
+    }
+    return false;
+}
+
+namespace {
+
+// The C# `ContainsAnonTypeVisitor` (NRExtensions.cs line 105): the TypeVisitor
+// recording whether any visited type is an anonymous type. The default
+// VisitOtherType/VisitTypeDefinition arms cover the kinds with no specific
+// visit (the anonymous-type shapes are definitions or the `other` kinds).
+class ContainsAnonTypeVisitor : public TypeVisitor {
+public:
+    bool ContainsAnonType = false;
+
+    ITypePtr VisitTypeDefinition(ITypeDefinition& type) override {
+        if (IsAnonymousType(type))
+            ContainsAnonType = true;
+        return TypeVisitor::VisitTypeDefinition(type);
+    }
+
+    ITypePtr VisitOtherType(IType& type) override {
+        if (IsAnonymousType(type))
+            ContainsAnonType = true;
+        return TypeVisitor::VisitOtherType(type);
+    }
+};
+
+} // namespace
+
+// The C# `ContainsAnonymousType(this IType)` (NRExtensions.cs line 99).
+bool ContainsAnonymousType(const IType& type)
+{
+    ContainsAnonTypeVisitor visitor;
+    // The C# type.AcceptVisitor(visitor) -- the mutable walk (the established
+    // const_cast convention for the type-system's mutable objects behind
+    // const references).
+    const_cast<IType&>(type).AcceptVisitor(visitor);
+    return visitor.ContainsAnonType;
 }
 
 // The C# `IsPotentialClosure` (TransformDisplayClassUsage.cs): the display-class

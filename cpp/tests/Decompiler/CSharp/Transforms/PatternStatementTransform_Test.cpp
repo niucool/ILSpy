@@ -1025,6 +1025,108 @@ TEST(PatternStatementTransformTest,
         << "a call inside a nested loop container keeps the for loop";
 }
 
+// The anonymous-type `var` decision (the C# foreach arms' VariableType
+// form): an item whose type is a C# anonymous type (when the
+// AnonymousTypes setting is on) renders the designation's type as `var`
+// instead of the unwritable named form.
+
+// A C#-anonymous-type stub: the compiler-generated, empty-namespace
+// <>f__AnonymousType shape with a configurable property set (the
+// TypeSystemExtensions_Test CompilerGeneratedDef rig shape).
+class AutoPropertyTestAnonType : public TS::TestSupport::LookupTypeDefinition {
+public:
+    AutoPropertyTestAnonType(const TS::ICompilation& compilation)
+        : TS::TestSupport::LookupTypeDefinition(
+              "<>f__AnonymousType0", std::string(),
+              TS::FullTypeName("<>f__AnonymousType0"), TS::TypeKind::Class,
+              TS::Accessibility::Public, compilation, nullptr),
+          getter_(compilation, TS::SymbolKind::Method),
+          property_(compilation) {
+        property_.SetName("A");
+        property_.SetGetter(getter_.Member());
+    }
+    void SetSettable(bool value) {
+        property_.SetSetter(value ? getter_.Member() : nullptr);
+    }
+    bool HasAttribute(TS::KnownAttribute attribute) const override {
+        return attribute == TS::KnownAttribute::CompilerGenerated;
+    }
+    std::vector<const TS::IProperty*> GetProperties(
+        std::function<bool(const TS::IProperty*)> filter = nullptr,
+        TS::GetMemberOptions options = TS::GetMemberOptions::None)
+        const override {
+        (void)filter;
+        (void)options;
+        return {&property_};
+    }
+
+private:
+    // The accessor method stub (the raw-member accessor the property rig
+    // consumes -- the two-IMethod-subobject diamond resolved by the first
+    // base).
+    class MethodStub : public TSImpl::FakeMethod {
+    public:
+        using TSImpl::FakeMethod::FakeMethod;
+        const TS::IMethod* Member() const {
+            return static_cast<const TS::IMethod*>(
+                static_cast<const TSImpl::FakeMethod*>(this));
+        }
+    };
+    MethodStub getter_;
+    // The property over the getter (read-only by default; SetSettable
+    // adds the setter).
+    TSImpl::FakeProperty property_;
+};
+
+TEST(PatternStatementTransformTest, ForeachOnArrayUsesVarForAnonymousType)
+{
+    PatternStatementFixture fx;
+    // A C# anonymous type: compiler-generated, empty namespace, the
+    // <>f__AnonymousType name, read-only properties (the
+    // TypeSystemExtensions_Test rig shape).
+    auto anon = std::make_shared<AutoPropertyTestAnonType>(fx.compilation);
+    auto loop = MakeForeachArrayLoop();
+    loop.item->Type = anon;
+
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    block->Statements().Add(loop.forStatement);
+
+    RunTransform(*block, fx);
+
+    auto* foreachStmt =
+        dynamic_cast<Syntax::ForeachStatement*>(block->Statements().At(0));
+    ASSERT_NE(foreachStmt, nullptr);
+    auto* varType =
+        dynamic_cast<Syntax::SimpleType*>(foreachStmt->VariableType());
+    ASSERT_NE(varType, nullptr)
+        << "the anonymous item renders the `var` form";
+    EXPECT_EQ(varType->Identifier(), "var");
+}
+
+// A non-anonymous item keeps the explicit type form (ConvertType).
+TEST(PatternStatementTransformTest, ForeachOnArrayUsesExplicitTypeForPlainItems)
+{
+    PatternStatementFixture fx;
+    auto loop = MakeForeachArrayLoop();
+    // A settable property makes the shape a VB anonymous type -- not a C#
+    // anonymous type (the named-declaration form).
+    auto anon = std::make_shared<AutoPropertyTestAnonType>(fx.compilation);
+    anon->SetSettable(true);
+    loop.item->Type = anon;
+
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    block->Statements().Add(loop.forStatement);
+
+    RunTransform(*block, fx);
+
+    auto* foreachStmt =
+        dynamic_cast<Syntax::ForeachStatement*>(block->Statements().At(0));
+    ASSERT_NE(foreachStmt, nullptr);
+    ASSERT_NE(foreachStmt->VariableType(), nullptr);
+    EXPECT_NE(foreachStmt->VariableType()->ToString(nullptr), "var")
+        << "a settable-property anonymous type keeps the explicit form";
+}
+
 // The index must be a pure counter (2 stores, 3 loads, no addresses).
 TEST(PatternStatementTransformTest, ForeachOnArrayRequiresTheIndexCounts)
 {

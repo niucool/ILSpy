@@ -36,6 +36,7 @@
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/IParameter.hpp"
 #include "Decompiler/TypeSystem/IProperty.hpp"
+#include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/LookupStubs.hpp"
 #include "Decompiler/TypeSystem/TypeKind.hpp"
@@ -50,6 +51,7 @@
 #include <vector>
 
 namespace TS = ILSpy::Decompiler::TypeSystem;
+namespace Impl = ILSpy::Decompiler::TypeSystem::Implementation;
 using TS::TestSupport::LookupCompilation;
 using TS::TestSupport::LookupMethod;
 using TS::TestSupport::LookupTypeDefinition;
@@ -1319,4 +1321,64 @@ TEST(TypeSystemExtensionsTest, IsUnmanagedTypeClassAndInterfaceAreFalse) {
     EXPECT_FALSE(TS::IsUnmanagedType(*classDef, true));
     auto ifaceDef = MakeDefinition(compilation, "I", "Ns", TS::TypeKind::Interface);
     EXPECT_FALSE(TS::IsUnmanagedType(*ifaceDef, true));
+}
+
+// ---- IsAnonymousType / ContainsAnonymousType (NRExtensions.cs lines 79-113) ------
+
+// A C# anonymous type: the empty-namespace compiler-generated
+// <>f__AnonymousType shape whose properties are all read-only.
+TEST(TypeSystemExtensionsTest, IsAnonymousTypeAcceptsCSharpShape) {
+    LookupCompilation compilation;
+    auto anon = std::make_shared<CompilerGeneratedDef>(
+        "<>f__AnonymousType0", "", TS::FullTypeName("<>f__AnonymousType0"),
+        TS::TypeKind::Class, TS::Accessibility::Public, compilation, nullptr,
+        TS::KnownTypeCode::None);
+    anon->SetCompilerGenerated(true);
+    auto property = std::make_shared<Impl::FakeProperty>(compilation);
+    property->SetName("A");
+    auto getter = std::make_shared<Impl::FakeMethod>(
+        compilation, TS::SymbolKind::Method);
+    property->SetGetter(getter.get());
+    anon->SetProperties(
+        {static_cast<const TS::IProperty*>(property.get())});
+    EXPECT_TRUE(TS::IsAnonymousType(*anon));
+    // The visitor finds it nested in a composed type (the shared-owned
+    // form -- the visitor walk returns the visited node).
+    auto arrayOverAnon = std::make_shared<TS::ArrayType>(anon);
+    EXPECT_TRUE(TS::ContainsAnonymousType(*arrayOverAnon));
+}
+
+// A VB anonymous type with a settable, non-'Key' property keeps its own
+// declaration (IsAnonymousTypeDeclaredAsNamedType's complement).
+TEST(TypeSystemExtensionsTest, IsAnonymousTypeRejectsSettableProperty) {
+    LookupCompilation compilation;
+    auto anon = std::make_shared<CompilerGeneratedDef>(
+        "VB$AnonymousType_0", "", TS::FullTypeName("VB$AnonymousType_0"),
+        TS::TypeKind::Class, TS::Accessibility::Public, compilation, nullptr,
+        TS::KnownTypeCode::None);
+    anon->SetCompilerGenerated(true);
+    auto property = std::make_shared<Impl::FakeProperty>(compilation);
+    property->SetName("A");
+    auto accessor = std::make_shared<Impl::FakeMethod>(
+        compilation, TS::SymbolKind::Method);
+    property->SetGetter(accessor.get());
+    property->SetSetter(accessor.get());
+    anon->SetProperties(
+        {static_cast<const TS::IProperty*>(property.get())});
+    EXPECT_FALSE(TS::IsAnonymousType(*anon));
+}
+
+// A user-named type is never anonymous, and neither is the plain array
+// over a non-anonymous element.
+TEST(TypeSystemExtensionsTest, IsAnonymousTypeRejectsPlainName) {
+    LookupCompilation compilation;
+    auto plain = std::make_shared<CompilerGeneratedDef>(
+        "Plain", "", TS::FullTypeName("Plain"), TS::TypeKind::Class,
+        TS::Accessibility::Public, compilation, nullptr,
+        TS::KnownTypeCode::None);
+    plain->SetCompilerGenerated(true);
+    EXPECT_FALSE(TS::IsAnonymousType(*plain));
+    auto arrayOverPlain = std::make_shared<TS::ArrayType>(
+        TS::ITypePtr(std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32)));
+    EXPECT_FALSE(TS::ContainsAnonymousType(*arrayOverPlain));
 }
