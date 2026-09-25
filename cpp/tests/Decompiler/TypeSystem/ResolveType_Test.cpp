@@ -485,6 +485,10 @@ TEST(ResolveTypeDirectBaseTypesTest, DirectBaseTypesCacheAndIdentity)
     // Two reads return the same ELEMENTS (the LazyInit cache -- the port's
     // by-value snapshot keeps the shared_ptr identity).
     const TS::ITypeDefinition* str = f.Type("System", "String");
+    // The fixture lookup EXPECTs non-null, but the deref below must not
+    // crash the run before that failure is reported (the PD13 family-run
+    // segfault: a missing or foreign mscorlib fixture yields nulls).
+    ASSERT_NE(str, nullptr);
     std::vector<TS::ITypePtr> first = str->DirectBaseTypes();
     std::vector<TS::ITypePtr> second = str->DirectBaseTypes();
     ASSERT_EQ(first.size(), second.size());
@@ -500,6 +504,7 @@ TEST(ResolveTypeDirectBaseTypesTest, DirectBaseTypesCacheAndIdentity)
     // The interface-fallback Object IS FindType(Object) (the KnownTypeCache
     // resolves through the module's entity cache).
     const TS::ITypeDefinition* comparable = f.Type("System", "IComparable");
+    ASSERT_NE(comparable, nullptr);
     std::vector<TS::ITypePtr> ifBases = comparable->DirectBaseTypes();
     ASSERT_EQ(ifBases.size(), 1u);
     EXPECT_EQ(ifBases[0].get(),
@@ -635,6 +640,10 @@ TEST(ResolveTypeDirectBaseTypesTest, ResolveTypeSpecificationArm)
     // over the type's own generic context.
     const TS::ITypeDefinition* fse = f.Type("System.IO",
                                             "FileSystemEnumerableIterator", 1);
+    // The fixture type is absent from the mono mscorlib (and every run
+    // without the Windows .NET Framework mscorlib the tokens were captured
+    // from); ASSERT before the deref so the run fails instead of crashing.
+    ASSERT_NE(fse, nullptr);
     ASSERT_EQ(fse->MetadataToken(), 0x0200018Fu);
     TS::GenericContext context{ fse->TypeParameters() };
     TS::ITypePtr base = f.module.ResolveType(0x1B00004Eu, context);

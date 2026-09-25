@@ -51,6 +51,7 @@
 //     mscorlib.
 
 #include "TestFixtures/ResolutionFixtures.hpp"
+#include <cstdio>
 #include <cstdlib>
 #include "TestFixtures/TinyNetModule.hpp"
 
@@ -96,6 +97,16 @@ const char* SystemPath() {
 #else
     return "/usr/lib/mono/4.5/System.dll";
 #endif
+}
+
+// The fixture-presence gate the fixture-dependent drives skip on (the
+// ResolveType_Test convention).
+bool FileExists(const char* path) {
+    FILE* file = std::fopen(path, "rb");
+    if (file == nullptr)
+        return false;
+    std::fclose(file);
+    return true;
 }
 
 #if defined(_WIN32)
@@ -309,6 +320,13 @@ TEST(MetadataModuleResolutionTest, ResolveModuleTwoPassFullNameThenName)
 // The FindModuleByReference extension drives the two passes directly.
 TEST(MetadataModuleResolutionTest, FindModuleByReferenceTwoPasses)
 {
+    // The System.dll assembly-reference rows the drives index into are
+    // fixture-specific; without the fixture files the run must skip (an
+    // absent MetadataFile carries no reference rows, and indexing them
+    // aborted the run -- the PD13 family-run finding).
+    if (!FileExists(SystemPath()) || !FileExists(MscorlibPath()))
+        GTEST_SKIP() << "mscorlib/System fixtures not present";
+
     CompilationBundle bundle;
     TS::MetadataModule& system = bundle.Add(SystemPath());
     TS::MetadataModule& mscorlib = bundle.Add(MscorlibPath());
@@ -316,6 +334,8 @@ TEST(MetadataModuleResolutionTest, FindModuleByReferenceTwoPasses)
 
     std::vector<TM::MetadataFile::AssemblyReferenceInfo> rows =
         system.MetadataFile()->GetAssemblyReferences();
+    ASSERT_GE(rows.size(), 3u)
+        << "the System.dll fixture carries the indexed reference rows";
     TM::AssemblyReference mscorlibRef(*system.MetadataFile(), rows[0].Token);
     EXPECT_EQ(TS::FindModuleByReference(bundle.compilation, mscorlibRef),
               &mscorlib);

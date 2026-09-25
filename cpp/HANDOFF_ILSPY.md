@@ -664,6 +664,30 @@ Facade instance surface.
 - PatternStatementTransform's remaining arms + the
   IteratorVariablesDeclaredInsideLoopBody bail (see above).
 
+### The PD13 pre-existing family segfault (fixed)
+
+The disasm lane's PD13 record flagged a pre-existing family-run segfault
+in ResolveTypeDirectBaseTypesTest, reproduced with their changes
+reverted and hidden from every full-suite run (the exclusion list kept
+the sweep green, and a second crasher --
+MetadataModuleResolutionTest.FindModuleByReferenceTwoPasses -- aborted
+even the isolated family run). Root cause: this box's
+/usr/lib/mono/4.5 fixture path is absent, so the fixture-dependent
+lookups return null and the tests dereferenced them -- a missing or
+foreign mscorlib crashed the run instead of failing it. Fixes: the three
+unguarded fixture derefs in ResolveType_Test.cpp (DirectBaseTypes
+CacheAndIdentity's String/IComparable, ResolveTypeSpecificationArm's
+FileSystemEnumerableIterator -- the PD13 crasher) ASSERT before the
+deref, and FindModuleByReferenceTwoPasses skips when the fixture files
+are absent (the file's own FileExists convention) plus guards the
+indexed reference rows. The family-run over an mscorlib override (the
+PD13 repro) now completes rc 1 with clean failures; the three stale
+exclusion entries are retired from the local sweep list, so
+DirectBaseTypesCacheAndIdentity and ResolveTypeSpecificationArm now fail
+cleanly like their fixture-dependent siblings (the sweep baseline is the
+mono-family failure set + these two; the IlParityGoldenTest capa-manifest
+row stays flaky per its own note).
+
 ## Build / test / sweep
 
 ```
