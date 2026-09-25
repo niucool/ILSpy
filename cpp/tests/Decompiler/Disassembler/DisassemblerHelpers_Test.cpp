@@ -258,6 +258,31 @@ TEST(DisassemblerHelpersEscapeTest, EscapeQuotesNamesStartingWithInvalidCharacte
 	EXPECT_EQ(Escape("~DequeEnumerator`1"), "'~DequeEnumerator`1'");
 }
 
+// The sweep's capa09 rows: the obfuscated field names carry non-ASCII
+// punctuation and control units (e.g. "v" + U+00BF + U+0088 + U+00CA +
+// "A") that the C# `char.IsLetterOrDigit` rejects, quoting the whole name;
+// the port classifies the non-ASCII BMP units through the Util letter/digit
+// tables (the char.IsLetterOrDigit semantics).
+TEST(DisassemblerHelpersEscapeTest, EscapeQuotesNamesWithNonAsciiNonLetters) {
+	// "v" + U+00BF (inverted question mark, punctuation) + U+0088 (a C1
+	// control) + U+00CA (E with circumflex, a letter) + "A", as UTF-8: the
+	// punctuation and the control unit each invalidate the name, and the
+	// quoted render escapes the control unit.
+	EXPECT_EQ(Escape("v\xc2\xbf\xc2\x88\xc3\x8aA"),
+		"'v\xc2\xbf\\u0088\xc3\x8aA'");
+	// U+00B5 (micro sign) and U+00E9 (e with acute) are letters (Ll): a
+	// letters-only non-ASCII name stays a valid identifier.
+	EXPECT_EQ(Escape("\xc2\xb5\xc3\xa9"), "\xc2\xb5\xc3\xa9");
+}
+
+// A supplementary-plane name iterates as two surrogate halves in the C#
+// (char.IsLetterOrDigit is false for every surrogate half), so it is not a
+// valid identifier; the quoted render escapes both halves.
+TEST(DisassemblerHelpersEscapeTest, EscapeQuotesSupplementaryPlaneNames) {
+	// U+1D400 (MATHEMATICAL BOLD CAPITAL A) as UTF-8.
+	EXPECT_EQ(Escape("\xf0\x9d\x90\x80"), "'\\ud835\\udc00'");
+}
+
 // ---------------------------------------------------------------------------
 // EscapeString
 // ---------------------------------------------------------------------------

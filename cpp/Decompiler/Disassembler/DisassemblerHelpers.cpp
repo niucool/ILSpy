@@ -25,6 +25,7 @@
 #include "Decompiler/IL/InstructionOutputExtensions.hpp"
 #include "Decompiler/Metadata/ILOpCodes.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/Util/Char.hpp"
 #include "Decompiler/Output/ITextOutput.hpp"
 
 #include <any>
@@ -115,9 +116,13 @@ void AppendUnicodeEscape4(std::string& sb, std::uint32_t cp) {
 	sb.append(buf);
 }
 
-// The C# `static bool IsValidIdentifierCharacter(char c)` -- the ASCII letter/
-// digit range classified faithfully; non-ASCII treated as letters (the
-// documented divergence -- see the header note).
+// The C# `static bool IsValidIdentifierCharacter(char c) => char.IsLetterOrDigit(c) ||
+// _validNonLetterIdentifierCharacter.Contains(c)` -- char.IsLetterOrDigit is
+// the Unicode L*/Nd classification, faithful through the Util::IsLetterOrDigit
+// tables over the BMP (the sweep's capa09 field names carry non-ASCII
+// punctuation/control units the C# rejects and quotes); supplementary-plane
+// code points have no UTF-16 letter classification, so they read false here
+// exactly as the C# surrogate-unit walk does.
 bool IsValidIdentifierCharacter(char32_t cp) {
 	if (cp < 0x80) {
 		if ((cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z') ||
@@ -130,12 +135,14 @@ bool IsValidIdentifierCharacter(char32_t cp) {
 			return false;
 		}
 	}
-	return true;
+	return cp <= 0xFFFF &&
+		Util::IsLetterOrDigit(static_cast<char16_t>(cp));
 }
 
 // The C# `static bool IsDigitStart(char c)` -- char.IsDigit for the first
-// character: the ASCII digits faithfully; non-ASCII treated as letters (the
-// same divergence direction as IsValidIdentifierCharacter).
+// character: the ASCII digits faithfully; the non-ASCII Nd digits stay a
+// documented divergence (no Nd-only table is carried -- see the header's
+// EscapeString note), so a non-ASCII unit reads as a non-digit start.
 bool IsDigitStart(char32_t cp) {
 	return cp < 0x80 && cp >= '0' && cp <= '9';
 }
