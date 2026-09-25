@@ -49,6 +49,7 @@
 #include "Decompiler/IL/Transforms/CachedReadOnlySpanInitialization.hpp"
 #include "Decompiler/IL/Transforms/CombineExitsTransform.hpp"
 #include "Decompiler/IL/Transforms/CopyPropagation.hpp"
+#include "Decompiler/IL/Transforms/DelegateConstruction.hpp"
 #include "Decompiler/IL/Transforms/DetectCatchWhenConditionBlocks.hpp"
 #include "Decompiler/IL/Transforms/EarlyExpressionTransforms.hpp"
 #include "Decompiler/IL/Transforms/ExpressionTransforms.hpp"
@@ -281,6 +282,13 @@ inline void RunGetILTransforms(ILFunction& function, ILTransformContext& context
     // single-def stack slots. Runs late, after the StatementTransform +
     // HighLevelLoopTransform (per GetILTransforms).
     CopyPropagation().Run(function, context);
+    // DelegateConstruction: embed the anonymous-method delegate bodies
+    // (the C# `new DelegateConstruction()` slot, after CopyPropagation and
+    // before the late naming/cleanup passes). No-ops when the
+    // AnonymousMethods setting is off, when the target method is not an
+    // anonymous method, or when no DelegateBodyResolver hook is wired (the
+    // bare CLI path).
+    DelegateConstruction().Run(function, context);
     AssignVariableNames().Run(function, context);
     // ReduceNestingTransform: EliminateRedundantTryFinally +
     // ImproveILOrdering. Runs after HighLevelLoopTransform (per

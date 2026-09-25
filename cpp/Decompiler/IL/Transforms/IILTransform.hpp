@@ -36,6 +36,10 @@ namespace ILSpy::Decompiler {
 class DecompilerSettings;
 }
 
+namespace ILSpy::Decompiler::Metadata {
+class MetadataFile;
+}
+
 namespace ILSpy::Decompiler::IL {
 
 class ILFunction;
@@ -249,6 +253,13 @@ public:
     std::function<std::unique_ptr<ILFunction>(std::uint32_t methodToken,
                                               std::uint32_t methodRva)>
         DelegateBodyResolver;
+
+    // The module the C# ILTransformContext carries as its PEFile slot (the
+    // metadata the DelegateConstruction transform reads the method bodies and
+    // the local-function gates through). Null on the bare CLI path (the seed
+    // readers own their file handles) and in tests that wire the
+    // DelegateBodyResolver hook directly; the facade sets it.
+    Metadata::MetadataFile* Metadata = nullptr;
 
     void StepOnce(const char* what) const {
         if (Step) Step(what);

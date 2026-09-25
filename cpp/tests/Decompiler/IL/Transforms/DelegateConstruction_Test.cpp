@@ -112,6 +112,206 @@ void Walk(ILInstruction* inst, const std::function<void(ILInstruction*)>& visit)
     for (int i = 0; i < inst->ChildCount(); ++i) Walk(inst->GetChild(i), visit);
 }
 
+// A resolved method for the transform's token gates (the
+// DeconstructionMethodStub pattern): carries a MethodDef token and a
+// lambda-shaped name.
+class DelegateTargetMethodStub : public ILSpy::Decompiler::TypeSystem::IMethod {
+public:
+    explicit DelegateTargetMethodStub(std::uint32_t token,
+                                      std::string name)
+        : token_(token), name_(std::move(name)) {}
+    // --- ISymbol / INamedElement ---
+    ILSpy::Decompiler::TypeSystem::SymbolKind SymbolKind() const override {
+        return ILSpy::Decompiler::TypeSystem::SymbolKind::Method;
+    }
+    std::string Name() const override { return name_; }
+    std::string FullName() const override { return "T::" + name_; }
+    std::string ReflectionName() const override { return name_; }
+    std::string Namespace() const override { return std::string(); }
+    const ILSpy::Decompiler::TypeSystem::ICompilation& Compilation()
+        const override {
+        throw std::logic_error("DelegateTargetMethodStub::Compilation");
+    }
+    // --- IParameterizedMember ---
+    std::vector<const ILSpy::Decompiler::TypeSystem::IParameter*>
+    Parameters() const override {
+        return {};
+    }
+    // --- IMember ---
+    const ILSpy::Decompiler::TypeSystem::IMember* MemberDefinition()
+        const override {
+        return this;
+    }
+    const ILSpy::Decompiler::TypeSystem::IType& ReturnType() const override {
+        throw std::logic_error("DelegateTargetMethodStub::ReturnType");
+    }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IMember*>
+    ExplicitlyImplementedInterfaceMembers() const override {
+        return {};
+    }
+    bool IsExplicitInterfaceImplementation() const override { return false; }
+    bool IsVirtual() const override { return false; }
+    bool IsOverride() const override { return false; }
+    bool IsOverridable() const override { return false; }
+    const ILSpy::Decompiler::TypeSystem::TypeParameterSubstitution*
+    Substitution() const override {
+        return &ILSpy::Decompiler::TypeSystem::TypeParameterSubstitution::
+            Identity();
+    }
+    const ILSpy::Decompiler::TypeSystem::IMethod* Specialize(
+        const ILSpy::Decompiler::TypeSystem::TypeParameterSubstitution*)
+        const override {
+        return this;
+    }
+    bool Equals(const ILSpy::Decompiler::TypeSystem::IMember* obj,
+                const ILSpy::Decompiler::TypeSystem::TypeVisitor*)
+        const override {
+        return obj == this;
+    }
+    // --- IMethod (the IEntity group) ---
+    std::vector<const ILSpy::Decompiler::TypeSystem::IAttribute*>
+    GetAttributes() const override {
+        return {};
+    }
+    bool HasAttribute(ILSpy::Decompiler::TypeSystem::KnownAttribute) const override {
+        return false;
+    }
+    const ILSpy::Decompiler::TypeSystem::IAttribute* GetAttribute(
+        ILSpy::Decompiler::TypeSystem::KnownAttribute) const override {
+        return nullptr;
+    }
+    ILSpy::Decompiler::TypeSystem::Accessibility Accessibility()
+        const override {
+        return ILSpy::Decompiler::TypeSystem::Accessibility::Public;
+    }
+    bool IsStatic() const override { return false; }
+    bool IsAbstract() const override { return false; }
+    bool IsSealed() const override { return false; }
+    std::uint32_t MetadataToken() const override { return token_; }
+    const ILSpy::Decompiler::TypeSystem::ITypeDefinition*
+    DeclaringTypeDefinition() const override {
+        return nullptr;
+    }
+    ILSpy::Decompiler::TypeSystem::ITypePtr DeclaringType() const override {
+        return nullptr;
+    }
+    const ILSpy::Decompiler::TypeSystem::IModule* ParentModule()
+        const override {
+        return nullptr;
+    }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IAttribute*>
+    GetReturnTypeAttributes() const override {
+        return {};
+    }
+    bool ReturnTypeIsRefReadOnly() const override { return false; }
+    bool ThisIsRefReadOnly() const override { return false; }
+    bool IsInitOnly() const override { return false; }
+    std::vector<const ILSpy::Decompiler::TypeSystem::ITypeParameter*>
+    TypeParameters() const override {
+        return {};
+    }
+    std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> TypeArguments()
+        const override {
+        return {};
+    }
+    bool IsExtensionMethod() const override { return false; }
+    bool IsLocalFunction() const override { return false; }
+    bool IsConstructor() const override { return false; }
+    bool IsDestructor() const override { return false; }
+    bool IsOperator() const override { return false; }
+    bool HasBody() const override { return true; }
+    bool IsAccessor() const override { return false; }
+    const ILSpy::Decompiler::TypeSystem::IMember* AccessorOwner()
+        const override {
+        return nullptr;
+    }
+    ILSpy::Decompiler::TypeSystem::MethodSemanticsAttributes AccessorKind()
+        const override {
+        return ILSpy::Decompiler::TypeSystem::MethodSemanticsAttributes::None;
+    }
+    const ILSpy::Decompiler::TypeSystem::IMethod* ReducedFrom()
+        const override {
+        return nullptr;
+    }
+
+private:
+    std::uint32_t token_;
+    std::string name_;
+};
+
+// Build a hand-wired delegate-construction Run fixture: `stloc v(newobj
+// ActionType(ldloc thisVar, ldftn <resolved>))` inside a block whose final
+// is a branch.
+struct RunFixture {
+    std::unique_ptr<ILFunction> fn;
+    std::shared_ptr<ILVariable> targetVar;
+    std::shared_ptr<ILVariable> delegateVar;
+    std::shared_ptr<ILSpy::Decompiler::TypeSystem::IMethod> method;
+    BlockContainer* body = nullptr;
+    Block* entry = nullptr;
+    StLoc* store = nullptr;
+
+    RunFixture()
+    {
+        fn = std::make_unique<ILFunction>();
+        fn->Kind = ILFunctionKind::TopLevelFunction;
+        auto container = std::make_unique<BlockContainer>();
+        body = container.get();
+        auto entryBlock = std::make_unique<Block>();
+        entry = entryBlock.get();
+        container->AddBlock(std::move(entryBlock));
+        fn->Body = std::move(container);
+        fn->Body->Parent = fn.get();
+        fn->Body->ChildIndex = 0;
+
+        targetVar = std::make_shared<ILVariable>(VariableKind::Parameter,
+                                                 nullptr, -1);
+        targetVar->Name = "this";
+        // The parameter arrives with a value (the C# IsSingleDefinition for
+        // a parameter: StoreCount == 1, AddressCount == 0).
+        targetVar->StoreCount = 1;
+        delegateVar = MakeLocal("v");
+        fn->Variables.push_back(delegateVar);
+
+        method = std::make_shared<DelegateTargetMethodStub>(
+            0x06000042u, "<Do>b__0_0");
+        auto ldftn = std::make_unique<LdFtn>(method);
+        auto call = std::make_unique<Call>("System.Action..ctor");
+        call->IsNewObj = true;
+        call->ReturnType = StackType::O;
+        call->DeclaringType =
+            MakeDelegateType("System", "Action");
+        call->AddArg(std::make_unique<LdLoc>(targetVar));
+        call->AddArg(std::move(ldftn));
+        auto st = std::make_unique<StLoc>(delegateVar, std::move(call));
+        store = st.get();
+        entry->Add(std::move(st));
+        entry->SetFinal(std::make_unique<Branch>());
+    }
+};
+
+// The Run test's resolver: a hand-built nested function body (a leave with
+// a constant -- the minimal decodable body).
+std::unique_ptr<ILFunction> MakeNestedBody(std::uint32_t token,
+                                           std::uint32_t rva,
+                                           bool* resolverHit) {
+    if (resolverHit != nullptr) *resolverHit = true;
+    auto fn = std::make_unique<ILFunction>();
+    fn->Kind = ILFunctionKind::TopLevelFunction;
+    auto container = std::make_unique<BlockContainer>();
+    auto entryBlock = std::make_unique<Block>();
+    auto leave = std::make_unique<Leave>(container.get(),
+                                         std::make_unique<LdcI4>(7));
+    entryBlock->SetFinal(std::move(leave));
+    container->AddBlock(std::move(entryBlock));
+    fn->Body = std::move(container);
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    (void)token;
+    (void)rva;
+    return fn;
+}
+
 } // namespace
 
 // A `newobj DelegateType(target, ldftn m)` with a Delegate declaring type
@@ -366,12 +566,74 @@ TEST(DelegateConstruction, MscorlibDelegateConstructionSweep) {
     EXPECT_EQ(matchCount, delegateKindCount + unknownKindCount);
 }
 
-// The Run embed tests (RunEmbedsTheDecodedBody, RunHonorsTheAnonymousMethodsGate,
-// RunRejectsPlainTargetNames) exercised the DelegateConstruction embedding
-// implemented on DelegateConstruction_impl.cpp against the pre-merge IL
-// pipeline list shape. The master merge took the inline RunGetILTransforms
-// pipeline (no transform list, no ILFunction::RunTransforms), so the embedding
-// is not registered in the merged build; re-porting it onto the merged
-// pipeline (and restoring these tests RED-first) is a follow-up.
 
+
+
+// The Run embed: `stloc v(newobj Action(ldloc this, ldftn <Do>b__0_0))`
+// with the AnonymousMethods gate on and a wired body resolver folds to the
+// embedded ILFunction (the C# TransformDelegateConstruction: the resolver
+// read, the Kind/DelegateType assignment, the ReplaceWith, the variable
+// rename, and the nested pipeline + this-swap).
+TEST(DelegateConstruction, RunEmbedsTheDecodedBody) {
+    RunFixture fx;
+    ILTransformContext ctx;
+    bool resolverHit = false;
+    ctx.Settings.AnonymousMethods = true;
+    ctx.DelegateBodyResolver = [&](std::uint32_t token, std::uint32_t rva) {
+        return MakeNestedBody(token, rva, &resolverHit);
+    };
+    DelegateConstruction().Run(*fx.fn, ctx);
+
+    EXPECT_TRUE(resolverHit) << "the resolver read the delegate target";
+    // The stloc's value is now the embedded ILFunction (Kind Delegate, the
+    // delegate type carried over).
+    ASSERT_EQ(fx.store->Value->Op, OpCode::ILFunction);
+    auto* nested = static_cast<ILFunction*>(fx.store->Value.get());
+    EXPECT_EQ(nested->Kind, ILFunctionKind::Delegate);
+    ASSERT_NE(nested->DelegateType, nullptr);
+    EXPECT_EQ(nested->DelegateType->Kind(), TypeKind::Delegate);
+    fx.fn->CheckInvariant(ILPhase::Normal);
+}
+
+// The AnonymousMethods gate off leaves the construction untouched.
+TEST(DelegateConstruction, RunHonorsTheAnonymousMethodsGate) {
+    RunFixture fx;
+    ILTransformContext ctx;
+    ctx.Settings.AnonymousMethods = false;
+    bool resolverHit = false;
+    ctx.DelegateBodyResolver = [&](std::uint32_t, std::uint32_t) {
+        return MakeNestedBody(0, 0, &resolverHit);
+    };
+    DelegateConstruction().Run(*fx.fn, ctx);
+    EXPECT_FALSE(resolverHit);
+    EXPECT_EQ(fx.store->Value->Op, OpCode::Call);
+}
+
+// A non-anonymous target name (no '<' prefix and no '$') does not match --
+// the C# IsAnonymousMethod name arms.
+TEST(DelegateConstruction, RunRejectsPlainTargetNames) {
+    RunFixture fx;
+    fx.method = std::make_shared<DelegateTargetMethodStub>(
+        0x06000042u, "PlainMethod");
+    // Rebuild the store's value with the plain-name ldftn.
+    auto call = std::make_unique<Call>("System.Action..ctor");
+    call->IsNewObj = true;
+    call->ReturnType = StackType::O;
+    call->DeclaringType = MakeDelegateType("System", "Action");
+    call->AddArg(std::make_unique<LdLoc>(fx.targetVar));
+    auto ldftn = std::make_unique<LdFtn>(fx.method);
+    call->AddArg(std::move(ldftn));
+    fx.store->Value = std::move(call);
+    fx.store->Value->Parent = fx.store;
+    fx.store->Value->ChildIndex = 0;
+
+    ILTransformContext ctx;
+    bool resolverHit = false;
+    ctx.DelegateBodyResolver = [&](std::uint32_t, std::uint32_t) {
+        return MakeNestedBody(0, 0, &resolverHit);
+    };
+    DelegateConstruction().Run(*fx.fn, ctx);
+    EXPECT_FALSE(resolverHit) << "a plain method is not an anonymous method";
+    EXPECT_EQ(fx.store->Value->Op, OpCode::Call);
+}
 

@@ -75,6 +75,7 @@ void CSharpDecompiler::RunILTransforms(IL::ILFunction& function,
 // entry (the port's DelegateBodyResolver hook over ReadIL).
 static void WireTransformContext(IL::ILTransformContext& context,
                                  const Metadata::MetadataFile& file) {
+    context.Metadata = const_cast<Metadata::MetadataFile*>(&file);
     context.DelegateBodyResolver =
         [&file](std::uint32_t methodToken,
                 std::uint32_t methodRva) -> std::unique_ptr<IL::ILFunction> {

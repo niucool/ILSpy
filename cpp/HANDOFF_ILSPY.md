@@ -87,19 +87,28 @@ facade-side adaptations (all in this merge commit):
 
 ### Follow-ups out of the merge (do NOT redo what already landed)
 
-- **The DelegateConstruction embedding needs a re-port** onto the merged
-  pipeline: my lineage's _impl.cpp (the Run embed, the nested pipeline,
-  BuildNestedTransforms over the old GetILTransforms LIST) is on disk but
-  NOT registered in CMake (master's pipeline has no list to slice). The 3
-  Run tests + the DelegateTargetMethodStub were dropped from
-  DelegateConstruction_Test.cpp (the matcher tests stay). RED-first, as
-  its own slice: rebuild the nested pipeline against
-  RunILTransformsThroughBlockTransforms or a list re-introduction.
+- ~~The DelegateConstruction embedding re-port~~ **DONE** (the slice after
+  the merge): `DelegateConstruction_impl.cpp` is registered and adapted --
+  the nested pipeline is the merged-driver prefix up to the transform's
+  position (`RunILTransformsThroughBlockTransforms` + HighLevelLoopTransform
+  + FixRemainingIncrements + CopyPropagation) plus CombineExits (the C#
+  TakeWhile + GetTransforms concat, sliced against the MERGED order since
+  master runs HighLevelLoop before FixRemainingIncrements). The driver calls
+  it after CopyPropagation (the C# slot, CSharpDecompiler.cs line 168).
+  `ILTransformContext::Metadata` (the C# PEFile slot) is re-grafted next to
+  DelegateBodyResolver and set by the facade's WireTransformContext; the
+  bare CLI path leaves it null and the transform no-ops on the null
+  resolver. The merged matcher's `DelegateConstructionMatch::method` is
+  now populated (`targetMethodRef.get()`) -- master set only the shared
+  handle. The 3 Run tests are restored (RED = the link error on the
+  undefined Run). Gates: DelegateConstruction.* 17 passed + 1 env-skip;
+  classic subset 219 = 204 + 15; full env-excluded suite 12855 ran with the
+  same 30 mono-profile failures; connid byte-identical (named methods gate
+  out -- the corpus has no anonymous-method bodies).
 - `ILVariablePtr`-taking ctors (ILVariableResolveResult) vs master's raw
   `IL::ILVariable*` in VariableToDeclare: bridged via VariableHandleOf
-  (first-use annotation). If the embedding re-port needs handles
-  elsewhere, follow that pattern; do NOT alias-construct shared_ptrs from
-  raws.
+  (first-use annotation). If another surface needs handles, follow that
+  pattern; do NOT alias-construct shared_ptrs from raws.
 
 ## Current position (pre-merge history -- the merge supersedes the queue)
 

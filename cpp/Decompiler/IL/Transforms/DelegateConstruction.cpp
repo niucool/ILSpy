@@ -81,6 +81,12 @@ bool DelegateConstruction::MatchDelegateConstruction(ILInstruction* inst,
         return false;
     }
 
+    // The resolved-method raw pointer (the header's `method` slot): the
+    // shared handle's pointee when the node carries a resolved method, null
+    // on the seed reader's string stand-ins (the reader discards the token
+    // target).
+    out.method = out.targetMethodRef.get();
+
     // The C# final gate: `delegateType.Kind == Delegate || Unknown`. A null
     // declaring type is treated like the C# null DeclaringTypeDefinition (the
     // NewObj branch's defensive guard, applied uniformly to both branches).

@@ -169,36 +169,40 @@ void ReplaceDelegateTarget(ILFunction& nested, const ILInstruction* target) {
     }
     // The C# `function.CapturedVariables.Add(v)` -- the target variable
     // (the LdLoc target's variable, or the LdObj chain's root local).
+    const ILVariable* captured = nullptr;
     if (target->Op == OpCode::LdLoc) {
         auto* ldloc = static_cast<const LdLoc*>(target);
-        if (ldloc->Variable != nullptr && !nested.CapturesVariable(ldloc->Variable.get()))
-            nested.CapturedVariables.push_back(ldloc->Variable);
+        captured = ldloc->Variable.get();
     } else if (target->Op == OpCode::LdObj) {
         const ILInstruction* inner = target;
         while (inner != nullptr &&
                (inner->Op == OpCode::LdObj || inner->Op == OpCode::LdFlda))
             inner = inner->GetChild(0);
-        if (inner != nullptr && inner->Op == OpCode::LdLoc) {
-            auto* ldloc = static_cast<const LdLoc*>(inner);
-            if (ldloc->Variable != nullptr &&
-                !nested.CapturesVariable(ldloc->Variable.get()))
-                nested.CapturedVariables.push_back(ldloc->Variable);
-        }
+        if (inner != nullptr && inner->Op == OpCode::LdLoc)
+            captured = static_cast<const LdLoc*>(inner)->Variable.get();
     }
+    if (captured != nullptr
+        && std::find(nested.CapturedVariables.begin(),
+                     nested.CapturedVariables.end(), captured)
+               == nested.CapturedVariables.end())
+        nested.CapturedVariables.push_back(
+            const_cast<ILVariable*>(captured));
 }
 
-// The nested-pipeline list the C# builds with
+// The nested pipeline the C# builds with
 // `GetILTransforms().TakeWhile(t => !(t is DelegateConstruction))
 // .Concat(GetTransforms())` -- the head of the main pipeline up to (not
-// including) this transform, plus the CombineExits tail.
-std::vector<std::unique_ptr<IILTransform>> BuildNestedTransforms() {
-    std::vector<std::unique_ptr<IILTransform>> transforms;
-    for (auto& t : GetILTransforms()) {
-        if (dynamic_cast<DelegateConstruction*>(t.get()) != nullptr) break;
-        transforms.push_back(std::move(t));
-    }
-    transforms.push_back(std::make_unique<CombineExitsTransform>());
-    return transforms;
+// including) this transform, plus the CombineExits tail. The port's pipeline
+// is the inline RunGetILTransforms driver (no transform list to slice), so
+// the head is the driver's prefix up to this transform's position (after
+// CopyPropagation, before AssignVariableNames): the block-transform phase,
+// HighLevelLoopTransform, FixRemainingIncrements, CopyPropagation.
+void RunNestedPipeline(ILFunction& function, ILTransformContext& context) {
+    RunILTransformsThroughBlockTransforms(function, context);
+    HighLevelLoopTransform::Run(function, context);
+    FixRemainingIncrements().Run(function, context);
+    CopyPropagation().Run(function, context);
+    CombineExitsTransform().Run(function, context);
 }
 
 // The C# `ILFunction TransformDelegateConstruction(...)` -- the gates plus
@@ -270,7 +274,7 @@ ILFunction* TransformDelegateConstruction(
     // The nested pipeline: the head of the main list up to this transform,
     // then CombineExits (the C# TakeWhile + GetTransforms() concat).
     ILTransformContext nestedContext = context;
-    nestedPtr->RunTransforms(BuildNestedTransforms(), nestedContext);
+    RunNestedPipeline(*nestedPtr, nestedContext);
     context.StepOnce("DelegateConstruction (ReplaceDelegateTargetVisitor)");
     ReplaceDelegateTarget(*nestedPtr, match.target);
     // Handle nested lambdas (the C# recursive Run over the embedded body);
