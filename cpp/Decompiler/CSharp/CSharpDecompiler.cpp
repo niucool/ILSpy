@@ -835,6 +835,138 @@ std::string MemberAttributesText(const TS::IEntity* entity,
 // share: everything but the module wiring (the static entry builds it per
 // call; the instance uses its own) and the registry lookup (the static
 // consults the process-global placeholder; the instance its own map).
+// The C# DoDecompileType worklist (EnqueueReferencedMembers' nested-type
+// half): the type's rendered members' attribute typeof arguments reference
+// nested types -- a hidden compiler-generated state machine whose
+// declaring type's rendered members still name it (the state-machine
+// attribute a failed de-sugar leaves in place) renders despite the hidden
+// predicate. The member half (the members of the current type the bodies
+// reference) has no flat-renderer surface yet; the attribute references
+// cover the corpus shapes.
+std::set<std::uint32_t> AttributeReferencedNestedTypes(
+    const Metadata::MetadataFile& file,
+    TS::DecompilerTypeSystem* typeSystem,
+    const TS::MetadataModule& module, std::uint32_t typeToken) {
+    std::set<std::uint32_t> result;
+    const TS::ITypeDefinition* currentType = module.GetDefinition(typeToken);
+    if (currentType == nullptr)
+        return result;
+    // The method entities (the de-sugar outcome consultation needs the
+    // tokens + RVAs alongside).
+    std::vector<std::pair<const TS::IMethod*, std::uint32_t>> methods;
+    for (const auto& m : module.MetadataFile()->GetMethods(typeToken)) {
+        const TS::IMethod* method =
+            const_cast<TS::MetadataModule&>(module).GetDefinitionMethod(
+                m.Token);
+        if (method != nullptr)
+            methods.emplace_back(method, m.RVA);
+    }
+    std::vector<const TS::IEntity*> entities;
+    for (const auto& methodPair : methods)
+        entities.push_back(methodPair.first);
+    for (const auto& f : module.MetadataFile()->GetFields(typeToken)) {
+        const TS::IField* field =
+            const_cast<TS::MetadataModule&>(module).GetDefinitionField(
+                f.Token);
+        if (field != nullptr)
+            entities.push_back(field);
+    }
+    for (const auto& p : module.MetadataFile()->GetProperties(typeToken)) {
+        const TS::IProperty* property =
+            const_cast<TS::MetadataModule&>(module).GetDefinitionProperty(
+                p.Token);
+        if (property != nullptr)
+            entities.push_back(property);
+    }
+    for (const auto& e : module.MetadataFile()->GetEvents(typeToken)) {
+        const TS::IEvent* event =
+            const_cast<TS::MetadataModule&>(module).GetDefinitionEvent(
+                e.Token);
+        if (event != nullptr)
+            entities.push_back(event);
+    }
+    for (const TS::IEntity* entity : entities) {
+        for (const TS::IAttribute* attribute : entity->GetAttributes()) {
+            if (attribute == nullptr)
+                continue;
+            // The C# EnqueueReferencedMembers scans the RENDERED
+            // declaration -- the de-sugar's attribute removal already
+            // dropped the state-machine attribute when it succeeded, so
+            // the reference is gone. The metadata walk mirrors that: a
+            // state-machine attribute counts only when its de-sugar did
+            // not succeed (the outcome consults the method pipeline once;
+            // the filter keeps this to the state-machine-attributed
+            // methods only).
+            std::string attributeName =
+                attribute->AttributeType().ReflectionName();
+            bool asyncDecompiled = false;
+            bool iteratorDecompiled = false;
+            bool isStateMachineAttribute =
+                attributeName ==
+                    "System.Runtime.CompilerServices."
+                    "AsyncStateMachineAttribute" ||
+                attributeName ==
+                    "System.Runtime.CompilerServices."
+                    "IteratorStateMachineAttribute" ||
+                attributeName ==
+                    "System.Runtime.CompilerServices."
+                    "AsyncIteratorStateMachineAttribute";
+            if (isStateMachineAttribute) {
+                bool found = false;
+                for (const auto& methodPair : methods) {
+                    if (methodPair.first != entity)
+                        continue;
+                    found = true;
+                    if (methodPair.second != 0) {
+                        std::string discarded;
+                        CSharpDecompiler::DecompileMethodToString(
+                            file, typeSystem, methodPair.first->MetadataToken(),
+                            methodPair.second, "", discarded, false,
+                            &asyncDecompiled, &iteratorDecompiled);
+                    }
+                    break;
+                }
+                if (found && asyncDecompiled &&
+                    attributeName ==
+                        "System.Runtime.CompilerServices."
+                        "AsyncStateMachineAttribute")
+                    continue;
+                if (found && iteratorDecompiled &&
+                    (attributeName ==
+                         "System.Runtime.CompilerServices."
+                         "IteratorStateMachineAttribute" ||
+                     attributeName ==
+                         "System.Runtime.CompilerServices."
+                         "AsyncIteratorStateMachineAttribute"))
+                    continue;
+            }
+            std::vector<TS::CustomAttributeTypedArgument> fixedArguments =
+                attribute->FixedArguments();
+            for (std::size_t argumentIndex = 0;
+                 argumentIndex < fixedArguments.size(); ++argumentIndex) {
+                std::any argumentValue = fixedArguments[argumentIndex].Value();
+                const auto* typeofType =
+                    std::any_cast<TS::ITypePtr>(&argumentValue);
+                if (typeofType == nullptr || *typeofType == nullptr)
+                    continue;
+                const TS::ITypeDefinition* definition =
+                    (*typeofType)->GetDefinition();
+                if (definition == nullptr ||
+                    definition->DeclaringTypeDefinition() != currentType)
+                    continue;
+                // Only the CURRENT type's own nested types (the C#
+                // worklist condition); the nested-type position carries
+                // the render.
+                auto info = module.MetadataFile()->GetTypeDefNameInfo(
+                    definition->MetadataToken());
+                if (info.has_value() && info->DeclaringTypeToken == typeToken)
+                    result.insert(definition->MetadataToken());
+            }
+        }
+    }
+    return result;
+}
+
 bool DecompileTypeToStringBody(
     const Metadata::MetadataFile& file, TS::DecompilerTypeSystem* typeSystem,
     TS::MetadataModule& module,
@@ -843,8 +975,6 @@ bool DecompileTypeToStringBody(
     const std::vector<std::string>* usingNamespaces,
     std::uint32_t typeToken, std::string& out) {
     const Metadata::PartialTypeInfo* partialType = partialLookup(typeToken);
-    if (TypeIsHiddenFromRender(file, typeToken))
-        return false;
     // The C# DecompileType member iteration: the partial-type info gates
     // the members (the C# `DoDecompileMember`'s
     // `partialType.IsDeclaredMember(entity) -> return` skip, and the
@@ -1120,10 +1250,19 @@ bool DecompileTypeToStringBody(
     }
     // The nested types (the C# DoDecompile's member order: the NestedTypes
     // concat LEADS the member list, so the nested declarations render
-    // inside the declaring type's braces). The hidden state machine types
-    // skip here too (a nested state machine renders nowhere).
+    // inside the declaring type's braces). The hidden types skip UNLESS
+    // the worklist still references them (the C# EnqueueReferencedMembers
+    // re-enqueue -- "the compiler-generated members that are still
+    // needed").
+    std::set<std::uint32_t> worklistTypes =
+        AttributeReferencedNestedTypes(file, typeSystem, module, typeToken);
     for (std::uint32_t nestedToken : file.GetNestedTypes(typeToken)) {
-        if (TypeIsHiddenFromRender(file, nestedToken))
+        // The C# DoDecompileType worklist: a hidden type the rendered
+        // members still reference (the attribute typeof collection above)
+        // renders at its nested position -- "the compiler-generated
+        // members that are still needed".
+        if (TypeIsHiddenFromRender(file, nestedToken) &&
+            worklistTypes.count(nestedToken) == 0)
             continue;
         std::string nestedText;
         if (DecompileTypeToStringBody(file, typeSystem, module,
@@ -1724,6 +1863,8 @@ bool CSharpDecompiler::DecompileTypeToString(
                               typeToken);
         usingSet = &ownUsingSet;
     }
+    if (TypeIsHiddenFromRender(file, typeToken))
+        return false;
     bool rendered = DecompileTypeToStringBody(
         file, &typeSystem, typeSystem.MainMetadataModule(),
         [](std::uint32_t token) {
@@ -1957,6 +2098,8 @@ bool CSharpDecompiler::DecompileTypeToString(
                               typeToken);
         usingSet = &ownUsingSet;
     }
+    if (TypeIsHiddenFromRender(*state_->file, typeToken))
+        return false;
     bool rendered = DecompileTypeToStringBody(
         *state_->file, state_->typeSystem ? &state_->typeSystem.value()
                                           : nullptr,

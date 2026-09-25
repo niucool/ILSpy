@@ -811,6 +811,31 @@ TEST(FacadeMemberModifiersTest, OverrideDirectiveRendersTheForwarder)
         << text;
 }
 
+// The C# DoDecompileType worklist (EnqueueReferencedMembers): a hidden
+// compiler-generated type whose declaring type's rendered members still
+// reference it -- the state-machine attribute's typeof -- renders at its
+// nested position despite the hidden predicate (the hidden members that
+// are "still needed").
+TEST(FacadeMemberModifiersTest, HiddenTypesReferencedByAttributesStillRender)
+{
+    constexpr const char* kWorklistFixture =
+        "/home/jim/ilspy-test-fixtures/worklist_fixture/"
+        "WorklistShape.dll";
+    std::string text;
+    if (!RenderType(kWorklistFixture, "WorklistShape", text))
+        GTEST_SKIP() << "the worklist fixture is not provisioned";
+    EXPECT_NE(text.find("private sealed class MyStateMachine"),
+              std::string::npos)
+        << text;
+    EXPECT_NE(text.find("public void MoveNext()"), std::string::npos)
+        << text;
+    EXPECT_NE(
+        text.find("public void SetStateMachine(IAsyncStateMachine "
+                  "stateMachine)"),
+        std::string::npos)
+        << text;
+}
+
 // The whole-module render's using header carries the module-wide
 // required set (the C# IntroduceUsingDeclarations over the whole-module
 // tree), not just the assembly-attribute namespaces: the connid module's
