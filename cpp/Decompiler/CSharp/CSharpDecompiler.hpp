@@ -184,7 +184,10 @@ public:
         // The single-type namespace header (the file-scoped `namespace X;`
         // form the oracle's -t render carries); the whole-module paths
         // pass false (they group the namespaces themselves).
-        bool wrapNamespace = true);
+        bool wrapNamespace = true,
+        // The using set the base-list qualification consults (the C#
+        // DecompileRun's scope); null = the type's own collected set.
+        const std::vector<std::string>* usingNamespaces = nullptr);
 
     // The C# `public string DecompileModuleAndAssemblyAttributesToString()`
     // (CSharpDecompiler.cs line 838): the `[assembly: ...]` /
@@ -262,7 +265,9 @@ public:
     // shape as the instance entry: the type render through THIS instance's
     // wiring and registry.
     bool DecompileTypeToString(std::uint32_t typeToken, std::string& out,
-                               bool wrapNamespace = true);
+                               bool wrapNamespace = true,
+                               const std::vector<std::string>*
+                                   usingNamespaces = nullptr);
 
     // The C# instance registry: register under the declaring type token
     // (a second registration for the same type unionizes).

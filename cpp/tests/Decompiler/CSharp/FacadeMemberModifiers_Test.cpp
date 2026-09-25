@@ -637,6 +637,30 @@ TEST(FacadeMemberModifiersTest, SingleTypeRenderCarriesTheNamespaceHeader)
         << text.substr(0, 200);
 }
 
+// The base-list qualification (the C# TypeSystemAstBuilder's short-name
+// decision): a base type's short name survives only when the resolver's
+// LookupSimpleNameOrTypeName over the render's using scope returns a
+// non-error type matching the intended base type. When the short name is
+// ambiguous -- the fixture implements IEnumerable while the net48
+// mscorlib carries a duplicate (internal)
+// System.Runtime.InteropServices.ComTypes.IEnumerable that mscorlib's
+// InternalsVisibleTo friend list makes visible to this assembly (built
+// under the name PresentationFramework for exactly that trigger) -- the
+// base list renders the qualified form, exactly like the C#.
+TEST(FacadeMemberModifiersTest, BaseListQualifiesAmbiguousTypeNames)
+{
+    constexpr const char* kAmbiguityFixture =
+        "/home/jim/ilspy-test-fixtures/ambiguous_fixture/"
+        "PresentationFramework.dll";
+    std::string text;
+    if (!RenderType(kAmbiguityFixture, "AmbiguousBase", text))
+        GTEST_SKIP() << "the ambiguity fixture is not provisioned";
+    EXPECT_NE(text.find(
+                  "class AmbiguousBase : System.Collections.IEnumerable"),
+              std::string::npos)
+        << text;
+}
+
 // The whole-module render's using header carries the module-wide
 // required set (the C# IntroduceUsingDeclarations over the whole-module
 // tree), not just the assembly-attribute namespaces: the connid module's

@@ -23,6 +23,8 @@
 #include "Decompiler/CSharp/RequiredNamespaceCollector.hpp"
 #include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
+#include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
+#include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/CSharp/Syntax/SyntaxTree.hpp"
 #include "Decompiler/TypeSystem/INamespace.hpp"
 #include "Decompiler/TypeSystem/IEvent.hpp"
@@ -235,6 +237,32 @@ namespace {
 namespace TS = ::ILSpy::Decompiler::TypeSystem;
 namespace SyntaxNS = ::ILSpy::Decompiler::CSharp::Syntax;
 
+// The C# compilation-root namespace walk (`ICompilation.GetNamespaceByFullName`):
+// each dotted segment through `GetChildNamespace`, null when any segment is
+// absent. The render's using-set resolution consults the COMPILATION's root
+// (the merged reference tree -- the module's own root namespace carries only
+// the module's own types, so referenced namespaces never resolve through
+// it).
+const TS::INamespace* ResolveNamespaceFullName(const TS::INamespace& root,
+                                                const std::string& fullName) {
+    const TS::INamespace* current = &root;
+    std::size_t start = 0;
+    while (current != nullptr) {
+        std::size_t dot = fullName.find('.', start);
+        std::string part =
+            fullName.substr(start,
+                            dot == std::string::npos ? std::string::npos
+                                                     : dot - start);
+        if (part.empty())
+            return nullptr;
+        current = current->GetChildNamespace(part);
+        if (dot == std::string::npos)
+            break;
+        start = dot + 1;
+    }
+    return current;
+}
+
 // The C# member-modifier composition for the type-level body's flat
 // renderer: the TypeSystemAstBuilder's GetMemberModifiers (the
 // accessibility under NeedsAccessibility -- explicit interface
@@ -342,31 +370,193 @@ std::string RootNamespaceOf(const Metadata::MetadataFile& file,
     }
 }
 
-// The -t render's using directives: the type entity's required namespace
-// set (the unseeded, implicit-base-skipping walk -- the C# resolver's
+// The -t render's using set: the type entity's required namespace set (the
+// unseeded, implicit-base-skipping walk -- the C# resolver's
 // IntroduceUsingDeclarations filtering approximated by the walk's own
-// references), sorted, the type's own namespace excluded.
-std::string UsingDirectivesText(const Metadata::MetadataFile& file,
-                                const TS::MetadataModule& module,
-                                std::uint32_t typeToken) {
+// references), sorted, the type's own namespace excluded. The base-list
+// qualification consumes the same set (the C# CreateDecompileRun threads
+// the collected namespaces into BOTH the emitted using directives and the
+// resolver's using scope).
+std::vector<std::string> MinimalUsingSetOf(const Metadata::MetadataFile& file,
+                                           const TS::MetadataModule& module,
+                                           std::uint32_t typeToken) {
+    std::vector<std::string> sorted;
     const TS::ITypeDefinition* typeDef = module.GetDefinition(typeToken);
     if (typeDef == nullptr)
-        return std::string();
+        return sorted;
     std::unordered_set<std::string> namespaces;
     CollectRequiredNamespaces(
         *typeDef, const_cast<TS::MetadataModule&>(module), namespaces);
     const std::string own = RootNamespaceOf(file, typeToken);
-    std::vector<std::string> sorted;
     for (const std::string& ns : namespaces) {
         if (!ns.empty() && ns != own)
             sorted.push_back(ns);
     }
     std::sort(sorted.begin(), sorted.end());
+    return sorted;
+}
+
+// The -t render's using directives: the type entity's required namespace
+// set rendered as the leading `using X;` lines (the same set the
+// base-list qualification consults).
+std::string UsingDirectivesText(const Metadata::MetadataFile& file,
+                                const TS::MetadataModule& module,
+                                std::uint32_t typeToken) {
+    std::vector<std::string> sorted =
+        MinimalUsingSetOf(file, module, typeToken);
     std::string out;
     for (const std::string& ns : sorted)
         out += "using " + ns + ";\n";
     if (!out.empty())
         out += "\n";
+    return out;
+}
+
+// The C# CreateDecompileRun's UsingScope plus the
+// FullyQualifyAmbiguousTypeNamesVisitor's resolver construction (the
+// visitor's ctor): the render's using set resolved through the
+// compilation's root namespace, the scope nested along the current type's
+// namespace chain (a name inside `namespace N { }` walks the chain BEFORE
+// the using declarations -- the render's own-namespace using exclusion
+// relies on exactly this lookup order), and the resolver carrying the
+// current type definition (the LookInCurrentType arm reads the type's own
+// members). Null when the type definition is absent (no scope to consult
+// -- the short names stay).
+std::shared_ptr<Resolver::CSharpResolver> RenderScopeResolver(
+    const TS::MetadataModule& module,
+    const TS::ITypeDefinition* currentType,
+    const std::vector<std::string>& usingNamespaces) {
+    if (currentType == nullptr)
+        return nullptr;
+    const TS::ICompilation& compilation = module.Compilation();
+    std::vector<const TS::INamespace*> resolvedNamespaces;
+    for (const std::string& ns : usingNamespaces) {
+        if (ns.empty())
+            continue;
+        const TS::INamespace* resolved =
+            ResolveNamespaceFullName(compilation.RootNamespace(), ns);
+        if (resolved != nullptr)
+            resolvedNamespaces.push_back(resolved);
+    }
+    auto usingScope = std::make_shared<TypeSystem::UsingScope>(
+        std::make_shared<TypeSystem::CSharpTypeResolveContext>(module),
+        compilation.RootNamespace(), resolvedNamespaces);
+    const std::string ownNamespace = currentType->Namespace();
+    std::size_t start = 0;
+    while (start < ownNamespace.size()) {
+        std::size_t dot = ownNamespace.find('.', start);
+        usingScope = usingScope->WithNestedNamespace(
+            ownNamespace.substr(
+                start, dot == std::string::npos ? std::string::npos
+                                                : dot - start));
+        if (dot == std::string::npos)
+            break;
+        start = dot + 1;
+    }
+    return std::make_shared<Resolver::CSharpResolver>(
+               std::make_shared<TypeSystem::CSharpTypeResolveContext>(module))
+        ->WithCurrentUsingScope(std::move(usingScope))
+        ->WithCurrentTypeDefinition(currentType);
+}
+
+// The C# TypeSystemAstBuilder's ConvertTypeHelper short-name decision: the
+// short name survives only when the using-scope lookup yields a non-error
+// TypeResolveResult whose definition is the intended base type. An
+// ambiguity (two accessible same-name types in the scope's imported
+// namespaces -- the net48 mscorlib's legacy duplicate
+// System.Runtime.InteropServices.ComTypes.IEnumerable against
+// System.Collections.IEnumerable, the duplicate internal so only the
+// assemblies in mscorlib's InternalsVisibleTo friend list see it) or a
+// shadowing (a same-name type in an earlier lookup position) qualifies
+// instead.
+bool BaseListShortNameUsable(
+    const TS::ITypePtr& baseType,
+    const Resolver::CSharpResolver& resolver) {
+    const TS::ITypeDefinition* typeDef = baseType->GetDefinition();
+    if (typeDef == nullptr)
+        // No definition to consult: the C# outer short-name path.
+        return true;
+    // The C# localTypeArguments: the type's own parameter slots sliced off
+    // the instantiation (the declaring chain's outer parameters excluded);
+    // the lookup's arity consults the count.
+    std::size_t outerTypeParameterCount = 0;
+    for (const TS::ITypeDefinition* d = typeDef->DeclaringTypeDefinition();
+         d != nullptr; d = d->DeclaringTypeDefinition())
+        outerTypeParameterCount +=
+            static_cast<std::size_t>(d->TypeParameterCount());
+    std::vector<TS::ITypePtr> localTypeArguments;
+    if (static_cast<std::size_t>(typeDef->TypeParameterCount()) >
+        outerTypeParameterCount) {
+        const auto* parameterized =
+            dynamic_cast<const TS::ParameterizedType*>(baseType.get());
+        if (parameterized != nullptr) {
+            const std::vector<TS::ITypePtr>& typeArguments =
+                parameterized->TypeArguments();
+            if (typeArguments.size() > outerTypeParameterCount)
+                localTypeArguments.assign(
+                    typeArguments.begin() + outerTypeParameterCount,
+                    typeArguments.begin() + typeDef->TypeParameterCount());
+        }
+    }
+    auto rr = resolver.LookupSimpleNameOrTypeName(
+        typeDef->Name(), localTypeArguments, Resolver::NameLookupMode::Type);
+    const auto trr =
+        std::dynamic_pointer_cast<Semantics::TypeResolveResult>(rr);
+    // The no-result case keeps the SHORT name: the port's compilation
+    // loads a SUBSET of the C#'s reference modules (the netcore
+    // runtime-pack discovery is not ported), so a name absent from the
+    // port's merged namespace tree is typically resolvable in the C#'s --
+    // the C# renders those short (the lookup succeeds there). Only a
+    // REAL lookup result qualifies: an ambiguity (two accessible
+    // same-name types both present) or an error type -- both carry
+    // positive information the render must respect.
+    if (trr == nullptr)
+        return true;
+    if (trr->IsError())
+        return false;
+    // The TypeMatches bounded form: the same definition (the lookup
+    // parameterizes with the base type's own arguments, so the resolved
+    // instantiation matches by construction when the definition does).
+    return trr->Type().GetDefinition() == typeDef;
+}
+
+// The qualified fallback (the C# MemberType form): the full namespace, the
+// declaring-type chain dotted, and the type arguments rendered through the
+// short names (the C# AddTypeArguments applies the same conversion
+// recursively, each argument through the short-name decision).
+std::string QualifiedBaseTypeName(const TS::ITypePtr& baseType) {
+    const TS::ITypeDefinition* typeDef = baseType->GetDefinition();
+    if (typeDef == nullptr)
+        return IL::CSharpTypeName(baseType);
+    std::vector<std::string> names;
+    for (const TS::ITypeDefinition* d = typeDef; d != nullptr;
+         d = d->DeclaringTypeDefinition())
+        names.push_back(d->Name());
+    std::reverse(names.begin(), names.end());
+    std::string out = typeDef->Namespace();
+    for (const std::string& name : names)
+        out += out.empty() ? name : "." + name;
+    const auto* parameterized =
+        dynamic_cast<const TS::ParameterizedType*>(baseType.get());
+    if (parameterized != nullptr && !parameterized->TypeArguments().empty()) {
+        std::size_t outerTypeParameterCount = 0;
+        for (const TS::ITypeDefinition* d = typeDef->DeclaringTypeDefinition();
+             d != nullptr; d = d->DeclaringTypeDefinition())
+            outerTypeParameterCount +=
+                static_cast<std::size_t>(d->TypeParameterCount());
+        const std::vector<TS::ITypePtr>& typeArguments =
+            parameterized->TypeArguments();
+        if (typeArguments.size() > outerTypeParameterCount) {
+            out += "<";
+            for (std::size_t i = outerTypeParameterCount;
+                 i < typeArguments.size(); ++i) {
+                if (i != outerTypeParameterCount)
+                    out += ", ";
+                out += IL::CSharpTypeName(typeArguments[i]);
+            }
+            out += ">";
+        }
+    }
     return out;
 }
 
@@ -534,6 +724,7 @@ bool DecompileTypeToStringBody(
     TS::MetadataModule& module,
     const std::function<const Metadata::PartialTypeInfo*(std::uint32_t)>&
         partialLookup,
+    const std::vector<std::string>* usingNamespaces,
     std::uint32_t typeToken, std::string& out) {
     const Metadata::PartialTypeInfo* partialType = partialLookup(typeToken);
     if (TypeIsHiddenFromRender(file, typeToken))
@@ -624,6 +815,14 @@ bool DecompileTypeToStringBody(
         out += ' ';
         out += t.Name;
         if (typeDef != nullptr) {
+            // The C# FullyQualifyAmbiguousTypeNamesVisitor's per-type
+            // resolver (the visitor's ctor threading): the render's using
+            // scope for the short-name decision. Null (no set passed)
+            // leaves every short name alone.
+            std::shared_ptr<Resolver::CSharpResolver> scopeResolver =
+                usingNamespaces != nullptr
+                    ? RenderScopeResolver(module, typeDef, *usingNamespaces)
+                    : nullptr;
             std::vector<std::string> baseTypeNames;
             for (const TS::ITypePtr& baseType :
                  typeDef->DirectBaseTypes()) {
@@ -660,7 +859,15 @@ bool DecompileTypeToStringBody(
                 if (TS::IsKnownType(*baseType, TS::KnownTypeCode::Object)) {
                     continue;
                 }
-                baseTypeNames.push_back(IL::CSharpTypeName(baseType));
+                // The C# ConvertTypeHelper's short-name decision: the
+                // ambiguous or shadowed short name renders the qualified
+                // MemberType form instead.
+                baseTypeNames.push_back(
+                    scopeResolver != nullptr &&
+                            !BaseListShortNameUsable(baseType,
+                                                     *scopeResolver)
+                        ? QualifiedBaseTypeName(baseType)
+                        : IL::CSharpTypeName(baseType));
             }
             if (!baseTypeNames.empty()) {
                 out += " : ";
@@ -683,7 +890,8 @@ bool DecompileTypeToStringBody(
             continue;
         std::string nestedText;
         if (DecompileTypeToStringBody(file, typeSystem, module,
-                                      partialLookup, nestedToken, nestedText))
+                                      partialLookup, usingNamespaces,
+                                      nestedToken, nestedText))
             out += nestedText;
     }
     // The property declarations (the C# DecompileType's DoDecompileMember
@@ -1113,18 +1321,30 @@ bool DecompileTypeToStringBody(
 // surfaces land with the metadata-slice work).
 bool CSharpDecompiler::DecompileTypeToString(
     const Metadata::MetadataFile& file, std::uint32_t typeToken,
-    std::string& out, bool wrapNamespace) {
+    std::string& out, bool wrapNamespace,
+    const std::vector<std::string>* usingNamespaces) {
     // The static scaffold's per-call wiring (the note above): the resolver
     // + the reference-loaded type system, one pair per call.
     Metadata::UniversalAssemblyResolver resolver(
         file.FileName(), false, Metadata::DetectTargetFrameworkId(file));
     TS::DecompilerTypeSystem typeSystem(file, resolver);
+    // The -t render's using set (the type's own collected namespaces) for
+    // the resolver's scope; the whole-module loop overrides it with the
+    // module-wide set (one DecompileRun over every type).
+    std::vector<std::string> ownUsingSet;
+    const std::vector<std::string>* usingSet = usingNamespaces;
+    if (usingSet == nullptr) {
+        ownUsingSet =
+            MinimalUsingSetOf(file, typeSystem.MainMetadataModule(),
+                              typeToken);
+        usingSet = &ownUsingSet;
+    }
     bool rendered = DecompileTypeToStringBody(
         file, &typeSystem, typeSystem.MainMetadataModule(),
         [](std::uint32_t token) {
             return FindRegisteredPartialType(token);
         },
-        typeToken, out);
+        usingSet, typeToken, out);
     if (rendered && wrapNamespace) {
         // The single-type render's leading using directives + the
         // namespace header (the C# -t render's file-scoped form:
@@ -1226,17 +1446,18 @@ CSharpDecompiler::~CSharpDecompiler() = default;
 // namespaces the attribute tree's own transform collects) followed by the
 // attribute sections. The module's own type namespaces never appear (the
 // tree's names inside them resolve through the namespace declarations).
-std::string WholeModuleHeader(
+// The whole-module render's using set (the C# CreateDecompileRun over
+// every type's collected namespaces -- the single module-wide
+// DecompileRun): a namespace emits iff some type OUTSIDE it references it
+// (a name inside `namespace N { }` resolves without a using for N, so N's
+// own types never pull it in; a module-owned namespace referenced only by
+// its own types -- the connid's stub types -- never appears either). The
+// assembly/module attributes' namespaces always emit (they sit at the
+// file root, outside every namespace block). The base-list qualification
+// consumes the same set (the whole-module scope).
+std::vector<std::string> WholeModuleUsingSet(
     const ::ILSpy::Decompiler::TypeSystem::MetadataModule& module) {
-    // A namespace is emitted iff some type OUTSIDE it references it (the
-    // C# resolver's per-namespace-block resolution: a name inside
-    // `namespace N { }` resolves without a using for N, so N's own types
-    // never pull it in; a module-owned namespace referenced only by its
-    // own types -- the connid's stub types -- never appears either). The
-    // assembly/module attributes' namespaces always emit (they sit at the
-    // file root, outside every namespace block).
     std::set<std::string> emitted;
-    const auto* metadata = module.MetadataFile();
     for (const TS::ITypeDefinition* type : module.TypeDefinitions()) {
         if (type == nullptr)
             continue;
@@ -1258,8 +1479,14 @@ std::string WholeModuleHeader(
     }
     std::vector<std::string> sorted(emitted.begin(), emitted.end());
     std::sort(sorted.begin(), sorted.end());
+    return sorted;
+}
+
+std::string WholeModuleHeader(
+    const ::ILSpy::Decompiler::TypeSystem::MetadataModule& module,
+    const std::vector<std::string>& usingSet) {
     std::string out;
-    for (const std::string& ns : sorted)
+    for (const std::string& ns : usingSet)
         out += "using " + ns + ";\n";
     if (!out.empty())
         out += "\n";
@@ -1287,7 +1514,15 @@ std::string CSharpDecompiler::DecompileWholeModuleToString() {
     // same-namespace types nest under one block; the empty namespace
     // renders at the root; a hidden type does not break the group).
     std::string out;
-    out += WholeModuleHeader(state_->typeSystem->MainMetadataModule());
+    // The whole-module using set computes ONCE (the
+    // CollectRequiredNamespaces walk over every type is the render's most
+    // expensive single pass) and feeds BOTH the emitted header and every
+    // type's base-list scope (the C# single DecompileRun over the whole
+    // tree: one using scope for every base-list decision).
+    std::vector<std::string> moduleUsingSet =
+        WholeModuleUsingSet(state_->typeSystem->MainMetadataModule());
+    out += WholeModuleHeader(state_->typeSystem->MainMetadataModule(),
+                             moduleUsingSet);
     std::string currentNamespace;
     bool namespaceOpen = false;
     for (const auto& t : state_->file->TypeDefs()) {
@@ -1314,7 +1549,7 @@ std::string CSharpDecompiler::DecompileWholeModuleToString() {
         }
         std::string text;
         if (DecompileTypeToString(t.Token, text,
-                                  /*wrapNamespace=*/false))
+                                 /*wrapNamespace=*/false, &moduleUsingSet))
             out += text;
     }
     if (namespaceOpen)
@@ -1323,13 +1558,26 @@ std::string CSharpDecompiler::DecompileWholeModuleToString() {
 }
 
 bool CSharpDecompiler::DecompileTypeToString(
-    std::uint32_t typeToken, std::string& out, bool wrapNamespace) {
+    std::uint32_t typeToken, std::string& out, bool wrapNamespace,
+    const std::vector<std::string>* usingNamespaces) {
+    // The -t render's using set (the type's own collected namespaces);
+    // the whole-module loop overrides it with the module-wide set (one
+    // DecompileRun over every type).
+    std::vector<std::string> ownUsingSet;
+    const std::vector<std::string>* usingSet = usingNamespaces;
+    if (usingSet == nullptr) {
+        ownUsingSet =
+            MinimalUsingSetOf(*state_->file,
+                              state_->typeSystem->MainMetadataModule(),
+                              typeToken);
+        usingSet = &ownUsingSet;
+    }
     bool rendered = DecompileTypeToStringBody(
         *state_->file, state_->typeSystem ? &state_->typeSystem.value()
                                           : nullptr,
         state_->typeSystem->MainMetadataModule(),
         [this](std::uint32_t token) { return FindPartialTypeInfo(token); },
-        typeToken, out);
+        usingSet, typeToken, out);
     if (rendered && wrapNamespace) {
         std::string ns = RootNamespaceOf(*state_->file, typeToken);
         if (!ns.empty())
@@ -1362,35 +1610,6 @@ const Metadata::PartialTypeInfo* CSharpDecompiler::FindPartialTypeInfo(
     auto it = state_->partialTypes.find(declaringTypeToken);
     return it == state_->partialTypes.end() ? nullptr : &it->second;
 }
-
-namespace {
-
-namespace TS = ::ILSpy::Decompiler::TypeSystem;
-
-
-// The C# `typeSystem.GetNamespaceByFullName(ns)` (CreateDecompileRun's
-// resolver, line 758): the root-namespace walk over the dotted name.
-const TS::INamespace* ResolveNamespaceFullName(const TS::INamespace& root,
-                                              const std::string& fullName) {
-    const TS::INamespace* current = &root;
-    std::size_t start = 0;
-    while (current != nullptr) {
-        std::size_t dot = fullName.find('.', start);
-        std::string part =
-            fullName.substr(start,
-                            dot == std::string::npos ? std::string::npos
-                                                    : dot - start);
-        if (part.empty())
-            return nullptr;
-        current = current->GetChildNamespace(part);
-        if (dot == std::string::npos)
-            break;
-        start = dot + 1;
-    }
-    return current;
-}
-
-} // namespace
 
 // The C# `public SyntaxTree DecompileModuleAndAssemblyAttributes()`
 // (CSharpDecompiler.cs line 823): the AST path -- the attribute sections
@@ -1506,8 +1725,13 @@ std::string CSharpDecompiler::DecompileWholeModuleToString(
 
     std::string out;
     // The leading attribute sections (the whole-module path's
-    // DoDecompileModuleAndAssemblyAttributes call at line 917).
-    out += WholeModuleHeader(typeSystem.MainMetadataModule());
+    // DoDecompileModuleAndAssemblyAttributes call at line 917). The using
+    // set computes once and feeds both the header and every type render's
+    // base-list scope (the C# single DecompileRun over the whole tree).
+    std::vector<std::string> moduleUsingSet =
+        WholeModuleUsingSet(typeSystem.MainMetadataModule());
+    out += WholeModuleHeader(typeSystem.MainMetadataModule(),
+                             moduleUsingSet);
     // The types (the C# DoDecompileTypes loop in metadata order), grouped
     // by namespace (the NamespaceDeclaration emission; a hidden type does
     // not break the group).
@@ -1534,7 +1758,8 @@ std::string CSharpDecompiler::DecompileWholeModuleToString(
         }
         std::string text;
         if (DecompileTypeToString(file, t.Token, text,
-                                  /*wrapNamespace=*/false))
+                                  /*wrapNamespace=*/false,
+                                  &moduleUsingSet))
             out += text;
     }
     if (namespaceOpen)
