@@ -46,6 +46,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/HighLevelLoopTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/NullableLiftingTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/ProxyCallReplacer.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/DynamicCallSiteTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/SplitVariables.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Instructions/DeconstructInstruction.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Instructions/UserDefinedLogicOperator.cpp

@@ -85,6 +85,10 @@ struct ILTransformSettings {
     // YieldReturnDecompiler's gate).
     bool YieldReturn = true;
     // Whether to decompile async/await state machines.
+    // DecompilerSettings.Dynamic (default true;
+    // DynamicCallSiteTransform's gate).
+    bool Dynamic = true;
+
     // DecompilerSettings.AsyncAwait (default true;
     // AsyncAwaitDecompiler's gate).
     bool AsyncAwait = true;

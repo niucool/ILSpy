@@ -247,6 +247,18 @@ void YieldReturnDecompiler::ResolveReaderSurfaces(ILFunction& function,
                         std::shared_ptr<const TypeSystem::IField>(),
                         module->GetDefinitionField(ldflda->FieldToken)));
             }
+        } else if (auto* ldsflda = dynamic_cast<LdsFlda*>(node)) {
+            // The static-field address carries the same deferred Field
+            // surface (the DynamicCallSiteTransform's cache-field reads).
+            if (ldsflda->Field == nullptr && ldsflda->FieldToken != 0 &&
+                (ldsflda->FieldToken >> 24) == 0x04) {
+                ldsflda->Field =
+                    std::const_pointer_cast<TypeSystem::IField>(
+                        std::shared_ptr<const TypeSystem::IField>(
+                            std::shared_ptr<const TypeSystem::IField>(),
+                            module->GetDefinitionField(
+                                ldsflda->FieldToken)));
+            }
         } else if (auto* call = dynamic_cast<Call*>(node)) {
             if (call->Method == nullptr && call->MethodToken != 0 &&
                 (call->MethodToken >> 24) == 0x06) {

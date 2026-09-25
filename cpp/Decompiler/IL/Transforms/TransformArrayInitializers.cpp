@@ -49,6 +49,17 @@ namespace ILSpy::Decompiler::IL {
 
 namespace {
 
+// File-local ldloc report form (the shared form is match-against).
+bool MatchLdLocOutLocal(ILInstruction* inst, ILVariable*& variable) {
+    variable = nullptr;
+    if (auto* ldloc = dynamic_cast<LdLoc*>(inst)) {
+        variable = ldloc->Variable.get();
+        return true;
+    }
+    return false;
+}
+
+
 // The port's array-instruction nodes live in ArrayInstructions.hpp (the NewArr
 // / LdElema pair the reader decodes); stelem decodes as
 // StObj(LdElema(type, array, indices), value, type) -- the C# has no separate
@@ -153,6 +164,48 @@ bool TransformArrayInitializersHandleSimple(
             step = 1;
             // stloc s(ldelema elementType(ldloc store, indices));
             // stobj elementType(ldloc s, value)
+        }
+        else if (auto* copyStore = dynamic_cast<StLoc*>(inst)) {
+            // The reader's stack-slot materialization of the array
+            // reference: `stloc s(ldloc store);
+            // stobj(ldelema(ldloc s, indices), value)`. The C# reader
+            // never produces this shape (the operand stays on the
+            // evaluation stack), so the C# HandleSimpleArrayInitializer
+            // has no matching arm.
+            ILVariable* copyTemporary = copyStore->Variable.get();
+            // The copy temp is single-definition, but its loads span both
+            // the element access and (in the binder-argument shape) the
+            // call that reads the array, so only the single store is
+            // required here.
+            if (copyTemporary == nullptr
+                || !copyTemporary->IsSingleDefinition())
+                break;
+            ILVariable* copiedVar = nullptr;
+            if (!MatchLdLocOutLocal(copyStore->Value.get(), copiedVar)
+                || copiedVar != store)
+                break;
+            if (i + 1 >= static_cast<int>(block->Instructions.size()))
+                break;
+            auto* stobj2 = dynamic_cast<StObj*>(
+                block->Instructions[static_cast<std::size_t>(i + 1)].get());
+            if (stobj2 == nullptr)
+                break;
+            auto* ldelem2 = dynamic_cast<LdElema*>(stobj2->Target.get());
+            if (ldelem2 == nullptr)
+                break;
+            auto* ldloc2 = dynamic_cast<LdLoc*>(ldelem2->Array.get());
+            if (ldloc2 == nullptr || ldloc2->Variable.get() != copyTemporary)
+                break;
+            bool badCopy = false;
+            for (const auto& idx : ldelem2->Indices) {
+                auto* ldc = dynamic_cast<LdcI4*>(idx.get());
+                if (ldc == nullptr) { badCopy = true; break; }
+                indices.push_back(ldc->Value);
+            }
+            if (badCopy) break;
+            value = stobj2->Value.get();
+            elementShell = stobj2;
+            step = 2;
         }
         else if (auto* addressStore = dynamic_cast<StLoc*>(inst)) {
             ILVariable* addressTemporary = addressStore->Variable.get();

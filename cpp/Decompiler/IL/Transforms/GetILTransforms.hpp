@@ -131,6 +131,31 @@ inline ILTransformSettings AnalysisTransformSettings()
 // This is the part `DecompileBodyForAnalysis` keeps; `RunGetILTransforms`
 // continues with the late transforms. Every comment documents the C# transform
 // it stands in for.
+// The pipeline through the second CFS only -- the prefix the transforms whose
+// C# slots sit right after it see (DynamicCallSiteTransform: before
+// SwitchDetection / LoopDetection / the block transforms).
+inline void RunILTransformsThroughSecondCFS(ILFunction& function, ILTransformContext& context)
+{
+    (void)function;
+    (void)context;
+    // The stages are delegated below through the shared prefix; see
+    // RunILTransformsThroughBlockTransforms for the per-stage comments.
+    ControlFlowSimplification().Run(function, context);
+    StObjToStLoc().Run(function, context);
+    ILInlining().Run(function, context);
+    InlineReturnTransform().Run(function, context);
+    RemoveInfeasiblePathTransform().Run(function, context);
+    DetectPinnedRegions().Run(function, context);
+    YieldReturnDecompiler().Run(function, context);
+    AsyncAwaitDecompiler().Run(function, context);
+    DetectCatchWhenConditionBlocks().Run(function, context);
+    DetectExitPoints().Run(function, context);
+    LdLocaDupInitObjTransform().Run(function, context);
+    EarlyExpressionTransforms().Run(function, context);
+    RemoveDeadVariableInit().Run(function, context);
+    ControlFlowSimplification().Run(function, context);
+}
+
 inline void RunILTransformsThroughBlockTransforms(ILFunction& function, ILTransformContext& context)
 {
     // ControlFlowSimplification (1st pass): block cleanup the rest of the

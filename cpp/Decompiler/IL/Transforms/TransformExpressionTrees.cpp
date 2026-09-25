@@ -79,19 +79,27 @@ bool TransformExpressionTrees::MatchGetTypeFromHandle(
     ILInstruction* inst, ::ILSpy::Decompiler::TypeSystem::ITypePtr& type) {
     type = nullptr;
     auto* call = dynamic_cast<Call*>(inst);
-    if (call == nullptr || call->IsNewObj || call->Method == nullptr ||
-        call->Arguments.size() != 1) {
+    if (call == nullptr || call->IsNewObj || call->Arguments.size() != 1) {
         return false;
     }
     // The C# `getTypeCall.Method.FullName == "System.Type.GetTypeFromHandle"`:
-    // the declaring type's full name + the method name pair.
-    ::ILSpy::Decompiler::TypeSystem::ITypePtr declaring =
-        call->Method->DeclaringType();
-    if (declaring == nullptr ||
-        !(declaring->Namespace() == "System" && declaring->Name() == "Type")) {
-        return false;
+    // the declaring type's full name + the method name pair. An unresolved
+    // out-of-module method (the deferred-resolution convention: System.Type
+    // lives in a referenced assembly) falls back to the reader's resolved
+    // "Namespace.Type::Method" surface.
+    if (call->Method != nullptr) {
+        ::ILSpy::Decompiler::TypeSystem::ITypePtr declaring =
+            call->Method->DeclaringType();
+        if (declaring == nullptr ||
+            !(declaring->Namespace() == "System" &&
+              declaring->Name() == "Type")) {
+            return false;
+        }
+        if (call->Method->Name() != "GetTypeFromHandle") return false;
+    } else {
+        if (call->MethodName != "System.Type::GetTypeFromHandle")
+            return false;
     }
-    if (call->Method->Name() != "GetTypeFromHandle") return false;
     auto* token = dynamic_cast<LdTypeToken*>(call->Arguments[0].get());
     if (token == nullptr || token->Type == nullptr) return false;
     type = token->Type;
