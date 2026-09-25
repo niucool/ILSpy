@@ -157,12 +157,15 @@ TEST(FacadeMemberModifiersTest, MethodModifiersRender)
         << text;
     EXPECT_NE(text.find("public ModifierShapes()"), std::string::npos)
         << text;
-    // The explicit interface implementation renders without accessibility.
-    EXPECT_NE(text.find("int ModifierFixture.IShape.Area()"), std::string::npos)
-        << text;
-    EXPECT_EQ(text.find("public int ModifierFixture.IShape.Area()"),
-              std::string::npos)
-        << text;
+    // The explicit interface implementation renders without accessibility
+    // and with the interface qualifier (the C#
+    // GetExplicitInterfaceType over the first implemented member's
+    // declaring type, the name after the last dot).
+    EXPECT_NE(text.find("int IShape.Area()"), std::string::npos) << text;
+    EXPECT_EQ(text.find("public int IShape.Area()"), std::string::npos)
+        << "no accessibility on the explicit implementation: " << text;
+    EXPECT_EQ(text.find("ModifierFixture.IShape.Area"), std::string::npos)
+        << "the dotted metadata name does not render: " << text;
 }
 
 // The derived class: override and the sealed override.

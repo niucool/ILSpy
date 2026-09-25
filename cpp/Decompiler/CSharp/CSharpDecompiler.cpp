@@ -561,9 +561,26 @@ bool DecompileTypeToStringBody(
         // case): the instance/type constructor renders with the TYPE name
         // and no return type.
         bool isConstructor = m.Name == ".ctor" || m.Name == ".cctor";
-        const std::string& methodName = isConstructor ? typeName : m.Name;
-        const TS::IMethod* methodEntity =
-            module.GetDefinitionMethod(m.Token);
+        // The explicit interface implementation (the C#
+        // DoDecompileMethod's name rewrite + GetExplicitInterfaceType):
+        // the name after the last dot, qualified by the first
+        // implemented member's declaring type -- `IShape.Area` instead
+        // of the dotted metadata name.
+        std::string methodName = isConstructor ? typeName : m.Name;
+        const TS::IMethod* methodEntity = module.GetDefinitionMethod(m.Token);
+        if (!isConstructor && methodEntity != nullptr &&
+            methodEntity->IsExplicitInterfaceImplementation()) {
+            methodName = methodName.substr(
+                methodName.find_last_of('.') + 1);
+            std::vector<const TS::IMember*> implemented =
+                methodEntity->ExplicitlyImplementedInterfaceMembers();
+            if (!implemented.empty() && implemented[0] != nullptr &&
+                implemented[0]->DeclaringType() != nullptr) {
+                methodName = IL::CSharpTypeName(
+                                 implemented[0]->DeclaringType()) +
+                             "." + methodName;
+            }
+        }
         std::string modifiers =
             MemberModifiersText(methodEntity);
         if (m.RVA == 0) {
