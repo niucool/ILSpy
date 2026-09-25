@@ -39,6 +39,7 @@
 //  (e) the `Arguments` getter returns the ctor's arguments (identity).
 //  (f) the input properties are mutable (set + get round-trip).
 
+#include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"
 #include "Decompiler/CSharp/Resolver/OverloadResolution.hpp"
 #include "Decompiler/Semantics/ResolveResult.hpp"
 #include "Decompiler/Semantics/TypeResolveResult.hpp"
@@ -57,6 +58,7 @@
 
 namespace {
 
+using ILSpy::Decompiler::CSharp::Resolver::CSharpConversions;
 using ILSpy::Decompiler::CSharp::Resolver::OverloadResolution;
 using ILSpy::Decompiler::Semantics::ResolveResult;
 using ILSpy::Decompiler::Semantics::TypeResolveResult;
@@ -103,7 +105,29 @@ TEST(OverloadResolutionCtorTest, Defaults) {
     EXPECT_TRUE(r.AllowImplicitIn());
     EXPECT_FALSE(r.CheckForOverflow());
     EXPECT_FALSE(r.IsExtensionMethodInvocation());
-    EXPECT_EQ(r.Conversions(), nullptr);  // deferred CSharpConversions fallback
+    // The C# ctor fallback (`conversions ?? CSharpConversions.Get(compilation)`)
+    // is now ported: a null conversions resolves to the per-compilation
+    // CSharpConversions singleton.
+    EXPECT_EQ(r.Conversions(), &CSharpConversions::Get(Compilation()));
+}
+
+// An EXPLICIT conversions instance is kept as-is (the C# `conversions ?? ...`
+// only fires on null).
+TEST(OverloadResolutionCtorTest, ExplicitConversionsAreKept) {
+    auto conversions = std::make_shared<CSharpConversions>(Compilation());
+    OverloadResolution r(Compilation(), Args(1), std::nullopt, std::nullopt,
+        conversions.get());
+    EXPECT_EQ(r.Conversions(), conversions.get());
+}
+
+// The fallback is the per-compilation SINGLETON: two null-converted
+// resolutions over the same compilation share the conversions instance (the
+// CacheManager identity).
+TEST(OverloadResolutionCtorTest, NullConversionsShareTheCompilationSingleton) {
+    OverloadResolution r1(Compilation(), Args(1));
+    OverloadResolution r2(Compilation(), Args(2));
+    ASSERT_NE(r1.Conversions(), nullptr);
+    EXPECT_EQ(r1.Conversions(), r2.Conversions());
 }
 
 // ---------------------------------------------------------------------------

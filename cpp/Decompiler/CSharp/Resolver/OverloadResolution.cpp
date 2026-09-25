@@ -43,7 +43,14 @@ OverloadResolution::OverloadResolution(
     const CSharpConversions* conversions)
     : compilation_(&compilation),
       arguments_(std::move(arguments)),
-      conversions_(conversions)
+      // The C# `this.conversions = conversions ?? CSharpConversions.Get(compilation);`
+      // -- a null conversions resolves to the per-compilation CSharpConversions
+      // singleton (the CacheManager-cached instance; the D512 skeleton deferred
+      // this fallback pending the CSharpConversions conversion methods, which
+      // have since landed).
+      conversions_(conversions != nullptr
+              ? conversions
+              : &CSharpConversions::Get(compilation))
 {
     // The C# throws `ArgumentNullException` on null `compilation`/`arguments`. The port's `const`
     // reference + owning-vector params cannot be null at the type level (a reference can't bind to
