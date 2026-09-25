@@ -474,6 +474,37 @@ emits them as top-level classes in the empty-namespace root group.
 That rides with the member-iteration restructuring (the C# DoDecompile
 type's NestedTypes concat leads the member list).
 
+### The single-type render completion (commits 1acdb59d8/676aac6bd)
+
+- **The nested-type placement** (`1acdb59d8`): the nested types render
+  inside their declaring type's braces (the C# DoDecompile's member
+  order -- the NestedTypes concat LEADS the member list) through the
+  recursive body entry; the hidden state machine types skip there too;
+  the whole-module loops skip nested types (they render once, within
+  their parent). The partial-type consult became a lookup callback so
+  each nested type resolves its own partial info. The single-type
+  namespace header walks the declaring chain (the -t render of
+  Derived carries `namespace ModifierFixture;`).
+- **The required using directives on the -t render** (`676aac6bd`): the
+  minimal using set over the new CollectRequiredNamespaces walk (the
+  entity walk without the known-type candidate seeding, the implicit
+  bases, the never-rendering enum members, the stripped attribute
+  families, and the type-reference base sweep -- the C#'s candidate
+  pool + resolver filtering approximated by restricting the walk to
+  what the render names). The modifier fixture matches the oracle
+  exactly (`using System;` on ModifierShapes, none on Color).
+
+NOTE (the stale-queue catches): TransformFieldAndConstructorInitializers
+was ALREADY PORTED via the master merge (885 lines + 17 tests, the
+record support / primary constructors / XML doc / decimal-constant arms
+deferred loudly in its .hpp) -- the facade queue's entry was stale, as
+was the earlier ProxyCallReplacer one. The queue's remaining REAL
+items: the name-qualification family (79 corpus base-list diffs -- the
+resolver-based short-vs-qualified decisions, the biggest single
+remaining diff mass), the body-level qualified member accesses
+(`ModifierFixture.ModifierShapes.StaticField` -> `StaticField`, ~540
+corpus lines), and the field-access short names in the flat bodies.
+
 ProxyCallReplacer is DONE (the handoff's earlier entry -- the
 EarlyILTransforms surface the facade queue referenced landed with it;
 the queue note was stale).
