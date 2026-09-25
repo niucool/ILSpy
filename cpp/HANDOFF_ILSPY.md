@@ -558,9 +558,14 @@ Facade instance surface.
   System.Core, System.Configuration -- ~12k rendered lines,
   reference-resolved) byte-identical against the pre-change build, and the
   full 12856-test suite unchanged. The remaining deferred IL transforms
-  (ProxyCallReplacer, YieldReturnDecompiler, AsyncAwaitDecompiler,
-  DynamicCallSiteTransform, IntroduceRefReadOnlyModifierOnLocals) are NOT
-  ported (no files) -- genuine port projects.
+  (ProxyCallReplacer DONE -- see above; YieldReturnDecompiler IN PROGRESS
+  -- Part 1 landed: LongDict + SymbolicExecution + StateRangeAnalysis, the
+  complete analysis core, with 3 RED-first tests; the next parts are the
+  enumerator-creation matching + the ctor/current/mapping/dispose analyses,
+  then the MoveNext conversion, then the try-finally reconstruction;
+  AsyncAwaitDecompiler, DynamicCallSiteTransform,
+  IntroduceRefReadOnlyModifierOnLocals) are NOT ported -- genuine port
+  projects.
 - The foreach-on-multi-dim arms: VERIFIED COMPLETE after the merge (the
   merged PatternStatementTransform carries the full
   TransformForeachOnMultiDimArray + MatchForeachOnMultiDimArray +

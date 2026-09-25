@@ -237,9 +237,14 @@ public:
     }
 
 private:
+private:
     std::vector<LongInterval> intervals_;
 
+public:
     // Construct from an already-normalized interval list (no sort/merge).
+    // (The C# public ctor over IEnumerable<LongInterval> sorts/merges; this
+    // form is the already-sorted producer's fast path -- the union of the
+    // switch-section exits in StateRangeAnalysis.)
     static LongSet FromNormalized(std::vector<LongInterval> intervals) {
         LongSet s;
         s.intervals_ = std::move(intervals);

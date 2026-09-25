@@ -50,6 +50,7 @@
 #include "Decompiler/IL/Instructions/CastClass.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
@@ -188,6 +189,29 @@ inline bool MatchLdLoc(const ILInstruction* inst, const ILVariable* variable)
 {
     const auto* ldloc = dynamic_cast<const LdLoc*>(inst);
     return ldloc != nullptr && ldloc->Variable.get() == variable;
+}
+
+// The C# `public bool MatchDefaultOrNullOrZero()` (PatternMatching.cs line
+// 556): a null literal, a zero constant, or a default value -- the shapes
+// the Roslyn 4.13 Dispose() cleanup stores into the hoisted fields.
+inline bool MatchDefaultOrNullOrZero(const ILInstruction* inst)
+{
+    if (inst == nullptr) return false;
+    switch (inst->Op) {
+        case OpCode::LdNull:
+        case OpCode::DefaultValue:
+            return true;
+        case OpCode::LdcI4:
+            return static_cast<const LdcI4*>(inst)->Value == 0;
+        case OpCode::LdcI8:
+            return static_cast<const LdcI8*>(inst)->Value == 0;
+        case OpCode::LdcF4:
+            return static_cast<const LdcF4*>(inst)->Value == 0;
+        case OpCode::LdcF8:
+            return static_cast<const LdcF8*>(inst)->Value == 0;
+        default:
+            return false;
+    }
 }
 
 // The C# `public bool MatchLdLoca(ILVariable? variable)` (PatternMatching.cs line
