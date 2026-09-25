@@ -786,6 +786,31 @@ TEST(FacadeMemberModifiersTest, MemberSignaturesQualifyAmbiguousNames)
         << text;
 }
 
+// The .override directive synthesis (the C# AddInterfaceImplHelpers):
+// a plain-named method bound to an interface contract through a
+// MethodImpl row (the VB-style explicit implementation C# source
+// cannot express) renders a synthesized explicit-interface-
+// implementation forwarder after its own declaration -- the interface
+// qualifier through the name decision, the generated comment, and the
+// forwarding call.
+TEST(FacadeMemberModifiersTest, OverrideDirectiveRendersTheForwarder)
+{
+    constexpr const char* kOverrideFixture =
+        "/home/jim/ilspy-test-fixtures/override_fixture/"
+        "OverrideSynth.dll";
+    std::string text;
+    if (!RenderType(kOverrideFixture, "OverrideShape", text))
+        GTEST_SKIP() << "the override fixture is not provisioned";
+    EXPECT_NE(text.find("int IShape.GetValue()"), std::string::npos)
+        << text;
+    EXPECT_NE(text.find("ILSpy generated this explicit interface "
+                        "implementation from .override directive in Impl"),
+              std::string::npos)
+        << text;
+    EXPECT_NE(text.find("return this.Impl();"), std::string::npos)
+        << text;
+}
+
 // The whole-module render's using header carries the module-wide
 // required set (the C# IntroduceUsingDeclarations over the whole-module
 // tree), not just the assembly-attribute namespaces: the connid module's

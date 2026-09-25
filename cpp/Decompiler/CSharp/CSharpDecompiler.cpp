@@ -1573,15 +1573,85 @@ bool DecompileTypeToStringBody(
             paramDecl = CSharpDecompiler::MethodDeclString(
                 *sig, paramNames, scopeResolver.get());
         }
+        // The C# AddInterfaceImplHelpers (the .override directive
+        // synthesis): a plain-named method bound to an interface contract
+        // through a MethodImpl row (the VB-style explicit implementation
+        // C# source cannot express) renders a synthesized
+        // explicit-interface-implementation forwarder after its own
+        // declaration. No forwarder when the member is already a dotted
+        // explicit implementation, is static, or renders extern (the C#'s
+        // three guards).
+        bool memberRendersExtern =
+            methodEntity != nullptr && !methodEntity->IsAbstract() &&
+            methodEntity->DeclaringType() != nullptr &&
+            methodEntity->DeclaringType()->Kind() !=
+                TS::TypeKind::Interface &&
+            m.RVA == 0;
+        auto renderOverrideForwarders = [&]() {
+            if (isConstructor || methodEntity == nullptr ||
+                methodEntity->IsExplicitInterfaceImplementation() ||
+                methodEntity->IsStatic() || memberRendersExtern)
+                return;
+            for (const TS::IMember* implemented :
+                 methodEntity->ExplicitlyImplementedInterfaceMembers()) {
+                const auto* interfaceMethod =
+                    dynamic_cast<const TS::IMethod*>(implemented);
+                if (interfaceMethod == nullptr ||
+                    interfaceMethod->DeclaringType() == nullptr ||
+                    interfaceMethod->DeclaringType()->Kind() !=
+                        TS::TypeKind::Interface)
+                    continue;
+                const TS::ITypePtr interfaceType =
+                    interfaceMethod->DeclaringType();
+                out += isConstructor ? std::string() : returnType + " ";
+                out += RenderBaseTypeName(
+                    interfaceType != nullptr
+                        ? interfaceType->GetDefinition()
+                        : nullptr,
+                    interfaceType, scopeResolver.get());
+                out += '.';
+                out += interfaceMethod->Name();
+                out += "(" + paramDecl + ")\n";
+                out += "{\n";
+                out += "//ILSpy generated this explicit interface "
+                       "implementation from .override directive in ";
+                out += methodName;
+                out += "\n";
+                // The forwarding call: this.<member>(parameters).
+                std::string call = "this." + methodName + "(";
+                std::vector<std::string> parameterNames =
+                    file.GetParameterNames(m.Token);
+                if (methodEntity != nullptr) {
+                    parameterNames.clear();
+                    for (const TS::IParameter* parameter :
+                         methodEntity->Parameters())
+                        parameterNames.push_back(
+                            parameter != nullptr
+                                ? parameter->Name()
+                                : std::string());
+                }
+                for (std::size_t i = 0; i < parameterNames.size(); ++i) {
+                    if (i != 0) call += ", ";
+                    if (parameterNames[i].empty())
+                        call += "arg_" + std::to_string(i + 1);
+                    else
+                        call += parameterNames[i];
+                }
+                call += ")";
+                if (interfaceMethod->ReturnType().ReflectionName() ==
+                    "System.Void")
+                    out += call + ";\n";
+                else
+                    out += "return " + call + ";\n";
+                out += "}\n";
+            }
+        };
         if (m.RVA == 0) {
             // The C# DoDecompileMethod's body-less arm: an abstract method
             // (or an interface member) renders as a declaration with no
             // body; a body-less non-abstract member of a non-interface type
             // is externally implemented (the C# adds the extern modifier).
-            if (methodEntity != nullptr && !methodEntity->IsAbstract() &&
-                methodEntity->DeclaringType() != nullptr &&
-                methodEntity->DeclaringType()->Kind() !=
-                    TS::TypeKind::Interface) {
+            if (memberRendersExtern) {
                 modifiers += "extern ";
             }
             out += MemberAttributesText(methodEntity);
@@ -1589,6 +1659,7 @@ bool DecompileTypeToStringBody(
             out += isConstructor ? std::string() : returnType + " ";
             out += methodName;
             out += "(" + paramDecl + ");\n";
+            renderOverrideForwarders();
             rendered = true;
             continue;
         }
@@ -1604,6 +1675,7 @@ bool DecompileTypeToStringBody(
             out += modifiers;
             out += text;
             out += "\n";
+            renderOverrideForwarders();
             rendered = true;
         } else {
             // The C# DecompileMethod's body-decode failure: the declaration
@@ -1619,6 +1691,7 @@ bool DecompileTypeToStringBody(
             out += "/*Error: Empty body found. Decompiled assembly might "
                    "be a reference assembly.*/;\n";
             out += "}\n";
+            renderOverrideForwarders();
             rendered = true;
         }
     }
