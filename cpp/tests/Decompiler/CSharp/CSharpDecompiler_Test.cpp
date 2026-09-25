@@ -32,6 +32,9 @@
 #include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
 #include "Decompiler/CSharp/Syntax/SyntaxTree.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/Metadata/DotNetCorePathFinderExtensions.hpp"
+#include "Decompiler/Metadata/UniversalAssemblyResolver.hpp"
+#include "Decompiler/TypeSystem/DecompilerTypeSystem.hpp"
 #include "Decompiler/TypeSystem/ICompilation.hpp"
 #include "Decompiler/TypeSystem/INamespace.hpp"
 #include "Decompiler/TypeSystem/StringComparer.hpp"
@@ -467,6 +470,62 @@ TEST(CSharpDecompilerTest, DecompileModuleAndAssemblyAttributesRender)
 // output-visitor form: `Debuggable (/*Could not decode attribute
 // arguments.*/)` (the multi-line comment carries no inner padding, the
 // NRefactory trivia-writer shape).
+// The enum-argument decode over the reference set (the C# CLI's actual
+// type-system shape): the connid DebuggableAttribute row's enum argument
+// resolves its DebuggingModes TypeRef through the resolver-loaded
+// referenced assemblies, so the attribute decodes and renders the enum
+// member form (ConvertEnumValue's MakeEnumMemberReference: the real
+// ilspycmd qualifies the nested enum as
+// DebuggableAttribute.DebuggingModes.X; the port's ConvertType renders the
+// short nested name -- a TypeSystemAstBuilder follow-up). The decode-error
+// comment form (the test above) is the UNRESOLVED fallback; this test
+// holds the resolved path. Gated on the box resolving the reference set
+// (the dotnet shared directories the net10.0 target's netcore arms
+// search): without them the resolver loads nothing and the attribute
+// keeps the decode-error render, which this box's default CLI run also
+// shows when the directories are absent.
+TEST(CSharpDecompilerTest, AttributeEnumArgumentDecodesOverTheReferenceSet)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+    // The facade's per-call wiring (the DecompileTypeToString note): the
+    // resolver over the main file's own name, throwOnError false, the
+    // target framework from the module.
+    ::ILSpy::Decompiler::Metadata::UniversalAssemblyResolver resolver(
+        file.FileName(), false,
+        ::ILSpy::Decompiler::Metadata::DetectTargetFrameworkId(file));
+    ::ILSpy::Decompiler::TypeSystem::DecompilerTypeSystem typeSystem(
+        file, resolver);
+    // The gate on the box's reference set: the connid library's actual
+    // reference (a net10.0 csc build references System.Runtime). The
+    // resolver reaches it through the dotnet shared directories, which the
+    // PATH scan of DotNetCorePathFinder.FindDotNetExeDirectory finds only
+    // when `dotnet` is on PATH -- the MinimalCorlib net still loads without
+    // it, so the check is on the named reference, not on any module.
+    const auto& modules = typeSystem.Modules();
+    bool systemRuntimeLoaded = false;
+    for (const TS::IModule* m : modules) {
+        if (m != &typeSystem.MainModule() && m->Name() == "System.Runtime")
+            systemRuntimeLoaded = true;
+    }
+    if (!systemRuntimeLoaded)
+        GTEST_SKIP()
+            << "the dotnet shared directories are not reachable "
+               "(dotnet not on PATH)";
+    std::string text =
+        CSharp::CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
+            typeSystem.MainMetadataModule());
+    EXPECT_NE(text.find("IgnoreSymbolStoreSequencePoints"), std::string::npos)
+        << "the enum argument decodes to the member-reference form: " << text;
+    EXPECT_EQ(text.find("Could not decode attribute arguments."),
+              std::string::npos)
+        << "the decode-error comment form is gone once the reference set "
+           "resolves: "
+        << text;
+}
+
 TEST(CSharpDecompilerTest,
      DecompileModuleAttributesRenderDecodeErrorsAsComments)
 {
