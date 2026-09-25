@@ -84,6 +84,7 @@ add_executable(ilspy_tests
     ILSpyX/FileLoaders/FileLoaders_Test.cpp
     ILSpyX/Abstractions/ILanguage_Test.cpp
     ILSpyX/Settings/Settings_Test.cpp
+    ILSpyX/Settings/DecompilerSettingsOptions_Test.cpp
     ILSpyCmd/IlspyCmdProgram_Test.cpp
     ILSpyCmd/ResourceExtensions_Test.cpp
     ILSpyCmd/MetadataTableDumper_Test.cpp
