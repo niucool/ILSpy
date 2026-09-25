@@ -964,6 +964,100 @@ bool DecompileTypeToStringBody(
                     out += baseTypeNames[i];
                 }
             }
+            // The type-parameter constraint clauses (the C#
+            // ConvertTypeParameterConstraint): a parameter carrying a
+            // special constraint (`class`/`struct`/`new()`), a type
+            // constraint beyond Object/ValueType, or a nullability
+            // constraint renders its `where` clause on the declaration
+            // line, the constraint types through the same name decision
+            // as the base list. The declaring type's own (outer)
+            // parameters do not restate their constraints.
+            {
+                const std::vector<const TS::ITypeParameter*>& typeParameters =
+                    typeDef->TypeParameters();
+                std::size_t outerTypeParameterCount = 0;
+                for (const TS::ITypeDefinition* d =
+                         typeDef->DeclaringTypeDefinition();
+                     d != nullptr; d = d->DeclaringTypeDefinition())
+                    outerTypeParameterCount +=
+                        static_cast<std::size_t>(d->TypeParameterCount());
+                for (std::size_t i = outerTypeParameterCount;
+                     i < typeParameters.size(); ++i) {
+                    const TS::ITypeParameter* tp = typeParameters[i];
+                    if (tp == nullptr)
+                        continue;
+                    // The C# skip clause: no special constraint, no
+                    // nullability constraint, and every type constraint
+                    // Object/ValueType.
+                    bool hasTypeConstraint = false;
+                    for (const TS::TypeConstraint& tc : tp->TypeConstraints()) {
+                        if (tc.Type() == nullptr)
+                            continue;
+                        const TS::ITypeDefinition* tcDef =
+                            tc.Type()->GetDefinition();
+                        const bool objectOrValueType =
+                            tcDef != nullptr &&
+                            (TS::IsKnownType(*tc.Type(),
+                                             TS::KnownTypeCode::Object) ||
+                             TS::IsKnownType(*tc.Type(),
+                                             TS::KnownTypeCode::ValueType));
+                        if (!objectOrValueType || !tc.Attributes().empty()) {
+                            hasTypeConstraint = true;
+                            break;
+                        }
+                    }
+                    if (!tp->HasDefaultConstructorConstraint() &&
+                        !tp->HasReferenceTypeConstraint() &&
+                        !tp->HasValueTypeConstraint() &&
+                        !tp->AllowsRefLikeType() &&
+                        tp->NullabilityConstraint() !=
+                            TS::Nullability::NotNullable &&
+                        !hasTypeConstraint)
+                        continue;
+                    out += " where ";
+                    out += tp->Name();
+                    out += " :";
+                    bool first = true;
+                    auto appendConstraint = [&](const std::string& item) {
+                        out += first ? " " : ", ";
+                        out += item;
+                        first = false;
+                    };
+                    if (tp->HasReferenceTypeConstraint()) {
+                        appendConstraint(
+                            tp->NullabilityConstraint() ==
+                                    TS::Nullability::Nullable
+                                ? "class?"
+                                : "class");
+                    } else if (tp->HasValueTypeConstraint()) {
+                        appendConstraint(
+                            tp->HasUnmanagedConstraint() ? "unmanaged"
+                                                         : "struct");
+                    } else if (tp->NullabilityConstraint() ==
+                               TS::Nullability::NotNullable) {
+                        appendConstraint("notnull");
+                    }
+                    for (const TS::TypeConstraint& tc : tp->TypeConstraints()) {
+                        if (tc.Type() == nullptr)
+                            continue;
+                        const bool objectOrValueType =
+                            TS::IsKnownType(*tc.Type(),
+                                            TS::KnownTypeCode::Object) ||
+                            TS::IsKnownType(*tc.Type(),
+                                            TS::KnownTypeCode::ValueType);
+                        if (objectOrValueType && tc.Attributes().empty())
+                            continue;
+                        appendConstraint(
+                            RenderBaseTypeName(tc.Type()->GetDefinition(),
+                                               tc.Type(), scopeResolver.get()));
+                    }
+                    if (tp->HasDefaultConstructorConstraint() &&
+                        !tp->HasValueTypeConstraint())
+                        appendConstraint("new()");
+                    if (tp->AllowsRefLikeType())
+                        appendConstraint("allows ref struct");
+                }
+            }
         }
         out += "\n{\n";
         rendered = true;

@@ -720,6 +720,42 @@ TEST(FacadeMemberModifiersTest, BaseListTypeArgumentsFollowTheNameDecision)
         << param;
 }
 
+// The type-parameter constraint clauses (the C#
+// ConvertTypeParameterConstraint): a parameter carrying a special
+// constraint (`class`/`struct`/`new()`), a type constraint beyond
+// Object/ValueType, or a nullability constraint renders its `where`
+// clause on the declaration line; the constraint types go through the same
+// name decision as the base list.
+TEST(FacadeMemberModifiersTest, TypeParameterConstraintsRender)
+{
+    constexpr const char* kNestedFixture =
+        "/home/jim/ilspy-test-fixtures/nested_fixture/NestedBase.dll";
+    std::string ref, val, type, multi, newC;
+    if (!RenderType(kNestedFixture, "RefConstrained", ref))
+        GTEST_SKIP() << "the nested-base fixture is not provisioned";
+    ASSERT_TRUE(RenderType(kNestedFixture, "ValConstrained", val));
+    ASSERT_TRUE(RenderType(kNestedFixture, "TypeConstrained", type));
+    ASSERT_TRUE(RenderType(kNestedFixture, "MultiConstrained", multi));
+    ASSERT_TRUE(RenderType(kNestedFixture, "NewConstrained", newC));
+    EXPECT_NE(ref.find("class RefConstrained<T> where T : class"),
+              std::string::npos)
+        << ref;
+    EXPECT_NE(val.find("class ValConstrained<T> where T : struct"),
+              std::string::npos)
+        << val;
+    EXPECT_NE(type.find("class TypeConstrained<T> where T : Holder.INested"),
+              std::string::npos)
+        << type;
+    EXPECT_NE(
+        multi.find("class MultiConstrained<T> where T : class, "
+                  "Holder.INested"),
+        std::string::npos)
+        << multi;
+    EXPECT_NE(newC.find("class NewConstrained<T> where T : new()"),
+              std::string::npos)
+        << newC;
+}
+
 // The whole-module render's using header carries the module-wide
 // required set (the C# IntroduceUsingDeclarations over the whole-module
 // tree), not just the assembly-attribute namespaces: the connid module's
