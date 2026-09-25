@@ -225,6 +225,19 @@ struct IndexMethods {
 
 namespace {
 
+// The port's position reader: the C# reads the block's instruction list
+// (the terminators included); the port's reader carries the terminator in
+// the FinalInstruction slot, so a position at the end of the list reads the
+// final (the YieldReturnDecompiler / AsyncAwaitDecompiler precedent).
+ILInstruction* BlockInstructionAt(Block* block, int pos) {
+    if (block == nullptr) return nullptr;
+    if (pos >= 0 && pos < static_cast<int>(block->Instructions.size()))
+        return block->Instructions[static_cast<std::size_t>(pos)].get();
+    if (pos == static_cast<int>(block->Instructions.size()))
+        return block->FinalInstruction.get();
+    return nullptr;
+}
+
 // The C# `MatchContainerLength(ILInstruction init, ILVariable lengthVar, ref
 // ILVariable containerVar)`: with a non-null lengthVar matches `ldloc
 // lengthVar`; otherwise the `call get_Length/get_Count(ldloc container)`
@@ -667,7 +680,7 @@ void IndexRangeTransform::TransformIndexing(IndexRangeState& state) {
     if (state.rangeVar != nullptr) return;
     std::vector<ILInstruction*> loadSites;
     CollectLoadSitesOf(
-        state.block.Instructions[static_cast<std::size_t>(state.pos)].get(),
+        BlockInstructionAt(&state.block, state.pos),
         state.startOffsetVar, loadSites);
     if (loadSites.size() != 1) return;
     auto* call = dynamic_cast<Call*>(loadSites[0]->Parent);
@@ -702,14 +715,14 @@ void IndexRangeTransform::TransformIndexing(IndexRangeState& state) {
         return;
     }
     if (!call->IsDescendantOf(
-            state.block.Instructions[static_cast<std::size_t>(state.pos)].get())) {
+            BlockInstructionAt(&state.block, state.pos))) {
         return;
     }
     // startOffsetVar might be used deep inside a complex statement, ensure we
     // can inline up to that point:
     for (int i = state.startPos; i < state.pos; i++) {
         auto fr = FindLoadInNext(
-            state.block.Instructions[static_cast<std::size_t>(state.pos)].get(),
+            BlockInstructionAt(&state.block, state.pos),
             state.startOffsetVar,
             state.block.Instructions[static_cast<std::size_t>(i)].get());
         if (fr.type != FindResultType::Found) {
@@ -802,13 +815,13 @@ void IndexRangeTransform::TransformSlicing(IndexRangeState& state,
     }
     std::vector<ILInstruction*> loadSites;
     CollectLoadSitesOf(
-        state.block.Instructions[static_cast<std::size_t>(state.pos)].get(),
+        BlockInstructionAt(&state.block, state.pos),
         sliceLengthVar, loadSites);
     if (loadSites.size() != 1) return;
     auto* call = dynamic_cast<Call*>(loadSites[0]->Parent);
     if (call == nullptr || call->Method == nullptr) return;
     if (!call->IsDescendantOf(
-            state.block.Instructions[static_cast<std::size_t>(state.pos)].get()))
+            BlockInstructionAt(&state.block, state.pos)))
         return;
     if (!IsSlicingMethod(call->Method.get())) return;
     if (call->Arguments.size() != 3) return;
@@ -821,13 +834,13 @@ void IndexRangeTransform::TransformSlicing(IndexRangeState& state,
             return;
         if (!CanMoveInto(
                 state.startOffsetVarInit,
-                state.block.Instructions[static_cast<std::size_t>(state.pos)].get(),
+                BlockInstructionAt(&state.block, state.pos),
                 call->Arguments[1].get()))
             return;
     }
     if (!IsLoadOfVariableRef(call->Arguments[2].get(), sliceLengthVar)) return;
     if (!CanMoveInto(sliceLengthVarInit,
-                     state.block.Instructions[static_cast<std::size_t>(state.pos)].get(),
+                     BlockInstructionAt(&state.block, state.pos),
                      call->Arguments[2].get()))
         return;
     if (!CSharpWillGenerateIndexer(call->Method->DeclaringType().get(), true)) return;
@@ -977,7 +990,7 @@ void IndexRangeTransform::ExtendSlicing(IndexRangeState& state) {
         return;
     }
     if (!slicingCall->IsDescendantOf(
-            state.block.Instructions[static_cast<std::size_t>(state.pos)].get())) {
+            BlockInstructionAt(&state.block, state.pos))) {
         return;
     }
     assert(rangeCtorCall->Arguments.size() == 2);
@@ -1018,7 +1031,7 @@ void IndexRangeTransform::ExtendSlicing(IndexRangeState& state) {
     if (state.rangeVar != nullptr) {
         if (state.rangeVarInit == nullptr) return;
         if (!CanMoveInto(state.rangeVarInit,
-                         state.block.Instructions[static_cast<std::size_t>(state.pos)].get(),
+                         BlockInstructionAt(&state.block, state.pos),
                          state.startIndex.load)) {
             return;
         }

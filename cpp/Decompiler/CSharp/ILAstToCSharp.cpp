@@ -36,6 +36,9 @@
 #include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/Conv.hpp"
 #include "Decompiler/IL/Instructions/DefaultValue.hpp"
+#include "Decompiler/IL/Instructions/Await.hpp"
+#include "Decompiler/IL/Instructions/DynamicInstructions.hpp"
+#include "Decompiler/IL/Instructions/YieldReturn.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
@@ -1753,6 +1756,68 @@ private:
                 return;
             case OpCode::Nop:
                 return;
+            case OpCode::YieldReturn: {
+                // `yield return <expr>;` (the real back end's
+                // VisitYieldReturn).
+                const auto& yr = static_cast<const YieldReturn&>(inst);
+                Line(indent, "yield return " +
+                                (yr.Value ? Expr(*yr.Value)
+                                          : std::string("(default)")) +
+                                ";");
+                return;
+            }
+            case OpCode::Await: {
+                // An await as a statement: `await <expr>;` (the real back
+                // end's VisitAwait inside an ExpressionStatement).
+                const auto& aw = static_cast<const Await&>(inst);
+                Line(indent, "await " +
+                                (aw.Value ? Expr(*aw.Value)
+                                          : std::string("(default)")) +
+                                ";");
+                return;
+            }
+            case OpCode::DynamicGetMemberInstruction:
+            case OpCode::DynamicInvokeMemberInstruction:
+            case OpCode::DynamicInvokeInstruction:
+            case OpCode::DynamicGetIndexInstruction:
+            case OpCode::DynamicInvokeConstructorInstruction:
+            case OpCode::DynamicBinaryOperatorInstruction:
+            case OpCode::DynamicUnaryOperatorInstruction:
+            case OpCode::DynamicConvertInstruction:
+            case OpCode::DynamicIsEventInstruction: {
+                // A value-form dynamic node as a statement renders as the
+                // expression statement (the C# ExpressionStatement form).
+                Line(indent, Expr(inst) + ";");
+                return;
+            }
+            case OpCode::DynamicSetMemberInstruction: {
+                // `target.Name = value;` (the real back end's
+                // VisitDynamicSetMember inside an AssignmentExpression).
+                const auto& sm =
+                    static_cast<const DynamicSetMemberInstruction&>(inst);
+                std::string target =
+                    sm.Target ? Expr(*sm.Target) : std::string("(default)");
+                std::string value =
+                    sm.Value ? Expr(*sm.Value) : std::string("(default)");
+                Line(indent, target + "." + sm.Name + " = " + value + ";");
+                return;
+            }
+            case OpCode::DynamicSetIndexInstruction: {
+                // `target[args] = value;`.
+                const auto& si =
+                    static_cast<const DynamicSetIndexInstruction&>(inst);
+                std::string target =
+                    si.Arguments.empty()
+                        ? std::string("(default)")
+                        : Expr(*si.Arguments[0]);
+                std::string indices = DynamicArgumentList(si, 1);
+                std::string value =
+                    si.Arguments.size() >= 1 && si.Arguments.back()
+                        ? Expr(*si.Arguments.back())
+                        : std::string("(default)");
+                Line(indent, target + "[" + indices + "] = " + value + ";");
+                return;
+            }
             default:
                 Line(indent, "/* unhandled statement op " +
                              std::to_string(static_cast<int>(inst.Op)) + " */;");
@@ -2680,8 +2745,215 @@ private:
                 else if (shortName == "op_UnsignedRightShift") op = ">>>=";
                 return target + " " + op + " " + value;
             }
+            case OpCode::Await: {
+                // An await as a value: `await <expr>` (the real back end's
+                // VisitAwait).
+                const auto& aw = static_cast<const Await&>(inst);
+                return "await " + (aw.Value ? Expr(*aw.Value)
+                                           : std::string("(default)"));
+            }
+            case OpCode::DynamicGetMemberInstruction: {
+                // `target.Name` (the real back end's VisitDynamicGetMember).
+                const auto& gm =
+                    static_cast<const DynamicGetMemberInstruction&>(inst);
+                return (gm.Target ? Expr(*gm.Target)
+                                  : std::string("(default)")) +
+                       "." + gm.Name;
+            }
+            case OpCode::DynamicInvokeMemberInstruction: {
+                // `target.Name<TArgs>(args)`.
+                const auto& im =
+                    static_cast<const DynamicInvokeMemberInstruction&>(inst);
+                std::string result =
+                    im.Arguments.empty()
+                        ? std::string("(default)")
+                        : Expr(*im.Arguments[0]);
+                result += "." + im.Name;
+                if (!im.TypeArguments.empty()) {
+                    result += "<";
+                    for (std::size_t i = 0; i < im.TypeArguments.size(); ++i) {
+                        if (i != 0) result += ", ";
+                        result += im.TypeArguments[i]
+                                      ? CSharpTypeName(im.TypeArguments[i])
+                                      : std::string("var");
+                    }
+                    result += ">";
+                }
+                result += "(" + DynamicArgumentList(im, 1) + ")";
+                return result;
+            }
+            case OpCode::DynamicInvokeInstruction: {
+                // `target(args)`.
+                const auto& iv =
+                    static_cast<const DynamicInvokeInstruction&>(inst);
+                return (iv.Arguments.empty()
+                            ? std::string("(default)")
+                            : Expr(*iv.Arguments[0])) +
+                       "(" + DynamicArgumentList(iv, 1) + ")";
+            }
+            case OpCode::DynamicGetIndexInstruction: {
+                // `target[indices]`.
+                const auto& gi =
+                    static_cast<const DynamicGetIndexInstruction&>(inst);
+                return (gi.Arguments.empty()
+                            ? std::string("(default)")
+                            : Expr(*gi.Arguments[0])) +
+                       "[" + DynamicArgumentList(gi, 1) + "]";
+            }
+            case OpCode::DynamicInvokeConstructorInstruction: {
+                // `new T(args)`.
+                const auto& ic =
+                    static_cast<const DynamicInvokeConstructorInstruction&>(
+                        inst);
+                return "new " + CSharpTypeName(ic.ConstructedType) + "(" +
+                       DynamicArgumentList(ic, 0) + ")";
+            }
+            case OpCode::DynamicBinaryOperatorInstruction: {
+                // `left <op> right` (the real back end's
+                // VisitDynamicBinaryOperator over the ExpressionType map).
+                const auto& bo =
+                    static_cast<const DynamicBinaryOperatorInstruction&>(
+                        inst);
+                std::string left =
+                    bo.Left ? Expr(*bo.Left) : std::string("(default)");
+                std::string right =
+                    bo.Right ? Expr(*bo.Right) : std::string("(default)");
+                return left + " " + DynamicOperatorSymbol(bo.Operation) +
+                       " " + right;
+            }
+            case OpCode::DynamicUnaryOperatorInstruction: {
+                // `<op>operand` (the prefix operators) or
+                // `operand<op>` (the post forms).
+                const auto& uo =
+                    static_cast<const DynamicUnaryOperatorInstruction&>(
+                        inst);
+                std::string operand =
+                    uo.Operand ? Expr(*uo.Operand)
+                               : std::string("(default)");
+                switch (uo.Operation) {
+                    case ::ILSpy::Decompiler::IL::ExpressionType::
+                        PostIncrementAssign:
+                        return operand + "++";
+                    case ::ILSpy::Decompiler::IL::ExpressionType::
+                        PostDecrementAssign:
+                        return operand + "--";
+                    default:
+                        return DynamicOperatorSymbol(uo.Operation) + operand;
+                }
+            }
+            case OpCode::DynamicConvertInstruction: {
+                // An explicit conversion renders the cast; an implicit one
+                // leaves the operand alone (the real back end's
+                // VisitDynamicConversion wraps the CastExpression only when
+                // C# requires it).
+                const auto& cv =
+                    static_cast<const DynamicConvertInstruction&>(inst);
+                std::string operand =
+                    cv.Argument ? Expr(*cv.Argument)
+                                : std::string("(default)");
+                if (cv.IsExplicit())
+                    return "(" + CSharpTypeName(cv.Type) + ")" + operand;
+                return operand;
+            }
+            case OpCode::DynamicIsEventInstruction: {
+                // The is-event check rides the compound-assignment
+                // pattern; the bare node renders its argument (the event
+                // access).
+                const auto& ie =
+                    static_cast<const DynamicIsEventInstruction&>(inst);
+                return ie.Argument ? Expr(*ie.Argument)
+                                   : std::string("(default)");
+            }
             default:
                 return "(default)/*op=" + std::to_string(static_cast<int>(inst.Op)) + "*/";
+        }
+    }
+
+    // The comma-separated argument/element list of a dynamic
+    // variable-argument node, from `start` on.
+    std::string DynamicArgumentList(
+        const ::ILSpy::Decompiler::IL::DynamicArgumentsInstruction& dyn,
+        std::size_t start) {
+        std::string result;
+        for (std::size_t i = start; i < dyn.Arguments.size(); ++i) {
+            if (i != start) result += ", ";
+            result += dyn.Arguments[i]
+                          ? Expr(*dyn.Arguments[i])
+                          : std::string("(default)");
+        }
+        return result;
+    }
+
+    // The C# operator symbol of a dynamic operator (the ExpressionBuilder
+    // operator map's common subset; the exotic kinds fall back to the
+    // ExpressionType name).
+    static std::string DynamicOperatorSymbol(
+        ::ILSpy::Decompiler::IL::ExpressionType op) {
+        using ET = ::ILSpy::Decompiler::IL::ExpressionType;
+        switch (op) {
+            case ET::Add:
+            case ET::AddAssign:
+            case ET::AddAssignChecked:
+                return "+";
+            case ET::AddChecked:
+                return "+";
+            case ET::Subtract:
+            case ET::SubtractAssign:
+            case ET::SubtractAssignChecked:
+                return "-";
+            case ET::Multiply:
+            case ET::MultiplyAssign:
+            case ET::MultiplyAssignChecked:
+                return "*";
+            case ET::Divide:
+            case ET::DivideAssign:
+                return "/";
+            case ET::Modulo:
+            case ET::ModuloAssign:
+                return "%";
+            case ET::Equal:
+                return "==";
+            case ET::NotEqual:
+                return "!=";
+            case ET::GreaterThan:
+                return ">";
+            case ET::GreaterThanOrEqual:
+                return ">=";
+            case ET::LessThan:
+                return "<";
+            case ET::LessThanOrEqual:
+                return "<=";
+            case ET::And:
+            case ET::AndAssign:
+                return "&";
+            case ET::Or:
+            case ET::OrAssign:
+                return "|";
+            case ET::ExclusiveOr:
+            case ET::ExclusiveOrAssign:
+                return "^";
+            case ET::LeftShift:
+            case ET::LeftShiftAssign:
+                return "<<";
+            case ET::RightShift:
+            case ET::RightShiftAssign:
+                return ">>";
+            case ET::Negate:
+            case ET::NegateChecked:
+            case ET::Decrement:
+            case ET::PreDecrementAssign:
+                return "-";
+            case ET::UnaryPlus:
+                return "+";
+            case ET::Not:
+                return "!";
+            case ET::OnesComplement:
+                return "~";
+            case ET::Increment:
+            case ET::PreIncrementAssign:
+                return "++";
+            default:
+                return ::ILSpy::Decompiler::IL::ExpressionTypeName(op);
         }
     }
 
