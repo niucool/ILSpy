@@ -917,3 +917,67 @@ Also noted for the main line: the merged mainline's
 `ReflectionDisassemblerTest.DisassembleFieldInvalidRvaCommentIsComplete`
 variants need `ILSPY_TEST_MSCORLIB` set to a corpus mscorlib (they pass
 with the fixture env var; pre-existing gate, flagged not edited).
+
+---
+
+# The --il parity re-verification over the FULL net48 corpus
+
+The eighth assignment: whole-module `--il` on all 133 corpus assemblies
+plus the capa .NET set plus the ilspycmd self-sample, both engines,
+post-T12 (the merged mainline's crash-fix batch). The harness gained
+`MODE=il ALL_CORPUS=1` (`textmatch_baseline.sh`); the tallies below are
+from /tmp/tm_il (183 paired runs).
+
+## 1. The matrix (whole-module `--il`, 183 samples)
+
+| Category | Count | Samples |
+|---|---:|---|
+| IDENTICAL | 176 (+1 re-verified) | the corpus minus one; mscorlib 369,783 lines byte-exact |
+| REAL-MISMATCH | 1 | System.EnterpriseServices.Wrapper.dll (see below) |
+| ORACLE-THROWS | 4 | 3 native capa PEs + System.EnterpriseServices.Thunk.dll (a native thunk module; both engines reject) |
+| PORT-FAIL(70) | 2 | capa7/capa9 -- the two strictness aborts now exit cleanly with their messages |
+| TIMEOUT | 0 | -- |
+
+The pre/post-merge comparison: the first differential run recorded 42/64
+IL-identical with 17 divergences caused by two bugs (the truncated
+invalid-RVA comment + the missing `.entrypoint`) and 2 SIGABRTs. Post
+T6/T12: both bugs are fixed (capa1 emits `.entrypoint`, the RVA comment
+renders in full), the two aborts exit cleanly (rc 70 + the message),
+and the corpus is **132/133 identical by file count** (131 exact
+byte-identical + the Wrapper divergence, below).
+
+## 2. The one real corpus divergence: System.EnterpriseServices.Wrapper.dll
+
+A C++/CLI mixed-mode assembly whose diff decomposes into exactly two
+new bug classes (both now handed to the main line with this repro):
+
+1. **The `calli` unmanaged-signature rendering** (~213 hunks): the port
+   emits `calli @1100000E /* signature 2 */` (the raw
+   StandAloneSignature token) where the oracle renders the resolved
+   unmanaged calling convention and return type
+   (`calli unmanaged stdcall int32 modopt([mscorlib]...IsLong)`). The
+   port's calli operand path does not decode the signature blob's
+   calling convention / modopts / return+parameter types.
+2. **The `pinvokeimpl ... native unmanaged` thunk bodies** (~42 hunks):
+   the port disassembles the NATIVE thunk bytes as if they were IL
+   (`conv.ovf.u.un`, `.emitbyte 0xec`, the "Invalid method body"
+   rows) where the oracle renders only the signature + the custom
+   attributes for a `native unmanaged` pinvoke. The disassembler should
+   skip the body for `native unmanaged` bodies (or render the native
+   marker the C# prints), not walk the bytes as IL.
+
+## 3. The IL-mode state
+
+Two corpus-wide IL bugs (the differential report's #1/#2) are closed by
+the mainline's T6/T12 fixes; the corpus parity is 132/133; the capa set
+adds 33 producing --csharp samples (the post-merge re-run, above) and 2
+clean rc-70 strictness failures. The remaining IL work items are the
+two new Wrapper classes above; everything else in the corpus is
+byte-exact.
+
+Rerun: `MODE=il ALL_CORPUS=1 bash cpp/tests/tools/textmatch_baseline.sh
+/tmp/tm_il`. Note: a mid-run disk-full can truncate a capture (the tr
+write error marks it) -- re-verify any non-IDENTICAL verdict by re-running
+the single pair before trusting it; the ilspycmd_self row here was
+quota-truncated on the first pass and re-verified IDENTICAL on a clean
+disk.
