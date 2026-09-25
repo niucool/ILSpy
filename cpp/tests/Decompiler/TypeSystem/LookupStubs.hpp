@@ -459,6 +459,22 @@ public:
 
     // --- IType ---
     TypeKind Kind() const override { return kind_; }
+    // The C# `IType.IsReferenceType` over ITypeDefinition: the kind-derived
+    // answer (Class/Interface/Delegate are reference types, Struct/Enum
+    // value types; the other kinds stay unknown).
+    std::optional<bool> IsReferenceType() const override {
+        switch (kind_) {
+            case TS::TypeKind::Class:
+            case TS::TypeKind::Interface:
+            case TS::TypeKind::Delegate:
+                return true;
+            case TS::TypeKind::Struct:
+            case TS::TypeKind::Enum:
+                return false;
+            default:
+                return std::nullopt;
+        }
+    }
     // The single `Name()` override is the final overrider for the
     // IType-vs-INamedElement diamond (the ITypeDefinition redeclarations).
     std::string Name() const override { return fullTypeName_.Name(); }

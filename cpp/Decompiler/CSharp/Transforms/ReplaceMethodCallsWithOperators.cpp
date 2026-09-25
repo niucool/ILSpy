@@ -28,7 +28,16 @@
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/LambdaExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TypeOfExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UndocumentedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/PatternMatching/PatternNodes.hpp"
+#include "Decompiler/Semantics/InvocationResolveResult.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
@@ -226,6 +235,115 @@ Syntax::Expression* ReplaceMethodCallsWithOperators::RemoveRedundantToStringInCo
     return m.target;
 }
 
+namespace PatternMatching = ::ILSpy::Decompiler::CSharp::Syntax::PatternMatching;
+
+// The C# `static readonly MemberReferenceExpression
+// typeHandleOnTypeOfPattern` (lines 39-46): `__.TypeHandle` where __ is a
+// Choice of `typeof(...)` or the `__refvalue`-shaped UndocumentedExpression
+// -- the RuntimeTypeHandle argument form the typeof rewrite unwraps.
+struct TypeHandleOnTypeOfPatternHolder {
+    PatternMatching::AnyNode typeOfOperand;
+    Syntax::TypeOfExpression typeOf{Syntax::AstType::ToType(typeOfOperand)};
+    // The C# `new UndocumentedExpression { UndocumentedExpressionType =
+    // UndocumentedExpressionType.RefType, Arguments = { new AnyNode() } }`.
+    Syntax::UndocumentedExpression refValue{
+        Syntax::UndocumentedExpressionType::RefType};
+    PatternMatching::AnyNode refValueOperand;
+    PatternMatching::Choice targetChoice;
+    Syntax::MemberReferenceExpression pattern{
+        Syntax::Expression::ToExpression(targetChoice), "TypeHandle"};
+
+    TypeHandleOnTypeOfPatternHolder() {
+        refValue.Arguments().Add(Syntax::Expression::ToExpression(
+            refValueOperand));
+        targetChoice.Add(typeOf);
+        targetChoice.Add(refValue);
+    }
+};
+
+Syntax::MemberReferenceExpression& TypeHandleOnTypeOfPattern() {
+    static TypeHandleOnTypeOfPatternHolder holder;
+    return holder.pattern;
+}
+
+// The C# `private bool IsStringConcat(IParameterizedMember member)`
+// (lines 332-336): the method is a String.Concat overload.
+bool IsStringConcat(const TS::IMethod& method) {
+    return method.Name() == "Concat"
+        && TS::IsKnownType(*method.DeclaringType(),
+                           TS::KnownTypeCode::String);
+}
+
+// The C# `bool CheckArgumentsForStringConcat(Expression[] arguments)`
+// (lines 277-330): the evaluation-order safety gates -- at least two
+// arguments, no named arguments, every non-last argument's ToString
+// effect-free, no nested string.Concat (the Roslyn/mcs flattening), no
+// by-ref-like operand, and one of the first two operands a String (the +
+// operator resolves to string concatenation only then).
+bool CheckArgumentsForStringConcat(
+    const std::vector<Syntax::Expression*>& arguments) {
+    if (arguments.size() < 2)
+        return false;
+    for (Syntax::Expression* argument : arguments) {
+        if (dynamic_cast<Syntax::NamedArgumentExpression*>(argument)
+            != nullptr)
+            return false;
+    }
+    for (std::size_t i = 0; i + 1 < arguments.size(); ++i) {
+        const Semantics::ResolveResult* rr =
+            CSharp::GetResolveResult(*arguments[i]);
+        if (!ReplaceMethodCallsWithOperators::ToStringIsKnownEffectFree(
+                rr->Type()))
+            return false;
+    }
+    for (Syntax::Expression* argument : arguments) {
+        const Semantics::ResolveResult* rr =
+            CSharp::GetResolveResult(*argument);
+        if (const auto* irr =
+                dynamic_cast<const Semantics::InvocationResolveResult*>(rr)) {
+            if (const auto* member =
+                    dynamic_cast<const TS::IMethod*>(irr->Member())) {
+                if (IsStringConcat(*member))
+                    return false;
+            }
+        }
+        if (rr->Type().IsByRefLike())
+            return false;
+    }
+    return TS::IsKnownType(
+               CSharp::GetResolveResult(*arguments[0])->Type(),
+               TS::KnownTypeCode::String)
+        || TS::IsKnownType(
+               CSharp::GetResolveResult(*arguments[1])->Type(),
+               TS::KnownTypeCode::String);
+}
+
+// The C# `bool IsInstantiableTypeParameter(IType type)` (lines 272-275):
+// a type parameter with the `new()` constraint.
+bool IsInstantiableTypeParameter(const TS::IType& type) {
+    const auto* typeParameter =
+        dynamic_cast<const TS::ITypeParameter*>(&type);
+    return typeParameter != nullptr
+        && typeParameter->HasDefaultConstructorConstraint();
+}
+
+// The C# `invocationExpression.Ancestors.OfType<LambdaExpression>().Any(
+// lambda => lambda.Annotation<IL.ILFunction>()?.Kind ==
+// IL.ILFunctionKind.ExpressionTree)`: whether the call sits inside an
+// expression-tree lambda (no ToString elimination there).
+bool IsInExpressionTree(Syntax::AstNode& invocationExpression) {
+    for (Syntax::AstNode* ancestor : invocationExpression.Ancestors()) {
+        auto* lambda = dynamic_cast<Syntax::LambdaExpression*>(ancestor);
+        if (lambda == nullptr)
+            continue;
+        IL::ILFunction* function = CSharp::GetILFunctionAnnotation(*lambda);
+        if (function != nullptr
+            && function->Kind == IL::ILFunctionKind::ExpressionTree)
+            return true;
+    }
+    return false;
+}
+
 // ---- the instance IAstTransform surface (the user-defined-operator core) ----
 
 // The C# `void IAstTransform.Run(AstNode rootNode, TransformContext context)`:
@@ -354,16 +472,14 @@ GetUnaryOperatorTypeFromMetadataName(const std::string& name, bool& isChecked,
 // The C# `void ProcessInvocationExpression(InvocationExpression
 // invocationExpression)` (lines 63-262): the method symbol's metadata-name
 // dispatch. THIS PORT carries the user-defined-operator arms (the binary
-// table, the unary table, the explicit conversion, op_True in a condition).
-// DEFERRED arms, loud at their slots: the String.Concat reduction (the
-// IsStringConcat/CheckArgumentsForStringConcat gates + the
-// RemoveRedundantToStringInConcat chain), the `switch (method.FullName)`
-// System.* special methods (GetTypeFromHandle, GetFieldFromHandle,
-// Activator.CreateInstance, RuntimeHelpers.GetSubArray, the lift/event
-// operator arms), the op_Increment/op_Decrement decimal special case (the
-// legacy-csc `d + 1m` reverse optimization -- the non-decimal behavior, the
-// call staying, is the port's observable), and the VisitCastExpression
-// methodof pattern.
+// table, the unary table, the explicit conversion, op_True in a condition),
+// the String.Concat reduction, the System.* special methods
+// (GetTypeFromHandle, Activator.CreateInstance, GetSubArray), and the
+// decimal increment reverse optimization.
+// DEFERRED arms, loud: the VisitCastExpression methodof pattern (the
+// getMethodOrConstructorFromHandlePattern needs the LdTokenPattern /
+// TypePattern pattern classes) and the C# GetFieldFromHandle arm (dead code
+// upstream -- the LdTokenAnnotation is never added).
 void ReplaceMethodCallsWithOperators::ProcessInvocationExpression(
     Syntax::InvocationExpression* invocationExpression) {
     const TS::IMethod* method = dynamic_cast<const TS::IMethod*>(
@@ -374,6 +490,119 @@ void ReplaceMethodCallsWithOperators::ProcessInvocationExpression(
     std::vector<Syntax::Expression*> arguments;
     for (int i = 0; i < invocationExpression->Arguments().Count(); ++i)
         arguments.push_back(invocationExpression->Arguments().At(i));
+
+    // The C# String.Concat reduction (lines 66-105): `String.Concat(a, b)`
+    // becomes `a + b` (the params-array overload flattens first). The
+    // evaluation-order gates (CheckArgumentsForStringConcat) and the
+    // ToString-elimination chain (RemoveRedundantToStringInConcat, the
+    // static half) carry; an expression-tree lambda suppresses the
+    // elimination (the tree must keep the explicit call).
+    if (IsStringConcat(*method)
+        && context_->DecompileRun->Settings().StringConcat()) {
+        // The C# `arguments is [ArrayCreateExpression { Initializer: { }
+        // aceInitializer }] && method.Parameters is [{ Type: ArrayType }]`.
+        if (arguments.size() == 1) {
+            auto* arrayCreate =
+                dynamic_cast<Syntax::ArrayCreateExpression*>(arguments[0]);
+            if (arrayCreate != nullptr
+                && arrayCreate->Initializer() != nullptr) {
+                const auto& parameters = method->Parameters();
+                if (!parameters.empty() && parameters[0] != nullptr
+                    && parameters[0]->Type().Kind()
+                           == TS::TypeKind::Array) {
+                    arguments.clear();
+                    auto& elements = arrayCreate->Initializer()->Elements();
+                    for (int i = 0; i < elements.Count(); ++i)
+                        arguments.push_back(elements.At(i));
+                }
+            }
+        }
+        if (!CheckArgumentsForStringConcat(arguments))
+            return;
+        bool isInExpressionTree = IsInExpressionTree(*invocationExpression);
+        context_->StepOnce("Replace String.Concat with +",
+                           invocationExpression);
+        Syntax::Expression* arg0 = Syntax::Detach(arguments[0]);
+        Syntax::Expression* arg1 = Syntax::Detach(arguments[1]);
+        if (!isInExpressionTree) {
+            arg1 = Syntax::Detach(RemoveRedundantToStringInConcat(
+                arg1, *method, /*isLastArgument*/ arguments.size() == 2));
+            if (TS::IsKnownType(
+                    CSharp::GetResolveResult(*arg1)->Type(),
+                    TS::KnownTypeCode::String)) {
+                arg0 = Syntax::Detach(RemoveRedundantToStringInConcat(
+                    arg0, *method, /*isLastArgument*/ false));
+            }
+        }
+        auto* expr = new Syntax::BinaryOperatorExpression(
+            arg0, Syntax::BinaryOperatorType::Add, arg1);
+        for (std::size_t i = 2; i < arguments.size(); ++i) {
+            Syntax::Expression* argument = Syntax::Detach(arguments[i]);
+            if (!isInExpressionTree) {
+                argument = Syntax::Detach(RemoveRedundantToStringInConcat(
+                    argument, *method,
+                    /*isLastArgument*/ i + 1 == arguments.size()));
+            }
+            expr = new Syntax::BinaryOperatorExpression(
+                expr, Syntax::BinaryOperatorType::Add, argument);
+        }
+        CopyAnnotationsFrom(expr, *invocationExpression);
+        invocationExpression->ReplaceWith(expr);
+        return;
+    }
+
+    // The C# `switch (method.FullName)` (lines 107-173): the System.*
+    // special methods.
+    const std::string fullName = method->FullName();
+    if (fullName == "System.Type.GetTypeFromHandle") {
+        // The C# GetFieldFromHandle arm is dead code upstream (the
+        // LdTokenAnnotation is never added) and does not port.
+        if (arguments.size() == 1) {
+            if (Syntax::IsMatchPattern(TypeHandleOnTypeOfPattern(),
+                                        arguments[0])) {
+                context_->StepOnce("Replace GetTypeFromHandle with typeof",
+                                   invocationExpression);
+                auto* memberReference =
+                    static_cast<Syntax::MemberReferenceExpression*>(
+                        arguments[0]);
+                Syntax::Expression* target = memberReference->Target();
+                CopyInstructionsFrom(target, *invocationExpression);
+                invocationExpression->ReplaceWith(target);
+                return;
+            }
+        }
+    } else if (fullName == "System.Activator.CreateInstance") {
+        if (context_->DecompileRun->Settings()
+                .UseObjectCreationOfGenericTypeParameter()
+            && arguments.empty()) {
+            const auto& typeArguments = method->TypeArguments();
+            if (typeArguments.size() == 1
+                && IsInstantiableTypeParameter(*typeArguments[0])) {
+                context_->StepOnce(
+                    "Replace Activator.CreateInstance with new",
+                    invocationExpression);
+                auto* objectCreate = new Syntax::ObjectCreateExpression(
+                    context_->TypeSystemAstBuilder->ConvertType(
+                        const_cast<TS::IType&>(*typeArguments[0])));
+                invocationExpression->ReplaceWith(objectCreate);
+                return;
+            }
+        }
+    } else if (fullName
+               == "System.Runtime.CompilerServices.RuntimeHelpers.GetSubArray") {
+        if (arguments.size() == 2
+            && context_->DecompileRun->Settings().Ranges()) {
+            context_->StepOnce(
+                "Replace RuntimeHelpers.GetSubArray with range indexer",
+                invocationExpression);
+            auto* slicing = new Syntax::IndexerExpression(
+                Syntax::Detach(arguments[0]));
+            slicing->Arguments().Add(Syntax::Detach(arguments[1]));
+            CopyAnnotationsFrom(slicing, *invocationExpression);
+            invocationExpression->ReplaceWith(slicing);
+            return;
+        }
+    }
 
     bool isChecked;
     std::optional<Syntax::BinaryOperatorType> bop =
@@ -408,10 +637,27 @@ void ReplaceMethodCallsWithOperators::ProcessInvocationExpression(
         }
         if (*uop == Syntax::UnaryOperatorType::Increment
             || *uop == Syntax::UnaryOperatorType::Decrement) {
-            // The C# decimal arm (the legacy-csc `d + 1m` reverse
-            // optimization) is DEFERRED loudly (see the method comment) --
-            // the non-decimal behavior is that `op_Increment(a)` is not
-            // equivalent to `++a` and the call stays.
+            // The C# decimal arm (lines 218-229): the legacy csc optimizes
+            // `d + 1m` into `op_Increment(d)`, so reverse that here. On any
+            // other declaring type `op_Increment(a)` is not equivalent to
+            // `++a` (it does not assign) and the call stays.
+            if (TS::IsKnownType(*method->DeclaringType(),
+                                TS::KnownTypeCode::Decimal)) {
+                context_->StepOnce(
+                    "Replace decimal increment method with arithmetic",
+                    invocationExpression);
+                auto* arithmetic = new Syntax::BinaryOperatorExpression(
+                    Syntax::Detach(
+                        UnwrapInDirectionExpression(arguments[0])),
+                    *uop == Syntax::UnaryOperatorType::Increment
+                        ? Syntax::BinaryOperatorType::Add
+                        : Syntax::BinaryOperatorType::Subtract,
+                    new Syntax::PrimitiveExpression(
+                        Syntax::DecimalValue::One(),
+                        Syntax::LiteralFormat::None));
+                CopyAnnotationsFrom(arithmetic, *invocationExpression);
+                invocationExpression->ReplaceWith(arithmetic);
+            }
         } else {
             context_->StepOnce("Replace operator method with unary operator",
                                invocationExpression);

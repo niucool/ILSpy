@@ -32,6 +32,12 @@
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TypeOfExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
+#include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
@@ -40,6 +46,8 @@
 #include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
 #include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
+#include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
+#include "Decompiler/TypeSystem/Implementation/DefaultTypeParameter.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
@@ -249,6 +257,236 @@ TEST(ReplaceMethodCallsWithOperatorsTest, DirectionWrappedArgumentUnwraps)
     ASSERT_NE(binary, nullptr);
     EXPECT_EQ(binary->Left(), a)
         << "the in-direction wrapper unwraps off the operand";
+}
+
+
+// ---- the follow-up arms (the String.Concat reduction and the System.* dispatch) ----
+
+// A known type stub (a LookupTypeDefinition carrying the known-type code --
+// the IsKnownType / FullName composition read it).
+std::shared_ptr<TS::TestSupport::LookupTypeDefinition> KnownTypeStub(
+    const RunFixture& fx, const std::string& ns, const std::string& name,
+    TS::KnownTypeCode code,
+    TS::TypeKind kind = TS::TypeKind::Class) {
+    auto type = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        name, ns, TS::FullTypeName(ns + "." + name), kind,
+        TS::Accessibility::Public, fx.compilation, nullptr, code);
+    static std::vector<
+        std::shared_ptr<TS::TestSupport::LookupTypeDefinition>> keepAlive;
+    keepAlive.push_back(type);
+    return type;
+}
+
+// A method stub in a known declaring type (the FullName dispatch reads
+// `declaringType.FullName + "." + name`).
+std::shared_ptr<TSImpl::FakeMethod> MethodStub(
+    const RunFixture& fx, const std::string& ns,
+    const std::string& typeName, const std::string& name,
+    TS::KnownTypeCode declaringCode = TS::KnownTypeCode::None) {
+    auto method = std::make_shared<TSImpl::FakeMethod>(
+        fx.compilation, TS::SymbolKind::Method);
+    method->SetName(name);
+    method->SetDeclaringType(KnownTypeStub(fx, ns, typeName, declaringCode));
+    method->SetReturnType(TS::ITypePtr(
+        KnownTypeStub(fx, "System", "Int32", TS::KnownTypeCode::Int32,
+                      TS::TypeKind::Struct)));
+    return method;
+}
+
+// An identifier annotated with its type (the GetResolveResult().Type reads).
+Syntax::IdentifierExpression* TypedArg(const std::string& name,
+                                        TS::ITypePtr type) {
+    auto* expression = new Syntax::IdentifierExpression(name);
+    expression->AddAnnotation(
+        std::make_shared<Sem::TypeResolveResult>(std::move(type)));
+    return expression;
+}
+
+// `string.Concat(a, b)` over string-typed arguments reduces to `a + b`.
+TEST(ReplaceMethodCallsWithOperatorsTest, StringConcatBecomesAddition)
+{
+    RunFixture fx;
+    auto stringType = KnownTypeStub(fx, "System", "String",
+                                    TS::KnownTypeCode::String);
+    auto* a = TypedArg("a", stringType);
+    auto* b = TypedArg("b", stringType);
+    auto* invocation = OperatorCall(
+        MethodStub(fx, "System", "String", "Concat",
+                   TS::KnownTypeCode::String),
+        {a, b});
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    block->Statements().Add(new Syntax::ExpressionStatement(invocation));
+
+    RunPipeline(*block, fx);
+
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(
+        block->Statements().At(0)->Children().At(0));
+    ASSERT_NE(binary, nullptr)
+        << "string.Concat reduces to the + operator";
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::Add);
+    EXPECT_EQ(binary->Left(), a);
+    EXPECT_EQ(binary->Right(), b);
+}
+
+// The compiler-generated ToString() on a value type is eliminated:
+// `string.Concat(a, i.ToString())` becomes `a + i` (the Int32 ToString is
+// effect-free; the params overload takes strings).
+TEST(ReplaceMethodCallsWithOperatorsTest, StringConcatEliminatesToStringOnValueTypes)
+{
+    RunFixture fx;
+    auto stringType = KnownTypeStub(fx, "System", "String",
+                                    TS::KnownTypeCode::String);
+    auto intType = KnownTypeStub(fx, "System", "Int32",
+                                 TS::KnownTypeCode::Int32,
+                                 TS::TypeKind::Struct);
+    auto* a = TypedArg("a", stringType);
+    auto* i = TypedArg("i", intType);
+    auto* toStringCall = new Syntax::InvocationExpression(
+        new Syntax::MemberReferenceExpression(i, "ToString"));
+    auto concat = MethodStub(fx, "System", "String", "Concat",
+                              TS::KnownTypeCode::String);
+    // The string.Concat overload check: the parameters take strings.
+    concat->SetParameters(
+        {std::make_shared<TSImpl::DefaultParameter>(stringType, "str")});
+    auto* invocation = OperatorCall(concat, {a, toStringCall});
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    block->Statements().Add(new Syntax::ExpressionStatement(invocation));
+
+    RunPipeline(*block, fx);
+
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(
+        block->Statements().At(0)->Children().At(0));
+    ASSERT_NE(binary, nullptr)
+        << "string.Concat reduces to the + operator";
+    EXPECT_EQ(binary->Left(), a);
+    EXPECT_EQ(binary->Right(), i)
+        << "the value-type ToString() call is eliminated";
+}
+
+// Neither of the first two operands is a string: the `+` would not resolve
+// to a string concatenation, so the call stays.
+TEST(ReplaceMethodCallsWithOperatorsTest, StringConcatRequiresAStringOperand)
+{
+    RunFixture fx;
+    auto intType = KnownTypeStub(fx, "System", "Int32",
+                                 TS::KnownTypeCode::Int32,
+                                 TS::TypeKind::Struct);
+    auto* a = TypedArg("a", intType);
+    auto* b = TypedArg("b", intType);
+    auto* invocation = OperatorCall(
+        MethodStub(fx, "System", "String", "Concat",
+                   TS::KnownTypeCode::String),
+        {a, b});
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    block->Statements().Add(new Syntax::ExpressionStatement(invocation));
+
+    RunPipeline(*block, fx);
+
+    EXPECT_EQ(block->Statements().At(0)->Children().At(0), invocation)
+        << "no string operand: the call stays";
+}
+
+// `RuntimeHelpers.GetSubArray(array, range)` becomes the range indexer
+// `array[range]` (the Ranges setting).
+TEST(ReplaceMethodCallsWithOperatorsTest, GetSubArrayBecomesRangeIndexer)
+{
+    RunFixture fx;
+    auto* array = new Syntax::IdentifierExpression("arr");
+    auto* range = new Syntax::IdentifierExpression("r");
+    auto* invocation = OperatorCall(
+        MethodStub(fx, "System.Runtime.CompilerServices",
+                   "RuntimeHelpers", "GetSubArray"),
+        {array, range});
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    block->Statements().Add(new Syntax::ExpressionStatement(invocation));
+
+    RunPipeline(*block, fx);
+
+    auto* indexer = dynamic_cast<Syntax::IndexerExpression*>(
+        block->Statements().At(0)->Children().At(0));
+    ASSERT_NE(indexer, nullptr)
+        << "GetSubArray reduces to the range indexer";
+    EXPECT_EQ(indexer->Target(), array);
+    ASSERT_EQ(indexer->Arguments().Count(), 1);
+    EXPECT_EQ(indexer->Arguments().At(0), range);
+}
+
+// `Activator.CreateInstance<T>()` where T has the default-constructor
+// constraint becomes `new T()`.
+TEST(ReplaceMethodCallsWithOperatorsTest, ActivatorCreateInstanceBecomesNew)
+{
+    RunFixture fx;
+    auto method = MethodStub(fx, "System", "Activator", "CreateInstance");
+    // The generic method: the type argument is a type parameter with the
+    // new() constraint (FakeMethod's TypeArguments read TypeParameters).
+    // The owner: the FakeMember subobject's IEntity base (FakeMethod
+    // derives IMember twice -- the static_cast convention).
+    auto* owner = static_cast<const TS::IEntity*>(
+        static_cast<TSImpl::FakeMember*>(method.get()));
+    auto typeParameter =
+        std::make_shared<TSImpl::DefaultTypeParameter>(
+            owner, 0, "T", TS::VarianceModifier::Invariant,
+            std::vector<const TS::IAttribute*>{}, false, false,
+            /*hasDefaultConstructorConstraint*/ true);
+    method->SetTypeParameters({typeParameter});
+    auto* invocation = OperatorCall(method, {});
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    block->Statements().Add(new Syntax::ExpressionStatement(invocation));
+
+    RunPipeline(*block, fx);
+
+    auto* create = dynamic_cast<Syntax::ObjectCreateExpression*>(
+        block->Statements().At(0)->Children().At(0));
+    ASSERT_NE(create, nullptr)
+        << "Activator.CreateInstance reduces to the new expression";
+    ASSERT_NE(create->Type(), nullptr);
+}
+
+// `decimal.op_Increment(d)` becomes `d + 1m` (the legacy-csc reverse
+// optimization).
+TEST(ReplaceMethodCallsWithOperatorsTest, DecimalIncrementBecomesAddition)
+{
+    RunFixture fx;
+    auto* d = TypedArg("d", KnownTypeStub(fx, "System", "Decimal",
+                                          TS::KnownTypeCode::Decimal,
+                                          TS::TypeKind::Struct));
+    auto* invocation = OperatorCall(
+        MethodStub(fx, "System", "Decimal", "op_Increment",
+                   TS::KnownTypeCode::Decimal),
+        {d});
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    block->Statements().Add(new Syntax::ExpressionStatement(invocation));
+
+    RunPipeline(*block, fx);
+
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(
+        block->Statements().At(0)->Children().At(0));
+    ASSERT_NE(binary, nullptr)
+        << "op_Increment becomes the arithmetic expression";
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::Add);
+    EXPECT_EQ(binary->Left(), d);
+    auto* one = dynamic_cast<Syntax::PrimitiveExpression*>(binary->Right());
+    ASSERT_NE(one, nullptr) << "the right operand is the 1m literal";
+}
+
+// `Type.GetTypeFromHandle(typeof(X).TypeHandle)` becomes `typeof(X)`.
+TEST(ReplaceMethodCallsWithOperatorsTest, GetTypeFromHandleBecomesTypeOf)
+{
+    RunFixture fx;
+    auto* typeofExpression =
+        new Syntax::TypeOfExpression(new Syntax::SimpleType("X"));
+    auto* invocation = OperatorCall(
+        MethodStub(fx, "System", "Type", "GetTypeFromHandle"),
+        {new Syntax::MemberReferenceExpression(typeofExpression,
+                                                "TypeHandle")});
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    block->Statements().Add(new Syntax::ExpressionStatement(invocation));
+
+    RunPipeline(*block, fx);
+
+    EXPECT_EQ(block->Statements().At(0)->Children().At(0), typeofExpression)
+        << "GetTypeFromHandle over typeof(...).TypeHandle unwraps to the "
+           "typeof expression";
 }
 
 // A method name outside the operator table leaves the invocation alone.
