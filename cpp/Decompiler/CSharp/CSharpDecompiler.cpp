@@ -122,18 +122,45 @@ std::string CSharpDecompiler::DecompileFunctionToString(
     return IL::ILAstToCSharp(function, returnType, methodName, paramDecl);
 }
 
+namespace {
+
+// The base-list/member-signature name composition (the C#
+// ConvertTypeHelper decision), forward-declared for the early class
+// member definitions above the full helper block below (the helpers
+// live in the later anonymous namespace with the scope machinery).
+std::string RenderBaseTypeName(
+    const ::ILSpy::Decompiler::TypeSystem::ITypeDefinition* typeDef,
+    const ::ILSpy::Decompiler::TypeSystem::ITypePtr& instantiation,
+    const ::ILSpy::Decompiler::CSharp::Resolver::CSharpResolver* resolver);
+
+} // namespace
+
 // The C# Decompile path's parameter-declaration builder (the CLI's inline
 // block, extracted): named parameters carry their metadata name; unnamed
 // parameters fall back to arg_<base + index> (base 1 for an instance
 // method -- `this` is the implicit arg_0; base 0 static).
 std::string CSharpDecompiler::MethodDeclString(
     const Metadata::MethodSignature& signature,
-    const std::vector<std::string>& parameterNames) {
+    const std::vector<std::string>& parameterNames,
+    const Resolver::CSharpResolver* scopeResolver) {
+    return MethodDeclString(signature.ParameterTypes, signature.IsInstance,
+                            parameterNames, scopeResolver);
+}
+
+std::string CSharpDecompiler::MethodDeclString(
+    const std::vector<TS::ITypePtr>& parameterTypes, bool isInstance,
+    const std::vector<std::string>& parameterNames,
+    const Resolver::CSharpResolver* scopeResolver) {
     std::string paramDecl;
-    const int base = signature.IsInstance ? 1 : 0;
-    for (std::size_t i = 0; i < signature.ParameterTypes.size(); ++i) {
+    const int base = isInstance ? 1 : 0;
+    for (std::size_t i = 0; i < parameterTypes.size(); ++i) {
         if (i != 0) paramDecl += ", ";
-        paramDecl += IL::CSharpTypeName(signature.ParameterTypes[i]);
+        if (parameterTypes[i] != nullptr)
+            paramDecl += RenderBaseTypeName(
+                parameterTypes[i]->GetDefinition(), parameterTypes[i],
+                scopeResolver);
+        else
+            paramDecl += "object";
         paramDecl += ' ';
         if (i < parameterNames.size() && !parameterNames[i].empty())
             paramDecl += parameterNames[i];
@@ -165,7 +192,8 @@ bool CSharpDecompiler::DecompileMethodToString(
     TS::DecompilerTypeSystem* typeSystem, std::uint32_t methodToken,
     std::uint32_t methodRva, const std::string& methodName,
     std::string& out, bool isConstructor, bool* asyncDecompiled,
-    bool* iteratorDecompiled) {
+    bool* iteratorDecompiled,
+    const Resolver::CSharpResolver* scopeResolver) {
     auto fn = IL::ReadIL(file, methodToken, methodRva);
     if (!fn) return false;
     // The C# ILReader decodes the body through the method definition (the
@@ -186,12 +214,37 @@ bool CSharpDecompiler::DecompileMethodToString(
     }
     std::string returnType = "void";
     std::string paramDecl;
-    if (auto sig = file.GetMethodSignature(methodToken)) {
+    if (resolvedMethod != nullptr) {
+        // The entity path: the resolved return type + parameters (the
+        // name decision needs the definitions; the file-signature decode
+        // yields unresolved simple types).
+        if (resolvedMethod->ReturnType().ReflectionName() != "System.Void") {
+            TS::ITypePtr resolvedReturnType(
+                const_cast<TS::IType*>(&resolvedMethod->ReturnType()),
+                [](TS::IType*) {});
+            returnType = RenderBaseTypeName(
+                resolvedReturnType->GetDefinition(), resolvedReturnType,
+                scopeResolver);
+        }
+        std::vector<TS::ITypePtr> parameterTypes;
+        for (const TS::IParameter* parameter : resolvedMethod->Parameters()) {
+            parameterTypes.push_back(
+                parameter != nullptr
+                    ? TS::ITypePtr(const_cast<TS::IType*>(&parameter->Type()),
+                                   [](TS::IType*) {})
+                    : nullptr);
+        }
+        auto paramNames = file.GetParameterNames(methodToken);
+        paramDecl = MethodDeclString(parameterTypes,
+                                      !resolvedMethod->IsStatic(), paramNames,
+                                      scopeResolver);
+    } else if (auto sig = file.GetMethodSignature(methodToken)) {
         if (sig->ReturnType &&
             sig->ReturnType->ReflectionName() != "System.Void")
-            returnType = IL::CSharpTypeName(sig->ReturnType);
+            returnType = RenderBaseTypeName(sig->ReturnType->GetDefinition(),
+                                            sig->ReturnType, scopeResolver);
         auto paramNames = file.GetParameterNames(methodToken);
-        paramDecl = MethodDeclString(*sig, paramNames);
+        paramDecl = MethodDeclString(*sig, paramNames, scopeResolver);
     }
     // The pipeline run rides the metadata-wired overload (the C# context
     // carries the PEFile for the closure transforms' deep-decode); the
@@ -799,6 +852,12 @@ bool DecompileTypeToStringBody(
     // declaration; the port's ILAstToCSharp method-text renderer carries
     // no type-header surface, so the modifier is deferred with it).
     bool rendered = false;
+    // The render's using-scope resolver (the C#
+    // FullyQualifyAmbiguousTypeNamesVisitor's ctor threading): built once
+    // per type; every name decision in the declaration -- the base list,
+    // the constraint clauses, and every member-signature type -- consults
+    // it. Null when no using set was passed (no scope to resolve).
+    std::shared_ptr<Resolver::CSharpResolver> scopeResolver;
     // The type's own name (the constructor headers render it; the empty
     // form covers an unknown token -- the member iteration then renders no
     // constructor).
@@ -849,6 +908,10 @@ bool DecompileTypeToStringBody(
         // bare name.
         SyntaxNS::Modifiers typeModifiers = SyntaxNS::Modifiers::None;
         const TS::ITypeDefinition* typeDef = module.GetDefinition(t.Token);
+        scopeResolver =
+            usingNamespaces != nullptr && typeDef != nullptr
+                ? RenderScopeResolver(module, typeDef, *usingNamespaces)
+                : nullptr;
         if (typeDef != nullptr) {
             typeModifiers = SyntaxNS::ModifierFromAccessibility(
                 typeDef->Accessibility(), /*usePrivateProtected=*/true);
@@ -901,14 +964,6 @@ bool DecompileTypeToStringBody(
             out += '>';
         }
         if (typeDef != nullptr) {
-            // The C# FullyQualifyAmbiguousTypeNamesVisitor's per-type
-            // resolver (the visitor's ctor threading): the render's using
-            // scope for the short-name decision. Null (no set passed)
-            // leaves every short name alone.
-            std::shared_ptr<Resolver::CSharpResolver> scopeResolver =
-                usingNamespaces != nullptr
-                    ? RenderScopeResolver(module, typeDef, *usingNamespaces)
-                    : nullptr;
             std::vector<std::string> baseTypeNames;
             for (const TS::ITypePtr& baseType :
                  typeDef->DirectBaseTypes()) {
@@ -1092,21 +1147,35 @@ bool DecompileTypeToStringBody(
     std::set<std::string> backingFieldNames;
     for (const auto& p : file.GetProperties(typeToken)) {
         auto accessors = file.GetPropertyAccessors(p.Token);
+        const TS::IProperty* propertyEntity =
+            module.GetDefinitionProperty(p.Token);
         std::string propertyTypeName = "var";
-        if (accessors.GetterToken != 0) {
+        if (propertyEntity != nullptr) {
+            // The entity's resolved return type carries the definition
+            // the name decision needs (the file-signature decode yields
+            // the unresolved simple types).
+            TS::ITypePtr propertyType(
+                const_cast<TS::IType*>(&propertyEntity->ReturnType()),
+                [](TS::IType*) {});
+            propertyTypeName = RenderBaseTypeName(
+                propertyType->GetDefinition(), propertyType,
+                scopeResolver.get());
+        } else if (accessors.GetterToken != 0) {
             if (auto sig = file.GetMethodSignature(accessors.GetterToken)) {
                 if (sig->ReturnType)
-                    propertyTypeName = IL::CSharpTypeName(sig->ReturnType);
+                    propertyTypeName =
+                        RenderBaseTypeName(sig->ReturnType->GetDefinition(),
+                                           sig->ReturnType,
+                                           scopeResolver.get());
             }
         } else if (accessors.SetterToken != 0) {
             if (auto sig = file.GetMethodSignature(accessors.SetterToken)) {
                 if (!sig->ParameterTypes.empty() && sig->ParameterTypes[0])
-                    propertyTypeName =
-                        IL::CSharpTypeName(sig->ParameterTypes[0]);
+                    propertyTypeName = RenderBaseTypeName(
+                        sig->ParameterTypes[0]->GetDefinition(),
+                        sig->ParameterTypes[0], scopeResolver.get());
             }
         }
-        const TS::IProperty* propertyEntity =
-            module.GetDefinitionProperty(p.Token);
         out += MemberAttributesText(propertyEntity);
         out += MemberModifiersText(propertyEntity);
         out += propertyTypeName;
@@ -1239,7 +1308,9 @@ bool DecompileTypeToStringBody(
                 TS::ITypePtr eventType(
                     const_cast<TS::IType*>(&event->ReturnType()),
                     [](TS::IType*) {});
-                eventTypeName = IL::CSharpTypeName(eventType);
+                eventTypeName = RenderBaseTypeName(
+                    eventType->GetDefinition(), eventType,
+                    scopeResolver.get());
             }
             out += "event ";
             out += eventTypeName;
@@ -1398,11 +1469,21 @@ bool DecompileTypeToStringBody(
     for (const auto& f : file.GetFields(typeToken)) {
         if (backingFieldNames.count(f.Name) != 0)
             continue;
+        const TS::IField* fieldEntity = module.GetDefinitionField(f.Token);
         auto fieldType = file.GetFieldSignature(f.Token);
         std::string fieldTypeName =
-            fieldType ? IL::CSharpTypeName(fieldType)
-                      : std::string("var");
-        const TS::IField* fieldEntity = module.GetDefinitionField(f.Token);
+            fieldType
+                ? RenderBaseTypeName(fieldType->GetDefinition(), fieldType,
+                                     scopeResolver.get())
+                : std::string("var");
+        if (fieldEntity != nullptr) {
+            TS::ITypePtr fieldResolvedType(
+                const_cast<TS::IType*>(&fieldEntity->ReturnType()),
+                [](TS::IType*) {});
+            fieldTypeName = RenderBaseTypeName(
+                fieldResolvedType->GetDefinition(), fieldResolvedType,
+                scopeResolver.get());
+        }
         out += MemberAttributesText(fieldEntity);
         out += MemberModifiersText(fieldEntity);
         out += fieldTypeName;
@@ -1442,13 +1523,56 @@ bool DecompileTypeToStringBody(
                 methodEntity->ExplicitlyImplementedInterfaceMembers();
             if (!implemented.empty() && implemented[0] != nullptr &&
                 implemented[0]->DeclaringType() != nullptr) {
-                methodName = IL::CSharpTypeName(
-                                 implemented[0]->DeclaringType()) +
-                             "." + methodName;
+                methodName =
+                    RenderBaseTypeName(
+                        implemented[0]->DeclaringType()->GetDefinition(),
+                        implemented[0]->DeclaringType(),
+                        scopeResolver.get()) +
+                    "." + methodName;
             }
         }
         std::string modifiers =
             MemberModifiersText(methodEntity);
+        // The signature render shared by the declaration forms: the entity
+        // path preferred (the name decision needs the definitions; the
+        // file-signature decode yields unresolved simple types), the file
+        // decode as the fallback.
+        std::string returnType = "void";
+        std::string paramDecl;
+        if (methodEntity != nullptr) {
+            if (methodEntity->ReturnType().ReflectionName() !=
+                "System.Void") {
+                TS::ITypePtr resolvedReturnType(
+                    const_cast<TS::IType*>(&methodEntity->ReturnType()),
+                    [](TS::IType*) {});
+                returnType = RenderBaseTypeName(
+                    resolvedReturnType->GetDefinition(), resolvedReturnType,
+                    scopeResolver.get());
+            }
+            std::vector<TS::ITypePtr> parameterTypes;
+            for (const TS::IParameter* parameter :
+                 methodEntity->Parameters()) {
+                parameterTypes.push_back(
+                    parameter != nullptr
+                        ? TS::ITypePtr(
+                              const_cast<TS::IType*>(&parameter->Type()),
+                              [](TS::IType*) {})
+                        : nullptr);
+            }
+            auto paramNames = file.GetParameterNames(m.Token);
+            paramDecl = CSharpDecompiler::MethodDeclString(
+                parameterTypes, !methodEntity->IsStatic(), paramNames,
+                scopeResolver.get());
+        } else if (auto sig = file.GetMethodSignature(m.Token)) {
+            if (sig->ReturnType &&
+                sig->ReturnType->ReflectionName() != "System.Void")
+                returnType = RenderBaseTypeName(
+                    sig->ReturnType->GetDefinition(), sig->ReturnType,
+                    scopeResolver.get());
+            auto paramNames = file.GetParameterNames(m.Token);
+            paramDecl = CSharpDecompiler::MethodDeclString(
+                *sig, paramNames, scopeResolver.get());
+        }
         if (m.RVA == 0) {
             // The C# DoDecompileMethod's body-less arm: an abstract method
             // (or an interface member) renders as a declaration with no
@@ -1459,16 +1583,6 @@ bool DecompileTypeToStringBody(
                 methodEntity->DeclaringType()->Kind() !=
                     TS::TypeKind::Interface) {
                 modifiers += "extern ";
-            }
-            std::string returnType = "void";
-            std::string paramDecl;
-            if (auto sig = file.GetMethodSignature(m.Token)) {
-                if (sig->ReturnType &&
-                    sig->ReturnType->ReflectionName() != "System.Void")
-                    returnType = IL::CSharpTypeName(sig->ReturnType);
-                auto paramNames = file.GetParameterNames(m.Token);
-                paramDecl = CSharpDecompiler::MethodDeclString(*sig,
-                                                                paramNames);
             }
             out += MemberAttributesText(methodEntity);
             out += modifiers;
@@ -1483,12 +1597,28 @@ bool DecompileTypeToStringBody(
         bool iteratorDecompiled = false;
         if (CSharpDecompiler::DecompileMethodToString(
                 file, typeSystem, m.Token, m.RVA, methodName, text,
-                isConstructor, &asyncDecompiled, &iteratorDecompiled)) {
+                isConstructor, &asyncDecompiled, &iteratorDecompiled,
+                scopeResolver.get())) {
             out += MemberAttributesText(methodEntity, asyncDecompiled,
                                         iteratorDecompiled);
             out += modifiers;
             out += text;
             out += "\n";
+            rendered = true;
+        } else {
+            // The C# DecompileMethod's body-decode failure: the declaration
+            // with the reference-assembly empty-body comment (a reference
+            // assembly carries stale RVAs whose bodies never decode; the
+            // members previously vanished from the render here).
+            out += MemberAttributesText(methodEntity);
+            out += modifiers;
+            out += isConstructor ? std::string() : returnType + " ";
+            out += methodName;
+            out += "(" + paramDecl + ")\n";
+            out += "{\n";
+            out += "/*Error: Empty body found. Decompiled assembly might "
+                   "be a reference assembly.*/;\n";
+            out += "}\n";
             rendered = true;
         }
     }

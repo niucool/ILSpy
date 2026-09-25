@@ -145,7 +145,21 @@ public:
     // method -- `this` is the implicit arg_0; base 0 static).
     static std::string MethodDeclString(
         const ::ILSpy::Decompiler::Metadata::MethodSignature& signature,
-        const std::vector<std::string>& parameterNames);
+        const std::vector<std::string>& parameterNames,
+        // The render's using-scope resolver (the parameter types' name
+        // decision); null renders the short names alone.
+        const ::ILSpy::Decompiler::CSharp::Resolver::CSharpResolver*
+            scopeResolver = nullptr);
+
+    // The same parameter-declaration builder over resolved types (the
+    // type-system entity path): the method entity's parameters carry
+    // their resolved types, so the name decision sees the definitions.
+    static std::string MethodDeclString(
+        const std::vector<::ILSpy::Decompiler::TypeSystem::ITypePtr>&
+            parameterTypes,
+        bool isInstance, const std::vector<std::string>& parameterNames,
+        const ::ILSpy::Decompiler::CSharp::Resolver::CSharpResolver*
+            scopeResolver = nullptr);
 
     // The per-method decompile entry (the C# Decompile(params handles[])
     // method-body half): decode the body, run the pipeline, render. False
@@ -172,7 +186,11 @@ public:
         // C# CleanUpMethodDeclaration's state machine attribute removals
         // when the async/iterator transform succeeded).
         bool* asyncDecompiled = nullptr,
-        bool* iteratorDecompiled = nullptr);
+        bool* iteratorDecompiled = nullptr,
+        // The render's using-scope resolver (the member-signature name
+        // decision); null renders the short names alone.
+        const ::ILSpy::Decompiler::CSharp::Resolver::CSharpResolver*
+            scopeResolver = nullptr);
 
     // The type-level entry: the type's decodable method bodies rendered in
     // sequence. True when at least one body rendered (the C#

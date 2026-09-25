@@ -756,6 +756,36 @@ TEST(FacadeMemberModifiersTest, TypeParameterConstraintsRender)
         << newC;
 }
 
+// The member-signature qualification: the C#
+// FullyQualifyAmbiguousTypeNamesVisitor re-renders every SimpleType with a
+// resolve-result annotation, so the return types, parameter types, field
+// types, and property types go through the same using-scope name decision
+// as the base list.
+TEST(FacadeMemberModifiersTest, MemberSignaturesQualifyAmbiguousNames)
+{
+    constexpr const char* kAmbiguityFixture =
+        "/home/jim/ilspy-test-fixtures/ambiguous_fixture/"
+        "PresentationFramework.dll";
+    std::string text;
+    if (!RenderType(kAmbiguityFixture, "AmbiguousBase", text))
+        GTEST_SKIP() << "the ambiguity fixture is not provisioned";
+    EXPECT_NE(text.find(
+                  "public System.Collections.IEnumerator GetEnumerator()"),
+              std::string::npos)
+        << text;
+    EXPECT_NE(text.find(
+                  "Consume(System.Collections.IEnumerable items)"),
+              std::string::npos)
+        << text;
+    EXPECT_NE(
+        text.find("private System.Collections.IEnumerable _list;"),
+        std::string::npos)
+        << text;
+    EXPECT_NE(text.find("public System.Collections.IEnumerable Items"),
+              std::string::npos)
+        << text;
+}
+
 // The whole-module render's using header carries the module-wide
 // required set (the C# IntroduceUsingDeclarations over the whole-module
 // tree), not just the assembly-attribute namespaces: the connid module's
