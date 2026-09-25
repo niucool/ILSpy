@@ -1392,3 +1392,67 @@ any host-level deadline wrapping the whole resolve session.
   future): the future IS ready for the waiter (the promise was
   satisfied), so a naive re-demand would read "loaded, with error" --
   the abandoned state must gate the accessors instead.
+
+---
+
+# Implemented: the promise/thread load core (two slices)
+
+The design doc above, implemented in LoadedAssembly (the lane files
+only); the TDD gates ran on both slices.
+
+## Slice 1 -- the in-flight load (`f60075e40`)
+
+* The first demand starts ONE worker thread; `StartLoad()` is the
+  start-once transition under `loadMutex_`, which now guards only the
+  state transition -- `LoadCore()` runs with no lock held (design rule
+  4.3.2). Concurrent demanders share the in-flight load through a
+  `std::shared_future<void>` (the C# `Lazy<Task>` dedup); the result
+  flows through the existing `loadResult_`/`faulted_` slots because
+  `LoadResult` is move-only (`shared_future<LoadResult>::get()` would
+  need a copy) -- the promise carries completion only.
+* The worker catches everything and always satisfies the promise
+  (bennu rule 3), recording the failure in the fault slots (the C#
+  faulted-task surface) instead of the promise state -- the deliberate
+  divergence from bennu's swallow, per the design doc. The Loaded
+  event fires on the worker thread after the promise lands, with the
+  mutexes released (the C# TaskScheduler.Default continuation).
+* The status arms regained their C# windows: `IsLoaded()` = demanded
+  AND completed (`IsValueCreated && IsCompleted` -- false while the
+  load runs), `HasLoadError()` = `IsFaulted` (false while it runs).
+  The polling contract (never triggers the load) is unchanged.
+* The destructor JOINS the worker before erasing the reverse-map
+  entries (the previous synchronous dtor could destroy a held mutex --
+  the RED test for the join hung exactly there). Detach stays a host
+  concern; the library never abandons a load.
+* RED-first evidence: `IsLoadedIsFalseWhileTheLoadIsInFlight` and
+  `StatusPollsProceedWhileTheLoadIsInFlight` failed against the
+  synchronous impl (the poll blocked behind the load, then reported
+  true); `DestructionWaitsForTheInFlightLoad` HUNG on the old dtor
+  (the held-mutex destruction). All green after the change; the whole
+  LoadedAssembly/AssemblyList/resolver suites pass unchanged (48 +
+  23 tests), ASan clean, and the full-suite failure set is byte-
+  identical to the pre-change baseline (251 pre-existing corpus-gated
+  failures, diff empty).
+
+## Slice 2 -- the bounded host edge (`882366623`)
+
+`WaitForLoaded(std::chrono::milliseconds)`: the bennu wait_for arm as
+a library primitive -- a demand (starts the load) followed by a
+bounded wait, true when the load completed within the deadline. The
+deadline arm stops at the return; a host applying detach on a hard
+deadline must `_Exit` the process (the session.cpp pattern) or keep
+the object alive until the load lands. RED-first: the member did not
+exist (build failure), then green.
+
+## The blocked remainder (documented, not implemented)
+
+The design doc's abandoned-load state (4.2) for a long-running GUI
+host is not implementable in this lane: it needs the detached worker
+to hold shared ownership of the load state independent of the
+LoadedAssembly (a `LoadJob` split), plus a consumer-side decision that
+abandoned assemblies are never re-entered. The CLI path does not need
+it (process exit reclaims strays); the GUI host should adopt
+`WaitForLoaded` + process-reclaim or fund the LoadJob split first.
+The assembly-list bulk-load fan-out (the bennu `--parallel` arm) has
+no C# ILSpyX-side consumer to port against (the C# app fans out in
+its own UI layer), so the edge primitive ships instead.
