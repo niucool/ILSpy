@@ -141,11 +141,14 @@ public:
 
     // The per-method decompile entry (the C# Decompile(params handles[])
     // method-body half): decode the body, run the pipeline, render. False
-    // when the body does not decode (the CLI skips those methods).
+    // when the body does not decode (the CLI skips those methods). A
+    // constructor renders with the TYPE name and no return type (the
+    // methodName then carries the type name).
     static bool DecompileMethodToString(
         const ::ILSpy::Decompiler::Metadata::MetadataFile& file,
         std::uint32_t methodToken, std::uint32_t methodRva,
-        const std::string& methodName, std::string& out);
+        const std::string& methodName, std::string& out,
+        bool isConstructor = false);
 
     // The type-level entry: the type's decodable method bodies rendered in
     // sequence. True when at least one body rendered (the C#

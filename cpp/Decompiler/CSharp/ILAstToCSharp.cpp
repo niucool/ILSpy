@@ -229,13 +229,21 @@ public:
     explicit CEmitter(std::string& out) : out_(out) {}
 
     void EmitMethod(const ILFunction& fn, std::string_view returnType,
-                    std::string_view methodName, std::string_view paramDecl) {
+                    std::string_view methodName, std::string_view paramDecl,
+                    bool isConstructor = false) {
         fn_ = &fn;
         returnTypeName_ = std::string(returnType);
         methodName_ = std::string(methodName);
-        out_ += returnType;
-        out_ += ' ';
-        out_ += methodName;
+        // A constructor header carries no return type: the methodName holds
+        // the TYPE name (the C# `TypeName(...)` header; the flat renderer
+        // carries no modifiers).
+        if (isConstructor) {
+            out_ += methodName;
+        } else {
+            out_ += returnType;
+            out_ += ' ';
+            out_ += methodName;
+        }
         out_ += '(';
         out_ += paramDecl;
         out_ += ")\n{\n";
@@ -2737,10 +2745,11 @@ std::string CSharpTypeName(const TypeSystem::ITypePtr& type) {
 std::string ILAstToCSharp(const ILFunction& fn,
                           std::string_view returnType,
                           std::string_view methodName,
-                          std::string_view paramDecl) {
+                          std::string_view paramDecl,
+                          bool isConstructor) {
     std::string out;
     CEmitter emitter(out);
-    emitter.EmitMethod(fn, returnType, methodName, paramDecl);
+    emitter.EmitMethod(fn, returnType, methodName, paramDecl, isConstructor);
     return out;
 }
 

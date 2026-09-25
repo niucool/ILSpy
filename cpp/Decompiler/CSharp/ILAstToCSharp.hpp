@@ -47,6 +47,7 @@ std::string CSharpTypeName(const TypeSystem::ITypePtr& type);
 std::string ILAstToCSharp(const ILFunction& fn,
                          std::string_view returnType,
                          std::string_view methodName,
-                         std::string_view paramDecl);
+                         std::string_view paramDecl,
+                         bool isConstructor = false);
 
 } // namespace ILSpy::Decompiler::IL

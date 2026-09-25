@@ -123,7 +123,7 @@ std::string CSharpDecompiler::MethodDeclString(
 bool CSharpDecompiler::DecompileMethodToString(
     const Metadata::MetadataFile& file, std::uint32_t methodToken,
     std::uint32_t methodRva, const std::string& methodName,
-    std::string& out) {
+    std::string& out, bool isConstructor) {
     auto fn = IL::ReadIL(file, methodToken, methodRva);
     if (!fn) return false;
     std::string returnType = "void";
@@ -141,7 +141,8 @@ bool CSharpDecompiler::DecompileMethodToString(
     WireTransformContext(transformContext, file);
     RunILTransforms(*fn, transformContext);
     fn->CheckInvariant(IL::ILPhase::Normal);
-    out = IL::ILAstToCSharp(*fn, returnType, methodName, paramDecl);
+    out = IL::ILAstToCSharp(*fn, returnType, methodName, paramDecl,
+                            isConstructor);
     return true;
 }
 
@@ -160,6 +161,10 @@ bool CSharpDecompiler::DecompileTypeToString(
     const Metadata::PartialTypeInfo* partialType =
         FindPartialTypeInfo(typeToken);
     bool rendered = false;
+    // The type's own name (the constructor headers render it; the empty
+    // form covers an unknown token -- the member iteration then renders no
+    // constructor).
+    std::string typeName;
     // The type declaration header (the C# DecompileType's
     // `TypeDeclaration` emission): `public partial class Name` -- the
     // partial modifier rides the generated-half convention (the XAML
@@ -168,6 +173,7 @@ bool CSharpDecompiler::DecompileTypeToString(
     // TypeDef kind.
     for (const auto& t : file.TypeDefs()) {
         if (t.Token != typeToken) continue;
+        typeName = t.Name;
         const char* keyword = "class";
         switch (t.Kind) {
             case ::ILSpy::Decompiler::TypeSystem::TypeKind::Struct:
@@ -192,11 +198,70 @@ bool CSharpDecompiler::DecompileTypeToString(
         rendered = true;
         break;
     }
+    // The property declarations (the C# DecompileType's DoDecompileMember
+    // property arm): the `Type Name { get; set; }` shape -- the type from
+    // the getter's return signature (the C# reads the property signature;
+    // the accessor's return type carries the same type by the compiler's
+    // contract; a setter-only property reads the setter's first parameter),
+    // the accessor presence from the MethodSemantics lookup. The accessor
+    // methods are collected for the method-loop skip (the C# renders them
+    // through the property), and the compiler-generated
+    // `<Name>k__BackingField` field declarations disappear (the
+    // auto-property end state the AST-level transform produces; only the
+    // compiler can emit those names, the C# identifier grammar excludes
+    // angle brackets).
+    std::set<std::uint32_t> accessorTokens;
+    std::set<std::string> backingFieldNames;
+    for (const auto& p : file.GetProperties(typeToken)) {
+        auto accessors = file.GetPropertyAccessors(p.Token);
+        std::string propertyTypeName = "var";
+        if (accessors.GetterToken != 0) {
+            if (auto sig = file.GetMethodSignature(accessors.GetterToken)) {
+                if (sig->ReturnType)
+                    propertyTypeName = IL::CSharpTypeName(sig->ReturnType);
+            }
+        } else if (accessors.SetterToken != 0) {
+            if (auto sig = file.GetMethodSignature(accessors.SetterToken)) {
+                if (!sig->ParameterTypes.empty() && sig->ParameterTypes[0])
+                    propertyTypeName =
+                        IL::CSharpTypeName(sig->ParameterTypes[0]);
+            }
+        }
+        out += propertyTypeName;
+        out += ' ';
+        out += p.Name;
+        out += " { ";
+        bool anyAccessor = false;
+        if (accessors.GetterToken != 0) {
+            out += "get; ";
+            anyAccessor = true;
+        }
+        if (accessors.SetterToken != 0) {
+            out += "set; ";
+            anyAccessor = true;
+        }
+        out += "}\n";
+        if (anyAccessor)
+            rendered = true;
+        accessorTokens.insert(accessors.GetterToken);
+        accessorTokens.insert(accessors.SetterToken);
+        for (std::uint32_t token : accessors.OtherTokens)
+            accessorTokens.insert(token);
+        backingFieldNames.insert("<" + p.Name + ">k__BackingField");
+    }
+    // The event declarations (the C# event arm) are DEFERRED: the corpus
+    // carries no event rows to test against, and the event TYPE resolves
+    // through the TypeDefOrRef token (the ReflectionDisassembler's
+    // provider path) plus the add/remove accessor bodies. The
+    // accessor-token collection below still covers the event accessors so
+    // they never render as plain methods when a fixture lands them.
     // The field declarations (the C# DecompileType's field members): the
     // `Type name;` shape from GetFields + GetFieldSignature (the C#
     // AstBuilder renders the modifiers and the initializer from the IL --
     // the declaration-only stand-in renders the type and the name).
     for (const auto& f : file.GetFields(typeToken)) {
+        if (backingFieldNames.count(f.Name) != 0)
+            continue;
         auto fieldType = file.GetFieldSignature(f.Token);
         std::string fieldTypeName =
             fieldType ? IL::CSharpTypeName(fieldType)
@@ -209,12 +274,20 @@ bool CSharpDecompiler::DecompileTypeToString(
     }
     for (const auto& m : file.GetMethods(typeToken)) {
         if (m.RVA == 0) continue;
+        if (accessorTokens.count(m.Token) != 0)
+            continue;
         if (partialType != nullptr &&
             partialType->IsDeclaredMember(m.Token)) {
             continue;
         }
+        // The constructor arm (the C# DoDecompileMember's constructor
+        // case): the instance/type constructor renders with the TYPE name
+        // and no return type.
+        bool isConstructor = m.Name == ".ctor" || m.Name == ".cctor";
+        const std::string& methodName = isConstructor ? typeName : m.Name;
         std::string text;
-        if (DecompileMethodToString(file, m.Token, m.RVA, m.Name, text)) {
+        if (DecompileMethodToString(file, m.Token, m.RVA, methodName, text,
+                                    isConstructor)) {
             out += text;
             out += "\n";
             rendered = true;

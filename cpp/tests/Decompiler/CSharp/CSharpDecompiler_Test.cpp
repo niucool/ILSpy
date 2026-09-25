@@ -442,6 +442,86 @@ TEST(CSharpDecompilerTest, DecompileTypeRendersFieldsAndProperties)
 // partial-type info -- CSharpDecompiler.cs DoDecompileType, the
 // `hasPartialTypeDeclaration` gate): the facade's type render emits the
 // `public partial class Name` header over the members.
+// The property member surface (the C# DecompileType's DoDecompileMember
+// property arm): a property renders as its `Type Name { get; set; }`
+// declaration -- the type from the getter's return signature (the C# reads
+// the property signature; the accessor's return type carries the same type
+// by the compiler's contract), the accessor presence from the
+// MethodSemantics lookup. The accessor METHODS no longer render separately
+// (the C# renders them through the property), and the compiler-generated
+// `<Name>k__BackingField` declarations disappear (the auto-property end
+// state the AST-level transform produces).
+TEST(CSharpDecompilerTest, DecompileTypeRendersProperties)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile module(path);
+    ASSERT_TRUE(module.IsValid());
+    for (const auto& t : module.TypeDefs()) {
+        if (t.Name != "EventSetter") continue;
+        std::string text;
+        ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
+            module, t.Token, text));
+        // Event: get + set; Handler: get + set; Setters is getter-only.
+        EXPECT_NE(text.find("Event { get; set; }"), std::string::npos)
+            << "the property renders as its auto-property declaration: "
+            << text;
+        EXPECT_NE(text.find("Handler { get; set; }"), std::string::npos);
+        EXPECT_EQ(text.find("get_Event("), std::string::npos)
+            << "the accessor methods render through the property";
+        EXPECT_EQ(text.find("set_Handler("), std::string::npos);
+        EXPECT_EQ(text.find("k__BackingField;"), std::string::npos)
+            << "the auto-property backing field declarations disappear";
+        return;
+    }
+    FAIL() << "the connid corpus has no EventSetter type";
+}
+
+// The getter-only property form (the Style.Setters shape).
+TEST(CSharpDecompilerTest, DecompileTypeRendersGetterOnlyProperties)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile module(path);
+    ASSERT_TRUE(module.IsValid());
+    for (const auto& t : module.TypeDefs()) {
+        if (t.Name != "Style") continue;
+        std::string text;
+        ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
+            module, t.Token, text));
+        EXPECT_NE(text.find("Setters { get; }"), std::string::npos)
+            << "the getter-only property carries only the get accessor: "
+            << text;
+        EXPECT_EQ(text.find("set_Setters("), std::string::npos);
+        return;
+    }
+    FAIL() << "the connid corpus has no Style type";
+}
+
+// The constructor member surface (the C# DoDecompileMember's constructor
+// arm): a `.ctor` method renders with the TYPE name and no return type
+// (the C# `public EventSetter()` header; the flat renderer carries no
+// modifiers).
+TEST(CSharpDecompilerTest, DecompileTypeRendersConstructors)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile module(path);
+    ASSERT_TRUE(module.IsValid());
+    for (const auto& t : module.TypeDefs()) {
+        if (t.Name != "EventSetter") continue;
+        std::string text;
+        ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
+            module, t.Token, text));
+        EXPECT_NE(text.find("EventSetter()"), std::string::npos)
+            << "the constructor renders with the type name: " << text;
+        EXPECT_EQ(text.find(".ctor"), std::string::npos)
+            << "the raw metadata constructor name does not leak: " << text;
+        return;
+    }
+    FAIL() << "the connid corpus has no EventSetter type";
+}
+
 TEST(CSharpDecompilerTest, DecompileTypeEmitsPartialHeader)
 {
     std::string path = ILSpy::Tests::WriteConnIdResDll();
@@ -494,5 +574,32 @@ TEST(CSharpDecompilerTest, DecompileModuleAttributesRenderFixedArguments)
     }
 }
 
+
+TEST(CSharpDecompilerTest, ProbeDumpMembers)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ::ILSpy::Decompiler::Metadata::MetadataFile f(path);
+    for (const auto& t : f.TypeDefs()) {
+        std::fprintf(stderr, "TYPE %s (0x%08x)\n", t.Name.c_str(), t.Token);
+        for (const auto& pr : f.GetProperties(t.Token))
+            std::fprintf(stderr, "  PROP %s (0x%08x)\n", pr.Name.c_str(), pr.Token);
+        for (const auto& e : f.GetEvents(t.Token))
+            std::fprintf(stderr, "  EVENT %s (0x%08x)\n", e.Name.c_str(), e.Token);
+        for (const auto& m : f.GetMethods(t.Token))
+            std::fprintf(stderr, "  METHOD %s (0x%08x, rva=%u)\n", m.Name.c_str(), m.Token, m.RVA);
+    }
+}
+
+TEST(CSharpDecompilerTest, ProbeDumpRender)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ::ILSpy::Decompiler::Metadata::MetadataFile f(path);
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Name != "EventSetter") continue;
+        std::string text;
+        CSharp::CSharpDecompiler::DecompileTypeToString(f, t.Token, text);
+        std::fprintf(stderr, "RENDER:\n%s\n", text.c_str());
+    }
+}
 } // namespace
 
