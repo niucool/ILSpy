@@ -1,4 +1,4 @@
-# ILSpy C++ Port -- Session Handoff (written after `aa94eceac`)
+# ILSpy C++ Port -- Session Handoff (written after the IntroduceUnsafeModifier port)
 
 Read this + `PORT_PLAN.md` + `cpp/README.md` (and the sibling
 `cpp/PORT_LOG_BAML.md` / `cpp/PORT_LOG_DISASM.md` logs) at the start of a
@@ -74,17 +74,17 @@ env-gated test for two slices.
 
 ## Next steps (in order)
 
-1. The ReplaceMethodCallsWithOperators follow-up arms (loudly deferred
-   in the .cpp): the String.Concat reduction (+ the
-   RemoveRedundantToStringInConcat chain the static half already
-   carries), the System.* special methods (GetTypeFromHandle /
-   GetFieldFromHandle / Activator.CreateInstance / GetSubArray), the
-   op_Increment decimal special case, and the VisitCastExpression
-   methodof pattern.
-2. The next GetAstTransforms slots in C# order: IntroduceUnsafeModifier,
-   AddCheckedBlocks (the annotation half exists -- the
-   CheckedUncheckedAnnotation singletons the operator rewrite now
-   annotates with).
+1. AddCheckedBlocks -- the next GetAstTransforms slot in C# order. The
+   annotation half exists (the CheckedUncheckedAnnotation singletons
+   the operator rewrite and the SkipInit/unary arms annotate with);
+   the transform itself is the DP cost-model pass (AddCheckedBlocks.cs:
+   the Cost struct with the comparison/addition operators, the
+   InsertedNode hierarchy with its per-node-kind Insert(context)
+   overrides, the checked/unchecked insertion with cost minimization)
+   -- 421 lines, its own multi-part slice.
+2. The ReplaceMethodCallsWithOperators methodof arm (loudly deferred in
+   the .cpp): the VisitCastExpression pattern needs the LdTokenPattern /
+   TypePattern pattern classes first.
 3. GetOptions (the DecompilerSettings -> TypeSystemOptions mapping in
    DecompilerTypeSystem.cs) -- deliberately deferred: the settings
    defaults could shift the render; port with its own baseline
@@ -93,7 +93,28 @@ env-gated test for two slices.
    DeclareVariables' InsertDeconstructionVariableDeclarations,
    IsRefReadOnly.
 
-## LANDED this session (SkipInit + the operator core)
+## LANDED this session (the follow-up arms + two transform slots)
+
+- `a81b94216` -- the ReplaceMethodCallsWithOperators follow-up arms: the
+  String.Concat reduction (the params-array flattening, the
+  CheckArgumentsForStringConcat gates, the ToString-elimination chain,
+  the expression-tree suppression), the System.Type.GetTypeFromHandle
+  typeof unwrap (the typeHandleOnTypeOfPattern -- the port's first
+  pattern over a Choice of expression nodes), the
+  Activator.CreateInstance<T>() rewrite, the GetSubArray range indexer,
+  and the decimal op_Increment reverse optimization. The C#
+  GetFieldFromHandle arm is dead code upstream; the methodof
+  VisitCastExpression arm stays deferred (needs LdTokenPattern /
+  TypePattern). The test-support LookupTypeDefinition grew the
+  kind-derived IsReferenceType the ToString null-safety gate reads.
+- The IntroduceUnsafeModifier port (the next slot): the bool-visitor
+  OR-reduce + the `unsafe` modifier add at the member boundary, the
+  pointer/sizeof/pointer-rank/function-pointer/dereference/address-of/
+  fixed detections, the resolve-result arms, and the two rewrites
+  (`*(ptr + i)` -> `ptr[i]`, `(*p).M` -> `p->M`). DeclareVariables moved
+  to the fourth pipeline slot.
+- Earlier this session (the reference-set wiring + the SkipInit forms +
+  the operator core): see the previous handoff sections and git log.
 
 - `a07f7c6e9` -- the SkipInit forms in DeclareVariables (the C# lines
   717-770): a local whose initial value is read before any store gets
