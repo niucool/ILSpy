@@ -39,6 +39,7 @@
 
 #pragma once
 
+#include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"  // DirectionExpression / FieldDirection
 #include "Decompiler/CSharp/Syntax/OperatorDeclaration.hpp"  // OperatorType (the enum)
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
@@ -69,6 +70,19 @@ template <class T>
 T* Detach(T* node) {
     node->Remove();
     return node;
+}
+
+// The C# `public static Expression UnwrapInDirectionExpression(
+// this Expression expr)` (SyntaxExtensions.cs lines 81-88): strip a
+// by-REFERENCE-OUT `in`-direction wrapper off an argument (the compiler's
+// by-ref operator-argument form; `out`/`ref` wrappers stay). First
+// consumed by ReplaceMethodCallsWithOperators' operator rewrites (the
+// user-defined-operator arguments).
+inline Expression* UnwrapInDirectionExpression(Expression* expr) {
+    auto* dir = dynamic_cast<DirectionExpression*>(expr);
+    if (dir == nullptr || dir->FieldDirection() != FieldDirection::In)
+        return expr;
+    return Detach(dir->Expression());
 }
 
 // The C# `public static Statement? GetNextStatement(Statement statement)`

@@ -650,11 +650,12 @@ CSharpDecompiler::GetAstTransforms() {
     std::vector<std::unique_ptr<Transforms::IAstTransform>> transforms;
     transforms.push_back(
         std::make_unique<Transforms::PatternStatementTransform>());
-    // transforms.push_back(std::make_unique<Transforms::
-    //                           ReplaceMethodCallsWithOperators>());
-    //   -- deferred: the port carries the static half (the
-    //      HasCheckedEquivalent prerequisite), the instance IAstTransform
-    //      machinery lands with that slice.
+    transforms.push_back(
+        std::make_unique<Transforms::ReplaceMethodCallsWithOperators>());
+    //   -- the user-defined-operator core is ported (the op_ metadata-name
+    //      tables and the binary/unary/explicit/op_True arms); the
+    //      String.Concat reduction, the System.* special methods, and the
+    //      methodof cast pattern stay deferred loudly in the .cpp.
     // IntroduceUnsafeModifier -- deferred.
     // AddCheckedBlocks -- deferred (the port carries the annotation half;
     // the block-rewriting IAstTransform itself lands with the rest of the

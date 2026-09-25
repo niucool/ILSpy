@@ -723,16 +723,19 @@ TEST(DeclareVariablesTest, RunUpdatesMergedAnnotations)
     EXPECT_EQ(CS::GetILVariable(*use2Right), i2.get());
 }
 
-// The transform occupies its C# GetAstTransforms slot (after the deferred
-// AddCheckedBlocks, before the deferred
+// The transform occupies its C# GetAstTransforms slot (after
+// PatternStatementTransform, ReplaceMethodCallsWithOperators, and the
+// deferred IntroduceUnsafeModifier / AddCheckedBlocks, before the deferred
 // TransformFieldAndConstructorInitializers).
 TEST(DeclareVariablesTest, PipelineCarriesDeclareVariables)
 {
     auto transforms = CS::CSharpDecompiler::GetAstTransforms();
-    ASSERT_GT(transforms.size(), 1u);
-    EXPECT_NE(dynamic_cast<CS::Transforms::DeclareVariables*>(transforms[1].get()),
+    ASSERT_GT(transforms.size(), 2u);
+    EXPECT_NE(dynamic_cast<CS::Transforms::DeclareVariables*>(
+                  transforms[2].get()),
               nullptr)
-        << "DeclareVariables is the second AST transform";
+        << "DeclareVariables is the third AST transform (after "
+           "ReplaceMethodCallsWithOperators)";
 }
 
 } // namespace

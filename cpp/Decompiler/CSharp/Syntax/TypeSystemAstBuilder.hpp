@@ -1902,7 +1902,9 @@ private:
     bool showAttributes_ = false;
     bool sortAttributes_ = false;
     bool alwaysUseShortTypeNames_ = false;
-    bool useKeywordsForBuiltinTypes_ = false;
+    // The C# field initializer: `= true` (the keywords `int`/`bool`/...
+    // for the builtin types).
+    bool useKeywordsForBuiltinTypes_ = true;
     bool useNullableSpecifierForValueTypes_ = false;
     NLM nameLookupMode_ = NLM::Expression;
     bool generateBody_ = false;

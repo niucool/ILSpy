@@ -26,17 +26,22 @@
 // VisitUserDefinedCompoundAssign arm consumes -- `HasCheckedEquivalent(IMethod)`
 // (the checked-operator twin detection) and `RemoveRedundantToStringInConcat`
 // (the string.Concat argument `ToString()` elimination with its
-// ToStringIsKnownEffectFree support table). The instance VisitInvocationExpression
-// machinery (the ProcessInvocationExpression rewrite, CheckArgumentsForStringConcat,
-// GetBinaryOperatorTypeFromMetadataName and the other method-call rewrites) is
-// DEFERRED with the IAstTransform slice it serves.
+// ToStringIsKnownEffectFree support table). The instance
+// VisitInvocationExpression machinery (the ProcessInvocationExpression
+// rewrite) lands with the IAstTransform slice: the user-defined-operator
+// core (the op_ metadata-name tables and the binary/unary/explicit/op_True
+// arms). The remaining ProcessInvocationExpression arms (String.Concat,
+// the System.* special methods, the methodof cast pattern) and the
+// VisitCastExpression override are DEFERRED loudly in the .cpp.
 
 #pragma once
 
+#include "Decompiler/CSharp/Syntax/DepthFirstAstVisitor.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Transforms/IAstTransform.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
 // The real type-system namespace alias (the ExpressionBuilder TS:: convention --
 // the CSharp/TypeSystem sub-namespace shadows the plain `TypeSystem::` lookup).
@@ -48,7 +53,9 @@ namespace ILSpy::Decompiler::CSharp::Transforms {
 // IAstTransform` -- the port carries the static half first (the
 // VisitUserDefinedCompoundAssign prerequisite); the instance AST-transform
 // machinery lands with that slice.
-class ReplaceMethodCallsWithOperators {
+class ReplaceMethodCallsWithOperators
+    : public Syntax::DepthFirstAstVisitor,
+      public IAstTransform {
 public:
     virtual ~ReplaceMethodCallsWithOperators() = default;
 
@@ -102,6 +109,31 @@ public:
     // over the NullConditional receiver. Returns the match shape; a failed
     // match leaves `call` null.
     static ToStringCallMatch MatchToStringCallPattern(Syntax::Expression* expr);
+
+    // ---- the instance IAstTransform surface (the user-defined-operator core) ----
+
+    // The C# `public override void VisitInvocationExpression(InvocationExpression
+    // invocationExpression)`: the depth-first children walk first, then this
+    // node's rewrite.
+    void VisitInvocationExpression(
+        Syntax::InvocationExpression* node) override;
+
+    // The C# `void IAstTransform.Run(AstNode rootNode, TransformContext
+    // context)`: the context lives for the walk (the C# try/finally nulls it
+    // after; an exception re-throws with the slot cleared).
+    void Run(Syntax::AstNode& rootNode, TransformContext& context) override;
+
+private:
+    // The C# `void ProcessInvocationExpression(InvocationExpression
+    // invocationExpression)` (lines 63-262): the method symbol's
+    // metadata-name dispatch -- this port carries the user-defined-operator
+    // arms (binary, unary, the explicit conversion, op_True in a condition);
+    // the String.Concat reduction, the System.* special methods, and the
+    // lift/event arms are DEFERRED loudly at their slots.
+    void ProcessInvocationExpression(Syntax::InvocationExpression* node);
+
+    // The C# `[AllowNull] TransformContext context`.
+    TransformContext* context_ = nullptr;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Transforms
