@@ -1392,3 +1392,131 @@ any host-level deadline wrapping the whole resolve session.
   future): the future IS ready for the waiter (the promise was
   satisfied), so a naive re-demand would read "loaded, with error" --
   the abandoned state must gate the accessors instead.
+
+---
+
+# Implemented: the promise/thread load core (two slices)
+
+The design doc above, implemented in LoadedAssembly (the lane files
+only); the TDD gates ran on both slices.
+
+## Slice 1 -- the in-flight load (`f60075e40`)
+
+* The first demand starts ONE worker thread; `StartLoad()` is the
+  start-once transition under `loadMutex_`, which now guards only the
+  state transition -- `LoadCore()` runs with no lock held (design rule
+  4.3.2). Concurrent demanders share the in-flight load through a
+  `std::shared_future<void>` (the C# `Lazy<Task>` dedup); the result
+  flows through the existing `loadResult_`/`faulted_` slots because
+  `LoadResult` is move-only (`shared_future<LoadResult>::get()` would
+  need a copy) -- the promise carries completion only.
+* The worker catches everything and always satisfies the promise
+  (bennu rule 3), recording the failure in the fault slots (the C#
+  faulted-task surface) instead of the promise state -- the deliberate
+  divergence from bennu's swallow, per the design doc. The Loaded
+  event fires on the worker thread after the promise lands, with the
+  mutexes released (the C# TaskScheduler.Default continuation).
+* The status arms regained their C# windows: `IsLoaded()` = demanded
+  AND completed (`IsValueCreated && IsCompleted` -- false while the
+  load runs), `HasLoadError()` = `IsFaulted` (false while it runs).
+  The polling contract (never triggers the load) is unchanged.
+* The destructor JOINS the worker before erasing the reverse-map
+  entries (the previous synchronous dtor could destroy a held mutex --
+  the RED test for the join hung exactly there). Detach stays a host
+  concern; the library never abandons a load.
+* RED-first evidence: `IsLoadedIsFalseWhileTheLoadIsInFlight` and
+  `StatusPollsProceedWhileTheLoadIsInFlight` failed against the
+  synchronous impl (the poll blocked behind the load, then reported
+  true); `DestructionWaitsForTheInFlightLoad` HUNG on the old dtor
+  (the held-mutex destruction). All green after the change; the whole
+  LoadedAssembly/AssemblyList/resolver suites pass unchanged (48 +
+  23 tests), ASan clean, and the full-suite failure set is byte-
+  identical to the pre-change baseline (251 pre-existing corpus-gated
+  failures, diff empty).
+
+## Slice 2 -- the bounded host edge (`882366623`)
+
+`WaitForLoaded(std::chrono::milliseconds)`: the bennu wait_for arm as
+a library primitive -- a demand (starts the load) followed by a
+bounded wait, true when the load completed within the deadline. The
+deadline arm stops at the return; a host applying detach on a hard
+deadline must `_Exit` the process (the session.cpp pattern) or keep
+the object alive until the load lands. RED-first: the member did not
+exist (build failure), then green.
+
+## The blocked remainder (documented, not implemented)
+
+The design doc's abandoned-load state (4.2) for a long-running GUI
+host is not implementable in this lane: it needs the detached worker
+to hold shared ownership of the load state independent of the
+LoadedAssembly (a `LoadJob` split), plus a consumer-side decision that
+abandoned assemblies are never re-entered. The CLI path does not need
+it (process exit reclaims strays); the GUI host should adopt
+`WaitForLoaded` + process-reclaim or fund the LoadJob split first.
+The assembly-list bulk-load fan-out (the bennu `--parallel` arm) has
+no C# ILSpyX-side consumer to port against (the C# app fans out in
+its own UI layer), so the edge primitive ships instead.
+
+---
+
+# Ported: the WebCIL container reader (two slices, one feature)
+
+Un-blocks the WebCilFileLoader deferral from the Phase 1 list (the
+LoadResult.hpp note; the registry's commented-out registration). TDD
+throughout; the ported C# test suite is
+ICSharpCode.Decompiler.Tests/Metadata/WebCilFileTests.cs.
+
+## Slice A -- the pure container reader
+
+`cpp/Decompiler/Metadata/WebCilFile.hpp/.cpp` ports the static
+structural surface of the C# `WebCilFile`:
+
+* `TryParse` (the `FromFile` structural half): the WASM magic/version
+  gates, the section walk (id + ULEB128 size per section, the Custom-0
+  terminator), the Data-section probe (two segments, the first
+  skipped), and `TryReadWebCilSegment` (the WbIL header, the COFF-style
+  section table, the CLI-header read via the section translation).
+  Every crafted/truncated shape the C# catch reduces to null maps to
+  the port's std::out_of_range catch (the EndOfStream/Overflow/
+  BadImageFormat -> out_of_range mapping documented on the header).
+* `TryGetSectionDataRange`: the C# internal verbatim (64-bit-widened
+  arithmetic, the RawDataSize-minus-delta length rule, the view-bounds
+  checks). All six C# range tests port one-for-one, plus the two
+  FromFile rejection tests and a garbage-file rejection pin.
+
+## Slice B -- the loader integration
+
+* `WebCilFileLoader` (ILSpyX/FileLoaders/) ports the C# loader: the
+  ParentBundle-null decline, the FromFile-over-the-path parse (the
+  passed bytes unused, exactly as the C# uses them), the nullopt
+  decline on any parse failure.
+* **The adapter decision** (the port's one divergence, documented on
+  `WebCilFile::BuildPeImage`): the C# models WebCilFile as its own
+  MetadataFile kind (a MetadataReaderProvider over the extracted
+  metadata stream). The port's MetadataFile is PE-shaped and
+  non-polymorphic, so instead of a subclass the adapter lays the
+  original container bytes behind a synthetic minimal PE header whose
+  section table is the WebCIL COFF table verbatim (the raw pointers
+  shifted into the adapted image) and whose COM directory points at
+  the REAL CLI header inside the payload. The winmd database and the
+  MethodBodyReader then parse the genuine metadata and bodies through
+  the established PE paths with zero reader changes; the payload is
+  byte-preserved (only the DOS/NT headers around it are fabricated).
+  The winmd source tree stays verbatim (the C#
+  MetadataReaderProvider.FromMetadataStream raw-stream entry point was
+  the alternative and would have required a vendored-code edit).
+* The registry registration (Xamarin, WebCil, Bundle, PE, Archive --
+  the C# order minus the remaining MetadataFileLoader deferral) and
+  the LoadResult.hpp deferral note updated (MetadataFileLoader is now
+  the only Phase-1 loader gap).
+* Tests: the end-to-end container load over the real ConnIdRes
+  metadata (extracted from the fixture PE in the test) asserting the
+  adapter image parses as a valid MetadataFile with the fixture's
+  assembly definition (Name == connid_res); the loader's bundle-entry
+  decline; the registry-order update to five loaders.
+
+Verification: the 10 WebCilFileTest + the 2 WebCilFileLoaderTest + the
+updated registry tests all green in the plain and ASan builds; the
+full-suite failure set is identical to the pre-change baseline (251
+pre-existing corpus-gated failures; only a gtest timing field differs
+in the raw output).

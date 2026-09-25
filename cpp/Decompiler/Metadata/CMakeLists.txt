@@ -8,6 +8,7 @@
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/MetadataFile.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/CodeMappingInfo.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/WebCilFile.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/AssemblyNameReference.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/AssemblyNameInfo.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/TypeName.cpp

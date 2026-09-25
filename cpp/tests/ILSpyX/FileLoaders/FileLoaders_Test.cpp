@@ -25,8 +25,10 @@
 #include "ILSpyX/FileLoaders/BundleFileLoader.hpp"
 #include "ILSpyX/FileLoaders/FileLoaderRegistry.hpp"
 #include "ILSpyX/FileLoaders/PEFileLoader.hpp"
+#include "ILSpyX/FileLoaders/WebCilFileLoader.hpp"
 #include "ILSpyX/FileLoaders/XamarinCompressedFileLoader.hpp"
 
+#include "TestFixtures/ConnIdResFixtures.hpp"
 #include "TestFixtures/TinyNetModule.hpp"
 
 #include <gtest/gtest.h>
@@ -48,6 +50,8 @@ namespace fs = std::filesystem;
 namespace FL = ILSpy::ILSpyX::FileLoaders;
 using FL::FileLoadContext;
 using FL::LoadResult;
+using ILSpy::ILSpyX::AssemblyList;
+using ILSpy::ILSpyX::LoadedAssembly;
 
 std::vector<std::uint8_t> Bytes(const std::string& s)
 {
@@ -91,6 +95,161 @@ std::vector<std::uint8_t> XalzWrap(const std::vector<std::uint8_t>& payload,
     return out;
 }
 
+// ---- The WebCIL container builders (duplicated file-locally from
+// WebCilFile_Test.cpp per the file-local helper convention).
+
+void PutU16WebCil(std::vector<std::uint8_t>& bytes, std::uint16_t value)
+{
+    bytes.push_back(static_cast<std::uint8_t>(value));
+    bytes.push_back(static_cast<std::uint8_t>(value >> 8));
+}
+
+void PutU32WebCil(std::vector<std::uint8_t>& bytes, std::uint32_t value)
+{
+    for (int i = 0; i < 4; i++) {
+        bytes.push_back(static_cast<std::uint8_t>(value >> (8 * i)));
+    }
+}
+
+std::uint16_t GetU16WebCil(const std::vector<std::uint8_t>& b,
+    std::size_t off)
+{
+    return static_cast<std::uint16_t>(b[off] | (b[off + 1] << 8));
+}
+
+std::uint32_t GetU32WebCil(const std::vector<std::uint8_t>& b,
+    std::size_t off)
+{
+    std::uint32_t v = 0;
+    for (int i = 3; i >= 0; i--) {
+        v = (v << 8) | b[off + i];
+    }
+    return v;
+}
+
+// Builds the WebCIL payload around a real metadata stream: one section
+// covering the blob, the CLI header at RVA 0x100 carrying the metadata
+// directory (the metadata itself at blob RVA 0x200).
+std::vector<std::uint8_t> BuildWebCilContainerOver(
+    const std::vector<std::uint8_t>& metadata)
+{
+    std::vector<std::uint8_t> payload;
+    PutU32WebCil(payload, 0x4c496257u);  // "WbIL"
+    PutU16WebCil(payload, 0);            // VersionMajor
+    PutU16WebCil(payload, 0);            // VersionMinor
+    PutU16WebCil(payload, 1);            // CoffSections
+    PutU16WebCil(payload, 0);            // reserved0
+    PutU32WebCil(payload, 0x100);        // PECliHeaderRVA
+    PutU32WebCil(payload, 72);           // PECliHeaderSize
+    PutU32WebCil(payload, 0);            // PEDebugRVA
+    PutU32WebCil(payload, 0);            // PEDebugSize
+    PutU32WebCil(payload, 0x1000);       // VirtualSize
+    PutU32WebCil(payload, 0);            // VirtualAddress
+    PutU32WebCil(payload, 0x1000);       // RawDataSize
+    PutU32WebCil(payload, 0);            // RawDataPtr
+    payload.resize(0x100, 0);
+    PutU32WebCil(payload, 72);           // the cor20 cb
+    PutU16WebCil(payload, 2);            // MajorRuntimeVersion
+    PutU16WebCil(payload, 5);            // MinorRuntimeVersion
+    PutU32WebCil(payload, 0x200);        // MetaData.VirtualAddress
+    PutU32WebCil(payload,
+        static_cast<std::uint32_t>(metadata.size()));  // MetaData.Size
+    PutU32WebCil(payload, 0);            // Flags
+    PutU32WebCil(payload, 0);            // EntryPointToken
+    for (int i = 0; i < 4; i++) {
+        PutU32WebCil(payload, 0);        // Resources etc.
+        PutU32WebCil(payload, 0);
+    }
+    PutU32WebCil(payload, 0);            // ManagedNativeHeader VA
+    PutU32WebCil(payload, 0);            // ManagedNativeHeader size
+    payload.resize(0x200, 0);
+    payload.insert(payload.end(), metadata.begin(), metadata.end());
+
+    // The WASM container: the magic + version, one Data section holding
+    // the two segments (the skipped first, the WebCIL blob second).
+    std::vector<std::uint8_t> container;
+    PutU32WebCil(container, 0x6d736100u);  // "\0asm"
+    PutU32WebCil(container, 1);            // the Wasm version
+    container.push_back(11);               // WasmSectionId::Data
+    // The section content: ULEB sizes are small enough to be single-byte.
+    std::vector<std::uint8_t> content;
+    content.push_back(2);                  // two segments
+    content.push_back(1);                  // segment 1 kind
+    content.push_back(0);                  // segment 1 length
+    content.push_back(1);                  // segment 2 kind
+    while (payload.size() >= 0x80) {
+        // The multi-byte ULEB128 path (defensive; the payloads here are
+        // small).
+        std::uint32_t remaining =
+            static_cast<std::uint32_t>(payload.size());
+        while (remaining >= 0x80) {
+            content.push_back(static_cast<std::uint8_t>(remaining) | 0x80);
+            remaining >>= 7;
+        }
+        content.push_back(static_cast<std::uint8_t>(remaining));
+        break;
+    }
+    if (payload.size() < 0x80) {
+        content.push_back(static_cast<std::uint8_t>(payload.size()));
+    }
+    content.insert(content.end(), payload.begin(), payload.end());
+    // ULEB128 the content length (single byte for small content).
+    if (content.size() < 0x80) {
+        container.push_back(static_cast<std::uint8_t>(content.size()));
+    } else {
+        std::uint32_t remaining = static_cast<std::uint32_t>(content.size());
+        while (remaining >= 0x80) {
+            container.push_back(static_cast<std::uint8_t>(remaining) | 0x80);
+            remaining >>= 7;
+        }
+        container.push_back(static_cast<std::uint8_t>(remaining));
+    }
+    container.insert(container.end(), content.begin(), content.end());
+    return container;
+}
+
+// Extracts the ECMA-335 metadata stream from the ConnIdRes fixture PE.
+std::vector<std::uint8_t> ExtractMetadataFromConnIdRes()
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    std::ifstream in(path, std::ios::binary);
+    std::vector<std::uint8_t> pe(
+        (std::istreambuf_iterator<char>(in)),
+        std::istreambuf_iterator<char>());
+    std::uint32_t lfanew = GetU32WebCil(pe, 0x3C);
+    std::size_t optional = lfanew + 4 + 20;
+    std::uint32_t comRva = GetU32WebCil(pe,
+        optional + 96 + 14 * 8);
+    std::size_t sectionsOffset = optional + 224;
+    std::uint32_t sectionCount = GetU16WebCil(pe, lfanew + 4 + 2);
+    std::uint8_t const* cli = nullptr;
+    for (std::uint32_t i = 0; i < sectionCount; i++) {
+        std::size_t s = sectionsOffset + i * 40;
+        std::uint32_t va = GetU32WebCil(pe, s + 12);
+        std::uint32_t vs = GetU32WebCil(pe, s + 8);
+        std::uint32_t raw = GetU32WebCil(pe, s + 20);
+        if (comRva >= va && comRva < va + vs) {
+            cli = pe.data() + raw + (comRva - va);
+            break;
+        }
+    }
+    std::uint8_t const* metadata = nullptr;
+    std::uint32_t mdRva = *reinterpret_cast<const std::uint32_t*>(cli + 8);
+    std::uint32_t mdSize =
+        *reinterpret_cast<const std::uint32_t*>(cli + 12);
+    for (std::uint32_t i = 0; i < sectionCount; i++) {
+        std::size_t s = sectionsOffset + i * 40;
+        std::uint32_t va = GetU32WebCil(pe, s + 12);
+        std::uint32_t vs = GetU32WebCil(pe, s + 8);
+        std::uint32_t raw = GetU32WebCil(pe, s + 20);
+        if (mdRva >= va && mdRva < va + vs) {
+            metadata = pe.data() + raw + (mdRva - va);
+            break;
+        }
+    }
+    return std::vector<std::uint8_t>(metadata, metadata + mdSize);
+}
+
 }  // namespace
 
 // ---- The registry.
@@ -98,20 +257,23 @@ std::vector<std::uint8_t> XalzWrap(const std::vector<std::uint8_t>& payload,
 TEST(FileLoaderRegistryTest, DefaultRegistrationOrder)
 {
     FL::FileLoaderRegistry registry;
-    // Xamarin, Bundle, PE, Archive (WebCil and Metadata are the documented
-    // deferrals -- see LoadResult.hpp).
-    ASSERT_EQ(registry.RegisteredLoaders().size(), 4u);
+    // Xamarin, WebCil, Bundle, PE, Archive (Metadata is the one remaining
+    // documented deferral -- see LoadResult.hpp).
+    ASSERT_EQ(registry.RegisteredLoaders().size(), 5u);
     EXPECT_NE(dynamic_cast<const FL::XamarinCompressedFileLoader*>(
                   registry.RegisteredLoaders()[0].get()),
         nullptr);
-    EXPECT_NE(dynamic_cast<const FL::BundleFileLoader*>(
+    EXPECT_NE(dynamic_cast<const FL::WebCilFileLoader*>(
                   registry.RegisteredLoaders()[1].get()),
         nullptr);
-    EXPECT_NE(dynamic_cast<const FL::PEFileLoader*>(
+    EXPECT_NE(dynamic_cast<const FL::BundleFileLoader*>(
                   registry.RegisteredLoaders()[2].get()),
         nullptr);
-    EXPECT_NE(dynamic_cast<const FL::ArchiveFileLoader*>(
+    EXPECT_NE(dynamic_cast<const FL::PEFileLoader*>(
                   registry.RegisteredLoaders()[3].get()),
+        nullptr);
+    EXPECT_NE(dynamic_cast<const FL::ArchiveFileLoader*>(
+                  registry.RegisteredLoaders()[4].get()),
         nullptr);
 }
 
@@ -501,4 +663,50 @@ TEST(XamarinCompressedFileLoaderTest, CorruptPayloadThrowsTheSizeMismatch)
             "Invalid Xamarin compressed module: decompressed size does not "
             "match the header.");
     }
+}
+
+// The WebCilFileLoader over the real registry surface: the container
+// written to disk, loaded through the loader, presented as the PE-shaped
+// MetadataFile.
+TEST(WebCilFileLoaderTest, LoadsAValidContainerAsThePeShape)
+{
+    // A valid container over the ConnIdRes metadata, written to disk.
+    std::vector<std::uint8_t> metadata = ExtractMetadataFromConnIdRes();
+    std::vector<std::uint8_t> container =
+        BuildWebCilContainerOver(metadata);
+    std::string path = fs::temp_directory_path() /
+        ("ilspy_webcil_loader_" + std::to_string(std::rand()) + ".wasm");
+    {
+        std::ofstream out(path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(container.data()),
+            static_cast<std::streamsize>(container.size()));
+    }
+
+    FL::WebCilFileLoader loader;
+    FL::FileLoadContext context;  // no parent bundle
+    auto result = loader.Load(path, container.data(), container.size(),
+        context);
+    std::error_code ec;
+    fs::remove(fs::path(path), ec);
+    ASSERT_TRUE(result.has_value());
+    ASSERT_NE(result->MetadataFile, nullptr);
+    EXPECT_TRUE(result->MetadataFile->IsValid());
+    auto asmDef = result->MetadataFile->GetAssemblyDefinition();
+    ASSERT_TRUE(asmDef.has_value());
+    EXPECT_EQ(asmDef->Name, "connid_res");
+}
+
+TEST(WebCilFileLoaderTest, DeclinesInsideABundle)
+{
+    // The C# `if (settings.ParentBundle != null) return null;`: a bundle
+    // entry is never a WebCIL container.
+    AssemblyList list;
+    std::string file = ILSpy::Tests::WriteConnIdResDll();
+    LoadedAssembly& bundle = list.OpenAssembly(file);
+    FL::WebCilFileLoader loader;
+    FL::FileLoadContext context;
+    context.ParentBundle = &bundle;
+    EXPECT_FALSE(loader
+            .Load(file, nullptr, 0, context)
+            .has_value());
 }

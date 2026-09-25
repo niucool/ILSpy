@@ -31,15 +31,22 @@
 #include "ILSpyX/AssemblyList.hpp"
 
 #include "Decompiler/Metadata/DotNetCorePathFinderExtensions.hpp"
+#include "ILSpyX/FileLoaders/FileLoaderRegistry.hpp"
 #include "TestFixtures/ConnIdResFixtures.hpp"
 #include "TestFixtures/TinyNetModule.hpp"
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -48,6 +55,61 @@ namespace fs = std::filesystem;
 
 using ILSpy::ILSpyX::AssemblyList;
 using ILSpy::ILSpyX::LoadedAssembly;
+namespace FileLoaders = ILSpy::ILSpyX::FileLoaders;
+
+// Parks the load until the test releases it, so tests can observe the
+// load's in-flight window from other threads. Registered last in a
+// private registry: the stock loaders all decline for garbage bytes,
+// so the park happens inside the load proper. After release the stock
+// PE fallback re-runs (the eventual failure message is the fallback's
+// -- these tests pin the concurrency, not the message).
+struct ParkingLoader : public FileLoaders::IFileLoader {
+    mutable std::mutex Mtx;
+    mutable std::condition_variable Cv;
+    bool Released = false;
+    mutable std::atomic<int> Calls{0};
+    mutable std::atomic<bool> Entered{false};
+    // Set when the parked load finished (the post-release epilogue ran).
+    mutable std::atomic<bool> Done{false};
+
+    std::optional<FileLoaders::LoadResult> Load(const std::string&,
+        const std::uint8_t*, std::size_t,
+        const FileLoaders::FileLoadContext&) const override
+    {
+        ++Calls;
+        Entered = true;
+        {
+            std::unique_lock lock(Mtx);
+            Cv.wait(lock, [this] { return Released; });
+        }
+        // A bounded post-release tail: the destructor-join contract
+        // asserts on it (the destroyer must not return before the
+        // worker does).
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        Done = true;
+        FileLoaders::LoadResult failure;
+        failure.FileLoadException = "parking loader declined";
+        return failure;
+    }
+
+    void Release()
+    {
+        {
+            std::lock_guard lock(Mtx);
+            Released = true;
+        }
+        Cv.notify_all();
+    }
+
+    // Spins (bounded) until a loader is parked inside Load.
+    static bool WaitEntered(const std::atomic<bool>& entered)
+    {
+        for (int i = 0; i < 1000 && !entered.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return entered.load();
+    }
+};
 
 // Writes arbitrary bytes to a temp file and returns the path.
 std::string WriteBytes(const std::string& fileName, const std::string& bytes)
@@ -228,6 +290,195 @@ TEST(LoadedAssemblyTest, LoadedListenerIsNotRetroactive) {
     // IsLoaded after subscribing."
     EXPECT_EQ(fired, 0);
     EXPECT_TRUE(asm_.IsLoaded());
+}
+
+// ---- The async load machinery (the promise/thread + detach-on-timeout
+// design from PORT_LOG_BAML.md; the library joins, the host may _Exit).
+
+TEST(LoadedAssemblyTest, IsLoadedIsFalseWhileTheLoadIsInFlight) {
+    AssemblyList list;
+    FileLoaders::FileLoaderRegistry registry;
+    auto loader = std::make_unique<ParkingLoader>();
+    ParkingLoader* raw = loader.get();
+    registry.Register(std::move(loader));
+    LoadedAssembly::Options options;
+    options.FileLoaders = &registry;
+    std::string file = WriteBytes("ilspy_la_parked.bin",
+        "parked bytes, not an image");
+    auto la = std::make_unique<LoadedAssembly>(list, file, options);
+
+    std::thread demander([&la] {
+        try {
+            (void)la->GetLoadResult();
+        } catch (const std::exception&) {
+        }
+    });
+    ASSERT_TRUE(ParkingLoader::WaitEntered(raw->Entered));
+    // The C# window: Lazy.Value created (the demand happened) but
+    // Task.IsCompleted false -- IsLoaded is false while the load runs.
+    // A watchdog releases the loader so an implementation that blocks
+    // the poll behind the in-flight load cannot hang the suite.
+    std::mutex gateMtx;
+    std::condition_variable gateCv;
+    bool testDone = false;
+    std::thread watchdog([&] {
+        std::unique_lock lock(gateMtx);
+        gateCv.wait_for(lock, std::chrono::seconds(2),
+            [&] { return testDone; });
+        raw->Release();
+    });
+    EXPECT_FALSE(la->IsLoaded());
+    {
+        std::lock_guard lock(gateMtx);
+        testDone = true;
+    }
+    gateCv.notify_all();
+    raw->Release();
+    watchdog.join();
+    demander.join();
+    EXPECT_TRUE(la->IsLoaded());
+    EXPECT_TRUE(la->HasLoadError());
+}
+
+TEST(LoadedAssemblyTest, StatusPollsProceedWhileTheLoadIsInFlight) {
+    AssemblyList list;
+    FileLoaders::FileLoaderRegistry registry;
+    auto loader = std::make_unique<ParkingLoader>();
+    ParkingLoader* raw = loader.get();
+    registry.Register(std::move(loader));
+    LoadedAssembly::Options options;
+    options.FileLoaders = &registry;
+    std::string file = WriteBytes("ilspy_la_poll.bin",
+        "parked bytes, not an image");
+    auto la = std::make_unique<LoadedAssembly>(list, file, options);
+
+    std::thread demander([&la] {
+        try {
+            (void)la->GetLoadResult();
+        } catch (const std::exception&) {
+        }
+    });
+    ASSERT_TRUE(ParkingLoader::WaitEntered(raw->Entered));
+    // A status poll must not block behind the in-flight load: poll from
+    // this thread while the loader is parked. A watchdog releases the
+    // loader so a wedged implementation cannot hang the suite.
+    std::mutex gateMtx;
+    std::condition_variable gateCv;
+    bool testDone = false;
+    std::thread watchdog([&] {
+        std::unique_lock lock(gateMtx);
+        gateCv.wait_for(lock, std::chrono::seconds(2),
+            [&] { return testDone; });
+        raw->Release();
+    });
+    EXPECT_FALSE(la->IsLoaded());
+    {
+        std::lock_guard lock(gateMtx);
+        testDone = true;
+    }
+    gateCv.notify_all();
+    raw->Release();
+    watchdog.join();
+    demander.join();
+    EXPECT_TRUE(la->HasLoadError());
+}
+
+TEST(LoadedAssemblyTest, ConcurrentDemandersShareOneLoad) {
+    AssemblyList list;
+    FileLoaders::FileLoaderRegistry registry;
+    auto loader = std::make_unique<ParkingLoader>();
+    ParkingLoader* raw = loader.get();
+    registry.Register(std::move(loader));
+    LoadedAssembly::Options options;
+    options.FileLoaders = &registry;
+    std::string file = WriteBytes("ilspy_la_shared.bin",
+        "parked bytes, not an image");
+    auto la = std::make_unique<LoadedAssembly>(list, file, options);
+
+    std::vector<std::string> messages(4);
+    std::vector<std::thread> demanders;
+    for (int i = 0; i < 4; i++) {
+        demanders.emplace_back([&, i] {
+            try {
+                (void)la->GetLoadResult();
+            } catch (const std::exception& ex) {
+                messages[i] = ex.what();
+            }
+        });
+    }
+    // The first demander is parked inside the load; no demander can
+    // complete before the release.
+    ASSERT_TRUE(ParkingLoader::WaitEntered(raw->Entered));
+    raw->Release();
+    for (auto& d : demanders) {
+        d.join();
+    }
+    EXPECT_EQ(raw->Calls.load(), 1);
+    // Every demander observed the same load outcome.
+    for (const auto& message : messages) {
+        EXPECT_EQ(message, messages[0]);
+    }
+}
+
+TEST(LoadedAssemblyTest, WaitForLoadedTimesOutWhileTheLoadIsInFlight) {
+    AssemblyList list;
+    FileLoaders::FileLoaderRegistry registry;
+    auto loader = std::make_unique<ParkingLoader>();
+    ParkingLoader* raw = loader.get();
+    registry.Register(std::move(loader));
+    LoadedAssembly::Options options;
+    options.FileLoaders = &registry;
+    std::string file = WriteBytes("ilspy_la_waitfor.bin",
+        "parked bytes, not an image");
+    auto la = std::make_unique<LoadedAssembly>(list, file, options);
+
+    // The bounded wait is a demand: it starts the load, then waits at
+    // most the deadline (the bennu wait_for arm; no C# analogue -- the
+    // C# host would Task.Wait(timeout)).
+    EXPECT_FALSE(la->WaitForLoaded(std::chrono::milliseconds(50)));
+    EXPECT_FALSE(la->IsLoaded());
+    raw->Release();
+    EXPECT_TRUE(la->WaitForLoaded(std::chrono::seconds(2)));
+    EXPECT_TRUE(la->IsLoaded());
+    EXPECT_TRUE(la->HasLoadError());
+}
+
+TEST(LoadedAssemblyTest, WaitForLoadedAfterCompletionReturnsImmediately) {
+    AssemblyList list;
+    std::string file = ILSpy::Tests::WriteConnIdResDll();
+    LoadedAssembly& asm_ = list.OpenAssembly(file);
+    (void)asm_.GetLoadResult();
+    // Completed loads satisfy the wait instantly, even with a zero
+    // deadline.
+    EXPECT_TRUE(asm_.WaitForLoaded(std::chrono::milliseconds(0)));
+}
+
+TEST(LoadedAssemblyTest, DestructionWaitsForTheInFlightLoad) {
+    AssemblyList list;
+    FileLoaders::FileLoaderRegistry registry;
+    auto loader = std::make_unique<ParkingLoader>();
+    ParkingLoader* raw = loader.get();
+    registry.Register(std::move(loader));
+    LoadedAssembly::Options options;
+    options.FileLoaders = &registry;
+    std::string file = WriteBytes("ilspy_la_join.bin",
+        "parked bytes, not an image");
+    auto la = std::make_unique<LoadedAssembly>(list, file, options);
+
+    std::thread demander([&la] {
+        try {
+            (void)la->GetLoadResult();
+        } catch (const std::exception&) {
+        }
+    });
+    ASSERT_TRUE(ParkingLoader::WaitEntered(raw->Entered));
+    raw->Release();
+    // Destroy while the load's post-release tail is still running: the
+    // destructor must wait for the worker (the bennu rule: join on the
+    // normal path) so the object never dies under a live load.
+    la.reset();
+    demander.join();
+    EXPECT_TRUE(raw->Done.load());
 }
 
 TEST(LoadedAssemblyTest, TargetFrameworkIdOverrideTrimsAndNormalizesBlank) {

@@ -22,13 +22,28 @@
 //
 // C#-to-C++ porting decisions:
 //  * The C# lazy load (`Lazy<Task<LoadResult>>` + `Task.Run(LoadAsync)`)
-//    ports SYNCHRONOUSLY: the port has no Task analogue (the
-//    AssemblyNameReference.hpp precedent), so the load runs on the first
-//    demand (GetLoadResult / GetMetadataFile / ...), guarded once under a
-//    mutex. The async status arms collapse accordingly: IsLoaded is "the
-//    load has run" (no in-flight window), HasLoadError is "the load
-//    threw", and polling never triggers the load (the C#
-//    Lazy.IsValueCreated contract).
+//    ports as the promise/thread pattern from the design doc in
+//    PORT_LOG_BAML.md (the bennu session.cpp mapping, commit 0dedade):
+//    the first demand starts one worker thread; the load state mutex
+//    guards only the state transition (the started flag + the future
+//    slot) -- LoadCore() runs unlocked on the worker, so a load that
+//    recursively demands another assembly's load cannot self-deadlock,
+//    and status polls proceed while a load is in flight. Concurrent
+//    demanders share the one in-flight load through the future (the C#
+//    in-flight task dedup). The worker catches everything and always
+//    satisfies the promise (bennu rule 3), storing the failure into the
+//    fault slots instead of the promise state (bennu swallows; here the
+//    C# faulted-task surface IS the result channel). The Loaded event
+//    fires on the worker thread after the promise is satisfied (the C#
+//    ContinueWith continuation on TaskScheduler.Default). The library
+//    always joins (the destructor waits for an in-flight load); the
+//    bennu detach-on-deadline arm belongs to the HOST (a CLI may
+//    _Exit the process on a deadline -- the detached worker dies with
+//    it), never to this class.
+//  * The async status arms: IsLoaded is "demanded AND completed" (the
+//    C# `Lazy.IsValueCreated && Value.IsCompleted` window -- false while
+//    the load runs), HasLoadError the C# `IsFaulted` (false while the
+//    load runs), and polling still never triggers the load.
 //  * The C# `Exception? FileLoadException` slots carry the message (the
 //    LoadResult.hpp convention); the final `throw result.FileLoadException`
 //    and the GetMetadataFileAsync rethrow port as std::runtime_error with
@@ -77,12 +92,15 @@
 #include "Decompiler/Metadata/ReferenceLoadInfo.hpp"
 #include "ILSpyX/FileLoaders/LoadResult.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace ILSpy::Decompiler::Metadata {
@@ -188,8 +206,7 @@ public:
     const Decompiler::Metadata::MetadataFile* GetMetadataFileOrNull() const;
 
     // The C# `public bool IsLoaded`: the load has run (triggered and
-    // completed -- the port's synchronous load has no in-flight window).
-    // Reading it must NOT trigger the load.
+    // completed). Reading it must NOT trigger the load.
     bool IsLoaded() const;
 
     // The C# `public bool IsLoadedAsValidAssembly`: loaded successfully
@@ -201,6 +218,17 @@ public:
     // The C# `public bool HasLoadError`: the load threw (the C# faulted
     // task).
     bool HasLoadError() const;
+
+    // The bounded wait (the bennu host-edge primitive; no C#
+    // analogue -- the C# host would Task.Wait(timeout)). A demand: it
+    // starts the load if it has not started, then waits at most the
+    // deadline. True when the load completed within the deadline; false
+    // while it is still in flight (the caller must keep the object
+    // alive until the load completes -- the destructor joins). The
+    // deadline arm stops here: detach belongs to the host, which may
+    // _Exit the process on a hard deadline (the bennu session.cpp
+    // pattern) -- the library never abandons a load.
+    bool WaitForLoaded(std::chrono::milliseconds timeout) const;
 
     // The C# `public bool IsAutoLoaded { get; set; }`.
     bool IsAutoLoaded() const { return isAutoLoaded_; }
@@ -307,7 +335,16 @@ public:
     std::string Text() const;
 
 private:
+    // The start-once step both EnsureLoaded and WaitForLoaded share:
+    // starts the worker on the first call, returns the shared future
+    // (the mutex guards only this transition).
+    std::shared_future<void> StartLoad() const;
     void EnsureLoaded() const;
+    // The worker body: runs LoadCore() with no lock held, records the
+    // outcome in the fault slots, then satisfies the promise and fires
+    // the Loaded listeners (in that order -- a waiter waking on the
+    // promise observes the landed state).
+    void RunLoad(std::shared_ptr<std::promise<void>> done) const;
     FileLoaders::LoadResult LoadCore() const;
     void SetPdbFileName(std::optional<std::string> value);
 
@@ -340,11 +377,19 @@ private:
     LoadedAssembly* parentBundle_ = nullptr;
 
     // The load state (the C# Lazy<Task<LoadResult>>), guarded by
-    // loadMutex_. loadTriggered_ is the C# Lazy.IsValueCreated (set
-    // before the work runs, so the status members can poll it without
-    // triggering); faulted_/faultMessage_ the C# faulted-task shape.
+    // loadMutex_, which protects only the state transition -- never the
+    // load itself (LoadCore runs on the worker with no lock held). The
+    // promise/thread machinery follows the bennu pattern (the design
+    // doc in PORT_LOG_BAML.md): the shared future lets concurrent
+    // demanders await the one in-flight load; the worker satisfies it
+    // unconditionally after recording the outcome. loadStarted_ is the
+    // C# Lazy.IsValueCreated; loadDone_'s readiness is the C#
+    // Task.IsCompleted (the IsLoaded in-flight window); faulted_/
+    // faultMessage_ the C# faulted-task shape.
     mutable std::mutex loadMutex_;
-    mutable bool loadTriggered_ = false;
+    mutable bool loadStarted_ = false;
+    mutable std::shared_future<void> loadDone_;
+    mutable std::unique_ptr<std::thread> loadThread_;
     mutable bool faulted_ = false;
     mutable std::string faultMessage_;
     mutable std::optional<FileLoaders::LoadResult> loadResult_;

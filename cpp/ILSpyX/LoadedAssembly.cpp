@@ -35,6 +35,7 @@
 #include "Decompiler/Metadata/UniversalAssemblyResolver.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -162,6 +163,14 @@ LoadedAssembly::LoadedAssembly(LoadedAssembly& bundle, std::string fileName,
 
 LoadedAssembly::~LoadedAssembly()
 {
+    // Join the load worker first (the bennu rule: join on the normal
+    // path): the worker touches this object's state and the registry
+    // below, so the object must not die under a live load. Detach is a
+    // host concern (a CLI may _Exit on a deadline); the library never
+    // detaches.
+    if (loadThread_ && loadThread_->joinable()) {
+        loadThread_->join();
+    }
     std::lock_guard<std::mutex> lock(gLoadedAssembliesMutex);
     for (const auto* file : loadedFiles_) {
         gLoadedAssemblies.erase(file);
@@ -178,35 +187,72 @@ void LoadedAssembly::AddLoadedListener(std::function<void()> listener)
     }
 }
 
+std::shared_future<void> LoadedAssembly::StartLoad() const
+{
+    std::lock_guard<std::mutex> lock(loadMutex_);
+    if (!loadStarted_) {
+        loadStarted_ = true;
+        // The promise is captured by the worker; the mutex guards only
+        // this transition (LoadCore itself runs unlocked, so a load that
+        // recursively demands another assembly's load cannot
+        // self-deadlock, and status polls proceed while the load runs).
+        auto done = std::make_shared<std::promise<void>>();
+        loadDone_ = done->get_future().share();
+        loadThread_ = std::make_unique<std::thread>(
+            [this, done] { RunLoad(done); });
+    }
+    return loadDone_;
+}
+
 void LoadedAssembly::EnsureLoaded() const
 {
+    // Every demander (including the one that started the work) waits on
+    // the shared future -- the C# `await loadingTask`.
+    StartLoad().wait();
+}
+
+bool LoadedAssembly::WaitForLoaded(
+    std::chrono::milliseconds timeout) const
+{
+    // The demand plus the bounded wait (the bennu wait_for arm): the
+    // deadline arm stops here -- the library never abandons a load; a
+    // host applying detach must _Exit the process (session.cpp) or keep
+    // the object alive until the load lands (the destructor joins).
+    return StartLoad().wait_for(timeout) == std::future_status::ready;
+}
+
+void LoadedAssembly::RunLoad(
+    std::shared_ptr<std::promise<void>> done) const
+{
     std::vector<std::function<void()>> listeners;
+    try {
+        FileLoaders::LoadResult result = LoadCore();
+        std::lock_guard<std::mutex> lock(loadMutex_);
+        loadResult_ = std::move(result);
+    } catch (const std::exception& ex) {
+        std::lock_guard<std::mutex> lock(loadMutex_);
+        faulted_ = true;
+        faultMessage_ = ex.what();
+    } catch (...) {
+        std::lock_guard<std::mutex> lock(loadMutex_);
+        faulted_ = true;
+        faultMessage_ = "Exception of type 'System.Exception' was thrown.";
+    }
     {
         std::lock_guard<std::mutex> lock(loadMutex_);
-        if (loadTriggered_) {
-            return;
-        }
-        // Set the flag BEFORE the work (the C# Lazy.IsValueCreated
-        // contract: a status poll must see "started" while the load
-        // runs).
-        loadTriggered_ = true;
-        try {
-            loadResult_ = LoadCore();
-        } catch (const std::exception& ex) {
-            faulted_ = true;
-            faultMessage_ = ex.what();
-        } catch (...) {
-            faulted_ = true;
-            faultMessage_ = "Exception of type 'System.Exception' was thrown.";
-        }
         // The C# `task.ContinueWith(... RaiseLoaded())`: fires on success
         // and failure alike, exactly once.
         loadedFired_ = true;
         listeners = std::move(loadedListeners_);
         loadedListeners_.clear();
     }
-    // Fired with the load mutex released (a listener may re-enter the
-    // status surface).
+    // Always satisfy the promise (bennu rule 3): the failure was already
+    // recorded in the fault slots, so the future carries completion, not
+    // the exception. A waiter waking here observes the landed state.
+    done->set_value();
+    // Fired with every lock released (a listener may re-enter the status
+    // surface), on the worker thread -- the C# continuation's pool
+    // thread.
     for (auto& listener : listeners) {
         listener();
     }
@@ -357,20 +403,31 @@ LoadedAssembly::GetMetadataFileOrNull() const
 bool LoadedAssembly::IsLoaded() const
 {
     std::lock_guard<std::mutex> lock(loadMutex_);
-    return loadTriggered_;
+    // The C# `IsValueCreated && Value.IsCompleted` window: demanded AND
+    // completed -- false while the load runs.
+    return loadStarted_ && loadDone_.valid() &&
+           loadDone_.wait_for(std::chrono::seconds(0)) ==
+        std::future_status::ready;
 }
 
 bool LoadedAssembly::IsLoadedAsValidAssembly() const
 {
     std::lock_guard<std::mutex> lock(loadMutex_);
-    return loadTriggered_ && !faulted_ &&
-           loadResult_.has_value() && loadResult_->MetadataFile != nullptr;
+    return loadStarted_ && loadDone_.valid() &&
+           loadDone_.wait_for(std::chrono::seconds(0)) ==
+               std::future_status::ready &&
+           !faulted_ && loadResult_.has_value() &&
+           loadResult_->MetadataFile != nullptr;
 }
 
 bool LoadedAssembly::HasLoadError() const
 {
     std::lock_guard<std::mutex> lock(loadMutex_);
-    return loadTriggered_ && faulted_;
+    // The C# `IsFaulted`: false while the load runs.
+    return loadStarted_ && loadDone_.valid() &&
+           loadDone_.wait_for(std::chrono::seconds(0)) ==
+               std::future_status::ready &&
+           faulted_;
 }
 
 std::string LoadedAssembly::GetTargetFrameworkId() const

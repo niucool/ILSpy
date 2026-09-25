@@ -15,6 +15,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/LoadedAssemblyExtensions.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/AssemblyList.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/FileLoaders/PEFileLoader.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/FileLoaders/WebCilFileLoader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/FileLoaders/BundleFileLoader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/FileLoaders/ArchiveFileLoader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/FileLoaders/XamarinCompressedFileLoader.cpp

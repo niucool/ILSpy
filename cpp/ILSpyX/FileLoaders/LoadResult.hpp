@@ -38,12 +38,14 @@
 //    wrapping the bundle; the port carries the same wrapper (raw pointer
 //    -- the loaders only read its nullness, and the wrapper is owned by
 //    the caller's AssemblyList).
-//  * DEFERRED: WebCilFileLoader (WebCilFile.FromFile -- the WebCIL
-//    container reader is a Phase 1 gap the port has not filled) and
-//    MetadataFileLoader (MetadataReaderProvider.FromMetadataStream -- the
-//    metadata-only MetadataFile shape the port's PE-only reader does not
-//    construct; see MetadataFile::Name()'s note). Neither is registered
-//    in FileLoaderRegistry; both are recorded in PORT_LOG_BAML.md.
+//  * DEFERRED: MetadataFileLoader (MetadataReaderProvider
+//    .FromMetadataStream -- the metadata-only MetadataFile shape the
+//    port's PE-only reader does not construct; see MetadataFile::Name()'s
+//    note). It is not registered in FileLoaderRegistry and is recorded in
+//    PORT_LOG_BAML.md. The WebCilFileLoader deferral has since been
+//    filled (the container reader in Metadata/WebCilFile.hpp; the loader
+//    presents the container as the PE-shaped MetadataFile over the
+//    adapted image).
 
 #pragma once
 
