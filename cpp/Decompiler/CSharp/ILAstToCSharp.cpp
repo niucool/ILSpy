@@ -1429,7 +1429,11 @@ private:
                 return;
             }
             case OpCode::Call: {
-                Line(indent, CtorCallStatementText(static_cast<const Call&>(inst)) + ";");
+                std::string callText =
+                    CtorCallStatementText(static_cast<const Call&>(inst));
+                if (!callText.empty()) {
+                    Line(indent, callText + ";");
+                }
                 return;
             }
             case OpCode::StObj: {
@@ -2049,6 +2053,11 @@ private:
             call.Arguments[0]->Op == OpCode::LdLoc) {
             auto& ld = static_cast<const LdLoc&>(*call.Arguments[0]);
             if (ld.Variable && ld.Variable->Name == "this") {
+                // The C# constructor initializer renders a base call only
+                // with arguments; the no-argument form is the implicit
+                // default and renders nothing.
+                if (call.Arguments.size() == 1)
+                    return std::string();
                 std::string text = "base(";
                 for (std::size_t i = 1; i < call.Arguments.size(); ++i) {
                     if (i > 1) text += ", ";

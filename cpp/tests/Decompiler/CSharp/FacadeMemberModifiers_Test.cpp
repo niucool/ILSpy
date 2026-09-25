@@ -295,6 +295,20 @@ TEST(FacadeMemberModifiersTest, ReadonlyStructRenders)
         << text;
 }
 
+// The constructor's implicit no-argument base call does not render (the
+// C# constructor-initializer convention: a base ctor call renders only
+// with arguments; the no-arg form is the implicit default).
+TEST(FacadeMemberModifiersTest, ImplicitBaseConstructorCallDoesNotRender)
+{
+    std::string text;
+    if (!RenderType(kModifierFixture, "ModifierShapes", text))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    EXPECT_NE(text.find("public ModifierShapes()"), std::string::npos)
+        << "the constructor renders: " << text;
+    EXPECT_EQ(text.find("base();"), std::string::npos)
+        << "the implicit no-arg base call is elided: " << text;
+}
+
 // The static constructor (the .cctor the static readonly field's
 // initializer produces) renders with the static modifier and no
 // accessibility (the C# NeedsAccessibility static-ctor arm), while the
