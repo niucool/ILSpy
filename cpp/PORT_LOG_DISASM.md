@@ -656,3 +656,101 @@ stays byte-identical (md5 b10e348a93301e0a40006f06a284ec09); the ASan
 build runs the lock over all 282 assemblies with ZERO AddressSanitizer
 reports (~191 s) -- the lock doubles as a standing ASan sweep of the
 whole Disassembler walk over the full corpus.
+
+## PD13 -- the post-facade --cs re-run on the merged tree (2026-09-25)
+
+The controller's chunk: merge origin/cpp (the facade + the whole-module
+--cs pipeline landed upstream) and re-run the --cs text-match. The merge
+was a clean fast-forward (this branch's tip was already absorbed
+upstream through fdacc29ee; e442b18df re-registered the four Disassembler
+test entries the merge resolution had dropped -- all PD10-12 artifacts
+verified present). Three findings from the post-merge tree:
+
+### The merge repair (the parity lock earning its keep on day one)
+
+The first post-merge parity-lock run FAILED: the master-lineage merge
+(42da94ab5) had resolved MetadataFile.cpp's GetEventTypeToken to the
+pre-f8bfb02a7 shape, re-adding the v == 0 / rid == 0 early returns, so a
+nil EVENT_TYPE column threw "Expected a TypeDef, TypeRef or TypeSpec
+handle!" and aborted the in-process ShowIL walk mid-manifest. Repaired
+(94ebe104c, the exact f8bfb02a7 hunk re-applied); the lock then passed
+282/282 again. The sweep confirms the full --il parity on the merged
+tree: 282 IDENTICAL + 4 BOTH-FAIL = 286/286, unchanged.
+
+### The nil-ResolveType follow-through (ef442f376)
+
+The post-facade --cs walk crashed on capa07 with a NEW signature:
+GetFullTypeNameFromDefinition's "invalid TypeDef token" out_of_range.
+The chain (the vendored sigabrt preload + addr2line): MetadataEvent::
+ReturnType -> MetadataModule::ResolveType -> TypeProvider::
+GetTypeFromDefinition -> the throw -- the nil TypeDef token (0x02000000)
+the T4 fix's GetEventTypeToken returns for a nil EVENT_TYPE column fell
+through ResolveType's nil arm, which only checked the RAW zero token.
+The C# answers `if (typeRefDefSpec.IsNil) return SpecialType.
+UnknownType;` and EntityHandle.IsNil is the ROW-zero test, so the fix
+widens the check to the row-mask form (the IL::WriteTo nil-widening
+convention): every tagged nil resolves to "?" exactly as the C# does.
+RED: the tagged nils threw pre-fix (the standalone
+ResolveTypeTaggedNilHandlesResolveUnknownType fixture); post-fix
+capa07's whole-module --cs completes rc 0 (1035 lines vs the oracle's
+3520). Blast radius verified by re-running the port side over every
+--cs sweep row: exactly ONE row changed (capa07, crash -> rc 0).
+
+### The post-facade --cs matrix (/tmp/diffval/post_facade, 572 runs)
+
+| mode | IDENTICAL | DIFFERENT | PORT-CRASH | PORT-FAIL | ORACLE-FAIL-ONLY | BOTH-FAIL |
+|---|---|---|---|---|---|---|
+| --il (286) | 282 | 0 | 0 | 0 | 0 | 4 |
+| --cs (286), pre-facade | 0 | 4 | 45 | 222 | 0 | 15 |
+| --cs (286), post-facade | **91** | **148*** | **32*** | **0** | **11** | 4 |
+
+(* post-fix: the sweep itself recorded 147/33; the nil-ResolveType fix
+moves capa07 from PORT-CRASH to DIFFERENT, giving the final 148/32.)
+
+The fate of the 222 metadata-only PORT-FAILs: **91 now byte-identical**
+(87 facades + 4 net48 -- the facade's signatures-only render matches the
+oracle exactly for the whole facades corpus and four net48 rows), 113
+now DIFFERENT (the port renders the using/attribute header and the
+types but FLATTENS the namespaces away -- no namespace blocks, thinner
+using lists -- plus per-type detail gaps; the line-proximity buckets:
+16 rows >= 98% of the oracle's lines, 4 at 90-98%, 16 at 50-90%, 111
+under 50%), and **18 turned crash** (17 facades + net082).
+
+The 11 ORACLE-FAIL-ONLY rows: the facade now decompiles rc 0 (thousands
+of lines each) where the C# oracle itself exits 70 -- the T11
+"oracle-throws" rows over the net48 reference assemblies (Microsoft.
+Build, System.Activities x2, System.Data.Entity, System.Data.SqlXml,
+System.ServiceModel x3, System.Web, System.Web.Extensions, System.
+Windows.Forms) -- the port handles per-type failures the oracle aborts
+on.
+
+### The crash signatures (33 sweep rows, 32 post-fix), deduped
+
+1. **18 rows -- TypeSystemAstBuilder.cpp:714 AddTypeArguments**
+   `assert(endIndex <= typeParameters.size())` -- 17 facades + net082
+   (System.Runtime...): a generic-arity assertion in the C# back end
+   over the metadata-only reference assemblies. Upstream lane (CSharp/
+   back end), NOT the nil family (verified: unaffected by the
+   ResolveType fix).
+2. **14 rows -- the stl_vector operator[] assert** over
+   `unique_ptr<ILInstruction>` -- the capa obfuscated samples (the
+   pre-existing T1/T2 family: the collection-initializers fold and the
+   ILAst invariant assert), 14 of the previous 45 crash rows remain.
+3. **1 row -- the out_of_range nil-token throw** (capa07) -- FIXED by
+   the nil-ResolveType widening above.
+
+### The upstream flag (for the facade/main-line owners)
+
+The merged tree carries PRE-EXISTING TypeSystem-family failures on the
+mono fixture, verified present with this branch's changes reverted:
+ResolveTypeNilAndDefinitionArms' R2 (ResolveType(0x02000073) resolves
+KeyValuePair`2 instead of String, and a different cache object than
+f.Type("System","String") -- the entity-cache identity is broken),
+DirectBaseTypesMscorlibMatrix (FileSystemEnumerableIterator`1's null
+definition), and a family-run segfault cascade after
+ResolveTypeSpecificationArm. These never appeared in the full-suite
+baselines because the link order places ResolveType_Test.cpp AFTER the
+FindModuleByReferenceTwoPasses crasher -- the abort hid the family from
+every recorded full-suite run. Repro: `ilspy_tests
+--gtest_filter='ResolveTypeDirectBaseTypesTest.*'` with
+ILSPY_TEST_MSCORLIB=mono (rc 139, the two failures above).
