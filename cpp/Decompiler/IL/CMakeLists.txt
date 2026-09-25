@@ -49,6 +49,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/SplitVariables.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Instructions/DeconstructInstruction.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Instructions/UserDefinedLogicOperator.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Instructions/DynamicInstructions.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/DeconstructionTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/IndexRangeTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/InlineArrayTransform.cpp

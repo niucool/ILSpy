@@ -84,6 +84,7 @@
 #include "Decompiler/IL/Instructions/StringToInt.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
+#include "Decompiler/IL/Instructions/DynamicInstructions.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
@@ -99,6 +100,17 @@
 #include <vector>
 
 namespace ILSpy::Decompiler::IL {
+
+namespace {
+
+// The dynamic variable-argument nodes share the Arguments vector slot; the
+// clone dispatch reads it through the common base.
+const std::vector<std::unique_ptr<ILInstruction>>& s_dynamicArgs(
+    const ILInstruction& inst) {
+    return static_cast<const DynamicArgumentsInstruction&>(inst).Arguments;
+}
+
+} // namespace
 
 namespace {
 
@@ -369,6 +381,125 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             clone->ResultStackType = s.ResultStackType;  // ctor computes; overwrite for fidelity
             clone->Signed = s.Signed;
             c = std::move(clone);
+            break;
+        }
+        case OpCode::DynamicBinaryOperatorInstruction: {
+            const auto& s = static_cast<const DynamicBinaryOperatorInstruction&>(*this);
+            auto clone = std::make_unique<DynamicBinaryOperatorInstruction>(
+                s.BinderFlags, s.Operation, s.CallingContext,
+                s.LeftArgumentInfo, s.Left ? s.Left->Clone() : nullptr,
+                s.RightArgumentInfo, s.Right ? s.Right->Clone() : nullptr);
+            clone->SetILRange(*this);
+            c = std::move(clone);
+            break;
+        }
+        case OpCode::DynamicUnaryOperatorInstruction: {
+            const auto& s = static_cast<const DynamicUnaryOperatorInstruction&>(*this);
+            auto clone = std::make_unique<DynamicUnaryOperatorInstruction>(
+                s.BinderFlags, s.Operation, s.CallingContext,
+                s.OperandArgumentInfo,
+                s.Operand ? s.Operand->Clone() : nullptr);
+            clone->SetILRange(*this);
+            c = std::move(clone);
+            break;
+        }
+        case OpCode::DynamicConvertInstruction: {
+            const auto& s = static_cast<const DynamicConvertInstruction&>(*this);
+            auto clone = std::make_unique<DynamicConvertInstruction>(
+                s.BinderFlags, s.Type, s.CallingContext,
+                s.Argument ? s.Argument->Clone() : nullptr);
+            clone->SetILRange(*this);
+            c = std::move(clone);
+            break;
+        }
+        case OpCode::DynamicGetMemberInstruction: {
+            const auto& s = static_cast<const DynamicGetMemberInstruction&>(*this);
+            auto clone = std::make_unique<DynamicGetMemberInstruction>(
+                s.BinderFlags, s.Name, s.CallingContext,
+                s.TargetArgumentInfo,
+                s.Target ? s.Target->Clone() : nullptr);
+            clone->SetILRange(*this);
+            c = std::move(clone);
+            break;
+        }
+        case OpCode::DynamicSetMemberInstruction: {
+            const auto& s = static_cast<const DynamicSetMemberInstruction&>(*this);
+            auto clone = std::make_unique<DynamicSetMemberInstruction>(
+                s.BinderFlags, s.Name, s.CallingContext,
+                s.TargetArgumentInfo, s.Target ? s.Target->Clone() : nullptr,
+                s.ValueArgumentInfo, s.Value ? s.Value->Clone() : nullptr);
+            clone->SetILRange(*this);
+            c = std::move(clone);
+            break;
+        }
+        case OpCode::DynamicIsEventInstruction: {
+            const auto& s = static_cast<const DynamicIsEventInstruction&>(*this);
+            auto clone = std::make_unique<DynamicIsEventInstruction>(
+                s.BinderFlags, s.Name, s.CallingContext,
+                s.Argument ? s.Argument->Clone() : nullptr);
+            clone->SetILRange(*this);
+            c = std::move(clone);
+            break;
+        }
+        case OpCode::DynamicGetIndexInstruction:
+        case OpCode::DynamicSetIndexInstruction:
+        case OpCode::DynamicInvokeInstruction:
+        case OpCode::DynamicInvokeMemberInstruction:
+        case OpCode::DynamicInvokeConstructorInstruction: {
+            std::vector<std::unique_ptr<ILInstruction>> arguments;
+            for (auto& a : s_dynamicArgs(*this))
+                arguments.push_back(a ? a->Clone() : nullptr);
+            switch (Op) {
+                case OpCode::DynamicGetIndexInstruction: {
+                    const auto& s = static_cast<const DynamicGetIndexInstruction&>(*this);
+                    auto clone = std::make_unique<DynamicGetIndexInstruction>(
+                        s.BinderFlags, s.CallingContext, s.ArgumentInfo,
+                        std::move(arguments));
+                    clone->SetILRange(*this);
+                    c = std::move(clone);
+                    break;
+                }
+                case OpCode::DynamicSetIndexInstruction: {
+                    const auto& s = static_cast<const DynamicSetIndexInstruction&>(*this);
+                    auto clone = std::make_unique<DynamicSetIndexInstruction>(
+                        s.BinderFlags, s.CallingContext, s.ArgumentInfo,
+                        std::move(arguments));
+                    clone->SetILRange(*this);
+                    c = std::move(clone);
+                    break;
+                }
+                case OpCode::DynamicInvokeInstruction: {
+                    const auto& s = static_cast<const DynamicInvokeInstruction&>(*this);
+                    auto clone = std::make_unique<DynamicInvokeInstruction>(
+                        s.BinderFlags, s.CallingContext, s.ArgumentInfo,
+                        std::move(arguments));
+                    clone->SetILRange(*this);
+                    c = std::move(clone);
+                    break;
+                }
+                case OpCode::DynamicInvokeMemberInstruction: {
+                    const auto& s = static_cast<const DynamicInvokeMemberInstruction&>(*this);
+                    auto clone = std::make_unique<DynamicInvokeMemberInstruction>(
+                        s.BinderFlags, s.Name, s.TypeArguments,
+                        s.CallingContext, s.ArgumentInfo,
+                        std::move(arguments));
+                    clone->SetILRange(*this);
+                    c = std::move(clone);
+                    break;
+                }
+                default: {
+                    const auto& s =
+                        static_cast<const DynamicInvokeConstructorInstruction&>(*this);
+                    auto clone =
+                        std::make_unique<DynamicInvokeConstructorInstruction>(
+                            s.BinderFlags, s.ConstructedType,
+                            s.CallingContext, s.ArgumentInfo,
+                            std::move(arguments));
+                    clone->SetILRange(*this);
+                    c = std::move(clone);
+                    break;
+                }
+            }
             break;
         }
         case OpCode::ThreeValuedBoolAnd: {

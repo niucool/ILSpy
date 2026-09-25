@@ -583,6 +583,7 @@ add_executable(ilspy_tests
     Decompiler/IL/Instructions/CompoundAssignmentInstruction_Test.cpp
     Decompiler/IL/Instructions/BinaryNumericInstruction_Test.cpp
     Decompiler/IL/Instructions/ThreeValuedBoolInstructions_Test.cpp
+    Decompiler/IL/Instructions/DynamicInstructions_Test.cpp
     Decompiler/IL/Instructions/UserDefinedLogicOperator_Test.cpp
     Decompiler/IL/Instructions/PatternMatching_Test.cpp
     Decompiler/IL/Transforms/NullCoalescingTransform_Test.cpp
