@@ -459,23 +459,23 @@ std::shared_ptr<Resolver::CSharpResolver> RenderScopeResolver(
         ->WithCurrentTypeDefinition(currentType);
 }
 
-// The C# TypeSystemAstBuilder's ConvertTypeHelper short-name decision: the
-// short name survives only when the using-scope lookup yields a non-error
-// TypeResolveResult whose definition is the intended base type. An
-// ambiguity (two accessible same-name types in the scope's imported
-// namespaces -- the net48 mscorlib's legacy duplicate
+// The C# TypeSystemAstBuilder's ConvertTypeHelper decision for one
+// base-list name: the short name (the lookup resolves it), the qualified
+// form (an ambiguity -- two accessible same-name types in the scope's
+// imported namespaces, e.g. the net48 mscorlib's legacy duplicate
 // System.Runtime.InteropServices.ComTypes.IEnumerable against
 // System.Collections.IEnumerable, the duplicate internal so only the
-// assemblies in mscorlib's InternalsVisibleTo friend list see it) or a
-// shadowing (a same-name type in an earlier lookup position) qualifies
-// instead.
-bool BaseListShortNameUsable(
-    const TS::ITypePtr& baseType,
-    const Resolver::CSharpResolver& resolver) {
-    const TS::ITypeDefinition* typeDef = baseType->GetDefinition();
+// assemblies in mscorlib's InternalsVisibleTo friend list see it -- or a
+// shadowing by a same-name type in an earlier lookup position), or the
+// not-found case (the name resolves to nothing in the scope).
+enum class BaseNameDecision { Short, NotFound, Qualify };
+
+BaseNameDecision DecideBaseName(const TS::ITypeDefinition* typeDef,
+                                 const TS::ITypePtr& instantiation,
+                                 const Resolver::CSharpResolver& resolver) {
     if (typeDef == nullptr)
         // No definition to consult: the C# outer short-name path.
-        return true;
+        return BaseNameDecision::Short;
     // The C# localTypeArguments: the type's own parameter slots sliced off
     // the instantiation (the declaring chain's outer parameters excluded);
     // the lookup's arity consults the count.
@@ -488,7 +488,7 @@ bool BaseListShortNameUsable(
     if (static_cast<std::size_t>(typeDef->TypeParameterCount()) >
         outerTypeParameterCount) {
         const auto* parameterized =
-            dynamic_cast<const TS::ParameterizedType*>(baseType.get());
+            dynamic_cast<const TS::ParameterizedType*>(instantiation.get());
         if (parameterized != nullptr) {
             const std::vector<TS::ITypePtr>& typeArguments =
                 parameterized->TypeArguments();
@@ -502,62 +502,86 @@ bool BaseListShortNameUsable(
         typeDef->Name(), localTypeArguments, Resolver::NameLookupMode::Type);
     const auto trr =
         std::dynamic_pointer_cast<Semantics::TypeResolveResult>(rr);
-    // The no-result case keeps the SHORT name: the port's compilation
-    // loads a SUBSET of the C#'s reference modules (the netcore
-    // runtime-pack discovery is not ported), so a name absent from the
-    // port's merged namespace tree is typically resolvable in the C#'s --
-    // the C# renders those short (the lookup succeeds there). Only a
-    // REAL lookup result qualifies: an ambiguity (two accessible
-    // same-name types both present) or an error type -- both carry
-    // positive information the render must respect.
     if (trr == nullptr)
-        return true;
+        return BaseNameDecision::NotFound;
     if (trr->IsError())
-        return false;
+        return BaseNameDecision::Qualify;
     // The TypeMatches bounded form: the same definition (the lookup
     // parameterizes with the base type's own arguments, so the resolved
     // instantiation matches by construction when the definition does).
-    return trr->Type().GetDefinition() == typeDef;
+    return trr->Type().GetDefinition() == typeDef
+               ? BaseNameDecision::Short
+               : BaseNameDecision::Qualify;
 }
 
-// The qualified fallback (the C# MemberType form): the full namespace, the
-// declaring-type chain dotted, and the type arguments rendered through the
-// short names (the C# AddTypeArguments applies the same conversion
-// recursively, each argument through the short-name decision).
-std::string QualifiedBaseTypeName(const TS::ITypePtr& baseType) {
-    const TS::ITypeDefinition* typeDef = baseType->GetDefinition();
+// The C# ConvertTypeHelper's name composition for a base-list entry: the
+// own name when the scope lookup resolves it (a sibling nested type
+// resolves by its own name -- the enclosing type's members are in the
+// lookup scope); the declaring type rendered through the SAME decision
+// joined by '.' when the own name fails on a nested type; the
+// namespace-qualified form for a top-level type the scope cannot name.
+// The type arguments render as the <...> tail (each argument through the
+// short-name renderer -- the arguments' own decision rides with the
+// member-signature work). An empty instantiation is the plain definition.
+std::string RenderBaseTypeName(const TS::ITypeDefinition* typeDef,
+                               const TS::ITypePtr& instantiation,
+                               const Resolver::CSharpResolver* resolver) {
+    if (typeDef == nullptr && instantiation != nullptr)
+        return IL::CSharpTypeName(instantiation);
     if (typeDef == nullptr)
-        return IL::CSharpTypeName(baseType);
-    std::vector<std::string> names;
-    for (const TS::ITypeDefinition* d = typeDef; d != nullptr;
-         d = d->DeclaringTypeDefinition())
-        names.push_back(d->Name());
-    std::reverse(names.begin(), names.end());
-    std::string out = typeDef->Namespace();
-    for (const std::string& name : names)
-        out += out.empty() ? name : "." + name;
+        return std::string();
+    std::size_t outerTypeParameterCount = 0;
+    for (const TS::ITypeDefinition* d = typeDef->DeclaringTypeDefinition();
+         d != nullptr; d = d->DeclaringTypeDefinition())
+        outerTypeParameterCount +=
+            static_cast<std::size_t>(d->TypeParameterCount());
     const auto* parameterized =
-        dynamic_cast<const TS::ParameterizedType*>(baseType.get());
-    if (parameterized != nullptr && !parameterized->TypeArguments().empty()) {
-        std::size_t outerTypeParameterCount = 0;
-        for (const TS::ITypeDefinition* d = typeDef->DeclaringTypeDefinition();
-             d != nullptr; d = d->DeclaringTypeDefinition())
-            outerTypeParameterCount +=
-                static_cast<std::size_t>(d->TypeParameterCount());
-        const std::vector<TS::ITypePtr>& typeArguments =
-            parameterized->TypeArguments();
-        if (typeArguments.size() > outerTypeParameterCount) {
-            out += "<";
-            for (std::size_t i = outerTypeParameterCount;
-                 i < typeArguments.size(); ++i) {
-                if (i != outerTypeParameterCount)
-                    out += ", ";
-                out += IL::CSharpTypeName(typeArguments[i]);
-            }
-            out += ">";
+        dynamic_cast<const TS::ParameterizedType*>(instantiation.get());
+    std::string args;
+    if (parameterized != nullptr &&
+        parameterized->TypeArguments().size() > outerTypeParameterCount) {
+        args = "<";
+        for (std::size_t i = outerTypeParameterCount;
+             i < parameterized->TypeArguments().size(); ++i) {
+            if (i != outerTypeParameterCount)
+                args += ", ";
+            args += IL::CSharpTypeName(parameterized->TypeArguments()[i]);
         }
+        args += ">";
     }
-    return out;
+    if (resolver == nullptr)
+        return typeDef->Name() + args;
+    BaseNameDecision decision =
+        DecideBaseName(typeDef, instantiation, *resolver);
+    if (decision == BaseNameDecision::Short)
+        return typeDef->Name() + args;
+    if (decision == BaseNameDecision::NotFound &&
+        typeDef->DeclaringTypeDefinition() == nullptr)
+        // The not-found TOP-LEVEL tolerance: the port's compilation loads
+        // a SUBSET of the C#'s reference modules (the netcore runtime-pack
+        // discovery is not ported), so a name absent from the port's
+        // merged namespace tree is typically resolvable in the C#'s, where
+        // it renders short. A NESTED name the scope cannot resolve is real
+        // (nested types are not namespace members -- only the enclosing
+        // type's scope names them) and falls through to the dotted form.
+        return typeDef->Name() + args;
+    if (typeDef->DeclaringTypeDefinition() != nullptr) {
+        // The C# MemberType form: the target is the declaring type
+        // through the same decision; the parameterized form's generic type
+        // carries the declaring instantiation when the metadata provides
+        // one (a plain definition renders argument-less -- the nested
+        // generic-instantiation chain lands with the member-signature
+        // work).
+        TS::ITypePtr declaringInstantiation;
+        if (parameterized != nullptr)
+            declaringInstantiation = parameterized->GenericType();
+        return RenderBaseTypeName(typeDef->DeclaringTypeDefinition(),
+                                  declaringInstantiation, resolver) +
+               "." + typeDef->Name() + args;
+    }
+    const std::string ns = typeDef->Namespace();
+    return ns.empty() ? typeDef->Name() + args
+                      : ns + "." + typeDef->Name() + args;
 }
 
 // The C# TypeDefinitionNameableInBaseList (the f41b12c01 fix for #3230):
@@ -859,14 +883,16 @@ bool DecompileTypeToStringBody(
                 if (TS::IsKnownType(*baseType, TS::KnownTypeCode::Object)) {
                     continue;
                 }
-                // The C# ConvertTypeHelper's short-name decision: the
-                // ambiguous or shadowed short name renders the qualified
-                // MemberType form instead.
+                // The C# ConvertTypeHelper's name decision: the short
+                // name (a sibling nested type resolves by its own name),
+                // the declaring-dotted form (a nested type whose own name
+                // the scope cannot resolve), or the namespace-qualified
+                // form (an ambiguous or shadowed name).
                 baseTypeNames.push_back(
-                    scopeResolver != nullptr &&
-                            !BaseListShortNameUsable(baseType,
-                                                     *scopeResolver)
-                        ? QualifiedBaseTypeName(baseType)
+                    scopeResolver != nullptr
+                        ? RenderBaseTypeName(
+                              baseType->GetDefinition(), baseType,
+                              scopeResolver.get())
                         : IL::CSharpTypeName(baseType));
             }
             if (!baseTypeNames.empty()) {

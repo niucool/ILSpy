@@ -661,6 +661,30 @@ TEST(FacadeMemberModifiersTest, BaseListQualifiesAmbiguousTypeNames)
         << text;
 }
 
+// The base-list nested-type spelling (the C# ConvertTypeHelper's
+// MakeSimpleType/MemberType composition): a sibling nested type resolves
+// by its own name (the enclosing type's members are in the lookup scope);
+// a nested type of another declaring type renders the declaring type
+// through the same decision joined by '.'; a top-level type implementing
+// a nested type names it through the declaring type's (short) name. The
+// '+' reflection spelling never appears in a base list.
+TEST(FacadeMemberModifiersTest, BaseListRendersNestedTypesThroughTheNameDecision)
+{
+    constexpr const char* kNestedFixture =
+        "/home/jim/ilspy-test-fixtures/nested_fixture/NestedBase.dll";
+    std::string sibling, far, top;
+    if (!RenderType(kNestedFixture, "SiblingImpl", sibling))
+        GTEST_SKIP() << "the nested-base fixture is not provisioned";
+    ASSERT_TRUE(RenderType(kNestedFixture, "FarImpl", far));
+    ASSERT_TRUE(RenderType(kNestedFixture, "TopImpl", top));
+    EXPECT_NE(sibling.find("class SiblingImpl : INested"), std::string::npos)
+        << sibling;
+    EXPECT_NE(far.find("class FarImpl : Other.IFar"), std::string::npos)
+        << far;
+    EXPECT_NE(top.find("class TopImpl : Holder.INested"), std::string::npos)
+        << top;
+}
+
 // The whole-module render's using header carries the module-wide
 // required set (the C# IntroduceUsingDeclarations over the whole-module
 // tree), not just the assembly-attribute namespaces: the connid module's
