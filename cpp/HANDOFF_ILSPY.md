@@ -70,9 +70,11 @@ facade-side adaptations (all in this merge commit):
 
 ### Merge gates (what "green" means on this box)
 
-- Full suite: `12852 ran` with the env-exclusion filter
+- Full suite: `13016 ran` with the env-exclusion filter
   (`--gtest_filter=-$(cat /tmp/excl2.txt)`-equivalent, no env vars) --
-  `12822 passed + 30 failed`, where ALL 30 are the mono-profile family
+  32 unique failures: the 30 mono-profile family (see below) + the 2
+  newly-counted ResolveType fixture failures (the PD13 retirement; see
+  the PD13 section), where the 30 are the mono-profile family
   (MetadataTypeDefinitionTest 16, TypeProviderTest 12,
   MetadataModuleResolutionTest 12, StandaloneSignatureTest 8,
   MetadataNamespaceTest 6, ResolveTypeDirectBaseTypesTest 4,
@@ -174,6 +176,13 @@ facade-side adaptations (all in this merge commit):
 
 ## Next steps (in order)
 
+0. The remaining AST-pipeline surface (the follow-ons the slice opened):
+   the facade renders the de-sugared methods but the ILAstToCSharp
+   render of the de-sugared locals still names the state machine
+   fields `num_1`-style (AssignVariableNames over the transferred
+   locals); the field/property surfaces of the type header (the C#
+   DecompileType's field and property declarations) are still the
+   metadata-slice deferral. Then continue with:
 1. TransformFieldAndConstructorInitializers -- the next GetAstTransforms
    slot after DeclareVariables (915 lines: the ThisCallClass/Struct
    patterns, the InitializerSequence analysis, the field/constructor
@@ -275,6 +284,95 @@ InlinesMoveNextBodyAndMarksAsync, TaskOfTUnderlyingReturnTypeIsTheElement,
 DetectsAwaitOverRealBody, DriverSlotConvertsTheRealBody,
 RejectsNonAsyncMethod); the sweep holds the baseline failure set and
 the connid hash is unchanged.
+
+### DynamicCallSiteTransform (parts 1-3, commits 615a00b8c/850f6be68/860d6655c)
+
+The full port of `ICSharpCode.Decompiler/IL/Transforms/
+DynamicCallSiteTransform.cs` + `Instructions/DynamicInstructions.cs`:
+the 11 dynamic nodes (binary/unary/convert/get-member/set-member/
+is-event; the DynamicArgumentsInstruction base over
+get/set-index/invoke/invoke-member/invoke-constructor), the 85-member
+ExpressionType enum, the CSharpArgumentInfo/BinderFlags structs, the
+dumps (the C# dotted mnemonics + the flag suffixes), and the transform
+(FindDynamicCallSitesInBlock, MatchCallSiteCacheNullCheck, the 11
+binder-arm scan, ExtractArgumentInfo, MakeDynamicInstruction). Driver
+slot after the second CFS, before SwitchDetection (the C# order), plus
+RunOnBasicBlock (the per-block static entry AsyncAwaitDecompiler's
+AnalyzeStateMachine calls over the MoveNext blocks).
+
+The port's deferred-resolution toolbox this slice established (the
+conventions every later C# list-read consults):
+- The resolver resolves `LdsFlda::Field` too (LdFlda was already there).
+- MatchGetTypeFromHandle falls back to the reader's
+  "System.Type::GetTypeFromHandle" surface when Method is null.
+- ReadBinderValue, the dual-form helper: the port's inliner folds
+  single-use scalar stores across instructions (the C# only inlines
+  into the immediately-following instruction), so binder scalar args
+  read the inlined value directly while array args keep the stloc chain.
+- HandleSimpleArrayInitializer gained the copy-store arm
+  (stloc copy(ldloc array); stobj(ldelema(ldloc copy), value) -- the
+  reader's stack-slot materialization of the array reference).
+
+Fixture: `/home/jim/ilspy-test-fixtures/dynamic_fixture/DynamicFixture.dll`
+(built over the SHARED-FRAMEWORK impl assemblies, NOT the ref pack --
+the ref-pack Microsoft.CSharp lacks the compiler-required Binder
+members; the csc line is in the test file's fixture comment).
+19 gtest cases across the two suites.
+
+### IntroduceRefReadOnlyModifierOnLocals (commit c043521c5)
+
+The 71-line transform: a by-ref local is marked ref-readonly when a
+store's value is IsReadonlyReference-shaped or a readonly. ldelema.
+`LdElema::IsReadOnly` + the reader's `readonly.` IL prefix decode
+(ReaderState::pendingReadOnlyPrefix, consumed by the next ldelema --
+the opcode was skipped with the semantics lost). Driver slot after
+SwitchOnNullable, before LoopDetection. 5 hand-built tests (the
+0-firing-on-corpus precedent: Roslyn rarely emits readonly. ldelema in
+the corpus -- net48 is reference assemblies with no bodies).
+
+### The AST-pipeline slice (commits a33da10d9/2614fed27/28759bd01)
+
+The facade now routes type bodies through the real pipeline end-to-end:
+- **The render arms** (`a33da10d9`): ILAstToCSharp renders the
+  Await/YieldReturn/dynamic nodes (the statement forms + the expression
+  forms; the ExpressionType -> C# operator symbol table; the
+  DynamicConvert explicit/implicit split). The IndexRangeTransform
+  crash this exposed: the C# reads the block list at a walked position
+  (terminators included); the port carries them in the FinalInstruction
+  slot, so the positional reads went through the BlockInstructionAt
+  helper (the established convention).
+- **The type-system wiring** (`2614fed27`): the static/instance
+  DecompileTypeToString entries thread the DecompilerTypeSystem they
+  already build through DecompileTypeToStringBody into a
+  type-system-carrying DecompileMethodToString overload; the bare
+  per-method static builds its own (the C# static shape). The facade
+  also resolves `ILFunction::Method` (ReadIL leaves it null; the
+  matchers read the return type through it) and keeps the shared_ptr
+  alive past the render. Two more crashes the wired path surfaced:
+  (a) InlineBodyOfMoveNext registered the inlined body's variables
+  through NON-OWNING aliasing shared_ptrs -- the state machine function
+  (the other owner) dies with the temporary decompiler, and the later
+  inlining passes delete the body's loads/stores, so the function's
+  variable list held dangling aliases; the registration now takes
+  owning copies (the nodes' shared_ptr members) and the result-variable
+  load takes the owning handle. (b) MatchEnumeratorCreationPattern lost
+  the C# empty-list bail (the port's list excludes the final slot, so
+  a non-return final fell through to the multi-instruction path and
+  indexed an empty vector).
+- **The hidden state machine types** (`28759bd01`): the C# MemberIsHidden
+  skips the compiler-generated state machine/enumerator types the
+  de-sugar replaces; the type-level body now consults the same
+  CodeMappingInfo predicates and returns an empty render when the
+  transform gates are on. The closure/local-function/anonymous-type
+  arms stay deferred (no transforms for them yet).
+
+`--csharp` over the async/iterator/dynamic fixtures now renders
+`await ...`, `yield return ...`, and `d.Foo` / `d.Bar(i)` end-to-end,
+without the `<T>d__` state machine classes. 18 gtest cases in
+`tests/Decompiler/CSharp/ILAstToCSharpAsyncDynamicArms_Test.cpp` (the
+hand-built render arms + the three facade end-to-ends + the
+hidden-state-machine whole-module pair). The sweep baseline moved to
+13016 ran / same failure set; the connid hash is unchanged.
 
 - `a81b94216` -- the ReplaceMethodCallsWithOperators follow-up arms: the
   String.Concat reduction (the params-array flattening, the
