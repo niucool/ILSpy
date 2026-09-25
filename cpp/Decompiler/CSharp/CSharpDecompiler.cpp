@@ -58,6 +58,7 @@
 #include "Decompiler/Metadata/UniversalAssemblyResolver.hpp"
 #include "Decompiler/Metadata/DotNetCorePathFinderExtensions.hpp"
 #include "Decompiler/TypeSystem/DecompilerTypeSystem.hpp"
+#include "Decompiler/Metadata/CodeMappingInfo.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/TypeSystem/SimpleTypeResolveContext.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
@@ -218,6 +219,18 @@ bool DecompileTypeToStringBody(
     const Metadata::MetadataFile& file, TS::DecompilerTypeSystem* typeSystem,
     TS::MetadataModule& module, const Metadata::PartialTypeInfo* partialType,
     std::uint32_t typeToken, std::string& out) {
+    // The C# MemberIsHidden's state machine arms (the whole-type skip):
+    // the compiler-generated state machine types the de-sugar replaces do
+    // not render when their transforms are enabled (the C# gates consult
+    // DecompilerSettings; the pipeline context's defaults carry the same
+    // on-by-default gates).
+    const IL::ILTransformSettings transformSettings;
+    if ((transformSettings.YieldReturn &&
+         Metadata::IsCompilerGeneratorEnumerator(file, typeToken)) ||
+        (transformSettings.AsyncAwait &&
+         Metadata::IsCompilerGeneratedStateMachine(file, typeToken))) {
+        return false;
+    }
     // The C# DecompileType member iteration: the partial-type info gates
     // the members (the C# `DoDecompileMember`'s
     // `partialType.IsDeclaredMember(entity) -> return` skip, and the

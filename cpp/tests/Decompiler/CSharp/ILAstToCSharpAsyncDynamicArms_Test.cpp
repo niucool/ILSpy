@@ -23,6 +23,7 @@
 // callsite transforms produce render as their C# forms.
 
 #include "Decompiler/CSharp/CSharpDecompiler.hpp"
+#include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/Await.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
@@ -307,6 +308,33 @@ TEST(ILAstToCSharpAsyncDynamicArmsTest, FacadeDecompilesYieldReturn) {
         GTEST_SKIP() << "the iterator fixture is not provisioned";
     EXPECT_NE(text.find("yield return"), std::string::npos)
         << "the iterator's yields render: " << text;
+}
+
+// The whole-module render hides the compiler-generated state machine types
+// the de-sugar replaces (the C# MemberIsHidden's state machine arms):
+// the async and iterator fixtures' renders carry the de-sugared methods but
+// not the nested <T>d__ classes.
+TEST(ILAstToCSharpAsyncDynamicArmsTest, WholeModuleHidesStateMachines) {
+    {
+        ::ILSpy::Decompiler::Metadata::MetadataFile file(kAsyncFixture);
+        if (!file.IsValid())
+            GTEST_SKIP() << "the async fixture is not provisioned";
+        ::ILSpy::Decompiler::DecompilerSettings settings;
+        CSharp::CSharpDecompiler decompiler(file, settings);
+        std::string whole = decompiler.DecompileWholeModuleToString();
+        EXPECT_NE(whole.find("await"), std::string::npos) << whole;
+        EXPECT_EQ(whole.find("<AwaitTask>d__1"), std::string::npos) << whole;
+    }
+    {
+        ::ILSpy::Decompiler::Metadata::MetadataFile file(kIteratorFixture);
+        if (!file.IsValid())
+            GTEST_SKIP() << "the iterator fixture is not provisioned";
+        ::ILSpy::Decompiler::DecompilerSettings settings;
+        CSharp::CSharpDecompiler decompiler(file, settings);
+        std::string whole = decompiler.DecompileWholeModuleToString();
+        EXPECT_NE(whole.find("yield return"), std::string::npos) << whole;
+        EXPECT_EQ(whole.find("<Numbers>d__0"), std::string::npos) << whole;
+    }
 }
 
 TEST(ILAstToCSharpAsyncDynamicArmsTest, FacadeDecompilesDynamic) {
