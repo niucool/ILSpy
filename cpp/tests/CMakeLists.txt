@@ -501,6 +501,7 @@ add_executable(ilspy_tests
     Decompiler/IL/ControlFlow/YieldReturnDecompiler_Part2_Test.cpp
     Decompiler/IL/Transforms/ProxyCallReplacer_Test.cpp
     Decompiler/IL/Transforms/DynamicCallSiteTransform_Test.cpp
+    Decompiler/IL/Transforms/IntroduceRefReadOnlyModifierOnLocals_Test.cpp
     Decompiler/IL/Transforms/DeconstructionTransform_Test.cpp
     Decompiler/IL/Transforms/IndexRangeTransform_Test.cpp
     Decompiler/IL/Transforms/InlineArrayTransform_Test.cpp

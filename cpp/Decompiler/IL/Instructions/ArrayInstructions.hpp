@@ -78,6 +78,12 @@ public:
     // the ExpressionBuilder's VisitLdElema reads to pick the System.Index hint;
     // rendered as the `withsystemindex.` prefix before the opcode.
     bool WithSystemIndex = false;
+    // The C# `public bool IsReadOnly` (the ILAstBuilder's DecodeReadonly):
+    // the `readonly.` IL prefix on this ldelema -- the reference to the
+    // element may not be written through. Set by the reader when the
+    // prefix precedes this instruction; IntroduceRefReadOnlyModifierOnLocals
+    // reads it to decide a by-ref local must be `ref readonly`.
+    bool IsReadOnly = false;
     LdElema(TypeSystem::ITypePtr type, std::unique_ptr<ILInstruction> array,
             std::vector<std::unique_ptr<ILInstruction>> indices)
         : ILInstruction(OpCode::LdElema), Type(std::move(type)), Array(std::move(array)),

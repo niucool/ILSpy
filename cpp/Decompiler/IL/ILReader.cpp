@@ -110,6 +110,9 @@ namespace {
 // values that survived a flush.
 struct ReaderState {
     std::vector<std::unique_ptr<ILInstruction>> expressionStack;
+    // A pending `readonly.` IL prefix: set by the prefix opcode, consumed by
+    // the next ldelema (the C# DecodeReadonly's tail).
+    bool pendingReadOnlyPrefix = false;
     // currentStack: the committed evaluation stack (values that survived a
     // flush or were seeded by the runtime, e.g. an exception object in a catch).
     // When the expression stack is empty, Pop reads from currentStack.
@@ -875,7 +878,12 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             if (!arr || !idx) return DecodeOutcome::Bail;
             std::vector<std::unique_ptr<ILInstruction>> indices;
             indices.push_back(std::move(idx));
-            if (!s.Push(std::make_unique<LdElema>(type, std::move(arr), std::move(indices)))) return DecodeOutcome::Bail;
+            auto ldelema = std::make_unique<LdElema>(type, std::move(arr),
+                                                     std::move(indices));
+            // The pending `readonly.` prefix (the C# DecodeReadonly).
+            ldelema->IsReadOnly = s.pendingReadOnlyPrefix;
+            s.pendingReadOnlyPrefix = false;
+            if (!s.Push(std::move(ldelema))) return DecodeOutcome::Bail;
             break;
         }
 #define IL_LDELEM(opc, kt) \
@@ -1199,8 +1207,16 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
         // following instruction's prefix fields. For the reader we skip the prefix
         // (consuming its operand if any) and continue -- losing the prefix
         // semantics but keeping the method decodable.
+        case ILOpCode::Readonly: {
+            // The C# DecodeReadonly (ILReader.cs lines 1721-1729): the
+            // `readonly.` prefix applies to the immediately-following
+            // ldelema; the operand is not consumed here but by that
+            // instruction's own case. Track the pending prefix through the
+            // decode loop's state so the next ldelema picks it up.
+            s.pendingReadOnlyPrefix = true;
+            break;
+        }
         case ILOpCode::Volatile:
-        case ILOpCode::Readonly:
         case ILOpCode::Tail:
             break;  // no operand; prefix semantics lost but method continues
         case ILOpCode::Constrained: {

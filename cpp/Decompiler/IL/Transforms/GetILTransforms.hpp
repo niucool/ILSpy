@@ -51,6 +51,7 @@
 #include "Decompiler/IL/Transforms/CombineExitsTransform.hpp"
 #include "Decompiler/IL/Transforms/CopyPropagation.hpp"
 #include "Decompiler/IL/Transforms/DynamicCallSiteTransform.hpp"
+#include "Decompiler/IL/Transforms/IntroduceRefReadOnlyModifierOnLocals.hpp"
 #include "Decompiler/IL/Transforms/DelegateConstruction.hpp"
 #include "Decompiler/IL/Transforms/DeconstructionTransform.hpp"
 #include "Decompiler/IL/Transforms/IndexRangeTransform.hpp"
@@ -243,6 +244,13 @@ inline void RunILTransformsThroughBlockTransforms(ILFunction& function, ILTransf
     // GetILTransforms()), so ifs are still block finals with
     // positional fall-through. Gated on LiftNullables (default true).
     SwitchOnNullableTransform().Run(function, context);
+    // IntroduceRefReadOnlyModifierOnLocals: infer the `ref readonly`
+    // modifier on by-ref locals from their stores' readonly-reference
+    // shapes. Runs after the last SplitVariables / SwitchOnNullable pass
+    // and before the BlockILTransform set (per the C# GetILTransforms()
+    // order; this port's driver folds the third SplitVariables into the
+    // block-transform prefix below).
+    IntroduceRefReadOnlyModifierOnLocals().Run(function, context);
     LoopDetection().Run(function, context);
     // DetectExitPoints (the re-run after loop detection, the C# comment at
     // CSharpDecompiler.cs line 127): replace inner Branch-to-loop-exit with
