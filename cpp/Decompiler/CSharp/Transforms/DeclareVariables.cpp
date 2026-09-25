@@ -64,26 +64,9 @@ namespace IL = ::ILSpy::Decompiler::IL;
 
 namespace {
 
-// The C# `node.Annotation<BlockContainer>()`: the first IL-instruction
-// annotation that is a BlockContainer (the loop statements carry their
-// container through WithILInstruction).
-IL::BlockContainer* GetBlockContainerAnnotation(const Syntax::AstNode& node) {
-    for (IL::ILInstruction* instruction : CS::GetILInstructions(node)) {
-        if (auto* container = dynamic_cast<IL::BlockContainer*>(instruction))
-            return container;
-    }
-    return nullptr;
-}
-
-// The C# `node.Annotation<ILFunction>()`: the first IL-instruction annotation
-// that is an ILFunction (the lambda/local-function references carry theirs).
-IL::ILFunction* GetILFunctionAnnotation(const Syntax::AstNode& node) {
-    for (IL::ILInstruction* instruction : CS::GetILInstructions(node)) {
-        if (auto* function = dynamic_cast<IL::ILFunction*>(instruction))
-            return function;
-    }
-    return nullptr;
-}
+// (The C# `node.Annotation<BlockContainer>()` / `Annotation<ILFunction>()`
+// queries moved to the shared Annotations surface:
+// CS::GetBlockContainerAnnotation / CS::GetILFunctionAnnotation.)
 
 } // namespace
 
@@ -206,7 +189,7 @@ void DeclareVariables::FindInsertionPoints(Syntax::AstNode* node, int nodeLevel)
     // BlockContainer annotation, or for an expression-bodied lambda (whose
     // BlockStatement-less body links to the container through the ILFunction
     // annotation).
-    IL::BlockContainer* scope = GetBlockContainerAnnotation(*node);
+    IL::BlockContainer* scope = CS::GetBlockContainerAnnotation(*node);
     bool scopeAdded = false;
     if (scope != nullptr && IsRelevantScope(scope)) {
         scopeTracking_.push_back(
@@ -221,7 +204,7 @@ void DeclareVariables::FindInsertionPoints(Syntax::AstNode* node, int nodeLevel)
         if (lambdaBody != nullptr) {
             // Expression-bodied lambdas don't have a BlockStatement linking
             // to the BlockContainer.
-            IL::ILFunction* function = GetILFunctionAnnotation(*node);
+            IL::ILFunction* function = CS::GetILFunctionAnnotation(*node);
             scope = function != nullptr
                         ? dynamic_cast<IL::BlockContainer*>(function->Body.get())
                         : nullptr;
@@ -247,7 +230,7 @@ void DeclareVariables::FindInsertionPoints(Syntax::AstNode* node, int nodeLevel)
                 VariableNeedsDeclaration(variable->Kind)) {
                 FindInsertionPointForVariable(variable, identExpr, nodeLevel);
             } else if (IL::ILFunction* localFunction =
-                           GetILFunctionAnnotation(*node);
+                           CS::GetILFunctionAnnotation(*node);
                        localFunction != nullptr &&
                        localFunction->Kind == IL::ILFunctionKind::LocalFunction) {
                 for (const IL::ILVariablePtr& v : localFunction->CapturedVariables) {
@@ -472,7 +455,7 @@ void DeclareVariables::EnsureExpressionStatementsAreValid(Syntax::AstNode* rootN
             IL::ILFunction* function = nullptr;
             for (Syntax::AstNode* ancestor = stmt; ancestor != nullptr;
                  ancestor = ancestor->Parent()) {
-                if (IL::ILFunction* candidate = GetILFunctionAnnotation(*ancestor);
+                if (IL::ILFunction* candidate = CS::GetILFunctionAnnotation(*ancestor);
                     candidate != nullptr && candidate->Parent == nullptr) {
                     function = candidate;
                     break;

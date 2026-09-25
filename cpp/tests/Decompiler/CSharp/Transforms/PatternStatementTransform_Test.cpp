@@ -33,13 +33,19 @@
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ForeachStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
+#include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
@@ -68,11 +74,13 @@ using ::ILSpy::Decompiler::DecompilerSettings;
 using ::ILSpy::Decompiler::DecompileRun;
 
 // The fixture: the compilation + the using scope the DecompileRun requires (the
-// NormalizeBlockStatements_Test pattern).
+// NormalizeBlockStatements_Test pattern), plus the type renderer the foreach
+// arms consume.
 struct PatternStatementFixture {
     TS::SimpleCompilation compilation{Impl::MinimalCorlib::Instance(), {}};
     std::shared_ptr<CSharpTS::CSharpTypeResolveContext> scopelessContext;
     std::shared_ptr<CSharpTS::UsingScope> usingScope;
+    Syntax::TypeSystemAstBuilder astBuilder;
 
     PatternStatementFixture()
         : scopelessContext(std::make_shared<CSharpTS::CSharpTypeResolveContext>(
@@ -109,12 +117,15 @@ std::string NameOf(const Syntax::Expression* expression) {
 
 // Runs the transform over a root node with the fixture's context.
 void RunTransform(Syntax::AstNode& root, const PatternStatementFixture& fx,
-                  bool forStatementSetting = true) {
+                  bool forStatementSetting = true,
+                  bool forEachStatementSetting = true) {
     DecompilerSettings settings;
     settings.SetForStatement(forStatementSetting);
+    settings.SetForEachStatement(forEachStatementSetting);
     DecompileRun runStorage(&settings, fx.usingScope);
     CS::Transforms::TransformContext context;
     context.DecompileRun = &runStorage;
+    context.TypeSystemAstBuilder = &const_cast<PatternStatementFixture&>(fx).astBuilder;
     CS::Transforms::PatternStatementTransform transform;
     transform.Run(root, context);
 }
@@ -698,6 +709,207 @@ TEST(PatternStatementTransformTest, ForSettingGatesTheReshape)
     ASSERT_EQ(block->Statements().Count(), 2);
     EXPECT_EQ(block->Statements().At(1), loop)
         << "the ForStatement setting turns the arm off";
+}
+
+// ---- The foreach-over-array reshape --------------------------------------------------------
+
+// A `name`-named local of the given type.
+IL::ILVariablePtr LocalOf(const std::string& name, TS::ITypePtr type) {
+    auto variable = std::make_shared<IL::ILVariable>(IL::VariableKind::Local,
+                                                     std::move(type));
+    variable->Name = name;
+    return variable;
+}
+
+// The convertible foreach-over-array shape: `for (i = 0; i < array.Length;
+// i = i + 1) { item = array[i]; work; }` with the three ILVariables
+// annotated and the use counts the arm checks (the C# IL pipeline maintains
+// them; the test sets them directly).
+struct ForeachArrayLoop {
+    IL::ILVariablePtr index;
+    IL::ILVariablePtr array_;
+    IL::ILVariablePtr item;
+    Syntax::ForStatement* forStatement = nullptr;
+    Syntax::Statement* work = nullptr;
+    Syntax::IdentifierExpression* arrayIdentifier = nullptr;
+};
+
+ForeachArrayLoop MakeForeachArrayLoop(TS::ITypePtr arrayType = nullptr) {
+    ForeachArrayLoop loop;
+    loop.index = LocalOf("i", TS::UnknownType());
+    loop.index->StoreCount = 2;
+    loop.index->LoadCount = 3;
+    loop.array_ =
+        LocalOf("array",
+               arrayType != nullptr
+                   ? std::move(arrayType)
+                   : TS::ITypePtr(std::make_shared<TS::KnownType>(
+                         TS::KnownTypeCode::String)));
+    loop.item = LocalOf("item", TS::ITypePtr(std::make_shared<TS::KnownType>(
+                                     TS::KnownTypeCode::Int32)));
+    // The single store is the `item = array[i]` assignment (IsSingleDefinition).
+    loop.item->StoreCount = 1;
+
+    loop.forStatement = new Syntax::ForStatement();
+    loop.forStatement->Initializers().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            Var("i", loop.index), Syntax::AssignmentOperatorType::Assign,
+            new Syntax::PrimitiveExpression(Syntax::PrimitiveValue(0)))));
+    loop.arrayIdentifier = Var("array", loop.array_);
+    loop.forStatement->Condition(new Syntax::BinaryOperatorExpression(
+        Var("i", loop.index), Syntax::BinaryOperatorType::LessThan,
+        new Syntax::MemberReferenceExpression(loop.arrayIdentifier, "Length")));
+    loop.forStatement->Iterators().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            Var("i", loop.index), Syntax::AssignmentOperatorType::Assign,
+            new Syntax::BinaryOperatorExpression(
+                Var("i", loop.index), Syntax::BinaryOperatorType::Add,
+                new Syntax::PrimitiveExpression(Syntax::PrimitiveValue(1))))));
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            Var("item", loop.item), Syntax::AssignmentOperatorType::Assign,
+            [&]() {
+                auto* elementAccess =
+                    new Syntax::IndexerExpression(Var("array", loop.array_));
+                elementAccess->Arguments().Add(Var("i", loop.index));
+                return elementAccess;
+            }())));
+    loop.work = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            new Syntax::IdentifierExpression("x"),
+            Syntax::AssignmentOperatorType::Assign,
+            new Syntax::IdentifierExpression("y")));
+    body->Statements().Add(loop.work);
+    loop.forStatement->EmbeddedStatement(body);
+    return loop;
+}
+
+// `for (i = 0; i < array.Length; i = i + 1) { item = array[i]; work; }`
+// becomes `foreach (int item in array) { work; }`.
+TEST(PatternStatementTransformTest, ForeachOnArrayIsIntroduced)
+{
+    PatternStatementFixture fx;
+    auto loop = MakeForeachArrayLoop();
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    block->Statements().Add(loop.forStatement);
+
+    RunTransform(*block, fx);
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    auto* foreachStmt =
+        dynamic_cast<Syntax::ForeachStatement*>(block->Statements().At(0));
+    ASSERT_NE(foreachStmt, nullptr) << "the for loop becomes a foreach";
+    ASSERT_NE(foreachStmt->VariableType(), nullptr);
+    auto* designation = dynamic_cast<Syntax::SingleVariableDesignation*>(
+        foreachStmt->VariableDesignation());
+    ASSERT_NE(designation, nullptr);
+    EXPECT_EQ(designation->Identifier(), "item");
+    const auto* designationAnnotation =
+        designation->Annotation<CS::ILVariableResolveResult>();
+    ASSERT_NE(designationAnnotation, nullptr);
+    EXPECT_EQ(designationAnnotation->Variable(), loop.item.get());
+    EXPECT_EQ(foreachStmt->InExpression(), loop.arrayIdentifier)
+        << "the in-expression is the array variable's identifier";
+    auto* body = dynamic_cast<Syntax::BlockStatement*>(
+        foreachStmt->EmbeddedStatement());
+    ASSERT_NE(body, nullptr);
+    ASSERT_EQ(body->Statements().Count(), 1);
+    EXPECT_EQ(body->Statements().At(0), loop.work);
+    EXPECT_EQ(loop.item->Kind, IL::VariableKind::ForeachLocal)
+        << "the item variable is re-kinded as the foreach local";
+}
+
+// The in-expression must be an array (or a string): a differently-typed
+// collection variable keeps the for loop.
+TEST(PatternStatementTransformTest, ForeachOnArrayRequiresArrayOrString)
+{
+    PatternStatementFixture fx;
+    auto loop = MakeForeachArrayLoop(
+        TS::ITypePtr(std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32)));
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    block->Statements().Add(loop.forStatement);
+
+    RunTransform(*block, fx);
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements().At(0), loop.forStatement)
+        << "a non-array non-string collection keeps the for loop";
+}
+
+// The item variable must be single-definition (assignable to the foreach
+// designation): a second store keeps the for loop.
+TEST(PatternStatementTransformTest, ForeachOnArrayRequiresSingleDefinitionItem)
+{
+    PatternStatementFixture fx;
+    auto loop = MakeForeachArrayLoop();
+    loop.item->StoreCount = 2;
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    block->Statements().Add(loop.forStatement);
+
+    RunTransform(*block, fx);
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements().At(0), loop.forStatement);
+}
+
+// The index must be a pure counter (2 stores, 3 loads, no addresses).
+TEST(PatternStatementTransformTest, ForeachOnArrayRequiresTheIndexCounts)
+{
+    PatternStatementFixture fx;
+    auto loop = MakeForeachArrayLoop();
+    loop.index->StoreCount = 1;
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    block->Statements().Add(loop.forStatement);
+
+    RunTransform(*block, fx);
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements().At(0), loop.forStatement);
+}
+
+// The ForEachStatement setting gates the arm.
+TEST(PatternStatementTransformTest, ForeachSettingGatesTheArrayArm)
+{
+    PatternStatementFixture fx;
+    auto loop = MakeForeachArrayLoop();
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    block->Statements().Add(loop.forStatement);
+
+    RunTransform(*block, fx, /*forStatementSetting=*/true,
+                 /*forEachStatementSetting=*/false);
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements().At(0), loop.forStatement)
+        << "the ForEachStatement setting turns the arm off";
+}
+
+// A merged item variable cannot become the foreach local (the merged
+// declaration covers a wider scope).
+TEST(PatternStatementTransformTest, ForeachOnArrayKeepsMergedItemVariable)
+{
+    PatternStatementFixture fx;
+    auto loop = MakeForeachArrayLoop();
+    // Another `item`-named variable used before the loop: the collision
+    // resolution merges the two into one outer declaration (the same type:
+    // same-named colliding variables share their type by the name-assignment
+    // invariant the C# ResolveCollisions asserts).
+    IL::ILVariablePtr outerItem =
+        LocalOf("item", TS::ITypePtr(std::make_shared<TS::KnownType>(
+                              TS::KnownTypeCode::Int32)));
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    block->Statements().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            new Syntax::IdentifierExpression("x"),
+            Syntax::AssignmentOperatorType::Assign,
+            Var("item", outerItem))));
+    block->Statements().Add(loop.forStatement);
+
+    RunTransform(*block, fx);
+
+    ASSERT_EQ(block->Statements().Count(), 2);
+    EXPECT_EQ(block->Statements().At(1), loop.forStatement)
+        << "a merged item variable keeps the for loop";
 }
 
 // ---- The Run shell ---------------------------------------------------------------------

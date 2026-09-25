@@ -367,4 +367,14 @@ T* CopyInstructionsFrom(T* node, const Syntax::AstNode& other) {
     return node;
 }
 
+// The C# `node.Annotation<BlockContainer>()`: the first IL-instruction
+// annotation that is a BlockContainer (the loop statements carry their
+// container through WithILInstruction).
+IL::BlockContainer* GetBlockContainerAnnotation(const Syntax::AstNode& node);
+
+// The C# `node.Annotation<ILFunction>()`: the first IL-instruction
+// annotation that is an ILFunction (the lambda/local-function references
+// carry theirs).
+IL::ILFunction* GetILFunctionAnnotation(const Syntax::AstNode& node);
+
 }  // namespace ILSpy::Decompiler::CSharp

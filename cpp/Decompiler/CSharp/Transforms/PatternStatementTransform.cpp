@@ -59,11 +59,15 @@
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/MethodDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/OperatorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/PatternMatching/Match.hpp"
 #include "Decompiler/CSharp/Syntax/PatternMatching/PatternNodes.hpp"
+#include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/DoWhileStatement.hpp"
@@ -75,11 +79,13 @@
 #include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
 #include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/CSharp/Transforms/DeclareVariables.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
 #include <cassert>
 #include <stdexcept>
@@ -207,6 +213,83 @@ struct TransformForPatternsHolder {
 
 TransformForPatternsHolder& GetTransformForPatterns() {
     static TransformForPatternsHolder holder;
+    return holder;
+}
+
+// ---- foreach -----------------------------------------------------------------------------
+
+// The C# `static readonly ForStatement forOnArrayPattern` (line ~287):
+//
+//     for ($indexVariable = 0; $indexVariable < $arrayVariable.Length;
+//          $indexVariable = $indexVariable + 1)
+//     {
+//         $itemVariable = $arrayVariable[$indexVariable];
+//         $statements...
+//     }
+//
+// the same lazy process-lifetime singleton convention.
+struct ForeachOnArrayPatternHolder {
+    // -- `indexVariable = 0;`
+    Syntax::IdentifierExpression indexVariable{
+        std::string(PatternMatching::Pattern::AnyString)};
+    PatternMatching::NamedNode indexVariableNamed{"indexVariable", indexVariable};
+    Syntax::PrimitiveExpression zero{Syntax::PrimitiveValue(0)};
+    Syntax::AssignmentExpression indexInit{
+        Syntax::Expression::ToExpression(indexVariableNamed),
+        Syntax::AssignmentOperatorType::Assign, &zero};
+    Syntax::ExpressionStatement indexInitStatement{&indexInit};
+
+    // -- `indexVariable < arrayVariable.Length`
+    PatternMatching::IdentifierExpressionBackreference indexRef{"indexVariable"};
+    Syntax::IdentifierExpression arrayVariable{
+        std::string(PatternMatching::Pattern::AnyString)};
+    PatternMatching::NamedNode arrayVariableNamed{"arrayVariable", arrayVariable};
+    Syntax::MemberReferenceExpression arrayLength{
+        Syntax::Expression::ToExpression(arrayVariableNamed), "Length"};
+    Syntax::BinaryOperatorExpression condition{
+        Syntax::Expression::ToExpression(indexRef),
+        Syntax::BinaryOperatorType::LessThan, &arrayLength};
+
+    // -- `indexVariable = indexVariable + 1;`
+    Syntax::PrimitiveExpression one{Syntax::PrimitiveValue(1)};
+    Syntax::BinaryOperatorExpression indexIncrement{
+        Syntax::Expression::ToExpression(indexRef),
+        Syntax::BinaryOperatorType::Add, &one};
+    Syntax::AssignmentExpression iteratorAssign{
+        Syntax::Expression::ToExpression(indexRef),
+        Syntax::AssignmentOperatorType::Assign, &indexIncrement};
+    Syntax::ExpressionStatement iteratorStatement{&iteratorAssign};
+
+    // -- `itemVariable = arrayVariable[indexVariable]; $statements...`
+    PatternMatching::IdentifierExpressionBackreference arrayRef{"arrayVariable"};
+    Syntax::IdentifierExpression itemVariable{
+        std::string(PatternMatching::Pattern::AnyString)};
+    PatternMatching::NamedNode itemVariableNamed{"itemVariable", itemVariable};
+    Syntax::IndexerExpression elementAccess{
+        Syntax::Expression::ToExpression(arrayRef)};
+    Syntax::AssignmentExpression itemAssign{
+        Syntax::Expression::ToExpression(itemVariableNamed),
+        Syntax::AssignmentOperatorType::Assign, &elementAccess};
+    Syntax::ExpressionStatement itemAssignStatement{&itemAssign};
+    PatternMatching::AnyNode statements{"statements"};
+    PatternMatching::Repeat statementsRepeat{statements};
+    Syntax::BlockStatement body;
+    Syntax::ForStatement pattern;
+
+    ForeachOnArrayPatternHolder() {
+        elementAccess.Arguments().Add(
+            Syntax::Expression::ToExpression(indexRef));
+        body.Statements().Add(&itemAssignStatement);
+        body.Statements().Add(Syntax::Statement::ToStatement(statementsRepeat));
+        pattern.Initializers().Add(&indexInitStatement);
+        pattern.Condition(&condition);
+        pattern.Iterators().Add(&iteratorStatement);
+        pattern.EmbeddedStatement(&body);
+    }
+};
+
+ForeachOnArrayPatternHolder& GetForeachOnArrayPattern() {
+    static ForeachOnArrayPatternHolder holder;
     return holder;
 }
 
@@ -503,6 +586,132 @@ public:
                 return true;
         }
         return false;
+    }
+
+    // The C# `public override AstNode VisitForStatement(ForStatement
+    // forStatement)` (line ~93): the foreach-on-array arm routes first; the
+    // inline-array arm is DEFERRED (its GetSymbol/IMethod
+    // DeclaringType.FullName checks need the resolved call surface).
+    void VisitForStatement(Syntax::ForStatement* forStatement) override {
+        if (Syntax::AstNode* result = TransformForeachOnArray(forStatement)) {
+            lastResult = result;
+            return;
+        }
+        // TransformForeachOnInlineArray -- deferred (the file header).
+        Syntax::DepthFirstAstVisitor::VisitForStatement(forStatement);
+    }
+
+    // The C# `bool VariableCanBeUsedAsForeachLocal(IL.ILVariable itemVar,
+    // Statement loop)` (line ~322): the checks deciding whether the loop's
+    // item variable can become the foreach designation.
+    bool VariableCanBeUsedAsForeachLocal(IL::ILVariable* itemVar,
+                                         Syntax::Statement* loop) {
+        if (itemVar == nullptr ||
+            !(itemVar->Kind == IL::VariableKind::Local ||
+              itemVar->Kind == IL::VariableKind::StackSlot)) {
+            // only locals/temporaries can be converted into foreach loop variable
+            return false;
+        }
+
+        IL::BlockContainer* blockContainer = CS::GetBlockContainerAnnotation(*loop);
+
+        if (!itemVar->IsSingleDefinition()) {
+            // foreach variable cannot be assigned to.
+            // As a special case, we accept taking the address for a method
+            // call, but only if the call is the only use, so that any mutation
+            // by the call cannot be observed.
+            // DEFERRED loudly (the C# AddressUsedForSingleCall special case,
+            // line ~346): it needs the per-variable address-use list (the
+            // port's ILVariable carries the counts only) and the resolved
+            // IMethod call surface (call.Method.IsStatic). Rejected
+            // conservatively -- a by-ref-taken item variable keeps the for
+            // loop.
+            return false;
+        }
+
+        if (itemVar->CaptureScope != nullptr &&
+            itemVar->CaptureScope != blockContainer) {
+            // captured variables cannot be declared in the loop unless the
+            // loop is their capture scope
+            return false;
+        }
+
+        Syntax::AstNode* declPoint = declareVariables->GetDeclarationPoint(itemVar);
+        // The C# `declPoint.Ancestors.Contains(loop)`.
+        bool insideLoop = false;
+        for (Syntax::AstNode* ancestor : declPoint->Ancestors()) {
+            if (ancestor == loop) {
+                insideLoop = true;
+                break;
+            }
+        }
+        return insideLoop && !declareVariables->WasMerged(itemVar);
+    }
+
+    // The C# `Statement? TransformForeachOnArray(ForStatement forStatement)`
+    // (line ~355): the index loop over an array (or string) becomes a
+    // foreach.
+    Syntax::Statement* TransformForeachOnArray(Syntax::ForStatement* forStatement) {
+        if (!context->DecompileRun->Settings().ForEachStatement())
+            return nullptr;
+        PatternMatching::Match m =
+            Syntax::MatchNode(GetForeachOnArrayPattern().pattern, forStatement);
+        if (!m.Success())
+            return nullptr;
+        std::vector<Syntax::IdentifierExpression*> itemCaptures =
+            m.Get<Syntax::IdentifierExpression>("itemVariable");
+        assert(itemCaptures.size() == 1);
+        std::vector<Syntax::IdentifierExpression*> indexCaptures =
+            m.Get<Syntax::IdentifierExpression>("indexVariable");
+        assert(indexCaptures.size() == 1);
+        std::vector<Syntax::IdentifierExpression*> arrayCaptures =
+            m.Get<Syntax::IdentifierExpression>("arrayVariable");
+        assert(arrayCaptures.size() == 1);
+        IL::ILVariable* itemVariable = CS::GetILVariable(*itemCaptures.front());
+        IL::ILVariable* indexVariable = CS::GetILVariable(*indexCaptures.front());
+        IL::ILVariable* arrayVariable = CS::GetILVariable(*arrayCaptures.front());
+        if (itemVariable == nullptr || indexVariable == nullptr ||
+            arrayVariable == nullptr)
+            return nullptr;
+        if (arrayVariable->Type->Kind() != TS::TypeKind::Array &&
+            !TS::IsKnownType(*arrayVariable->Type, TS::KnownTypeCode::String))
+            return nullptr;
+        if (!VariableCanBeUsedAsForeachLocal(itemVariable, forStatement))
+            return nullptr;
+        if (indexVariable->StoreCount != 2 || indexVariable->LoadCount != 3 ||
+            indexVariable->AddressCount != 0)
+            return nullptr;
+        context->StepOnce("Introduce foreach over array", forStatement);
+        auto* body = new Syntax::BlockStatement();
+        for (Syntax::Statement* statement : m.Get<Syntax::Statement>("statements"))
+            body->Statements().Add(Syntax::Detach(statement));
+        auto* foreachStmt = new Syntax::ForeachStatement();
+        // (The C# `context.Settings.AnonymousTypes &&
+        // itemVariable.Type.ContainsAnonymousType()` `var` decision is
+        // DEFERRED with the NRExtensions anonymous-type walk; the explicit
+        // ConvertType form is always used.)
+        foreachStmt->VariableType(
+            context->TypeSystemAstBuilder->ConvertType(*itemVariable->Type));
+        auto* designation = new Syntax::SingleVariableDesignation();
+        designation->Identifier(itemVariable->Name);
+        foreachStmt->VariableDesignation(designation);
+        foreachStmt->InExpression(Syntax::Detach(arrayCaptures.front()));
+        foreachStmt->EmbeddedStatement(body);
+        CS::CopyAnnotationsFrom(foreachStmt, *forStatement);
+        itemVariable->Kind = IL::VariableKind::ForeachLocal;
+        // Add the variable annotation for highlighting (TokenTextWriter
+        // expects it directly on the ForeachStatement).
+        // A non-owning alias over the caller-owned variable (the IL function
+        // tree owns it -- the no-op-deleter convention).
+        IL::ILVariablePtr itemVariableHandle(itemVariable, [](IL::ILVariable*) {});
+        foreachStmt->VariableDesignation()->AddAnnotation(
+            std::make_shared<CS::ILVariableResolveResult>(itemVariableHandle,
+                                                           itemVariable->Type));
+        // TODO : add ForeachAnnotation
+        forStatement->ReplaceWith(foreachStmt);
+        // The C# `context.EndStep(foreachStmt)` (the step-group close) folds
+        // onto the single step hook.
+        return foreachStmt;
     }
 
     // The C# `public override AstNode VisitIfElseStatement(IfElseStatement ...)`.

@@ -23,6 +23,7 @@
 #include "Decompiler/CSharp/Annotations.hpp"
 
 #include "Decompiler/CSharp/Resolver/MethodGroupResolveResult.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/Semantics/ErrorResolveResult.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
@@ -166,6 +167,22 @@ Syntax::ForeachStatement* WithILVariable(Syntax::ForeachStatement& loop,
     loop.AddAnnotation(
         std::make_shared<ILVariableResolveResult>(variable, variable->Type));
     return &loop;
+}
+
+IL::BlockContainer* GetBlockContainerAnnotation(const Syntax::AstNode& node) {
+    for (IL::ILInstruction* instruction : GetILInstructions(node)) {
+        if (auto* container = dynamic_cast<IL::BlockContainer*>(instruction))
+            return container;
+    }
+    return nullptr;
+}
+
+IL::ILFunction* GetILFunctionAnnotation(const Syntax::AstNode& node) {
+    for (IL::ILInstruction* instruction : GetILInstructions(node)) {
+        if (auto* function = dynamic_cast<IL::ILFunction*>(instruction))
+            return function;
+    }
+    return nullptr;
 }
 
 }  // namespace ILSpy::Decompiler::CSharp
