@@ -614,7 +614,8 @@ int RunMain(int argc, char** argv) {
                 if (t.Name == "<Module>") continue;
                 if (!typeMatch(t.Namespace, t.Name)) continue;
                 std::string typeText;
-                if (decompiler.DecompileTypeToString(t.Token, typeText)) {
+                if (decompiler.DecompileTypeToString(t.Token, typeText,
+                                                    /*wrapNamespace=*/true)) {
                     text += typeText;
                     text += '\n';
                     ++typesPrinted;

@@ -1050,15 +1050,28 @@ bool DecompileTypeToStringBody(
 // surfaces land with the metadata-slice work).
 bool CSharpDecompiler::DecompileTypeToString(
     const Metadata::MetadataFile& file, std::uint32_t typeToken,
-    std::string& out) {
+    std::string& out, bool wrapNamespace) {
     // The static scaffold's per-call wiring (the note above): the resolver
     // + the reference-loaded type system, one pair per call.
     Metadata::UniversalAssemblyResolver resolver(
         file.FileName(), false, Metadata::DetectTargetFrameworkId(file));
     TS::DecompilerTypeSystem typeSystem(file, resolver);
-    return DecompileTypeToStringBody(
+    bool rendered = DecompileTypeToStringBody(
         file, &typeSystem, typeSystem.MainMetadataModule(),
         FindRegisteredPartialType(typeToken), typeToken, out);
+    if (rendered && wrapNamespace) {
+        // The single-type namespace header (the C# -t render's
+        // file-scoped form: `namespace X;` before the declaration; a
+        // type with no namespace renders bare).
+        for (const auto& t : file.TypeDefs()) {
+            if (t.Token != typeToken)
+                continue;
+            if (!t.Namespace.empty())
+                out = "namespace " + t.Namespace + ";\n\n" + out;
+            break;
+        }
+    }
+    return rendered;
 }
 
 namespace {
@@ -1171,7 +1184,8 @@ std::string CSharpDecompiler::DecompileWholeModuleToString() {
             currentNamespace = t.Namespace;
         }
         std::string text;
-        if (DecompileTypeToString(t.Token, text))
+        if (DecompileTypeToString(t.Token, text,
+                                  /*wrapNamespace=*/false))
             out += text;
     }
     if (namespaceOpen)
@@ -1180,12 +1194,22 @@ std::string CSharpDecompiler::DecompileWholeModuleToString() {
 }
 
 bool CSharpDecompiler::DecompileTypeToString(
-    std::uint32_t typeToken, std::string& out) {
-    return DecompileTypeToStringBody(
+    std::uint32_t typeToken, std::string& out, bool wrapNamespace) {
+    bool rendered = DecompileTypeToStringBody(
         *state_->file, state_->typeSystem ? &state_->typeSystem.value()
                                           : nullptr,
         state_->typeSystem->MainMetadataModule(),
         FindPartialTypeInfo(typeToken), typeToken, out);
+    if (rendered && wrapNamespace) {
+        for (const auto& t : state_->file->TypeDefs()) {
+            if (t.Token != typeToken)
+                continue;
+            if (!t.Namespace.empty())
+                out = "namespace " + t.Namespace + ";\n\n" + out;
+            break;
+        }
+    }
+    return rendered;
 }
 
 void CSharpDecompiler::AddPartialTypeDefinition(
@@ -1377,7 +1401,8 @@ std::string CSharpDecompiler::DecompileWholeModuleToString(
             currentNamespace = t.Namespace;
         }
         std::string text;
-        if (DecompileTypeToString(file, t.Token, text))
+        if (DecompileTypeToString(file, t.Token, text,
+                                  /*wrapNamespace=*/false))
             out += text;
     }
     if (namespaceOpen)

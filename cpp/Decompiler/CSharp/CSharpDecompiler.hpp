@@ -180,7 +180,11 @@ public:
     // with the metadata-slice work).
     static bool DecompileTypeToString(
         const ::ILSpy::Decompiler::Metadata::MetadataFile& file,
-        std::uint32_t typeToken, std::string& out);
+        std::uint32_t typeToken, std::string& out,
+        // The single-type namespace header (the file-scoped `namespace X;`
+        // form the oracle's -t render carries); the whole-module paths
+        // pass false (they group the namespaces themselves).
+        bool wrapNamespace = true);
 
     // The C# `public string DecompileModuleAndAssemblyAttributesToString()`
     // (CSharpDecompiler.cs line 838): the `[assembly: ...]` /
@@ -257,7 +261,8 @@ public:
     // The C# `public string DecompileTypeAsString(TypeDefinitionHandle)`
     // shape as the instance entry: the type render through THIS instance's
     // wiring and registry.
-    bool DecompileTypeToString(std::uint32_t typeToken, std::string& out);
+    bool DecompileTypeToString(std::uint32_t typeToken, std::string& out,
+                               bool wrapNamespace = true);
 
     // The C# instance registry: register under the declaring type token
     // (a second registration for the same type unionizes).

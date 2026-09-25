@@ -486,6 +486,19 @@ TEST(FacadeMemberModifiersTest, InterfacePropertyKeepsTheStubForm)
         << text;
 }
 
+// The single-type render carries its namespace header (the file-scoped
+// form the oracle renders for a single type: `namespace X;` before the
+// declaration).
+TEST(FacadeMemberModifiersTest, SingleTypeRenderCarriesTheNamespaceHeader)
+{
+    std::string text;
+    if (!RenderType(kModifierFixture, "Color", text))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    EXPECT_EQ(text.find("namespace ModifierFixture;\n\npublic enum Color"),
+              0u)
+        << text.substr(0, 200);
+}
+
 // The whole-module render groups the types by namespace (the C#
 // DoDecompileTypes' NamespaceDeclaration emission): consecutive
 // same-namespace types nest under one `namespace X { }` block; types
