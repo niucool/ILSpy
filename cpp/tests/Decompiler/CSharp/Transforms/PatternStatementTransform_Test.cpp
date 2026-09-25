@@ -149,11 +149,13 @@ void RunTransform(Syntax::AstNode& root, const PatternStatementFixture& fx,
                   bool forStatementSetting = true,
                   bool forEachStatementSetting = true,
                   const TS::ITypeDefinition* currentTypeDefinition = nullptr,
-                  bool useEnhancedUsingSetting = true) {
+                  bool useEnhancedUsingSetting = true,
+                  bool getterOnlyAutomaticPropertiesSetting = true) {
     DecompilerSettings settings;
     settings.SetForStatement(forStatementSetting);
     settings.SetForEachStatement(forEachStatementSetting);
     settings.SetUseEnhancedUsing(useEnhancedUsingSetting);
+    settings.SetGetterOnlyAutomaticProperties(getterOnlyAutomaticPropertiesSetting);
     DecompileRun runStorage(&settings, fx.usingScope);
     CS::Transforms::TransformContext context;
     context.DecompileRun = &runStorage;
@@ -1741,6 +1743,40 @@ private:
     std::set<TS::KnownAttribute> known_;
 };
 
+// A fake IMethod with settable classified attributes: the accessor
+// checks read [CompilerGenerated] through IEntity::HasAttribute.
+class AutoPropertyTestMethod : public TSImpl::FakeMethod {
+public:
+    AutoPropertyTestMethod(const TS::ICompilation& compilation,
+                           TS::SymbolKind symbolKind)
+        : TSImpl::FakeMethod(compilation, symbolKind) {}
+    bool HasAttribute(TS::KnownAttribute attribute) const override {
+        return known_.find(attribute) != known_.end();
+    }
+    const TS::IAttribute* GetAttribute(TS::KnownAttribute attribute) const override {
+        return HasAttribute(attribute) ? &sentinel_ : nullptr;
+    }
+    void AddKnownAttribute(TS::KnownAttribute attribute) {
+        known_.insert(attribute);
+    }
+
+private:
+    struct SentinelAttribute : TS::IAttribute {
+        const TS::IType& AttributeType() const override { return type_; }
+        const TS::IMethod* Constructor() const override { return nullptr; }
+        bool HasDecodeErrors() const override { return false; }
+        std::vector<TS::CustomAttributeTypedArgument> FixedArguments() const override {
+            return {};
+        }
+        std::vector<TS::CustomAttributeNamedArgument> NamedArguments() const override {
+            return {};
+        }
+        TS::KnownType type_{TS::KnownTypeCode::Object};
+    };
+    SentinelAttribute sentinel_;
+    std::set<TS::KnownAttribute> known_;
+};
+
 // The convertible auto-property shape inside a type declaration:
 //   int Count { get { return <Count>k__BackingField; }
 //              set { <Count>k__BackingField = value; } }
@@ -1784,12 +1820,14 @@ AutoPropertyRig MakeAutoProperty(PatternStatementFixture& fx) {
     // because the declaring type carries a compiler-generated _Count field).
     rig.property = std::make_shared<TSImpl::FakeProperty>(fx.compilation);
     rig.property->SetName("Count");
-    auto getterMethod = std::make_shared<TSImpl::FakeMethod>(
+    auto getterMethod = std::make_shared<AutoPropertyTestMethod>(
         fx.compilation, TS::SymbolKind::Method);
     getterMethod->SetName("get_Count");
-    auto setterMethod = std::make_shared<TSImpl::FakeMethod>(
+    getterMethod->AddKnownAttribute(TS::KnownAttribute::CompilerGenerated);
+    auto setterMethod = std::make_shared<AutoPropertyTestMethod>(
         fx.compilation, TS::SymbolKind::Method);
     setterMethod->SetName("set_Count");
+    setterMethod->AddKnownAttribute(TS::KnownAttribute::CompilerGenerated);
     rig.property->SetGetter(static_cast<const TS::IMethod*>(getterMethod.get()));
     rig.property->SetSetter(static_cast<const TS::IMethod*>(setterMethod.get()));
     rig.property->SetDeclaringType(rig.typeDef);
@@ -1931,6 +1969,90 @@ TEST(PatternStatementTransformTest, AutomaticPropertyRequiresBackingFieldName)
     EXPECT_NE(rig.getter->Body(), nullptr)
         << "a non-backing-field name keeps the accessor bodies";
     EXPECT_EQ(rig.type->Members().Count(), 2);
+}
+
+// ---- The backing-field identifier rewrite ----------------------------------------------
+
+// A use of the compiler-generated backing field outside the accessors
+// becomes a use of the property (the identifier is replaced and the
+// parent's resolve result is re-pointed).
+TEST(PatternStatementTransformTest, BackingFieldUsageIsReplacedWithProperty)
+{
+    PatternStatementFixture fx;
+    auto rig = MakeAutoProperty(fx);
+
+    auto* use = new Syntax::IdentifierExpression("<Count>k__BackingField");
+    use->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        std::make_shared<Sem::TypeResolveResult>(rig.typeDef),
+        static_cast<TSImpl::FakeMember*>(rig.backingField.get())));
+
+    auto root = std::make_unique<Syntax::BlockStatement>();
+    root->Statements().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            new Syntax::IdentifierExpression("y"),
+            Syntax::AssignmentOperatorType::Assign, use)));
+
+    RunTransform(*root, fx);
+
+    EXPECT_EQ(use->IdentifierToken()->Name(), "Count")
+        << "the backing field identifier becomes the property name";
+    const auto* resolveResult = use->Annotation<Sem::MemberResolveResult>();
+    ASSERT_NE(resolveResult, nullptr);
+    EXPECT_EQ(resolveResult->Member(),
+              static_cast<const TS::IMember*>(
+                  static_cast<const TS::IProperty*>(rig.property.get())))
+        << "the parent's resolve result now points at the property";
+}
+
+// A getter-only property without the GetterOnlyAutomaticProperties
+// setting keeps the backing field use.
+TEST(PatternStatementTransformTest, BackingFieldUsageRequiresSetterOrSetting)
+{
+    PatternStatementFixture fx;
+    auto rig = MakeAutoProperty(fx);
+    rig.property->SetSetter(nullptr);
+
+    auto* use = new Syntax::IdentifierExpression("<Count>k__BackingField");
+    use->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        std::make_shared<Sem::TypeResolveResult>(rig.typeDef),
+        static_cast<TSImpl::FakeMember*>(rig.backingField.get())));
+
+    auto root = std::make_unique<Syntax::BlockStatement>();
+    root->Statements().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            new Syntax::IdentifierExpression("y"),
+            Syntax::AssignmentOperatorType::Assign, use)));
+
+    RunTransform(*root, fx, /*forStatementSetting=*/true,
+                 /*forEachStatementSetting=*/true, /*currentTypeDefinition=*/nullptr,
+                 /*useEnhancedUsingSetting=*/true,
+                 /*getterOnlyAutomaticPropertiesSetting=*/false);
+
+    EXPECT_EQ(use->IdentifierToken()->Name(), "<Count>k__BackingField")
+        << "a getter-only property keeps the backing field use";
+}
+
+// A field whose name is not the backing-field pattern keeps its use.
+TEST(PatternStatementTransformTest, BackingFieldUsageRequiresFieldName)
+{
+    PatternStatementFixture fx;
+    auto rig = MakeAutoProperty(fx);
+    rig.backingField->SetName("someOtherField");
+
+    auto* use = new Syntax::IdentifierExpression("someOtherField");
+    use->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        std::make_shared<Sem::TypeResolveResult>(rig.typeDef),
+        static_cast<TSImpl::FakeMember*>(rig.backingField.get())));
+
+    auto root = std::make_unique<Syntax::BlockStatement>();
+    root->Statements().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            new Syntax::IdentifierExpression("y"),
+            Syntax::AssignmentOperatorType::Assign, use)));
+
+    RunTransform(*root, fx);
+
+    EXPECT_EQ(use->IdentifierToken()->Name(), "someOtherField");
 }
 
 // A Run entered while another Run is in flight throws (the C# reentrancy

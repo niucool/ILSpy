@@ -95,6 +95,8 @@
 #include "Decompiler/CSharp/Transforms/DeclareVariables.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/Semantics/MemberResolveResult.hpp"
+#include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/IProperty.hpp"
@@ -108,6 +110,7 @@
 namespace ILSpy::Decompiler::CSharp::Transforms {
 
 namespace CS = ::ILSpy::Decompiler::CSharp;
+namespace Sem = ::ILSpy::Decompiler::Semantics;
 namespace Syntax = ::ILSpy::Decompiler::CSharp::Syntax;
 namespace PatternMatching = ::ILSpy::Decompiler::CSharp::Syntax::PatternMatching;
 namespace TS = ::ILSpy::Decompiler::TypeSystem;
@@ -1687,6 +1690,73 @@ public:
         // visitor as usual, so return null.
     }
 
+    // The C# `internal static bool IsBackingFieldOfAutomaticProperty(IField
+    // field, out IProperty? property)` (line ~853): whether the field is the
+    // compiler-generated backing field of a same-named property on its
+    // declaring type.
+    static bool IsBackingFieldOfAutomaticProperty(const TS::IField* field,
+                                                   const TS::IProperty** property) {
+        *property = nullptr;
+        std::string propertyName;
+        if (!NameCouldBeBackingFieldOfAutomaticProperty(field->Name(), &propertyName))
+            return false;
+        // The C# `field.IsCompilerGenerated()` (the direct HasAttribute).
+        if (!field->HasAttribute(TS::KnownAttribute::CompilerGenerated))
+            return false;
+        const TS::ITypeDefinition* declaringType = field->DeclaringTypeDefinition();
+        if (declaringType != nullptr) {
+            for (const TS::IProperty* p : declaringType->GetProperties(
+                     /*filter=*/nullptr,
+                     TS::GetMemberOptions::IgnoreInheritedMembers)) {
+                if (p->Name() == propertyName) {
+                    *property = p;
+                    break;
+                }
+            }
+        }
+        return *property != nullptr;
+    }
+
+    // The C# `Identifier? ReplaceBackingFieldUsage(Identifier identifier)`
+    // (line ~894): a backing-field identifier becomes the property name,
+    // with the parent's resolve result re-pointed at the property.
+    Syntax::Identifier* ReplaceBackingFieldUsage(Syntax::Identifier* identifier) {
+        std::string propertyName;
+        if (!NameCouldBeBackingFieldOfAutomaticProperty(identifier->Name(),
+                                                        &propertyName))
+            return nullptr;
+        Syntax::AstNode* parent = identifier->Parent();
+        if (parent == nullptr)
+            return nullptr;
+        const auto* mrr = parent->Annotation<Sem::MemberResolveResult>();
+        const TS::IField* field =
+            mrr != nullptr
+                ? dynamic_cast<const TS::IField*>(mrr->Member())
+                : nullptr;
+        const TS::IProperty* property = nullptr;
+        if (field != nullptr &&
+            IsBackingFieldOfAutomaticProperty(field, &property) &&
+            CanTransformToAutomaticProperty(
+                property,
+                !(field->HasAttribute(TS::KnownAttribute::CompilerGenerated) &&
+                  field->Name() == "_" + property->Name())) &&
+            (currentMethod == nullptr ||
+             currentMethod->AccessorOwner() !=
+                 static_cast<const TS::IMember*>(property))) {
+            if (!property->CanSet() &&
+                !context->DecompileRun->Settings().GetterOnlyAutomaticProperties())
+                return nullptr;
+            context->StepOnce("Replace backing field use with property", identifier);
+            parent->RemoveAnnotations<Sem::MemberResolveResult>();
+            // The C# re-uses mrr.TargetResult; the port re-attaches the
+            // owning shared handle.
+            parent->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+                mrr->SharedTargetResult(), property));
+            return Syntax::Identifier::Create(property->Name());
+        }
+        return nullptr;
+    }
+
     // The C# `TryCatchStatement? TransformTryCatchFinally(TryCatchStatement
     // tryFinally)` (line ~996): simplify nested 'try { try {} catch {} } finally
     // {}'. Runs after the using/lock transformations in the C# pipeline.
@@ -1784,6 +1854,21 @@ public:
         Syntax::PropertyDeclaration* propertyDeclaration) override {
         TransformAutomaticProperty(propertyDeclaration);
         Syntax::DepthFirstAstVisitor::VisitPropertyDeclaration(propertyDeclaration);
+    }
+
+    // The C# `public override AstNode VisitIdentifier(Identifier identifier)`
+    // (line ~838): the backing-field rewrite replaces the identifier token
+    // in place.
+    void VisitIdentifier(Syntax::Identifier* identifier) override {
+        if (context->DecompileRun->Settings().AutomaticProperties()) {
+            if (Syntax::Identifier* newIdentifier =
+                    ReplaceBackingFieldUsage(identifier)) {
+                identifier->ReplaceWith(newIdentifier);
+                lastResult = newIdentifier;
+                return;
+            }
+        }
+        Syntax::DepthFirstAstVisitor::VisitIdentifier(identifier);
     }
 
     // The C# `public override AstNode VisitIfElseStatement(IfElseStatement ...)`.

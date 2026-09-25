@@ -174,6 +174,14 @@ public:
     // the result was constructed with a null target.
     ResolveResult* TargetResult() const noexcept { return targetResult_.get(); }
 
+    // The owning shared handle behind the stored target (the port's addition):
+    // the C# re-uses `mrr.TargetResult` when re-pointing a resolve result at
+    // another member (the GC reference); the port's ctor takes the shared
+    // handle, so this exposes it for the re-point call sites.
+    std::shared_ptr<ResolveResult> SharedTargetResult() const noexcept {
+        return targetResult_;
+    }
+
     // The C# `IMember Member` -- the stored member (the C# doc says "never returns
     // null"). Returns a non-owning raw pointer (the member is owned by the type
     // system, not by this result).
