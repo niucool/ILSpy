@@ -724,18 +724,18 @@ TEST(DeclareVariablesTest, RunUpdatesMergedAnnotations)
 }
 
 // The transform occupies its C# GetAstTransforms slot (after
-// PatternStatementTransform, ReplaceMethodCallsWithOperators, and the
-// deferred IntroduceUnsafeModifier / AddCheckedBlocks, before the deferred
-// TransformFieldAndConstructorInitializers).
+// PatternStatementTransform, ReplaceMethodCallsWithOperators,
+// IntroduceUnsafeModifier, and the deferred AddCheckedBlocks, before the
+// deferred TransformFieldAndConstructorInitializers).
 TEST(DeclareVariablesTest, PipelineCarriesDeclareVariables)
 {
     auto transforms = CS::CSharpDecompiler::GetAstTransforms();
-    ASSERT_GT(transforms.size(), 2u);
+    ASSERT_GT(transforms.size(), 3u);
     EXPECT_NE(dynamic_cast<CS::Transforms::DeclareVariables*>(
-                  transforms[2].get()),
+                  transforms[3].get()),
               nullptr)
-        << "DeclareVariables is the third AST transform (after "
-           "ReplaceMethodCallsWithOperators)";
+        << "DeclareVariables is the fourth AST transform (after "
+           "ReplaceMethodCallsWithOperators and IntroduceUnsafeModifier)";
 }
 
 } // namespace

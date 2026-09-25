@@ -15,6 +15,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/StatementBuilder.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/AddCheckedBlocks.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/ReplaceMethodCallsWithOperators.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/IntroduceUnsafeModifier.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/FlattenSwitchBlocks.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/FixNameCollisions.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/EscapeInvalidIdentifiers.cpp

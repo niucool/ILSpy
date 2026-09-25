@@ -31,6 +31,7 @@
 #include "Decompiler/DecompileRun.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/CSharp/Transforms/ReplaceMethodCallsWithOperators.hpp"
+#include "Decompiler/CSharp/Transforms/IntroduceUnsafeModifier.hpp"
 #include "Decompiler/CSharp/Transforms/AddCheckedBlocks.hpp"
 #include "Decompiler/CSharp/Transforms/PatternStatementTransform.hpp"
 #include "Decompiler/CSharp/Transforms/DeclareVariables.hpp"
@@ -656,7 +657,8 @@ CSharpDecompiler::GetAstTransforms() {
     //      tables and the binary/unary/explicit/op_True arms); the
     //      String.Concat reduction, the System.* special methods, and the
     //      methodof cast pattern stay deferred loudly in the .cpp.
-    // IntroduceUnsafeModifier -- deferred.
+    transforms.push_back(
+        std::make_unique<Transforms::IntroduceUnsafeModifier>());
     // AddCheckedBlocks -- deferred (the port carries the annotation half;
     // the block-rewriting IAstTransform itself lands with the rest of the
     // AST-transform layer, at this same slot).
