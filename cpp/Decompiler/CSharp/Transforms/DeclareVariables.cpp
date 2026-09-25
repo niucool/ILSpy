@@ -51,6 +51,8 @@
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/Semantics/OutVarResolveResult.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
 #include <cassert>
 #include <functional>
@@ -539,11 +541,13 @@ void DeclareVariables::InsertVariableDeclarations() {
         Syntax::DirectionExpression* dirExpr = nullptr;
         if (CombineDeclarationAndInitializer(v) && IsMatchingAssignment(v, &assignment)) {
             // 'int v; v = expr;' can be combined to 'int v = expr;'
-            // (The C# `context.Settings.AnonymousTypes &&
-            // v.Type.ContainsAnonymousType()` `var` decision is DEFERRED with
-            // the NRExtensions anonymous-type walk -- the explicit
-            // ConvertType form is always used.)
-            Syntax::AstType* type = context_->TypeSystemAstBuilder->ConvertType(*v.ILVariable()->Type);
+            Syntax::AstType* type =
+                context_->DecompileRun->Settings().AnonymousTypes() &&
+                        TS::ContainsAnonymousType(*v.ILVariable()->Type)
+                    ? static_cast<Syntax::AstType*>(
+                          new Syntax::SimpleType("var"))
+                    : context_->TypeSystemAstBuilder->ConvertType(
+                          *v.ILVariable()->Type);
             // (The C# IsRefReadOnly readonly-specifier fixup is DEFERRED: the
             // ILVariable flag is not ported.)
             if (v.ILVariable()->Kind == IL::VariableKind::PinnedLocal) {
@@ -577,11 +581,18 @@ void DeclareVariables::InsertVariableDeclarations() {
                 "Combine variable declaration with initializer"});
         } else if (CanBeDeclaredAsOutVariable(v, &dirExpr)) {
             // 'T v; SomeCall(out v);' can be combined to 'SomeCall(out T v);'
-            // (The C# anonymous-type / UseImplicitlyTypedOutAnnotation `var`
-            // decision is DEFERRED with the NRExtensions anonymous-type walk;
-            // the explicit ConvertType form is always used, so the
-            // OutVarResolveResult re-annotation arm is unreachable.)
-            Syntax::AstType* type = context_->TypeSystemAstBuilder->ConvertType(*v.ILVariable()->Type);
+            Syntax::AstType* type = nullptr;
+            bool isOutVar = false;
+            if (context_->DecompileRun->Settings().AnonymousTypes() &&
+                TS::ContainsAnonymousType(*v.ILVariable()->Type)) {
+                type = new Syntax::SimpleType("var");
+                isOutVar = true;
+            } else {
+                // (The C# UseImplicitlyTypedOutAnnotation `var` decision is
+                // DEFERRED: the annotation surface is not ported, so only
+                // the anonymous-type arm reaches the implicit form.)
+                type = context_->TypeSystemAstBuilder->ConvertType(*v.ILVariable()->Type);
+            }
             std::string name;
             // Variable is not used and discards are allowed, we can simplify
             // this to 'out T _'.
@@ -596,6 +607,11 @@ void DeclareVariables::InsertVariableDeclarations() {
             ovd->Variable()->AddAnnotation(
                 std::make_shared<CS::ILVariableResolveResult>(v.ILVariableHandle()));
             CS::CopyAnnotationsFrom(ovd, *dirExpr);
+            if (isOutVar) {
+                ovd->RemoveAnnotations<Sem::ResolveResult>();
+                ovd->AddAnnotation(std::make_shared<Sem::OutVarResolveResult>(
+                    v.ILVariable()->Type));
+            }
             Replacement replacement{
                 dirExpr, [ovd]() -> Syntax::AstNode* { return ovd; },
                 "Declare out variable"};

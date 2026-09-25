@@ -50,8 +50,11 @@
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/Semantics/OutVarResolveResult.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
+#include "Decompiler/TypeSystem/LookupStubs.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
 
 #include <gtest/gtest.h>
@@ -63,6 +66,7 @@
 namespace {
 
 namespace CS = ::ILSpy::Decompiler::CSharp;
+namespace Sem = ::ILSpy::Decompiler::Semantics;
 namespace Syntax = ::ILSpy::Decompiler::CSharp::Syntax;
 namespace IL = ::ILSpy::Decompiler::IL;
 namespace TS = ::ILSpy::Decompiler::TypeSystem;
@@ -324,6 +328,45 @@ IL::ILVariablePtr LocalInt32(const std::string& name) {
     return variable;
 }
 
+// A C#-anonymous-type stub (the PatternStatementTransform_Test rig shape):
+// the compiler-generated, empty-namespace <>f__AnonymousType shape with a
+// read-only property set.
+class AnonTypeStub : public TS::TestSupport::LookupTypeDefinition {
+public:
+    AnonTypeStub(const TS::ICompilation& compilation)
+        : TS::TestSupport::LookupTypeDefinition(
+              "<>f__AnonymousType0", std::string(),
+              TS::FullTypeName("<>f__AnonymousType0"), TS::TypeKind::Class,
+              TS::Accessibility::Public, compilation, nullptr),
+          getter_(compilation), property_(compilation) {
+        property_.SetName("A");
+        property_.SetGetter(getter_.Member());
+    }
+    bool HasAttribute(TS::KnownAttribute attribute) const override {
+        return attribute == TS::KnownAttribute::CompilerGenerated;
+    }
+    std::vector<const TS::IProperty*> GetProperties(
+        std::function<bool(const TS::IProperty*)> filter = nullptr,
+        TS::GetMemberOptions options = TS::GetMemberOptions::None)
+        const override {
+        (void)filter;
+        (void)options;
+        return {&property_};
+    }
+
+private:
+    class MethodStub : public Impl::FakeMethod {
+    public:
+        MethodStub(const TS::ICompilation& compilation)
+            : Impl::FakeMethod(compilation, TS::SymbolKind::Method) {}
+        const TS::IMethod* Member() const {
+            return static_cast<const TS::IMethod*>(this);
+        }
+    };
+    MethodStub getter_;
+    Impl::FakeProperty property_;
+};
+
 // Runs the transform's IAstTransform entry over the tree.
 void RunPipeline(Syntax::AstNode& root, RunFixture& fx) {
     DecompileRun runStorage(&fx.settings, fx.usingScope);
@@ -415,6 +458,62 @@ TEST(DeclareVariablesTest, RunKeepsDeclarationSeparateUnderTheSetting)
     const auto* annotation = initializer->Annotation<CS::ILVariableResolveResult>();
     ASSERT_NE(annotation, nullptr);
     EXPECT_EQ(annotation->Variable(), v.get());
+}
+
+// A variable whose type is a C# anonymous type combines into `var v =
+// a;` (the unwritable mangled form is never rendered).
+TEST(DeclareVariablesTest, RunCombinesDeclarationWithVarForAnonymousType)
+{
+    RunFixture fx;
+    auto anon = std::make_shared<AnonTypeStub>(fx.compilation);
+    auto v = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, anon);
+    v->Name = "v";
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    Syntax::Expression* right = new Syntax::IdentifierExpression("a");
+    auto* assignment = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Var("v", v),
+                                          Syntax::AssignmentOperatorType::Assign,
+                                          right));
+    block->Statements().Add(assignment);
+    block->Statements().Add(AssignUse("w", v));
+
+    RunPipeline(*block, fx);
+
+    auto* declaration = dynamic_cast<Syntax::VariableDeclarationStatement*>(
+        block->Statements().At(0));
+    ASSERT_NE(declaration, nullptr);
+    ASSERT_NE(declaration->Type(), nullptr);
+    EXPECT_EQ(declaration->Type()->ToString(nullptr), "var")
+        << "the anonymous-typed variable declares as var";
+}
+
+// The out-var form over an anonymous type declares `out var v` and carries
+// the OutVarResolveResult re-annotation.
+TEST(DeclareVariablesTest, RunDeclaresOutVariableWithVarForAnonymousType)
+{
+    RunFixture fx;
+    auto anon = std::make_shared<AnonTypeStub>(fx.compilation);
+    auto v = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, anon);
+    v->Name = "v";
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    auto* direction = new Syntax::DirectionExpression(
+        Syntax::FieldDirection::Out, Var("v", v));
+    auto* invocation = new Syntax::InvocationExpression(
+        new Syntax::MemberReferenceExpression(new Syntax::IdentifierExpression("M"), "M"));
+    invocation->Arguments().Add(direction);
+    auto* call = new Syntax::ExpressionStatement(invocation);
+    block->Statements().Add(call);
+
+    RunPipeline(*block, fx);
+
+    auto* outVar = dynamic_cast<Syntax::OutVarDeclarationExpression*>(
+        invocation->Arguments().At(0));
+    ASSERT_NE(outVar, nullptr);
+    ASSERT_NE(outVar->Type(), nullptr);
+    EXPECT_EQ(outVar->Type()->ToString(nullptr), "var")
+        << "the anonymous-typed out variable declares as var";
+    EXPECT_NE(outVar->Annotation<Sem::OutVarResolveResult>(), nullptr)
+        << "the implicitly-typed out var carries the OutVarResolveResult";
 }
 
 // A variable whose only use is an `out` argument of a call is declared at the
