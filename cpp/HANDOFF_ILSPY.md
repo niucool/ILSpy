@@ -3,8 +3,11 @@
 Read this + `PORT_PLAN.md` + `cpp/README.md` (and the sibling
 `cpp/PORT_LOG_BAML.md` / `cpp/PORT_LOG_DISASM.md` logs) at the start of a
 fresh session.
-Standing baseline: **connid_csharp sha256 `025b55b938356763`** (re-pinned
-DELIBERATELY across the render-fidelity slices: the enum keyword +
+Standing baseline: **connid_csharp sha256 `8944c06b3e316e71`** (re-pinned
+DELIBERATELY at the whole-module namespace grouping -- the types nest
+under `namespace X { }` blocks; the single-type -t header rides the
+entry and does not move the whole-module hash). Prior pins:
+`025b55b938356763` (the render-fidelity slices: the enum keyword +
 builtin keywords (`9c778042...`) and the expression-bodied getter-only
 properties (`025b55b9...`); the enum member list did not move it (the
 connid module has no enum types). Prior pins: `185df866d5551fd8`
@@ -450,6 +453,26 @@ The corpus-diff findings, one commit each:
   single-return getter folds to `=> <expr>;` (the
   NormalizeBlockStatements.SimplifyPropertyDeclaration shape);
   multi-statement bodies keep the block form.
+
+### The namespace-declaration slices (commits 0096c19e0/328c65e54)
+
+- **The whole-module namespace grouping** (`0096c19e0`): the C#
+  DoDecompileTypes NamespaceDeclaration emission -- consecutive
+  same-namespace types nest under one `namespace X { }` block, the
+  empty namespace renders at the root, a hidden type does not break the
+  group (the hidden check extracts into TypeIsHiddenFromRender, shared
+  with the type-level body). The earlier flat render diverged from the
+  oracle from the first type onward.
+- **The single-type namespace header** (`328c65e54`): the -t render
+  carries the file-scoped `namespace X;` header (the oracle's single-
+  type form); the whole-module paths pass wrapNamespace=false.
+
+The NESTED-TYPE placement remains the known divergence: the oracle
+nests nested types inside their declaring type's braces (the
+`public sealed class Derived` inside ModifierShapes); the flat render
+emits them as top-level classes in the empty-namespace root group.
+That rides with the member-iteration restructuring (the C# DoDecompile
+type's NestedTypes concat leads the member list).
 
 ProxyCallReplacer is DONE (the handoff's earlier entry -- the
 EarlyILTransforms surface the facade queue referenced landed with it;
