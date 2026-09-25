@@ -30,6 +30,10 @@
 
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/CSharpDecompiler.hpp"
+#include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
 #include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
@@ -886,6 +890,139 @@ TEST(PatternStatementTransformTest, ForeachOnArrayRequiresSingleDefinitionItem)
 
     ASSERT_EQ(block->Statements().Count(), 1);
     EXPECT_EQ(block->Statements().At(0), loop.forStatement);
+}
+
+// The AddressUsedForSingleCall special case: an item variable whose
+// address feeds exactly one instance-method call as the this pointer
+// (the first argument) is still assignable to the foreach designation --
+// any mutation by the call cannot be observed (the address is the only
+// use).
+TEST(PatternStatementTransformTest, ForeachOnArrayAcceptsAddressUsedForSingleCall)
+{
+    PatternStatementFixture fx;
+    auto loop = MakeForeachArrayLoop();
+    // The address-taken item: one store, one address, no loads.
+    loop.item->AddressCount = 1;
+    loop.item->LoadCount = 0;
+
+    // The IL side: the loop's BlockContainer with the call taking the
+    // item's address as its first argument (the this-pointer position).
+    auto* addressOf = new IL::LdLoca(loop.item);
+    // A resolved non-static method (the FakeMethod rig).
+    auto method = std::make_shared<TSImpl::FakeMethod>(
+        fx.compilation, TS::SymbolKind::Method);
+    method->SetName("M");
+    method->SetIsStatic(false);
+    auto* call = new IL::Call(method, /*isNewObj=*/false);
+    addressOf->Parent = call;
+    addressOf->ChildIndex = 0;
+    call->Arguments.push_back(std::unique_ptr<IL::ILInstruction>(addressOf));
+    auto* block = new IL::Block();
+    block->Add(std::unique_ptr<IL::ILInstruction>(call));
+    auto* blockContainer = new IL::BlockContainer();
+    blockContainer->AddBlock(std::unique_ptr<IL::Block>(block));
+    loop.item->AddressInstructions.push_back(addressOf);
+    // Keep the method stub alive (the call holds the shared handle).
+    static std::vector<std::shared_ptr<TSImpl::FakeMethod>> keepAlive;
+    keepAlive.push_back(std::move(method));
+    // The loop statement carries its BlockContainer (the annotation the
+    // CaptureScope/AddressUsedForSingleCall walks read).
+    loop.forStatement->AddAnnotation(
+        std::make_shared<CS::ILInstructionAnnotation>(blockContainer));
+
+    auto block2 = std::make_unique<Syntax::BlockStatement>();
+    block2->Statements().Add(loop.forStatement);
+
+    RunTransform(*block2, fx);
+
+    auto* foreachStmt =
+        dynamic_cast<Syntax::ForeachStatement*>(block2->Statements().At(0));
+    ASSERT_NE(foreachStmt, nullptr)
+        << "the address-used-for-single-call item becomes the foreach local";
+    EXPECT_EQ(loop.item->Kind, IL::VariableKind::ForeachLocal);
+}
+
+// A static method does not take a this pointer: the address use is an
+// observable reference and the for loop stays.
+TEST(PatternStatementTransformTest,
+     ForeachOnArrayRejectsAddressUsedForStaticCall)
+{
+    PatternStatementFixture fx;
+    auto loop = MakeForeachArrayLoop();
+    loop.item->AddressCount = 1;
+    loop.item->LoadCount = 0;
+
+    auto* addressOf = new IL::LdLoca(loop.item);
+    auto method = std::make_shared<TSImpl::FakeMethod>(
+        fx.compilation, TS::SymbolKind::Method);
+    method->SetName("M");
+    method->SetIsStatic(true);
+    auto* call = new IL::Call(method, /*isNewObj=*/false);
+    addressOf->Parent = call;
+    addressOf->ChildIndex = 0;
+    call->Arguments.push_back(std::unique_ptr<IL::ILInstruction>(addressOf));
+    auto* block = new IL::Block();
+    block->Add(std::unique_ptr<IL::ILInstruction>(call));
+    auto* blockContainer = new IL::BlockContainer();
+    blockContainer->AddBlock(std::unique_ptr<IL::Block>(block));
+    loop.item->AddressInstructions.push_back(addressOf);
+    static std::vector<std::shared_ptr<TSImpl::FakeMethod>> keepAlive;
+    keepAlive.push_back(std::move(method));
+    loop.forStatement->AddAnnotation(
+        std::make_shared<CS::ILInstructionAnnotation>(blockContainer));
+
+    auto block2 = std::make_unique<Syntax::BlockStatement>();
+    block2->Statements().Add(loop.forStatement);
+
+    RunTransform(*block2, fx);
+
+    EXPECT_EQ(block2->Statements().At(0), loop.forStatement)
+        << "a static call's address use keeps the for loop";
+}
+
+// The call must not sit within a NESTED loop container: the parent walk
+// reaching another BlockContainer first rejects the variable.
+TEST(PatternStatementTransformTest,
+     ForeachOnArrayRejectsAddressUsedInNestedLoop)
+{
+    PatternStatementFixture fx;
+    auto loop = MakeForeachArrayLoop();
+    loop.item->AddressCount = 1;
+    loop.item->LoadCount = 0;
+
+    auto* addressOf = new IL::LdLoca(loop.item);
+    auto method = std::make_shared<TSImpl::FakeMethod>(
+        fx.compilation, TS::SymbolKind::Method);
+    method->SetName("M");
+    method->SetIsStatic(false);
+    auto* call = new IL::Call(method, /*isNewObj=*/false);
+    addressOf->Parent = call;
+    addressOf->ChildIndex = 0;
+    call->Arguments.push_back(std::unique_ptr<IL::ILInstruction>(addressOf));
+    auto* innerBlock = new IL::Block();
+    innerBlock->Add(std::unique_ptr<IL::ILInstruction>(call));
+    // The NESTED container: the call sits inside it, and the nested
+    // container itself sits inside the loop's container.
+    auto* nestedContainer = new IL::BlockContainer();
+    nestedContainer->AddBlock(std::unique_ptr<IL::Block>(innerBlock));
+    auto* outerBlock = new IL::Block();
+    outerBlock->Add(
+        std::unique_ptr<IL::ILInstruction>(nestedContainer));
+    auto* blockContainer = new IL::BlockContainer();
+    blockContainer->AddBlock(std::unique_ptr<IL::Block>(outerBlock));
+    loop.item->AddressInstructions.push_back(addressOf);
+    static std::vector<std::shared_ptr<TSImpl::FakeMethod>> keepAlive;
+    keepAlive.push_back(std::move(method));
+    loop.forStatement->AddAnnotation(
+        std::make_shared<CS::ILInstructionAnnotation>(blockContainer));
+
+    auto block2 = std::make_unique<Syntax::BlockStatement>();
+    block2->Statements().Add(loop.forStatement);
+
+    RunTransform(*block2, fx);
+
+    EXPECT_EQ(block2->Statements().At(0), loop.forStatement)
+        << "a call inside a nested loop container keeps the for loop";
 }
 
 // The index must be a pure counter (2 stores, 3 loads, no addresses).

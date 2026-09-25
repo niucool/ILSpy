@@ -103,6 +103,8 @@
 #include "Decompiler/CSharp/Transforms/DeclareVariables.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/Semantics/MemberResolveResult.hpp"
 #include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
@@ -1006,6 +1008,36 @@ public:
         Syntax::DepthFirstAstVisitor::VisitForStatement(forStatement);
     }
 
+    // The C# `static bool AddressUsedForSingleCall(IL.ILVariable v,
+    // IL.BlockContainer? loop)` (line ~346): the variable's single address
+    // use feeds an instance-method call as the this pointer (the first
+    // argument), and the call is not within a NESTED loop container (the
+    // parent walk reaches the loop's container before any other). Any
+    // mutation by the call then cannot be observed.
+    bool AddressUsedForSingleCall(IL::ILVariable* v, IL::BlockContainer* loop) {
+        if (v->StoreCount == 1 && v->AddressCount == 1 && v->LoadCount == 0 &&
+            v->Type != nullptr &&
+            v->Type->IsReferenceType() == std::optional<bool>(false)) {
+            if (v->AddressInstructions.empty())
+                return false;
+            IL::LdLoca* addressOf = v->AddressInstructions[0];
+            auto* call = dynamic_cast<IL::Call*>(addressOf->Parent);
+            if (call != nullptr && addressOf->ChildIndex == 0 &&
+                call->Method != nullptr && !call->Method->IsStatic()) {
+                // used as this pointer for a method call
+                // this is OK iff the call is not within a nested loop
+                for (IL::ILInstruction* node = call->Parent; node != nullptr;
+                     node = node->Parent) {
+                    if (node == loop)
+                        return true;
+                    else if (dynamic_cast<IL::BlockContainer*>(node) != nullptr)
+                        break;
+                }
+            }
+        }
+        return false;
+    }
+
     // The C# `bool VariableCanBeUsedAsForeachLocal(IL.ILVariable itemVar,
     // Statement loop)` (line ~322): the checks deciding whether the loop's
     // item variable can become the foreach designation.
@@ -1023,15 +1055,11 @@ public:
         if (!itemVar->IsSingleDefinition()) {
             // foreach variable cannot be assigned to.
             // As a special case, we accept taking the address for a method
-            // call, but only if the call is the only use, so that any mutation
-            // by the call cannot be observed.
-            // DEFERRED loudly (the C# AddressUsedForSingleCall special case,
-            // line ~346): it needs the per-variable address-use list (the
-            // port's ILVariable carries the counts only) and the resolved
-            // IMethod call surface (call.Method.IsStatic). Rejected
-            // conservatively -- a by-ref-taken item variable keeps the for
-            // loop.
-            return false;
+            // call, but only if the call is the only use, so that any
+            // mutation by the call cannot be observed.
+            if (!AddressUsedForSingleCall(itemVar, blockContainer)) {
+                return false;
+            }
         }
 
         if (itemVar->CaptureScope != nullptr &&
