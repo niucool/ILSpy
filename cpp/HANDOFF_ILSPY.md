@@ -1,4 +1,4 @@
-# ILSpy C++ Port -- Session Handoff (written after `dfcba6e08`)
+# ILSpy C++ Port -- Session Handoff (written after `e6ee1d822`)
 
 Read this + `PORT_PLAN.md` + `cpp/README.md` (and the sibling
 `cpp/PORT_LOG_BAML.md` / `cpp/PORT_LOG_DISASM.md` logs) at the start of a
@@ -9,53 +9,66 @@ skipped` (filters below).
 
 ## Current position
 
-- **PatternStatementTransform: the shell + four arms landed.** Two commits:
-  `93f1f9bd2` (the cascading if-else simplification, the `a && (b && c)` ->
-  `(a && b) && c` reassociation, the `!(a == b)` -> `a != b` rewrite, the
-  ContextTrackingVisitor shell with the re-visit loop, the
-  `Statement::PatternPlaceholder`/`Statement::ToStatement` bridge, the
-  GetAstTransforms head wiring) and `dfcba6e08` (TransformFor: the
-  while->for reshape + the declaration merge into an existing for's
-  initializers; ForStatementUsesVariable / IsVariableUsedAfter /
-  DescendIntoStatement and the same-variable / ref-local-used-after /
-  continue bails).
-- **RED discipline held both slices** (23 gtest cases in
-  `tests/Decompiler/CSharp/Transforms/PatternStatementTransform_Test.cpp`).
+- **PatternStatementTransform: shell + four arms landed** (`93f1f9bd2`,
+  `dfcba6e08`); see the previous handoffs' notes in git for the arm list.
+- **DeclareVariables: the ANALYSIS half landed** (`e6ee1d822`):
+  InsertionPoint/VariableToDeclare/VariableNeedsDeclaration/
+  FindInsertionPoints (incl. the local-function CapturedVariables arm and the
+  expression-bodied-lambda scope tracking over the BlockContainer
+  annotations)/ResolveCollisions/FindCommonParent/Analyze/
+  ClearAnalysisResults/GetDeclarationPoint/WasMerged.
+  PatternStatementTransform::Run now calls Analyze + ClearAnalysisResults
+  around its visit, and the TransformFor
+  IteratorVariablesDeclaredInsideLoopBody bail is live over GetDeclarationPoint
+  (the former loud deferral is gone). ILVariable.InitialValueIsInitialized
+  landed with it (TransformDisplayClassUsage.GetOrDeclare sets it now).
+- RED discipline held (9 analysis tests RED against a no-op stub; the bail
+  test RED against the firing reshape; 33/33 GREEN after).
 - **Design notes for the landed code (read before extending):**
   - The void-visitor re-visit loop carries the C# `ContextTrackingVisitor<
     AstNode>` return value in the visitor's `lastResult` slot; every Visit
-    override records there the node the C# method returns. Keep that
-    contract when adding arms.
-  - Patterns are lazily built process-lifetime singletons
-    (`CascadingIfElsePatternHolder` / `TransformForPatternsHolder`, the
-    `GetForeachPatterns` convention) with pattern children embedded through
-    `Expression::ToExpression` / `Statement::ToStatement`.
-- **Known deferral inside TransformFor:** the
-  `IteratorVariablesDeclaredInsideLoopBody` bail reads
-  `declareVariables.GetDeclarationPoint` and is deferred on the
-  DeclareVariables port (loud comment at its C# slot in
-  `PatternStatementTransform.cpp`). Nothing observes it yet -- the CLI
-  `--csharp` path does not consult `GetAstTransforms` (connid stays
-  byte-identical through both commits).
+    override records there the node the C# method returns.
+  - Patterns are lazily built process-lifetime singletons with pattern
+    children embedded through `Expression::ToExpression` /
+    `Statement::ToStatement`.
+  - The C# Dictionary<ILVariable, VariableToDeclare> ports as an
+    insertion-ordered vector + a reference-identity index (the enumeration
+    order the collision resolution relies on).
+  - `node.Annotation<BlockContainer>()` / `Annotation<ILFunction>()` read
+    the ILInstructionAnnotation channel (the WithILInstruction carriers);
+    see GetBlockContainerAnnotation/GetILFunctionAnnotation in
+    DeclareVariables.cpp.
 - Remaining PatternStatementTransform arms, smallest-first: foreach-on-array
-  (`forOnArrayPattern`, ~287), foreach-on-inline-array (~410),
-  foreach-on-multi-dim (~516), automatic property (~693, needs the
-  IsBackingFieldOfAutomaticProperty regex + IProperty), destructor (~931,
-  needs currentTypeDefinition), try-catch-finally reshape (~983), C# 7.3
-  pattern-based fixed (~1087, needs GetResolveResult().Type), C# 8.0
-  enhanced using (~1119), the Identifier backing-field rewrite (~840).
+  (~287), foreach-on-inline-array (~410), foreach-on-multi-dim (~516),
+  automatic property (~693), destructor (~931), try-catch-finally (~983),
+  C# 7.3 pattern-based fixed (~1087), C# 8.0 enhanced using (~1119), the
+  Identifier backing-field rewrite (~840).
 
 ## Next steps (in order)
 
-1. **DeclareVariables (893 lines)**: `Analyze`/`FindInsertionPoints`/
-   `ResolveCollisions`/`InsertVariableDeclarations`/`UpdateAnnotations` +
-   `VariableNeedsDeclaration` + `GetDeclarationPoint` -- RED-first per
-   slice. When it lands: (a) wire `declareVariables.Analyze(rootNode)` +
-   `ClearAnalysisResults` into `PatternStatementTransform::Run` (the loud
-   comment there), (b) land the deferred `IteratorVariablesDeclaredInsideLoopBody`
-   bail in TransformFor, (c) add its slot to `GetAstTransforms` (the C#
-   position: after AddCheckedBlocks, before
+1. **DeclareVariables mutation half** (the class's Run + the C# lines
+   ~405-510/540-860): EnsureExpressionStatementsAreValid,
+   InsertDeconstructionVariableDeclarations, InsertVariableDeclarations
+   (the combine-declaration-and-initializer arm, the out-var arm with
+   CanBeDeclaredAsOutVariable + IsReferencedWithinDeclaringCall, the separate
+   declaration arm with the NeedsDefaultValue/NeedsSkipInit forms),
+   UpdateAnnotations, the IAstTransform derivation, and the GetAstTransforms
+   slot (after AddCheckedBlocks, before
    TransformFieldAndConstructorInitializers -- currently a loud comment).
+   Dependency survey already done:
+   - READY: OutVarResolveResult (Semantics/), TypeSystemAstBuilder.ConvertType,
+     the settings (SeparateLocalVariableDeclarations/AnonymousTypes/Discards/
+     OutVariables), DeconstructInstruction (IL/Instructions/),
+     VariableDeclarationStatement/OutVarDeclarationExpression/DeclarationExpression/
+     DirectionExpression/Comment + the trivia channel, RemoveAnnotations<T>,
+     ILVariable.LoadCount/StoreCount/AddressCount.
+   - MISSING: TransformContext's TypeSystemAstBuilder member (the C# ctor
+     carries one; the port's TransformContext is minimal), a live
+     context.TypeSystem for the SkipInit arm's FindType(KnownTypeCode.Unsafe)
+     (sub-arm deferral candidate), StatementBuilder.TranslateDeconstruction
+     Designation (blocks InsertDeconstructionVariableDeclarations -- sub-
+     transform deferral candidate), and ContainsAnonymousType (the IType
+     extension behind the `var` decision in the combine arm).
 2. The foreach arms (the `ForStatement` patterns at ~287/410/516; they
    also need `VisitForStatement`).
 3. Then: the remaining arms above, the facade completion items, the
