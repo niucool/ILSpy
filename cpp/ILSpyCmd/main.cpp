@@ -597,27 +597,43 @@ int RunMain(int argc, char** argv) {
         // line 658) with no -t; the -t filter renders the matched types
         // through the type-level entry (the C# DecompileTypes path -- no
         // module/assembly attribute sections).
+        std::string text;
         if (typeFilter.empty()) {
-            std::cout << ILSpy::Decompiler::CSharp::CSharpDecompiler::
+            text = ILSpy::Decompiler::CSharp::CSharpDecompiler::
                 DecompileWholeModuleToString(file);
-            return 0;
-        }
-        int typesPrinted = 0;
-        for (const auto& t : file.TypeDefs()) {
-            if (t.Name == "<Module>") continue;
-            if (!typeMatch(t.Namespace, t.Name)) continue;
-            std::string text;
-            if (ILSpy::Decompiler::CSharp::CSharpDecompiler::
-                    DecompileTypeToString(file, t.Token, text)) {
-                std::cout << text << '\n';
-                ++typesPrinted;
+        } else {
+            int typesPrinted = 0;
+            for (const auto& t : file.TypeDefs()) {
+                if (t.Name == "<Module>") continue;
+                if (!typeMatch(t.Namespace, t.Name)) continue;
+                std::string typeText;
+                if (ILSpy::Decompiler::CSharp::CSharpDecompiler::
+                        DecompileTypeToString(file, t.Token, typeText)) {
+                    text += typeText;
+                    text += '\n';
+                    ++typesPrinted;
+                }
+            }
+            if (typesPrinted == 0) {
+                std::cerr << "ilspycmd: no members found for type '"
+                          << typeFilter << "'\n";
+                return 1;
             }
         }
-        if (typesPrinted == 0) {
-            std::cerr << "ilspycmd: no members found for type '"
-                      << typeFilter << "'\n";
-            return 1;
+        // The C# -o writer branch (IlspyCmdProgram.cs lines 406-411):
+        // `File.CreateText(Path.Combine(outputDirectory,
+        // (string.IsNullOrEmpty(TypeName) ? outputName : TypeName)) +
+        // ".decompiled.cs")` -- the render goes to the per-file output,
+        // nothing to stdout.
+        if (outputDirectory.has_value()) {
+            if (!WriteActionOutput(
+                    ILSpy::ILSpyCmd::DecompiledOutputFilePath(
+                        *outputDirectory, asmPath, typeFilter),
+                    text))
+                return 70;  // ProgramExitCodes.EX_SOFTWARE
+            return 0;
         }
+        std::cout << text;
         return 0;
     }
 

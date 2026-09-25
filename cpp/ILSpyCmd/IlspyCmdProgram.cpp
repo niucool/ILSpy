@@ -856,6 +856,19 @@ std::string OutputFilePath(const std::string& outputDirectory,
         FileNameWithoutExtensionOf(assemblyFileName)) + extension;
 }
 
+std::string DecompiledOutputFilePath(const std::string& outputDirectory,
+    const std::string& assemblyFileName, const std::string& typeName) {
+    // The C# `-o` writer branch for the decompile path (lines 406-411):
+    // the base is the assembly's name without -t, or the TYPE NAME
+    // VERBATIM with -t (a type name's dots are part of the name -- only
+    // the assembly path goes through GetFileNameWithoutExtension).
+    return CombinePaths(outputDirectory,
+               typeName.empty()
+                   ? FileNameWithoutExtensionOf(assemblyFileName)
+                   : typeName)
+        + ".decompiled.cs";
+}
+
 void WriteOutputFile(const std::string& path, const std::string& contents) {
     // The C# `File.CreateText(path)`: create/truncate and a UTF-8-no-BOM
     // StreamWriter (the rendered text already carries its CRLFs, so the

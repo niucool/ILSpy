@@ -1018,3 +1018,28 @@ TEST(IlspyCmdProgramTest, CliOpenFailurePeWithoutManagedMetadataArm)
     EXPECT_EQ(failure.stdoutLine, "");
     EXPECT_EQ(failure.exitCode, 70);
 }
+
+// The -o writer branch for the decompile path (IlspyCmdProgram.cs lines
+// 406-411): `Path.Combine(outputDirectory, (string.IsNullOrEmpty(TypeName)
+// ? outputName : TypeName)) + ".decompiled.cs"` -- the assembly's base
+// name without -t, or the TYPE NAME VERBATIM with -t (the namespace dots
+// are part of the name, not an extension).
+TEST(IlspyCmdProgramTest, DecompiledOutputFilePathComposition)
+{
+#if defined(_WIN32)
+    constexpr const char* kSep = "\\";
+#else
+    constexpr const char* kSep = "/";
+#endif
+    std::string dir = (TempDir("decompiledpath") / "out").string();
+    // No -t: the assembly's base name.
+    EXPECT_EQ(Cmd::DecompiledOutputFilePath(dir, "mscorlib.dll", ""),
+        dir + kSep + "mscorlib.decompiled.cs");
+    // With -t: the type name verbatim.
+    EXPECT_EQ(Cmd::DecompiledOutputFilePath(dir, "mscorlib.dll", "MyApp.Page1"),
+        dir + kSep + "MyApp.Page1.decompiled.cs");
+    // The directory parts of the input path are stripped (the
+    // FileNameWithoutExtensionOf convention).
+    EXPECT_EQ(Cmd::DecompiledOutputFilePath(dir, "../../out/tiny.exe", ""),
+        dir + kSep + "tiny.decompiled.cs");
+}

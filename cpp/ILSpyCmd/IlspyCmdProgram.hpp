@@ -182,6 +182,15 @@ std::filesystem::path ToNativePath(const std::string& utf8);
 std::string OutputFilePath(const std::string& outputDirectory,
     const std::string& assemblyFileName, const std::string& extension);
 
+// The C# -o writer branch for the decompile path (IlspyCmdProgram.cs
+// lines 406-411): `Path.Combine(outputDirectory,
+// (string.IsNullOrEmpty(TypeName) ? outputName : TypeName)) +
+// ".decompiled.cs"` -- the assembly's base name without -t, or the TYPE
+// NAME VERBATIM with -t (the namespace dots are part of the name, not an
+// extension to strip).
+std::string DecompiledOutputFilePath(const std::string& outputDirectory,
+    const std::string& assemblyFileName, const std::string& typeName);
+
 // The C# `File.CreateText(path)` + the finally `output.Close()` pair
 // behind every -o writer branch: create/truncate the file and write the
 // whole block (the port renders to a buffer first and writes it at once;
