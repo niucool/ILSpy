@@ -28,17 +28,24 @@
 
 #include "Decompiler/CSharp/Transforms/PatternStatementTransform.hpp"
 
+#include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/CSharpDecompiler.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
 #include "Decompiler/DecompileRun.hpp"
+#include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
 
@@ -53,6 +60,7 @@ namespace {
 
 namespace CS = ::ILSpy::Decompiler::CSharp;
 namespace Syntax = ::ILSpy::Decompiler::CSharp::Syntax;
+namespace IL = ::ILSpy::Decompiler::IL;
 namespace Impl = ::ILSpy::Decompiler::TypeSystem::Implementation;
 namespace CSharpTS = ::ILSpy::Decompiler::CSharp::TypeSystem;
 namespace TS = ::ILSpy::Decompiler::TypeSystem;
@@ -100,8 +108,10 @@ std::string NameOf(const Syntax::Expression* expression) {
 }
 
 // Runs the transform over a root node with the fixture's context.
-void RunTransform(Syntax::AstNode& root, const PatternStatementFixture& fx) {
+void RunTransform(Syntax::AstNode& root, const PatternStatementFixture& fx,
+                  bool forStatementSetting = true) {
     DecompilerSettings settings;
+    settings.SetForStatement(forStatementSetting);
     DecompileRun runStorage(&settings, fx.usingScope);
     CS::Transforms::TransformContext context;
     context.DecompileRun = &runStorage;
@@ -340,6 +350,309 @@ TEST(PatternStatementTransformTest, NegatedRelationalIsNotRewritten)
     ASSERT_NE(top, nullptr);
     EXPECT_EQ(top, negation);
     EXPECT_EQ(less->Operator(), Syntax::BinaryOperatorType::LessThan);
+}
+
+// ---- The for-loop reshape ------------------------------------------------------------------
+
+// An `name` identifier carrying the variable annotation (the variable identity the
+// reshape's checks compare through GetILVariable).
+Syntax::IdentifierExpression* Var(const std::string& name, const IL::ILVariablePtr& variable) {
+    auto* expression = new Syntax::IdentifierExpression(name);
+    expression->AddAnnotation(std::make_shared<CS::ILVariableResolveResult>(variable));
+    return expression;
+}
+
+// `v = <init>; while (v < n) { <body...>; v = v + 1; }` -- the canonical convertible shape
+// (the variable, the condition's left operand, and the iterator's left/right operands all
+// carry the same ILVariable annotation).
+Syntax::BlockStatement* MakeWhileOverVariable(const IL::ILVariablePtr& v,
+                                             Syntax::Statement* extraBody) {
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Var("v", v),
+                                          Syntax::AssignmentOperatorType::Assign,
+                                          Id("zero"))));
+    auto* iterator = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Var("v", v),
+                                          Syntax::AssignmentOperatorType::Assign,
+                                          new Syntax::BinaryOperatorExpression(
+                                              Var("v", v), Syntax::BinaryOperatorType::Add,
+                                              Id("one"))));
+    auto* body = new Syntax::BlockStatement();
+    if (extraBody != nullptr)
+        body->Statements().Add(extraBody);
+    body->Statements().Add(iterator);
+    auto* loop = new Syntax::WhileStatement(
+        new Syntax::BinaryOperatorExpression(Var("v", v),
+                                              Syntax::BinaryOperatorType::LessThan,
+                                              Id("n")),
+        body);
+    block->Statements().Add(loop);
+    return block;
+}
+
+// `v = 0; while (v < n) { work; v = v + 1; }` becomes
+// `for (v = 0; v < n; v = v + 1) { work; }`: the declaration moves into the
+// initializers, the condition and iterator detach into the for statement, and
+// the body keeps the matched statements in a fresh block.
+TEST(PatternStatementTransformTest, WhileLoopBecomesFor)
+{
+    PatternStatementFixture fx;
+    IL::ILVariablePtr v = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local, TS::UnknownType());
+    Syntax::BlockStatement* block = MakeWhileOverVariable(v, Call("Work"));
+    auto root = std::unique_ptr<Syntax::BlockStatement>(block);
+    Syntax::Statement* declaration = block->Statements().At(0);
+    Syntax::WhileStatement* loop =
+        dynamic_cast<Syntax::WhileStatement*>(block->Statements().At(1));
+    ASSERT_NE(loop, nullptr);
+    Syntax::Expression* condition = loop->Condition();
+    auto* body = dynamic_cast<Syntax::BlockStatement*>(loop->EmbeddedStatement());
+    ASSERT_NE(body, nullptr);
+    Syntax::Statement* work = body->Statements().At(0);
+    Syntax::Statement* iterator = body->Statements().At(1);
+    // The annotation-copy channel is pinned on the replacement node.
+    loop->AddAnnotation(std::make_shared<CS::ILVariableResolveResult>(v));
+
+    RunTransform(*root, fx);
+
+    ASSERT_EQ(block->Statements().Count(), 1) << "the declaration is absorbed";
+    auto* forStatement = dynamic_cast<Syntax::ForStatement*>(block->Statements().At(0));
+    ASSERT_NE(forStatement, nullptr) << "the while is replaced by a for";
+    ASSERT_EQ(forStatement->Initializers().Count(), 1);
+    EXPECT_EQ(forStatement->Initializers().At(0), declaration);
+    EXPECT_EQ(forStatement->Condition(), condition)
+        << "the condition detaches into the for statement";
+    ASSERT_EQ(forStatement->Iterators().Count(), 1);
+    EXPECT_EQ(forStatement->Iterators().At(0), iterator);
+    auto* newBody = dynamic_cast<Syntax::BlockStatement*>(forStatement->EmbeddedStatement());
+    ASSERT_NE(newBody, nullptr);
+    EXPECT_NE(newBody, body) << "the body block is fresh (the iterator is stripped)";
+    ASSERT_EQ(newBody->Statements().Count(), 1);
+    EXPECT_EQ(newBody->Statements().At(0), work);
+    EXPECT_NE(forStatement->Annotation<CS::ILVariableResolveResult>(), nullptr)
+        << "CopyAnnotationsFrom carries the loop's annotations";
+}
+
+// The reshape requires the declared variable and the loop variable to be the
+// same ILVariable: a mismatch keeps the while.
+TEST(PatternStatementTransformTest, WhileLoopToForRequiresTheSameVariable)
+{
+    PatternStatementFixture fx;
+    IL::ILVariablePtr a = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local, TS::UnknownType());
+    IL::ILVariablePtr b = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local, TS::UnknownType());
+    // a = 0; while (b < n) { work; b = b + 1; }
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    block->Statements().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Var("a", a),
+                                          Syntax::AssignmentOperatorType::Assign,
+                                          Id("zero"))));
+    auto* iterator = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Var("b", b),
+                                          Syntax::AssignmentOperatorType::Assign,
+                                          new Syntax::BinaryOperatorExpression(
+                                              Var("b", b), Syntax::BinaryOperatorType::Add,
+                                              Id("one"))));
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(Call("Work"));
+    body->Statements().Add(iterator);
+    auto* loop = new Syntax::WhileStatement(
+        new Syntax::BinaryOperatorExpression(Var("b", b),
+                                              Syntax::BinaryOperatorType::LessThan,
+                                              Id("n")),
+        body);
+    block->Statements().Add(loop);
+
+    RunTransform(*block, fx);
+
+    ASSERT_EQ(block->Statements().Count(), 2);
+    EXPECT_EQ(block->Statements().At(1), loop)
+        << "a variable mismatch keeps the while loop";
+}
+
+// A `continue` in the loop body blocks the reshape (continue jumps to the
+// condition in a while but to the iterator in a for).
+TEST(PatternStatementTransformTest, ContinueInBodyBlocksTheFor)
+{
+    PatternStatementFixture fx;
+    IL::ILVariablePtr v = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local, TS::UnknownType());
+    auto* continueIf = new Syntax::IfElseStatement(
+        Id("c"), new Syntax::ContinueStatement());
+    Syntax::BlockStatement* block = MakeWhileOverVariable(v, continueIf);
+    auto root = std::unique_ptr<Syntax::BlockStatement>(block);
+    Syntax::WhileStatement* loop =
+        dynamic_cast<Syntax::WhileStatement*>(block->Statements().At(1));
+    ASSERT_NE(loop, nullptr);
+
+    RunTransform(*root, fx);
+
+    ASSERT_EQ(block->Statements().Count(), 2);
+    EXPECT_EQ(block->Statements().At(1), loop)
+        << "a continue in the body keeps the while loop";
+}
+
+// A `continue` inside a NESTED loop does not block the reshape (it targets the
+// nested loop, not the outer one).
+TEST(PatternStatementTransformTest, ContinueInNestedLoopDoesNotBlockTheFor)
+{
+    PatternStatementFixture fx;
+    IL::ILVariablePtr v = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local, TS::UnknownType());
+    auto* nested = new Syntax::WhileStatement(
+        Id("m"), new Syntax::ContinueStatement());
+    Syntax::BlockStatement* block = MakeWhileOverVariable(
+        v, new Syntax::ExpressionStatement(Id("work")));
+    auto root = std::unique_ptr<Syntax::BlockStatement>(block);
+    // Put the nested loop in the body before the iterator.
+    auto* body = dynamic_cast<Syntax::BlockStatement*>(
+        dynamic_cast<Syntax::WhileStatement*>(block->Statements().At(1))
+            ->EmbeddedStatement());
+    ASSERT_NE(body, nullptr);
+    body->Statements().InsertAfter(nullptr, nested);
+
+    RunTransform(*root, fx);
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    auto* forStatement = dynamic_cast<Syntax::ForStatement*>(block->Statements().At(0));
+    ASSERT_NE(forStatement, nullptr)
+        << "a continue inside a nested loop still converts";
+    ASSERT_EQ(forStatement->Initializers().Count(), 1);
+    ASSERT_EQ(forStatement->Iterators().Count(), 1);
+    auto* newBody = dynamic_cast<Syntax::BlockStatement*>(forStatement->EmbeddedStatement());
+    ASSERT_NE(newBody, nullptr);
+    ASSERT_EQ(newBody->Statements().Count(), 2);
+    EXPECT_EQ(newBody->Statements().At(0), nested);
+}
+
+// A by-ref-like iteration variable used after the loop blocks the reshape (the
+// hoisted declaration would leave a headless for whose only initialization is
+// the for-initializer ref-assignment, which cannot be split from a ref local).
+TEST(PatternStatementTransformTest, RefLocalUsedAfterLoopStaysWhile)
+{
+    PatternStatementFixture fx;
+    IL::ILVariablePtr v = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local,
+        std::make_shared<TS::ByReferenceType>(TS::UnknownType()));
+    Syntax::BlockStatement* block = MakeWhileOverVariable(v, Call("Work"));
+    auto root = std::unique_ptr<Syntax::BlockStatement>(block);
+    // use(v); -- after the loop.
+    block->Statements().Add(
+        new Syntax::ExpressionStatement(Var("v", v)));
+    Syntax::WhileStatement* loop =
+        dynamic_cast<Syntax::WhileStatement*>(block->Statements().At(1));
+    ASSERT_NE(loop, nullptr);
+
+    RunTransform(*root, fx);
+
+    ASSERT_EQ(block->Statements().Count(), 3);
+    EXPECT_EQ(block->Statements().At(1), loop)
+        << "a ref local used after the loop keeps the while loop";
+}
+
+// A by-ref-like iteration variable NOT used after the loop still converts.
+TEST(PatternStatementTransformTest, RefLocalNotUsedAfterConverts)
+{
+    PatternStatementFixture fx;
+    IL::ILVariablePtr v = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local,
+        std::make_shared<TS::ByReferenceType>(TS::UnknownType()));
+    Syntax::BlockStatement* block = MakeWhileOverVariable(v, Call("Work"));
+    auto root = std::unique_ptr<Syntax::BlockStatement>(block);
+
+    RunTransform(*root, fx);
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    auto* forStatement = dynamic_cast<Syntax::ForStatement*>(block->Statements().At(0));
+    ASSERT_NE(forStatement, nullptr)
+        << "a ref local not used after the loop still converts";
+}
+
+// `v = 0;` immediately before an existing for statement that uses `v` in its
+// condition or iterators moves the declaration into the for's initializers.
+TEST(PatternStatementTransformTest, DeclarationMergesIntoForInitializer)
+{
+    PatternStatementFixture fx;
+    IL::ILVariablePtr v = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local, TS::UnknownType());
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    auto* declaration = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Var("v", v),
+                                          Syntax::AssignmentOperatorType::Assign,
+                                          Id("zero")));
+    block->Statements().Add(declaration);
+    auto* forStatement = new Syntax::ForStatement();
+    forStatement->Condition(new Syntax::BinaryOperatorExpression(
+        Var("v", v), Syntax::BinaryOperatorType::LessThan, Id("n")));
+    forStatement->Iterators().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Var("v", v),
+                                          Syntax::AssignmentOperatorType::Assign,
+                                          Id("one"))));
+    forStatement->EmbeddedStatement(new Syntax::BlockStatement());
+    block->Statements().Add(forStatement);
+
+    RunTransform(*block, fx);
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements().At(0), forStatement);
+    ASSERT_EQ(forStatement->Initializers().Count(), 1);
+    EXPECT_EQ(forStatement->Initializers().At(0), declaration)
+        << "the declaration moves into the for initializer slot";
+}
+
+// The initializer merge requires the for statement to use the declared
+// variable: a mismatch keeps the two statements apart (and the for-pattern
+// half does not match a for statement).
+TEST(PatternStatementTransformTest, ForInitializerMergeRequiresVariableUse)
+{
+    PatternStatementFixture fx;
+    IL::ILVariablePtr a = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local, TS::UnknownType());
+    IL::ILVariablePtr b = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local, TS::UnknownType());
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    auto* declaration = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Var("a", a),
+                                          Syntax::AssignmentOperatorType::Assign,
+                                          Id("zero")));
+    block->Statements().Add(declaration);
+    auto* forStatement = new Syntax::ForStatement();
+    forStatement->Condition(new Syntax::BinaryOperatorExpression(
+        Var("b", b), Syntax::BinaryOperatorType::LessThan, Id("n")));
+    forStatement->Iterators().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Var("b", b),
+                                          Syntax::AssignmentOperatorType::Assign,
+                                          Id("one"))));
+    forStatement->EmbeddedStatement(new Syntax::BlockStatement());
+    block->Statements().Add(forStatement);
+
+    RunTransform(*block, fx);
+
+    ASSERT_EQ(block->Statements().Count(), 2);
+    EXPECT_EQ(block->Statements().At(0), declaration);
+    EXPECT_EQ(block->Statements().At(1), forStatement);
+    EXPECT_EQ(forStatement->Initializers().Count(), 0);
+}
+
+// The ForStatement setting gates the whole arm.
+TEST(PatternStatementTransformTest, ForSettingGatesTheReshape)
+{
+    PatternStatementFixture fx;
+    IL::ILVariablePtr v = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local, TS::UnknownType());
+    Syntax::BlockStatement* block = MakeWhileOverVariable(v, Call("Work"));
+    auto root = std::unique_ptr<Syntax::BlockStatement>(block);
+    Syntax::WhileStatement* loop =
+        dynamic_cast<Syntax::WhileStatement*>(block->Statements().At(1));
+    ASSERT_NE(loop, nullptr);
+
+    RunTransform(*root, fx, /*forStatementSetting=*/false);
+
+    ASSERT_EQ(block->Statements().Count(), 2);
+    EXPECT_EQ(block->Statements().At(1), loop)
+        << "the ForStatement setting turns the arm off";
 }
 
 // ---- The Run shell ---------------------------------------------------------------------
