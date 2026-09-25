@@ -22,17 +22,19 @@
 // async/await -- matches the compiler-generated state machine, inlines its
 // MoveNext body, and converts the await points into Await instructions.
 //
-// SLICE STATE (part 1): the task-creation pattern match + the Run skeleton
-// are ported; the state machine analysis (AnalyzeMoveNext /
-// ValidateCatchBlock / InlineBodyOfMoveNext / AnalyzeStateMachine /
-// DetectAwaitPattern and the cleanups) is not ported yet -- Run bails after
-// the pattern match. The async-enumerator arms (the
+// SLICE STATE (parts 1-2): the task-creation pattern match + the MoveNext
+// analyses (AnalyzeMoveNext / ValidateCatchBlock / AnalyzeDisposeAsync)
+// + InlineBodyOfMoveNext + CleanUpBodyOfMoveNext are ported; the state
+// machine await analysis (AnalyzeStateMachine / DetectAwaitPattern / the
+// final translations) is not ported yet -- Run stops after the body
+// inlining. The async-enumerator arms (the
 // MatchAsyncEnumeratorCreationPattern family) are deferred with the
 // enumerator slice.
 
 #pragma once
 
 #include "Decompiler/IL/ControlFlow/StateRangeAnalysis.hpp"
+#include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
@@ -64,6 +66,13 @@ public:
     // match for the regression tests, the MatchEnumeratorCreationNewObj
     // precedent).
     bool MatchTaskCreationPattern(ILFunction& function);
+
+    // The driver's Run resolves the reader surfaces (the deferred field/
+    // method tokens) before it matches; a caller that drives the pattern
+    // directly -- outside Run -- needs the same resolution, so this
+    // overload stores the context and resolves first.
+    bool MatchTaskCreationPattern(ILFunction& function,
+                                  ILTransformContext& context);
 
     // The pattern's extracted state (the C# sets the same fields; the test
     // seam reads them through these accessors).
@@ -101,6 +110,43 @@ private:
     bool ClassifyTaskType(ILFunction& function, ILInstruction* startCall,
                           const TypeSystem::IType& builderType);
 
+    // The C# `void AnalyzeMoveNext()` (lines 759-880): the MoveNext decode
+    // and the analyses of everything outside the big try-catch.
+    void AnalyzeMoveNext();
+    // The C# `void ValidateCatchBlock()` (lines 1020-1157): the catch
+    // handler shape.
+    void ValidateCatchBlock();
+    // The C# `void AnalyzeDisposeAsync()` (lines 1192-1230): the enumerator
+    // dispose-mode field (a no-op for the task shapes).
+    void AnalyzeDisposeAsync();
+    // The C# `void InlineBodyOfMoveNext(ILFunction function)` (lines
+    // 1234-1290): the body swap + the return-block conversions.
+    void InlineBodyOfMoveNext(ILFunction& function);
+    // The C# `void CleanUpBodyOfMoveNext(ILFunction function)` (lines
+    // 250-287): the copy propagation + inlining cleanup after the body
+    // swap.
+    void CleanUpBodyOfMoveNext(ILFunction& function);
+    // The C# `Block CheckSetResultReturnBlock(...)` (lines 886-960).
+    Block* CheckSetResultReturnBlock(BlockContainer* blockContainer, int pos,
+                                     std::vector<bool>& blocksAnalyzed);
+    // The C# `void CheckSetResultAndExit(...)` (lines 979-1015).
+    void CheckSetResultAndExit(BlockContainer* blockContainer, Block* block,
+                               int& pos);
+    // The C# `void MatchHoistedLocalCleanup(Block, ref int)` (lines 995-
+    // 1004): the Roslyn 39735 hoisted-local nulling.
+    void MatchHoistedLocalCleanup(Block* block, int& pos);
+    // The C# `void MatchCompleteCall(Block, ref int)` (lines 1159-1168).
+    void MatchCompleteCall(Block* block, int& pos);
+    // The C# `bool IsBuilderFieldOnThis(ILInstruction)` (lines 1170-1186).
+    bool IsBuilderFieldOnThis(ILInstruction* inst);
+    // The C# `bool IsBuilderOrPromiseFieldOnThis(ILInstruction)` (lines
+    // 1188-1200): the enumerator promise fields accept any field (deferred
+    // with the enumerator arms).
+    bool IsBuilderOrPromiseFieldOnThis(ILInstruction* inst);
+    // The C# `bool MatchStateAssignment(ILInstruction, out int)` (lines
+    // 1202-1215).
+    bool MatchStateAssignment(ILInstruction* inst, int& newState);
+
     ILTransformContext* context_ = nullptr;
 
     // These fields are set by MatchTaskCreationPattern() (the C# field
@@ -114,6 +160,19 @@ private:
     const TypeSystem::IField* stateField_ = nullptr;
     int initialState_ = 0;
     std::map<const TypeSystem::IField*, ILVariable*> fieldToParameterMap_;
+
+    // These fields are set by AnalyzeMoveNext() (the C# field block, lines
+    // 115-121).
+    std::unique_ptr<ILFunction> moveNextFunction_;
+    ILVariable* cachedStateVar_ = nullptr;  // caches the stateField in MoveNext
+    TryCatch* mainTryCatch_ = nullptr;
+    Block* setResultReturnBlock_ = nullptr;  // the return statement block
+    int finalState_ = 0;        // final state after the setResultAndExitBlock
+    bool finalStateKnown_ = false;
+    ILVariable* resultVar_ = nullptr;  // returned by the setResultReturnBlock
+    Block* setResultYieldBlock_ = nullptr;  // the 'yield return' block
+    ILVariable* doFinallyBodies_ = nullptr;
+    std::vector<bool> blocksAnalyzed_;
 };
 
 } // namespace ILSpy::Decompiler::IL

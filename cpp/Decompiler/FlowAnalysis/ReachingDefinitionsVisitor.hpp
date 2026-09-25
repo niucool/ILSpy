@@ -46,6 +46,8 @@
 #include <unordered_map>
 #include <vector>
 
+namespace ILSpy::Decompiler::IL { class TryCatch; }
+
 namespace ILSpy::Decompiler::IL {
 
 class Block;
@@ -129,6 +131,12 @@ protected:
     State bottomState{0};
 
 private:
+    // The C# HandleTryBlock / VisitTryCatch pair (DataFlowVisitor.cs lines
+    // 508-551): the per-try exceptional state and the handler seeding.
+    void VisitTryCatchBlocks(ILInstruction* inst);
+    std::map<IL::TryCatch*, State> stateOnException_;
+    State* currentStateOnException_ = nullptr;
+
     // --- the walk (the C# ILVisitor dispatch, manual) ---
     void Visit(ILInstruction* inst);
     void VisitDefault(ILInstruction* inst);

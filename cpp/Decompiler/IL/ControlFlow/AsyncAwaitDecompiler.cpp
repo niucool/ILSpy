@@ -21,6 +21,13 @@
 
 #include "Decompiler/IL/ControlFlow/AsyncAwaitDecompiler.hpp"
 
+#include "Decompiler/IL/Instructions/LdcConstants.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Transforms/ILInlining.hpp"
+#include "Decompiler/IL/Transforms/CopyPropagation.hpp"
+#include "Decompiler/IL/Transforms/RemoveDeadVariableInit.hpp"
+#include "Decompiler/IL/Transforms/StObjToStLoc.hpp"
+
 
 #include "Decompiler/IL/ControlFlow/YieldReturnDecompiler.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
@@ -66,6 +73,27 @@ std::string NameWithoutArity(const std::string& name) {
             return name;  // not an arity suffix
     }
     return name.substr(0, pos);
+}
+
+// The port's position reader: the C# reads the block's instruction list
+// (the terminators included); the port's reader carries the terminator in
+// the FinalInstruction slot, so a position at the end of the list reads the
+// final (the YieldReturnDecompiler InstructionAt precedent).
+ILInstruction* BlockInstructionAt(Block* block, int pos) {
+    if (block == nullptr)
+        return nullptr;
+    if (pos >= 0 && pos < static_cast<int>(block->Instructions.size()))
+        return block->Instructions[static_cast<std::size_t>(pos)].get();
+    if (pos == static_cast<int>(block->Instructions.size()))
+        return block->FinalInstruction.get();
+    return nullptr;
+}
+
+// The shared PatternMatching MatchStFld (stobj over ldflda), unshadowed
+// from the class's stateMachineVar-typed member.
+bool MatchStFldRaw(ILInstruction* inst, ILInstruction*& target,
+                   const TypeSystem::IField*& field, ILInstruction*& value) {
+    return ILSpy::Decompiler::IL::MatchStFld(inst, target, field, value);
 }
 
 // File-local MatchLdcI4 out-form (the C# `MatchLdcI4(out int value)`): an
@@ -127,10 +155,590 @@ void AsyncAwaitDecompiler::Run(ILFunction& function,
         return;
     }
 
-    // SLICE STATE (part 2): AnalyzeMoveNext + ValidateCatchBlock +
-    // AnalyzeDisposeAsync + InlineBodyOfMoveNext; (part 3) the state
-    // machine analysis and the await-pattern detection. Until they land,
-    // Run stops after the pattern match.
+    try {
+        AnalyzeMoveNext();
+        ValidateCatchBlock();
+        AnalyzeDisposeAsync();
+    } catch (const ControlFlow::SymbolicAnalysisFailedException&) {
+        return;
+    }
+
+    InlineBodyOfMoveNext(function);
+    CleanUpBodyOfMoveNext(function);
+
+    // SLICE STATE (part 3): AnalyzeStateMachine + DetectAwaitPattern +
+    // CleanDoFinallyBodies + the field translations + FinalizeInlineMoveNext.
+    // Until they land, Run stops after the body inlining (the function is
+    // marked async and carries the inlined MoveNext body, but the await
+    // points stay as their raw state-machine instructions).
+}
+
+void AsyncAwaitDecompiler::AnalyzeMoveNext() {
+    const Metadata::MetadataFile& metadata = *context_->Metadata;
+    // The C# `metadata.GetTypeDefinition(stateMachineType).GetMethods()
+    // .FirstOrDefault(f => ...Name == "MoveNext")` -- the raw-token scan.
+    std::uint32_t moveNextMethod = 0;
+    for (const auto& m : metadata.GetMethods(stateMachineType_->MetadataToken())) {
+        if (m.Name == "MoveNext") {
+            moveNextMethod = m.Token;
+            break;
+        }
+    }
+    if (moveNextMethod == 0)
+        throw ControlFlow::SymbolicAnalysisFailedException("MoveNext not found");
+    moveNextFunction_ = YieldReturnDecompiler::CreateILAst(moveNextMethod, *context_);
+    auto* blockContainer =
+        dynamic_cast<BlockContainer*>(moveNextFunction_->Body.get());
+    if (blockContainer == nullptr)
+        throw ControlFlow::SymbolicAnalysisFailedException("MoveNext body not a container");
+    Block* entry = blockContainer->EntryPoint();
+    if (entry == nullptr)
+        throw ControlFlow::SymbolicAnalysisFailedException("no entry block");
+    // The C# `entry.IncomingEdgeCount != 1` -- the C# counts the function
+    // entry as the one incoming edge; the port's edge count tracks branch
+    // predecessors only, so the entry's count is 0 (no branch targets it).
+    if (entry->IncomingEdgeCount != 0) {
+        throw ControlFlow::SymbolicAnalysisFailedException("entry incoming edges");
+    }
+    blocksAnalyzed_.assign(blockContainer->Blocks.size(), false);
+    cachedStateVar_ = nullptr;
+    int pos = 0;
+    // Visual Basic state machines initialize doFinallyBodies at the start of
+    // MoveNext(): stloc doFinallyBodies(ldc.i4 1). Deferred with the VB
+    // arms (isVisualBasicStateMachine is always false).
+    while (pos < static_cast<int>(entry->Instructions.size()) &&
+           dynamic_cast<StLoc*>(entry->Instructions[static_cast<std::size_t>(
+                                    pos)].get()) != nullptr) {
+        auto* stloc = static_cast<StLoc*>(
+            entry->Instructions[static_cast<std::size_t>(pos)].get());
+        // stloc V_1(ldfld <>4__this(ldloc this))
+        ILInstruction* target = nullptr;
+        const TypeSystem::IField* field = nullptr;
+        if (!MatchLdFld(stloc->Value.get(), target, field))
+            throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+        if (!MatchLdThis(target))
+            throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+        const TypeSystem::IMember* definition =
+            field != nullptr ? field->MemberDefinition() : nullptr;
+        if (definition == stateField_ && cachedStateVar_ == nullptr) {
+            // stloc(cachedState, ldfld(valuetype StateMachineStruct::<>1__state, ldloc(this)))
+            cachedStateVar_ = stloc->Variable.get();
+        } else {
+            auto it = fieldToParameterMap_.find(
+                static_cast<const TypeSystem::IField*>(definition));
+            if (it != fieldToParameterMap_.end()) {
+                if (stloc->Variable == nullptr ||
+                    !stloc->Variable->IsSingleDefinition())
+                    throw ControlFlow::SymbolicAnalysisFailedException("entry stloc not single-def");
+                // cachedFieldToParameterMap is deferred with the
+                // TranslateCachedFieldsToLocals arm (part 3).
+            } else {
+                throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+            }
+        }
+        pos++;
+    }
+    // The port's post-pipeline shape: the aggressive EarlyILTransforms
+    // inline the cached-state stores away, so the try-catch is the entry
+    // block's instruction at the first non-stloc position (the C# reads the
+    // same position).
+    if (pos >= static_cast<int>(entry->Instructions.size()))
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    mainTryCatch_ = dynamic_cast<TryCatch*>(
+        entry->Instructions[static_cast<std::size_t>(pos)].get());
+    if (mainTryCatch_ == nullptr)
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    // CatchHandler will be validated in ValidateCatchBlock()
+
+    // stloc doFinallyBodies(ldc.i4 1)
+    if (auto* tryContainer =
+            dynamic_cast<BlockContainer*>(mainTryCatch_->TryBlock.get())) {
+        Block* tryEntry = tryContainer->EntryPoint();
+        if (tryEntry != nullptr && !tryEntry->Instructions.empty()) {
+            auto* initDoFinallyBodies = dynamic_cast<StLoc*>(
+                tryEntry->Instructions[0].get());
+            if (initDoFinallyBodies != nullptr &&
+                initDoFinallyBodies->Variable != nullptr &&
+                initDoFinallyBodies->Variable->Kind == VariableKind::Local &&
+                initDoFinallyBodies->Variable->Type != nullptr &&
+                TypeSystem::IsKnownType(
+                    *initDoFinallyBodies->Variable->Type,
+                    TypeSystem::KnownTypeCode::Boolean) &&
+                MatchLdcI4(initDoFinallyBodies->Value.get(), 1)) {
+                doFinallyBodies_ = initDoFinallyBodies->Variable.get();
+            }
+        }
+    }
+
+    // The port's reader emits an explicit branch for the fall-through into
+    // the try-catch block (the C# block layout has no such branch); the
+    // blocks after the entry follow the C# indexing once the entry block
+    // holds the try-catch.
+    blocksAnalyzed_[0] = true;
+    int blockPos = 1;
+    setResultYieldBlock_ = nullptr;  // MatchYieldBlock (enumerator-only, deferred)
+    setResultReturnBlock_ =
+        CheckSetResultReturnBlock(blockContainer, blockPos, blocksAnalyzed_);
+
+    for (bool analyzed : blocksAnalyzed_) {
+        if (!analyzed)
+            throw ControlFlow::SymbolicAnalysisFailedException("too many blocks");
+    }
+}
+
+Block* AsyncAwaitDecompiler::CheckSetResultReturnBlock(
+    BlockContainer* blockContainer, int setResultReturnBlockIndex,
+    std::vector<bool>& blocksAnalyzed) {
+    if (setResultReturnBlockIndex >=
+        static_cast<int>(blockContainer->Blocks.size())) {
+        // This block can be absent if the function never exits normally,
+        // but always throws an exception/loops infinitely.
+        resultVar_ = nullptr;
+        finalStateKnown_ = false;  // final state will be detected in ValidateCatchBlock() instead
+        return nullptr;
+    }
+
+    Block* block =
+        blockContainer->Blocks[static_cast<std::size_t>(
+                                  setResultReturnBlockIndex)]
+            .get();
+
+    int pos = 0;
+    // [vb-only] stloc S_10(ldloc this)
+    if (pos < static_cast<int>(block->Instructions.size()) &&
+        MatchLdThis(block->Instructions[static_cast<std::size_t>(pos)]
+                        .get())) {
+        // handled by the VB-only slot check below (skipped)
+    }
+    if (pos < static_cast<int>(block->Instructions.size())) {
+        auto* stlocThisCache = dynamic_cast<StLoc*>(
+            block->Instructions[static_cast<std::size_t>(pos)].get());
+        if (stlocThisCache != nullptr &&
+            stlocThisCache->Value != nullptr &&
+            MatchLdThis(stlocThisCache->Value.get()) &&
+            stlocThisCache->Variable != nullptr &&
+            stlocThisCache->Variable->Kind == VariableKind::StackSlot) {
+            pos++;
+        }
+    }
+    // [vb-only] stloc S_11(ldc.i4 -2)
+    if (pos < static_cast<int>(block->Instructions.size())) {
+        auto* stlocFinalState = dynamic_cast<StLoc*>(
+            block->Instructions[static_cast<std::size_t>(pos)].get());
+        if (stlocFinalState != nullptr &&
+            dynamic_cast<LdcI4*>(stlocFinalState->Value.get()) != nullptr &&
+            stlocFinalState->Variable != nullptr &&
+            stlocFinalState->Variable->Kind == VariableKind::StackSlot) {
+            pos++;
+        }
+    }
+
+    // stfld <>1__state(ldloc this, ldc.i4 -2)
+    if (pos >= static_cast<int>(block->Instructions.size()))
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    if (!MatchStateAssignment(
+            block->Instructions[static_cast<std::size_t>(pos)].get(),
+            finalState_))
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    finalStateKnown_ = true;
+    pos++;
+
+    // [optional] stfld <>u__N(ldloc this, ldnull)
+    MatchHoistedLocalCleanup(block, pos);
+
+    // The async-iterator combined-tokens disposal (the
+    // MatchDisposeCombinedTokens arm) is deferred with the enumerator
+    // slice; a block whose remaining shape matches it fails the
+    // SetResultAndExit check below (the documented rollback).
+
+    MatchHoistedLocalCleanup(block, pos);
+    CheckSetResultAndExit(blockContainer, block, pos);
+    blocksAnalyzed[static_cast<std::size_t>(block->ChildIndex)] = true;
+    return blockContainer
+        ->Blocks[static_cast<std::size_t>(setResultReturnBlockIndex)]
+        .get();
+}
+
+void AsyncAwaitDecompiler::MatchHoistedLocalCleanup(Block* block, int& pos) {
+    while (pos < static_cast<int>(block->Instructions.size())) {
+        // https://github.com/dotnet/roslyn/pull/39735 hoisted local cleanup
+        ILInstruction* target = nullptr;
+        const TypeSystem::IField* field = nullptr;
+        ILInstruction* value = nullptr;
+        if (!MatchStFldRaw(BlockInstructionAt(block, pos),
+                           target, field, value))
+            break;
+        if (!MatchLdThis(target))
+            throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+        if (!MatchDefaultOrNullOrZero(value))
+            throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+        pos++;
+    }
+}
+
+void AsyncAwaitDecompiler::CheckSetResultAndExit(BlockContainer* blockContainer,
+                                                 Block* block, int& pos) {
+    // [optional] call Complete(ldflda <>t__builder(ldloc this)) (Roslyn >=3.9)
+    // call SetResult(ldflda <>t__builder(ldloc this), ldloc result)
+    // [optional] call Complete(ldflda <>t__builder(ldloc this))
+    // leave IL_0000
+    MatchCompleteCall(block, pos);
+    if (pos >= static_cast<int>(block->Instructions.size()))
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    std::vector<ILInstruction*> args;
+    if (!MatchCall(block->Instructions[static_cast<std::size_t>(pos)].get(),
+                   "SetResult", args))
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    if (!IsBuilderOrPromiseFieldOnThis(args.empty() ? nullptr : args[0]))
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    switch (methodType_) {
+        case AsyncMethodType::TaskOfT:
+            if (args.size() != 2)
+                throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+            if (!MatchLdLocOut(args[1], resultVar_))
+                throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+            break;
+        case AsyncMethodType::Task:
+        case AsyncMethodType::Void:
+            resultVar_ = nullptr;
+            if (args.size() != 1)
+                throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+            break;
+        case AsyncMethodType::AsyncEnumerable:
+        case AsyncMethodType::AsyncEnumerator:
+            resultVar_ = nullptr;
+            if (args.size() != 2)
+                throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+            if (!MatchLdcI4(args[1], 0))
+                throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+            break;
+    }
+    pos++;
+    MatchCompleteCall(block, pos);
+    if (BlockInstructionAt(block, pos) == nullptr)
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    if (!MatchLeave(BlockInstructionAt(block, pos),
+                    blockContainer))
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+}
+
+void AsyncAwaitDecompiler::MatchCompleteCall(Block* block, int& pos) {
+    if (pos >= static_cast<int>(block->Instructions.size()))
+        return;
+    std::vector<ILInstruction*> args;
+    if (MatchCall(BlockInstructionAt(block, pos),
+                  "Complete", args)) {
+        if (!(args.size() == 1 && IsBuilderFieldOnThis(args[0])))
+            throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+        pos++;
+    }
+}
+
+bool AsyncAwaitDecompiler::IsBuilderFieldOnThis(ILInstruction* inst) {
+    ILInstruction* target = nullptr;
+    const TypeSystem::IField* field = nullptr;
+    const std::optional<bool> builderIsRef =
+        builderType_ != nullptr ? builderType_->IsReferenceType()
+                                : std::optional<bool>{};
+    if (builderIsRef.has_value() && *builderIsRef) {
+        // ldfld(StateMachine::<>t__builder, ldloc(this))
+        if (!MatchLdFld(inst, target, field))
+            return false;
+    } else {
+        // ldflda(StateMachine::<>t__builder, ldloc(this))
+        if (!MatchLdFlda(inst, target, field))
+            return false;
+    }
+    return MatchLdThis(target) &&
+           field != nullptr && field->MemberDefinition() == builderField_;
+}
+
+bool AsyncAwaitDecompiler::IsBuilderOrPromiseFieldOnThis(ILInstruction* inst) {
+    // The enumerator promise fields accept any field (the C# TODO); the
+    // enumerator shapes are deferred, so this reduces to the builder check.
+    return IsBuilderFieldOnThis(inst);
+}
+
+bool AsyncAwaitDecompiler::MatchStateAssignment(ILInstruction* inst,
+                                                int& newState) {
+    // stfld(StateMachine::<>1__state, ldloc(this), ldc.i4(stateId))
+    ILInstruction* target = nullptr;
+    const TypeSystem::IField* field = nullptr;
+    ILInstruction* value = nullptr;
+    if (MatchStFldRaw(inst, target, field, value) &&
+        MatchLdThis(target) &&
+        field != nullptr && field->MemberDefinition() == stateField_ &&
+        MatchLdcI4Out(value, newState)) {
+        return true;
+    }
+    newState = 0;
+    return false;
+}
+
+void AsyncAwaitDecompiler::ValidateCatchBlock() {
+    // catch E_143 : System.Exception if (ldc.i4 1) BlockContainer { ... }
+    if (mainTryCatch_ == nullptr || mainTryCatch_->Handlers.size() != 1)
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    auto& handler = mainTryCatch_->Handlers[0];
+    if (handler->Variable == nullptr || handler->Variable->Type == nullptr ||
+        !TypeSystem::IsKnownType(*handler->Variable->Type,
+                                 TypeSystem::KnownTypeCode::Exception))
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    if (!MatchLdcI4(handler->Filter.get(), 1))
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    auto* handlerContainer =
+        dynamic_cast<BlockContainer*>(handler->Body.get());
+    if (handlerContainer == nullptr)
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    std::vector<bool> blocksAnalyzed(handlerContainer->Blocks.size(), false);
+    Block* catchBlock = handlerContainer->EntryPoint();
+    if (catchBlock == nullptr)
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    int pos = 0;
+    // [vb-only] call SetProjectError(ldloc E_143) -- deferred with the VB
+    // arms.
+    // stloc exception(ldloc E_143)
+    if (pos >= static_cast<int>(catchBlock->Instructions.size()))
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    auto* stloc = dynamic_cast<StLoc*>(
+        catchBlock->Instructions[static_cast<std::size_t>(pos++)].get());
+    if (stloc == nullptr || stloc->Value == nullptr)
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    if (!MatchLdLoc(stloc->Value.get(), handler->Variable.get()))
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    // stfld <>1__state(ldloc this, ldc.i4 -2)
+    if (pos >= static_cast<int>(catchBlock->Instructions.size()))
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    int newState = 0;
+    if (!MatchStateAssignment(
+            catchBlock->Instructions[static_cast<std::size_t>(pos++)].get(),
+            newState))
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    if (finalStateKnown_) {
+        if (newState != finalState_)
+            throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    } else {
+        finalState_ = newState;
+        finalStateKnown_ = true;
+    }
+
+    // [optional] stfld <>u__N(ldloc this, ldnull)
+    MatchHoistedLocalCleanup(catchBlock, pos);
+    // [optional] call Complete(ldfld <>t__builder(ldloc this))
+    MatchCompleteCall(catchBlock, pos);
+
+    // call SetException(ldfld <>t__builder(ldloc this), ldloc exception)
+    if (BlockInstructionAt(catchBlock, pos) == nullptr)
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    std::vector<ILInstruction*> args;
+    if (!MatchCall(
+            BlockInstructionAt(catchBlock, pos),
+            "SetException", args))
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    if (args.size() != 2)
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    if (!IsBuilderOrPromiseFieldOnThis(args[0]))
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    if (!MatchLdLoc(args[1], stloc->Variable.get()))
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+
+    pos++;
+    // [optional] call Complete(ldfld <>t__builder(ldloc this))
+    MatchCompleteCall(catchBlock, pos);
+    // [vb-only] call ClearProjectError() -- deferred with the VB arms.
+
+    // leave IL_0000
+    if (BlockInstructionAt(catchBlock, pos) == nullptr)
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    if (!MatchLeave(BlockInstructionAt(catchBlock, pos),
+                    dynamic_cast<BlockContainer*>(
+                        moveNextFunction_->Body.get())))
+        throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    blocksAnalyzed[static_cast<std::size_t>(catchBlock->ChildIndex)] = true;
+    for (bool analyzed : blocksAnalyzed) {
+        if (!analyzed)
+            throw ControlFlow::SymbolicAnalysisFailedException("async analysis failed");
+    }
+}
+
+void AsyncAwaitDecompiler::AnalyzeDisposeAsync() {
+    // The disposeModeField (the enumerator-only surface): a no-op for the
+    // task shapes.
+}
+
+void AsyncAwaitDecompiler::InlineBodyOfMoveNext(ILFunction& function) {
+    context_->StepOnce("Inline body of MoveNext()");
+    // The C# `function.Body = mainTryCatch.TryBlock` -- the try block is a
+    // BlockContainer node; the static cast is the C# reference assignment.
+    function.Body.reset(
+        static_cast<BlockContainer*>(mainTryCatch_->TryBlock.release()));
+    function.AsyncReturnType = underlyingReturnType_;
+    function.IsIterator = false;  // the enumerator shapes are deferred
+    // The C# clears moveNextFunction.Variables and takes the body out; the
+    // port's unique_ptr ownership transfers the try block to the function
+    // and leaves the moveNext function holding the catch handler.
+    std::vector<ILInstruction*> stack{function.Body.get()};
+    while (!stack.empty()) {
+        ILInstruction* node = stack.back();
+        stack.pop_back();
+        if (auto* branch = dynamic_cast<Branch*>(node)) {
+            if (branch->TargetBlock == setResultReturnBlock_) {
+                // The result variable stays owned by the state
+                // machine's function; the LdLoc carries a non-owning alias
+                // (an owning shared_ptr over the raw pointer would double
+                // free it when the leave dies).
+                std::unique_ptr<ILInstruction> value =
+                    resultVar_ != nullptr
+                        ? std::unique_ptr<ILInstruction>(
+                              new LdLoc(ILVariablePtr(ILVariablePtr(),
+                                                      resultVar_)))
+                        : nullptr;
+                std::unique_ptr<ILInstruction> replacement(
+                    new Leave(dynamic_cast<BlockContainer*>(function.Body.get()),
+                              std::move(value)));
+                replacement->SetILRange(*branch);
+                branch->ReplaceWith(std::move(replacement));
+                // ReplaceWith destroys the branch (the port's unique_ptr
+                // ownership); the C# GC lets the walk continue over the
+                // replaced node, but the branch carries no children, so
+                // skipping its child walk is the same traversal.
+                continue;
+            }
+        }
+        for (int i = 0; i < node->ChildCount(); i++) {
+            if (ILInstruction* child = node->GetChild(i))
+                stack.push_back(child);
+        }
+    }
+    // The C# adds the setResultYieldBlock (the enumerator shape) and
+    // retargets the leaves from moveNextFunction.Body to the new body --
+    // the enumerator arms are deferred, and the function-level leaves
+    // already target the (transferred) container.
+    // Register the variables the inlined body uses.
+    if (resultVar_ != nullptr)
+        function.RegisterExistingVariable(
+            ILVariablePtr(ILVariablePtr(), resultVar_));
+    {
+        std::vector<ILInstruction*> stack{function.Body.get()};
+        while (!stack.empty()) {
+            ILInstruction* node = stack.back();
+            stack.pop_back();
+            if (auto* stloc = dynamic_cast<StLoc*>(node)) {
+                if (stloc->Variable != nullptr)
+                    function.RegisterExistingVariable(stloc->Variable);
+            } else if (auto* ldloc = dynamic_cast<LdLoc*>(node)) {
+                if (ldloc->Variable != nullptr)
+                    function.RegisterExistingVariable(ldloc->Variable);
+            } else if (auto* ldloca = dynamic_cast<LdLoca*>(node)) {
+                if (ldloca->Variable != nullptr)
+                    function.RegisterExistingVariable(ldloca->Variable);
+            }
+            for (int i = 0; i < node->ChildCount(); i++) {
+                if (ILInstruction* child = node->GetChild(i))
+                    stack.push_back(child);
+            }
+        }
+    }
+}
+
+void AsyncAwaitDecompiler::CleanUpBodyOfMoveNext(ILFunction& function) {
+    context_->StepOnce("CleanUpBodyOfMoveNext");
+    // Copy-propagate stack slots holding an 'ldloca'.
+    {
+        std::vector<StLoc*> stlocs;
+        std::vector<ILInstruction*> stack{function.Body.get()};
+        while (!stack.empty()) {
+            ILInstruction* node = stack.back();
+            stack.pop_back();
+            if (auto* stloc = dynamic_cast<StLoc*>(node)) {
+                if (stloc->Variable != nullptr &&
+                    stloc->Variable->Kind == VariableKind::StackSlot &&
+                    stloc->Variable->IsSingleDefinition() &&
+                    stloc->Value != nullptr &&
+                    dynamic_cast<LdLoca*>(stloc->Value.get()) != nullptr)
+                    stlocs.push_back(stloc);
+            }
+            for (int i = 0; i < node->ChildCount(); i++) {
+                if (ILInstruction* child = node->GetChild(i))
+                    stack.push_back(child);
+            }
+        }
+        for (StLoc* stloc : stlocs)
+            CopyPropagation::Propagate(stloc, *context_);
+    }
+
+    // Simplify stobj(ldloca) -> stloc
+    {
+        std::vector<StObj*> stobjs;
+        std::vector<ILInstruction*> stack{function.Body.get()};
+        while (!stack.empty()) {
+            ILInstruction* node = stack.back();
+            stack.pop_back();
+            if (auto* stobj = dynamic_cast<StObj*>(node))
+                stobjs.push_back(stobj);
+            for (int i = 0; i < node->ChildCount(); i++) {
+                if (ILInstruction* child = node->GetChild(i))
+                    stack.push_back(child);
+            }
+        }
+        (void)stobjs;
+    }
+    StObjToStLoc().Run(function, *context_);
+
+    // The Visual Basic builder-field stack stores and the lone ldc.i4
+    // removal are deferred with the VB arms.
+
+    // Copy-propagate temporaries holding a copy of 'this'.
+    {
+        std::vector<StLoc*> stlocs;
+        std::vector<ILInstruction*> stack{function.Body.get()};
+        while (!stack.empty()) {
+            ILInstruction* node = stack.back();
+            stack.pop_back();
+            if (auto* stloc = dynamic_cast<StLoc*>(node)) {
+                if (stloc->Variable != nullptr &&
+                    stloc->Variable->IsSingleDefinition() &&
+                    stloc->Value != nullptr &&
+                    MatchLdThis(stloc->Value.get()))
+                    stlocs.push_back(stloc);
+            }
+            for (int i = 0; i < node->ChildCount(); i++) {
+                if (ILInstruction* child = node->GetChild(i))
+                    stack.push_back(child);
+            }
+        }
+        for (StLoc* stloc : stlocs)
+            CopyPropagation::Propagate(stloc, *context_);
+    }
+    RemoveDeadVariableInit().Run(function, *context_);
+    // The per-block inlining (the C# InlineAllInBlock; the enumerator
+    // ldc.i4 removal rides with the enumerator slice).
+    {
+        std::vector<ILInstruction*> stack{function.Body.get()};
+        while (!stack.empty()) {
+            ILInstruction* node = stack.back();
+            stack.pop_back();
+            if (auto* block = dynamic_cast<Block*>(node)) {
+                // Inline, but don't remove dead variables (they might get
+                // revived by the field translation).
+                for (int i = static_cast<int>(block->Instructions.size()) - 1;
+                     i >= 0; i--) {
+                    InlineOneIfPossible(block, i, *context_);
+                }
+            }
+            for (int i = 0; i < node->ChildCount(); i++) {
+                if (ILInstruction* child = node->GetChild(i))
+                    stack.push_back(child);
+            }
+        }
+    }
+}
+
+bool AsyncAwaitDecompiler::MatchTaskCreationPattern(
+    ILFunction& function, ILTransformContext& context) {
+    context_ = &context;
+    YieldReturnDecompiler::ResolveReaderSurfaces(function, context);
+    return MatchTaskCreationPattern(function);
 }
 
 bool AsyncAwaitDecompiler::MatchTaskCreationPattern(ILFunction& function) {
@@ -439,7 +1047,7 @@ bool AsyncAwaitDecompiler::MatchStFld(ILInstruction* stfld,
                                       const TypeSystem::IField*& field,
                                       ILInstruction*& value) {
     ILInstruction* target = nullptr;
-    if (!ILSpy::Decompiler::IL::MatchStFld(stfld, target, field, value))
+    if (!MatchStFldRaw(stfld, target, field, value))
         return false;
     // The C# `field.MemberDefinition as IField`.
     field = field != nullptr

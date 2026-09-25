@@ -54,6 +54,7 @@
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/IL/StackTypeOf.hpp"
 #include "Decompiler/Metadata/ILOpCodes.hpp"
+#include "Decompiler/Metadata/SRMExtensions.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
@@ -1593,7 +1594,38 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
             auto v = std::make_shared<ILVariable>();
             v->Name = "E_" + std::to_string(eh.HandlerOffset);
             v->Kind = VariableKind::ExceptionStackSlot;
-            v->Type = nullptr;  // catch type resolved later; the token is in ClassTokenOrFilterOffset
+            // The C# resolves the catch clause's type through the module
+            // (module.ResolveType(eh.CatchType)). The reader resolves the
+            // name only: the common System.Exception shape becomes the
+            // KnownType stand-in (the IsKnownType consumers match it
+            // directly); any other catch type keeps the name-only SimpleType
+            // (the deferred-resolution convention).
+            if (eh.Kind == ExceptionHandlerKind::Filter) {
+                // The C# gives filter handlers the object type (the catch
+                // type is unknown -- the filter does the matching).
+                v->Type = std::make_shared<TypeSystem::KnownType>(
+                    TypeSystem::KnownTypeCode::Object);
+            } else {
+                try {
+                    if (eh.ClassTokenOrFilterOffset != 0) {
+                        TypeSystem::FullTypeName catchTypeName =
+                            Metadata::GetFullTypeName(
+                                file, static_cast<std::uint32_t>(
+                                          eh.ClassTokenOrFilterOffset));
+                        if (catchTypeName.ReflectionName() ==
+                            "System.Exception")
+                            v->Type =
+                                std::make_shared<TypeSystem::KnownType>(
+                                    TypeSystem::KnownTypeCode::Exception);
+                        else
+                            v->Type =
+                                std::make_shared<TypeSystem::SimpleType>(
+                                    catchTypeName.GetTopLevelTypeName());
+                    }
+                } catch (const std::exception&) {
+                    v->Type = nullptr;
+                }
+            }
             v->HasGeneratedName = true;  // matches the C# ILReader's exception-slot name
             handlerExceptionVar[eh.HandlerOffset] = v;
         }

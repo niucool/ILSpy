@@ -28,6 +28,7 @@
 #include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/PatternMatching.hpp"
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
 #include "Decompiler/Metadata/DotNetCorePathFinderExtensions.hpp"
@@ -139,8 +140,8 @@ TEST(AsyncAwaitDecompilerTest, MatchesTaskCreationOverRealBody) {
 
     IL::ILTransformContext ctx = MakeContext(fixture);
     IL::AsyncAwaitDecompiler decompiler;
-    decompiler.Run(*method.function, ctx);
-    EXPECT_TRUE(decompiler.MatchTaskCreationPattern(*method.function));
+    EXPECT_TRUE(
+        decompiler.MatchTaskCreationPattern(*method.function, ctx));
     EXPECT_EQ(decompiler.MethodType(), IL::AsyncMethodType::Task);
     EXPECT_NE(decompiler.StateField(), nullptr);
     EXPECT_NE(decompiler.BuilderField(), nullptr);
@@ -159,8 +160,8 @@ TEST(AsyncAwaitDecompilerTest, MatchesTaskOfTCreationOverRealBody) {
 
     IL::ILTransformContext ctx = MakeContext(fixture);
     IL::AsyncAwaitDecompiler decompiler;
-    decompiler.Run(*method.function, ctx);
-    EXPECT_TRUE(decompiler.MatchTaskCreationPattern(*method.function));
+    EXPECT_TRUE(
+        decompiler.MatchTaskCreationPattern(*method.function, ctx));
     EXPECT_EQ(decompiler.MethodType(), IL::AsyncMethodType::TaskOfT);
 }
 
@@ -175,9 +176,70 @@ TEST(AsyncAwaitDecompilerTest, MatchesVoidCreationOverRealBody) {
 
     IL::ILTransformContext ctx = MakeContext(fixture);
     IL::AsyncAwaitDecompiler decompiler;
-    decompiler.Run(*method.function, ctx);
-    EXPECT_TRUE(decompiler.MatchTaskCreationPattern(*method.function));
+    EXPECT_TRUE(
+        decompiler.MatchTaskCreationPattern(*method.function, ctx));
     EXPECT_EQ(decompiler.MethodType(), IL::AsyncMethodType::Void);
+}
+
+// The MoveNext analyses + the body inlining: Run over the real async Task
+// method swaps the body for the state machine's try block and marks the
+// function async (the await points are still their raw instructions --
+// the state machine analysis is the next slice).
+TEST(AsyncAwaitDecompilerTest, InlinesMoveNextBodyAndMarksAsync) {
+    AsyncFixtureData fixture;
+    if (!fixture.Load())
+        GTEST_SKIP() << "the async fixture is not provisioned";
+    DecodedAsyncMethod method = DecodeMethod(fixture, "AwaitTask");
+    ASSERT_NE(method.function, nullptr);
+    ASSERT_NE(method.method, nullptr);
+
+    IL::ILTransformContext ctx = MakeContext(fixture);
+    IL::AsyncAwaitDecompiler decompiler;
+    decompiler.Run(*method.function, ctx);
+
+    EXPECT_TRUE(method.function->IsAsync())
+        << "the function is marked async";
+    ASSERT_NE(method.function->AsyncReturnType, nullptr);
+    // `async Task` -- the underlying return type is void.
+    EXPECT_TRUE(TS::IsKnownType(*method.function->AsyncReturnType,
+                                TS::KnownTypeCode::Void));
+    // The body is the state machine's try block: the awaited task's
+    // GetAwaiter call is inlined into it.
+    std::size_t getAwaiterCalls = 0;
+    std::vector<IL::ILInstruction*> stack{method.function->Body.get()};
+    while (!stack.empty()) {
+        IL::ILInstruction* node = stack.back();
+        stack.pop_back();
+        if (auto* call = dynamic_cast<IL::Call*>(node)) {
+            if (call->MethodName.find("GetAwaiter") != std::string::npos)
+                getAwaiterCalls++;
+        }
+        for (int i = 0; i < node->ChildCount(); i++) {
+            if (IL::ILInstruction* child = node->GetChild(i))
+                stack.push_back(child);
+        }
+    }
+    EXPECT_GE(getAwaiterCalls, 1u)
+        << "the inlined MoveNext body carries the await's GetAwaiter call";
+}
+
+// The Task<int> shape's underlying return type is the T.
+TEST(AsyncAwaitDecompilerTest, TaskOfTUnderlyingReturnTypeIsTheElement) {
+    AsyncFixtureData fixture;
+    if (!fixture.Load())
+        GTEST_SKIP() << "the async fixture is not provisioned";
+    DecodedAsyncMethod method = DecodeMethod(fixture, "AwaitTaskOfT");
+    ASSERT_NE(method.function, nullptr);
+    ASSERT_NE(method.method, nullptr);
+
+    IL::ILTransformContext ctx = MakeContext(fixture);
+    IL::AsyncAwaitDecompiler decompiler;
+    decompiler.Run(*method.function, ctx);
+
+    EXPECT_TRUE(method.function->IsAsync());
+    ASSERT_NE(method.function->AsyncReturnType, nullptr);
+    EXPECT_TRUE(TS::IsKnownType(*method.function->AsyncReturnType,
+                                TS::KnownTypeCode::Int32));
 }
 
 // A non-async method (the fixture's constructor) does not match.
@@ -191,6 +253,6 @@ TEST(AsyncAwaitDecompilerTest, RejectsNonAsyncMethod) {
 
     IL::ILTransformContext ctx = MakeContext(fixture);
     IL::AsyncAwaitDecompiler decompiler;
-    decompiler.Run(*method.function, ctx);
-    EXPECT_FALSE(decompiler.MatchTaskCreationPattern(*method.function));
+    EXPECT_FALSE(
+        decompiler.MatchTaskCreationPattern(*method.function, ctx));
 }

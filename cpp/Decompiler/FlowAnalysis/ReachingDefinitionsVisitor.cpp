@@ -27,6 +27,7 @@
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
+#include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
@@ -203,6 +204,19 @@ void ReachingDefinitionsVisitor::Visit(ILInstruction* inst) {
         }
         case OpCode::MatchInstruction: {
             EvaluateMatch(inst);
+            break;
+        }
+        case OpCode::TryCatch: {
+            // The C# VisitTryCatch (DataFlowVisitor.cs lines 533-551): the
+            // try block is visited through HandleTryBlock (the exceptional
+            // path seeds the handler inputs -- the state at an arbitrary
+            // point inside the try), then each handler is visited with the
+            // on-exception state and the endpoints join.
+            VisitTryCatchBlocks(inst);
+            break;
+        }
+        case OpCode::TryCatchHandler: {
+            VisitDefault(inst);
             break;
         }
         case OpCode::SwitchInstruction: {
@@ -408,6 +422,44 @@ ReachingDefinitionsVisitor::GetBlockInputState(Block* block) {
     return stateOnBranch_.emplace(block, bottomState.Clone()).first->second;
 }
 
+void ReachingDefinitionsVisitor::VisitTryCatchBlocks(ILInstruction* inst) {
+    // The C# HandleTryBlock (DataFlowVisitor.cs lines 504-530): the try
+    // block's visit writes the incoming state into the per-try
+    // stateOnException slot (an exception can be thrown at any point inside
+    // the try, so every store in it is visible to the handlers); the saved
+    // outer slot is joined with the new one after the visit ("an async
+    // exception can be thrown immediately in the handler block").
+    auto* tryCatch = static_cast<IL::TryCatch*>(inst);
+    State* newStateOnException = nullptr;
+    auto it = stateOnException_.find(tryCatch);
+    if (it != stateOnException_.end()) {
+        newStateOnException = &it->second;
+        newStateOnException->JoinWith(state);
+    } else {
+        newStateOnException =
+            &stateOnException_.emplace(tryCatch, state.Clone()).first->second;
+    }
+    State* oldStateOnException = currentStateOnException_;
+    currentStateOnException_ = newStateOnException;
+    Visit(tryCatch->TryBlock.get());
+    currentStateOnException_ = oldStateOnException;
+    if (oldStateOnException != nullptr)
+        oldStateOnException->JoinWith(*newStateOnException);
+    State onException = newStateOnException->Clone();
+    // The C# VisitTryCatch (lines 533-551): each handler visits with the
+    // on-exception state (the filter first, its mutations joined back in
+    // case the filter ran), and the endpoints join into the exit state.
+    State endpoint = state.Clone();
+    for (auto& handler : tryCatch->Handlers) {
+        if (handler == nullptr) continue;
+        state.ReplaceWith(onException);
+        if (handler->Filter != nullptr) Visit(handler->Filter.get());
+        onException.JoinWith(state);
+        if (handler->Body != nullptr) Visit(handler->Body.get());
+        endpoint.JoinWith(state);
+    }
+    state = std::move(endpoint);
+}
 void ReachingDefinitionsVisitor::VisitBlockContainerBlock(
     ILInstruction* inst) {
     auto* container = static_cast<BlockContainer*>(inst);
