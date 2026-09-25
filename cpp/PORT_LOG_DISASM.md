@@ -601,3 +601,58 @@ with the back end's error-comment render, not in the seed's stderr.
 * The ReadIL bail to close for the 23: the `mergeFailed` path
   (MergeStackIntoTarget -> the `if (s.mergeFailed) return nullptr` bail in
   ReadIL) rejecting joins the C# ILReader's stack analysis accepts.
+
+## PD12 -- the parity lock: the golden digest manifest (2026-09-24)
+
+The controller's follow-up to the 286/286: materialize the byte-identical
+`--il` outputs as golden fixtures so the parity is permanently locked in
+the committed test suite. The raw dumps are 174 MB (the biggest net48
+rows are 9-13 MB each) -- not committable -- so the lock is the digests
++ regeneration script shape:
+
+* **The manifest** (`cpp/tests/Decompiler/Disassembler/data/
+  il_parity_manifest.tsv`, 282 rows, 25 KB): one row per corpus sample
+  the CLI decompiles with rc 0 -- corpus (net48 / facades / capa), the
+  sample path relative to the corpus root, and the SHA-1 of the CLI's
+  raw `--il` stdout (CRLF included). The rc-0 row filter is what makes
+  the row set exactly the sweep's 282 IDENTICAL rows: the 4
+  malformed/native refusals (rc 70, empty stdout -- the both-fail set)
+  have no successful dump to pin and drop out automatically; their
+  refusal shape stays pinned by the PD7 ClassifyCliOpenFailure tests.
+  SHA-1 (not md5) because the repo already carries
+  Util::Sha1ForNonSecretPurposes -- no new hash dependency.
+* **The regeneration script** (`cpp/tests/tools/il_parity_manifest.sh`,
+  the differential_sweep_full.sh corpus-walk conventions): walks the same
+  three corpora, runs the CLI `--il`, and rewrites the manifest from the
+  rc-0 rows. For recording INTENTIONAL output changes only -- an
+  unexpected digest diff means the parity broke; investigate, do not
+  regenerate (the script header says so).
+* **The regression test** (`cpp/tests/Decompiler/Disassembler/
+  IlParityGolden_Test.cpp`): one gtest that reads the manifest, resolves
+  the corpus roots (ILSPY_TEST_NET48_DIR / ILSPY_TEST_CAPA_DIR, the
+  ILSPY_TEST_MSCORLIB env convention), and drives the IN-PROCESS
+  `Cmd::ShowIL` over every present row, comparing SHA-1 -- the CLI's
+  `--il` stdout is ShowIL's output buffer dumped verbatim, so the
+  digests the script takes over the CLI verify unchanged in-process
+  (spot-verified against the sweep captures, then proven by the full
+  green run). Absent fixtures SKIP with a visible tally (never fail);
+  a digest mismatch fails listing the offending corpus\tsample rows;
+  the row accounting must close (verified + skipped + mismatched ==
+  rows). CMake carries the tests source dir as a compile definition
+  (ILSPY_TESTS_SOURCE_DIR) for the data-file path.
+
+RED evidence (the lock's sensitivity): temporarily reverting the PD10
+lone-surrogate ldstr escape (the DecodeUtf8 surrogate-decode hunk) makes
+the test fail with EXACTLY the regressed sample -- "1 of 282 manifest
+rows render different bytes: capa 0953cc3b77..." -- the fix's precise
+blast radius over the whole corpus; restored, the test is green again.
+The skip path is exercised by pointing the roots at nonexistent
+directories (an instant pass, all rows skipped).
+
+Gates: the full ilspy_tests failure set is IDENTICAL (139 entries, the
+same abort point; the new test runs inside the suite and passes --
+~99 s for the 282 in-process dumps); the net48 mscorlib `--il` dump
+stays byte-identical (md5 b10e348a93301e0a40006f06a284ec09); the ASan
+build runs the lock over all 282 assemblies with ZERO AddressSanitizer
+reports (~191 s) -- the lock doubles as a standing ASan sweep of the
+whole Disassembler walk over the full corpus.
