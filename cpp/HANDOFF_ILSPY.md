@@ -1,4 +1,4 @@
-# ILSpy C++ Port -- Session Handoff (written after the IntroduceUnsafeModifier port)
+# ILSpy C++ Port -- Session Handoff (written after the dead-arm resolution)
 
 Read this + `PORT_PLAN.md` + `cpp/README.md` (and the sibling
 `cpp/PORT_LOG_BAML.md` / `cpp/PORT_LOG_DISASM.md` logs) at the start of a
@@ -74,17 +74,14 @@ env-gated test for two slices.
 
 ## Next steps (in order)
 
-1. AddCheckedBlocks -- the next GetAstTransforms slot in C# order. The
-   annotation half exists (the CheckedUncheckedAnnotation singletons
-   the operator rewrite and the SkipInit/unary arms annotate with);
-   the transform itself is the DP cost-model pass (AddCheckedBlocks.cs:
-   the Cost struct with the comparison/addition operators, the
-   InsertedNode hierarchy with its per-node-kind Insert(context)
-   overrides, the checked/unchecked insertion with cost minimization)
-   -- 421 lines, its own multi-part slice.
-2. The ReplaceMethodCallsWithOperators methodof arm (loudly deferred in
-   the .cpp): the VisitCastExpression pattern needs the LdTokenPattern /
-   TypePattern pattern classes first.
+1. TransformFieldAndConstructorInitializers -- the next GetAstTransforms
+   slot after DeclareVariables (915 lines: the ThisCallClass/Struct
+   patterns, the InitializerSequence analysis, the field/constructor
+   initializer movement). A multi-slice project.
+2. IntroduceUsingDeclarations (439 lines: the FindRequiredImports
+   visitor, the namespace resolution through the compilation, the
+   using-statement insertion) -- the high-value one: the `using`
+   lines at the top of every render.
 3. GetOptions (the DecompilerSettings -> TypeSystemOptions mapping in
    DecompilerTypeSystem.cs) -- deliberately deferred: the settings
    defaults could shift the render; port with its own baseline
@@ -92,6 +89,23 @@ env-gated test for two slices.
 4. The remaining loud sub-deferrals: UseImplicitlyTypedOutAnnotation,
    DeclareVariables' InsertDeconstructionVariableDeclarations,
    IsRefReadOnly.
+
+## RESOLVED this session (do NOT re-open)
+
+- **AddCheckedBlocks**: ALREADY PORTED on the parallel session lineage
+  (commit `90b8fdfe5`, "gnhf 168", NOT an ancestor of this branch --
+  it arrives via a future merge). An in-progress duplicate was reverted
+  cleanly this session (the working tree was restored before any
+  commit; the link breakage the revert exposed was the parallel
+  lineage's annotation-handle definitions living in that file). Before
+  porting anything here, check `git log --all --oneline -- '<path>'`
+  for parallel-lineage commits.
+- **The ReplaceMethodCallsWithOperators methodof arm** (the
+  VisitCastExpression pattern over LdTokenPattern/TypePattern): DEAD
+  CODE UPSTREAM. The LdTokenAnnotation those patterns read is only ever
+  read, never attached anywhere in the C# (the GetFieldFromHandle
+  comment documents the mechanism), so the pattern never matches.
+  Resolved as not-porting (the .cpp deferral comment updated).
 
 ## LANDED this session (the follow-up arms + two transform slots)
 

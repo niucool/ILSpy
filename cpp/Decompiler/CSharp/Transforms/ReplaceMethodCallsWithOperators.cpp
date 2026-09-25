@@ -476,10 +476,13 @@ GetUnaryOperatorTypeFromMetadataName(const std::string& name, bool& isChecked,
 // the String.Concat reduction, the System.* special methods
 // (GetTypeFromHandle, Activator.CreateInstance, GetSubArray), and the
 // decimal increment reverse optimization.
-// DEFERRED arms, loud: the VisitCastExpression methodof pattern (the
-// getMethodOrConstructorFromHandlePattern needs the LdTokenPattern /
-// TypePattern pattern classes) and the C# GetFieldFromHandle arm (dead code
-// upstream -- the LdTokenAnnotation is never added).
+// The VisitCastExpression methodof pattern (the
+// getMethodOrConstructorFromHandlePattern over the LdTokenPattern /
+// TypePattern classes) is DEAD CODE UPSTREAM and does not port: the
+// LdTokenAnnotation those patterns read is only ever read, never attached
+// anywhere in the C# (the GetFieldFromHandle arm's own comment documents
+// this), so the pattern never matches -- like the GetFieldFromHandle arm,
+// resolved as not-porting rather than deferred.
 void ReplaceMethodCallsWithOperators::ProcessInvocationExpression(
     Syntax::InvocationExpression* invocationExpression) {
     const TS::IMethod* method = dynamic_cast<const TS::IMethod*>(
