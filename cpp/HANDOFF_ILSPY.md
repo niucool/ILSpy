@@ -3,8 +3,12 @@
 Read this + `PORT_PLAN.md` + `cpp/README.md` (and the sibling
 `cpp/PORT_LOG_BAML.md` / `cpp/PORT_LOG_DISASM.md` logs) at the start of a
 fresh session.
-Standing baseline: **connid_csharp sha256 `185df866d5551fd8`** (re-pinned
-DELIBERATELY across the facade-gap batch: the explicit-impl interface
+Standing baseline: **connid_csharp sha256 `025b55b938356763`** (re-pinned
+DELIBERATELY across the render-fidelity slices: the enum keyword +
+builtin keywords (`9c778042...`) and the expression-bodied getter-only
+properties (`025b55b9...`); the enum member list did not move it (the
+connid module has no enum types). Prior pins: `185df866d5551fd8`
+(the accessor bodies; also across the facade-gap batch: the explicit-impl interface
 qualifier (`d4149f89...`), the member/type attributes (`65650637...`), and
 the accessor visibility/body forms (`185df866...` -- the getter-only
 properties with real bodies render their blocks instead of the stub).
@@ -419,6 +423,37 @@ over the module entities (GetDefinitionField/Method/Property/Event):
   the struct's ValueType, the enum's Enum replaced by the underlying
   type when not int). The C#'s BaseTypeAccessibleFrom filter stays
   deferred with the MemberLookup resolver surface.
+
+### The render-fidelity batch (commits a71543577/7ebc3b816/dbd408fa4)
+
+The corpus-diff findings, one commit each:
+- **The enum keyword + builtin keywords** (`a71543577`): the type-header
+  switch's enum arm rendered `struct` (the stand-in) -- the corpus's
+  `internal enum CS : uint` came out `internal struct CS : UInt32`; the
+  arm now renders `enum`. The builtin keywords missed the
+  entity-resolved types (System.UInt32 resolves to a SimpleType, not a
+  KnownType) -- the name-based arm in CSharpTypeName maps the primitive
+  reflection names to their keyword forms. The unnameable-base-list
+  filter's internal check also over-dropped over the corpus: ISealable
+  is internal to WindowsBase but PresentationFramework names it through
+  [InternalsVisibleTo] -- the check now uses the ported
+  IModule::InternalsVisibleTo (the same-assembly arm plus the friend
+  list). The PresentationFramework base-list diffs drop 125 -> 79 (the
+  remainder are the resolver-based name qualification -- a different gap
+  family).
+- **The enum member list** (`7ebc3b816`): the enum's const fields
+  render as the C# enum member list (the display-mode analysis:
+  consecutive-from-zero bare names, first-only for a non-zero start,
+  all / all-hex otherwise; value__ never renders). The literal suffix
+  spellings match the C# TextWriterTokenWriter (uint "u", ulong "uL").
+- **The expression-bodied getter-only property** (`dbd408fa4`): the
+  single-return getter folds to `=> <expr>;` (the
+  NormalizeBlockStatements.SimplifyPropertyDeclaration shape);
+  multi-statement bodies keep the block form.
+
+ProxyCallReplacer is DONE (the handoff's earlier entry -- the
+EarlyILTransforms surface the facade queue referenced landed with it;
+the queue note was stale).
 
 ### The facade-gap batch (commits 52e915582/a9285994e/25dd73412/545a47fb1)
 
