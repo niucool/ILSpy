@@ -1,4 +1,4 @@
-# ILSpy C++ Port -- Session Handoff (written after `46a269370`)
+# ILSpy C++ Port -- Session Handoff (written after `aa94eceac`)
 
 Read this + `PORT_PLAN.md` + `cpp/README.md` (and the sibling
 `cpp/PORT_LOG_BAML.md` / `cpp/PORT_LOG_DISASM.md` logs) at the start of a
@@ -74,19 +74,17 @@ env-gated test for two slices.
 
 ## Next steps (in order)
 
-1. The SkipInit forms in DeclareVariables -- UNBLOCKED by the
-   reference-set wiring: the recorded blocker was a live
-   context.TypeSystem for FindType(KnownTypeCode.Unsafe) (the
-   MinimalCorlib net answers it when the reference set misses Unsafe).
-   The remaining work: wire TransformContext::TypeSystem (the slot
-   exists, null today; the callers that hold a module can pass
-   &module.Compilation()), then port the C# DeclareVariables lines
-   717-770 (the SkipInit call statement in both the out-var and the
-   plain-declaration forms).
-2. The deferred GetAstTransforms slots as their transforms land
-   (ReplaceMethodCallsWithOperators, IntroduceUnsafeModifier,
-   AddCheckedBlocks, TransformFieldAndConstructorInitializers,
-   IntroduceUsingDeclarations, ...).
+1. The ReplaceMethodCallsWithOperators follow-up arms (loudly deferred
+   in the .cpp): the String.Concat reduction (+ the
+   RemoveRedundantToStringInConcat chain the static half already
+   carries), the System.* special methods (GetTypeFromHandle /
+   GetFieldFromHandle / Activator.CreateInstance / GetSubArray), the
+   op_Increment decimal special case, and the VisitCastExpression
+   methodof pattern.
+2. The next GetAstTransforms slots in C# order: IntroduceUnsafeModifier,
+   AddCheckedBlocks (the annotation half exists -- the
+   CheckedUncheckedAnnotation singletons the operator rewrite now
+   annotates with).
 3. GetOptions (the DecompilerSettings -> TypeSystemOptions mapping in
    DecompilerTypeSystem.cs) -- deliberately deferred: the settings
    defaults could shift the render; port with its own baseline
@@ -95,7 +93,36 @@ env-gated test for two slices.
    DeclareVariables' InsertDeconstructionVariableDeclarations,
    IsRefReadOnly.
 
-## LANDED this session (the reference-set wiring)
+## LANDED this session (SkipInit + the operator core)
+
+- `a07f7c6e9` -- the SkipInit forms in DeclareVariables (the C# lines
+  717-770): a local whose initial value is read before any store gets
+  the System.Runtime.CompilerServices.Unsafe.SkipInit call (the
+  out-variables form folds the declaration into the call's argument;
+  the plain form declares then calls over the out-direction
+  identifier). The enabler: TransformContext::TypeSystem wired
+  (RunAstTransforms reads the compilation off its decompilation-context
+  parameter -- the C# TransformContext ctor's IDecompilerTypeSystem; the
+  attribute path's caller passes a SimpleTypeResolveContext over the
+  module; a caller passing no context leaves the slot null and the arm
+  degrades to the plain declaration).
+- `aa94eceac` -- ReplaceMethodCallsWithOperators' user-defined-operator
+  core, the first GetAstTransforms slot: the instance IAstTransform
+  (Run + VisitInvocationExpression + ProcessInvocationExpression), the
+  op_ metadata-name tables, and the four arms (binary, unary, the
+  op_Explicit cast, op_True in a condition). UnwrapInDirectionExpression
+  ports into SyntaxExtensions (it was on the deferred list). Fallout
+  fixes: the TypeSystemAstBuilder's UseKeywordsForBuiltinTypes default
+  corrected to the C# initializer (true -- the header documented it but
+  the member said false; the connid baseline is unaffected), and the
+  transform's .cpp qualified two sibling-namespace references (the
+  nested CSharp::TypeSystem its new includes open). DeclareVariables
+  moved to the third pipeline slot (the C# order).
+- Earlier this session (the reference-set wiring): `b3cc5f1f4` the
+  DecompilerTypeSystem over the resolver-loaded reference set, `9691fdf08`
+  the KnownTypeCache FindType + the MinimalCorlib net, `46a269370` the
+  SimpleCompilation derivation. A port-baml merge (`748421cdd`) landed
+  mid-session; the gates were verified after it.
 
 - `b3cc5f1f4` -- the reference-set wiring: the DecompilerTypeSystem
   (Decompiler/TypeSystem/) resolves every AssemblyReference row
