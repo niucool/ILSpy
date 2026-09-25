@@ -33,6 +33,7 @@
 #include "Decompiler/IL/Instructions/InvalidInstructions.hpp"
 #include "Decompiler/IL/PatternMatching.hpp"
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
+#include "Decompiler/IL/Transforms/GetILTransforms.hpp"
 #include "Decompiler/Metadata/DotNetCorePathFinderExtensions.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/UniversalAssemblyResolver.hpp"
@@ -282,6 +283,39 @@ TEST(AsyncAwaitDecompilerTest, DetectsAwaitOverRealBody) {
     EXPECT_EQ(invalidBranches, 0u)
         << "no await point went undetected (the leaves would have become "
            "InvalidBranch)";
+}
+
+// The driver slot: GetILTransforms runs AsyncAwaitDecompiler right after
+// YieldReturnDecompiler (the C# CSharpDecompiler.GetILTransforms order),
+// so the full per-body pipeline over the real async method produces the
+// Await node without any direct AsyncAwaitDecompiler call.
+TEST(AsyncAwaitDecompilerTest, DriverSlotConvertsTheRealBody) {
+    AsyncFixtureData fixture;
+    if (!fixture.Load())
+        GTEST_SKIP() << "the async fixture is not provisioned";
+    DecodedAsyncMethod method = DecodeMethod(fixture, "AwaitTask");
+    ASSERT_NE(method.function, nullptr);
+    ASSERT_NE(method.method, nullptr);
+
+    IL::ILTransformContext ctx = MakeContext(fixture);
+    IL::RunILTransformsThroughBlockTransforms(*method.function, ctx);
+
+    EXPECT_TRUE(method.function->IsAsync())
+        << "the driver slot marked the function async";
+    std::size_t awaits = 0;
+    std::vector<IL::ILInstruction*> stack{method.function->Body.get()};
+    while (!stack.empty()) {
+        IL::ILInstruction* node = stack.back();
+        stack.pop_back();
+        if (dynamic_cast<IL::Await*>(node))
+            awaits++;
+        for (int i = 0; i < node->ChildCount(); i++) {
+            if (IL::ILInstruction* child = node->GetChild(i))
+                stack.push_back(child);
+        }
+    }
+    EXPECT_EQ(awaits, 1u)
+        << "the driver slot detected the await over the real body";
 }
 
 // A non-async method (the fixture's constructor) does not match.

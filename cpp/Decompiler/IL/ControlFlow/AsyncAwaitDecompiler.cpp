@@ -255,7 +255,8 @@ void AsyncAwaitDecompiler::Run(ILFunction& function,
     // reader surfaces resolve first (the CreateILAst precedent).
     YieldReturnDecompiler::ResolveReaderSurfaces(function, context);
 
-    if (!MatchTaskCreationPattern(function)) {
+    bool matched = MatchTaskCreationPattern(function);
+    if (!matched) {
         // The async-enumerator creation pattern and the runtime-async
         // transforms are deferred with their slices.
         return;
@@ -692,6 +693,12 @@ void AsyncAwaitDecompiler::InlineBodyOfMoveNext(ILFunction& function) {
     // BlockContainer node; the static cast is the C# reference assignment.
     function.Body.reset(
         static_cast<BlockContainer*>(mainTryCatch_->TryBlock.release()));
+    // The released try block still carries the try-catch as its parent (the
+    // moveNext function's tree owns that); the function owns the body now,
+    // and the parent chain the walks consult (IsDescendantOf, the CFG's
+    // function-exit test) must end at the function -- the reader wires a
+    // root body's parent to the function the same way.
+    function.Body->Parent = &function;
     function.AsyncReturnType = underlyingReturnType_;
     function.IsIterator = false;  // the enumerator shapes are deferred
     // The C# clears moveNextFunction.Variables and takes the body out; the
@@ -1513,14 +1520,6 @@ void AsyncAwaitDecompiler::DetectAwaitPattern(Block* block) {
     // block in the container.
     const int count = static_cast<int>(block->Instructions.size()) +
                       (block->FinalInstruction != nullptr ? 1 : 0);
-    for (auto& i2 : block->Instructions)
-        std::fprintf(stderr, " %s",
-                     i2->ToString().substr(0, 46).c_str());
-    if (block->FinalInstruction != nullptr)
-        std::fprintf(stderr, " |F| %s",
-                      block->FinalInstruction->ToString().substr(0, 26)
-                          .c_str());
-    std::fprintf(stderr, "\n");
     if (count < 2)
         return;
     // stloc awaiterVar(callvirt GetAwaiter(...))
