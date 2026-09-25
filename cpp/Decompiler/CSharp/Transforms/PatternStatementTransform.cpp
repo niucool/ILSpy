@@ -109,6 +109,10 @@
 #include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/IField.hpp"
+#include "Decompiler/TypeSystem/IEvent.hpp"
+#include "Decompiler/CSharp/Syntax/EventDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/FieldDeclaration.hpp"
+#include "Decompiler/TypeSystem/MetadataModule.hpp"
 #include "Decompiler/TypeSystem/IProperty.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
@@ -1894,6 +1898,60 @@ public:
         Syntax::PropertyDeclaration* propertyDeclaration) override {
         TransformAutomaticProperty(propertyDeclaration);
         Syntax::DepthFirstAstVisitor::VisitPropertyDeclaration(propertyDeclaration);
+    }
+
+    // The C# `public override AstNode VisitEventDeclaration(EventDeclaration
+    // eventDeclaration)` (line ~128): a field-like event declaration hides its
+    // backing field; remove the field declaration if it was emitted because
+    // other members reference it. (This happens for events that
+    // CSharpDecompiler.DoDecompile already recognized as automatic: the
+    // backing field is hidden from the normal member list, but re-emitted
+    // via the work list when referenced.)
+    void VisitEventDeclaration(
+        Syntax::EventDeclaration* eventDeclaration) override {
+        if (context->DecompileRun->Settings().AutomaticEvents()) {
+            auto* symbol =
+                dynamic_cast<const TS::IEvent*>(CS::GetSymbol(*eventDeclaration));
+            if (symbol != nullptr) {
+                Syntax::AstNode* parent = eventDeclaration->Parent();
+                if (parent != nullptr) {
+                    for (Syntax::AstNode* child : parent->Children()) {
+                        auto* fd =
+                            dynamic_cast<Syntax::FieldDeclaration*>(child);
+                        if (fd != nullptr &&
+                            IsEventBackingFieldDeclaration(fd, symbol)) {
+                            fd->Remove();
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        Syntax::DepthFirstAstVisitor::VisitEventDeclaration(eventDeclaration);
+    }
+
+    // The C# `static bool IsEventBackingFieldDeclaration(FieldDeclaration fd,
+    // IEvent ev)` (line ~917): the single-variable field declaration whose
+    // symbol is the event's private backing field (the same return type, and
+    // the metadata lookup maps the field row to the event row).
+    static bool IsEventBackingFieldDeclaration(Syntax::FieldDeclaration* fd,
+                                                const TS::IEvent* ev) {
+        if (fd->Variables().Count() > 1)
+            return false;
+        const TS::ISymbol* symbol = CS::GetSymbol(*fd);
+        auto* f = dynamic_cast<const TS::IField*>(symbol);
+        if (f == nullptr)
+            return false;
+        auto* module = const_cast<TS::MetadataModule*>(
+            dynamic_cast<const TS::MetadataModule*>(f->ParentModule()));
+        if (module == nullptr)
+            return false;
+        std::uint32_t eventToken = 0;
+        return f->Accessibility() == TS::Accessibility::Private &&
+               ev->ReturnType().Equals(f->ReturnType()) &&
+               module->MetadataFile()
+                   ->GetPropertyAndEventBackingFieldLookup()
+                   .IsEventBackingField(f->MetadataToken(), &eventToken);
     }
 
     // The C# `public override AstNode VisitIdentifier(Identifier identifier)`

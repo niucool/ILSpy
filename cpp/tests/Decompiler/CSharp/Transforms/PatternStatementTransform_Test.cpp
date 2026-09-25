@@ -84,9 +84,14 @@
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
 #include "Decompiler/TypeSystem/LookupStubs.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
+#include "Decompiler/CSharp/Syntax/EventDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/FieldDeclaration.hpp"
+#include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/TypeSystem/MetadataModule.hpp"
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
 #include <memory>
 #include <set>
 #include <stdexcept>
@@ -2292,6 +2297,156 @@ TEST(PatternStatementTransformTest, BackingFieldUsageRequiresFieldName)
     RunTransform(*root, fx);
 
     EXPECT_EQ(use->IdentifierToken()->Name(), "someOtherField");
+}
+
+// ---- The automatic-events arm ------------------------------------------------
+
+// The net48 PresentationFramework fixture (the baml-provisioned reference
+// assemblies): the FrameworkContentElement Loaded event + LoadedEvent
+// field drive the event convention through the REAL metadata lookup (the
+// suffix form). The reference assemblies strip the private backing fields,
+// so the field side rides a stub carrying the real compiler shape
+// (private, the event's return type, the real field row token) -- the
+// lookup and the event entity are the real metadata.
+constexpr const char* kNet48PresentationFramework =
+    "/home/jim/ilspy-test-fixtures/net48/PresentationFramework.dll";
+
+// A private field stub over a real MetadataModule (the real compiler
+// backing shape; the MetadataToken drives the metadata lookup).
+class EventBackingFieldStub : public TSImpl::FakeField {
+public:
+    EventBackingFieldStub(const TS::ICompilation& compilation,
+                           const TS::IType* returnType,
+                           std::uint32_t metadataToken)
+        : TSImpl::FakeField(compilation), returnType_(returnType),
+          metadataToken_(metadataToken) {}
+    const TS::IType& ReturnType() const override { return *returnType_; }
+    std::uint32_t MetadataToken() const override { return metadataToken_; }
+    const TS::IModule* ParentModule() const override { return parentModule_; }
+    void SetParentModule(const TS::IModule* module) { parentModule_ = module; }
+
+private:
+    const TS::IType* returnType_;
+    std::uint32_t metadataToken_;
+    const TS::IModule* parentModule_ = nullptr;
+};
+
+// A field-like event's backing field declaration is removed from the
+// enclosing type (the field is hidden behind the event).
+TEST(PatternStatementTransformTest, AutomaticEventRemovesBackingFieldDeclaration)
+{
+    std::error_code ec;
+    if (!std::filesystem::exists(kNet48PresentationFramework, ec))
+        GTEST_SKIP() << "the net48 fixture set is not provisioned";
+    PatternStatementFixture fx;
+    ::ILSpy::Decompiler::Metadata::MetadataFile file(kNet48PresentationFramework);
+    ASSERT_TRUE(file.IsValid());
+    TS::MetadataModule module{fx.compilation, &file,
+                              TS::TypeSystemOptions::Default};
+
+    // FrameworkContentElement: the Loaded event + the LoadedEvent field --
+    // the suffix-convention pair.
+    std::uint32_t eventToken = 0;
+    std::uint32_t fieldToken = 0;
+    for (const auto& t : file.TypeDefs()) {
+        if (t.Name != "FrameworkContentElement") continue;
+        for (const auto& e : file.GetEvents(t.Token))
+            if (e.Name == "Loaded") eventToken = e.Token;
+        for (const auto& f : file.GetFields(t.Token))
+            if (f.Name == "LoadedEvent") fieldToken = f.Token;
+    }
+    ASSERT_NE(eventToken, 0u) << "the fixture carries the Loaded event";
+    ASSERT_NE(fieldToken, 0u) << "the fixture carries the LoadedEvent field";
+    const TS::IEvent* loaded = module.GetDefinitionEvent(eventToken);
+    ASSERT_NE(loaded, nullptr);
+
+    // The event declaration with its symbol annotation.
+    auto* eventDeclaration = new Syntax::EventDeclaration();
+    eventDeclaration->AddAnnotation(
+        std::make_shared<Sem::MemberResolveResult>(
+            std::shared_ptr<Sem::ResolveResult>(), loaded));
+
+    // The backing field declaration (one variable, the stub symbol over the
+    // real row).
+    auto* fieldDeclaration = new Syntax::FieldDeclaration();
+    auto* variable = new Syntax::VariableInitializer();
+    variable->Name("LoadedEvent");
+    fieldDeclaration->Variables().Add(variable);
+    auto field = std::make_shared<EventBackingFieldStub>(
+        fx.compilation, &loaded->ReturnType(), fieldToken);
+    field->SetName("LoadedEvent");
+    field->SetAccessibility(TS::Accessibility::Private);
+    field->SetParentModule(&module);
+    fieldDeclaration->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        std::shared_ptr<Sem::ResolveResult>(),
+        static_cast<TSImpl::FakeMember*>(field.get())));
+
+    auto type = std::make_unique<Syntax::TypeDeclaration>();
+    type->Members().Add(eventDeclaration);
+    type->Members().Add(fieldDeclaration);
+
+    RunTransform(*type, fx);
+
+    ASSERT_EQ(type->Members().Count(), 1)
+        << "the backing field declaration is removed";
+    EXPECT_EQ(type->Members().At(0), eventDeclaration);
+}
+
+// A non-private field (the reference assembly's real public static
+// LoadedEvent accessibility) keeps the declaration.
+TEST(PatternStatementTransformTest, AutomaticEventRequiresPrivateField)
+{
+    std::error_code ec;
+    if (!std::filesystem::exists(kNet48PresentationFramework, ec))
+        GTEST_SKIP() << "the net48 fixture set is not provisioned";
+    PatternStatementFixture fx;
+    ::ILSpy::Decompiler::Metadata::MetadataFile file(kNet48PresentationFramework);
+    ASSERT_TRUE(file.IsValid());
+    TS::MetadataModule module{fx.compilation, &file,
+                              TS::TypeSystemOptions::Default};
+
+    std::uint32_t eventToken = 0;
+    std::uint32_t fieldToken = 0;
+    for (const auto& t : file.TypeDefs()) {
+        if (t.Name != "FrameworkContentElement") continue;
+        for (const auto& e : file.GetEvents(t.Token))
+            if (e.Name == "Loaded") eventToken = e.Token;
+        for (const auto& f : file.GetFields(t.Token))
+            if (f.Name == "LoadedEvent") fieldToken = f.Token;
+    }
+    ASSERT_NE(eventToken, 0u);
+    ASSERT_NE(fieldToken, 0u);
+    const TS::IEvent* loaded = module.GetDefinitionEvent(eventToken);
+    ASSERT_NE(loaded, nullptr);
+
+    auto* eventDeclaration = new Syntax::EventDeclaration();
+    eventDeclaration->AddAnnotation(
+        std::make_shared<Sem::MemberResolveResult>(
+            std::shared_ptr<Sem::ResolveResult>(), loaded));
+
+    auto* fieldDeclaration = new Syntax::FieldDeclaration();
+    auto* variable = new Syntax::VariableInitializer();
+    variable->Name("LoadedEvent");
+    fieldDeclaration->Variables().Add(variable);
+    auto field = std::make_shared<EventBackingFieldStub>(
+        fx.compilation, &loaded->ReturnType(), fieldToken);
+    field->SetName("LoadedEvent");
+    // The reference assembly's real accessibility: a public static
+    // RoutedEvent field, not a backing field.
+    field->SetAccessibility(TS::Accessibility::Public);
+    field->SetParentModule(&module);
+    fieldDeclaration->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        std::shared_ptr<Sem::ResolveResult>(),
+        static_cast<TSImpl::FakeMember*>(field.get())));
+
+    auto type = std::make_unique<Syntax::TypeDeclaration>();
+    type->Members().Add(eventDeclaration);
+    type->Members().Add(fieldDeclaration);
+
+    RunTransform(*type, fx);
+
+    ASSERT_EQ(type->Members().Count(), 2)
+        << "a non-private field keeps its declaration";
 }
 
 // A Run entered while another Run is in flight throws (the C# reentrancy
