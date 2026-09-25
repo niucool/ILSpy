@@ -164,6 +164,16 @@ std::vector<const ITypeDefinition*> GetTopLevelTypeDefinitions(const ICompilatio
     return result;
 }
 
+std::shared_ptr<IMethod> AliasMethod(const IMethod* method) {
+    if (method == nullptr)
+        return nullptr;
+    return std::shared_ptr<IMethod>(const_cast<IMethod*>(method),
+                                    [](IMethod*) {
+                                        // no-op: the type system owns the
+                                        // instance (the header contract)
+                                    });
+}
+
 bool IsKnownType(const IType& type, KnownTypeCode knownType) {
     // The reader's primitive stand-in (KnownType) carries the known-type code
     // directly; it has no ITypeDefinition to resolve, so answer via its code.

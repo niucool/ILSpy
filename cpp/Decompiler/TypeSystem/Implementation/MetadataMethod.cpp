@@ -660,11 +660,9 @@ const IMethod* MetadataMethod::Specialize(
     TypeParameterSubstitution sub = (substitution != nullptr)
         ? *substitution
         : TypeParameterSubstitution(std::nullopt, std::nullopt);
-    std::shared_ptr<IMethod> alias(
-        static_cast<IMethod*>(const_cast<MetadataMethod*>(this)),
-        [](IMethod*) {
-            // no-op: the module's methodDefs_ cache owns this instance
-        });
+    // A non-owning alias over this module-cache-owned instance (the
+    // `AliasMethod` surface).
+    std::shared_ptr<IMethod> alias = TypeSystem::AliasMethod(this);
     std::shared_ptr<IMethod> result =
         SpecializedMethod::Create(std::move(alias), std::move(sub));
     const IMethod* raw = result.get();

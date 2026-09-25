@@ -1161,17 +1161,6 @@ NormalizeTypeVisitor& CompareTypeNormalizer()
     return instance;
 }
 
-// A non-owning alias over a method this module (or one of its registries)
-// keeps alive -- the `VarArgInstanceMethod` ctor's `shared_ptr<IMethod>`
-// parameter over a module-cache-owned `MetadataMethod` (the
-// no-op-deleter-alias convention).
-std::shared_ptr<IMethod> AliasMethod(IMethod* method)
-{
-    return std::shared_ptr<IMethod>(method, [](IMethod*) {
-        // no-op: the module's cache or registry owns this instance
-    });
-}
-
 // A non-owning alias over an IType object its owner keeps alive (a
 // parameter's type flowing into a fake property's ReturnType, the C#
 // reference assignment -- the ReflectionHelper.cpp alias convention).
@@ -1309,7 +1298,7 @@ const IMethod* MetadataModule::ResolveMethodDefinition(
             && parameters.back()->Type().Kind() == TypeKind::ArgList)
         {
             auto wrapper = std::make_shared<VarArgInstanceMethod>(
-                AliasMethod(const_cast<IMethod*>(method)),
+                AliasMethod(method),
                 std::vector<ITypePtr>{});
             resolvedMethods_.push_back(wrapper);
             method = wrapper.get();
@@ -1548,7 +1537,7 @@ const IMethod* MetadataModule::ResolveMethodReference(
             signature.ParameterTypes.begin() + signature.RequiredParameterCount,
             signature.ParameterTypes.end());
         auto wrapper = std::make_shared<VarArgInstanceMethod>(
-            AliasMethod(const_cast<IMethod*>(method)),
+            AliasMethod(method),
             std::move(varArgTypes));
         resolvedMethods_.push_back(wrapper);
         method = wrapper.get();

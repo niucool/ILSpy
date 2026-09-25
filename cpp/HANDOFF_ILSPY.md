@@ -399,13 +399,34 @@ Facade instance surface.
   the LdMemberToken node; Call's resolved-method ctor family +
   ExpectedTypeForThisPointer) -- all C#-present members, verified against
   the reference source. ConvertCoalesce is COMPLETE;
-  ConvertComparison's 4-arg lifted form (node-sourced handle) and the
-  builtin Comp fallback are DONE, but its user-defined-operator and
-  String-arms DETECT-then-bail: building their Call needs a shared
-  IMethod handle and the port only has raw pointers for resolver-sourced
-  methods (OperatorResolveResult stores the method raw; only the
-  token-node-sourced handles are shared) -- a shared-method-handle
-  surface is the named prerequisite. TEST DISCIPLINE: the resolver-backed
+  ConvertComparison is COMPLETE (all four arms: the 4-arg lifted form,
+  the resolver user-defined-operator arm, the String
+  op_Equality/op_Inequality arm, and the builtin Comp fallback).
+  The shared-method-handle surface landed as
+  `TypeSystemExtensions.h(pp)::AliasMethod(const IMethod*)` -- the
+  consolidated no-op-deleter borrow (the C# holds every IMethod as a GC
+  reference; the owner -- the module's methodDefs_ cache, a stub registry,
+  the fake's creator -- keeps the instance alive, the SnapshotType
+  convention (c) for methods). The four sites that had re-invented the
+  inline lambda (CSharpResolver::GetUserDefinedOperatorCandidates,
+  MetadataModule's file-local AliasMethod, MetadataMethod::Specialize,
+  FakeMethod::Specialize) now route through it. THE RESOLVER LIFETIME BUG
+  THE NEW rr-arm TEST EXPOSED (fixed in the same slice): the
+  user-defined-operator candidate collection kept only RAW pointers to
+  the freshly-built LiftedUserDefinedOperator wrappers, which the C#
+  HashSet holds as strong references -- the wrappers freed at each scan's
+  end (the second scan's fresh lift REUSED the freed block, which is why
+  the pointer-identity dedup "worked" and the resolver's own tests passed
+  by UB luck; the TET fixture's heap state segfaulted). The fix:
+  ResolveUnaryOperator and ResolveBinaryOperator hold every candidate
+  handle in a local keep-alive vector, wrap it in a shared holder after
+  the AddCandidate loop, and thread it through
+  CreateResolveResultForUserDefinedOperator into the
+  OperatorResolveResult's new ctor-2 `methodKeepAlive` (a type-erased
+  `shared_ptr<const void>`; null for the module-cached methods that need
+  no keep-alive) -- the rr keeps its method raw valid for its own
+  lifetime, the C# GC-reference field made explicit. TEST DISCIPLINE: the
+  resolver-backed
   arms need the test compilation to register the FULL KnownTypeCode range
   (Object..String + NullableOfT) -- an unregistered code falls to the
   non-shared unknownType_ stub whose shared_from_this throws bad_weak_ptr

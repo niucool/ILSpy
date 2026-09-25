@@ -23,6 +23,7 @@
 // and the CreateDummyConstructor factory.
 
 #include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // AliasMethod
 
 #include "Decompiler/TypeSystem/ICompilation.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
@@ -236,11 +237,9 @@ const IMethod* FakeMethod::Specialize(
     TypeParameterSubstitution sub = (substitution != nullptr)
         ? *substitution
         : TypeParameterSubstitution(std::nullopt, std::nullopt);
-    std::shared_ptr<IMethod> alias(
-        static_cast<IMethod*>(const_cast<FakeMethod*>(this)),
-        [](IMethod*) {
-            // no-op: the fake's creator owns this instance
-        });
+    // A non-owning alias over this creator-owned instance (the `AliasMethod`
+    // surface).
+    std::shared_ptr<IMethod> alias = TypeSystem::AliasMethod(this);
     std::shared_ptr<IMethod> result =
         SpecializedMethod::Create(std::move(alias), std::move(sub));
     const IMethod* raw = result.get();

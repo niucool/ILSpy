@@ -404,7 +404,8 @@ public:
     static std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
     CreateResolveResultForUserDefinedOperator(
         ILSpy::Decompiler::CSharp::Resolver::OverloadResolution& r,
-        ILSpy::Decompiler::TypeSystem::ExpressionType operatorType);
+        ILSpy::Decompiler::TypeSystem::ExpressionType operatorType,
+        std::shared_ptr<const void> methodKeepAlive = nullptr);
 
     // ---- Convert / ResolveCast ----------------------------------------------------------------
     // (The `ResolveCast` region, CSharpResolver.cs lines 1319-1470, plus the private

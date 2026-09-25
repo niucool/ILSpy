@@ -44,6 +44,7 @@
 #include <stdexcept>
 #include <optional>
 #include <vector>
+#include <memory>
 
 // Forward declarations for the new closure/default-value region's parameter types
 // (pointer / reference declarations only -- the .cpp includes the full headers;
@@ -261,6 +262,20 @@ const IModule* FindModuleByAssemblyNameInfo(
 const IModule* FindModuleByReference(
     const ICompilation& compilation,
     const ::ILSpy::Decompiler::Metadata::IAssemblyReference& assemblyName);
+
+// The shared-handle surface over a type-system-owned method (the consolidated
+// no-op-deleter alias; the C# holds every `IMethod` as a GC reference, so the
+// port needs a handle wherever a `shared_ptr<IMethod>` parameter crosses into
+// raw-pointer land). The deleter is a no-op: the owner -- the module's
+// `methodDefs_` cache, a stub registry, the fake's creator -- keeps the
+// instance alive for the type system's lifetime, the same borrow
+// `SnapshotType` (the TypeProvider convention (c)) makes for `IType`. The
+// `const_cast` reconciles the const-correct raw views (`IType::GetMethods`,
+// `OperatorResolveResult::UserDefinedOperatorMethod`) with the non-const
+// handle the consumers (the `Call` node, the `SpecializedMethod` ctors) take
+// (the D515 convention -- the underlying type-system objects are mutable).
+// A null method yields a null handle.
+std::shared_ptr<IMethod> AliasMethod(const IMethod* method);
 
 // The C# `public static bool IsKnownType(this IType type, KnownTypeCode knownType)`:
 //

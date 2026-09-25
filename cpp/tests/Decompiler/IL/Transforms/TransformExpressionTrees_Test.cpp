@@ -37,6 +37,7 @@
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/TypeSystem/LookupStubs.hpp"
+#include "Decompiler/TypeSystem/IParameter.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
@@ -728,6 +729,208 @@ TEST(TransformExpressionTreesTest, ConvertComparisonReducesToComp)
     EXPECT_EQ(comp->Kind, IL::ComparisonKind::Equality);
     EXPECT_EQ(comp->LiftingKind, IL::ComparisonLiftingKind::None);
     EXPECT_EQ(comp->InputType, IL::StackType::I4);
+}
+
+// The parameter stub the operator-method fixtures below need (the
+// CSharpResolverBinaryOperator_Test TestParameter precedent).
+class OpParameter : public TS::IParameter {
+public:
+    explicit OpParameter(TS::ITypePtr type) : type_(std::move(type)) {}
+    TS::SymbolKind SymbolKind() const override
+    { return TS::SymbolKind::Parameter; }
+    std::string Name() const override { return "p"; }
+    const TS::IType& Type() const override { return *type_; }
+    bool IsConst() const override { return false; }
+    std::any GetConstantValue(bool) const override { return std::any{}; }
+    std::vector<const TS::IAttribute*> GetAttributes() const override
+    { return {}; }
+    TS::ReferenceKind ReferenceKind() const override
+    { return TS::ReferenceKind::None; }
+    bool IsParams() const override { return false; }
+    bool IsOptional() const override { return false; }
+    bool HasConstantValueInSignature() const override { return false; }
+    const TS::IParameterizedMember* Owner() const override { return nullptr; }
+    TS::LifetimeAnnotation Lifetime() const override { return {}; }
+private:
+    TS::ITypePtr type_;
+};
+
+// The user-defined comparison operator arm (the C# 2-arg form's resolver path):
+// `Expression.Equal(a, b)` over a struct with `op_Equality(S, S) -> bool` resolves
+// the user-defined operator through the resolver and converts to a Call carrying
+// that method (the raw from the OperatorResolveResult aliased onto the
+// type-system-owned handle).
+TEST(TransformExpressionTreesTest, ConvertComparisonResolvesUserDefinedOperator)
+{
+    auto compilationOwner =
+        std::make_unique<TS::TestSupport::LookupCompilation>();
+    auto& compilation = *compilationOwner;
+    std::vector<std::shared_ptr<KindDef>> kindDefs;
+    RegisterKnownTypeCodes(compilation, kindDefs);
+    auto booleanType =
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Boolean);
+    auto hostDef = std::make_shared<KindDef>(
+        "Host", "", TS::FullTypeName(TS::TopLevelTypeName("", "Host", 0)),
+        TS::TypeKind::Struct, TS::Accessibility::Public, compilation, nullptr,
+        TS::KnownTypeCode::None);
+    auto expressionDef = std::make_shared<TS::SimpleType>(TS::TopLevelTypeName(
+        std::string("System.Linq.Expressions"), std::string("Expression")));
+    TS::ITypePtr lambdaMethodReturnType =
+        std::make_shared<TS::ParameterizedType>(
+            expressionDef, std::vector<TS::ITypePtr>{booleanType});
+    // `bool Host::op_Equality(Host, Host)` -- the keep-alives hold the stubs
+    // for the test's lifetime (the resolver reads them through raw views).
+    std::vector<std::shared_ptr<OpParameter>> opParams;
+    for (int i = 0; i < 2; i++)
+        opParams.push_back(std::make_shared<OpParameter>(hostDef));
+    auto op = std::make_shared<TS::TestSupport::LookupMethod>(
+        "op_Equality", compilation);
+    op->SetIsOperator(true);
+    op->SetReturnType(booleanType);
+    op->SetParameters({opParams[0].get(), opParams[1].get()});
+    hostDef->SetMethods({op.get()});
+
+    // Expression.Equal(Expression.Constant(default(Host), typeof(Host)),
+    //                  Expression.Constant(default(Host), typeof(Host)))
+    auto constantOfHost = [&hostDef]() {
+        auto constant = std::make_unique<IL::Call>(
+            std::make_shared<NamedMethodStub>(
+                "System.Linq.Expressions", "Expression", "Constant"));
+        constant->Arguments.push_back(std::make_unique<IL::LdNull>());
+        auto innerGetTypeCall = std::make_unique<IL::Call>(
+            std::make_shared<GetTypeFromHandleStub>());
+        innerGetTypeCall->Arguments.push_back(
+            std::make_unique<IL::LdTypeToken>(hostDef, std::string("Host")));
+        constant->Arguments.push_back(std::move(innerGetTypeCall));
+        return constant;
+    };
+    auto equalCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Equal"));
+    equalCall->Arguments.push_back(constantOfHost());
+    equalCall->Arguments.push_back(constantOfHost());
+
+    auto lambdaCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Lambda",
+            lambdaMethodReturnType));
+    lambdaCall->Arguments.push_back(std::move(equalCall));
+    lambdaCall->Arguments.push_back(std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>("System", "Array", "Empty")));
+
+    auto block = std::make_unique<IL::Block>();
+    block->Kind = IL::BlockKind::ControlFlow;
+    block->Add(std::move(lambdaCall));
+
+    IL::ILTransformContext ctx;
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    ctx.CSharpSettings = &settings;  // ExpressionTrees defaults true
+    ctx.TypeSystem = &compilation;
+    IL::StatementTransformContext driverCtx(ctx, block.get());
+    IL::TransformExpressionTrees transform;
+    transform.Run(*block, 0, driverCtx);
+
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* fn = dynamic_cast<IL::ILFunction*>(block->Instructions[0].get());
+    ASSERT_NE(fn, nullptr);
+    ASSERT_NE(fn->Body, nullptr);
+    ASSERT_NE(fn->Body->EntryPoint(), nullptr);
+    auto* leave = dynamic_cast<IL::Leave*>(
+        fn->Body->EntryPoint()->Instructions[0].get());
+    ASSERT_NE(leave, nullptr);
+    auto* call = dynamic_cast<IL::Call*>(leave->Value.get());
+    ASSERT_NE(call, nullptr) << "the Equal call converts to a user-defined op Call";
+    EXPECT_EQ(call->Method.get(), op.get());
+    ASSERT_EQ(call->Arguments.size(), 2u);
+    EXPECT_NE(dynamic_cast<IL::LdNull*>(call->Arguments[0].get()), nullptr);
+    EXPECT_NE(dynamic_cast<IL::LdNull*>(call->Arguments[1].get()), nullptr);
+}
+
+// The String op_Equality/op_Inequality arm (the resolver-independent
+// fallback): without a type system (the resolver-less pipeline), a
+// String/String comparison converts to a Call carrying the type's
+// op_Equality method found by the member scan.
+TEST(TransformExpressionTreesTest, ConvertComparisonFallsBackToStringEquality)
+{
+    auto compilationOwner =
+        std::make_unique<TS::TestSupport::LookupCompilation>();
+    auto& compilation = *compilationOwner;
+    auto booleanType =
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Boolean);
+    auto stringTypeDef = std::make_shared<KindDef>(
+        "String", "System",
+        TS::FullTypeName(TS::TopLevelTypeName("System", "String", 0)),
+        TS::TypeKind::Class, TS::Accessibility::Public, compilation, nullptr,
+        TS::KnownTypeCode::String);
+    auto expressionDef = std::make_shared<TS::SimpleType>(TS::TopLevelTypeName(
+        std::string("System.Linq.Expressions"), std::string("Expression")));
+    TS::ITypePtr lambdaMethodReturnType =
+        std::make_shared<TS::ParameterizedType>(
+            expressionDef, std::vector<TS::ITypePtr>{booleanType});
+    std::vector<std::shared_ptr<OpParameter>> opParams;
+    for (int i = 0; i < 2; i++)
+        opParams.push_back(std::make_shared<OpParameter>(stringTypeDef));
+    auto op = std::make_shared<TS::TestSupport::LookupMethod>(
+        "op_Equality", compilation);
+    op->SetIsOperator(true);
+    op->SetReturnType(booleanType);
+    op->SetParameters({opParams[0].get(), opParams[1].get()});
+    stringTypeDef->SetMethods({op.get()});
+
+    // Expression.Equal(Expression.Constant("a", typeof(String)),
+    //                  Expression.Constant("b", typeof(String)))
+    auto constantOfString = [&stringTypeDef](const char* value) {
+        auto constant = std::make_unique<IL::Call>(
+            std::make_shared<NamedMethodStub>(
+                "System.Linq.Expressions", "Expression", "Constant"));
+        constant->Arguments.push_back(std::make_unique<IL::LdStr>(value));
+        auto innerGetTypeCall = std::make_unique<IL::Call>(
+            std::make_shared<GetTypeFromHandleStub>());
+        innerGetTypeCall->Arguments.push_back(std::make_unique<IL::LdTypeToken>(
+            stringTypeDef, std::string("System.String")));
+        constant->Arguments.push_back(std::move(innerGetTypeCall));
+        return constant;
+    };
+    auto equalCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Equal"));
+    equalCall->Arguments.push_back(constantOfString("a"));
+    equalCall->Arguments.push_back(constantOfString("b"));
+
+    auto lambdaCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Lambda",
+            lambdaMethodReturnType));
+    lambdaCall->Arguments.push_back(std::move(equalCall));
+    lambdaCall->Arguments.push_back(std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>("System", "Array", "Empty")));
+
+    auto block = std::make_unique<IL::Block>();
+    block->Kind = IL::BlockKind::ControlFlow;
+    block->Add(std::move(lambdaCall));
+
+    IL::ILTransformContext ctx;
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    ctx.CSharpSettings = &settings;  // ExpressionTrees defaults true
+    ctx.TypeSystem = nullptr;  // the resolver-less pipeline
+    IL::StatementTransformContext driverCtx(ctx, block.get());
+    IL::TransformExpressionTrees transform;
+    transform.Run(*block, 0, driverCtx);
+
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* fn = dynamic_cast<IL::ILFunction*>(block->Instructions[0].get());
+    ASSERT_NE(fn, nullptr);
+    ASSERT_NE(fn->Body, nullptr);
+    ASSERT_NE(fn->Body->EntryPoint(), nullptr);
+    auto* leave = dynamic_cast<IL::Leave*>(
+        fn->Body->EntryPoint()->Instructions[0].get());
+    ASSERT_NE(leave, nullptr);
+    auto* call = dynamic_cast<IL::Call*>(leave->Value.get());
+    ASSERT_NE(call, nullptr) << "the String Equal converts to the op_Equality Call";
+    EXPECT_EQ(call->Method.get(), op.get());
+    ASSERT_EQ(call->Arguments.size(), 2u);
+    EXPECT_NE(dynamic_cast<IL::LdStr*>(call->Arguments[0].get()), nullptr);
+    EXPECT_NE(dynamic_cast<IL::LdStr*>(call->Arguments[1].get()), nullptr);
 }
 
 // The settings gate: the transform's Run is gated on the FULL settings'

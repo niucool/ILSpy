@@ -442,12 +442,10 @@ CSharpResolver::GetUserDefinedOperatorCandidates(
              [operatorName](const IMethod* m) {
                  return m->IsOperator() && m->Name() == operatorName;
              })) {
-        // A non-owning alias (the header comment): the no-op deleter borrows the
-        // type-system-owned method; the `const_cast` reconciles the `GetMethods`
-        // const-return contract (the D515 convention -- the underlying type-system
-        // objects are mutable).
-        operators.push_back(std::shared_ptr<IMethod>(
-            const_cast<IMethod*>(m), [](IMethod*) {}));
+        // A non-owning alias (the `AliasMethod` surface) over the
+        // type-system-owned method.
+        operators.push_back(
+            ILSpy::Decompiler::TypeSystem::AliasMethod(m));
     }
     LiftUserDefinedOperators(operators);
     return operators;
@@ -475,7 +473,8 @@ void CSharpResolver::LiftUserDefinedOperators(
 std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
 CSharpResolver::CreateResolveResultForUserDefinedOperator(
     ILSpy::Decompiler::CSharp::Resolver::OverloadResolution& r,
-    ILSpy::Decompiler::TypeSystem::ExpressionType operatorType)
+    ILSpy::Decompiler::TypeSystem::ExpressionType operatorType,
+    std::shared_ptr<const void> methodKeepAlive)
 {
     using ILSpy::Decompiler::TypeSystem::IMethod;
     using ILSpy::Decompiler::TypeSystem::IType;
@@ -503,7 +502,7 @@ CSharpResolver::CreateResolveResultForUserDefinedOperator(
     return std::make_shared<ILSpy::Decompiler::Semantics::OperatorResolveResult>(
         std::move(returnType), operatorType, method,
         /*isLiftedOperator=*/dynamic_cast<const ILiftedOperator*>(method) != nullptr,
-        r.GetArgumentsWithConversions());
+        r.GetArgumentsWithConversions(), std::move(methodKeepAlive));
 }
 
 // ---- Convert / ResolveCast region (CSharpResolver.cs lines 1319-1470) ---------------------
@@ -2745,18 +2744,31 @@ CSharpResolver::ResolveUnaryOperator(
     bool isNullable = IsNullable(expression->Type());
 
     // the operator is overloadable:
+    // (The candidate list is held by a NAMED local: the lifted forms the list owns
+    // are resolution-transient wrappers, and the returned result's method raw must
+    // keep pointing at a live wrapper -- the shared holder below rides the result,
+    // the C# GC-reference field's lifetime made explicit.)
     std::unique_ptr<OverloadResolution> userDefinedOperatorOR =
         CreateOverloadResolution({expression});
-    for (const auto& candidate :
-         GetUserDefinedOperatorCandidates(*type, overloadableOperatorName))
+    std::vector<std::shared_ptr<ILSpy::Decompiler::TypeSystem::IMethod>>
+        userDefinedOperators =
+            GetUserDefinedOperatorCandidates(*type, overloadableOperatorName);
+    for (const auto& candidate : userDefinedOperators)
     {
         userDefinedOperatorOR->AddCandidate(*candidate);
     }
+    // A shared holder over the candidate list -- the type-erased keep-alive the
+    // user-defined results carry so their method raws outlive this frame.
+    std::shared_ptr<const void> candidateKeepAlive =
+        std::make_shared<
+            std::vector<std::shared_ptr<ILSpy::Decompiler::TypeSystem::IMethod>>>(
+            std::move(userDefinedOperators));
     if (userDefinedOperatorOR->FoundApplicableCandidate())
     {
         return CreateResolveResultForUserDefinedOperator(
             *userDefinedOperatorOR,
-            UnaryOperatorExpression::GetLinqNodeType(op, checkForOverflow_));
+            UnaryOperatorExpression::GetLinqNodeType(op, checkForOverflow_),
+            candidateKeepAlive);
     }
 
     // (The result-type reference is bound BEFORE the operand move: the C# reads
@@ -2898,7 +2910,8 @@ CSharpResolver::ResolveUnaryOperator(
             // operators. It'll be a more informative error.
             return CreateResolveResultForUserDefinedOperator(
                 *userDefinedOperatorOR,
-                UnaryOperatorExpression::GetLinqNodeType(op, checkForOverflow_));
+                UnaryOperatorExpression::GetLinqNodeType(op, checkForOverflow_),
+                candidateKeepAlive);
         }
         else if (builtinOperatorOR->BestCandidateAmbiguousWith() != nullptr)
         {
@@ -3057,10 +3070,18 @@ CSharpResolver::ResolveBinaryOperator(
     std::unique_ptr<OverloadResolution> userDefinedOperatorOR =
         CreateOverloadResolution({lhs, rhs});
     std::vector<const IParameterizedMember*> userOperatorCandidates;
+    // The handles behind the raws: the lifted forms are resolution-transient
+    // wrappers owned by the candidate lists (the C# HashSet holds strong
+    // references; the port's raw-only union would leave them freed at each
+    // scan's end). A local vector holds every handle through the resolution,
+    // and the shared holder below rides the returned results.
+    std::vector<std::shared_ptr<ILSpy::Decompiler::TypeSystem::IMethod>>
+        userOperatorKeepAlive;
     auto unionWithCandidates = [&](const IType& type) {
-        for (const auto& candidate :
+        for (auto& candidate :
              GetUserDefinedOperatorCandidates(type, overloadableOperatorName))
         {
+            userOperatorKeepAlive.push_back(candidate);
             const IParameterizedMember* member = candidate.get();
             bool found = false;
             for (const IParameterizedMember* existing : userOperatorCandidates)
@@ -3081,11 +3102,18 @@ CSharpResolver::ResolveBinaryOperator(
     {
         userDefinedOperatorOR->AddCandidate(*candidate);
     }
+    // A shared holder over the collected handles -- the type-erased keep-alive
+    // the user-defined results carry so their method raws outlive this frame.
+    std::shared_ptr<const void> candidateKeepAlive =
+        std::make_shared<
+            std::vector<std::shared_ptr<ILSpy::Decompiler::TypeSystem::IMethod>>>(
+            std::move(userOperatorKeepAlive));
     if (userDefinedOperatorOR->FoundApplicableCandidate())
     {
         return CreateResolveResultForUserDefinedOperator(
             *userDefinedOperatorOR,
-            BinaryOperatorExpression::GetLinqNodeType(op, checkForOverflow_));
+            BinaryOperatorExpression::GetLinqNodeType(op, checkForOverflow_),
+            candidateKeepAlive);
     }
 
     // The C# `rhsType.IsReferenceType == false` / `lhsType.IsReferenceType == false` --
@@ -3487,7 +3515,8 @@ CSharpResolver::ResolveBinaryOperator(
         {
             return CreateResolveResultForUserDefinedOperator(
                 *userDefinedOperatorOR,
-                BinaryOperatorExpression::GetLinqNodeType(op, checkForOverflow_));
+                BinaryOperatorExpression::GetLinqNodeType(op, checkForOverflow_),
+                candidateKeepAlive);
         }
         else
         {

@@ -127,16 +127,26 @@ public:
     // to the base, stores all four fields. The C# `operands == null` guard has no C++
     // counterpart (the D441 precedent); `userDefinedOperatorMethod` is NOT guarded (the
     // C# does not guard it -- it may be `null` for a predefined operator).
+    //
+    // The trailing `methodKeepAlive` (defaulted null) is the port's lifetime bridge for
+    // a RESOLUTION-TRANSIENT method: the C# `UserDefinedOperatorMethod` field is a GC
+    // reference that keeps the method alive for the result's lifetime, but the port's
+    // raw may point at a freshly-built `LiftedUserDefinedOperator` wrapper whose only
+    // owner is the resolver's candidate list -- a shared holder over that list rides
+    // the result, keeping the raw valid. The module-cached methods need no keep-alive
+    // (the D515 borrow discipline -- the type system owns them).
     OperatorResolveResult(ILSpy::Decompiler::TypeSystem::ITypePtr resultType,
                           ILSpy::Decompiler::TypeSystem::ExpressionType operatorType,
                           const ILSpy::Decompiler::TypeSystem::IMethod* userDefinedOperatorMethod,
                           bool isLiftedOperator,
-                          std::vector<std::shared_ptr<ResolveResult>> operands)
+                          std::vector<std::shared_ptr<ResolveResult>> operands,
+                          std::shared_ptr<const void> methodKeepAlive = nullptr)
         : ResolveResult(std::move(resultType)),
           operatorType_(operatorType),
           userDefinedOperatorMethod_(userDefinedOperatorMethod),
           isLiftedOperator_(isLiftedOperator),
-          operands_(std::move(operands)) {}
+          operands_(std::move(operands)),
+          methodKeepAlive_(std::move(methodKeepAlive)) {}
 
     // The C# `ExpressionType OperatorType` -- the operator kind (the BCL enum). Returned by
     // value (a plain `enum class` value, never null).
@@ -193,6 +203,8 @@ private:
     const ILSpy::Decompiler::TypeSystem::IMethod* userDefinedOperatorMethod_ = nullptr;
     bool isLiftedOperator_ = false;
     std::vector<std::shared_ptr<ResolveResult>> operands_;
+    // The ctor-2 lifetime bridge (null when the method is module-cached).
+    std::shared_ptr<const void> methodKeepAlive_;
 };
 
 } // namespace ILSpy::Decompiler::Semantics

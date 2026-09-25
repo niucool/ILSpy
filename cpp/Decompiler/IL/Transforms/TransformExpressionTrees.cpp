@@ -850,27 +850,79 @@ TransformExpressionTrees::ConvertComparison(Call* invocation,
                     right.type)));
         if (rr != nullptr && !rr->IsError()
             && rr->UserDefinedOperatorMethod() != nullptr) {
-            // DEFERRED loudly: the user-defined operator Call needs a shared
-            // IMethod handle, and the port's OperatorResolveResult carries
-            // only the raw pointer (the resolver-sourced methods have no
-            // shared-handle surface -- only the token-node-sourced ones do,
-            // the MatchGetMethodFromHandle route). The arm bails so the
-            // expression tree keeps its Expression.* call rather than
-            // rendering a wrong builtin Comp.
-            return {nullptr, nullptr};
+            // The user-defined operator method, aliased onto the
+            // type-system-owned handle (the AliasMethod borrow; the module's
+            // method cache -- a stub registry in the tests -- keeps the
+            // instance alive past the converted tree, the D515 convention).
+            std::shared_ptr<TypeSystem::IMethod> callMethod =
+                TypeSystem::AliasMethod(rr->UserDefinedOperatorMethod());
+            // The C# `rr.UserDefinedOperatorMethod.ReturnType` (the
+            // shared_from_this recovery of the owning handle, the D529
+            // convention).
+            TypeSystem::ITypePtr returnType =
+                const_cast<TypeSystem::IType&>(
+                    rr->UserDefinedOperatorMethod()->ReturnType())
+                    .shared_from_this();
+            return {[leftThunk = std::move(left.thunk),
+                     rightThunk = std::move(right.thunk),
+                     callMethod = std::move(callMethod)]() mutable
+                        -> std::unique_ptr<ILInstruction> {
+                auto call = std::make_unique<Call>(std::move(callMethod));
+                call->Arguments.push_back(leftThunk());
+                call->Arguments.push_back(rightThunk());
+                return call;
+            },
+                    std::move(returnType)};
         }
     }
     // The C# String op_Equality/op_Inequality pair: the String/String
     // comparison operators are the ONE user-defined form the C# resolves
-    // without the resolver. DEFERRED loudly with the rr arm above -- the
-    // operator Call needs a shared IMethod handle and
-    // IType::GetMethods hands back module-owned raw pointers.
+    // without the resolver (the member scan over the operand type).
     if (TypeSystem::IsKnownType(*left.type, TypeSystem::KnownTypeCode::String)
         && TypeSystem::IsKnownType(*right.type,
                                    TypeSystem::KnownTypeCode::String)) {
         if (kind == ComparisonKind::Equality
             || kind == ComparisonKind::Inequality) {
-            return {nullptr, nullptr};
+            const std::string operatorName =
+                kind == ComparisonKind::Equality ? "op_Equality"
+                                                : "op_Inequality";
+            // The C# `leftType.GetMethods(m => m.IsOperator
+            // && m.Name == <op> && m.Parameters.Count == 2)
+            // .FirstOrDefault(m => <both params String>)`.
+            const TypeSystem::IMethod* operatorMethod = nullptr;
+            for (const TypeSystem::IMethod* m :
+                 left.type->GetMethods(
+                     [&operatorName](const TypeSystem::IMethod* m) {
+                         return m->IsOperator() && m->Name() == operatorName
+                             && m->Parameters().size() == 2;
+                     })) {
+                if (TypeSystem::IsKnownType(m->Parameters()[0]->Type(),
+                                            TypeSystem::KnownTypeCode::String)
+                    && TypeSystem::IsKnownType(
+                        m->Parameters()[1]->Type(),
+                        TypeSystem::KnownTypeCode::String)) {
+                    operatorMethod = m;
+                    break;
+                }
+            }
+            if (operatorMethod == nullptr)
+                return {nullptr, nullptr};
+            std::shared_ptr<TypeSystem::IMethod> callMethod =
+                TypeSystem::AliasMethod(operatorMethod);
+            // The C# `operatorMethod.ReturnType` (the D529 handle recovery).
+            TypeSystem::ITypePtr returnType =
+                const_cast<TypeSystem::IType&>(operatorMethod->ReturnType())
+                    .shared_from_this();
+            return {[leftThunk = std::move(left.thunk),
+                     rightThunk = std::move(right.thunk),
+                     callMethod = std::move(callMethod)]() mutable
+                        -> std::unique_ptr<ILInstruction> {
+                auto call = std::make_unique<Call>(std::move(callMethod));
+                call->Arguments.push_back(leftThunk());
+                call->Arguments.push_back(rightThunk());
+                return call;
+            },
+                    std::move(returnType)};
         }
         return {nullptr, nullptr};
     }
