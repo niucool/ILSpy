@@ -50,6 +50,7 @@
 #include "Decompiler/IL/Transforms/CachedReadOnlySpanInitialization.hpp"
 #include "Decompiler/IL/Transforms/CombineExitsTransform.hpp"
 #include "Decompiler/IL/Transforms/CopyPropagation.hpp"
+#include "Decompiler/IL/Transforms/DynamicCallSiteTransform.hpp"
 #include "Decompiler/IL/Transforms/DelegateConstruction.hpp"
 #include "Decompiler/IL/Transforms/DeconstructionTransform.hpp"
 #include "Decompiler/IL/Transforms/IndexRangeTransform.hpp"
@@ -218,6 +219,10 @@ inline void RunILTransformsThroughBlockTransforms(ILFunction& function, ILTransf
     // Re-run CFS so the duplicated 1-pred return blocks merge and
     // the single-definition variable inlines to `leave (expr)`.
     ControlFlowSimplification().Run(function, context);
+    // DynamicCallSiteTransform (the `dynamic` callsite caches): runs after
+    // the second CFS and before SwitchDetection (per the C#
+    // GetILTransforms() order). Gated on the Dynamic setting.
+    DynamicCallSiteTransform().Run(function, context);
     // SwitchDetection: reconstruct a C# switch compiled to a sequence
     // of if-statements (non-contiguous case labels) as a single
     // SwitchInstruction, and run SimplifySwitchInstruction as the 2nd

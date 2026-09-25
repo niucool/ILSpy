@@ -118,6 +118,14 @@ class DynamicCallSiteTransform : public IILTransform {
 public:
     void Run(ILFunction& function, ILTransformContext& context) override;
 
+    // The C# `internal static void RunOnBasicBlock(Block block,
+    // ILTransformContext context)` (lines 54-67): the per-block entry the
+    // async state-machine analysis drives while it iterates the
+    // container's blocks (deleting the now-unreachable callsite-init blocks
+    // is deferred to the container's SortBlocks, so removing blocks here
+    // would corrupt that loop).
+    static void RunOnBasicBlock(Block* block, ILTransformContext& context);
+
 private:
     ILTransformContext* context_ = nullptr;
     std::map<const TypeSystem::IField*, CallSiteInfo> callsites_;

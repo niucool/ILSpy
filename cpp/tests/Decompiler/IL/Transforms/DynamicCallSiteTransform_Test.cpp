@@ -238,6 +238,37 @@ TEST(DynamicCallSiteTransformTest, ConvertsInvokeOverRealBody) {
     EXPECT_EQ(invokes[0]->ChildCount(), 1) << "the receiver alone";
 }
 
+// The driver slot: GetILTransforms runs DynamicCallSiteTransform right
+// after the second CFS (the C# CSharpDecompiler.GetILTransforms order),
+// so the full per-body pipeline produces the dynamic node without any
+// direct transform call.
+TEST(DynamicCallSiteTransformTest, DriverSlotConvertsTheRealBody) {
+    DynamicFixtureData fixture;
+    if (!fixture.Load())
+        GTEST_SKIP() << "the dynamic fixture is not provisioned";
+    DecodedDynamicMethod method = DecodeMethod(fixture, "GetMember");
+    ASSERT_NE(method.function, nullptr);
+    ASSERT_NE(method.method, nullptr);
+
+    ILTransformContext ctx = MakeContext(fixture);
+    RunILTransformsThroughBlockTransforms(*method.function, ctx);
+
+    std::size_t getMembers = 0;
+    std::vector<ILInstruction*> stack{method.function->Body.get()};
+    while (!stack.empty()) {
+        ILInstruction* node = stack.back();
+        stack.pop_back();
+        if (dynamic_cast<DynamicGetMemberInstruction*>(node))
+            getMembers++;
+        for (int i = 0; i < node->ChildCount(); i++) {
+            if (ILInstruction* child = node->GetChild(i))
+                stack.push_back(child);
+        }
+    }
+    EXPECT_EQ(getMembers, 1u)
+        << "the driver slot converted the callsite over the real body";
+}
+
 // The setting gate: with Dynamic off, the transform is a no-op (the
 // callsite machinery stays).
 TEST(DynamicCallSiteTransformTest, SettingGateBlocksTheTransform) {

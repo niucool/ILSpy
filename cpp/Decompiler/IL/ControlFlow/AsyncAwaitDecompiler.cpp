@@ -24,6 +24,7 @@
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
+#include "Decompiler/IL/Transforms/DynamicCallSiteTransform.hpp"
 #include "Decompiler/IL/Transforms/CopyPropagation.hpp"
 #include "Decompiler/IL/Transforms/RemoveDeadVariableInit.hpp"
 #include "Decompiler/IL/Transforms/StObjToStLoc.hpp"
@@ -1256,8 +1257,9 @@ void AsyncAwaitDecompiler::AnalyzeStateMachine(ILFunction& function) {
     for (auto* container : containers) {
         // The NormalizeAwaitOnCompletedDualBranch fold (the runtime
         // ICriticalNotifyCompletion type check Roslyn emits for dynamic /
-        // some generic awaiters) and DynamicCallSiteTransform are deferred
-        // with the dynamic-callsite arms.
+        // some generic awaiters) is deferred with the dynamic-awaiter arms;
+        // the dynamic callsite conversion runs per block here (the C#
+        // DynamicCallSiteTransform.RunOnBasicBlock).
         // Use a separate state range analysis per container.
         ControlFlow::StateRangeAnalysis sra(
             ControlFlow::StateRangeAnalysisMode::AsyncMoveNext, stateField_,
@@ -1268,6 +1270,7 @@ void AsyncAwaitDecompiler::AnalyzeStateMachine(ILFunction& function) {
 
         for (auto& blockPtr : container->Blocks) {
             Block* block = blockPtr.get();
+            DynamicCallSiteTransform::RunOnBasicBlock(block, *context_);
             // This is likely an 'await' block.
             if (auto* leave = dynamic_cast<Leave*>(LastInstruction(block))) {
                 if (moveNextLeaves_.count(leave) != 0) {

@@ -199,6 +199,35 @@ Block* NextBlock(Block* block) {
 
 } // namespace
 
+void DynamicCallSiteTransform::RunOnBasicBlock(Block* block,
+                                              ILTransformContext& context) {
+    if (!context.Settings.Dynamic)
+        return;
+    // The C# collects the callsites in this block and transforms the
+    // container's invokes; the unreachable-block deletion stays with the
+    // caller's SortBlocks (the async analysis iterates the blocks).
+    DynamicCallSiteTransform instance;
+    instance.context_ = &context;
+    // The callsite scan needs the reader surfaces (the cache-field
+    // identity); the driver resolved them before the async slot, but a
+    // per-block caller may not have.
+    if (block == nullptr) return;
+    ILFunction* function = nullptr;
+    for (ILInstruction* p = block->Parent; p != nullptr; p = p->Parent) {
+        if (auto* fn = dynamic_cast<ILFunction*>(p)) {
+            function = fn;
+            break;
+        }
+    }
+    if (function == nullptr) return;
+    if (context.TypeSystem != nullptr)
+        YieldReturnDecompiler::ResolveReaderSurfaces(*function, context);
+    instance.FindDynamicCallSitesInBlock(block);
+    std::vector<BlockContainer*> modifiedContainers;
+    if (auto* parent = dynamic_cast<BlockContainer*>(block->Parent))
+        instance.TransformCallSites(parent, modifiedContainers);
+}
+
 void DynamicCallSiteTransform::Run(ILFunction& function,
                                     ILTransformContext& context) {
     if (!context.Settings.Dynamic)
