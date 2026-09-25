@@ -68,6 +68,7 @@
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/GetPinnableReference.hpp"
 #include "Decompiler/IL/Instructions/YieldReturn.hpp"
+#include "Decompiler/IL/Instructions/Await.hpp"
 #include "Decompiler/IL/Instructions/LockInstruction.hpp"
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
@@ -253,6 +254,14 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         case OpCode::YieldReturn: {
             const auto& s = static_cast<const YieldReturn&>(*this);
             c = std::make_unique<YieldReturn>(s.Value ? s.Value->Clone() : nullptr);
+            break;
+        }
+        case OpCode::Await: {
+            const auto& s = static_cast<const Await&>(*this);
+            auto clone = std::make_unique<Await>(s.Value ? s.Value->Clone() : nullptr);
+            clone->GetAwaiterMethod = s.GetAwaiterMethod;
+            clone->GetResultMethod = s.GetResultMethod;
+            c = std::move(clone);
             break;
         }
 

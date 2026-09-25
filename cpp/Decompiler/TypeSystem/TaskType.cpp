@@ -90,6 +90,49 @@ bool IsCustomTask(const IType& type, ITypePtr& builderType)
 	return true;
 }
 
+bool IsNonGenericTaskType(const IType& task, FullTypeName& builderTypeName)
+{
+	// C# TaskType.IsNonGenericTaskType (TaskType.cs lines 73-84):
+	// `if (task.IsKnownType(KnownTypeCode.Task)) { builderTypeName = new
+	// TopLevelTypeName(ns, "AsyncTaskMethodBuilder"); return true; }
+	// if (IsCustomTask(task, out var builderType)) { builderTypeName = new
+	// FullTypeName(builderType.ReflectionName); return
+	// builderTypeName.TypeParameterCount == 0; } builderTypeName = default; return false;`
+	if (IsKnownType(task, KnownTypeCode::Task)) {
+		builderTypeName = FullTypeName(TopLevelTypeName(
+			"System.Runtime.CompilerServices", "AsyncTaskMethodBuilder"));
+		return true;
+	}
+	ITypePtr builderType;
+	if (IsCustomTask(task, builderType) && builderType != nullptr) {
+		builderTypeName = FullTypeName(builderType->ReflectionName());
+		if (builderTypeName.TypeParameterCount() == 0)
+			return true;
+	}
+	builderTypeName = FullTypeName();
+	return false;
+}
+
+bool IsGenericTaskType(const IType& task, FullTypeName& builderTypeName)
+{
+	// C# TaskType.IsGenericTaskType (TaskType.cs lines 90-104): the same shape
+	// over `Task<T>` / the `AsyncTaskMethodBuilder`1` builder name, and the
+	// custom Task-like whose builder carries exactly one type parameter.
+	if (IsKnownType(task, KnownTypeCode::TaskOfT)) {
+		builderTypeName = FullTypeName(TopLevelTypeName(
+			"System.Runtime.CompilerServices", "AsyncTaskMethodBuilder", 1));
+		return true;
+	}
+	ITypePtr builderType;
+	if (IsCustomTask(task, builderType) && builderType != nullptr) {
+		builderTypeName = FullTypeName(builderType->ReflectionName());
+		if (builderTypeName.TypeParameterCount() == 1)
+			return true;
+	}
+	builderTypeName = FullTypeName();
+	return false;
+}
+
 ITypePtr UnpackTask(const ICompilation& compilation, const IType& type)
 {
 	// C# TaskType.UnpackTask: `if (!IsTask(type)) return type; if

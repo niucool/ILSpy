@@ -72,6 +72,20 @@ bool IsTask(const IType& type);
 // `InvalidCastException` on); the helper then returns false with `builderType` already null.
 bool IsCustomTask(const IType& type, ITypePtr& builderType);
 
+// The C# `public static bool TaskType.IsNonGenericTaskType(IType task, out
+// FullTypeName builderTypeName)` (TaskType.cs lines 73-84): whether the type
+// is a non-generic Task-like -- `Task` itself, or a custom Task-like whose
+// `[AsyncMethodBuilder]` builder type has no type parameters. On success
+// `builderTypeName` receives the builder's full name.
+bool IsNonGenericTaskType(const IType& task, FullTypeName& builderTypeName);
+
+// The C# `public static bool TaskType.IsGenericTaskType(IType task, out
+// FullTypeName builderTypeName)` (TaskType.cs lines 90-104): whether the
+// type is a generic Task-like -- `Task<T>`, or a custom Task-like whose
+// builder type has exactly one type parameter. On success `builderTypeName`
+// receives the builder's full name.
+bool IsGenericTaskType(const IType& task, FullTypeName& builderTypeName);
+
 // The C# `public static IType TaskType.UnpackTask(ICompilation compilation, IType type)`
 // (TaskType.cs line 19) -- gets the `T` in `Task<T>`: returns `void` for the non-generic `Task`,
 // the type argument for `Task<T>`, and the type itself unmodified for any non-task type. Returns

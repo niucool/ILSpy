@@ -72,6 +72,8 @@ using TS::TopLevelTypeName;
 using TS::TypeKind;
 using TS::UnpackAnyTask;
 using TS::UnpackTask;
+using TS::IsGenericTaskType;
+using TS::IsNonGenericTaskType;
 using TS::TestSupport::LookupCompilation;
 using TS::TestSupport::LookupTypeDefinition;
 
@@ -102,6 +104,8 @@ std::shared_ptr<LookupTypeDefinition> TaskOfTDef() {
 ITypePtr TaskOf(ITypePtr element) {
 	return std::make_shared<ParameterizedType>(TaskOfTDef(), std::vector<ITypePtr>{std::move(element)});
 }
+
+ITypePtr Task() { return TaskDef(); }
 
 ITypePtr Int32() { return std::make_shared<KnownType>(KnownTypeCode::Int32); }
 ITypePtr String() { return std::make_shared<KnownType>(KnownTypeCode::String); }
@@ -511,4 +515,63 @@ TEST(TaskTypeTest, UnpackAnyTaskReturnsTypeUnmodifiedForBareTaskOfTDefinition) {
 	ASSERT_NE(result, nullptr);
 	// The bare `Task`1` definition is neither a task nor a custom task-like, returned unmodified.
 	EXPECT_EQ(result.get(), def.get());
+}
+
+// The `IsNonGenericTaskType` / `IsGenericTaskType` pair (TaskType.cs lines 73
+// and 90): the Task-like classification the AsyncAwaitDecompiler's task-
+// creation pattern consults -- a non-generic Task-like is `Task` itself or a
+// custom builder type with no type parameters; a generic Task-like is
+// `Task<T>` or a custom builder with exactly one.
+TEST(TaskTypeTest, IsNonGenericTaskTypeMatchesTask) {
+	FullTypeName builder;
+	EXPECT_TRUE(IsNonGenericTaskType(*Task(), builder));
+	// `Task` pairs with the AsyncTaskMethodBuilder full name.
+	EXPECT_EQ(builder, FullTypeName(TopLevelTypeName("System.Runtime.CompilerServices", "AsyncTaskMethodBuilder")));
+	EXPECT_EQ(builder.TypeParameterCount(), 0);
+}
+
+TEST(TaskTypeTest, IsGenericTaskTypeMatchesTaskOfT) {
+	auto taskOfInt = std::make_shared<ParameterizedType>(TaskOfTDef(),
+		std::vector<ITypePtr>{Int32()});
+	FullTypeName builder;
+	EXPECT_TRUE(IsGenericTaskType(*taskOfInt, builder));
+	// `Task<T>` pairs with the generic AsyncTaskMethodBuilder`1 full name.
+	EXPECT_EQ(builder, FullTypeName(TopLevelTypeName("System.Runtime.CompilerServices", "AsyncTaskMethodBuilder", 1)));
+	EXPECT_EQ(builder.TypeParameterCount(), 1);
+}
+
+TEST(TaskTypeTest, IsNonGenericTaskTypeRejectsTaskOfT) {
+	auto taskOfInt = std::make_shared<ParameterizedType>(TaskOfTDef(),
+		std::vector<ITypePtr>{Int32()});
+	FullTypeName builder;
+	EXPECT_FALSE(IsNonGenericTaskType(*taskOfInt, builder));
+}
+
+TEST(TaskTypeTest, IsGenericTaskTypeRejectsPlainTask) {
+	FullTypeName builder;
+	EXPECT_FALSE(IsGenericTaskType(*Task(), builder));
+}
+
+TEST(TaskTypeTest, IsNonGenericTaskTypeMatchesCustomTaskWithZeroTypeParameters) {
+	auto builder = String();
+	auto customDef = NonGenericCustomTaskDef(builder);
+	FullTypeName builderName;
+	EXPECT_TRUE(IsNonGenericTaskType(*customDef, builderName));
+	EXPECT_EQ(builderName.TypeParameterCount(), 0);
+}
+
+TEST(TaskTypeTest, IsGenericTaskTypeMatchesCustomTaskWithOneTypeParameter) {
+	auto builder = TaskOfTDef();  // any 1-type-param type serves as the builder
+	auto customDef = GenericCustomTaskDef(builder);
+	auto customTaskInt = std::make_shared<ParameterizedType>(customDef,
+		std::vector<ITypePtr>{Int32()});
+	FullTypeName builderName;
+	EXPECT_TRUE(IsGenericTaskType(*customTaskInt, builderName));
+	EXPECT_EQ(builderName.TypeParameterCount(), 1);
+}
+
+TEST(TaskTypeTest, TaskClassificationsRejectInt32) {
+	FullTypeName builder;
+	EXPECT_FALSE(IsNonGenericTaskType(*Int32(), builder));
+	EXPECT_FALSE(IsGenericTaskType(*Int32(), builder));
 }

@@ -64,6 +64,25 @@ public:
         std::uint32_t currentType, std::uint32_t& enumeratorCtor,
         std::uint32_t& enumeratorType);
 
+    // The C# `internal static ILFunction CreateILAst(
+    // MethodDefinitionHandle method, ILTransformContext context)`
+    // (YieldReturnDecompiler.cs lines 1552-1571): the body decode + the
+    // early transform list (the aggressivelyDuplicateReturnBlocks form) +
+    // the reader-surface resolution. Promoted from the file-local helper
+    // (the AsyncAwaitDecompiler needs the same surface).
+    static std::unique_ptr<ILFunction> CreateILAst(std::uint32_t method,
+                                                   ILTransformContext& context);
+
+    // The reader-surface resolution pass (the port's deferred-resolution
+    // convention): fills the decoded body's LdFlda::Field (in-module FieldDef
+    // tokens through the compilation's main module) and Call::Method
+    // (in-module MethodDef tokens, borrowed through AliasMethod). The CreateIL
+    // path runs it over each decoded body; the AsyncAwaitDecompiler runs it
+    // over its input function (its pattern matchers read field and method
+    // identities from the driver-decoded body).
+    static void ResolveReaderSurfaces(ILFunction& function,
+                                      ILTransformContext& context);
+
     // The C# `MatchMonoEnumeratorCreationNewObj`: the mcs shape -- a no-arg
     // ctor newobj.
     static bool MatchMonoEnumeratorCreationNewObj(

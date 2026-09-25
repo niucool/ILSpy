@@ -172,13 +172,15 @@ void ResolveCalls(ILInstruction* node, const TypeSystem::MetadataModule& module)
     }
 }
 
-// The C# `internal static ILFunction CreateILAst(MethodDefinitionHandle
+// The C# `internal static ILFunction CreateILAstLocal(MethodDefinitionHandle
 // method, ILTransformContext context)`: the body decode + the early
 // transform list (the aggressivelyDuplicateReturnBlocks form) + the port's
 // field resolution. The decode routes through the context's
-// DelegateBodyResolver hook (the CreateILReader bridge).
-std::unique_ptr<ILFunction> CreateILAst(std::uint32_t method,
-                                         ILTransformContext& context) {
+// DelegateBodyResolver hook (the CreateILReader bridge). Named ...Local so
+// the public member wrapper can call it without the member name shadowing
+// it inside the wrapper's body.
+std::unique_ptr<ILFunction> CreateILAstLocal(std::uint32_t method,
+                                             ILTransformContext& context) {
     if (method == 0)
         throw ControlFlow::SymbolicAnalysisFailedException("Method not found");
     const Metadata::MetadataFile& metadata = *context.Metadata;
@@ -201,7 +203,8 @@ std::unique_ptr<ILFunction> CreateILAst(std::uint32_t method,
     cfs.Run(*il, nestedContext);
     SplitVariables().Run(*il, nestedContext);
     ILInlining().Run(*il, nestedContext);
-    // The field resolution (the reader's deferred surface; see the helper).
+    // The field/method resolution (the reader's deferred surface; see the
+    // file-local helpers above).
     if (context.TypeSystem != nullptr) {
         if (const auto* module = dynamic_cast<const TypeSystem::MetadataModule*>(
                 &context.TypeSystem->MainModule())) {
@@ -215,6 +218,50 @@ std::unique_ptr<ILFunction> CreateILAst(std::uint32_t method,
 }
 
 } // namespace
+
+std::unique_ptr<ILFunction> YieldReturnDecompiler::CreateILAst(
+    std::uint32_t method, ILTransformContext& context) {
+    return CreateILAstLocal(method, context);
+}
+
+void YieldReturnDecompiler::ResolveReaderSurfaces(ILFunction& function,
+                                                   ILTransformContext& context) {
+    // The field/method resolution (the reader's deferred surface; the
+    // file-local helpers live above, so this re-implements their walk
+    // through the same metadata module bridge).
+    if (context.TypeSystem == nullptr || function.Body == nullptr)
+        return;
+    const auto* module = dynamic_cast<const TypeSystem::MetadataModule*>(
+        &context.TypeSystem->MainModule());
+    if (module == nullptr)
+        return;
+    std::vector<ILInstruction*> stack{function.Body.get()};
+    while (!stack.empty()) {
+        ILInstruction* node = stack.back();
+        stack.pop_back();
+        if (auto* ldflda = dynamic_cast<LdFlda*>(node)) {
+            if (ldflda->Field == nullptr && ldflda->FieldToken != 0 &&
+                (ldflda->FieldToken >> 24) == 0x04) {
+                ldflda->Field = std::const_pointer_cast<TypeSystem::IField>(
+                    std::shared_ptr<const TypeSystem::IField>(
+                        std::shared_ptr<const TypeSystem::IField>(),
+                        module->GetDefinitionField(ldflda->FieldToken)));
+            }
+        } else if (auto* call = dynamic_cast<Call*>(node)) {
+            if (call->Method == nullptr && call->MethodToken != 0 &&
+                (call->MethodToken >> 24) == 0x06) {
+                const TypeSystem::IMethod* method =
+                    module->GetDefinitionMethod(call->MethodToken);
+                if (method != nullptr)
+                    call->Method = TypeSystem::AliasMethod(method);
+            }
+        }
+        for (int i = 0; i < node->ChildCount(); i++) {
+            if (ILInstruction* child = node->GetChild(i))
+                stack.push_back(child);
+        }
+    }
+}
 
 void YieldReturnDecompiler::Run(ILFunction& function,
                                 ILTransformContext& context) {
@@ -626,7 +673,7 @@ bool YieldReturnDecompiler::MatchMonoEnumeratorCreationNewObj(
 }
 
 void YieldReturnDecompiler::AnalyzeCtor(ILTransformContext& context) {
-    auto il = CreateILAst(enumeratorCtor_, context);
+    auto il = CreateILAstLocal(enumeratorCtor_, context);
     Block* body = SingleBlock(il->Body.get());
     if (body == nullptr)
         throw ControlFlow::SymbolicAnalysisFailedException(
@@ -653,7 +700,7 @@ void YieldReturnDecompiler::AnalyzeCtor(ILTransformContext& context) {
 void YieldReturnDecompiler::AnalyzeCurrentProperty(ILTransformContext& context) {
     std::uint32_t getCurrentMethod = 0;
     getCurrentMethod = FindMethod(*metadata_, enumeratorType_, "get_Current");
-    auto il = CreateILAst(getCurrentMethod, context);
+    auto il = CreateILAstLocal(getCurrentMethod, context);
     Block* body = SingleBlock(il->Body.get());
     if (body == nullptr)
         throw ControlFlow::SymbolicAnalysisFailedException(
@@ -715,7 +762,7 @@ void YieldReturnDecompiler::ResolveIEnumerableIEnumeratorFieldMapping(
     std::uint32_t getEnumeratorMethod) {
     if (getEnumeratorMethod == 0)
         return;  // no mappings (maybe it's just an IEnumerator implementation?)
-    auto function = CreateILAst(getEnumeratorMethod, context);
+    auto function = CreateILAstLocal(getEnumeratorMethod, context);
     // The C# `function.Descendants.OfType<Block>()` walk.
     std::vector<Block*> worklist;
     std::vector<ILInstruction*> stack{function.get()};
@@ -762,7 +809,7 @@ void YieldReturnDecompiler::ResolveIEnumerableIEnumeratorFieldMapping(
 void YieldReturnDecompiler::ConstructExceptionTable(ILTransformContext& context) {
     disposeMethod_ = 0;
     disposeMethod_ = FindMethod(*metadata_, enumeratorType_, "Dispose");
-    auto function = CreateILAst(disposeMethod_, context);
+    auto function = CreateILAstLocal(disposeMethod_, context);
 
     if (!isCompiledWithVisualBasic_ && !isCompiledWithMono_) {
         auto* body = dynamic_cast<BlockContainer*>(function->Body.get());
@@ -847,7 +894,7 @@ std::unique_ptr<BlockContainer> YieldReturnDecompiler::AnalyzeMoveNext(
     context.StepOnce("AnalyzeMoveNext");
     std::uint32_t moveNextMethod =
         FindMethod(*metadata_, enumeratorType_, "MoveNext");
-    auto moveNextFunction = CreateILAst(moveNextMethod, context);
+    auto moveNextFunction = CreateILAstLocal(moveNextMethod, context);
     if (moveNextFunction == nullptr)
         throw ControlFlow::SymbolicAnalysisFailedException(
             "MoveNext did not decode");
@@ -1659,7 +1706,7 @@ void YieldReturnDecompiler::DecompileFinallyBlocks(
     ILTransformContext& context) {
     for (auto& entry : finallyMethodToStateRange_) {
         const TypeSystem::IMethod* method = entry.first;
-        auto function = CreateILAst(method->MetadataToken(), context);
+        auto function = CreateILAstLocal(method->MetadataToken(), context);
         auto* body = dynamic_cast<BlockContainer*>(function->Body.get());
         if (body == nullptr)
             throw ControlFlow::SymbolicAnalysisFailedException(

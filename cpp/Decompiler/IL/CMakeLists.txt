@@ -29,6 +29,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/ControlFlow/RemoveUnreachableBlocks.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ControlFlow/SwitchAnalysis.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ControlFlow/StateRangeAnalysis.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ControlFlow/AsyncAwaitDecompiler.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ControlFlow/YieldReturnDecompiler.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ControlFlow/SwitchDetection.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/ILInlining.cpp

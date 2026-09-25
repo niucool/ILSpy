@@ -91,6 +91,12 @@ private:
 bool IsLocalFunctionMethod(const MetadataFile& module,
                            std::uint32_t methodToken);
 
+// The C# `AsyncAwaitDecompiler.IsCompilerGeneratedStateMachine` (a public
+// static): the type is a nested [CompilerGenerated] type implementing
+// System.Runtime.CompilerServices.IAsyncStateMachine.
+bool IsCompilerGeneratedStateMachine(const MetadataFile& metadata,
+                                     std::uint32_t typeDefToken);
+
 // The C# `YieldReturnDecompiler.IsCompilerGeneratorEnumerator(
 // TypeDefinitionHandle, MetadataReader)`: a nested compiler-generated type
 // implementing System.Collections.IEnumerator (the .cpp keeps the full

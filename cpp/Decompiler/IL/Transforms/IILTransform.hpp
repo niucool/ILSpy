@@ -84,6 +84,10 @@ struct ILTransformSettings {
     // DecompilerSettings.YieldReturn (default true;
     // YieldReturnDecompiler's gate).
     bool YieldReturn = true;
+    // Whether to decompile async/await state machines.
+    // DecompilerSettings.AsyncAwait (default true;
+    // AsyncAwaitDecompiler's gate).
+    bool AsyncAwait = true;
     // Whether to deconstruct tuples into separate variables.
     // DecompilerSettings.Deconstruction (default true;
     // DeconstructionTransform's gate).
