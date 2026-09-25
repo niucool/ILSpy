@@ -647,19 +647,44 @@ THE MEMBER-SIGNATURE SLICES (landed after the base-list family):
     the MethodList ranges must point at the right rows or the types
     leak each other's methods).
 
+THE WORKLIST + PARAMETER SLICES (landed after the member-signature
+batch):
+  * `88232828d` -- the worklist: a hidden compiler-generated type whose
+    declaring type's rendered members still reference it (the
+    state-machine attribute's typeof) renders at its nested position.
+    The reference discovery walks the member entities' attribute typeof
+    arguments (the any-held ITypePtr), MIRRORING the rendered text: a
+    state-machine attribute counts only when its de-sugar did NOT
+    succeed (the collection consults the method pipeline's outcomes
+    once per state-machine-attributed method -- the regression the
+    async fixture caught: its de-sugared methods' metadata still
+    carries the attribute, but the rendered declaration dropped it).
+    The hidden check moved from the render body to its callers (the C#
+    DoDecompileType has none of its own) so the nested-types loop can
+    admit the worklist types. Corpus: the 17 .override forwarders now
+    match the oracle exactly.
+  * `fa9b68ee2` -- the ref/out/in/params parameter modifiers (the
+    entity-path builder renders them; the file-decode fallback carries
+    no reference kinds).
+  * `08b0eb6f4` -- the optional parameters' default values (the
+    trailing-optional rule + the shared ConstantValueText with the
+    float/double forms).
+Corpus position: the member-signature category at 322/321 code rows;
+the remaining 11/12 diffs are four small families:
+  * the state machines' type-parameter SUPPRESSION (the oracle renders
+    `<GetEnumerator>d__22 :` without `<TKey, TValue>` -- mine adds the
+    declared list; find the C#'s drop rule).
+  * the typeof argument's declaring-type qualification
+    (`RBTree<>.<...>d__39` -- the nested typeof through the declaring
+    type with the empty-generic marker).
+  * the DELEGATE shape (the oracle renders `public delegate void
+    CollectionSynchronizationCallback(...)` WITHOUT the Invoke/
+    BeginInvoke/EndInvoke members; mine emits them as externs).
+  * the indexer property (`this[string name]` vs `Item`).
+
 THE NEXT QUEUE for this family (the corpus remainder):
-  * THE WORKLIST (the biggest remaining corpus gap): the oracle
-    renders the hidden iterator state machines
-    (`<ProtectedGetEnumerator>d__16` etc.) because the C#'s
-    DoDecompileType worklist re-enqueues HIDDEN members whose types
-    the rendered declarations still reference (the
-    [IteratorStateMachine(typeof(...))] attribute's typeof is a
-    TypeResolveResult over a nested type -> EnqueueReferencedMembers
-    puts it on the worklist -> "Decompile compiler-generated members
-    that are still needed", CSharpDecompiler.cs ~1687-1790). The port
-    hides the state machines unconditionally; the corpus's 17
-    .override forwarders + their state machine types all live behind
-    this mechanism.
+  * The four families above (all in the final corpus diff at
+    /tmp/pf_final_diff.txt).
   * The nested-generic declaring instantiation bound (the recursion
     renders the declaring type argument-less when the parameterized
     form lacks a generic-type chain).
