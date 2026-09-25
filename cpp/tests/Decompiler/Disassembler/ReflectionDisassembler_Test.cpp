@@ -1890,6 +1890,73 @@ TEST(ReflectionDisassemblerTest, DisassembleMethodPinvokeImplWithRvaHasNoBody)
     std::remove(path.string().c_str());
 }
 
+// The sweep's T4 (capa07): the C# SRM decode of a nil EVENT_TYPE column is
+// the NIL TypeDefinition handle (the coded-index tag 0), which renders
+// `<nil>` through EntityHandle.WriteTo; the port returned the raw 0 and
+// threw `Expected a TypeDef, TypeRef or TypeSpec handle!` aborting the
+// whole --il walk. The fixture zeroes one event's EVENT_TYPE column and
+// pins the C# render shape.
+TEST(ReflectionDisassemblerTest, DisassembleEventNilTypeRendersNil)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t appDomain = FindTypeDefTokenIn(f, "System", "AppDomain");
+    ASSERT_NE(appDomain, 0u);
+    std::uint32_t load = 0;
+    std::size_t at = 0;
+    std::ifstream in(MscorlibPath(), std::ios::binary);
+    std::string bytes((std::istreambuf_iterator<char>(in)),
+        std::istreambuf_iterator<char>());
+    ASSERT_FALSE(bytes.empty());
+    for (const auto& e : f.GetEvents(appDomain)) {
+        std::uint32_t flags = f.GetEventAttributes(e.Token);
+        std::uint32_t nameOff = f.CorTableColumnValue(MD::CorTableIndex::Event,
+            (e.Token & 0x00FFFFFFu) - 1, 1);
+        std::uint32_t typeRaw = f.CorTableColumnValue(MD::CorTableIndex::Event,
+            (e.Token & 0x00FFFFFFu) - 1, 2);
+        const std::uint8_t rowPrefix[] = {
+            static_cast<std::uint8_t>(flags), static_cast<std::uint8_t>(flags >> 8),
+            static_cast<std::uint8_t>(nameOff), static_cast<std::uint8_t>(nameOff >> 8),
+            static_cast<std::uint8_t>(nameOff >> 16), static_cast<std::uint8_t>(nameOff >> 24),
+            static_cast<std::uint8_t>(typeRaw), static_cast<std::uint8_t>(typeRaw >> 8)};
+        int matches = 0;
+        std::size_t candidate = 0;
+        for (std::size_t i = 0; i + sizeof(rowPrefix) <= bytes.size(); ++i) {
+            if (std::memcmp(bytes.data() + i, rowPrefix, sizeof(rowPrefix)) == 0) {
+                ++matches;
+                candidate = i;
+            }
+            if (matches > 1) break;
+        }
+        if (matches == 1) {
+            load = e.Token;
+            at = candidate;
+            break;
+        }
+    }
+    ASSERT_NE(load, 0u) << "no AppDomain event locates uniquely";
+    bytes[at + 6] = 0x00;
+    bytes[at + 7] = 0x00;  // EVENT_TYPE := nil (the tag-0 TypeDef arm)
+    namespace fs = std::filesystem;
+    fs::path path = fs::temp_directory_path() / "ilspy_mscorlib_nil_event.dll";
+    std::FILE* out = std::fopen(path.string().c_str(), "wb");
+    ASSERT_NE(out, nullptr);
+    std::fwrite(bytes.data(), 1, bytes.size(), out);
+    std::fclose(out);
+
+    MD::MetadataFile f2(path.string());
+    ASSERT_TRUE(f2.IsValid());
+    // The C# `eventDefinition.Type` for the tag-0 nil decodes to the NIL
+    // TypeDefinition handle.
+    EXPECT_EQ(f2.GetEventTypeToken(load), 0x02000000u);
+    std::string actual = RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleEventHeader(f2, load);
+    });
+    EXPECT_NE(actual.find("<nil>"), std::string::npos) << actual;
+    EXPECT_EQ(actual.find("// Method begins"), std::string::npos) << actual;
+    std::remove(path.string().c_str());
+}
+
 TEST(ReflectionDisassemblerTest, DisassembleMethodFullNoBodyPinvokeAlias)
 {
     MD::MetadataFile f(MscorlibPath());

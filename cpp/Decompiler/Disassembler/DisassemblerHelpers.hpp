@@ -61,13 +61,18 @@
 //  * `EscapeString`/`IsValidIdentifier` iterate the C# UTF-16 `char` loop; the
 //    port decodes the UTF-8 text to code points (the ILAmbience EscapeName
 //    convention): the named escapes fire on the exact code points, a non-BMP
-//    code point emits the two `\udXXX` surrogate halves (each `IsSurrogate`
-//    half escapes separately in the C#), control characters and non-space
-//    whitespace escape as `\uXXXX`, and everything else passes through raw.
-//    `char.IsLetterOrDigit`/`char.IsDigit` classify the ASCII range faithfully;
-//    non-ASCII is treated as letters (a documented divergence -- the C#
-//    consults the Unicode category database, which the port does not carry;
-//    for the ASCII identifiers real metadata uses the two agree).
+//    code point emits the two `\udXXX` surrogate halves and a LONE surrogate
+//    unit (carried as its WTF-8 encoding, the Util::Utf16ToUtf8 lone-unit
+//    arm) escapes as its own `\uXXXX` form (each IsSurrogate half escapes
+//    separately in the C#), control characters and non-space whitespace
+//    escape as `\uXXXX`, and everything else passes through raw.
+//    `char.IsLetterOrDigit` (the identifier characters) is faithful over the
+//    BMP through the Util tables; `char.IsDigit` (the first-character check)
+//    is ASCII-faithful only -- a non-ASCII Nd digit start stays a documented
+//    divergence (the C# consults the Unicode category database; real
+//    metadata does not start identifiers with non-ASCII digits), and a
+//    supplementary-plane code point reads as a non-letter here exactly as
+//    the C# surrogate-unit walk does.
 //  * The ExceptionRegion `WriteTo` extension is DEFERRED: it needs the
 //    ExceptionRegion model (unported), MetadataGenericContext (now ported --
 //    Metadata/MetadataGenericContext.hpp), and the ReflectionDisassembler

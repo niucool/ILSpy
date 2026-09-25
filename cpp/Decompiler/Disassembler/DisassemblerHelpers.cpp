@@ -25,6 +25,7 @@
 #include "Decompiler/IL/InstructionOutputExtensions.hpp"
 #include "Decompiler/Metadata/ILOpCodes.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/Util/Char.hpp"
 #include "Decompiler/Output/ITextOutput.hpp"
 
 #include <any>
@@ -52,8 +53,13 @@ namespace {
 
 // Decode one UTF-8 sequence in `str` starting at `index` to a code point;
 // returns the code point and the number of bytes consumed. For an
-// invalid/overlong/surrogate sequence, returns the offending lead byte as a
-// code point and consumes 1 byte (the ILAmbience.cpp DecodeUtf8 shape).
+// invalid/overlong sequence, returns the offending lead byte as a code
+// point and consumes 1 byte (the ILAmbience.cpp DecodeUtf8 shape). The
+// three-byte encodings of the surrogate code points (U+D800..U+DFFF) are
+// NOT rejected here: the port's text convention carries a lone surrogate
+// unit as that encoding (Util::Utf16ToUtf8's lone-unit arm -- the C# keeps
+// the unit in its UTF-16 string), so the escaper must decode it back to
+// the unit and apply the C# `char.IsSurrogate` rule to it.
 std::pair<char32_t, std::size_t> DecodeUtf8(std::string_view str, std::size_t index) {
 	if (index >= str.size())
 		return {char32_t(0), 0};
@@ -77,7 +83,6 @@ std::pair<char32_t, std::size_t> DecodeUtf8(std::string_view str, std::size_t in
 	}
 	if (n == 2 && cp < 0x80) return {char32_t(b0), 1};           // overlong
 	if (n == 3 && cp < 0x800) return {char32_t(b0), 1};          // overlong
-	if (n == 3 && cp >= 0xD800 && cp <= 0xDFFF) return {char32_t(b0), 1};  // surrogate
 	if (n == 4 && (cp < 0x10000 || cp > 0x10FFFF)) return {char32_t(b0), 1};  // out of range
 	return {cp, n};
 }
@@ -115,9 +120,13 @@ void AppendUnicodeEscape4(std::string& sb, std::uint32_t cp) {
 	sb.append(buf);
 }
 
-// The C# `static bool IsValidIdentifierCharacter(char c)` -- the ASCII letter/
-// digit range classified faithfully; non-ASCII treated as letters (the
-// documented divergence -- see the header note).
+// The C# `static bool IsValidIdentifierCharacter(char c) => char.IsLetterOrDigit(c) ||
+// _validNonLetterIdentifierCharacter.Contains(c)` -- char.IsLetterOrDigit is
+// the Unicode L*/Nd classification, faithful through the Util::IsLetterOrDigit
+// tables over the BMP (the sweep's capa09 field names carry non-ASCII
+// punctuation/control units the C# rejects and quotes); supplementary-plane
+// code points have no UTF-16 letter classification, so they read false here
+// exactly as the C# surrogate-unit walk does.
 bool IsValidIdentifierCharacter(char32_t cp) {
 	if (cp < 0x80) {
 		if ((cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z') ||
@@ -130,12 +139,14 @@ bool IsValidIdentifierCharacter(char32_t cp) {
 			return false;
 		}
 	}
-	return true;
+	return cp <= 0xFFFF &&
+		Util::IsLetterOrDigit(static_cast<char16_t>(cp));
 }
 
 // The C# `static bool IsDigitStart(char c)` -- char.IsDigit for the first
-// character: the ASCII digits faithfully; non-ASCII treated as letters (the
-// same divergence direction as IsValidIdentifierCharacter).
+// character: the ASCII digits faithfully; the non-ASCII Nd digits stay a
+// documented divergence (no Nd-only table is carried -- see the header's
+// EscapeString note), so a non-ASCII unit reads as a non-digit start.
 bool IsDigitStart(char32_t cp) {
 	return cp < 0x80 && cp >= '0' && cp <= '9';
 }

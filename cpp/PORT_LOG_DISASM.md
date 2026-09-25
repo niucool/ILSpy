@@ -394,3 +394,111 @@ The full-suite failure set is byte-identical to the pre-PD7 baseline
 (139 entries, the Windows-gold/env-pinned shapes). The --il miss list
 after this slice: ONLY the capa07/09 decoder throws (T4/T5); net065 is
 byte-identical.
+
+## PD10 -- the T4/T5 root-cause completion + the full --il parity (2026-09-24)
+
+The queue item after PD9: the two --il decoder throws (the T4
+`out_of_range: Expected a TypeDef, TypeRef or TypeSpec handle!` and the T5
+`logic_error: trailing bytes after the type`), root-caused at the
+SignatureTypeProviderDecoder::Fail sites. The session picked up a
+half-finished state (an interrupted prior session): the two root-cause
+commits were already on the branch but unrecorded here, the T5 fix carried
+no regression test, and a third fix (the identifier classification below)
+sat uncommitted in the worktree. This slice verified the landed fixes,
+completed the missing pieces RED-first, and drove the re-sweep to full --il
+parity.
+
+### The T4 root cause -- the nil EVENT_TYPE column (f8bfb02a7, verified)
+
+The sweep's capa07 abort was NOT a malformed field signature (the original
+backtrace attribution): the sample's obfuscated events carry a NIL
+Event.Type column, which the C# `eventDefinition.Type` decodes to the
+TypeDefinition-TAGGED nil EntityHandle (the coded index's tag-0 arm with
+row 0), and `DisassembleEventHeaderInternal` routes it to
+`GetTypeFromDefinition` whose `((EntityHandle)handle).WriteTo` renders
+`<nil>` -- the oracle's `.event <nil> ''` lines. The port's
+`GetEventTypeToken` returned the raw 0 for the nil column, the header's
+switch hit the default arm and threw. The fix decodes the tag-0 arm to the
+nil TypeDefinition token (0x02000000) and widens `IL::WriteTo`'s nil check
+to the C# `EntityHandle.IsNil` row-zero semantics (any tagged nil handle,
+not just the zero token). RED fixture: an mscorlib AppDomain event with its
+EVENT_TYPE column zeroed renders `<nil> AssemblyLoad`.
+
+### The T5 root cause -- the strict whole-blob checks (43d321d02, verified)
+
+The sweep's capa09 abort: the obfuscated field signatures carry padding
+bytes after the type, and the port's four `trailing bytes` Fail checks (one
+per decode entry) rejected them -- the C# SRM decoders read the signature's
+semantic parts over a BlobReader and never require the blob to end there
+(only the over-read throws BadImageFormatException). The fix drops the
+four checks; the truncated-blob arm stays. This slice adds the missing
+regression tests (b22ee4898), one per decode entry (type / method signature
+/ methodspec / locals), demonstrated RED against the pre-fix tree (the
+same `trailing bytes after the type` throw the sweep captured), plus the
+stale DecodeMethodSpecSignature doc comment that still claimed the
+strict-blob behavior.
+
+### The capa09 last rows -- the identifier classification (bf52c6fef)
+
+With the two throws fixed, capa09 still differed on its obfuscated field
+names: the C# `IsValidIdentifier` validates every UTF-16 unit through
+`char.IsLetterOrDigit`, so a name with non-ASCII punctuation or a control
+unit (e.g. "v" + U+00BF + U+0088 + U+00CA + "A") quotes; the port accepted
+every non-ASCII unit as a letter (the old documented divergence). The fix
+classifies the non-ASCII BMP units through the Util letter/digit tables
+(the probed .NET char.IsLetterOrDigit set); supplementary-plane code
+points read as non-letters exactly as the C# surrogate-unit walk does. RED
+(the reverted tree): `v¿\u0088ÊA` unquoted vs the oracle's quoted form.
+
+### The capa07 last rows -- the ldstr lone surrogates (0b1f04f75)
+
+capa07's remaining 96-line diff family (24 hunks): the obfuscated #US-heap
+strings are built from LONE surrogate code units, which the C# GetUserString
+keeps in the UTF-16 string and `EscapeString`'s `char.IsSurrogate` arm
+renders as `\udcXX`/`\ud8XX` escapes. The port's UTF-8 text convention
+carries a lone surrogate as its WTF-8 encoding (Util::Utf16ToUtf8's
+lone-unit arm), but the escaper's local DecodeUtf8 REJECTED the three-byte
+surrogate encodings and fell back per byte -- raw high bytes with the C1
+controls escaped as `\u00XX`. The fix decodes the surrogate encodings back
+to their code points so the existing `IsUtf16Surrogate` escape arm fires
+(the overlong/out-of-range rejections stay; the ILAmbience and
+TextWriterTokenWriter local copies keep their own rejecting shapes -- the
+--csharp identifier paths are main-line territory). RED: `EscapeString` of
+U+DC22's WTF-8 rendered `\xED\u00a0\xBD`-shaped garbage instead of
+`\udc22`; WriteOperand over a lone-surrogate #US string pinned end-to-end.
+
+### The gates
+
+* The 8 new tests: RED demonstrated against each fix's pre-state (the
+  trailing-bytes tests against the pre-fix SignatureTypeProvider.hpp; the
+  identifier tests against the reverted tree; the surrogate tests against
+  the current HEAD), all GREEN after.
+* The full ilspy_tests failure set with the mono fixture is IDENTICAL
+  pre/post (139 entries, the same abort point at the known
+  FindModuleByReferenceTwoPasses crasher).
+* The CLI `--il` dump over the staged net48 reference assembly: byte-
+  identical (exit 0, 11281597 bytes, md5 b10e348a93301e0a40006f06a284ec09).
+* The mono-mscorlib whole-module `--il` dump: byte-identical to the oracle
+  (1112566 lines, CR-stripped).
+* ASan (build/linux-asan): the touched families (DisassemblerHelpers,
+  SignatureTypeProviderDecoder, DisassemblerSignatureTypeProvider,
+  InstructionOutputExtensions, ReflectionDisassembler) and both capa07/09
+  samples run with ZERO AddressSanitizer reports (the 89 family failures
+  are the pre-existing mono-fixture golds, identical to the regular build).
+
+### The post-T12 + post-T4/T5 re-sweep (/tmp/diffval/post_t45, 572 runs)
+
+| mode | IDENTICAL | DIFFERENT | PORT-CRASH | PORT-FAIL | BOTH-FAIL |
+|---|---|---|---|---|---|
+| --il (286) | **282** | **0** | **0** | **0** | 4 |
+| --cs (286) | 0 | 4 | 45 | 222 | 15 |
+
+**The --il mode is at full parity: 286/286** -- 282 byte-identical plus the
+4 BOTH-FAIL-IDENTICAL malformed/native rows (capa 0da87fccbf /
+6f9cb3f56d / kernel32-64.dll_ / net064 System.EnterpriseServices.Thunk,
+the known T11 set both engines refuse identically). Up from PD9's 280
+IDENTICAL + 2 PORT-CRASH. The --cs column is unchanged from PD9's
+pre-merge branch state (the 45 crash rows are fixed on merged main; the 222
+metadata-only PORT-FAILs and the 4 scaffold DIFFERENTs are the T3/T10
+main-line shapes).
+

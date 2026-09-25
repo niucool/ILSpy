@@ -302,8 +302,9 @@ public:
         std::size_t size, const TGenericContext& genericContext);
     // The SRM `MethodSpecification.DecodeSignature` shape: a compressed
     // type-argument count followed by that many full types (the MethodSpec
-    // Instantiation blob). Trailing bytes throw std::logic_error (the same
-    // strict-blob convention as the other entries).
+    // Instantiation blob). Trailing bytes past the declared sequence are
+    // ignored, exactly as the SRM BlobReader decode ignores them (the
+    // over-read of a truncated blob is the std::logic_error throw).
     std::vector<TType> DecodeMethodSpecSignature(
         const std::uint8_t* data, std::size_t size,
         const TGenericContext& genericContext);
@@ -606,7 +607,6 @@ SignatureTypeProviderDecoder<TProvider>::DecodeType(
     end_ = data + size;
     context_ = &genericContext;
     TType t = DecodeTypeWithPrefixes();
-    if (cur_ != end_) Fail("trailing bytes after the type");
     context_ = nullptr;
     return t;
 }
@@ -620,7 +620,6 @@ SignatureTypeProviderDecoder<TProvider>::DecodeMethodSignature(
     end_ = data + size;
     context_ = &genericContext;
     ProviderMethodSignature<TType> sig = DecodeMethodSignatureBody();
-    if (cur_ != end_) Fail("trailing bytes after the method signature");
     context_ = nullptr;
     return sig;
 }
@@ -652,7 +651,6 @@ SignatureTypeProviderDecoder<TProvider>::DecodeMethodSpecSignature(
     for (std::uint32_t i = 0; i < count; i++) {
         result.push_back(DecodeTypeWithPrefixes());
     }
-    if (cur_ != end_) Fail("trailing bytes after the method specification");
     context_ = nullptr;
     return result;
 }
@@ -683,7 +681,6 @@ SignatureTypeProviderDecoder<TProvider>::DecodeLocalSignature(
     for (std::uint32_t i = 0; i < count; i++) {
         result.push_back(DecodeTypeWithPrefixes());
     }
-    if (cur_ != end_) Fail("trailing bytes after the local signature");
     context_ = nullptr;
     return result;
 }

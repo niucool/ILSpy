@@ -105,8 +105,11 @@ void WriteParent(ITextOutput& output, const MetadataFile& module,
 void WriteTo(const MetadataFile& module, ITextOutput& output,
     const MetadataGenericContext& genericContext, std::uint32_t entityToken,
     Disassembler::ILNameSyntax syntax) {
-    // The C# `if (entity.IsNil)` arm.
-    if (entityToken == 0) {
+    // The C# `if (entity.IsNil)` arm -- the SRM EntityHandle.IsNil is the
+    // ROW-id-zero test, so a tagged nil handle (e.g. the TypeDef-tagged 0
+    // a nil EVENT_TYPE column decodes to) renders `<nil>` too, exactly as
+    // the C# WriteTo does for it.
+    if ((entityToken & 0x00FFFFFFu) == 0) {
         output.Write("<nil>");
         return;
     }
