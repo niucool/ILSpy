@@ -46,6 +46,7 @@
 #include "Decompiler/CSharp/OutputVisitor/GenericGrammarAmbiguityVisitor.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/PartialTypeInfo.hpp"
+#include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/IL/Transforms/GetILTransforms.hpp"
 #include "Decompiler/IL/ILReader.hpp"
@@ -198,20 +199,20 @@ private:
 };
 
 
-// The type-level entry: the type's decodable method bodies rendered in
-// sequence (the C# DecompileType's member iteration; the field/property
-// surfaces land with the metadata-slice work).
-bool CSharpDecompiler::DecompileTypeToString(
-    const Metadata::MetadataFile& file, std::uint32_t typeToken,
-    std::string& out) {
+// The render body the static and instance DecompileTypeToString entries
+// share: everything but the module wiring (the static entry builds it per
+// call; the instance uses its own) and the registry lookup (the static
+// consults the process-global placeholder; the instance its own map).
+bool DecompileTypeToStringBody(
+    const Metadata::MetadataFile& file, TS::MetadataModule& module,
+    const Metadata::PartialTypeInfo* partialType,
+    std::uint32_t typeToken, std::string& out) {
     // The C# DecompileType member iteration: the partial-type info gates
     // the members (the C# `DoDecompileMember`'s
     // `partialType.IsDeclaredMember(entity) -> return` skip, and the
     // `partial` modifier note -- the C# renders `partial` on the type
     // declaration; the port's ILAstToCSharp method-text renderer carries
     // no type-header surface, so the modifier is deferred with it).
-    const Metadata::PartialTypeInfo* partialType =
-        FindPartialTypeInfo(typeToken);
     bool rendered = false;
     // The type's own name (the constructor headers render it; the empty
     // form covers an unknown token -- the member iteration then renders no
@@ -307,13 +308,9 @@ bool CSharpDecompiler::DecompileTypeToString(
     // context included), the add/remove accessor methods collected for
     // the method-loop skip (the C# renders them through the event; their
     // bodies are the flat renderer's documented stand-in gap, like the
-    // fields'). The per-call module wiring (the SingleModuleCompilation
-    // shape) rides until the instance surface.
+    // fields'). The module param carries the wiring (the static entry's
+    // per-call pair or the instance's own).
     if (!file.GetEvents(typeToken).empty()) {
-        SingleModuleCompilation compilation;
-        TS::MetadataModule module{compilation, &file,
-                                  TS::TypeSystemOptions::Default};
-        compilation.SetMainModule(&module);
         for (const auto& e : file.GetEvents(typeToken)) {
             auto accessors = file.GetEventAccessors(e.Token);
             accessorTokens.insert(accessors.AdderToken);
@@ -372,8 +369,8 @@ bool CSharpDecompiler::DecompileTypeToString(
         bool isConstructor = m.Name == ".ctor" || m.Name == ".cctor";
         const std::string& methodName = isConstructor ? typeName : m.Name;
         std::string text;
-        if (DecompileMethodToString(file, m.Token, m.RVA, methodName, text,
-                                    isConstructor)) {
+        if (CSharpDecompiler::DecompileMethodToString(
+                file, m.Token, m.RVA, methodName, text, isConstructor)) {
             out += text;
             out += "\n";
             rendered = true;
@@ -383,6 +380,24 @@ bool CSharpDecompiler::DecompileTypeToString(
         out += "}\n";
     }
     return rendered;
+}
+
+// The type-level entry: the type's decodable method bodies rendered in
+// sequence (the C# DecompileType's member iteration; the field/property
+// surfaces land with the metadata-slice work).
+bool CSharpDecompiler::DecompileTypeToString(
+    const Metadata::MetadataFile& file, std::uint32_t typeToken,
+    std::string& out) {
+    // The static scaffold's per-call wiring (the SingleModuleCompilation
+    // note): each call builds the compilation/module pair the instance
+    // ctor builds once.
+    SingleModuleCompilation compilation;
+    TS::MetadataModule module{compilation, &file,
+                              TS::TypeSystemOptions::Default};
+    compilation.SetMainModule(&module);
+    return DecompileTypeToStringBody(
+        file, module, FindRegisteredPartialType(typeToken), typeToken,
+        out);
 }
 
 namespace {
@@ -400,7 +415,8 @@ std::map<std::uint32_t, Metadata::PartialTypeInfo>& PartialTypes() {
 
 } // namespace
 
-void CSharpDecompiler::AddPartialTypeDefinition(Metadata::PartialTypeInfo info) {
+void CSharpDecompiler::RegisterPartialTypeDefinition(
+    Metadata::PartialTypeInfo info) {
     // The C# `partialTypes.TryGetValue(info.DeclaringTypeDefinitionHandle,
     // out var existingInfo)` shape: a second registration unionizes.
     auto it = PartialTypes().find(info.DeclaringTypeDefinitionToken());
@@ -412,7 +428,7 @@ void CSharpDecompiler::AddPartialTypeDefinition(Metadata::PartialTypeInfo info) 
     it->second.AddDeclaredMembers(info);
 }
 
-const Metadata::PartialTypeInfo* CSharpDecompiler::FindPartialTypeInfo(
+const Metadata::PartialTypeInfo* CSharpDecompiler::FindRegisteredPartialType(
     std::uint32_t declaringTypeToken) {
     auto it = PartialTypes().find(declaringTypeToken);
     return it == PartialTypes().end() ? nullptr : &it->second;
@@ -420,6 +436,86 @@ const Metadata::PartialTypeInfo* CSharpDecompiler::FindPartialTypeInfo(
 
 void CSharpDecompiler::ClearPartialTypes() {
     PartialTypes().clear();
+}
+
+// ---- the instance surface (the C# CSharpDecompiler object) ----
+
+// The per-instance state behind the pimpl: the type-system wiring (the
+// single-module compilation placeholder + the module the instance built
+// once), the partial-types registry (the C# `readonly Dictionary<...>`
+// field -- per-instance, unlike the process-global static above), the
+// settings copy, and the file the wiring was built over.
+struct CSharpDecompiler::InstanceState {
+    SingleModuleCompilation compilation;
+    std::unique_ptr<TS::MetadataModule> module;
+    std::map<std::uint32_t, Metadata::PartialTypeInfo> partialTypes;
+    // The C# holds the settings REFERENCE (the caller's mutable object);
+    // the port copies -- the caller-side mutation between calls lands
+    // with the DecompileRun adoption.
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    const Metadata::MetadataFile* file = nullptr;
+};
+
+CSharpDecompiler::CSharpDecompiler(
+    const Metadata::MetadataFile& file,
+    const ::ILSpy::Decompiler::DecompilerSettings& settings)
+    : state_(std::make_unique<InstanceState>()) {
+    // The C# ctor's DecompilerTypeSystem wiring: the module binds the
+    // compilation reference first, then the compilation adopts the module
+    // as its main module (the MetadataModule_Test pattern; the
+    // SingleModuleCompilation placeholder note above).
+    state_->settings = settings;
+    state_->file = &file;
+    state_->module = std::make_unique<TS::MetadataModule>(
+        state_->compilation, &file, TS::TypeSystemOptions::Default);
+    state_->compilation.SetMainModule(state_->module.get());
+}
+
+CSharpDecompiler::~CSharpDecompiler() = default;
+
+std::string CSharpDecompiler::DecompileWholeModuleToString() {
+    // The C# DecompileWholeModuleAsSingleFile composition over THIS
+    // instance's wiring: the attribute sections, then every type in
+    // metadata order through the instance entries (the registry
+    // consults this instance's map).
+    std::string out;
+    out += DecompileModuleAndAssemblyAttributesToString(*state_->module);
+    for (const auto& t : state_->file->TypeDefs()) {
+        if (t.Name == "<Module>")
+            continue;
+        std::string text;
+        if (DecompileTypeToString(t.Token, text))
+            out += text;
+    }
+    return out;
+}
+
+bool CSharpDecompiler::DecompileTypeToString(
+    std::uint32_t typeToken, std::string& out) {
+    return DecompileTypeToStringBody(*state_->file, *state_->module,
+                                     FindPartialTypeInfo(typeToken),
+                                     typeToken, out);
+}
+
+void CSharpDecompiler::AddPartialTypeDefinition(
+    Metadata::PartialTypeInfo info) {
+    // The C# `partialTypes.TryGetValue(info.DeclaringTypeDefinitionHandle,
+    // out var existingInfo)` shape over the INSTANCE map: a second
+    // registration unionizes.
+    auto it = state_->partialTypes.find(
+        info.DeclaringTypeDefinitionToken());
+    if (it == state_->partialTypes.end()) {
+        state_->partialTypes.emplace(
+            info.DeclaringTypeDefinitionToken(), std::move(info));
+        return;
+    }
+    it->second.AddDeclaredMembers(info);
+}
+
+const Metadata::PartialTypeInfo* CSharpDecompiler::FindPartialTypeInfo(
+    std::uint32_t declaringTypeToken) const {
+    auto it = state_->partialTypes.find(declaringTypeToken);
+    return it == state_->partialTypes.end() ? nullptr : &it->second;
 }
 
 namespace {

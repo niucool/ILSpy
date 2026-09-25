@@ -26,6 +26,7 @@
 #include "Decompiler/CSharp/CSharpDecompiler.hpp"
 
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
+#include "Decompiler/DecompilerSettings.hpp"
 #include "TestFixtures/ConnIdResFixtures.hpp"
 #include "Decompiler/CSharp/Syntax/Attribute.hpp"
 #include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
@@ -268,7 +269,7 @@ TEST(CSharpDecompilerTest, PartialTypeInfoSkipsDeclaredMembers)
         // type's rendered members.
         Metadata::PartialTypeInfo info(t.Token);
         info.AddDeclaredMember(firstBody);
-        CSharp::CSharpDecompiler::AddPartialTypeDefinition(info);
+        CSharp::CSharpDecompiler::RegisterPartialTypeDefinition(info);
         std::string text;
         ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
             module, t.Token, text));
@@ -284,30 +285,30 @@ TEST(CSharpDecompilerTest, PartialTypeInfoSkipsDeclaredMembers)
 }
 
 // The merge: two infos for the same declaring type unionize (the C#
-// AddDeclaredMembers path in AddPartialTypeDefinition).
+// AddDeclaredMembers path in RegisterPartialTypeDefinition).
 TEST(CSharpDecompilerTest, PartialTypeInfosMergeForTheSameType)
 {
     Metadata::PartialTypeInfo a(0x02000001);
     a.AddDeclaredMember(0x06000001);
     Metadata::PartialTypeInfo b(0x02000001);
     b.AddDeclaredMember(0x06000002);
-    CSharp::CSharpDecompiler::AddPartialTypeDefinition(a);
-    CSharp::CSharpDecompiler::AddPartialTypeDefinition(b);
-    // The registry lookup surface is the static FindPartialTypeInfo
-    // probe.
-    EXPECT_TRUE(CSharp::CSharpDecompiler::FindPartialTypeInfo(0x02000001)
+    CSharp::CSharpDecompiler::RegisterPartialTypeDefinition(a);
+    CSharp::CSharpDecompiler::RegisterPartialTypeDefinition(b);
+    // The registry lookup surface is the static
+    // FindRegisteredPartialType probe.
+    EXPECT_TRUE(CSharp::CSharpDecompiler::FindRegisteredPartialType(0x02000001)
                     ->IsDeclaredMember(0x06000001));
-    EXPECT_TRUE(CSharp::CSharpDecompiler::FindPartialTypeInfo(0x02000001)
+    EXPECT_TRUE(CSharp::CSharpDecompiler::FindRegisteredPartialType(0x02000001)
                     ->IsDeclaredMember(0x06000002));
-    EXPECT_FALSE(CSharp::CSharpDecompiler::FindPartialTypeInfo(0x02000001)
+    EXPECT_FALSE(CSharp::CSharpDecompiler::FindRegisteredPartialType(0x02000001)
                      ->IsDeclaredMember(0x06000003));
     // The registry is process-global (the static placeholder for the C#
     // instance field): clear it so the later corpus-driven tests (the
     // whole-module render) do not see this test's registrations.
     CSharp::CSharpDecompiler::ClearPartialTypes();
-    EXPECT_EQ(CSharp::CSharpDecompiler::FindPartialTypeInfo(0x02000001),
+    EXPECT_EQ(CSharp::CSharpDecompiler::FindRegisteredPartialType(0x02000001),
               nullptr);
-    EXPECT_EQ(CSharp::CSharpDecompiler::FindPartialTypeInfo(0x02000009),
+    EXPECT_EQ(CSharp::CSharpDecompiler::FindRegisteredPartialType(0x02000009),
               nullptr)
         << "an unregistered type has no partial info";
 }
@@ -361,6 +362,54 @@ TEST(CSharpDecompilerTest, DecompileModuleAndAssemblyAttributesBuildsTree)
 // whole-module render -- the module/assembly attribute sections (the AST
 // path), then every type in metadata order (the `<Module>` placeholder
 // skipped, the C# DoDecompileTypes gate).
+// The instance surface (the C# `CSharpDecompiler(MetadataFile,
+// DecompilerSettings)` ctor + the per-instance state): one instance
+// wires the type system once; the whole-module and per-type renders go
+// through it; and the partial-types registry is PER-INSTANCE -- one
+// instance's registrations are invisible to another (the C# registry
+// lives on the instance, unlike the port's earlier process-global
+// placeholder).
+TEST(CSharpDecompilerTest, InstanceDecompilerOwnsItsPartialTypes)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+    // The Page1 tokens (the member iteration's registration target).
+    std::uint32_t page1Token = 0;
+    std::uint32_t initializeComponent = 0;
+    for (const auto& t : file.TypeDefs()) {
+        if (t.Name != "Page1") continue;
+        page1Token = t.Token;
+        for (const auto& m : file.GetMethods(t.Token))
+            if (m.Name == "InitializeComponent")
+                initializeComponent = m.Token;
+    }
+    ASSERT_NE(page1Token, 0u);
+    ASSERT_NE(initializeComponent, 0u);
+
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    CSharp::CSharpDecompiler decompiler(file, settings);
+    // The instance renders the whole module.
+    std::string whole = decompiler.DecompileWholeModuleToString();
+    EXPECT_NE(whole.find("public partial class Page1"), std::string::npos);
+    // The partial-type registration hides the member in THIS instance's
+    // render.
+    Metadata::PartialTypeInfo info(page1Token);
+    info.AddDeclaredMember(initializeComponent);
+    decompiler.AddPartialTypeDefinition(info);
+    std::string own;
+    ASSERT_TRUE(decompiler.DecompileTypeToString(page1Token, own));
+    EXPECT_EQ(own.find("InitializeComponent()"), std::string::npos)
+        << "the registered member is skipped in this instance's render";
+    // A second instance does not see the registration.
+    CSharp::CSharpDecompiler other(file, settings);
+    std::string theirs;
+    ASSERT_TRUE(other.DecompileTypeToString(page1Token, theirs));
+    EXPECT_NE(theirs.find("InitializeComponent()"), std::string::npos)
+        << "the registry does not leak across instances";
+}
+
 TEST(CSharpDecompilerTest, DecompileWholeModuleRendersAttributesAndTypes)
 {
     std::string path = ILSpy::Tests::WriteConnIdResDll();

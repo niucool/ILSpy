@@ -191,15 +191,14 @@ public:
     // (CSharpDecompiler.cs line 1481): register the partial-type info under
     // its declaring type token (a second registration for the same type
     // unionizes the declared-member sets, the C# AddDeclaredMembers path).
-    static void AddPartialTypeDefinition(
+    static void RegisterPartialTypeDefinition(
         ::ILSpy::Decompiler::Metadata::PartialTypeInfo info);
 
     // The registry probe (the C# `partialTypes.TryGetValue(...)` shape the
     // member iteration consults): the registered info for a type token, or
     // null.
     static const ::ILSpy::Decompiler::Metadata::PartialTypeInfo*
-        FindPartialTypeInfo(
-        std::uint32_t declaringTypeToken);
+        FindRegisteredPartialType(std::uint32_t declaringTypeToken);
 
     // The registry lifecycle (the port's addition for the static
     // placeholder): the C# registry lives on the CSharpDecompiler INSTANCE
@@ -207,6 +206,51 @@ public:
     // explicit reset so one consumer's registrations do not leak into
     // another's decompilation.
     static void ClearPartialTypes();
+
+    // ---- the instance surface (the C# CSharpDecompiler object) ----
+
+    // The C# `CSharpDecompiler(MetadataFile module, DecompilerSettings
+    // settings)` ctor (CSharpDecompiler.cs line 191): one decompiler wires
+    // the type system ONCE and owns its per-instance state -- the settings
+    // and the partial-types registry (the C# `readonly Dictionary<...>
+    // partialTypes` fields). The static entries above remain the
+    // not-yet-migrated scaffold (each builds the per-call wiring); the
+    // instance entries are the C#-faithful surface. The settings are held
+    // by value (the C# holds the reference; the caller-side mutation
+    // between calls lands with the DecompileRun adoption).
+    explicit CSharpDecompiler(
+        const ::ILSpy::Decompiler::Metadata::MetadataFile& file,
+        const ::ILSpy::Decompiler::DecompilerSettings& settings);
+    ~CSharpDecompiler();
+    CSharpDecompiler(const CSharpDecompiler&) = delete;
+    CSharpDecompiler& operator=(const CSharpDecompiler&) = delete;
+
+    // The C# `public string DecompileWholeModuleAsString()` as the
+    // instance entry: the attribute sections + every type through THIS
+    // instance's wiring and registry.
+    std::string DecompileWholeModuleToString();
+
+    // The C# `public string DecompileTypeAsString(TypeDefinitionHandle)`
+    // shape as the instance entry: the type render through THIS instance's
+    // wiring and registry.
+    bool DecompileTypeToString(std::uint32_t typeToken, std::string& out);
+
+    // The C# instance registry: register under the declaring type token
+    // (a second registration for the same type unionizes).
+    void AddPartialTypeDefinition(
+        ::ILSpy::Decompiler::Metadata::PartialTypeInfo info);
+
+    // The instance registry probe: the registered info for a type token,
+    // or null.
+    const ::ILSpy::Decompiler::Metadata::PartialTypeInfo*
+        FindPartialTypeInfo(std::uint32_t declaringTypeToken) const;
+
+private:
+    // The per-instance state behind the pimpl (the single-module
+    // compilation placeholder + the module wiring + the registry -- the
+    // .cpp-internal shapes the header cannot name).
+    struct InstanceState;
+    ::std::unique_ptr<InstanceState> state_;
 };
 
 } // namespace ILSpy::Decompiler::CSharp

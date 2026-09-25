@@ -25,6 +25,8 @@
 // ILAst trees; --csharp translates them through the transform pipeline.
 
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
+#include "Decompiler/CSharp/CSharpDecompiler.hpp"
+#include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/IL/ControlFlow/ControlFlowSimplification.hpp"
 #include "Decompiler/IL/ControlFlow/ConditionDetection.hpp"
 #include "Decompiler/IL/ControlFlow/DetectExitPoints.hpp"
@@ -592,23 +594,27 @@ int RunMain(int argc, char** argv) {
     };
 
     if (wantCSharp) {
-        // The C# whole-module path (`output.Write(
-        // decompiler.DecompileWholeModuleAsString())`, IlspyCmdProgram.cs
-        // line 658) with no -t; the -t filter renders the matched types
-        // through the type-level entry (the C# DecompileTypes path -- no
+        // The C# `new CSharpDecompiler(module, settings)` per input file
+        // (IlspyCmdProgram.cs Decompile): one instance wires the type
+        // system once and owns the partial-types registry; the renders go
+        // through it. No -t renders the whole module (the C#
+        // `output.Write(decompiler.DecompileWholeModuleAsString())`, line
+        // 658); the -t filter renders the matched types through the
+        // type-level entry (the C# DecompileTypes path -- no
         // module/assembly attribute sections).
+        ::ILSpy::Decompiler::DecompilerSettings decompilerSettings;
+        ::ILSpy::Decompiler::CSharp::CSharpDecompiler decompiler(
+            file, decompilerSettings);
         std::string text;
         if (typeFilter.empty()) {
-            text = ILSpy::Decompiler::CSharp::CSharpDecompiler::
-                DecompileWholeModuleToString(file);
+            text = decompiler.DecompileWholeModuleToString();
         } else {
             int typesPrinted = 0;
             for (const auto& t : file.TypeDefs()) {
                 if (t.Name == "<Module>") continue;
                 if (!typeMatch(t.Namespace, t.Name)) continue;
                 std::string typeText;
-                if (ILSpy::Decompiler::CSharp::CSharpDecompiler::
-                        DecompileTypeToString(file, t.Token, typeText)) {
+                if (decompiler.DecompileTypeToString(t.Token, typeText)) {
                     text += typeText;
                     text += '\n';
                     ++typesPrinted;
