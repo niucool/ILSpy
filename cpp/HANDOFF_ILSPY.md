@@ -553,6 +553,55 @@ per-block scope + the name-collision check over the FILE's using set
 (the resolver's LookupSimpleNameOrTypeName over a UsingScope -- the
 ported resolver surface exists; the wiring is the work).
 
+### The base-list qualification investigation (no commit -- the mechanism
+### is 90% pinned; the notes + the probe are the artifacts)
+
+The C# rule (confirmed from the source): the TypeSystemAstBuilder's
+short-name decision resolves the name through the USING SCOPE --
+`resolver.LookupSimpleNameOrTypeName(name, args, mode)`; a non-error
+TypeResolveResult MATCHING the intended type keeps the short name, an
+error result (Unknown OR Ambiguous) or a mismatch qualifies.
+Probe: `/home/jim/ilspy-test-fixtures/ambiguous_fixture/
+probe_ambiguity.cpp` (the build recipe: the standard probe link line).
+
+The port-side mechanism (the probe reproduces it): over the PF
+whole-module emitted set (98 namespaces), the `IEnumerable` lookup
+returns **AmbiguousTypeResolveResult** -- the collision pair is
+`System.Collections.IEnumerable` +
+`System.Runtime.InteropServices.ComTypes.IEnumerable` -- BOTH in the
+net48 mscorlib itself (the legacy .NET Framework duplicate; 48
+ComTypes-hits in the file). Two hard requirements the probe found:
+  * The using namespaces MUST resolve through
+    `module.Compilation().RootNamespace()` (the MERGED tree) --
+    `module.RootNamespace()` (the module's own types only) does NOT
+    resolve System.Collections at all.
+  * The scope threads through `ctx->WithUsingScope(scope)` (the
+    context's immutable-With pattern; a direct member assignment
+    writes a copy).
+
+THE OPEN SUBTLETY: the oracle renders the tiny crafted fixture
+(`/home/jim/ilspy-test-fixtures/ambiguous_fixture/` -- a type
+implementing IEnumerable + a ComTypes-typed field, compiled over the
+net48 reference assemblies, with mscorlib+System copied beside it so
+the sibling-directory resolution finds the duplicate carrier) SHORT
+even though its own using set carries both colliding namespaces --
+while the PF whole-module (the huge using set) QUALIFIES. Something in
+the oracle's scope-construction or its ambiguity handling differs
+between the two; the C#'s `TopLevelTypeDefinitionIsAccessible` gate in
+LookInCurrentUsingScope is the next suspect (the accessibility of the
+ComTypes duplicate), or the oracle's -t/whole-module scope resolution
+differs from the emitted using lines.
+
+THE TEST-VECTOR PROBLEM: the only port-reproducible qualification case
+is the PF whole-module render (174s CLI / 274s test -- too heavy for
+the suite). The tiny fixture does not reproduce the oracle's
+qualification. RESOLVING the subtlety first is the prerequisite; then
+wire the resolver into the facade's base-list render (the pieces:
+UsingScope over the emitted set resolved via the compilation root, the
+lookup + IsError/match check, the qualified full-name render, the
+per-path using-set threading -- the -t path's type set vs the
+whole-module's module-wide set).
+
 NOTE (the stale-queue catches): TransformFieldAndConstructorInitializers
 was ALREADY PORTED via the master merge (885 lines + 17 tests, the
 record support / primary constructors / XML doc / decimal-constant arms
