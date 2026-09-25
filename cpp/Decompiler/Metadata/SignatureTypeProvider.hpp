@@ -302,8 +302,9 @@ public:
         std::size_t size, const TGenericContext& genericContext);
     // The SRM `MethodSpecification.DecodeSignature` shape: a compressed
     // type-argument count followed by that many full types (the MethodSpec
-    // Instantiation blob). Trailing bytes throw std::logic_error (the same
-    // strict-blob convention as the other entries).
+    // Instantiation blob). Trailing bytes past the declared sequence are
+    // ignored, exactly as the SRM BlobReader decode ignores them (the
+    // over-read of a truncated blob is the std::logic_error throw).
     std::vector<TType> DecodeMethodSpecSignature(
         const std::uint8_t* data, std::size_t size,
         const TGenericContext& genericContext);

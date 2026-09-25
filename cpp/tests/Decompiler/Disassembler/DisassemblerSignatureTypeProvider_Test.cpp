@@ -629,6 +629,85 @@ TEST(SignatureTypeProviderDecoderTest, TruncatedBlobThrows) {
         std::logic_error);
 }
 
+// The SRM decoders read a signature's semantic parts over a BlobReader and
+// never require the blob to end there -- trailing bytes are silently
+// ignored (the sweep's capa09 row: an obfuscated field signature carried
+// padding after the type and the whole-module --il walk aborted with
+// "trailing bytes after the type"; only the over-read throws, per
+// TruncatedBlobThrows above). Each decode entry tolerates its own trailing
+// bytes.
+TEST(SignatureTypeProviderDecoderTest, TrailingBytesAfterTheTypeAreTolerated) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // SZArray of int32, then two padding bytes.
+    const std::uint8_t typeBlob[] = {0x1D, 0x08, 0x00, 0x00};
+    std::ostringstream stream;
+    PlainTextOutput output(stream);
+    DisassemblerSignatureTypeProvider provider(f, output);
+    Metadata::SignatureTypeProviderDecoder decoder(provider, f);
+    decoder.DecodeType(typeBlob, sizeof(typeBlob),
+        MetadataGenericContext{})(ILNameSyntax::Signature);
+    EXPECT_EQ(stream.str(), "int32[]");
+}
+
+TEST(SignatureTypeProviderDecoderTest, TrailingBytesAfterTheMethodSignatureAreTolerated) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // The vararg-shape blob (see MethodSignatureBlobDecodesVarargShape) plus
+    // one trailing byte.
+    const std::uint8_t blob[] = {0x20, 0x02, 0x08, 0x08, 0x08, 0xFF};
+    std::ostringstream stream;
+    PlainTextOutput output(stream);
+    DisassemblerSignatureTypeProvider provider(f, output);
+    Metadata::SignatureTypeProviderDecoder decoder(provider, f);
+    MethodSignatureT sig = decoder.DecodeMethodSignature(blob, sizeof(blob),
+        MetadataGenericContext{});
+    EXPECT_EQ(sig.ParameterTypes.size(), 2u);
+    EXPECT_EQ(sig.RequiredParameterCount, 2u);
+}
+
+TEST(SignatureTypeProviderDecoderTest, TrailingBytesAfterTheMethodSpecAreTolerated) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // The GENERICINST marker, one type argument (int32), then a trailing
+    // byte.
+    const std::uint8_t blob[] = {0x0A, 0x01, 0x08, 0xFF};
+    std::ostringstream stream;
+    PlainTextOutput output(stream);
+    DisassemblerSignatureTypeProvider provider(f, output);
+    Metadata::SignatureTypeProviderDecoder decoder(provider, f);
+    auto args = decoder.DecodeMethodSpecSignature(blob, sizeof(blob),
+        MetadataGenericContext{});
+    ASSERT_EQ(args.size(), 1u);
+    // The decoded writer is bound to the decoding provider's output stream;
+    // clear it and render the argument through that binding.
+    stream.str("");
+    stream.clear();
+    args[0](ILNameSyntax::Signature);
+    EXPECT_EQ(stream.str(), "int32");
+}
+
+TEST(SignatureTypeProviderDecoderTest, TrailingBytesAfterTheLocalSignatureAreTolerated) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // The LocalVariables kind nibble, one local (int32), then a trailing
+    // byte.
+    const std::uint8_t blob[] = {0x07, 0x01, 0x08, 0xFF};
+    std::ostringstream stream;
+    PlainTextOutput output(stream);
+    DisassemblerSignatureTypeProvider provider(f, output);
+    Metadata::SignatureTypeProviderDecoder decoder(provider, f);
+    auto locals = decoder.DecodeLocalSignature(blob, sizeof(blob),
+        MetadataGenericContext{});
+    ASSERT_EQ(locals.size(), 1u);
+    // The decoded writer is bound to the decoding provider's output stream;
+    // clear it and render the local through that binding.
+    stream.str("");
+    stream.clear();
+    locals[0](ILNameSyntax::Signature);
+    EXPECT_EQ(stream.str(), "int32");
+}
+
 // ---------------------------------------------------------------------------
 // The member-table arms of IL::WriteTo (InstructionOutputExtensions.cs
 // EntityHandle.WriteTo): the MethodDefinition and FieldDefinition arms -- the
