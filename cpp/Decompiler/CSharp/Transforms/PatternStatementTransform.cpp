@@ -498,8 +498,32 @@ DestructorPatternsHolder& GetDestructorPatterns() {
     return holder;
 }
 
-// (The C# `DestructorDeclaration dd = new()` construction helper -- the port
-// inlines it in TransformDestructor.)
+// The C# `tryCatchFinallyPattern` (line ~985): the nested
+// `try { try { ... } catch { ... } } finally { ... }` shape.
+struct TryCatchFinallyPatternsHolder {
+    PatternMatching::AnyNode innerTry{"innerTry"};
+    PatternMatching::AnyNode anyCatch;
+    PatternMatching::Repeat anyCatches{anyCatch};
+    Syntax::TryCatchStatement innerTryCatch;
+    Syntax::BlockStatement outerTryBlock;
+    PatternMatching::AnyNode finallyBlock;
+    Syntax::TryCatchStatement tryCatchFinallyPattern;
+
+    TryCatchFinallyPatternsHolder() {
+        innerTryCatch.TryBlock(Syntax::BlockStatement::ToBlockStatement(innerTry));
+        innerTryCatch.CatchClauses().Add(
+            Syntax::CatchClause::ToCatchClause(anyCatches));
+        outerTryBlock.Statements().Add(&innerTryCatch);
+        tryCatchFinallyPattern.TryBlock(&outerTryBlock);
+        tryCatchFinallyPattern.FinallyBlock(
+            Syntax::BlockStatement::ToBlockStatement(finallyBlock));
+    }
+};
+
+TryCatchFinallyPatternsHolder& GetTryCatchFinallyPatterns() {
+    static TryCatchFinallyPatternsHolder holder;
+    return holder;
+}
 
 // The C# `bool DescendIntoStatement(AstNode node)` -- the continue-scan gate:
 // do not descend into expressions (their identifier references are not
@@ -1352,6 +1376,38 @@ public:
         assert(bodyCaptures.size() == 1);
         dtorDef->Body(Syntax::Detach(bodyCaptures.front()));
         return dtorDef;
+    }
+
+    // The C# `TryCatchStatement? TransformTryCatchFinally(TryCatchStatement
+    // tryFinally)` (line ~996): simplify nested 'try { try {} catch {} } finally
+    // {}'. Runs after the using/lock transformations in the C# pipeline.
+    // The tryFinally instance is not changed in identity, so the visitor
+    // continues as usual -- return null (the port falls through to the base
+    // visit).
+    void TransformTryCatchFinally(Syntax::TryCatchStatement* tryFinally) {
+        if (!Syntax::MatchNode(GetTryCatchFinallyPatterns().tryCatchFinallyPattern,
+                               tryFinally)
+                 .Success())
+            return;
+        context->StepOnce("Merge nested try-catch-finally", tryFinally);
+        // The C# `.Single()` on the try block's statements (the pattern
+        // guarantees exactly one).
+        Syntax::BlockStatement* tryBlock = tryFinally->TryBlock();
+        assert(tryBlock->Statements().Count() == 1);
+        auto* tryCatch =
+            dynamic_cast<Syntax::TryCatchStatement*>(tryBlock->Statements().At(0));
+        assert(tryCatch != nullptr);
+        tryFinally->TryBlock(Syntax::Detach(tryCatch->TryBlock()));
+        tryCatch->CatchClauses().MoveTo(tryFinally->CatchClauses());
+    }
+
+    // The C# `public override AstNode VisitTryCatchStatement(TryCatchStatement
+    // tryCatchStatement)` (line ~149): the merge mutates in place and returns
+    // null, so the visit continues into the children as usual.
+    void VisitTryCatchStatement(
+        Syntax::TryCatchStatement* tryCatchStatement) override {
+        TransformTryCatchFinally(tryCatchStatement);
+        Syntax::DepthFirstAstVisitor::VisitTryCatchStatement(tryCatchStatement);
     }
 
     // The C# `public override AstNode VisitIfElseStatement(IfElseStatement ...)`.

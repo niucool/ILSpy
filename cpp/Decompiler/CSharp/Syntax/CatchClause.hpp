@@ -352,6 +352,15 @@ public:
     // faithful to the `hasPatternPlaceholder:true` non-sealed form). No elaborated specifiers (no
     // member is named `AstType`/`Identifier`/`Expression`/`BlockStatement`); the child `Clone()`
     // calls return the typed pointers the setters accept directly.
+    // wraps a Pattern so it can occupy a CatchClause-typed slot (the C# generator's
+    // `implicit operator CatchClause(Pattern)`). Defined out-of-line below the class
+    // (the nested class derives from the enclosing one, which must be complete).
+    class PatternPlaceholder;
+
+    // The C# `public static implicit operator CatchClause(Pattern? pattern)` -- the
+    // PatternExtensions `ToCatchClause(this Pattern)` call-site form.
+    static CatchClause* ToCatchClause(PatternMatching::Pattern& pattern);
+
     CatchClause* Clone() const override {
         auto* node = new CatchClause();
         node->CloneAnnotationsFrom(*this);
@@ -410,6 +419,46 @@ private:
 namespace Slots {
 inline const CSharpSlotInfoT<CatchClause> CatchClause{"CatchClause", false, nullptr, false};
 } // namespace Slots
+
+// The out-of-line nested-class definition (the enclosing CatchClause must be complete for the
+// nested class deriving from it).
+class CatchClause::PatternPlaceholder final : public CatchClause {
+public:
+    explicit PatternPlaceholder(PatternMatching::Pattern& child) : child_(&child) {}
+
+    // The shallow-copy equivalent of the C# inherited MemberwiseClone: a fresh
+    // placeholder over the same child reference.
+    CatchClause* Clone() const override { return new PatternPlaceholder(*child_); }
+
+    void AcceptVisitor(IAstVisitor& visitor) override {
+        visitor.VisitPatternPlaceholder(this, child_);
+    }
+
+    bool AcceptVisitorBool(IAstVisitorBool& visitor) override {
+        return visitor.VisitPatternPlaceholder(this, child_);
+    }
+
+    bool DoMatch(AstNode* other, PatternMatching::Match match) override {
+        return child_->DoMatch(other, match);
+    }
+
+    bool DoMatchCollection(const std::vector<PatternMatching::INode*>& other, int pos,
+                           PatternMatching::Match match,
+                           PatternMatching::BacktrackingInfo& backtrackingInfo) override {
+        return child_->DoMatchCollection(other, pos, match, backtrackingInfo);
+    }
+
+    PatternMatching::Pattern& Child() const { return *child_; }
+
+private:
+    PatternMatching::Pattern* child_;
+};
+
+// The C# `public static implicit operator CatchClause(Pattern? pattern)` /
+// the PatternExtensions `ToCatchClause(this Pattern)`: the call-site form.
+inline CatchClause* CatchClause::ToCatchClause(PatternMatching::Pattern& pattern) {
+    return new PatternPlaceholder(pattern);
+}
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 

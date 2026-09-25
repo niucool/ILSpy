@@ -1504,6 +1504,64 @@ TEST(PatternStatementTransformTest, DestructorBodyIsSimplified)
         << "the try body unwraps into the destructor body";
 }
 
+// ---- The try-catch-finally merge --------------------------------------------------------
+
+// `try { try { work } catch { c } } finally { f }` becomes
+// `try { work } catch { c } finally { f }` (the nested try-catch merges into
+// the outer try-finally).
+TEST(PatternStatementTransformTest, NestedTryCatchFinallyIsMerged)
+{
+    PatternStatementFixture fx;
+    auto* outer = new Syntax::TryCatchStatement();
+    auto* outerTryBlock = new Syntax::BlockStatement();
+    auto* inner = new Syntax::TryCatchStatement();
+    auto* work = new Syntax::BlockStatement();
+    work->Statements().Add(new Syntax::ReturnStatement());
+    inner->TryBlock(work);
+    auto* catchClause = new Syntax::CatchClause();
+    inner->CatchClauses().Add(catchClause);
+    outerTryBlock->Statements().Add(inner);
+    outer->TryBlock(outerTryBlock);
+    auto* finallyBlock = new Syntax::BlockStatement();
+    outer->FinallyBlock(finallyBlock);
+
+    auto root = std::make_unique<Syntax::BlockStatement>();
+    root->Statements().Add(outer);
+
+    RunTransform(*root, fx);
+
+    ASSERT_EQ(root->Statements().Count(), 1);
+    EXPECT_EQ(root->Statements().At(0), outer);
+    EXPECT_EQ(outer->TryBlock(), work)
+        << "the inner try's block becomes the outer try's block";
+    ASSERT_EQ(outer->CatchClauses().Count(), 1);
+    EXPECT_EQ(outer->CatchClauses().At(0), catchClause)
+        << "the inner catches move to the outer try";
+    EXPECT_EQ(outer->FinallyBlock(), finallyBlock);
+}
+
+// A nested try without the outer finally does not merge.
+TEST(PatternStatementTransformTest, NestedTryCatchWithoutFinallyIsNotMerged)
+{
+    PatternStatementFixture fx;
+    auto* outer = new Syntax::TryCatchStatement();
+    auto* outerTryBlock = new Syntax::BlockStatement();
+    auto* inner = new Syntax::TryCatchStatement();
+    inner->TryBlock(new Syntax::BlockStatement());
+    inner->CatchClauses().Add(new Syntax::CatchClause());
+    outerTryBlock->Statements().Add(inner);
+    outer->TryBlock(outerTryBlock);
+
+    auto root = std::make_unique<Syntax::BlockStatement>();
+    root->Statements().Add(outer);
+
+    RunTransform(*root, fx);
+
+    EXPECT_EQ(outer->TryBlock(), outerTryBlock)
+        << "without a finally the nested structure stays";
+    EXPECT_EQ(outer->CatchClauses().Count(), 0);
+}
+
 // ---- The Run shell ---------------------------------------------------------------------
 
 // A Run entered while another Run is in flight throws (the C# reentrancy
