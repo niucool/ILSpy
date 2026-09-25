@@ -1,4 +1,4 @@
-# ILSpy C++ Port -- Session Handoff (written after `d936b1f81`)
+# ILSpy C++ Port -- Session Handoff (written after `01dd3aea7`)
 
 Read this + `PORT_PLAN.md` + `cpp/README.md` (and the sibling
 `cpp/PORT_LOG_BAML.md` / `cpp/PORT_LOG_DISASM.md` logs) at the start of a
@@ -9,8 +9,14 @@ skipped` (filters below).
 
 ## Current position
 
-- **PatternStatementTransform: shell + four arms landed** (`93f1f9bd2`,
-  `dfcba6e08`); see the previous handoffs' notes in git for the arm list.
+- **PatternStatementTransform: five arms landed** (`93f1f9bd2`,
+  `dfcba6e08`, `01dd3aea7`): the logic arms, TransformFor, and the
+  foreach-on-array reshape (forOnArrayPattern + VisitForStatement +
+  VariableCanBeUsedAsForeachLocal over the analysis; the
+  AddressUsedForSingleCall special case deferred on the address-use list +
+  the resolved-IMethod surface). The Annotation<BlockContainer>/
+  Annotation<ILFunction> queries now live on the shared Annotations surface
+  (CS::GetBlockContainerAnnotation / CS::GetILFunctionAnnotation).
 - **DeclareVariables: COMPLETE** (`e6ee1d822` analysis, `d936b1f81`
   mutation): the IAstTransform Run with EnsureExpressionStatementsAreValid
   (direction unwrap + discard; the temporary arm deferred on
@@ -40,19 +46,24 @@ skipped` (filters below).
   - Trees handed to RunAstTransforms/DeclareVariables.Run need the root
     ILFunction annotation for the invalid-statement fixup (the C# contract;
     the pipeline driver test attaches one now).
-- Remaining PatternStatementTransform arms, smallest-first: foreach-on-array
-  (~287), foreach-on-inline-array (~410), foreach-on-multi-dim (~516),
-  automatic property (~693), destructor (~931), try-catch-finally (~983),
-  C# 7.3 pattern-based fixed (~1087), C# 8.0 enhanced using (~1119), the
-  Identifier backing-field rewrite (~840).
+- Remaining PatternStatementTransform arms, smallest-first: foreach-on-
+  multi-dim (~516, needs SyntaxExtensions.GetNextStatement -- a small port
+  -- plus ArrayType.Dimensions and the GetUpperBound/GetLowerBound patterns),
+  foreach-on-inline-array (~410, needs the resolved-IMethod GetSymbol checks
+  + GetInlineArrayLength), automatic property (~693), destructor (~931),
+  try-catch-finally (~983), C# 7.3 pattern-based fixed (~1087), C# 8.0
+  enhanced using (~1119), the Identifier backing-field rewrite (~840).
 
 ## Next steps (in order)
 
-1. **The foreach arms** (PatternStatementTransform.cs lines ~287-690):
-   forOnArrayPattern / forOnInlineArrayPattern / forOnArrayMultiDimPattern
-   + `VisitForStatement` + TransformForeachOnArray/
-   TransformForeachOnInlineArray/TransformForeachOnMultiDimArray +
-   `ExpressionBuilder.IsMovable`-family helpers as needed. RED-first.
+1. **The remaining foreach arms**: multi-dim first (the
+   GetUpperBound/GetLowerBound/element-assign patterns + MatchLowerBound/
+   MatchForeachOnMultiDimArray + TransformForeachOnMultiDimArray via
+   VisitExpressionStatement; port SyntaxExtensions.GetNextStatement -- a
+   6-line walk to the next Statement sibling -- and check ArrayType's
+   Dimensions), then inline-array (survey its GetSymbol/IMethod
+   DeclaringType.FullName + GetInlineArrayLength dependencies; the
+   resolved-IMethod checks may need a loud deferral). RED-first.
 2. The remaining PatternStatementTransform arms (automatic property,
    destructor, try-catch-finally, fixed, enhanced using, Identifier
    rewrite).
