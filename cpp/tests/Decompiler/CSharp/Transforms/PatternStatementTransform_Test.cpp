@@ -48,6 +48,7 @@
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/FixedStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ForeachStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
@@ -58,6 +59,7 @@
 #include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/VariableInitializer.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
@@ -1617,6 +1619,83 @@ TEST(PatternStatementTransformTest, EnhancedUsingRequiresVariableDeclaration)
     RunTransform(*root, fx);
 
     EXPECT_FALSE(usingStatement->IsEnhanced());
+}
+
+// ---- The pattern-based fixed statement --------------------------------------------------
+
+// `fixed (var p = &expr.GetPinnableReference()) { }` over a value-type target
+// becomes `fixed (var p = expr) { }` (the C# 7.3 pattern-based fixed).
+TEST(PatternStatementTransformTest, PatternBasedFixedIsIntroduced)
+{
+    PatternStatementFixture fx;
+    auto* fixedStatement = new Syntax::FixedStatement();
+    auto* variable = new Syntax::VariableInitializer();
+    auto* target = new Syntax::IdentifierExpression("buffer");
+    // The target resolves to a value type (IsReferenceType false).
+    target->AddAnnotation(std::make_shared<Sem::TypeResolveResult>(
+        TS::ITypePtr(std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32))));
+    auto* call = new Syntax::InvocationExpression(
+        new Syntax::MemberReferenceExpression(target, "GetPinnableReference"));
+    variable->Initializer(new Syntax::UnaryOperatorExpression(
+        call, Syntax::UnaryOperatorType::AddressOf));
+    fixedStatement->Variables().Add(variable);
+    fixedStatement->EmbeddedStatement(new Syntax::BlockStatement());
+
+    auto root = std::make_unique<Syntax::BlockStatement>();
+    root->Statements().Add(fixedStatement);
+
+    RunTransform(*root, fx);
+
+    EXPECT_EQ(variable->Initializer(), target)
+        << "the address-of-GetPinnableReference initializer unwraps to the target";
+}
+
+// A reference-type target keeps the GetPinnableReference call (the fixed
+// semantics only match for value types).
+TEST(PatternStatementTransformTest, PatternBasedFixedRequiresValueType)
+{
+    PatternStatementFixture fx;
+    auto* fixedStatement = new Syntax::FixedStatement();
+    auto* variable = new Syntax::VariableInitializer();
+    auto* target = new Syntax::IdentifierExpression("buffer");
+    // A reference type (a class).
+    target->AddAnnotation(std::make_shared<Sem::TypeResolveResult>(
+        TS::ITypePtr(std::make_shared<TS::KnownType>(TS::KnownTypeCode::String))));
+    auto* call = new Syntax::InvocationExpression(
+        new Syntax::MemberReferenceExpression(target, "GetPinnableReference"));
+    variable->Initializer(new Syntax::UnaryOperatorExpression(
+        call, Syntax::UnaryOperatorType::AddressOf));
+    fixedStatement->Variables().Add(variable);
+    fixedStatement->EmbeddedStatement(new Syntax::BlockStatement());
+
+    auto root = std::make_unique<Syntax::BlockStatement>();
+    root->Statements().Add(fixedStatement);
+
+    RunTransform(*root, fx);
+
+    auto* initializer =
+        dynamic_cast<Syntax::UnaryOperatorExpression*>(variable->Initializer());
+    ASSERT_NE(initializer, nullptr)
+        << "a reference-type target keeps the address-of call";
+}
+
+// A fixed initializer that is not the GetPinnableReference shape keeps its form.
+TEST(PatternStatementTransformTest, PatternBasedFixedRequiresTheHelperShape)
+{
+    PatternStatementFixture fx;
+    auto* fixedStatement = new Syntax::FixedStatement();
+    auto* variable = new Syntax::VariableInitializer();
+    variable->Initializer(new Syntax::IdentifierExpression("ptr"));
+    fixedStatement->Variables().Add(variable);
+    fixedStatement->EmbeddedStatement(new Syntax::BlockStatement());
+
+    auto root = std::make_unique<Syntax::BlockStatement>();
+    root->Statements().Add(fixedStatement);
+
+    RunTransform(*root, fx);
+
+    EXPECT_NE(variable->Initializer(), nullptr)
+        << "a non-matching initializer is untouched";
 }
 
 // ---- The Run shell ---------------------------------------------------------------------

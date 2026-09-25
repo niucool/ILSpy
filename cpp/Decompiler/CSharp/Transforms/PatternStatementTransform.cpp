@@ -82,6 +82,7 @@
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/Statement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/FixedStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/UsingStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
@@ -89,6 +90,7 @@
 #include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
+#include "Decompiler/CSharp/Syntax/VariableInitializer.hpp"
 #include "Decompiler/CSharp/Transforms/DeclareVariables.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
@@ -524,6 +526,23 @@ struct TryCatchFinallyPatternsHolder {
 
 TryCatchFinallyPatternsHolder& GetTryCatchFinallyPatterns() {
     static TryCatchFinallyPatternsHolder holder;
+    return holder;
+}
+
+// The C# `addressOfPinnableReference` pattern (line ~1091):
+// `&$target.GetPinnableReference()` (the C# 7.3 pattern-based fixed form).
+// Reference types are handled by DetectPinnedRegions.IsCustomRefPinPattern.
+struct PatternBasedFixedPatternsHolder {
+    PatternMatching::AnyNode target{"target"};
+    Syntax::MemberReferenceExpression pinnableMember{
+        Syntax::Expression::ToExpression(target), "GetPinnableReference"};
+    Syntax::InvocationExpression pinnableCall{&pinnableMember};
+    Syntax::UnaryOperatorExpression addressOfPinnableReference{
+        &pinnableCall, Syntax::UnaryOperatorType::AddressOf};
+};
+
+PatternBasedFixedPatternsHolder& GetPatternBasedFixedPatterns() {
+    static PatternBasedFixedPatternsHolder holder;
     return holder;
 }
 
@@ -1401,6 +1420,37 @@ public:
         assert(tryCatch != nullptr);
         tryFinally->TryBlock(Syntax::Detach(tryCatch->TryBlock()));
         tryCatch->CatchClauses().MoveTo(tryFinally->CatchClauses());
+    }
+
+    // The C# `public override AstNode VisitFixedStatement(FixedStatement
+    // fixedStatement)` (line ~1102): `fixed (var p = &target.GetPinnableReference())
+    // { }` over a value-type target becomes `fixed (var p = target) { }`.
+    void VisitFixedStatement(Syntax::FixedStatement* fixedStatement) override {
+        if (context->DecompileRun->Settings().PatternBasedFixedStatement()) {
+            for (int i = 0; i < fixedStatement->Variables().Count(); i++) {
+                Syntax::VariableInitializer* v = fixedStatement->Variables().At(i);
+                PatternMatching::Match m = Syntax::MatchNode(
+                    GetPatternBasedFixedPatterns().addressOfPinnableReference,
+                    v->Initializer());
+                if (m.Success()) {
+                    std::vector<Syntax::Expression*> targetCaptures =
+                        m.Get<Syntax::Expression>("target");
+                    // The C# `.Single()` (exactly one capture by construction).
+                    assert(targetCaptures.size() == 1);
+                    Syntax::Expression* target = targetCaptures.front();
+                    // The C# `target.GetResolveResult().Type.IsReferenceType ==
+                    // false` -- the port's IsReferenceType is an optional<bool>
+                    // (an unknown/null is not the C# false).
+                    if (CS::GetResolveResult(*target)->Type().IsReferenceType() ==
+                        std::optional<bool>(false)) {
+                        context->StepOnce("Use pattern-based fixed statement",
+                                          fixedStatement);
+                        v->Initializer(Syntax::Detach(target));
+                    }
+                }
+            }
+        }
+        Syntax::DepthFirstAstVisitor::VisitFixedStatement(fixedStatement);
     }
 
     // The C# `public override AstNode VisitTryCatchStatement(TryCatchStatement
