@@ -83,6 +83,8 @@
 #include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/Statement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/UsingStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
 #include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
@@ -1408,6 +1410,33 @@ public:
         Syntax::TryCatchStatement* tryCatchStatement) override {
         TransformTryCatchFinally(tryCatchStatement);
         Syntax::DepthFirstAstVisitor::VisitTryCatchStatement(tryCatchStatement);
+    }
+
+    // The C# `public override AstNode VisitUsingStatement(UsingStatement
+    // usingStatement)` (line ~1120): a `using (var x = e) { }` statement that is
+    // the last statement of its block becomes the C# 8.0 using-declaration form
+    // (the resource acquisition stays a variable declaration; the embedded
+    // statement disappears from the printed form).
+    void VisitUsingStatement(Syntax::UsingStatement* usingStatement) override {
+        Syntax::DepthFirstAstVisitor::VisitUsingStatement(usingStatement);
+        if (!context->DecompileRun->Settings().UseEnhancedUsing()) {
+            lastResult = usingStatement;
+            return;
+        }
+        if (Syntax::GetNextStatement(usingStatement) != nullptr ||
+            dynamic_cast<Syntax::BlockStatement*>(usingStatement->Parent()) ==
+                nullptr) {
+            lastResult = usingStatement;
+            return;
+        }
+        if (dynamic_cast<Syntax::VariableDeclarationStatement*>(
+                usingStatement->ResourceAcquisition()) == nullptr) {
+            lastResult = usingStatement;
+            return;
+        }
+        context->StepOnce("Use enhanced using statement", usingStatement);
+        usingStatement->IsEnhanced(true);
+        lastResult = usingStatement;
     }
 
     // The C# `public override AstNode VisitIfElseStatement(IfElseStatement ...)`.

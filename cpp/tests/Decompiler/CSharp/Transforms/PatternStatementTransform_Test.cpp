@@ -53,6 +53,8 @@
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/UsingStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
@@ -137,10 +139,12 @@ std::string NameOf(const Syntax::Expression* expression) {
 void RunTransform(Syntax::AstNode& root, const PatternStatementFixture& fx,
                   bool forStatementSetting = true,
                   bool forEachStatementSetting = true,
-                  const TS::ITypeDefinition* currentTypeDefinition = nullptr) {
+                  const TS::ITypeDefinition* currentTypeDefinition = nullptr,
+                  bool useEnhancedUsingSetting = true) {
     DecompilerSettings settings;
     settings.SetForStatement(forStatementSetting);
     settings.SetForEachStatement(forEachStatementSetting);
+    settings.SetUseEnhancedUsing(useEnhancedUsingSetting);
     DecompileRun runStorage(&settings, fx.usingScope);
     CS::Transforms::TransformContext context;
     context.DecompileRun = &runStorage;
@@ -1560,6 +1564,59 @@ TEST(PatternStatementTransformTest, NestedTryCatchWithoutFinallyIsNotMerged)
     EXPECT_EQ(outer->TryBlock(), outerTryBlock)
         << "without a finally the nested structure stays";
     EXPECT_EQ(outer->CatchClauses().Count(), 0);
+}
+
+// ---- The enhanced-using statement -------------------------------------------------------
+
+// A `using (var x = e) { }` statement that is the last statement of its block
+// becomes the C# 8.0 using-declaration form (`using var x = e;`).
+TEST(PatternStatementTransformTest, EnhancedUsingIsIntroduced)
+{
+    PatternStatementFixture fx;
+    auto* usingStatement = new Syntax::UsingStatement();
+    auto* declaration = new Syntax::VariableDeclarationStatement();
+    usingStatement->ResourceAcquisition(declaration);
+    usingStatement->EmbeddedStatement(new Syntax::BlockStatement());
+
+    auto root = std::make_unique<Syntax::BlockStatement>();
+    root->Statements().Add(usingStatement);
+
+    RunTransform(*root, fx);
+
+    EXPECT_TRUE(usingStatement->IsEnhanced());
+}
+
+// A using statement followed by another statement keeps the statement form.
+TEST(PatternStatementTransformTest, EnhancedUsingRequiresLastStatement)
+{
+    PatternStatementFixture fx;
+    auto* usingStatement = new Syntax::UsingStatement();
+    usingStatement->ResourceAcquisition(new Syntax::VariableDeclarationStatement());
+    usingStatement->EmbeddedStatement(new Syntax::BlockStatement());
+
+    auto root = std::make_unique<Syntax::BlockStatement>();
+    root->Statements().Add(usingStatement);
+    root->Statements().Add(new Syntax::ReturnStatement());
+
+    RunTransform(*root, fx);
+
+    EXPECT_FALSE(usingStatement->IsEnhanced());
+}
+
+// A using over an expression (not a variable declaration) keeps the form.
+TEST(PatternStatementTransformTest, EnhancedUsingRequiresVariableDeclaration)
+{
+    PatternStatementFixture fx;
+    auto* usingStatement = new Syntax::UsingStatement();
+    usingStatement->ResourceAcquisition(new Syntax::IdentifierExpression("x"));
+    usingStatement->EmbeddedStatement(new Syntax::BlockStatement());
+
+    auto root = std::make_unique<Syntax::BlockStatement>();
+    root->Statements().Add(usingStatement);
+
+    RunTransform(*root, fx);
+
+    EXPECT_FALSE(usingStatement->IsEnhanced());
 }
 
 // ---- The Run shell ---------------------------------------------------------------------
