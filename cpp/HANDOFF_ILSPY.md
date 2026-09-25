@@ -18,19 +18,21 @@ skipped` (filters below; grew by one test per landed arm -- 118 at
   the resolved-IMethod surface). The Annotation<BlockContainer>/
   Annotation<ILFunction> queries now live on the shared Annotations surface
   (CS::GetBlockContainerAnnotation / CS::GetILFunctionAnnotation).
-- **PatternStatementTransform: EIGHT of nine arms landed** (through
-  `6f27d7110`): the logic arms (`93f1f9bd2`), TransformFor (`dfcba6e08`),
-  foreach-on-array (`01dd3aea7`), foreach-on-multi-dim (`b4e892ad2`:
-  GetNextStatement + the GetUpperBound/GetLowerBound chain),
-  foreach-on-inline-array (`df98f5c45`: GetSymbol/MemberResolveResult +
-  GetInlineArrayLength), destructor (`77a8695af`), try-catch-finally
-  (`b40d74d57`), C# 8.0 enhanced using (`e87a68ff8`), C# 7.3 pattern-based
-  fixed (`6f27d7110`). The only remaining family is the automatic-property
-  pair (~693 TransformAutomaticProperty + ~840 ReplaceBackingFieldUsage).
-  Pattern-placeholder surfaces landed along the way: BlockStatement and
-  AttributeSection (`77a8695af`) and CatchClause (`b40d74d57`) -- each the
-  C# generator's `implicit operator X(Pattern)` + nested PatternPlaceholder
-  (the Statement/Expression/AstType precedents).
+- **PatternStatementTransform: COMPLETE** (through `0073d82c7`): all nine
+  families landed -- the logic arms (`93f1f9bd2`), TransformFor
+  (`dfcba6e08`), foreach-on-array (`01dd3aea7`), foreach-on-multi-dim
+  (`b4e892ad2`), foreach-on-inline-array (`df98f5c45`), the automatic
+  property declaration half (`b31a10a2f`), the destructor (`77a8695af`),
+  try-catch-finally (`b40d74d57`), C# 8.0 enhanced using (`e87a68ff8`),
+  C# 7.3 pattern-based fixed (`6f27d7110`), and the backing-field
+  identifier rewrite (`0073d82c7`). Pattern-placeholder surfaces landed
+  along the way: BlockStatement and AttributeSection (`77a8695af`) and
+  CatchClause (`b40d74d57`) -- each the C# generator's `implicit operator
+  X(Pattern)` + nested PatternPlaceholder. MemberResolveResult grew
+  SharedTargetResult (the re-point call site). CSharpDecompiler gained
+  RemoveAttribute (the KnownAttribute section stripper). Remaining
+  sub-deferrals, loud in the .cpp header: AddressUsedForSingleCall,
+  the anonymous-type `var` decision, the automatic-events family.
 - **DeclareVariables: COMPLETE** (`e6ee1d822` analysis, `d936b1f81`
   mutation): the IAstTransform Run with EnsureExpressionStatementsAreValid
   (direction unwrap + discard; the temporary arm deferred on
@@ -60,43 +62,14 @@ skipped` (filters below; grew by one test per landed arm -- 118 at
   - Trees handed to RunAstTransforms/DeclareVariables.Run need the root
     ILFunction annotation for the invalid-statement fixup (the C# contract;
     the pipeline driver test attaches one now).
-- Remaining PatternStatementTransform arms: ONLY the automatic-property
-  pair -- TransformAutomaticProperty (~693) and the VisitIdentifier/
-  ReplaceBackingFieldUsage backing-field rewrite (~840). Dependency map
-  (all surveyed, all feasible with the existing surfaces):
-  - Symbols: `propertyDeclaration.GetSymbol() as IProperty` via a
-    MemberResolveResult annotation (the TypeResolveResult-on-TypeDeclaration
-    precedent in the destructor tests); field references via a
-    MemberResolveResult over an IField. The test rig:
-    TSImpl::FakeProperty/FakeMethod + LookupTypeDefinition::
-    SetProperties/SetFields (the IsBackingFieldOfAutomaticProperty
-    enumeration + the `Fields.Any(f => f.Name == "_" + property.Name ...)`
-    check read exactly those).
-  - TS::IsCompilerGeneratedOrIsInCompilerGeneratedClass /
-    TS::HasReadonlyModifier already ported (TypeSystemExtensions).
-  - NameCouldBeBackingFieldOfAutomaticProperty: the regex
-    `^(<(?<name>.+)>k__BackingField|_(?<name>.+))$` -- port as a hand
-    matcher (no std::regex in the port conventions; two alternates).
-  - RemoveCompilerGeneratedAttribute(section list, full names): the
-    attribute Type's GetSymbol() as IType -- the port has no IType.FullName,
-    compose Namespace()+"."+Name() (empty-namespace → Name() only, the
-    inline-array PID precedent).
-  - CSharpDecompiler.RemoveAttribute(EntityDeclaration, KnownAttribute)
-    is NOT ported yet -- port it (or a local static) with the C# shape.
-  - currentMethod.AccessorOwner: the visitor already tracks currentMethod
-    (the tracking overrides); IMethod::AccessorOwner exists (FakeMethod
-    SetAccessorOwner).
-  - The GetterOnlyAutomaticProperties and AutomaticProperties settings
-    exist on DecompilerSettings.
+- Remaining PatternStatementTransform work: none (the sub-deferrals above
+  are tracked in place).
 
 ## Next steps (in order)
 
-1. **The automatic-property pair** (the last PatternStatementTransform
-   family): TransformAutomaticProperty (~693) then
-   ReplaceBackingFieldUsage (~840), using the dependency map above.
-   RED-first, one arm per commit.
-2. Then: the facade completion items, the deferred GetAstTransforms slots
-   as their transforms land.
+1. **The facade completion items** (PORT_PLAN.md's remaining facade
+   checklist) and the deferred GetAstTransforms slots as their transforms
+   land; the PatternStatementTransform work is done.
 
 ## Hazard-ledger highlights (keep)
 

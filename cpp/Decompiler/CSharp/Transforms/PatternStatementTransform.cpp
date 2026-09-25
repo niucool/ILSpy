@@ -41,12 +41,20 @@
 // first order of the port plan): foreach-on-array / inline-array / multi-dim,
 // TransformAutomaticProperty, the destructor
 // TransformDestructorFinalizerWithPattern, TransformTryCatchFinally, the C# 7.3
-// pattern-based fixed, the C# 8.0 enhanced using, and the Identifier
-// backing-field rewrite. The `DeclareVariables declareVariables` member's
-// analysis (Analyze/GetDeclarationPoint, feeding the for reshape's
-// iterator-variable bail) is ported; the DeclareVariables mutation half
-// (Run/InsertVariableDeclarations/UpdateAnnotations and its GetAstTransforms
-// slot) lands with its own slice.
+// backing-field rewrite -- ALL LANDED (the foreach arms in `b4e892ad2` /
+// `df98f5c45`, the automatic property in `b31a10a2f` / `0073d82c7`, the
+// destructor in `77a8695af`, try-catch-finally in `b40d74d57`, the fixed /
+// using arms in `6f27d7110` / `e87a68ff8`). The `DeclareVariables
+// declareVariables` member's analysis (Analyze/GetDeclarationPoint, feeding
+// the for reshape's iterator-variable bail) is ported, as is the mutation half
+// (its own earlier slices).
+//
+// The remaining known sub-deferrals, loud in place:
+// AddressUsedForSingleCall (VariableCanBeUsedAsForeachLocal -- the per-variable
+// address-use list), the anonymous-type `var` decision (NRExtensions
+// ContainsAnonymousType), and the automatic-events family
+// (IsEventBackingFieldDeclaration -- the PropertyAndEventBackingFieldLookup
+// metadata surface).
 
 #include "Decompiler/CSharp/Transforms/PatternStatementTransform.hpp"
 
