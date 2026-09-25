@@ -1424,9 +1424,32 @@ bool FindBranchTargets(const std::uint8_t* b, std::size_t size, std::set<std::ui
     return true;
 }
 
-// Resolve all Branch.TargetOffset references in the tree to Block pointers,
-// using the offset->Block map. Branches whose target offset has no block are
-// left as offset branches (graceful).
+// Find the block at `targetILOffset` visible from the branch's enclosing
+// container chain (the C# BlockBuilder.FindBranchTarget: walk the
+// containerStack from the innermost enclosing container outward, and take
+// the first block at the offset). The nesting pass puts two blocks at an
+// EH region's entry offset -- the flat block inside the region container
+// and the outer block wrapping the region construct -- and a branch from
+// outside the region must enter through the OUTER block (a flat
+// offset->block lookup would jump into the region's interior, bypassing
+// the region's semantics on later branch-chain simplification).
+Block* FindBranchTargetInContainers(const Branch* br,
+                                    std::uint32_t targetILOffset) {
+    for (ILInstruction* p = br->Parent; p != nullptr; p = p->Parent) {
+        auto* container = dynamic_cast<BlockContainer*>(p);
+        if (container == nullptr) continue;
+        for (auto& block : container->Blocks) {
+            if (block && block->StartILOffset == targetILOffset &&
+                !(block->StartILOffset == block->EndILOffset))
+                return block.get();
+        }
+    }
+    return nullptr;
+}
+
+// Resolve all Branch.TargetOffset references in the tree to Block pointers.
+// Branches whose target offset has no block are left as offset branches
+// (graceful).
 void ResolveBranches(ILInstruction* inst, const std::map<std::uint32_t, Block*>& byOffset) {
     if (!inst) return;
     // Recurse into children first.
@@ -1437,8 +1460,13 @@ void ResolveBranches(ILInstruction* inst, const std::map<std::uint32_t, Block*>&
     if (inst->Op == OpCode::Branch) {
         auto* br = static_cast<Branch*>(inst);
         if (br->HasOffset) {
-            auto it = byOffset.find(br->TargetOffset);
-            if (it != byOffset.end()) { br->TargetBlock = it->second; br->HasOffset = false; }
+            if (Block* target = FindBranchTargetInContainers(br, br->TargetOffset)) {
+                br->TargetBlock = target;
+                br->HasOffset = false;
+            } else {
+                auto it = byOffset.find(br->TargetOffset);
+                if (it != byOffset.end()) { br->TargetBlock = it->second; br->HasOffset = false; }
+            }
         }
     }
 }

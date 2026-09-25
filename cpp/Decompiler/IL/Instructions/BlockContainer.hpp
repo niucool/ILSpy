@@ -121,6 +121,21 @@ public:
     // Block.cpp.
     bool MatchIncrementBlock(Block* block);
 
+    // The C# `public List<Block> TopologicalSort(bool deleteUnreachableBlocks
+    // = false)` (BlockContainer.cs lines 277-322): visit blocks from the
+    // entry in DFS post-order (the C# GraphTraversal.DepthFirstSearch with
+    // reverseSuccessors: true -- successors visited last-listed-first),
+    // reverse the post-order, then append the never-visited blocks unless
+    // deletion is requested. The successor scan follows the C# Successors
+    // local: every Branch descendant whose target block's parent is this
+    // container.
+    std::vector<Block*> TopologicalSort(bool deleteUnreachableBlocks = false) const;
+
+    // The C# `public void SortBlocks(bool deleteUnreachableBlocks = false)`
+    // (BlockContainer.cs lines 324-329): reorder Blocks into the
+    // topological order (a no-op under two blocks).
+    void SortBlocks(bool deleteUnreachableBlocks = false);
+
     void WriteTo(std::string& out) const override {
         out += "BlockContainer {\n";
         for (auto& b : Blocks) {

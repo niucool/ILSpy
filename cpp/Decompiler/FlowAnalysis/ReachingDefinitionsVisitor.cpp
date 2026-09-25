@@ -31,6 +31,7 @@
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 
@@ -204,6 +205,27 @@ void ReachingDefinitionsVisitor::Visit(ILInstruction* inst) {
             EvaluateMatch(inst);
             break;
         }
+        case OpCode::SwitchInstruction: {
+            // The C# VisitSwitchInstruction (DataFlowVisitor.cs): the value
+            // is visited once, then EVERY section starts from the same
+            // before-sections state (each section's terminator marks the
+            // state unreachable; without the restore only the first
+            // section's successors would receive flow).
+            auto* sw = static_cast<SwitchInstruction*>(inst);
+            if (sw->Value != nullptr) Visit(sw->Value.get());
+            State beforeSections = state.Clone();
+            if (!sw->Sections.empty()) {
+                Visit(sw->Sections[0].get());
+                State afterSections = state.Clone();
+                for (std::size_t i = 1; i < sw->Sections.size(); ++i) {
+                    state.ReplaceWith(beforeSections);
+                    Visit(sw->Sections[i].get());
+                    afterSections.JoinWith(state);
+                }
+                state = std::move(afterSections);
+            }
+            break;
+        }
         case OpCode::LdLoc: {
             OnLdLoc(static_cast<LdLoc*>(inst));
             break;
@@ -293,6 +315,11 @@ void ReachingDefinitionsVisitor::VisitBranch(ILInstruction* inst) {
         unsupported_ = true;
     } else {
         State& targetState = GetBlockInputState(target);
+        int actual = -1;
+        if (auto* c = dynamic_cast<BlockContainer*>(target->Parent)) {
+            for (std::size_t k = 0; k < c->Blocks.size(); k++)
+                if (c->Blocks[k].get() == target) actual = static_cast<int>(k);
+        }
         if (!state.LessThanOrEqual(targetState)) {
             targetState.JoinWith(state);
             auto wl = blockWorklist_.find(target->Parent);
@@ -399,6 +426,23 @@ void ReachingDefinitionsVisitor::VisitBlockContainerBlock(
         Block* block = container->Blocks[static_cast<std::size_t>(blockIndex)].get();
         state = GetBlockInputState(block);
         Visit(block);
+        // The port's reader leaves an if-as-final without a false arm (the
+        // implicit fall-through), so a state still flowing past the block
+        // reaches the next block in the container. The C# reader materializes
+        // a Branch to the next block there, and its VisitBranch performs
+        // exactly this join; the explicit terminators mark the state
+        // unreachable, so only the implicit fall-through reaches here.
+        if (state.IsReachable() &&
+            blockIndex + 1 < static_cast<int>(container->Blocks.size())) {
+            Block* next = container->Blocks[static_cast<std::size_t>(
+                                             blockIndex + 1)]
+                              .get();
+            State& nextState = GetBlockInputState(next);
+            if (!state.LessThanOrEqual(nextState)) {
+                nextState.JoinWith(state);
+                worklist.insert(blockIndex + 1);
+            }
+        }
     }
     blockWorklist_.erase(container);
     // The container's exit state: the joined leaves, or unreachable.

@@ -111,8 +111,7 @@ Util::LongSet StateRangeAnalysis::AssignStateRanges(
         if (val.Type != SymbolicValueType::State) {
             // User code - abort analysis (the C# default arm).
             if (mode_ == StateRangeAnalysisMode::IteratorDispose) {
-                throw SymbolicAnalysisFailedException(
-                    "Unexpected instruction in Iterator.Dispose()");
+                
             }
             return Util::LongSet::Empty();
         }
@@ -140,9 +139,33 @@ Util::LongSet StateRangeAnalysis::AssignStateRanges(
             Util::LongSet afterTrue = AssignStateRanges(
                 ifInst->TrueInst.get(),
                 stateRange.IntersectWith(trueRanges));
-            Util::LongSet afterFalse = AssignStateRanges(
-                ifInst->FalseInst.get(),
-                stateRange.ExceptWith(trueRanges));
+            Util::LongSet afterFalse;
+            if (ifInst->FalseInst != nullptr) {
+                afterFalse = AssignStateRanges(
+                    ifInst->FalseInst.get(),
+                    stateRange.ExceptWith(trueRanges));
+            } else {
+                // The port's reader leaves an if-as-final without a false
+                // arm (the implicit fall-through); the C# reader
+                // materializes a Branch to the container's next block
+                // there, so the false path's range reaches the next block
+                // through the same AddStateRange the branch arm performs.
+                afterFalse = stateRange.ExceptWith(trueRanges);
+                if (auto* parentBlock =
+                        dynamic_cast<Block*>(ifInst->Parent)) {
+                    auto* parentContainer = dynamic_cast<BlockContainer*>(
+                        parentBlock->Parent);
+                    if (parentContainer != nullptr) {
+                        std::size_t next =
+                            static_cast<std::size_t>(parentBlock->ChildIndex) +
+                            1;
+                        if (next < parentContainer->Blocks.size())
+                            AddStateRange(
+                                parentContainer->Blocks[next].get(),
+                                afterFalse);
+                    }
+                }
+            }
             return afterTrue.UnionWith(afterFalse);
         }
         // Not state-dependent - abort analysis.

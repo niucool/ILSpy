@@ -31,6 +31,9 @@
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"  // LdFlda
 #include "Decompiler/IL/PatternMatching.hpp"
+#include "Decompiler/IL/Instructions/Nop.hpp"
+#include <algorithm>
+#include "Decompiler/Disassembler/DisassemblerHelpers.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/Instructions/InvalidInstructions.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
@@ -147,6 +150,28 @@ void ResolveFields(ILInstruction* node, const TypeSystem::MetadataModule& module
     }
 }
 
+// The method-resolution pass: the same deferred-resolution convention for
+// Call nodes -- the reader leaves `Method` null and carries the raw token;
+// the analyses read method identities (the finally-method table, the fault-
+// block dispose check), so in-module MethodDef tokens borrow the module's
+// interned definition through the AliasMethod surface (the no-op-deleter
+// shared handle).
+void ResolveCalls(ILInstruction* node, const TypeSystem::MetadataModule& module) {
+    if (auto* call = dynamic_cast<Call*>(node)) {
+        if (call->Method == nullptr && call->MethodToken != 0 &&
+            (call->MethodToken >> 24) == 0x06) {
+            const TypeSystem::IMethod* method =
+                module.GetDefinitionMethod(call->MethodToken);
+            if (method != nullptr)
+                call->Method = TypeSystem::AliasMethod(method);
+        }
+    }
+    for (int i = 0; i < node->ChildCount(); i++) {
+        if (ILInstruction* child = node->GetChild(i))
+            ResolveCalls(child, module);
+    }
+}
+
 // The C# `internal static ILFunction CreateILAst(MethodDefinitionHandle
 // method, ILTransformContext context)`: the body decode + the early
 // transform list (the aggressivelyDuplicateReturnBlocks form) + the port's
@@ -180,8 +205,10 @@ std::unique_ptr<ILFunction> CreateILAst(std::uint32_t method,
     if (context.TypeSystem != nullptr) {
         if (const auto* module = dynamic_cast<const TypeSystem::MetadataModule*>(
                 &context.TypeSystem->MainModule())) {
-            if (il->Body != nullptr)
+            if (il->Body != nullptr) {
                 ResolveFields(il->Body.get(), *module);
+                ResolveCalls(il->Body.get(), *module);
+            }
         }
     }
     return il;
@@ -228,7 +255,7 @@ void YieldReturnDecompiler::Run(ILFunction& function,
         AnalyzeCurrentProperty(context);
         ResolveIEnumerableIEnumeratorFieldMapping(context);
         ConstructExceptionTable(context);
-    } catch (const ControlFlow::SymbolicAnalysisFailedException&) {
+    } catch (const ControlFlow::SymbolicAnalysisFailedException& ex) {
         // The C# adds a warning and leaves the state machine as-is.
         return;
     }
@@ -236,9 +263,9 @@ void YieldReturnDecompiler::Run(ILFunction& function,
     std::unique_ptr<BlockContainer> newBody;
     try {
         newBody = AnalyzeMoveNext(function, context);
-    } catch (const ControlFlow::SymbolicAnalysisFailedException&) {
+    } catch (const ControlFlow::SymbolicAnalysisFailedException& ex) {
         return;
-    } catch (const std::exception&) {
+    } catch (const std::exception& ex) {
         return;
     }
     if (newBody == nullptr)
@@ -272,11 +299,47 @@ void YieldReturnDecompiler::Run(ILFunction& function,
             }
         }
     }
-    // SLICE STATE (part 4): the try-finally reconstruction (the MS
-    // DecompileFinallyBlocks + ReconstructTryFinallyBlocks; the Mono/VB
-    // CleanSkipFinallyBodies / CleanDoFinallyBodies /
-    // CleanFinallyStateChecks) is not ported yet -- the finally-method
-    // calls stay as calls until it lands.
+    // Add state machine field meta-data to parameter ILVariables (the C#
+    // foreach over fieldToParameterMap).
+    for (auto& entry : fieldToParameterMap_) {
+        if (entry.second != nullptr)
+            entry.second->StateMachineField = entry.first;
+    }
+
+    context.StepOnce("Delete unreachable blocks");
+    // The state-dispatch copies the ConvertBody left behind (and any other
+    // unreachable block) drop out here; the C# relies on the sort's
+    // deleteUnreachableBlocks.
+    if (auto* newBodyContainer =
+            dynamic_cast<BlockContainer*>(function.Body.get())) {
+        newBodyContainer->SortBlocks(/*deleteUnreachableBlocks=*/true);
+    }
+
+    // The C# branch dispatch (lines 199-216): the Mono/VB cleanup arms are
+    // deferred with the Mono/VB discriminators (ValidateConstructor is
+    // unported; a no-arg ctor is treated as Mono, so the flags stay false
+    // on the Roslyn fixtures); the MS arm reconstructs the try-finally
+    // structure, rolling the whole conversion back on failure (the C#
+    // reverts the body + the iterator flag + the variables).
+    {
+        std::size_t variableCountBefore = function.Variables.size();
+        try {
+            DecompileFinallyBlocks(context);
+            ReconstructTryFinallyBlocks(function, context);
+        } catch (const ControlFlow::SymbolicAnalysisFailedException&) {
+            // Revert the yield-return transformation
+            context.StepOnce("Transform failed, roll it back");
+            function.IsIterator = false;
+            function.Body = std::move(oldBody);
+            function.Body->Parent = &function;
+            function.Body->ChildIndex = 0;
+            // The variables the new body registered drop out with it (the
+            // C# Variables.RemoveDead()).
+            if (function.Variables.size() > variableCountBefore)
+                function.Variables.resize(variableCountBefore);
+            return;
+        }
+    }
     context.StepOnce("Translate fields to local accesses");
     if (function.Body != nullptr) {
         TranslateFieldsToLocalAccess(function, function.Body.get(),
@@ -865,23 +928,26 @@ std::unique_ptr<BlockContainer> YieldReturnDecompiler::AnalyzeMoveNext(
                 throw ControlFlow::SymbolicAnalysisFailedException(
                     "Unexpected number of blocks in MoveNext() fault block");
             Block* faultBlock = faultBlockContainer->Blocks[0].get();
-            BlockContainer* dummy = nullptr;
-            bool ok = faultBlock->Instructions.size() == 2 &&
+            // The port's terminator convention: the C# reads [call, leave]
+            // from the instructions list; the port carries the leave in the
+            // FinalInstruction slot.
+            bool ok = faultBlock->Instructions.size() == 1 &&
                       dynamic_cast<Call*>(faultBlock->Instructions[0].get()) !=
                           nullptr &&
-                      faultBlock->Instructions[1]->Op == OpCode::Leave;
+                      faultBlock->FinalInstruction != nullptr;
             if (ok) {
                 auto* call =
                     dynamic_cast<Call*>(faultBlock->Instructions[0].get());
-                ok = call->Method != nullptr &&
-                     call->Method->MetadataToken() == disposeMethod_ &&
+                // The reader's deferred-resolution convention: the decoded
+                // call may carry only the raw token (Method null).
+                std::uint32_t callToken =
+                    call->Method != nullptr
+                        ? call->Method->MetadataToken()
+                        : call->MethodToken;
+                ok = callToken == disposeMethod_ &&
                      call->Arguments.size() == 1 &&
-                     MatchLdThis(call->Arguments[0].get());
-            }
-            if (ok) {
-                ok = MatchLeave(faultBlock->Instructions[1].get(),
-                                dummy) &&
-                     MatchLeave(faultBlock->Instructions[1].get(),
+                     MatchLdThis(call->Arguments[0].get()) &&
+                     MatchLeave(faultBlock->FinalInstruction.get(),
                                 faultBlockContainer);
             }
             if (!ok)
@@ -1533,8 +1599,301 @@ std::unique_ptr<BlockContainer> YieldReturnDecompiler::ConvertBody(
             std::unique_ptr<ILInstruction>(MakeGoTo(ctx, initialState)));
         ctx.newBody->Blocks.insert(ctx.newBody->Blocks.begin(),
                                    std::move(entryBlock));
+        // The raw vector insert shifts every block's position; keep the
+        // ChildIndex back-pointers consistent (the C# BlockCollection
+        // maintains them on insert) -- the try-finally reconstruction
+        // indexes the per-block state array by ChildIndex.
+        for (std::size_t bi = 0; bi < ctx.newBody->Blocks.size(); bi++) {
+            ctx.newBody->Blocks[bi]->Parent = ctx.newBody.get();
+            ctx.newBody->Blocks[bi]->ChildIndex = static_cast<int>(bi);
+        }
     }
     return std::move(ctx.newBody);
+}
+
+// The C# `bool IsStateAssignment(ILInstruction inst)` (line 1376): a store
+// of a constant to the state field.
+bool YieldReturnDecompiler::IsStateAssignment(ILInstruction* inst) const {
+    ILInstruction* target = nullptr;
+    const TypeSystem::IField* field = nullptr;
+    ILInstruction* value = nullptr;
+    if (!MatchStFld(inst, target, field, value) || !MatchLdThis(target))
+        return false;
+    return field != nullptr &&
+           field->MemberDefinition() == stateField_;
+}
+
+// The C# `int? GetNewState(Block block)` (lines 1380-1396): the state the
+// block transitions to -- a leading state store, or (for a nested
+// try-finally) a call to an already-decompiled finally method.
+std::optional<int> YieldReturnDecompiler::GetNewState(Block* block) const {
+    if (block->Instructions.empty())
+        return std::nullopt;
+    ILInstruction* first = block->Instructions[0].get();
+    ILInstruction* target = nullptr;
+    const TypeSystem::IField* field = nullptr;
+    ILInstruction* value = nullptr;
+    int newState = 0;
+    if (MatchStFld(first, target, field, value) && MatchLdThis(target) &&
+        field != nullptr &&
+        field->MemberDefinition() == stateField_ &&
+        value != nullptr && MatchLdcI4(value, newState)) {
+        return newState;
+    }
+    if (auto* call = dynamic_cast<Call*>(first)) {
+        if (call->Arguments.size() == 1 &&
+            MatchLdThis(call->Arguments[0].get()) &&
+            call->Method != nullptr) {
+            const TypeSystem::IMethod* def = dynamic_cast<
+                const TypeSystem::IMethod*>(call->Method->MemberDefinition());
+            auto it = decompiledFinallyMethods_.find(def);
+            if (it != decompiledFinallyMethods_.end())
+                return it->second.first;
+        }
+    }
+    return std::nullopt;
+}
+
+// The C# `void DecompileFinallyBlocks()` (lines 1211-1232).
+void YieldReturnDecompiler::DecompileFinallyBlocks(
+    ILTransformContext& context) {
+    for (auto& entry : finallyMethodToStateRange_) {
+        const TypeSystem::IMethod* method = entry.first;
+        auto function = CreateILAst(method->MetadataToken(), context);
+        auto* body = dynamic_cast<BlockContainer*>(function->Body.get());
+        if (body == nullptr)
+            throw ControlFlow::SymbolicAnalysisFailedException(
+                "finally method body is not a container");
+        std::optional<int> newState = GetNewState(body->EntryPoint());
+        if (newState.has_value())
+            body->EntryPoint()->RemoveInstructionAt(0);
+        // Avoid yield-return decompilation if there are unrecognized state
+        // assignments in a finally method.
+        std::vector<ILInstruction*> stack{function->Body.get()};
+        while (!stack.empty()) {
+            ILInstruction* inst = stack.back();
+            stack.pop_back();
+            if (IsStateAssignment(inst))
+                throw ControlFlow::SymbolicAnalysisFailedException(
+                    "Unknown state transition in finally at IL_" +
+                    Disassembler::OffsetToString(
+                        static_cast<int>(inst->StartILOffset)));
+            for (int i = 0; i < inst->ChildCount(); i++) {
+                if (ILInstruction* child = inst->GetChild(i))
+                    stack.push_back(child);
+            }
+        }
+        decompiledFinallyMethods_[method] = {newState, std::move(function)};
+    }
+}
+
+// The C# FindFinallyMethod local (lines 1359-1374): the finally method whose
+// state range contains the state.
+const TypeSystem::IMethod* YieldReturnDecompiler::FindFinallyMethod(
+    int state) const {
+    const TypeSystem::IMethod* foundMethod = nullptr;
+    for (auto& entry : finallyMethodToStateRange_) {
+        std::string rangesStr;
+        for (const auto& iv : entry.second.Intervals())
+            rangesStr += "[" + std::to_string(iv.Start) + ".." +
+                        std::to_string(iv.InclusiveEnd()) + "]";
+        if (entry.second.Contains(state)) {
+            if (foundMethod == nullptr)
+                foundMethod = entry.first;
+            else
+                return nullptr;  // ambiguous (the C# Debug.Fail)
+        }
+    }
+    return foundMethod;
+}
+
+// The C# `void ReconstructTryFinallyBlocks(ILFunction iteratorFunction)`
+// (lines 1237-1374). Precondition: the blocks in newBody are topologically
+// sorted (the C# SortBlocks(deleteUnreachableBlocks: true) ran before this).
+void YieldReturnDecompiler::ReconstructTryFinallyBlocks(
+    ILFunction& iteratorFunction, ILTransformContext& context) {
+    (void)context;
+    auto* newBody = dynamic_cast<BlockContainer*>(iteratorFunction.Body.get());
+    if (newBody == nullptr)
+        return;
+    context_ != nullptr ? (void)0 : (void)0;
+
+    // stateToContainer lives across the CreateTryBlock closure (the C#
+    // local function pair); the port passes it explicitly.
+    std::map<int, BlockContainer*> stateToContainer;
+
+    // The C# CreateTryBlock local (lines 1328-1357): wrap the block's
+    // contents in a TryFinally over the matching finally body.
+    auto CreateTryBlock = [&](Block* block, int state) {
+        const TypeSystem::IMethod* finallyMethod = FindFinallyMethod(state);
+        if (finallyMethod != nullptr) {
+            // remove the method so that it doesn't cause ambiguity when
+            // processing nested try-finally blocks
+            finallyMethodToStateRange_.erase(finallyMethod);
+        }
+
+        auto tryBlock = std::make_unique<Block>();
+        tryBlock->StartILOffset = block->StartILOffset;
+        tryBlock->EndILOffset = block->EndILOffset;
+        for (auto& inst : block->Instructions)
+            tryBlock->Add(std::move(inst));
+        // The C# AddRange copies the whole instruction list (the terminator
+        // included -- the C# list holds it); the port's convention carries
+        // it in the FinalInstruction slot, so it moves with the rest.
+        if (block->FinalInstruction != nullptr)
+            tryBlock->SetFinal(std::move(block->FinalInstruction));
+        auto tryBlockContainer = std::make_unique<BlockContainer>();
+        BlockContainer* tryContainerRaw = tryBlockContainer.get();
+        tryBlockContainer->AddBlock(std::move(tryBlock));
+        stateToContainer.emplace(state, tryContainerRaw);
+
+        std::unique_ptr<ILInstruction> finallyBlock;
+        if (finallyMethod == nullptr) {
+            finallyBlock = std::unique_ptr<ILInstruction>(new InvalidBranch(
+                "Could not find finallyMethod for state=" +
+                std::to_string(state) +
+                ".\nPossibly this method is affected by a C# compiler bug "
+                "that causes the finally body\nnot to run in case of an "
+                "exception or early 'break;' out of a loop consuming this "
+                "iterable."));
+        } else {
+            auto it = decompiledFinallyMethods_.find(finallyMethod);
+            if (it != decompiledFinallyMethods_.end()) {
+                // The C# splices the decompiled function's body out (the
+                // function keeps its variables; they move to the iterator
+                // function).
+                ILFunction& finallyFunction = *it->second.second;
+                finallyBlock = std::move(finallyFunction.Body);
+                for (auto& v : finallyFunction.Variables)
+                    iteratorFunction.RegisterExistingVariable(v);
+                finallyFunction.Variables.clear();
+            } else {
+                finallyBlock = std::unique_ptr<ILInstruction>(
+                    new InvalidBranch("Missing decompiledFinallyMethod"));
+            }
+        }
+
+        block->Instructions.clear();
+        block->Add(std::make_unique<TryFinally>(std::move(tryBlockContainer),
+                                                std::move(finallyBlock)));
+        block->RenumberChildren();
+    };
+
+    std::vector<int> blockState(newBody->Blocks.size(), 0);
+    blockState[0] = -1;
+    stateToContainer.emplace(-1, newBody);
+    // First, analyse the newBody: for each block, determine the active state
+    // number.
+    for (std::size_t i = 0; i < newBody->Blocks.size(); i++) {
+        Block* block = newBody->Blocks[i].get();
+        int oldState = blockState[static_cast<std::size_t>(block->ChildIndex)];
+        BlockContainer* container = nullptr;  // new container for the block
+        int newState = 0;
+        std::optional<int> newStateOpt = GetNewState(block);
+        if (newStateOpt.has_value()) {
+            // OK, state change
+            // Remove the state-changing instruction
+            block->RemoveInstructionAt(0);
+            newState = *newStateOpt;
+            auto it = stateToContainer.find(newState);
+            if (it == stateToContainer.end()) {
+                // First time we see this state.
+                // This means we just found the entry point of a try block.
+                CreateTryBlock(block, newState);
+                // CreateTryBlock() wraps the contents of 'block' with a
+                // TryFinally. We thus need to put the block (which now
+                // contains the whole TryFinally) into the parent container.
+                // Assuming a state transition never enters more than one
+                // state at once, we can use stateToContainer[oldState] as
+                // parent.
+                container = stateToContainer[oldState];
+            } else {
+                container = it->second;
+            }
+        } else {
+            // Because newBody is topologically sorted we because we just
+            // removed unreachable code, we can assume that blockState[] was
+            // already set for this block.
+            newState = oldState;
+            container = stateToContainer[oldState];
+        }
+        if (container != nullptr && container != newBody) {
+            // Move the block into the container. The C# BlockCollection.Add
+            // re-parents; the port's raw push_back must do it explicitly
+            // (the C# RemoveAll then drops the moved blocks by the Parent
+            // check).
+            for (auto& owned : newBody->Blocks) {
+                if (owned.get() == block) {
+                    block->Parent = container;
+                    block->ChildIndex =
+                        static_cast<int>(container->Blocks.size());
+                    container->Blocks.push_back(std::move(owned));
+                    break;
+                }
+            }
+            // Keep the stale reference in newBody.Blocks for now, to avoid
+            // changing the ChildIndex of the other blocks while we use it
+            // to index the blockState array.
+        }
+        // Propagate newState to successor blocks
+        std::vector<ILInstruction*> stack{block};
+        while (!stack.empty()) {
+            ILInstruction* node = stack.back();
+            stack.pop_back();
+            if (auto* branch = dynamic_cast<Branch*>(node)) {
+                if (branch->TargetBlock != nullptr &&
+                    branch->TargetBlock->Parent == newBody) {
+                    int stateAfterBranch = newState;
+                    // The C# `Block.GetPredecessor(branch) is Call call`:
+                    // pre-roslyn compiles "yield break;" into "Dispose();
+                    // goto return_false;", so convert the dispose call into
+                    // a state transition to the final state.
+                    ILInstruction* pred = nullptr;
+                    if (branch->Parent != nullptr &&
+                        dynamic_cast<Block*>(branch->Parent) != nullptr &&
+                        branch->ChildIndex > 0) {
+                        pred = dynamic_cast<Block*>(branch->Parent)
+                                   ->Instructions[static_cast<std::size_t>(
+                                       branch->ChildIndex - 1)]
+                                   .get();
+                    }
+                    if (auto* call = dynamic_cast<Call*>(pred)) {
+                        std::uint32_t callToken =
+                            call->Method != nullptr
+                                ? call->Method->MetadataToken()
+                                : call->MethodToken;
+                        if (call->Arguments.size() == 1 &&
+                            MatchLdThis(call->Arguments[0].get()) &&
+                            callToken == disposeMethod_) {
+                            stateAfterBranch = -1;
+                            call->ReplaceWith(std::unique_ptr<ILInstruction>(
+                                new Nop()));
+                        }
+                    }
+                    blockState[static_cast<std::size_t>(
+                        branch->TargetBlock->ChildIndex)] = stateAfterBranch;
+                }
+            }
+            for (int ci = 0; ci < node->ChildCount(); ci++) {
+                if (ILInstruction* child = node->GetChild(ci))
+                    stack.push_back(child);
+            }
+        }
+    }
+    // newBody.Blocks.RemoveAll(b => b.Parent != newBody)
+    newBody->Blocks.erase(
+        std::remove_if(newBody->Blocks.begin(), newBody->Blocks.end(),
+                       [newBody](const std::unique_ptr<Block>& b) {
+                           return !b || b->Parent != newBody;
+                       }),
+        newBody->Blocks.end());
+    // The moved blocks kept stale (null) unique_ptrs in newBody.Blocks; the
+    // C# RemoveAll drops them by the Parent check -- the port's moved-from
+    // slots are null.
+    for (std::size_t i = 0; i < newBody->Blocks.size(); i++) {
+        newBody->Blocks[i]->Parent = newBody;
+        newBody->Blocks[i]->ChildIndex = static_cast<int>(i);
+    }
 }
 
 void YieldReturnDecompiler::TranslateFieldsToLocalAccess(

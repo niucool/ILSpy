@@ -36,6 +36,7 @@
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/YieldReturn.hpp"
+#include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/IL/PatternMatching.hpp"
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
 #include "Decompiler/Metadata/CodeMappingInfo.hpp"  // IsCompilerGeneratorEnumerator
@@ -356,6 +357,68 @@ TEST(YieldReturnDecompilerPart2, ConvertsTheRealCreatingMethodBody) {
     EXPECT_EQ(yieldReturns, 3u);
     std::sort(yieldedValues.begin(), yieldedValues.end());
     EXPECT_EQ(yieldedValues, (std::vector<int>{1, 2, 3}));
+}
+
+// The try-finally reconstruction: an iterator whose try region leaves
+// through multiple states (the two yields) factors its finally body into a
+// compiler-generated finally method; the conversion inlines that body back
+// into a TryFinally node over the try states.
+TEST(YieldReturnDecompilerPart2, ReconstructsTryFinallyOverRealBody) {
+    MscorlibEnumeratorFixture fixture;
+    if (!fixture.Load())
+        GTEST_SKIP() << "the iterator fixture is not provisioned";
+    ASSERT_NE(fixture.enumeratorType, 0u);
+
+    std::uint32_t methodToken = 0, methodRva = 0;
+    for (const auto& m : fixture.file->GetMethods(fixture.currentType)) {
+        if (m.Name == "WithFinally" && m.RVA != 0) {
+            methodToken = m.Token;
+            methodRva = m.RVA;
+            break;
+        }
+    }
+    ASSERT_NE(methodToken, 0u);
+    auto fn = IL::ReadIL(*fixture.file, methodToken, methodRva);
+    ASSERT_NE(fn, nullptr);
+    auto methodStub = std::make_shared<TokenMethodStub>(methodToken);
+    methodStub->SetReturnType(
+        std::make_shared<TS::KnownType>(
+            TS::KnownTypeCode::IEnumerableOfT));
+    fn->Method = methodStub.get();
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.YieldReturn = true;
+    ctx.Metadata = fixture.file.get();
+    ctx.TypeSystem = fixture.ts.get();
+    ctx.DelegateBodyResolver =
+        [&fixture](std::uint32_t token,
+                   std::uint32_t rva) -> std::unique_ptr<IL::ILFunction> {
+        if (rva == 0) return nullptr;
+        return IL::ReadIL(*fixture.file, token, rva);
+    };
+
+    IL::YieldReturnDecompiler transform;
+    transform.Run(*fn, ctx);
+
+    EXPECT_TRUE(fn->IsIterator) << "the state machine was inverted";
+    std::size_t yieldReturns = 0, tryFinallys = 0;
+    std::vector<IL::ILInstruction*> stack{fn->Body.get()};
+    while (!stack.empty()) {
+        IL::ILInstruction* node = stack.back();
+        stack.pop_back();
+        if (dynamic_cast<IL::YieldReturn*>(node) != nullptr)
+            yieldReturns++;
+        if (dynamic_cast<IL::TryFinally*>(node) != nullptr)
+            tryFinallys++;
+        for (int i = 0; i < node->ChildCount(); i++) {
+            if (IL::ILInstruction* child = node->GetChild(i))
+                stack.push_back(child);
+        }
+    }
+    EXPECT_EQ(yieldReturns, 2u)
+        << "both try-region yields converted";
+    EXPECT_GE(tryFinallys, 1u)
+        << "the try region was reconstructed over a TryFinally";
 }
 
 // The four analyses over the real state machine: Run over a hand-built

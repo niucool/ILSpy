@@ -37,6 +37,7 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace ILSpy::Decompiler::IL {
@@ -109,6 +110,21 @@ private:
     // StateRangeAnalysis rangeAnalysis)`.
     std::unique_ptr<BlockContainer> ConvertBody(
         BlockContainer& oldBody, ControlFlow::StateRangeAnalysis& rangeAnalysis);
+    // The C# `void DecompileFinallyBlocks()` (YieldReturnDecompiler.cs
+    // lines 1211-1232): decode each finally method, strip its leading state
+    // assignment, and record it for the try-finally reconstruction.
+    void DecompileFinallyBlocks(ILTransformContext& context);
+    // The C# `void ReconstructTryFinallyBlocks(ILFunction
+    // iteratorFunction)` (lines 1237-1374): the block-state walk that wraps
+    // each state change in a TryFinally over the matching finally body.
+    void ReconstructTryFinallyBlocks(ILFunction& iteratorFunction,
+                                     ILTransformContext& context);
+    // The C# `bool IsStateAssignment(ILInstruction inst)` (line 1376).
+    bool IsStateAssignment(ILInstruction* inst) const;
+    // The C# `int? GetNewState(Block block)` (lines 1380-1396).
+    std::optional<int> GetNewState(Block* block) const;
+    // The C# FindFinallyMethod local (lines 1359-1374).
+    const TypeSystem::IMethod* FindFinallyMethod(int state) const;
 
     // The transform state (the C# fields; the raw tokens replace the SRM
     // handles, the port's raw-token convention).
@@ -134,6 +150,14 @@ private:
     ILVariable* skipFinallyBodies_ = nullptr;
     ILVariable* doFinallyBodies_ = nullptr;
     std::vector<ILVariable*> cachedStateVars_;
+    // The C# `Dictionary<IMethod, (int? outerState, ILFunction function)>
+    // decompiledFinallyMethods` (filled by DecompileFinallyBlocks): the
+    // decoded finally methods, their outer state, and their bodies (the
+    // body is taken out when the reconstruction splices it into a
+    // TryFinally).
+    std::map<const TypeSystem::IMethod*,
+             std::pair<std::optional<int>, std::unique_ptr<ILFunction>>>
+        decompiledFinallyMethods_;
 };
 
 } // namespace ILSpy::Decompiler::IL
