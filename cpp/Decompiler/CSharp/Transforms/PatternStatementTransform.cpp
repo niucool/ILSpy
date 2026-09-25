@@ -51,6 +51,7 @@
 #include "Decompiler/CSharp/Transforms/PatternStatementTransform.hpp"
 
 #include "Decompiler/CSharp/Annotations.hpp"
+#include "Decompiler/CSharp/CSharpDecompiler.hpp"
 #include "Decompiler/CSharp/Syntax/Accessor.hpp"
 #include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
 #include "Decompiler/CSharp/Syntax/ConstructorDeclaration.hpp"
@@ -95,6 +96,8 @@
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/IField.hpp"
+#include "Decompiler/TypeSystem/IProperty.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
@@ -543,6 +546,124 @@ struct PatternBasedFixedPatternsHolder {
 
 PatternBasedFixedPatternsHolder& GetPatternBasedFixedPatterns() {
     static PatternBasedFixedPatternsHolder holder;
+    return holder;
+}
+
+// The C# `NameCouldBeBackingFieldOfAutomaticProperty` (line ~878): the C#-style
+// `<Name>k__BackingField` or the VB-style `_Name` (the C# regex
+// `^(<(?<name>.+)>k__BackingField|_(?<name>.+))$`, hand-matched).
+bool NameCouldBeBackingFieldOfAutomaticProperty(const std::string& name,
+                                                 std::string* propertyName) {
+    static const std::string kBackingFieldSuffix = ">k__BackingField";
+    if (name.size() > kBackingFieldSuffix.size() + 1 && !name.empty() &&
+        name[0] == '<' &&
+        name.compare(name.size() - kBackingFieldSuffix.size(),
+                     kBackingFieldSuffix.size(), kBackingFieldSuffix) == 0) {
+        *propertyName = name.substr(
+            1, name.size() - kBackingFieldSuffix.size() - 1);
+        return true;
+    }
+    if (name.size() >= 2 && name[0] == '_') {
+        *propertyName = name.substr(1);
+        return true;
+    }
+    return false;
+}
+
+// The C# automatic-property patterns (lines ~694-738):
+//   automaticPropertyPattern:
+//     `$RET $Name { get { return $fieldReference; }
+//                 set { $fieldReference = value; } }`
+//   automaticReadonlyPropertyPattern: the getter-only form.
+// (Each pattern owns its own accessor/body chain -- a node cannot be
+// parented in two patterns.)
+struct AutomaticPropertyPatternsHolder {
+    // -- the full pattern: getter + setter
+    PatternMatching::AnyNode fieldReference{"fieldReference"};
+    Syntax::ReturnStatement fieldReturn;
+    Syntax::BlockStatement getterBody;
+    PatternMatching::AnyNode getterAnyAttribute;
+    PatternMatching::Repeat getterAttributes{getterAnyAttribute};
+    Syntax::Accessor getter;
+    PatternMatching::IdentifierExpressionBackreference fieldReferenceBack{
+        "fieldReference"};
+    Syntax::IdentifierExpression valueIdentifier{"value"};
+    Syntax::AssignmentExpression fieldAssign{
+        Syntax::Expression::ToExpression(fieldReferenceBack),
+        Syntax::AssignmentOperatorType::Assign, &valueIdentifier};
+    Syntax::ExpressionStatement fieldAssignStatement{&fieldAssign};
+    Syntax::BlockStatement setterBody;
+    PatternMatching::AnyNode setterAnyAttribute;
+    PatternMatching::Repeat setterAttributes{setterAnyAttribute};
+    Syntax::Accessor setter;
+    PatternMatching::AnyNode anyReturnType;
+    PatternMatching::AnyNode anyPrivateImpl;
+    PatternMatching::OptionalNode optionalPrivateImpl{anyPrivateImpl};
+    PatternMatching::AnyNode propertyAnyAttribute;
+    PatternMatching::Repeat propertyAttributes{propertyAnyAttribute};
+    Syntax::PropertyDeclaration automaticPropertyPattern;
+
+    // -- the readonly pattern's own getter chain
+    PatternMatching::AnyNode readonlyFieldReference{"fieldReference"};
+    Syntax::ReturnStatement readonlyFieldReturn;
+    Syntax::BlockStatement readonlyGetterBody;
+    PatternMatching::AnyNode roGetterAnyAttribute;
+    PatternMatching::Repeat roGetterAttributes{roGetterAnyAttribute};
+    Syntax::Accessor readonlyGetter;
+    PatternMatching::AnyNode roAnyReturnType;
+    PatternMatching::AnyNode roAnyPrivateImpl;
+    PatternMatching::OptionalNode roOptionalPrivateImpl{roAnyPrivateImpl};
+    PatternMatching::AnyNode roPropertyAnyAttribute;
+    PatternMatching::Repeat roPropertyAttributes{roPropertyAnyAttribute};
+    Syntax::PropertyDeclaration automaticReadonlyPropertyPattern;
+
+    AutomaticPropertyPatternsHolder() {
+        // the full pattern
+        fieldReturn.Expression(Syntax::Expression::ToExpression(fieldReference));
+        getterBody.Statements().Add(&fieldReturn);
+        getter.Modifiers(Syntax::Modifiers::Any);
+        getter.Body(&getterBody);
+        getter.Attributes().Add(
+            Syntax::AttributeSection::ToAttributeSection(getterAttributes));
+        setterBody.Statements().Add(&fieldAssignStatement);
+        setter.Modifiers(Syntax::Modifiers::Any);
+        setter.Body(&setterBody);
+        setter.Attributes().Add(
+            Syntax::AttributeSection::ToAttributeSection(setterAttributes));
+        automaticPropertyPattern.Attributes().Add(
+            Syntax::AttributeSection::ToAttributeSection(propertyAttributes));
+        automaticPropertyPattern.Modifiers(Syntax::Modifiers::Any);
+        automaticPropertyPattern.ReturnType(Syntax::AstType::ToType(anyReturnType));
+        automaticPropertyPattern.PrivateImplementationType(
+            Syntax::AstType::ToType(optionalPrivateImpl));
+        automaticPropertyPattern.Name(
+            std::string(PatternMatching::Pattern::AnyString));
+        automaticPropertyPattern.Getter(&getter);
+        automaticPropertyPattern.Setter(&setter);
+
+        // the readonly pattern
+        readonlyFieldReturn.Expression(
+            Syntax::Expression::ToExpression(readonlyFieldReference));
+        readonlyGetterBody.Statements().Add(&readonlyFieldReturn);
+        readonlyGetter.Modifiers(Syntax::Modifiers::Any);
+        readonlyGetter.Body(&readonlyGetterBody);
+        readonlyGetter.Attributes().Add(
+            Syntax::AttributeSection::ToAttributeSection(roGetterAttributes));
+        automaticReadonlyPropertyPattern.Attributes().Add(
+            Syntax::AttributeSection::ToAttributeSection(roPropertyAttributes));
+        automaticReadonlyPropertyPattern.Modifiers(Syntax::Modifiers::Any);
+        automaticReadonlyPropertyPattern.ReturnType(
+            Syntax::AstType::ToType(roAnyReturnType));
+        automaticReadonlyPropertyPattern.PrivateImplementationType(
+            Syntax::AstType::ToType(roOptionalPrivateImpl));
+        automaticReadonlyPropertyPattern.Name(
+            std::string(PatternMatching::Pattern::AnyString));
+        automaticReadonlyPropertyPattern.Getter(&readonlyGetter);
+    }
+};
+
+AutomaticPropertyPatternsHolder& GetAutomaticPropertyPatterns() {
+    static AutomaticPropertyPatternsHolder holder;
     return holder;
 }
 
@@ -1399,6 +1520,173 @@ public:
         return dtorDef;
     }
 
+    // The C# `bool CanTransformToAutomaticProperty(IProperty property, bool
+    // accessorsMustBeCompilerGenerated)` (line ~742).
+    bool CanTransformToAutomaticProperty(const TS::IProperty* property,
+                                          bool accessorsMustBeCompilerGenerated) {
+        if (!property->CanGet())
+            return false;
+        // The C# `property.Getter.IsCompilerGenerated()` (NRExtensions -- the
+        // direct HasAttribute check).
+        if (accessorsMustBeCompilerGenerated &&
+            !property->Getter()->HasAttribute(TS::KnownAttribute::CompilerGenerated))
+            return false;
+        const TS::IMethod* setter = property->Setter();
+        if (setter != nullptr) {
+            if (accessorsMustBeCompilerGenerated &&
+                !setter->HasAttribute(TS::KnownAttribute::CompilerGenerated))
+                return false;
+            if (TS::HasReadonlyModifier(*setter))
+                return false;
+        }
+        return true;
+    }
+
+    // The C# `static void RemoveCompilerGeneratedAttribute(
+    // AstNodeCollection<AttributeSection> attributeSections, params string[]
+    // attributesToRemove)` (line ~817): strips the named attribute types.
+    void RemoveCompilerGeneratedAttribute(
+        Syntax::AstNodeCollectionT<Syntax::AttributeSection>& attributeSections) {
+        for (int i = 0; i < attributeSections.Count(); i++) {
+            Syntax::AttributeSection* section = attributeSections.At(i);
+            for (int j = 0; j < section->Attributes().Count(); j++) {
+                Syntax::Attribute* attr = section->Attributes().At(j);
+                const TS::ISymbol* symbol = CS::GetSymbol(*attr->Type());
+                auto* type = dynamic_cast<const TS::IType*>(symbol);
+                // The C# `tr.FullName` -- the port's IType has no FullName;
+                // compose the top-level form (the inline-array PID precedent).
+                if (type != nullptr) {
+                    std::string fullName = type->Namespace().empty()
+                                               ? type->Name()
+                                               : type->Namespace() + "." + type->Name();
+                    if (fullName ==
+                            "System.Runtime.CompilerServices."
+                            "CompilerGeneratedAttribute" ||
+                        fullName == "System.Diagnostics.DebuggerBrowsableAttribute") {
+                        attr->Remove();
+                        j--;
+                    }
+                }
+            }
+            if (section->Attributes().Count() == 0)
+                section->Remove();
+        }
+    }
+
+    // The C# `PropertyDeclaration? TransformAutomaticProperty(PropertyDeclaration
+    // propertyDeclaration)` (line ~757): `int Count { get { return field; } set {
+    // field = value; } }` over its compiler-generated backing field becomes the
+    // auto-property `int Count { get; set; }`, absorbing the backing field
+    // declaration. The property instance is not changed in identity, so the
+    // visitor continues as usual -- return null (the port falls through to
+    // the base visit).
+    void TransformAutomaticProperty(Syntax::PropertyDeclaration* propertyDeclaration) {
+        if (!context->DecompileRun->Settings().AutomaticProperties())
+            return;
+        const TS::ISymbol* symbol = CS::GetSymbol(*propertyDeclaration);
+        auto* property = dynamic_cast<const TS::IProperty*>(symbol);
+        if (property == nullptr)
+            return;
+        // The C# `accessorsMustBeCompilerGenerated` -- false when the declaring
+        // type carries a VB-style compiler-generated `_Name` field.
+        bool accessorsMustBeCompilerGenerated = true;
+        const TS::ITypeDefinition* declaringType = property->DeclaringTypeDefinition();
+        if (declaringType != nullptr) {
+            for (const TS::IField* f : declaringType->GetFields()) {
+                if (f->Name() == "_" + property->Name() &&
+                    f->HasAttribute(TS::KnownAttribute::CompilerGenerated)) {
+                    accessorsMustBeCompilerGenerated = false;
+                    break;
+                }
+            }
+        }
+        if (!CanTransformToAutomaticProperty(property, accessorsMustBeCompilerGenerated))
+            return;
+        const TS::IField* field = nullptr;
+        PatternMatching::Match m = Syntax::MatchNode(
+            GetAutomaticPropertyPatterns().automaticPropertyPattern,
+            propertyDeclaration);
+        if (m.Success()) {
+            std::vector<Syntax::AstNode*> fieldReferenceCaptures =
+                m.Get<Syntax::AstNode>("fieldReference");
+            // The C# `.Single()` (exactly one capture by construction).
+            assert(fieldReferenceCaptures.size() == 1);
+            field = dynamic_cast<const TS::IField*>(
+                CS::GetSymbol(*fieldReferenceCaptures.front()));
+        } else {
+            PatternMatching::Match m2 = Syntax::MatchNode(
+                GetAutomaticPropertyPatterns().automaticReadonlyPropertyPattern,
+                propertyDeclaration);
+            if (m2.Success()) {
+                std::vector<Syntax::AstNode*> fieldReferenceCaptures =
+                    m2.Get<Syntax::AstNode>("fieldReference");
+                assert(fieldReferenceCaptures.size() == 1);
+                field = dynamic_cast<const TS::IField*>(
+                    CS::GetSymbol(*fieldReferenceCaptures.front()));
+            }
+        }
+        std::string propertyName;
+        if (field == nullptr ||
+            !NameCouldBeBackingFieldOfAutomaticProperty(field->Name(), &propertyName))
+            return;
+        if ((propertyDeclaration->Setter() != nullptr &&
+             propertyDeclaration->Setter()->HasModifier(Syntax::Modifiers::Readonly)) ||
+            (propertyDeclaration->HasModifier(Syntax::Modifiers::Readonly) &&
+             propertyDeclaration->Setter() != nullptr))
+            return;
+        if (field->HasAttribute(TS::KnownAttribute::CompilerGenerated) &&
+            field->DeclaringTypeDefinition() == property->DeclaringTypeDefinition()) {
+            context->StepOnce("Convert property to auto-property", propertyDeclaration);
+            // Clearing the accessor body turns it into an auto-property
+            // accessor.
+            Syntax::Accessor* getter = propertyDeclaration->Getter();
+            Syntax::Accessor* setter = propertyDeclaration->Setter();
+            if (getter != nullptr) {
+                RemoveCompilerGeneratedAttribute(getter->Attributes());
+                getter->Body(nullptr);
+            }
+            if (setter != nullptr) {
+                RemoveCompilerGeneratedAttribute(setter->Attributes());
+                setter->Body(nullptr);
+            }
+            propertyDeclaration->Modifiers(propertyDeclaration->Modifiers() &
+                                           ~Syntax::Modifiers::Readonly);
+            if (getter != nullptr)
+                getter->Modifiers(getter->Modifiers() &
+                                  ~Syntax::Modifiers::Readonly);
+
+            Syntax::AstNode* parent = propertyDeclaration->Parent();
+            Syntax::FieldDeclaration* fieldDecl = nullptr;
+            if (parent != nullptr) {
+                for (Syntax::AstNode* child : parent->Children()) {
+                    auto* fd = dynamic_cast<Syntax::FieldDeclaration*>(child);
+                    if (fd == nullptr)
+                        continue;
+                    if (dynamic_cast<const TS::IField*>(CS::GetSymbol(*fd)) == field) {
+                        fieldDecl = fd;
+                        break;
+                    }
+                }
+            }
+            if (fieldDecl != nullptr) {
+                fieldDecl->Remove();
+                // Add C# 7.3 attributes on backing field:
+                CS::CSharpDecompiler::RemoveAttribute(
+                    *fieldDecl, TS::KnownAttribute::CompilerGenerated);
+                CS::CSharpDecompiler::RemoveAttribute(
+                    *fieldDecl, TS::KnownAttribute::DebuggerBrowsable);
+                for (int i = 0; i < fieldDecl->Attributes().Count(); i++) {
+                    Syntax::AttributeSection* section = fieldDecl->Attributes().At(i);
+                    section->AttributeTarget("field");
+                    propertyDeclaration->Attributes().Add(Syntax::Detach(section));
+                    i--;
+                }
+            }
+        }
+        // Since the property instance is not changed, we can continue in the
+        // visitor as usual, so return null.
+    }
+
     // The C# `TryCatchStatement? TransformTryCatchFinally(TryCatchStatement
     // tryFinally)` (line ~996): simplify nested 'try { try {} catch {} } finally
     // {}'. Runs after the using/lock transformations in the C# pipeline.
@@ -1487,6 +1775,15 @@ public:
         context->StepOnce("Use enhanced using statement", usingStatement);
         usingStatement->IsEnhanced(true);
         lastResult = usingStatement;
+    }
+
+    // The C# `public override AstNode VisitPropertyDeclaration(PropertyDeclaration
+    // propertyDeclaration)` (line ~134): the auto-property reshape mutates in
+    // place and returns null, so the visit continues into the children.
+    void VisitPropertyDeclaration(
+        Syntax::PropertyDeclaration* propertyDeclaration) override {
+        TransformAutomaticProperty(propertyDeclaration);
+        Syntax::DepthFirstAstVisitor::VisitPropertyDeclaration(propertyDeclaration);
     }
 
     // The C# `public override AstNode VisitIfElseStatement(IfElseStatement ...)`.

@@ -18,7 +18,7 @@
 // SOFTWARE.
 
 #include "Decompiler/CSharp/CSharpDecompiler.hpp"
-
+#include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
 #include "Decompiler/DecompileRun.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
@@ -27,6 +27,9 @@
 #include "Decompiler/CSharp/Transforms/PatternStatementTransform.hpp"
 #include "Decompiler/CSharp/Transforms/DeclareVariables.hpp"
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
+#include "Decompiler/CSharp/Syntax/Attribute.hpp"
+#include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
+#include "Decompiler/CSharp/Syntax/EntityDeclaration.hpp"
 #include "Decompiler/CSharp/Transforms/PrettifyAssignments.hpp"
 #include "Decompiler/CSharp/Transforms/NormalizeBlockStatements.hpp"
 #include "Decompiler/CSharp/Transforms/FlattenSwitchBlocks.hpp"
@@ -460,6 +463,40 @@ Syntax::TypeSystemAstBuilder CSharpDecompiler::CreateAstBuilder(
     typeSystemAstBuilder.AddResolveResultAnnotations() = true;
     typeSystemAstBuilder.UseNullableSpecifierForValueTypes() = settings.LiftNullables();
     return typeSystemAstBuilder;
+}
+
+// The C# `internal static bool RemoveAttribute(EntityDeclaration entityDecl,
+// KnownAttribute attributeType)` (line 2342): removes the sections' attributes
+// whose type resolves to the known attribute type; empty sections are
+// dropped.
+bool CSharpDecompiler::RemoveAttribute(
+    Syntax::EntityDeclaration& entityDecl,
+    ::ILSpy::Decompiler::TypeSystem::KnownAttribute attributeType) {
+    bool found = false;
+    for (int i = 0; i < entityDecl.Attributes().Count(); i++) {
+        Syntax::AttributeSection* section = entityDecl.Attributes().At(i);
+        for (int j = 0; j < section->Attributes().Count(); j++) {
+            Syntax::Attribute* attr = section->Attributes().At(j);
+            const ::ILSpy::Decompiler::TypeSystem::ISymbol* symbol =
+                GetSymbol(*attr->Type());
+            auto* typeDefinition = dynamic_cast<
+                const ::ILSpy::Decompiler::TypeSystem::ITypeDefinition*>(symbol);
+            if (typeDefinition != nullptr &&
+                typeDefinition->FullTypeName() ==
+                    ::ILSpy::Decompiler::TypeSystem::FullTypeName(
+                        ::ILSpy::Decompiler::TypeSystem::GetTypeName(
+                            attributeType))) {
+                attr->Remove();
+                found = true;
+                j--;
+            }
+        }
+        if (section->Attributes().Count() == 0) {
+            section->Remove();
+            i--;
+        }
+    }
+    return found;
 }
 
 } // namespace ILSpy::Decompiler::CSharp

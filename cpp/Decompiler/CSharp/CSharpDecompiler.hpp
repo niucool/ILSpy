@@ -62,6 +62,7 @@ namespace ILSpy::Decompiler::CSharp {
 namespace Syntax {
 class AstNode;
 class TypeSystemAstBuilder;
+class EntityDeclaration;
 } // namespace Syntax
 namespace Transforms { class IAstTransform; }
 
@@ -108,6 +109,15 @@ public:
     // transform family consume ConvertType through it).
     static Syntax::TypeSystemAstBuilder CreateAstBuilder(
         const ::ILSpy::Decompiler::DecompilerSettings& settings);
+
+    // The C# `internal static bool RemoveAttribute(EntityDeclaration entityDecl,
+    // KnownAttribute attributeType)` (CSharpDecompiler.cs line 2342): removes
+    // the sections' attributes whose type resolves to the known attribute
+    // type; empty sections are dropped. Returns whether any attribute was
+    // removed.
+    static bool RemoveAttribute(Syntax::EntityDeclaration& entityDecl,
+                                ::ILSpy::Decompiler::TypeSystem::KnownAttribute
+                                    attributeType);
 
     // The C# Decompile path's per-body half (the DecodeMethodBody +
     // decompile-body flow the CLI's --csharp block carries inline): runs

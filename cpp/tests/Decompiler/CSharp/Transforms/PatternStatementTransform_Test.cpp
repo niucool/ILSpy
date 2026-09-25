@@ -57,6 +57,12 @@
 #include "Decompiler/CSharp/Syntax/Statements/UsingStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Accessor.hpp"
+#include "Decompiler/CSharp/Syntax/Attribute.hpp"
+#include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
+#include "Decompiler/CSharp/Syntax/FieldDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/PropertyDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/VariableInitializer.hpp"
@@ -78,6 +84,7 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -1698,7 +1705,233 @@ TEST(PatternStatementTransformTest, PatternBasedFixedRequiresTheHelperShape)
         << "a non-matching initializer is untouched";
 }
 
-// ---- The Run shell ---------------------------------------------------------------------
+// ---- The automatic-property reshape ------------------------------------------------------
+
+// A fake IField with settable classified attributes: the backing-field
+// checks read [CompilerGenerated] through IEntity::HasAttribute.
+class AutoPropertyTestField : public TSImpl::FakeField {
+public:
+    explicit AutoPropertyTestField(const TS::ICompilation& compilation)
+        : TSImpl::FakeField(compilation) {}
+    bool HasAttribute(TS::KnownAttribute attribute) const override {
+        return known_.find(attribute) != known_.end();
+    }
+    const TS::IAttribute* GetAttribute(TS::KnownAttribute attribute) const override {
+        return HasAttribute(attribute) ? &sentinel_ : nullptr;
+    }
+    void AddKnownAttribute(TS::KnownAttribute attribute) {
+        known_.insert(attribute);
+    }
+    void ClearKnownAttributes() { known_.clear(); }
+
+private:
+    struct SentinelAttribute : TS::IAttribute {
+        const TS::IType& AttributeType() const override { return type_; }
+        const TS::IMethod* Constructor() const override { return nullptr; }
+        bool HasDecodeErrors() const override { return false; }
+        std::vector<TS::CustomAttributeTypedArgument> FixedArguments() const override {
+            return {};
+        }
+        std::vector<TS::CustomAttributeNamedArgument> NamedArguments() const override {
+            return {};
+        }
+        TS::KnownType type_{TS::KnownTypeCode::Object};
+    };
+    SentinelAttribute sentinel_;
+    std::set<TS::KnownAttribute> known_;
+};
+
+// The convertible auto-property shape inside a type declaration:
+//   int Count { get { return <Count>k__BackingField; }
+//              set { <Count>k__BackingField = value; } }
+//   private int <Count>k__BackingField;   // removed, its sections move
+struct AutoPropertyRig {
+    std::shared_ptr<TS::TestSupport::LookupTypeDefinition> typeDef;
+    std::shared_ptr<TSImpl::FakeProperty> property;
+    std::shared_ptr<AutoPropertyTestField> backingField;
+    Syntax::PropertyDeclaration* propertyDeclaration = nullptr;
+    Syntax::Accessor* getter = nullptr;
+    Syntax::Accessor* setter = nullptr;
+    Syntax::AttributeSection* movedSection = nullptr;
+    Syntax::Attribute* survivingAttribute = nullptr;
+    Syntax::FieldDeclaration* fieldDecl = nullptr;
+    std::unique_ptr<Syntax::TypeDeclaration> type;
+};
+
+// The [Attr] attribute definition stub (the type the syntax attribute's
+// resolve result points at).
+TS::ITypePtr MakeAttributeType(const PatternStatementFixture& fx,
+                               const std::string& ns, const std::string& name) {
+    return std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        name, ns, TS::FullTypeName(ns.empty() ? name : ns + "." + name),
+        TS::TypeKind::Class, TS::Accessibility::Public, fx.compilation, nullptr);
+}
+
+// A syntax [Attr] node whose type resolves to the given definition.
+Syntax::Attribute* MakeAttribute(TS::ITypePtr attributeType) {
+    auto* simpleType = new Syntax::SimpleType(attributeType->Name());
+    simpleType->AddAnnotation(std::make_shared<Sem::TypeResolveResult>(attributeType));
+    return new Syntax::Attribute(simpleType);
+}
+
+AutoPropertyRig MakeAutoProperty(PatternStatementFixture& fx) {
+    AutoPropertyRig rig;
+    rig.typeDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        "MyClass", std::string(), TS::FullTypeName("MyClass"), TS::TypeKind::Class,
+        TS::Accessibility::Public, fx.compilation, nullptr);
+
+    // The property and its accessors (fakes; the accessor checks are skipped
+    // because the declaring type carries a compiler-generated _Count field).
+    rig.property = std::make_shared<TSImpl::FakeProperty>(fx.compilation);
+    rig.property->SetName("Count");
+    auto getterMethod = std::make_shared<TSImpl::FakeMethod>(
+        fx.compilation, TS::SymbolKind::Method);
+    getterMethod->SetName("get_Count");
+    auto setterMethod = std::make_shared<TSImpl::FakeMethod>(
+        fx.compilation, TS::SymbolKind::Method);
+    setterMethod->SetName("set_Count");
+    rig.property->SetGetter(static_cast<const TS::IMethod*>(getterMethod.get()));
+    rig.property->SetSetter(static_cast<const TS::IMethod*>(setterMethod.get()));
+    rig.property->SetDeclaringType(rig.typeDef);
+
+    // The backing field: <Count>k__BackingField, compiler-generated.
+    rig.backingField = std::make_shared<AutoPropertyTestField>(fx.compilation);
+    rig.backingField->SetName("<Count>k__BackingField");
+    rig.backingField->AddKnownAttribute(TS::KnownAttribute::CompilerGenerated);
+    rig.backingField->SetDeclaringType(rig.typeDef);
+    rig.backingField->SetReturnType(TS::ITypePtr(std::make_shared<TS::KnownType>(
+        TS::KnownTypeCode::Int32)));
+
+    // The declaring type's fields: the VB-style _Count (a compiler-generated
+    // field makes the accessor compiler-generated checks unnecessary) and
+    // the backing field itself.
+    auto countField = std::make_shared<AutoPropertyTestField>(fx.compilation);
+    countField->SetName("_Count");
+    countField->AddKnownAttribute(TS::KnownAttribute::CompilerGenerated);
+    countField->SetDeclaringType(rig.typeDef);
+    rig.typeDef->SetFields({countField.get(), rig.backingField.get()});
+    rig.typeDef->SetProperties(
+        {static_cast<const TS::IProperty*>(rig.property.get())});
+
+    // The property declaration with the get/set bodies over the backing field.
+    rig.propertyDeclaration = new Syntax::PropertyDeclaration();
+    rig.propertyDeclaration->Name("Count");
+    rig.propertyDeclaration->ReturnType(new Syntax::SimpleType("Int32"));
+    rig.propertyDeclaration->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        std::make_shared<Sem::TypeResolveResult>(rig.typeDef),
+        static_cast<TSImpl::FakeMember*>(rig.property.get())));
+
+    rig.getter = new Syntax::Accessor();
+    auto* getterBody = new Syntax::BlockStatement();
+    auto* fieldReference = new Syntax::IdentifierExpression("<Count>k__BackingField");
+    fieldReference->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        std::make_shared<Sem::TypeResolveResult>(rig.typeDef),
+        static_cast<TSImpl::FakeMember*>(rig.backingField.get())));
+    getterBody->Statements().Add(new Syntax::ReturnStatement(fieldReference));
+    rig.getter->Body(getterBody);
+    // The accessor's [CompilerGenerated] section is stripped.
+    auto* getterSection = new Syntax::AttributeSection();
+    getterSection->Attributes().Add(MakeAttribute(MakeAttributeType(
+        fx, "System.Runtime.CompilerServices", "CompilerGeneratedAttribute")));
+    rig.getter->Attributes().Add(getterSection);
+    rig.propertyDeclaration->Getter(rig.getter);
+
+    rig.setter = new Syntax::Accessor();
+    auto* setterBody = new Syntax::BlockStatement();
+    setterBody->Statements().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            new Syntax::IdentifierExpression("<Count>k__BackingField"),
+            Syntax::AssignmentOperatorType::Assign,
+            new Syntax::IdentifierExpression("value"))));
+    rig.setter->Body(setterBody);
+    rig.propertyDeclaration->Setter(rig.setter);
+
+    // The backing field declaration: a [CompilerGenerated] plus a surviving
+    // custom attribute (its section moves onto the property with the
+    // "field" target).
+    rig.fieldDecl = new Syntax::FieldDeclaration();
+    rig.fieldDecl->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        std::make_shared<Sem::TypeResolveResult>(rig.typeDef),
+        static_cast<TSImpl::FakeMember*>(rig.backingField.get())));
+    rig.movedSection = new Syntax::AttributeSection();
+    rig.movedSection->Attributes().Add(MakeAttribute(MakeAttributeType(
+        fx, "System.Runtime.CompilerServices", "CompilerGeneratedAttribute")));
+    rig.survivingAttribute =
+        MakeAttribute(MakeAttributeType(fx, "MyNamespace", "MyAttribute"));
+    rig.movedSection->Attributes().Add(rig.survivingAttribute);
+    rig.fieldDecl->Attributes().Add(rig.movedSection);
+    auto* variable = new Syntax::VariableInitializer();
+    variable->Name("<Count>k__BackingField");
+    rig.fieldDecl->Variables().Add(variable);
+
+    rig.type = std::make_unique<Syntax::TypeDeclaration>();
+    rig.type->Members().Add(rig.propertyDeclaration);
+    rig.type->Members().Add(rig.fieldDecl);
+    rig.type->AddAnnotation(std::make_shared<Sem::TypeResolveResult>(rig.typeDef));
+
+    // Keep the fake members alive for the program's lifetime (the resolve
+    // results hold raw pointers).
+    static std::vector<std::shared_ptr<void>> keepAlive;
+    keepAlive.push_back(getterMethod);
+    keepAlive.push_back(setterMethod);
+    keepAlive.push_back(countField);
+    return rig;
+}
+
+// The shape above becomes the auto-property `int Count { get; set; }`; the
+// backing field declaration disappears and its surviving attribute
+// sections move onto the property with the "field" target.
+TEST(PatternStatementTransformTest, AutomaticPropertyIsIntroduced)
+{
+    PatternStatementFixture fx;
+    auto rig = MakeAutoProperty(fx);
+
+    RunTransform(*rig.type, fx);
+
+    EXPECT_EQ(rig.getter->Body(), nullptr) << "the getter body is cleared";
+    EXPECT_EQ(rig.setter->Body(), nullptr) << "the setter body is cleared";
+    EXPECT_EQ(rig.getter->Attributes().Count(), 0)
+        << "the accessor's [CompilerGenerated] section is stripped";
+    ASSERT_EQ(rig.type->Members().Count(), 1)
+        << "the backing field declaration is removed";
+    ASSERT_EQ(rig.propertyDeclaration->Attributes().Count(), 1)
+        << "the surviving field section moves onto the property";
+    EXPECT_EQ(rig.propertyDeclaration->Attributes().At(0), rig.movedSection);
+    EXPECT_EQ(rig.propertyDeclaration->Attributes().At(0)->AttributeTarget(), "field");
+    EXPECT_EQ(rig.movedSection->Attributes().Count(), 1);
+    EXPECT_EQ(rig.movedSection->Attributes().At(0), rig.survivingAttribute);
+}
+
+// A property whose backing field is not compiler-generated keeps its
+// accessor bodies.
+TEST(PatternStatementTransformTest, AutomaticPropertyRequiresCompilerGeneratedField)
+{
+    PatternStatementFixture fx;
+    auto rig = MakeAutoProperty(fx);
+    rig.backingField->ClearKnownAttributes();
+
+    RunTransform(*rig.type, fx);
+
+    EXPECT_NE(rig.getter->Body(), nullptr)
+        << "a non-compiler-generated backing field keeps the accessor bodies";
+    EXPECT_EQ(rig.type->Members().Count(), 2)
+        << "the field declaration stays";
+}
+
+// A backing field whose name is not the compiler's pattern keeps the
+// accessor bodies.
+TEST(PatternStatementTransformTest, AutomaticPropertyRequiresBackingFieldName)
+{
+    PatternStatementFixture fx;
+    auto rig = MakeAutoProperty(fx);
+    rig.backingField->SetName("someOtherField");
+
+    RunTransform(*rig.type, fx);
+
+    EXPECT_NE(rig.getter->Body(), nullptr)
+        << "a non-backing-field name keeps the accessor bodies";
+    EXPECT_EQ(rig.type->Members().Count(), 2);
+}
 
 // A Run entered while another Run is in flight throws (the C# reentrancy
 // guard). The step hook re-enters the transform mid-visit.
