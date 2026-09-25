@@ -24,6 +24,7 @@
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/WebCilFile.hpp"
 
+#include <cstdio>
 #include <fstream>
 #include <iterator>
 #include <vector>
