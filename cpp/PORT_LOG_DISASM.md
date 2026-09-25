@@ -502,3 +502,25 @@ pre-merge branch state (the 45 crash rows are fixed on merged main; the 222
 metadata-only PORT-FAILs and the 4 scaffold DIFFERENTs are the T3/T10
 main-line shapes).
 
+### The T4/T5 closure + the final count (the controller's verification pass)
+
+Both original sweep signatures are confirmed ABSENT from every --il capture
+of the re-sweep: no `Expected a TypeDef, TypeRef or TypeSpec handle!` and no
+`trailing bytes after the type` in any port stderr, and the only non-zero
+--il exit codes are the 4 both-fail rows below -- zero --il PORT-CRASH and
+zero --il DIFFERENT rows exist. The two affected samples render
+byte-identical: capa07 (0953cc3b77, T4) and capa09 (2dae11cc5f, T5).
+T4 and T5 are CLOSED.
+
+The final count over the 286 --il rows: 282 IDENTICAL (both engines rc 0,
+the CR-stripped outputs equal) + 4 BOTH-FAIL-IDENTICAL = 286/286. The
+harness's BOTH-FAIL-IDENTICAL verdict is itself an output comparison (both
+stderr-split stdout files diff clean), and the 4 rows concretely show the
+strongest shape: both engines exit 70 (the C# BadImageFormatException
+exit code, matched by the port through the PD7 T11 ClassifyCliOpenFailure
+fix) with EMPTY stdout on both sides -- the refusals agree on exit code
+and output, only the stderr message texts differ (the documented T11
+cosmetic note). The parity claim is closed on the evidence: every --il row
+either decompiles to the oracle's bytes or refuses exactly as the oracle
+refuses.
+
