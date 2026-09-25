@@ -416,9 +416,18 @@ over the module entities (GetDefinitionField/Method/Property/Event):
   type when not int). The C#'s BaseTypeAccessibleFrom filter stays
   deferred with the MemberLookup resolver surface.
 
+The const field initializer rides here too (`af35644b9`): the literal
+from the field entity's decoded constant (the integer family with the
+C# suffixes, the boolean, the quoted string, the char, null; the
+floating-point forms stay deferred with the ConvertFloatingPointLiteral
+fraction logic). The implicit no-argument base constructor call renders
+nothing (`3269e9c63`): the C# constructor-initializer convention -- a
+base call renders only with arguments; the spurious `base();` was the
+seed's render of the decoded base .ctor call.
+
 Fixture: `/home/jim/ilspy-test-fixtures/modifier_fixture/
-ModifierFixture.dll` (the modifier matrix; the build recipe is in
-ModifierFixture.cs). 11 gtest cases in
+ModifierFixture.dll` (the modifier matrix, the string/bool/long consts;
+the build recipe is in ModifierFixture.cs). 12 gtest cases in
 `tests/Decompiler/CSharp/FacadeMemberModifiers_Test.cpp`. The
 accessor-visibility (`private set`) and accessor-body (`{ get { ... } }`)
 forms remain the documented stand-in gap (the property renders `get;`
