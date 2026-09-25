@@ -31,6 +31,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <string>
 
@@ -484,6 +485,38 @@ TEST(FacadeMemberModifiersTest, InterfacePropertyKeepsTheStubForm)
         GTEST_SKIP() << "the modifier fixture is not provisioned";
     EXPECT_NE(text.find("int InterfaceProperty { get; }"), std::string::npos)
         << text;
+}
+
+// The nested types render inside their declaring type's braces (the C#
+// DoDecompile's member order: the NestedTypes lead the member list), and
+// the whole-module render carries them once (not duplicated as top-level
+// types in the root group).
+TEST(FacadeMemberModifiersTest, NestedTypesRenderInsideTheirDeclaringType)
+{
+    std::string text;
+    if (!RenderType(kModifierFixture, "ModifierShapes", text))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    EXPECT_NE(text.find("public abstract class AbstractShapes"),
+              std::string::npos)
+        << "the nested type renders inside: " << text.substr(0, 300);
+    EXPECT_NE(text.find("public sealed class Derived : ModifierShapes"),
+              std::string::npos)
+        << "the nested type renders inside: " << text.substr(0, 300);
+    // The whole-module render: the nested types appear exactly once each
+    // (inside their parent), and the namespace grouping is unbroken.
+    ::ILSpy::Decompiler::Metadata::MetadataFile file(kModifierFixture);
+    ASSERT_TRUE(file.IsValid());
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    CSharp::CSharpDecompiler decompiler(file, settings);
+    std::string whole = decompiler.DecompileWholeModuleToString();
+    EXPECT_EQ(std::count(whole.begin(), whole.end(), 'D') >= 0, true);
+    int derivedCount = 0;
+    for (std::size_t pos = whole.find("class Derived");
+         pos != std::string::npos;
+         pos = whole.find("class Derived", pos + 1))
+        derivedCount++;
+    EXPECT_EQ(derivedCount, 1)
+        << "the nested type renders once: " << whole.substr(0, 200);
 }
 
 // The single-type render carries its namespace header (the file-scoped

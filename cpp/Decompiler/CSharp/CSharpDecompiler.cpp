@@ -67,6 +67,7 @@
 #include "Decompiler/IL/Transforms/GetILTransforms.hpp"
 #include "Decompiler/IL/ILReader.hpp"
 
+#include <functional>
 #include <map>
 #include <optional>
 #include <utility>
@@ -322,6 +323,23 @@ bool TypeIsHiddenFromRender(const Metadata::MetadataFile& file,
             Metadata::IsCompilerGeneratedStateMachine(file, typeToken));
 }
 
+// The enclosing namespace of a (possibly nested) type: the declaring
+// chain's root namespace (a nested type's own namespace column is empty
+// by the ECMA requirement, and the C# entity model surfaces the
+// enclosing namespace).
+std::string RootNamespaceOf(const Metadata::MetadataFile& file,
+                            std::uint32_t typeToken) {
+    std::uint32_t current = typeToken;
+    while (true) {
+        auto info = file.GetTypeDefNameInfo(current);
+        if (!info.has_value())
+            return std::string();
+        if (info->DeclaringTypeToken == 0)
+            return info->Namespace;
+        current = info->DeclaringTypeToken;
+    }
+}
+
 // The C# TypeDefinitionNameableInBaseList (the f41b12c01 fix for #3230):
 // whether a type's base list can NAME the type. A type may name its own
 // nested types (and those of its enclosing types) regardless of
@@ -483,8 +501,11 @@ std::string MemberAttributesText(const TS::IEntity* entity,
 // consults the process-global placeholder; the instance its own map).
 bool DecompileTypeToStringBody(
     const Metadata::MetadataFile& file, TS::DecompilerTypeSystem* typeSystem,
-    TS::MetadataModule& module, const Metadata::PartialTypeInfo* partialType,
+    TS::MetadataModule& module,
+    const std::function<const Metadata::PartialTypeInfo*(std::uint32_t)>&
+        partialLookup,
     std::uint32_t typeToken, std::string& out) {
+    const Metadata::PartialTypeInfo* partialType = partialLookup(typeToken);
     if (TypeIsHiddenFromRender(file, typeToken))
         return false;
     // The C# DecompileType member iteration: the partial-type info gates
@@ -622,6 +643,18 @@ bool DecompileTypeToStringBody(
         out += "\n{\n";
         rendered = true;
         break;
+    }
+    // The nested types (the C# DoDecompile's member order: the NestedTypes
+    // concat LEADS the member list, so the nested declarations render
+    // inside the declaring type's braces). The hidden state machine types
+    // skip here too (a nested state machine renders nowhere).
+    for (std::uint32_t nestedToken : file.GetNestedTypes(typeToken)) {
+        if (TypeIsHiddenFromRender(file, nestedToken))
+            continue;
+        std::string nestedText;
+        if (DecompileTypeToStringBody(file, typeSystem, module,
+                                      partialLookup, nestedToken, nestedText))
+            out += nestedText;
     }
     // The property declarations (the C# DecompileType's DoDecompileMember
     // property arm): the `Type Name { get; set; }` shape -- the type from
@@ -1058,18 +1091,17 @@ bool CSharpDecompiler::DecompileTypeToString(
     TS::DecompilerTypeSystem typeSystem(file, resolver);
     bool rendered = DecompileTypeToStringBody(
         file, &typeSystem, typeSystem.MainMetadataModule(),
-        FindRegisteredPartialType(typeToken), typeToken, out);
+        [](std::uint32_t token) {
+            return FindRegisteredPartialType(token);
+        },
+        typeToken, out);
     if (rendered && wrapNamespace) {
         // The single-type namespace header (the C# -t render's
         // file-scoped form: `namespace X;` before the declaration; a
         // type with no namespace renders bare).
-        for (const auto& t : file.TypeDefs()) {
-            if (t.Token != typeToken)
-                continue;
-            if (!t.Namespace.empty())
-                out = "namespace " + t.Namespace + ";\n\n" + out;
-            break;
-        }
+        std::string ns = RootNamespaceOf(file, typeToken);
+        if (!ns.empty())
+            out = "namespace " + ns + ";\n\n" + out;
     }
     return rendered;
 }
@@ -1172,6 +1204,12 @@ std::string CSharpDecompiler::DecompileWholeModuleToString() {
             continue;
         if (TypeIsHiddenFromRender(*state_->file, t.Token))
             continue;
+        // The nested types render inside their declaring type's braces
+        // (the type-level body's nested-type loop), not as top-level
+        // entries.
+        auto nestedInfo = state_->file->GetTypeDefNameInfo(t.Token);
+        if (nestedInfo.has_value() && nestedInfo->DeclaringTypeToken != 0)
+            continue;
         if (t.Namespace != currentNamespace) {
             if (namespaceOpen)
                 out += "}\n";
@@ -1199,15 +1237,12 @@ bool CSharpDecompiler::DecompileTypeToString(
         *state_->file, state_->typeSystem ? &state_->typeSystem.value()
                                           : nullptr,
         state_->typeSystem->MainMetadataModule(),
-        FindPartialTypeInfo(typeToken), typeToken, out);
+        [this](std::uint32_t token) { return FindPartialTypeInfo(token); },
+        typeToken, out);
     if (rendered && wrapNamespace) {
-        for (const auto& t : state_->file->TypeDefs()) {
-            if (t.Token != typeToken)
-                continue;
-            if (!t.Namespace.empty())
-                out = "namespace " + t.Namespace + ";\n\n" + out;
-            break;
-        }
+        std::string ns = RootNamespaceOf(*state_->file, typeToken);
+        if (!ns.empty())
+            out = "namespace " + ns + ";\n\n" + out;
     }
     return rendered;
 }
@@ -1388,6 +1423,9 @@ std::string CSharpDecompiler::DecompileWholeModuleToString(
         if (t.Name == "<Module>")
             continue;
         if (TypeIsHiddenFromRender(file, t.Token))
+            continue;
+        auto nestedInfo = file.GetTypeDefNameInfo(t.Token);
+        if (nestedInfo.has_value() && nestedInfo->DeclaringTypeToken != 0)
             continue;
         if (t.Namespace != currentNamespace) {
             if (namespaceOpen)
