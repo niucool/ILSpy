@@ -2004,12 +2004,25 @@ private:
             (call.IsNewObj && call.DeclaringType)
                 ? dynamic_cast<const TypeSystem::ParameterizedType*>(call.DeclaringType.get())
                 : nullptr;
-        std::string typeName =
-            genDecl ? CSharpTypeName(call.DeclaringType)
-                    : (prefix.empty()
-                           ? SimplifyQualifiedMember(
-                                 FlattenMetadataName(std::move(name)))
-                           : FlattenMetadataName(std::move(name)));
+        std::string typeName = genDecl ? CSharpTypeName(call.DeclaringType)
+                                       : FlattenMetadataName(std::move(name));
+        if (!genDecl) {
+            if (prefix.empty()) {
+                // The static call: the own-type member renders
+                // unqualified.
+                typeName = SimplifyQualifiedMember(typeName);
+            } else {
+                // A new-expression's type renders its short name (the C#
+                // name lookup through the using directives; the oracle's
+                // `new RoutedEventHandler(...)` over the full
+                // `new System.Windows.RoutedEventHandler(...)`). The
+                // resolver-based collision qualification rides with the
+                // name-qualification family.
+                auto dot = typeName.rfind('.');
+                if (dot != std::string::npos)
+                    typeName = typeName.substr(dot + 1);
+            }
+        }
         std::string text = prefix + typeName + "(";
         for (std::size_t i = 0; i < call.Arguments.size(); ++i) {
             if (i) text += ", ";

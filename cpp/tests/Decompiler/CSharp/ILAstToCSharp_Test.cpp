@@ -250,7 +250,9 @@ TEST(ILAstToCSharp, ConstructorCallEmitsNewExpression) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "int arg_1");
-    EXPECT_NE(text.find("    new System.Text.StringBuilder(arg_1);\n"), std::string::npos) << text;
+    // The new-expression's type renders its short name (the C# name lookup
+    // through the using directives).
+    EXPECT_NE(text.find("    new StringBuilder(arg_1);\n"), std::string::npos) << text;
 }
 
 TEST(ILAstToCSharp, BaseConstructorCallEmitsBase) {

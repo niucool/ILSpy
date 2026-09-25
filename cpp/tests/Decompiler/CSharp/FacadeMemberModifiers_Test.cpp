@@ -519,6 +519,32 @@ TEST(FacadeMemberModifiersTest, NestedTypesRenderInsideTheirDeclaringType)
         << "the nested type renders once: " << whole.substr(0, 200);
 }
 
+// The new-expression's type renders its short name (the C# name lookup
+// through the using directives; the oracle's `new RoutedEventHandler(...)`
+// over the full `new System.Windows.RoutedEventHandler(...)`).
+TEST(FacadeMemberModifiersTest, NewExpressionTypesRenderShortNames)
+{
+    std::string path = ::ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    Metadata::MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+    std::string text;
+    for (const auto& t : file.TypeDefs()) {
+        if (std::string(t.Name) != "Page1")
+            continue;
+        ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
+            file, t.Token, text, /*wrapNamespace=*/false));
+        break;
+    }
+    ASSERT_FALSE(text.empty());
+    EXPECT_NE(text.find("new RoutedEventHandler(this, OKButton_Click)"),
+              std::string::npos)
+        << text;
+    EXPECT_EQ(text.find("new System.Windows.RoutedEventHandler"),
+              std::string::npos)
+        << "the new-expression type renders its short name: " << text;
+}
+
 // The body's static member accesses render unqualified within the
 // declaring type (the C# name lookup's unqualified resolution: the
 // oracle's .cctor renders `StaticReadonlyField = 42;`).
