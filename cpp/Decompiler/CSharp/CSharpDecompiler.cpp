@@ -58,6 +58,7 @@
 #include "Decompiler/Metadata/UniversalAssemblyResolver.hpp"
 #include "Decompiler/Metadata/DotNetCorePathFinderExtensions.hpp"
 #include "Decompiler/TypeSystem/DecompilerTypeSystem.hpp"
+#include "Decompiler/TypeSystem/IProperty.hpp"
 #include "Decompiler/Metadata/CodeMappingInfo.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/TypeSystem/SimpleTypeResolveContext.hpp"
@@ -211,6 +212,46 @@ bool CSharpDecompiler::DecompileMethodToString(
 // resolves into the referenced module's real entity.
 
 
+namespace {
+
+namespace TS = ::ILSpy::Decompiler::TypeSystem;
+namespace SyntaxNS = ::ILSpy::Decompiler::CSharp::Syntax;
+
+// The C# member-modifier composition for the type-level body's flat
+// renderer: the TypeSystemAstBuilder's GetMemberModifiers (the
+// accessibility under NeedsAccessibility -- explicit interface
+// implementations, static constructors, and interface members suppress
+// it -- plus static and the virtual family) with ConvertField's
+// const/readonly/volatile bits, rendered as the declaration's leading
+// keywords in the AllModifiers output order.
+std::string MemberModifiersText(const TS::IMember* member) {
+    if (member == nullptr)
+        return std::string();
+    SyntaxNS::TypeSystemAstBuilder builder;
+    SyntaxNS::Modifiers m = builder.GetMemberModifiers(*member);
+    if (const auto* field = dynamic_cast<const TS::IField*>(member)) {
+        if (field->IsConst()) {
+            m = (m & ~SyntaxNS::Modifiers::Static) |
+                SyntaxNS::Modifiers::Const;
+        } else if (field->IsReadOnly()) {
+            m = m | SyntaxNS::Modifiers::Readonly;
+        } else if (field->IsVolatile()) {
+            m = m | SyntaxNS::Modifiers::Volatile;
+        }
+    }
+    std::string out;
+    for (SyntaxNS::Modifiers modifier : SyntaxNS::CSharpModifiers::AllModifiers) {
+        if (modifier == SyntaxNS::Modifiers::Any)
+            continue;
+        if ((m & modifier) == modifier)
+            out += SyntaxNS::CSharpModifiers::GetModifierName(modifier) +
+                   std::string(" ");
+    }
+    return out;
+}
+
+} // namespace
+
 // The render body the static and instance DecompileTypeToString entries
 // share: everything but the module wiring (the static entry builds it per
 // call; the instance uses its own) and the registry lookup (the static
@@ -304,6 +345,8 @@ bool DecompileTypeToStringBody(
                         IL::CSharpTypeName(sig->ParameterTypes[0]);
             }
         }
+        out += MemberModifiersText(
+            module.GetDefinitionProperty(p.Token));
         out += propertyTypeName;
         out += ' ';
         out += p.Name;
@@ -344,6 +387,7 @@ bool DecompileTypeToStringBody(
                 accessorTokens.insert(token);
             std::string eventTypeName = "object";
             const TS::IEvent* event = module.GetDefinitionEvent(e.Token);
+            out += MemberModifiersText(event);
             if (event != nullptr) {
                 // A non-owning alias (the module's entity cache owns the
                 // event and its resolved return type -- the no-op-deleter
@@ -373,6 +417,7 @@ bool DecompileTypeToStringBody(
         std::string fieldTypeName =
             fieldType ? IL::CSharpTypeName(fieldType)
                       : std::string("var");
+        out += MemberModifiersText(module.GetDefinitionField(f.Token));
         out += fieldTypeName;
         out += ' ';
         out += f.Name;
@@ -380,7 +425,6 @@ bool DecompileTypeToStringBody(
         rendered = true;
     }
     for (const auto& m : file.GetMethods(typeToken)) {
-        if (m.RVA == 0) continue;
         if (accessorTokens.count(m.Token) != 0)
             continue;
         if (partialType != nullptr &&
@@ -392,10 +436,43 @@ bool DecompileTypeToStringBody(
         // and no return type.
         bool isConstructor = m.Name == ".ctor" || m.Name == ".cctor";
         const std::string& methodName = isConstructor ? typeName : m.Name;
+        const TS::IMethod* methodEntity =
+            module.GetDefinitionMethod(m.Token);
+        std::string modifiers =
+            MemberModifiersText(methodEntity);
+        if (m.RVA == 0) {
+            // The C# DoDecompileMethod's body-less arm: an abstract method
+            // (or an interface member) renders as a declaration with no
+            // body; a body-less non-abstract member of a non-interface type
+            // is externally implemented (the C# adds the extern modifier).
+            if (methodEntity != nullptr && !methodEntity->IsAbstract() &&
+                methodEntity->DeclaringType() != nullptr &&
+                methodEntity->DeclaringType()->Kind() !=
+                    TS::TypeKind::Interface) {
+                modifiers += "extern ";
+            }
+            std::string returnType = "void";
+            std::string paramDecl;
+            if (auto sig = file.GetMethodSignature(m.Token)) {
+                if (sig->ReturnType &&
+                    sig->ReturnType->ReflectionName() != "System.Void")
+                    returnType = IL::CSharpTypeName(sig->ReturnType);
+                auto paramNames = file.GetParameterNames(m.Token);
+                paramDecl = CSharpDecompiler::MethodDeclString(*sig,
+                                                                paramNames);
+            }
+            out += modifiers;
+            out += isConstructor ? std::string() : returnType + " ";
+            out += methodName;
+            out += "(" + paramDecl + ");\n";
+            rendered = true;
+            continue;
+        }
         std::string text;
         if (CSharpDecompiler::DecompileMethodToString(
                 file, typeSystem, m.Token, m.RVA, methodName, text,
                 isConstructor)) {
+            out += modifiers;
             out += text;
             out += "\n";
             rendered = true;

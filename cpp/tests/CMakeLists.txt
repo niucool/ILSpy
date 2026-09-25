@@ -517,6 +517,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/DecompilerTypeSystem_Test.cpp
     Decompiler/CSharp/CSharpDecompilerAstPipeline_Test.cpp
     Decompiler/CSharp/ILAstToCSharpAsyncDynamicArms_Test.cpp
+    Decompiler/CSharp/FacadeMemberModifiers_Test.cpp
     Decompiler/CSharp/CSharpDecompiler_Test.cpp
     Decompiler/CSharp/Transforms/CustomPatterns_Test.cpp
     Decompiler/CSharp/Transforms/CombineQueryExpressions_Test.cpp
