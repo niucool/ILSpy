@@ -553,8 +553,7 @@ per-block scope + the name-collision check over the FILE's using set
 (the resolver's LookupSimpleNameOrTypeName over a UsingScope -- the
 ported resolver surface exists; the wiring is the work).
 
-### The base-list qualification investigation (no commit -- the mechanism
-### is 90% pinned; the notes + the probe are the artifacts)
+### The name-decision family (RESOLVED -- four commits this cycle)
 
 The C# rule (confirmed from the source): the TypeSystemAstBuilder's
 short-name decision resolves the name through the USING SCOPE --
@@ -579,28 +578,64 @@ ComTypes-hits in the file). Two hard requirements the probe found:
     context's immutable-With pattern; a direct member assignment
     writes a copy).
 
-THE OPEN SUBTLETY: the oracle renders the tiny crafted fixture
-(`/home/jim/ilspy-test-fixtures/ambiguous_fixture/` -- a type
-implementing IEnumerable + a ComTypes-typed field, compiled over the
-net48 reference assemblies, with mscorlib+System copied beside it so
-the sibling-directory resolution finds the duplicate carrier) SHORT
-even though its own using set carries both colliding namespaces --
-while the PF whole-module (the huge using set) QUALIFIES. Something in
-the oracle's scope-construction or its ambiguity handling differs
-between the two; the C#'s `TopLevelTypeDefinitionIsAccessible` gate in
-LookInCurrentUsingScope is the next suspect (the accessibility of the
-ComTypes duplicate), or the oracle's -t/whole-module scope resolution
-differs from the emitted using lines.
+THE SUBTLETY (resolved): the net48 mscorlib's ComTypes.IEnumerable
+duplicate is INTERNAL, and the C# using-scope lookup's
+TopLevelTypeDefinitionIsAccessible gate only lets it participate when
+mscorlib's InternalsVisibleTo friend list covers the consuming
+assembly. The friend list includes PresentationFramework -- which is
+why the PF corpus qualifies while any small fixture does not. The RED
+fixture (`/home/jim/ilspy-test-fixtures/ambiguous_fixture/`) builds
+under the name PresentationFramework.dll for exactly that trigger
+(mscorlib+System copied beside it so the sibling-directory resolution
+finds the duplicate carrier).
 
-THE TEST-VECTOR PROBLEM: the only port-reproducible qualification case
-is the PF whole-module render (174s CLI / 274s test -- too heavy for
-the suite). The tiny fixture does not reproduce the oracle's
-qualification. RESOLVING the subtlety first is the prerequisite; then
-wire the resolver into the facade's base-list render (the pieces:
-UsingScope over the emitted set resolved via the compilation root, the
-lookup + IsError/match check, the qualified full-name render, the
-per-path using-set threading -- the -t path's type set vs the
-whole-module's module-wide set).
+THE SLICES (all landed, all corpus-verified against the oracle):
+  * `5bb3fdf8d` -- the base-list qualification: the render's using set
+    (the type's own on -t, the module-wide on the whole-module path --
+    one DecompileRun per the C# flow) threads into a UsingScope
+    resolved through the COMPILATION root (the merged tree; the
+    module's own root carries only its own types), nested along the
+    current type's namespace chain, carrying the current type
+    definition into the CSharpResolver. The whole-module using set
+    computes ONCE and feeds both the header and the scopes (the
+    per-type CollectRequiredNamespaces walk over every type is the
+    render's most expensive single pass -- a second copy doubled the
+    corpus render to ~8 minutes). BOUND: a lookup that finds NOTHING
+    keeps the short name for a TOP-LEVEL name (the port's compilation
+    loads a subset of the C#'s modules -- the netcore runtime-pack
+    discovery is unported -- so a miss is typically a resolution gap,
+    not real information); a NESTED miss is real (nested types are not
+    namespace members) and falls to the dotted form.
+  * `0b5c7ff80` -- the nested spelling: the declaring type renders
+    through the same decision joined by '.' (the sibling nested types
+    resolve by their own name -- the enclosing type's members are in
+    the lookup scope); the reflection '+' spelling is gone.
+  * `5f245055c` -- the generic <...> tail through the same decision +
+    the type-declaration header's bare name + the declared parameter
+    list (<TItem>, never `1`) + the keyword spellings (uint, ...)
+    preceding every name decision.
+  * `201d0cca0` -- the type-parameter constraint clauses (where T :
+    class/struct/new()/type-constraints) on the declaration line.
+CORPUS RESULT: the PresentationFramework base-list diff went 79 -> 0
+(the whole base-declaration category -- modifiers, base types,
+qualification, nested spelling, arguments, constraints -- is
+oracle-exact). The connid pin `aa0c7056...` held through every slice.
+
+THE NEXT QUEUE for this family (the corpus remainder):
+  * The member-signature qualification: the oracle qualifies the
+    return/param/explicit-impl types through the same visitor (129
+    rows on PF: `public System.Collections.IEnumerable GetChildren(...)`,
+    `System.Collections.IEnumerator
+    System.Collections.IEnumerable.GetEnumerator()`); the port's
+    method/property/field text arms still render the reflection
+    spelling for nested names and skip the decision. The machinery is
+    all in place -- thread the scopeResolver into those arms.
+  * The nested-generic declaring instantiation bound (the recursion
+    renders the declaring type argument-less when the parameterized
+    form lacks a generic-type chain).
+  * The using-set over-collection: my PF whole-module set carries
+    `using System.Threading.Tasks;` where the oracle's does not (find
+    the over-collecting reference).
 
 NOTE (the stale-queue catches): TransformFieldAndConstructorInitializers
 was ALREADY PORTED via the master merge (885 lines + 17 tests, the
