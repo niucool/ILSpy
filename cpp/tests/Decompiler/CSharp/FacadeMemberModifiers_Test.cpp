@@ -836,6 +836,25 @@ TEST(FacadeMemberModifiersTest, HiddenTypesReferencedByAttributesStillRender)
         << text;
 }
 
+// The parameter modifiers (the C# ConvertParameter's ReferenceKind +
+// IsParams arms): ref/out/in render as the type's leading keyword, the
+// params array as the leading `params`.
+TEST(FacadeMemberModifiersTest, ParameterModifiersRender)
+{
+    constexpr const char* kNestedFixture =
+        "/home/jim/ilspy-test-fixtures/nested_fixture/NestedBase.dll";
+    std::string text;
+    if (!RenderType(kNestedFixture, "RefOut", text))
+        GTEST_SKIP() << "the nested-base fixture is not provisioned";
+    EXPECT_NE(text.find("public void Shape(ref int a, out string b, "
+                        "in double c)"),
+              std::string::npos)
+        << text;
+    EXPECT_NE(text.find("public void Values(params int[] numbers)"),
+              std::string::npos)
+        << text;
+}
+
 // The whole-module render's using header carries the module-wide
 // required set (the C# IntroduceUsingDeclarations over the whole-module
 // tree), not just the assembly-attribute namespaces: the connid module's

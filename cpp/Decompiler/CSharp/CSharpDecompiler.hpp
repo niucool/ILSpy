@@ -151,12 +151,13 @@ public:
         const ::ILSpy::Decompiler::CSharp::Resolver::CSharpResolver*
             scopeResolver = nullptr);
 
-    // The same parameter-declaration builder over resolved types (the
-    // type-system entity path): the method entity's parameters carry
-    // their resolved types, so the name decision sees the definitions.
+    // The same parameter-declaration builder over the resolved parameter
+    // entities (the type-system entity path): the parameters carry their
+    // reference kinds (ref/out/in) and the params-array flag, so the
+    // declaration renders the modifiers.
     static std::string MethodDeclString(
-        const std::vector<::ILSpy::Decompiler::TypeSystem::ITypePtr>&
-            parameterTypes,
+        const std::vector<
+            const ::ILSpy::Decompiler::TypeSystem::IParameter*>& parameters,
         bool isInstance, const std::vector<std::string>& parameterNames,
         const ::ILSpy::Decompiler::CSharp::Resolver::CSharpResolver*
             scopeResolver = nullptr);

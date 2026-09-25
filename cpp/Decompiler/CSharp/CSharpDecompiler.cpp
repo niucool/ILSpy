@@ -143,24 +143,63 @@ std::string CSharpDecompiler::MethodDeclString(
     const Metadata::MethodSignature& signature,
     const std::vector<std::string>& parameterNames,
     const Resolver::CSharpResolver* scopeResolver) {
-    return MethodDeclString(signature.ParameterTypes, signature.IsInstance,
-                            parameterNames, scopeResolver);
+    // The file-signature decode path: no parameter entities, so the
+    // modifiers are unavailable (the reference kinds live only on the
+    // type-system entities); the types render without them.
+    std::string paramDecl;
+    const int base = signature.IsInstance ? 1 : 0;
+    for (std::size_t i = 0; i < signature.ParameterTypes.size(); ++i) {
+        if (i != 0) paramDecl += ", ";
+        if (signature.ParameterTypes[i] != nullptr)
+            paramDecl += RenderBaseTypeName(
+                signature.ParameterTypes[i]->GetDefinition(),
+                signature.ParameterTypes[i], scopeResolver);
+        else
+            paramDecl += "object";
+        paramDecl += ' ';
+        if (i < parameterNames.size() && !parameterNames[i].empty())
+            paramDecl += parameterNames[i];
+        else
+            paramDecl += "arg_" + std::to_string(base + static_cast<int>(i));
+    }
+    return paramDecl;
 }
 
 std::string CSharpDecompiler::MethodDeclString(
-    const std::vector<TS::ITypePtr>& parameterTypes, bool isInstance,
+    const std::vector<const TS::IParameter*>& parameters, bool isInstance,
     const std::vector<std::string>& parameterNames,
     const Resolver::CSharpResolver* scopeResolver) {
     std::string paramDecl;
     const int base = isInstance ? 1 : 0;
-    for (std::size_t i = 0; i < parameterTypes.size(); ++i) {
+    for (std::size_t i = 0; i < parameters.size(); ++i) {
         if (i != 0) paramDecl += ", ";
-        if (parameterTypes[i] != nullptr)
-            paramDecl += RenderBaseTypeName(
-                parameterTypes[i]->GetDefinition(), parameterTypes[i],
-                scopeResolver);
-        else
-            paramDecl += "object";
+        const TS::IParameter* parameter = parameters[i];
+        if (parameter == nullptr)
+            continue;
+        // The C# ConvertParameter's modifier composition: the params
+        // array leads, then the reference kind.
+        if (parameter->IsParams())
+            paramDecl += "params ";
+        switch (parameter->ReferenceKind()) {
+            case TS::ReferenceKind::Ref:
+                paramDecl += "ref ";
+                break;
+            case TS::ReferenceKind::Out:
+                paramDecl += "out ";
+                break;
+            case TS::ReferenceKind::In:
+                paramDecl += "in ";
+                break;
+            case TS::ReferenceKind::RefReadOnly:
+                paramDecl += "ref readonly ";
+                break;
+            default:
+                break;
+        }
+        TS::ITypePtr type(const_cast<TS::IType*>(&parameter->Type()),
+                          [](TS::IType*) {});
+        paramDecl += RenderBaseTypeName(type->GetDefinition(), type,
+                                        scopeResolver);
         paramDecl += ' ';
         if (i < parameterNames.size() && !parameterNames[i].empty())
             paramDecl += parameterNames[i];
@@ -226,16 +265,10 @@ bool CSharpDecompiler::DecompileMethodToString(
                 resolvedReturnType->GetDefinition(), resolvedReturnType,
                 scopeResolver);
         }
-        std::vector<TS::ITypePtr> parameterTypes;
-        for (const TS::IParameter* parameter : resolvedMethod->Parameters()) {
-            parameterTypes.push_back(
-                parameter != nullptr
-                    ? TS::ITypePtr(const_cast<TS::IType*>(&parameter->Type()),
-                                   [](TS::IType*) {})
-                    : nullptr);
-        }
+        std::vector<const TS::IParameter*> parameters =
+            resolvedMethod->Parameters();
         auto paramNames = file.GetParameterNames(methodToken);
-        paramDecl = MethodDeclString(parameterTypes,
+        paramDecl = MethodDeclString(parameters,
                                       !resolvedMethod->IsStatic(), paramNames,
                                       scopeResolver);
     } else if (auto sig = file.GetMethodSignature(methodToken)) {
@@ -1688,19 +1721,11 @@ bool DecompileTypeToStringBody(
                     resolvedReturnType->GetDefinition(), resolvedReturnType,
                     scopeResolver.get());
             }
-            std::vector<TS::ITypePtr> parameterTypes;
-            for (const TS::IParameter* parameter :
-                 methodEntity->Parameters()) {
-                parameterTypes.push_back(
-                    parameter != nullptr
-                        ? TS::ITypePtr(
-                              const_cast<TS::IType*>(&parameter->Type()),
-                              [](TS::IType*) {})
-                        : nullptr);
-            }
+            std::vector<const TS::IParameter*> parameters =
+                methodEntity->Parameters();
             auto paramNames = file.GetParameterNames(m.Token);
             paramDecl = CSharpDecompiler::MethodDeclString(
-                parameterTypes, !methodEntity->IsStatic(), paramNames,
+                parameters, !methodEntity->IsStatic(), paramNames,
                 scopeResolver.get());
         } else if (auto sig = file.GetMethodSignature(m.Token)) {
             if (sig->ReturnType &&
