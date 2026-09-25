@@ -1093,8 +1093,12 @@ ITypePtr MetadataModule::ResolveType(
     ::ILSpy::Decompiler::TypeSystem::Nullability nullableContext) const
 {
     // The C# `if (typeRefDefSpec.IsNil) return SpecialType.UnknownType;` --
-    // the null-object convention (a nil raw token is 0).
-    if (typeRefDefSpec == 0)
+    // the null-object convention. IsNil is the ROW-zero test (any tagged
+    // nil handle -- the TypeDef-tagged 0x02000000 a nil EVENT_TYPE column
+    // decodes to, the TypeRef/TypeSpec-tagged nils likewise), so the
+    // row-mask check covers every tagged nil, not just the raw zero token
+    // (the IL::WriteTo nil-widening convention).
+    if ((typeRefDefSpec & 0x00FFFFFFu) == 0)
         return UnknownType();
     ITypePtr ty;
     std::uint32_t kind = typeRefDefSpec >> 24;

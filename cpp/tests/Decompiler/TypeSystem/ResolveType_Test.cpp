@@ -600,6 +600,32 @@ TEST(ResolveTypeDirectBaseTypesTest, ResolveTypeNilAndDefinitionArms)
     EXPECT_EQ(resolved2.get(), stringDef);
 }
 
+// The C# `if (typeRefDefSpec.IsNil) return SpecialType.UnknownType;` first
+// arm of MetadataModule.ResolveType -- IsNil is the ROW-zero test, not the
+// raw-zero token check: a nil EVENT_TYPE column decodes to the
+// TypeDef-tagged nil handle 0x02000000, and the tagged TypeRef/TypeSpec
+// nils exist likewise. The post-facade --cs walk over the obfuscated
+// capa07 (whose events carry nil Type columns) drove the nil TypeDef token
+// through MetadataEvent::ReturnType -> ResolveType and aborted the
+// whole-module decompile with GetFullTypeNameFromDefinition's
+// "invalid TypeDef token"; the C# answers UnknownType ("?") for every
+// tagged nil.
+TEST(ResolveTypeDirectBaseTypesTest, ResolveTypeTaggedNilHandlesResolveUnknownType)
+{
+    MscorlibFixture f;
+    TS::GenericContext emptyContext{ std::vector<const TS::ITypeParameter*>{} };
+
+    TS::ITypePtr taggedNilDef = f.module.ResolveType(0x02000000u, emptyContext);
+    EXPECT_EQ(taggedNilDef->ReflectionName(), std::string("?"));
+    EXPECT_EQ(taggedNilDef->Kind(), TS::TypeKind::Unknown);
+    EXPECT_EQ(taggedNilDef->GetDefinition(), nullptr);
+
+    TS::ITypePtr taggedNilRef = f.module.ResolveType(0x01000000u, emptyContext);
+    EXPECT_EQ(taggedNilRef->ReflectionName(), std::string("?"));
+    TS::ITypePtr taggedNilSpec = f.module.ResolveType(0x1B000000u, emptyContext);
+    EXPECT_EQ(taggedNilSpec->ReflectionName(), std::string("?"));
+}
+
 TEST(ResolveTypeDirectBaseTypesTest, ResolveTypeSpecificationArm)
 {
     MscorlibFixture f;
