@@ -55,6 +55,10 @@ namespace ILSpy::Decompiler::CSharp {
 class AstNode;
 } // namespace ILSpy::Decompiler::CSharp
 
+namespace ILSpy::Decompiler::CSharp::Syntax {
+class TypeSystemAstBuilder;
+} // namespace ILSpy::Decompiler::CSharp::Syntax
+
 namespace ILSpy::Decompiler::CSharp::Transforms {
 
 class TransformContext {
@@ -74,6 +78,15 @@ public:
     const ::ILSpy::Decompiler::TypeSystem::ITypeDefinition* CurrentTypeDefinition =
         nullptr;
     const ::ILSpy::Decompiler::TypeSystem::IModule* CurrentModule = nullptr;
+
+    // The C# `public readonly TypeSystemAstBuilder TypeSystemAstBuilder` --
+    // the type renderer the insertion arms consult (ConvertType). A
+    // driver-owned instance (RunAstTransforms builds it through
+    // CSharpDecompiler::CreateAstBuilder, the C# ctor parameter); null when
+    // the driver did not provide one (the insertion arms that need it are
+    // skipped in that configuration).
+    ::ILSpy::Decompiler::CSharp::Syntax::TypeSystemAstBuilder* TypeSystemAstBuilder =
+        nullptr;
 
     // The C# `public DecompilerSettings Settings` (aliased to the run's bag;
     // the run is the owner, the port's ctor requires it non-null like the C#

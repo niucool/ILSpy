@@ -24,18 +24,36 @@
 #include "Decompiler/CSharp/Transforms/DeclareVariables.hpp"
 
 #include "Decompiler/CSharp/Annotations.hpp"
+#include "Decompiler/CSharp/ExpressionBuilder.hpp"
+#include "Decompiler/CSharp/Syntax/Comment.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DefaultValueExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ErrorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/LambdaExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/OutVarDeclarationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Slots.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/Statement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
+#include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
+#include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
+#include "Decompiler/CSharp/Syntax/VariableInitializer.hpp"
+#include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 
 #include <cassert>
+#include <functional>
 #include <stdexcept>
 
 namespace ILSpy::Decompiler::CSharp::Transforms {
@@ -92,7 +110,7 @@ DeclareVariables::InsertionPoint DeclareVariables::InsertionPoint::UpTo(
 // ---- VariableToDeclare -------------------------------------------------------------------
 
 DeclareVariables::VariableToDeclare::VariableToDeclare(
-    IL::ILVariable* variable, InsertionPoint insertionPoint,
+    const IL::ILVariablePtr& variable, InsertionPoint insertionPoint,
     Syntax::IdentifierExpression* firstUse, int sourceOrder)
     : DefaultInitialization(VariableInitKind::None),
       insertionPoint(insertionPoint),
@@ -114,6 +132,31 @@ DeclareVariables::VariableToDeclare::VariableToDeclare(
 }
 
 // ---- The analysis surface ----------------------------------------------------------------
+
+void DeclareVariables::Run(Syntax::AstNode& rootNode, TransformContext& context) {
+    try {
+        if (context_ != nullptr)
+            throw std::logic_error("Reentrancy in DeclareVariables?");
+        context_ = &context;
+        ClearAnalysisResults();
+        EnsureExpressionStatementsAreValid(&rootNode);
+        FindInsertionPoints(&rootNode, 0);
+        ResolveCollisions();
+        // InsertDeconstructionVariableDeclarations is DEFERRED loudly (the
+        // C# call site, line ~484): it needs
+        // StatementBuilder.TranslateDeconstructionDesignation, which is not
+        // ported. Deconstruction assignments keep their tuple-expression
+        // left side until that lands.
+        InsertVariableDeclarations();
+        UpdateAnnotations(&rootNode);
+    } catch (...) {
+        context_ = nullptr;
+        ClearAnalysisResults();
+        throw;
+    }
+    context_ = nullptr;
+    ClearAnalysisResults();
+}
 
 bool DeclareVariables::VariableNeedsDeclaration(IL::VariableKind kind) {
     switch (kind) {
@@ -268,8 +311,12 @@ void DeclareVariables::FindInsertionPointForVariable(
         it->second->insertionPoint =
             FindCommonParent(it->second->insertionPoint, newPoint);
     } else {
+        // A non-owning alias over the caller-owned variable (the IL function
+        // tree owns it; the annotation constructions downstream copy the
+        // alias without taking ownership -- the no-op-deleter convention).
+        IL::ILVariablePtr variableHandle(variable, [](IL::ILVariable*) {});
         auto v = std::make_unique<VariableToDeclare>(
-            variable, newPoint, identExpr,
+            variableHandle, newPoint, identExpr,
             static_cast<int>(variables_.size()));
         VariableToDeclare* raw = v.get();
         variables_.push_back(std::move(v));
@@ -404,6 +451,320 @@ bool DeclareVariables::IsMatchingAssignment(
     return assignment->Operator() == Syntax::AssignmentOperatorType::Assign &&
            identExpr != nullptr && identExpr->Identifier() == v.Name() &&
            identExpr->TypeArguments().Count() == 0;
+}
+
+// ---- The mutation half -------------------------------------------------------------------
+
+void DeclareVariables::EnsureExpressionStatementsAreValid(Syntax::AstNode* rootNode) {
+    for (Syntax::AstNode* node : rootNode->DescendantsAndSelf()) {
+        auto* stmt = dynamic_cast<Syntax::ExpressionStatement*>(node);
+        if (stmt == nullptr)
+            continue;
+        auto* dir = dynamic_cast<Syntax::DirectionExpression*>(stmt->Expression());
+        if (dir != nullptr && IsValidInStatementExpression(dir->Expression())) {
+            context_->StepOnce("Unwrap direction expression statement", stmt);
+            stmt->Expression(Syntax::Detach(dir->Expression()));
+        } else if (!IsValidInStatementExpression(stmt->Expression())) {
+            // fetch ILFunction: the root ILFunction annotation among the
+            // statement's ancestors (the C# `Ancestors.SelectMany(a =>
+            // a.Annotations.OfType<ILFunction>()).First(f => f.Parent ==
+            // null)`; the First on an empty sequence throws).
+            IL::ILFunction* function = nullptr;
+            for (Syntax::AstNode* ancestor = stmt; ancestor != nullptr;
+                 ancestor = ancestor->Parent()) {
+                if (IL::ILFunction* candidate = GetILFunctionAnnotation(*ancestor);
+                    candidate != nullptr && candidate->Parent == nullptr) {
+                    function = candidate;
+                    break;
+                }
+            }
+            if (function == nullptr)
+                throw std::runtime_error(
+                    "DeclareVariables: no root ILFunction annotation found for the "
+                    "invalid expression statement");
+            // if possible use C# 7.0 discard-assignment
+            if (context_->DecompileRun->Settings().Discards() &&
+                !ExpressionBuilder::HidesVariableWithName(*function, "_")) {
+                context_->StepOnce("Assign invalid expression statement to discard", stmt);
+                stmt->Expression(new Syntax::AssignmentExpression(
+                    new Syntax::IdentifierExpression("_"),
+                    // no ResolveResult
+                    Syntax::Detach(stmt->Expression())));
+            } else {
+                // DEFERRED loudly (the C# temporary arm, line ~249): it needs
+                // AssignVariableNames.GenerateVariableName over the function
+                // and the UsingScope, which is not ported. The invalid
+                // statement keeps its shape until that lands.
+                context_->StepOnce(
+                    "Assign invalid expression statement to temporary -- DEFERRED",
+                    stmt);
+            }
+        }
+    }
+}
+
+bool DeclareVariables::IsValidInStatementExpression(Syntax::Expression* expr) {
+    if (dynamic_cast<Syntax::InvocationExpression*>(expr) != nullptr ||
+        dynamic_cast<Syntax::ObjectCreateExpression*>(expr) != nullptr ||
+        dynamic_cast<Syntax::AssignmentExpression*>(expr) != nullptr ||
+        dynamic_cast<Syntax::ErrorExpression*>(expr) != nullptr)
+        return true;
+    if (auto* uoe = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr)) {
+        switch (uoe->Operator()) {
+            case Syntax::UnaryOperatorType::PostIncrement:
+            case Syntax::UnaryOperatorType::PostDecrement:
+            case Syntax::UnaryOperatorType::Increment:
+            case Syntax::UnaryOperatorType::Decrement:
+            case Syntax::UnaryOperatorType::Await:
+                return true;
+            case Syntax::UnaryOperatorType::NullConditionalRewrap:
+                return IsValidInStatementExpression(uoe->Expression());
+            default:
+                return false;
+        }
+    }
+    return false;
+}
+
+bool DeclareVariables::CombineDeclarationAndInitializer(VariableToDeclare& v) {
+    if (v.Type()->IsByRefLike())
+        return true; // by-ref-like variables always must be initialized at their declaration.
+
+    const Syntax::CSharpSlotInfo* slot = v.insertionPoint.nextNode->Slot();
+    if (slot != nullptr && slot->Kind() == &Syntax::Slots::ForInitializer)
+        return true; // for-statement initializers always should combine declaration and initialization.
+
+    return !context_->DecompileRun->Settings().SeparateLocalVariableDeclarations();
+}
+
+void DeclareVariables::InsertVariableDeclarations() {
+    // The C# replacements list: (oldNode, createNewNode, stepDescription)
+    // -- performed at the end, so that no node is replaced while it is still
+    // referenced by a VariableToDeclare.
+    struct Replacement {
+        Syntax::AstNode* oldNode;
+        std::function<Syntax::AstNode*()> createNewNode;
+        const char* stepDescription;
+    };
+    std::vector<Replacement> replacements;
+    for (std::unique_ptr<VariableToDeclare>& vPtr : variables_) {
+        VariableToDeclare& v = *vPtr;
+        if (v.RemovedDueToCollision() || v.declaredInDeconstruction)
+            continue;
+
+        Syntax::AssignmentExpression* assignment = nullptr;
+        Syntax::DirectionExpression* dirExpr = nullptr;
+        if (CombineDeclarationAndInitializer(v) && IsMatchingAssignment(v, &assignment)) {
+            // 'int v; v = expr;' can be combined to 'int v = expr;'
+            // (The C# `context.Settings.AnonymousTypes &&
+            // v.Type.ContainsAnonymousType()` `var` decision is DEFERRED with
+            // the NRExtensions anonymous-type walk -- the explicit
+            // ConvertType form is always used.)
+            Syntax::AstType* type = context_->TypeSystemAstBuilder->ConvertType(*v.ILVariable()->Type);
+            // (The C# IsRefReadOnly readonly-specifier fixup is DEFERRED: the
+            // ILVariable flag is not ported.)
+            if (v.ILVariable()->Kind == IL::VariableKind::PinnedLocal) {
+                type->AddTrailingTrivia(
+                    new Syntax::Comment("pinned", Syntax::CommentType::MultiLine));
+            }
+            replacements.push_back(Replacement{
+                v.insertionPoint.nextNode,
+                [&v, assignment, type]() -> Syntax::AstNode* {
+                    auto* vds = new Syntax::VariableDeclarationStatement(
+                        type, v.Name(), Syntax::Detach(assignment->Right()));
+                    Syntax::VariableInitializer* init = vds->Variables().At(0);
+                    init->AddAnnotation(
+                        CS::GetSharedResolveResult(*assignment->Left()));
+                    // Move the non-resolve-result annotations of the
+                    // assignment's left side and of the whole assignment
+                    // onto the initializer.
+                    for (const auto& annotation :
+                         assignment->Left()->SharedAnnotations()) {
+                        if (dynamic_cast<const Sem::ResolveResult*>(
+                                annotation.get()) == nullptr)
+                            init->AddAnnotation(annotation);
+                    }
+                    for (const auto& annotation : assignment->SharedAnnotations()) {
+                        if (dynamic_cast<const Sem::ResolveResult*>(
+                                annotation.get()) == nullptr)
+                            init->AddAnnotation(annotation);
+                    }
+                    return vds;
+                },
+                "Combine variable declaration with initializer"});
+        } else if (CanBeDeclaredAsOutVariable(v, &dirExpr)) {
+            // 'T v; SomeCall(out v);' can be combined to 'SomeCall(out T v);'
+            // (The C# anonymous-type / UseImplicitlyTypedOutAnnotation `var`
+            // decision is DEFERRED with the NRExtensions anonymous-type walk;
+            // the explicit ConvertType form is always used, so the
+            // OutVarResolveResult re-annotation arm is unreachable.)
+            Syntax::AstType* type = context_->TypeSystemAstBuilder->ConvertType(*v.ILVariable()->Type);
+            std::string name;
+            // Variable is not used and discards are allowed, we can simplify
+            // this to 'out T _'.
+            if (context_->DecompileRun->Settings().Discards() &&
+                v.ILVariable()->LoadCount == 0 && v.ILVariable()->StoreCount == 0 &&
+                v.ILVariable()->AddressCount == 1) {
+                name = "_";
+            } else {
+                name = v.Name();
+            }
+            auto* ovd = new Syntax::OutVarDeclarationExpression(type, name);
+            ovd->Variable()->AddAnnotation(
+                std::make_shared<CS::ILVariableResolveResult>(v.ILVariableHandle()));
+            CS::CopyAnnotationsFrom(ovd, *dirExpr);
+            Replacement replacement{
+                dirExpr, [ovd]() -> Syntax::AstNode* { return ovd; },
+                "Declare out variable"};
+            replacements.push_back(std::move(replacement));
+        } else {
+            // Insert a separate declaration statement.
+            Syntax::AstType* type = context_->TypeSystemAstBuilder->ConvertType(*v.ILVariable()->Type);
+            Syntax::Expression* initializer = nullptr;
+            if (v.DefaultInitialization == VariableInitKind::NeedsDefaultValue) {
+                initializer = new Syntax::DefaultValueExpression(type->Clone());
+            }
+            auto* vds =
+                new Syntax::VariableDeclarationStatement(type, v.Name(), initializer);
+            vds->Variables().At(0)->AddAnnotation(
+                std::make_shared<CS::ILVariableResolveResult>(v.ILVariableHandle()));
+            context_->StepOnce("Insert variable declaration", v.insertionPoint.nextNode);
+            if (auto* lambda = dynamic_cast<Syntax::LambdaExpression*>(
+                    v.insertionPoint.nextNode->Parent());
+                lambda != nullptr) {
+                // An expression-bodied lambda body gets wrapped in a block
+                // with a return statement, so the declaration has a block to
+                // live in.
+                auto* lambdaBody = dynamic_cast<Syntax::Expression*>(lambda->Body());
+                assert(lambdaBody != nullptr);
+                auto* blockStatement = new Syntax::BlockStatement();
+                blockStatement->Statements().Add(
+                    new Syntax::ReturnStatement(Syntax::Detach(lambdaBody)));
+                lambda->Body(blockStatement);
+            }
+            if (dynamic_cast<Syntax::ReturnStatement*>(
+                    v.insertionPoint.nextNode->Parent()) != nullptr) {
+                v.insertionPoint = v.insertionPoint.Up();
+            }
+            assert(v.insertionPoint.nextNode->Slot() != nullptr &&
+                   v.insertionPoint.nextNode->Slot()->Kind() ==
+                       &Syntax::Slots::Statement);
+            // The insertion point is a statement within a block, so it always
+            // has a parent.
+            Syntax::AstNode* insertionNode = v.insertionPoint.nextNode;
+            Syntax::AstNode* insertionParent = insertionNode->Parent();
+            if (insertionParent == nullptr)
+                throw std::runtime_error("Variable insertion point has no parent.");
+            // (The C# NeedsSkipInit forms -- the SkipInit call statements --
+            // are DEFERRED: they need a live context.TypeSystem for
+            // FindType(KnownTypeCode.Unsafe). The plain declaration is
+            // inserted; the skip-init marker stays on the variable's
+            // DefaultInitialization value until the compilation wiring
+            // lands.)
+            insertionParent->InsertChildBefore(insertionNode, vds,
+                                                 &Syntax::Slots::Statement);
+        }
+    }
+    // perform replacements at end, so that we don't replace a node while it
+    // is still referenced by a VariableToDeclare
+    for (Replacement& replacement : replacements) {
+        context_->StepOnce(replacement.stepDescription, replacement.oldNode);
+        Syntax::AstNode* newNode = replacement.createNewNode();
+        replacement.oldNode->ReplaceWith(newNode);
+    }
+}
+
+bool DeclareVariables::CanBeDeclaredAsOutVariable(
+    VariableToDeclare& v, Syntax::DirectionExpression** dirExprOut) {
+    *dirExprOut = dynamic_cast<Syntax::DirectionExpression*>(v.firstUse->Parent());
+    Syntax::DirectionExpression* dirExpr = *dirExprOut;
+    if (dirExpr == nullptr || dirExpr->FieldDirection() != Syntax::FieldDirection::Out)
+        return false;
+    if (!context_->DecompileRun->Settings().OutVariables())
+        return false;
+    if (v.DefaultInitialization != VariableInitKind::None)
+        return false;
+    for (Syntax::AstNode* node = v.firstUse; node != nullptr; node = node->Parent()) {
+        const Syntax::CSharpSlotInfo* slot = node->Slot();
+        if (slot != nullptr && slot->Kind() == &Syntax::Slots::EmbeddedStatement) {
+            return false;
+        }
+        if (dynamic_cast<Syntax::IfElseStatement*>(node) != nullptr) {
+            // variable declared in if condition appears in parent scope
+            return node == v.insertionPoint.nextNode;
+        }
+        if (dynamic_cast<Syntax::ExpressionStatement*>(node) != nullptr)
+            return node == v.insertionPoint.nextNode;
+        if (dynamic_cast<Syntax::Statement*>(node) != nullptr) {
+            // other statements (e.g. while) don't allow variables to be
+            // promoted to parent scope
+            return false;
+        }
+        if (auto* lambda = dynamic_cast<Syntax::LambdaExpression*>(node))
+            return lambda->Body() == v.insertionPoint.nextNode;
+    }
+    return false;
+}
+
+bool DeclareVariables::IsReferencedWithinDeclaringCall(
+    Syntax::DirectionExpression* dirExpr, VariableToDeclare& v) {
+    Syntax::AstNode* call = dirExpr->Parent();
+    if (call == nullptr)
+        return false;
+    for (Syntax::AstNode* argument = call->FirstChild(); argument != nullptr;
+         argument = argument->NextSibling()) {
+        if (argument == dirExpr)
+            continue;
+        for (Syntax::AstNode* node : argument->DescendantsAndSelf()) {
+            if (auto* identifier = dynamic_cast<Syntax::IdentifierExpression*>(node);
+                identifier != nullptr &&
+                ResolveVariableToDeclare(CS::GetILVariable(*identifier)) == &v)
+                return true;
+        }
+    }
+    return false;
+}
+
+DeclareVariables::VariableToDeclare* DeclareVariables::ResolveVariableToDeclare(
+    IL::ILVariable* variable) {
+    if (variable == nullptr)
+        return nullptr;
+    auto it = variableDict_.find(variable);
+    if (it == variableDict_.end())
+        return nullptr;
+    VariableToDeclare* v = it->second;
+    while (v->replacementDueToCollision != nullptr) {
+        v = v->replacementDueToCollision;
+    }
+    return v;
+}
+
+void DeclareVariables::UpdateAnnotations(Syntax::AstNode* rootNode) {
+    for (Syntax::AstNode* node : rootNode->Descendants()) {
+        IL::ILVariable* ilVar = nullptr;
+        if (auto* id = dynamic_cast<Syntax::IdentifierExpression*>(node)) {
+            ilVar = CS::GetILVariable(*id);
+        } else if (auto* vi = dynamic_cast<Syntax::VariableInitializer*>(node)) {
+            ilVar = CS::GetILVariable(*vi);
+        } else {
+            continue;
+        }
+        if (ilVar == nullptr || !VariableNeedsDeclaration(ilVar->Kind))
+            continue;
+        auto it = variableDict_.find(ilVar);
+        if (it == variableDict_.end())
+            throw std::out_of_range(
+                "DeclareVariables::UpdateAnnotations: variable not analyzed");
+        VariableToDeclare* v = it->second;
+        if (!v->RemovedDueToCollision())
+            continue;
+        while (v->replacementDueToCollision != nullptr) {
+            v = v->replacementDueToCollision;
+        }
+        node->RemoveAnnotations<Sem::ResolveResult>();
+        node->AddAnnotation(std::make_shared<CS::ILVariableResolveResult>(
+            v->ILVariableHandle(), v->ILVariable()->Type));
+    }
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Transforms

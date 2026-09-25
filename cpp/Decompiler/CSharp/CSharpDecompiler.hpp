@@ -49,14 +49,20 @@ class MetadataFile;
 class PartialTypeInfo;
 } // namespace ILSpy::Decompiler::Metadata
 
-namespace ILSpy::Decompiler { class DecompileRun; }
+namespace ILSpy::Decompiler {
+class DecompileRun;
+class DecompilerSettings;
+} // namespace ILSpy::Decompiler
 
 namespace ILSpy::Decompiler::TypeSystem {
 class ITypeResolveContext;
 } // namespace ILSpy::Decompiler::TypeSystem
 
 namespace ILSpy::Decompiler::CSharp {
-namespace Syntax { class AstNode; }
+namespace Syntax {
+class AstNode;
+class TypeSystemAstBuilder;
+} // namespace Syntax
 namespace Transforms { class IAstTransform; }
 
 class CSharpDecompiler {
@@ -95,6 +101,13 @@ public:
         Syntax::AstNode& rootNode, ::ILSpy::Decompiler::DecompileRun& decompileRun,
         const ::ILSpy::Decompiler::TypeSystem::ITypeResolveContext*
             decompilationContext = nullptr);
+
+    // The C# `static TypeSystemAstBuilder CreateAstBuilder(DecompilerSettings
+    // settings)` (line 722): the type renderer the transform context carries
+    // (the insertion arms of DeclareVariables and the remaining
+    // transform family consume ConvertType through it).
+    static Syntax::TypeSystemAstBuilder CreateAstBuilder(
+        const ::ILSpy::Decompiler::DecompilerSettings& settings);
 
     // The C# Decompile path's per-body half (the DecodeMethodBody +
     // decompile-body flow the CLI's --csharp block carries inline): runs

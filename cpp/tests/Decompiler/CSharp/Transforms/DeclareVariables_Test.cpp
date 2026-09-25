@@ -27,18 +27,32 @@
 #include "Decompiler/CSharp/Transforms/DeclareVariables.hpp"
 
 #include "Decompiler/CSharp/Annotations.hpp"
+#include "Decompiler/CSharp/CSharpDecompiler.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/OutVarDeclarationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
+#include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
+#include "Decompiler/CSharp/Transforms/TransformContext.hpp"
+#include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
+#include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
+#include "Decompiler/DecompileRun.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
+#include "Decompiler/TypeSystem/SimpleCompilation.hpp"
 
 #include <gtest/gtest.h>
 
@@ -52,6 +66,10 @@ namespace CS = ::ILSpy::Decompiler::CSharp;
 namespace Syntax = ::ILSpy::Decompiler::CSharp::Syntax;
 namespace IL = ::ILSpy::Decompiler::IL;
 namespace TS = ::ILSpy::Decompiler::TypeSystem;
+namespace Impl = ::ILSpy::Decompiler::TypeSystem::Implementation;
+namespace CSharpTS = ::ILSpy::Decompiler::CSharp::TypeSystem;
+using ::ILSpy::Decompiler::DecompilerSettings;
+using ::ILSpy::Decompiler::DecompileRun;
 using CS::Transforms::DeclareVariables;
 
 // A `name`-named local of unknown type (the annotation the analysis reads is
@@ -272,6 +290,255 @@ TEST(DeclareVariablesTest, ClearAnalysisResultsDropsTheDict)
 
     EXPECT_THROW(declareVariables.GetDeclarationPoint(v.get()), std::out_of_range);
     EXPECT_THROW(declareVariables.WasMerged(v.get()), std::out_of_range);
+}
+
+// ---- The mutation half (Run) --------------------------------------------------------------
+
+namespace {
+
+// The Run fixture: the settings + the using scope the DecompileRun requires
+// plus the type renderer the insertion arms consult (the
+// NormalizeBlockStatements_Test pattern + the TransformContext ast-builder
+// slot).
+struct RunFixture {
+    TS::SimpleCompilation compilation{Impl::MinimalCorlib::Instance(), {}};
+    std::shared_ptr<CSharpTS::CSharpTypeResolveContext> scopelessContext;
+    std::shared_ptr<CSharpTS::UsingScope> usingScope;
+    DecompilerSettings settings;
+    Syntax::TypeSystemAstBuilder astBuilder;
+
+    RunFixture()
+        : scopelessContext(std::make_shared<CSharpTS::CSharpTypeResolveContext>(
+              compilation.MainModule())),
+          usingScope(std::make_shared<CSharpTS::UsingScope>(
+              scopelessContext, compilation.RootNamespace(),
+              std::vector<const TS::INamespace*>{})) {}
+};
+
+// An Int32-typed local (a type ConvertType renders).
+IL::ILVariablePtr LocalInt32(const std::string& name) {
+    auto variable = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local,
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32));
+    variable->Name = name;
+    return variable;
+}
+
+// Runs the transform's IAstTransform entry over the tree.
+void RunPipeline(Syntax::AstNode& root, RunFixture& fx) {
+    DecompileRun runStorage(&fx.settings, fx.usingScope);
+    CS::Transforms::TransformContext context;
+    context.DecompileRun = &runStorage;
+    context.TypeSystemAstBuilder = &fx.astBuilder;
+    CS::Transforms::DeclareVariables declareVariables;
+    declareVariables.Run(root, context);
+}
+
+// A valid statement using the variable: `target = v;` (an assignment is a
+// valid statement expression, so the Run fixup leaves it alone; the
+// annotated right side is the use).
+Syntax::ExpressionStatement* AssignUse(const std::string& target,
+                                       const IL::ILVariablePtr& variable) {
+    return new Syntax::ExpressionStatement(new Syntax::AssignmentExpression(
+        new Syntax::IdentifierExpression(target),
+        Syntax::AssignmentOperatorType::Assign,
+        Var(variable->Name, variable)));
+}
+
+} // namespace
+
+// `v = a; use(v);` becomes `int v = a; use(v);`: the assignment statement is
+// replaced by a variable declaration carrying the assignment's right side as
+// the initializer.
+TEST(DeclareVariablesTest, RunCombinesDeclarationAndInitializer)
+{
+    RunFixture fx;
+    IL::ILVariablePtr v = LocalInt32("v");
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    Syntax::Expression* right = new Syntax::IdentifierExpression("a");
+    auto* assignment = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Var("v", v),
+                                          Syntax::AssignmentOperatorType::Assign,
+                                          right));
+    Syntax::Statement* use = AssignUse("w", v);
+    block->Statements().Add(assignment);
+    block->Statements().Add(use);
+
+    RunPipeline(*block, fx);
+
+    ASSERT_EQ(block->Statements().Count(), 2);
+    auto* declaration = dynamic_cast<Syntax::VariableDeclarationStatement*>(
+        block->Statements().At(0));
+    ASSERT_NE(declaration, nullptr)
+        << "the assignment becomes the declaration";
+    EXPECT_EQ(block->Statements().At(1), use);
+    ASSERT_NE(declaration->Type(), nullptr);
+    ASSERT_EQ(declaration->Variables().Count(), 1);
+    Syntax::VariableInitializer* initializer = declaration->Variables().At(0);
+    EXPECT_EQ(initializer->Name(), "v");
+    EXPECT_EQ(initializer->Initializer(), right)
+        << "the initializer is the assignment's right side";
+    const auto* annotation = initializer->Annotation<CS::ILVariableResolveResult>();
+    ASSERT_NE(annotation, nullptr);
+    EXPECT_EQ(annotation->Variable(), v.get())
+        << "the resolve-result annotation moves onto the initializer";
+}
+
+// With SeparateLocalVariableDeclarations the declaration stays separate
+// (no initializer) and precedes the assignment.
+TEST(DeclareVariablesTest, RunKeepsDeclarationSeparateUnderTheSetting)
+{
+    RunFixture fx;
+    fx.settings.SetSeparateLocalVariableDeclarations(true);
+    IL::ILVariablePtr v = LocalInt32("v");
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    auto* assignment = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Var("v", v),
+                                          Syntax::AssignmentOperatorType::Assign,
+                                          new Syntax::IdentifierExpression("a")));
+    block->Statements().Add(assignment);
+    block->Statements().Add(AssignUse("w", v));
+
+    RunPipeline(*block, fx);
+
+    ASSERT_EQ(block->Statements().Count(), 3);
+    auto* declaration = dynamic_cast<Syntax::VariableDeclarationStatement*>(
+        block->Statements().At(0));
+    ASSERT_NE(declaration, nullptr)
+        << "a separate declaration is inserted before the assignment";
+    EXPECT_EQ(block->Statements().At(1), assignment);
+    ASSERT_EQ(declaration->Variables().Count(), 1);
+    Syntax::VariableInitializer* initializer = declaration->Variables().At(0);
+    EXPECT_EQ(initializer->Name(), "v");
+    EXPECT_EQ(initializer->Initializer(), nullptr)
+        << "the separate declaration carries no initializer";
+    const auto* annotation = initializer->Annotation<CS::ILVariableResolveResult>();
+    ASSERT_NE(annotation, nullptr);
+    EXPECT_EQ(annotation->Variable(), v.get());
+}
+
+// A variable whose only use is an `out` argument of a call is declared at the
+// call: `M(out v);` becomes `M(out int v);`.
+TEST(DeclareVariablesTest, RunDeclaresOutVariable)
+{
+    RunFixture fx;
+    IL::ILVariablePtr v = LocalInt32("v");
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    auto* direction = new Syntax::DirectionExpression(
+        Syntax::FieldDirection::Out, Var("v", v));
+    auto* invocation = new Syntax::InvocationExpression(
+        new Syntax::MemberReferenceExpression(new Syntax::IdentifierExpression("M"), "M"));
+    invocation->Arguments().Add(direction);
+    auto* call = new Syntax::ExpressionStatement(invocation);
+    block->Statements().Add(call);
+
+    RunPipeline(*block, fx);
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements().At(0), call);
+    ASSERT_EQ(invocation->Arguments().Count(), 1);
+    auto* outVar = dynamic_cast<Syntax::OutVarDeclarationExpression*>(
+        invocation->Arguments().At(0));
+    ASSERT_NE(outVar, nullptr) << "the direction becomes an out-var declaration";
+    ASSERT_NE(outVar->Variable(), nullptr);
+    EXPECT_EQ(outVar->Variable()->Name(), "v");
+    const auto* annotation =
+        outVar->Variable()->Annotation<CS::ILVariableResolveResult>();
+    ASSERT_NE(annotation, nullptr);
+    EXPECT_EQ(annotation->Variable(), v.get());
+}
+
+// A direction-expression statement over a valid inner expression unwraps to
+// the inner expression.
+TEST(DeclareVariablesTest, RunUnwrapsDirectionExpressionStatement)
+{
+    RunFixture fx;
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    auto* inner = new Syntax::InvocationExpression(
+        new Syntax::MemberReferenceExpression(new Syntax::IdentifierExpression("M"), "M"));
+    auto* statement = new Syntax::ExpressionStatement(
+        new Syntax::DirectionExpression(Syntax::FieldDirection::Out, inner));
+    block->Statements().Add(statement);
+
+    RunPipeline(*block, fx);
+
+    EXPECT_EQ(statement->Expression(), inner)
+        << "the direction wrapper is unwrapped";
+}
+
+// An invalid expression statement is assigned to the C# 7.0 discard (the
+// method's ILFunction annotation rides on the root).
+TEST(DeclareVariablesTest, RunAssignsInvalidStatementToDiscard)
+{
+    RunFixture fx;
+    auto function = std::make_shared<IL::ILFunction>();
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    Syntax::Expression* invalid = new Syntax::IdentifierExpression("a");
+    auto* statement = new Syntax::ExpressionStatement(invalid);
+    block->Statements().Add(statement);
+    block->AddAnnotation(
+        std::make_shared<CS::ILInstructionAnnotation>(function.get()));
+
+    RunPipeline(*block, fx);
+
+    auto* assignment = dynamic_cast<Syntax::AssignmentExpression*>(
+        statement->Expression());
+    ASSERT_NE(assignment, nullptr) << "the statement becomes a discard assignment";
+    auto* discard = dynamic_cast<Syntax::IdentifierExpression*>(assignment->Left());
+    ASSERT_NE(discard, nullptr);
+    EXPECT_EQ(discard->Identifier(), "_");
+    EXPECT_EQ(assignment->Right(), invalid);
+}
+
+// Two same-named variables merged by ResolveCollisions end up with one
+// declaration, and the removed variable's use sites are re-annotated to the
+// surviving variable.
+TEST(DeclareVariablesTest, RunUpdatesMergedAnnotations)
+{
+    RunFixture fx;
+    IL::ILVariablePtr i1 = LocalInt32("i");
+    IL::ILVariablePtr i2 = LocalInt32("i");
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    Syntax::ExpressionStatement* use1 = AssignUse("x", i1);
+    Syntax::ExpressionStatement* use2 = AssignUse("y", i2);
+    block->Statements().Add(use1);
+    block->Statements().Add(use2);
+
+    RunPipeline(*block, fx);
+
+    ASSERT_EQ(block->Statements().Count(), 3);
+    auto* declaration = dynamic_cast<Syntax::VariableDeclarationStatement*>(
+        block->Statements().At(0));
+    ASSERT_NE(declaration, nullptr)
+        << "one declaration covers the merged pair";
+    EXPECT_EQ(block->Statements().At(1), use1);
+    EXPECT_EQ(block->Statements().At(2), use2);
+    const auto* annotation =
+        declaration->Variables().At(0)->Annotation<CS::ILVariableResolveResult>();
+    ASSERT_NE(annotation, nullptr);
+    EXPECT_EQ(annotation->Variable(), i2.get())
+        << "the merged declaration belongs to the surviving variable";
+    // The removed variable's use site is re-annotated to the survivor.
+    auto* use1Right = dynamic_cast<Syntax::IdentifierExpression*>(
+        dynamic_cast<Syntax::AssignmentExpression*>(use1->Expression())->Right());
+    ASSERT_NE(use1Right, nullptr);
+    EXPECT_EQ(CS::GetILVariable(*use1Right), i2.get());
+    auto* use2Right = dynamic_cast<Syntax::IdentifierExpression*>(
+        dynamic_cast<Syntax::AssignmentExpression*>(use2->Expression())->Right());
+    ASSERT_NE(use2Right, nullptr);
+    EXPECT_EQ(CS::GetILVariable(*use2Right), i2.get());
+}
+
+// The transform occupies its C# GetAstTransforms slot (after the deferred
+// AddCheckedBlocks, before the deferred
+// TransformFieldAndConstructorInitializers).
+TEST(DeclareVariablesTest, PipelineCarriesDeclareVariables)
+{
+    auto transforms = CS::CSharpDecompiler::GetAstTransforms();
+    ASSERT_GT(transforms.size(), 1u);
+    EXPECT_NE(dynamic_cast<CS::Transforms::DeclareVariables*>(transforms[1].get()),
+              nullptr)
+        << "DeclareVariables is the second AST transform";
 }
 
 } // namespace

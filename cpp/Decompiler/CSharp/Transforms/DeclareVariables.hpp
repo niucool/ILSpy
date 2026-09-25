@@ -18,7 +18,7 @@
 // SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 // Port of ICSharpCode.Decompiler/CSharp/Transforms/DeclareVariables.cs -- the
-// ANALYSIS half: where each variable's declaration would be inserted. The
+// analysis half: where each variable's declaration would be inserted. The
 // insertion point for a variable is the common parent of all its uses (the
 // smallest scope containing them), computed by FindInsertionPoints over the
 // resolve-result annotations and then adjusted by ResolveCollisions so that
@@ -27,22 +27,27 @@
 // front (the C# does the same), and TransformFor's iterator bail reads
 // GetDeclarationPoint.
 //
-// The MUTATION half is DEFERRED with its own slice (loud below): the
-// IAstTransform derivation and Run (EnsureExpressionStatementsAreValid,
-// InsertDeconstructionVariableDeclarations, InsertVariableDeclarations with the
-// combine-declaration-and-initializer / out-var / SkipInit arms, and
-// UpdateAnnotations) -- they need TypeSystemAstBuilder.ConvertType, the
-// settings family (SeparateLocalVariableDeclarations/AnonymousTypes/Discards/
-// OutVariables), the DeconstructInstruction/TranslateDeconstructionDesignation
-// surfaces, and OutVarResolveResult. Until Run lands, the class is the
-// analysis surface only (the GetAstTransforms slot stays a loud comment).
+// The mutation half is ported in Run: EnsureExpressionStatementsAreValid
+// (the direction-expression unwrap and the discard assignment), and
+// InsertVariableDeclarations (the combine-declaration-and-initializer arm,
+// the out-var arm, and the separate-declaration arm) with UpdateAnnotations
+// for the collision-replaced variables. DEFERRED loudly within it:
+// InsertDeconstructionVariableDeclarations (needs
+// StatementBuilder.TranslateDeconstructionDesignation), the temporary arm of
+// EnsureExpressionStatementsAreValid (needs
+// AssignVariableNames.GenerateVariableName), the NeedsSkipInit forms (need a
+// live context.TypeSystem for FindType(KnownTypeCode.Unsafe)), the
+// anonymous-type `var` decision (needs the NRExtensions
+// ContainsAnonymousType/IsAnonymousType walk), and the IsRefReadOnly
+// readonly-specifier fixup (the ILVariable flag is not ported).
 //
 // The C# `Dictionary<ILVariable, VariableToDeclare>` enumeration order (the
-// insertion order the collision resolution and the later insertion loop rely
-// on) ports as an insertion-ordered vector plus a reference-identity index.
+// insertion order the collision resolution and the insertion loop rely on)
+// ports as an insertion-ordered vector plus a reference-identity index.
 
 #pragma once
 
+#include "Decompiler/CSharp/Transforms/IAstTransform.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 
 #include <memory>
@@ -61,6 +66,8 @@ class IType;
 namespace ILSpy::Decompiler::CSharp::Syntax {
 class AstNode;
 class AssignmentExpression;
+class DirectionExpression;
+class Expression;
 class IdentifierExpression;
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 
@@ -70,9 +77,8 @@ class BlockContainer;
 
 namespace ILSpy::Decompiler::CSharp::Transforms {
 
-// The C# `public class DeclareVariables : IAstTransform` -- the analysis half
-// (see the file header; the IAstTransform base lands with Run).
-class DeclareVariables final {
+// The C# `public class DeclareVariables : IAstTransform`.
+class DeclareVariables final : public IAstTransform {
 public:
     // The C# `struct InsertionPoint` (the DebuggerDisplay'd position
     // immediately before nextNode; nextNode is either an ExpressionStatement
@@ -106,13 +112,17 @@ public:
     // The C# `class VariableToDeclare`.
     class VariableToDeclare {
     public:
-        VariableToDeclare(IL::ILVariable* variable, InsertionPoint insertionPoint,
+        VariableToDeclare(const IL::ILVariablePtr& variable,
+                          InsertionPoint insertionPoint,
                           Syntax::IdentifierExpression* firstUse, int sourceOrder);
 
         // The C# `public readonly ILVariable ILVariable` (a GC reference; the
-        // port observes the caller-owned variable -- the IL function tree or
-        // the test owns it).
-        IL::ILVariable* ILVariable() const { return ilVariable_; }
+        // port holds a NON-OWNING shared-handle alias -- the no-op-deleter
+        // convention -- because the variable is owned by the IL function
+        // tree, and the annotation constructions copy the alias without
+        // taking ownership).
+        IL::ILVariable* ILVariable() const { return ilVariable_.get(); }
+        const IL::ILVariablePtr& ILVariableHandle() const { return ilVariable_; }
         // The C# `IType Type => ILVariable.Type`.
         const ::ILSpy::Decompiler::TypeSystem::IType* Type() const {
             return ilVariable_->Type.get();
@@ -144,13 +154,18 @@ public:
         bool declaredInDeconstruction = false;
 
     private:
-        IL::ILVariable* ilVariable_;
+        IL::ILVariablePtr ilVariable_;
     };
 
     // The C# `internal static bool VariableNeedsDeclaration(VariableKind kind)`:
     // the kinds that already carry their own declaration (or are handled by
     // the construct that introduced them) are not declared by this transform.
     static bool VariableNeedsDeclaration(IL::VariableKind kind);
+
+    // The C# `void Run(AstNode rootNode, TransformContext context)` -- the
+    // IAstTransform entry: the statement fixup, the analysis, and the
+    // declaration insertion.
+    void Run(Syntax::AstNode& rootNode, TransformContext& context) override;
 
     // The C# `public void Analyze(AstNode rootNode)`: analyze the input AST
     // (containing undeclared variables) for where those variables would be
@@ -172,6 +187,10 @@ public:
     bool WasMerged(IL::ILVariable* variable);
 
 private:
+    // The C# `[AllowNull] TransformContext context` (the reentrancy guard's
+    // state; null between runs).
+    TransformContext* context_ = nullptr;
+
     // The C# `readonly Dictionary<ILVariable, VariableToDeclare>
     // variableDict`: the insertion-ordered list (the C# Dictionary's
     // enumeration order) with a reference-identity index over the stable
@@ -206,6 +225,37 @@ private:
 
     // The C# `void ResolveCollisions()`.
     void ResolveCollisions();
+
+    // The C# `void EnsureExpressionStatementsAreValid(AstNode rootNode)`.
+    void EnsureExpressionStatementsAreValid(Syntax::AstNode* rootNode);
+
+    // The C# `private static bool IsValidInStatementExpression(Expression
+    // expr)`.
+    static bool IsValidInStatementExpression(Syntax::Expression* expr);
+
+    // The C# `bool CombineDeclarationAndInitializer(VariableToDeclare v,
+    // TransformContext context)`.
+    bool CombineDeclarationAndInitializer(VariableToDeclare& v);
+
+    // The C# `void InsertVariableDeclarations(TransformContext context)`.
+    void InsertVariableDeclarations();
+
+    // The C# `bool CanBeDeclaredAsOutVariable(VariableToDeclare v, out
+    // DirectionExpression? dirExpr)`.
+    bool CanBeDeclaredAsOutVariable(VariableToDeclare& v,
+                                    Syntax::DirectionExpression** dirExpr);
+
+    // The C# `bool IsReferencedWithinDeclaringCall(DirectionExpression
+    // dirExpr, VariableToDeclare v)`.
+    bool IsReferencedWithinDeclaringCall(Syntax::DirectionExpression* dirExpr,
+                                         VariableToDeclare& v);
+
+    // The C# `VariableToDeclare? ResolveVariableToDeclare(ILVariable?
+    // variable)`.
+    VariableToDeclare* ResolveVariableToDeclare(IL::ILVariable* variable);
+
+    // The C# `void UpdateAnnotations(AstNode rootNode)`.
+    void UpdateAnnotations(Syntax::AstNode* rootNode);
 
     // The C# `bool IsMatchingAssignment(VariableToDeclare v, out
     // AssignmentExpression? assignment)`: whether the insertion point's node

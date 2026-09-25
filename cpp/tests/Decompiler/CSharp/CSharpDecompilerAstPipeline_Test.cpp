@@ -5,6 +5,7 @@
 
 #include "Decompiler/CSharp/CSharpDecompiler.hpp"
 
+#include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
@@ -28,6 +29,7 @@ namespace {
 
 namespace CS = ::ILSpy::Decompiler::CSharp;
 namespace Syntax = ::ILSpy::Decompiler::CSharp::Syntax;
+namespace IL = ::ILSpy::Decompiler::IL;
 namespace Transforms = ::ILSpy::Decompiler::CSharp::Transforms;
 namespace TS = ::ILSpy::Decompiler::TypeSystem;
 namespace Impl = ::ILSpy::Decompiler::TypeSystem::Implementation;
@@ -76,9 +78,15 @@ TEST(AstTransformPipeline, ListIsFreshInstanceInCSharpOrder) {
 }
 
 // The driver applies the pipeline: a while body that NormalizeBlockStatements
-// wraps in a block ends up as a block after RunAstTransforms.
+// wraps in a block ends up as a block after RunAstTransforms. The root
+// carries the root-ILFunction annotation every method decompilation
+// attaches (DeclareVariables' invalid-statement fixup reads it through the
+// ancestors).
 TEST(AstTransformPipeline, RunAppliesThePortedPipeline) {
     auto whileStatement = MakeWhileWithBareBody();
+    auto function = std::make_shared<IL::ILFunction>();
+    whileStatement->AddAnnotation(
+        std::make_shared<CS::ILInstructionAnnotation>(function.get()));
     AstPipelineFixture fx;
     DecompilerSettings settings;
     DecompileRun runStorage(&settings, fx.usingScope);

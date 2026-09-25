@@ -25,6 +25,8 @@
 #include "Decompiler/CSharp/Transforms/ReplaceMethodCallsWithOperators.hpp"
 #include "Decompiler/CSharp/Transforms/AddCheckedBlocks.hpp"
 #include "Decompiler/CSharp/Transforms/PatternStatementTransform.hpp"
+#include "Decompiler/CSharp/Transforms/DeclareVariables.hpp"
+#include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/CSharp/Transforms/PrettifyAssignments.hpp"
 #include "Decompiler/CSharp/Transforms/NormalizeBlockStatements.hpp"
 #include "Decompiler/CSharp/Transforms/FlattenSwitchBlocks.hpp"
@@ -396,7 +398,7 @@ CSharpDecompiler::GetAstTransforms() {
     // AddCheckedBlocks -- deferred (the port carries the annotation half;
     // the block-rewriting IAstTransform itself lands with the rest of the
     // AST-transform layer, at this same slot).
-    // DeclareVariables -- deferred (the FindInsertionPoints machinery).
+    transforms.push_back(std::make_unique<Transforms::DeclareVariables>());
     // TransformFieldAndConstructorInitializers -- deferred.
     transforms.push_back(
         std::make_unique<Transforms::PrettifyAssignments>());
@@ -413,8 +415,7 @@ CSharpDecompiler::GetAstTransforms() {
     return transforms;
 }
 
-void CSharpDecompiler::RunAstTransforms(
-    Syntax::AstNode& rootNode, DecompileRun& decompileRun,
+void CSharpDecompiler::RunAstTransforms(    Syntax::AstNode& rootNode, DecompileRun& decompileRun,
     const ::ILSpy::Decompiler::TypeSystem::ITypeResolveContext* decompilationContext) {
     (void)decompilationContext;
     // The C# RunTransforms shape: the context build, the up-front invariant
@@ -424,6 +425,12 @@ void CSharpDecompiler::RunAstTransforms(
     // CancellationToken bookkeeping is deferred with those surfaces.
     Transforms::TransformContext context;
     context.DecompileRun = &decompileRun;
+    // The C# `var typeSystemAstBuilder = CreateAstBuilder(decompileRun.Settings)`
+    // + the TransformContext ctor parameter: the type renderer the
+    // insertion arms consume (ConvertType).
+    Syntax::TypeSystemAstBuilder typeSystemAstBuilder =
+        CreateAstBuilder(decompileRun.Settings());
+    context.TypeSystemAstBuilder = &typeSystemAstBuilder;
     // The C# TypeSystem slot (the IDecompilerTypeSystem the C# ctor passes)
     // stays null in the port until the DecompileRun carries the compilation
     // (the type-system wiring slice).
@@ -438,6 +445,21 @@ void CSharpDecompiler::RunAstTransforms(
     rootNode.AcceptVisitor(insertParentheses);
     OutputVisitor::GenericGrammarAmbiguityVisitor::ResolveAmbiguities(
         &rootNode);
+}
+
+// The C# `static TypeSystemAstBuilder CreateAstBuilder(DecompilerSettings
+// settings)` (line 722).
+Syntax::TypeSystemAstBuilder CSharpDecompiler::CreateAstBuilder(
+    const ::ILSpy::Decompiler::DecompilerSettings& settings) {
+    Syntax::TypeSystemAstBuilder typeSystemAstBuilder;
+    typeSystemAstBuilder.ShowAttributes() = true;
+    typeSystemAstBuilder.UsePrivateProtectedAccessibility() =
+        settings.IntroducePrivateProtectedAccessibility();
+    typeSystemAstBuilder.SortAttributes() = settings.SortCustomAttributes();
+    typeSystemAstBuilder.AlwaysUseShortTypeNames() = true;
+    typeSystemAstBuilder.AddResolveResultAnnotations() = true;
+    typeSystemAstBuilder.UseNullableSpecifierForValueTypes() = settings.LiftNullables();
+    return typeSystemAstBuilder;
 }
 
 } // namespace ILSpy::Decompiler::CSharp
