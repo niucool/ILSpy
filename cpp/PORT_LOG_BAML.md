@@ -1131,3 +1131,78 @@ The full-assembly gold for the broader sweep is recoverable with
    `ilspy_cli --csharp <corpus>/mscorlib.dll` should produce the
    227,308-line declaration surface (the oracle capture is the gold
    capture of record; the previous differential runs archived it).
+
+---
+
+# Phase 11 exit artifact: the full-corpus --csharp text-match matrix
+
+`MODE=csharp ALL_CORPUS=1` over the complete net48 corpus (133 top-level
+assemblies + 49 capa samples + ilspycmd_self), run against the tip of
+`port-baml` (= `cpp` after the integrated merge, `dc41b4214`). Log:
+`/tmp/tm_cs_full/summary.tsv`, run transcript `/tmp/tm_cs_full.log`.
+
+## The matrix (corpus 133 / capa 49 / self 1)
+
+| Verdict | corpus | capa | self |
+|---|---|---|---|
+| IDENTICAL | 0 | 0 | 0 |
+| CONVENTION-DIFF | 2 | 33 | 0 |
+| PORT-FAIL(1) | 118 | 0 | 0 |
+| ORACLE-THROWS | 12 | 3 | 0 |
+| PORT-CRASH(134) | 1 | 13 | 1 |
+
+Interpretation per cohort:
+
+* **118 PORT-FAIL(1)** -- the metadata-only reference assemblies: the
+  port's bodies-only `--csharp` loop prints nothing and bails with
+  `no method bodies found`. This is the T3 blocker; the spec and the
+  proving fixtures are in the preceding section. Every one of these
+  becomes runnable once the main line lands the metadata-driven
+  declaration path.
+* **2 CONVENTION-DIFF** -- `Microsoft.VisualC.dll` and
+  `Microsoft.VisualC.STLCLR.dll`: the mixed-mode C++/CLI assemblies,
+  the only corpus members with real method bodies, where the port's
+  existing pipeline already runs and emits text (STLCLR: the port 2800
+  lines vs the oracle 4263; VisualC: 67 vs 132). The verbatim
+  statement-level overlap is small (2 of 381 unique code lines for
+  STLCLR) -- the C++/CLI surface (the iterator templates, the
+  properties-with-fields shape, the ctor chains) exercises convention
+  differences the port has not yet closed. These two are the best
+  small-scale --csharp targets with real bodies.
+* **12 ORACLE-THROWS** -- 11 of them (System.Windows.Forms, System.Web,
+  System.Web.Extensions, System.ServiceModel, System.ServiceModel.
+  Discovery, System.ServiceModel.Activation, System.Data.SqlXml,
+  System.Data.Entity, System.Activities, System.Activities.Presentation,
+  Microsoft.Build) die on the **C# oracle's own bug**:
+  `CSharpDecompiler.IsAccessorInterfaceImplementationRuntimeHelper`
+  -> `ILParser.DecodeOpCode` -> `BlobReader.ReadByte()` throws
+  `BadImageFormatException: Read out of bounds` on a method body whose
+  blob ends mid-instruction; the exception aborts the WHOLE
+  assembly (rc 70, `Error decompiling @02000009 ...`). The port
+  instead emits its rc-1 bail. For these the differential exit
+  criterion cannot be "matches the oracle" -- the oracle cannot
+  produce output; the criterion becomes "both engines fail, and the
+  port's failure is clean". The 12th is the known native
+  `System.EnterpriseServices.Thunk.dll`.
+* **1 PORT-CRASH + 13 capa crashes + self**: the Wrapper --csharp run
+  trips the same `std::vector::operator[]` `__n < this->size()`
+  assertion on `ILInstruction` as the capa crashers -- the
+  IndexRangeTransform-family OOB, now confirmed to fire on real
+  mixed-mode corpus content too, not just the capa fixtures.
+
+## What the expansion surfaced (new since the 15-sample baseline)
+
+1. **The 11-assembly oracle-bug cohort** (above): an upstream C#
+   limitation in the accessor-sniffing helper (no bounds guard before
+   reading the body's opcodes). Flag for the main line: a future port
+   of `IsAccessorInterfaceImplementationRuntimeHelper` must add the
+   bounds check the C# lacks, and the Phase-11 criterion for these 11
+   assemblies should be re-framed accordingly.
+2. **The Wrapper's third pathology**: --il renders mismatched
+   pseudo-IL for the pinvoke/native thunks, and --csharp crashes with
+   the ILInstruction-vector OOB assertion. One assembly, two engines'
+   worth of divergence; the minimal repro set for the main line is
+   this single file.
+3. **The mixed-mode corpus pair runs**: VisualC/STLCLR prove the
+   port's --csharp pipeline executes on real corpus bodies; their
+   diffs are convention-level, not structural.
