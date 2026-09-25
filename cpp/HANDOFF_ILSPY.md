@@ -209,6 +209,73 @@ facade-side adaptations (all in this merge commit):
 
 ## LANDED this session (the follow-up arms + two transform slots)
 
+### AsyncAwaitDecompiler (parts 1-4, commits 40e0b9927/195d60f6a/4a6c9b9bf/1f9248eb4)
+
+The full task-shape port of `ICSharpCode.Decompiler/IL/ControlFlow/
+AsyncAwaitDecompiler.cs` (the async void / Task / Task<T> state
+machines): MatchTaskCreationPattern (the builder/state field pair, the
+-1 initial state, the Start call, the get_Task return), the MoveNext
+analyses (AnalyzeMoveNext / ValidateCatchBlock / the AnalyzeDisposeAsync
+gate), InlineBodyOfMoveNext (the body swap, the branch-to-set-result
+conversion into leaves, the variable registration) + CleanUpBodyOfMoveNext,
+AnalyzeStateMachine (the per-container StateRangeAnalysis in the
+AsyncMoveNext mode; the await-point blocks -- everything between the
+awaiter field store and the leave -- collapse to Await(ldloca awaiter) +
+a branch to the state block; the entry skips the state dispatcher),
+DetectAwaitPattern (the GetAwaiter/IsCompleted/GetResult chain folds
+into the Await node over the awaited value, carrying the methods), the
+tail cleanups (CleanDoFinallyBodies' null early-out,
+TranslateFieldsToLocalAccess shared with the yield decompiler,
+FinalizeInlineMoveNext turning undetected leaves into InvalidBranch),
+and the GetILTransforms driver slot right after YieldReturnDecompiler.
+
+Engine fixes that surfaced under the locally-compiled fixture
+(`/home/jim/ilspy-test-fixtures/async_fixture/AsyncFixture.dll`, the
+AsyncShapes AwaitPlain/AwaitTask/AwaitTaskOfT trio; rebuild with the
+csc line in the test file's fixture comment):
+- The reader resolves the catch-clause exception variable's type (the
+  C# reads it through the module at IL-reader time; the port had left
+  it null). A plain catch reads its TypeDef/Ref/Spec token through
+  GetFullTypeName; System.Exception becomes the KnownType stand-in;
+  filter handlers get Object, matching the C# ILReader.
+- ReachingDefinitionsVisitor gained the C# VisitTryCatch /
+  HandleTryBlock pair: handler bodies walked with an empty input state
+  fragmented same-handler variables in SplitVariables (the exception
+  temp + the state field), whose store-less loads were then deleted as
+  dead code.
+- The container topological sort counts the positional fall-through as
+  a successor edge (the C# ILAst materializes every terminator as an
+  explicit branch, so its branch-only walk is complete; this port's
+  reader leaves the fall-through implicit in the FinalInstruction
+  slot, and a fall-through-only-reachable block was deleted as
+  unreachable).
+- ILVariable gained the C# StoreInstructions list (populated by
+  ComputeVariableUsage like AddressInstructions) for the C#
+  StackSlotValue single-definition stack-slot resolution.
+- A call whose Method handle is null (out-of-module, the deferred-
+  resolution convention) synthesizes a FakeMethod from the reader's
+  call surfaces for the Await's GetAwaiter/GetResult methods (the
+  CreateDynamicAwaiterMethod precedent).
+- The transferred MoveNext try block re-parents to the function (the
+  driver's temporary decompiler dies with the statement; a parent
+  chain left pointing into its tree dangled and crashed the loop-
+  detection CFG's function-exit test).
+
+Deferred (documented at the Run branch + the slice-state header):
+NormalizeAwaitOnCompletedDualBranch + the dynamic-callsite arms
+(DynamicCallSiteTransform, CoalesceDynamicAwaiterBlocks, the dynamic
+GetAwaiter/GetResult sites), the async-enumerator arms
+(MatchAsyncEnumeratorCreationPattern, AnalyzeYieldReturn,
+TransformYieldBreak, SimplifyIfDisposeMode, the real AnalyzeDisposeAsync),
+the Visual Basic arms, the pre-roslyn stack save/restore, the
+cachedFieldToParameterMap capture, and the AsyncDebugInfo map (no
+ILFunction surface). 8 gtest cases
+(MatchesTask/TaskOfT/VoidCreationOverRealBody,
+InlinesMoveNextBodyAndMarksAsync, TaskOfTUnderlyingReturnTypeIsTheElement,
+DetectsAwaitOverRealBody, DriverSlotConvertsTheRealBody,
+RejectsNonAsyncMethod); the sweep holds the baseline failure set and
+the connid hash is unchanged.
+
 - `a81b94216` -- the ReplaceMethodCallsWithOperators follow-up arms: the
   String.Concat reduction (the params-array flattening, the
   CheckArgumentsForStringConcat gates, the ToString-elimination chain,
@@ -585,9 +652,10 @@ Facade instance surface.
   absence fragmented the per-state return temporaries).
   The Mono/VB arms (the discriminator + CleanSkipFinallyBodies/
   CleanDoFinallyBodies/CleanFinallyStateChecks) stay deferred;
-  AsyncAwaitDecompiler, DynamicCallSiteTransform,
-  IntroduceRefReadOnlyModifierOnLocals) are NOT ported -- genuine port
-  projects.
+  DynamicCallSiteTransform, IntroduceRefReadOnlyModifierOnLocals) are
+  NOT ported -- genuine port projects. AsyncAwaitDecompiler's task
+  shapes ARE ported (see the LANDED entry); its dynamic / enumerator /
+  VB arms stay deferred with their slices.
 - The foreach-on-multi-dim arms: VERIFIED COMPLETE after the merge (the
   merged PatternStatementTransform carries the full
   TransformForeachOnMultiDimArray + MatchForeachOnMultiDimArray +
