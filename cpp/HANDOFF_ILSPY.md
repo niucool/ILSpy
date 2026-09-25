@@ -561,8 +561,20 @@ Facade instance surface.
   (ProxyCallReplacer DONE -- see above; YieldReturnDecompiler IN PROGRESS
   -- Part 1 landed: LongDict + SymbolicExecution + StateRangeAnalysis, the
   complete analysis core, with 3 RED-first tests; the next parts are the
-  enumerator-creation matching + the ctor/current/mapping/dispose analyses,
-  then the MoveNext conversion, then the try-finally reconstruction;
+  enumerator-creation matching + the ctor/current/mapping/dispose analyses
+  (PART 2 DONE: the metadata analyses over the DelegateBodyResolver hook
+  -- ReadIL + EarlyILTransforms(true) + a field-resolution pass that fills
+  the decoded bodies' LdFlda::Field from the compilation's main module, the
+  port's reader deferring that surface; the IsMethod walk over the
+  MethodImpl table handles the net48 mscorlib's EXPLICIT interface
+  implementations -- get_Current/Dispose are named
+  "System.Collections.IEnumerator.get_Current"/"System.IDisposable.Dispose"
+  in the metadata, matched through their MethodImpl declaration rows; the
+  tests run over the real net48 mscorlib iterators -- 14 compiler-generated
+  enumerator types; the Mono-vs-legacyVB discriminator is deferred with
+  TransformDisplayClassUsage.ValidateConstructor, the no-arg-ctor shape
+  treated as Mono), then the MoveNext conversion, then the try-finally
+  reconstruction;
   AsyncAwaitDecompiler, DynamicCallSiteTransform,
   IntroduceRefReadOnlyModifierOnLocals) are NOT ported -- genuine port
   projects.

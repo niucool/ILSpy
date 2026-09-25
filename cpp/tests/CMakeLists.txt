@@ -493,6 +493,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Transforms/IntroduceUnsafeModifier_Test.cpp
     Decompiler/CSharp/Transforms/ContextTrackingVisitor_Test.cpp
     Decompiler/IL/ControlFlow/StateRangeAnalysis_Test.cpp
+    Decompiler/IL/ControlFlow/YieldReturnDecompiler_Part2_Test.cpp
     Decompiler/IL/Transforms/ProxyCallReplacer_Test.cpp
     Decompiler/IL/Transforms/DeconstructionTransform_Test.cpp
     Decompiler/IL/Transforms/IndexRangeTransform_Test.cpp

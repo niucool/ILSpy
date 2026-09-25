@@ -214,6 +214,22 @@ inline bool MatchDefaultOrNullOrZero(const ILInstruction* inst)
     }
 }
 
+// The C# `public bool MatchReturn([NotNullWhen(true)] out ILInstruction?
+// value)` (PatternMatching.cs line 159): a Leave that exits the whole
+// function, reporting its value.
+inline bool MatchReturn(ILInstruction* inst, ILInstruction*& value)
+{
+    auto* leave = dynamic_cast<Leave*>(inst);
+    if (leave != nullptr && leave->TargetContainer != nullptr
+        && leave->TargetContainer->Parent != nullptr
+        && leave->TargetContainer->Parent->Op == OpCode::ILFunction) {
+        value = leave->Value.get();
+        return true;
+    }
+    value = nullptr;
+    return false;
+}
+
 // The C# `public bool MatchLdLoca(ILVariable? variable)` (PatternMatching.cs line
 // 88): a bare LdLoca whose variable is the given one.
 inline bool MatchLdLoca(const ILInstruction* inst, const ILVariable* variable)
@@ -263,6 +279,22 @@ inline bool MatchStLoc(ILInstruction* inst, ILVariable*& variable)
         return true;
     }
     variable = nullptr;
+    return false;
+}
+
+// The C# `public bool MatchStLoc(out ILVariable? variable, out ILInstruction?
+// value)` (Instructions.cs line 8519): a StLoc reporting both.
+inline bool MatchStLoc(ILInstruction* inst, ILVariable*& variable,
+                       ILInstruction*& value)
+{
+    auto* stloc = dynamic_cast<StLoc*>(inst);
+    if (stloc != nullptr) {
+        variable = stloc->Variable.get();
+        value = stloc->Value.get();
+        return true;
+    }
+    variable = nullptr;
+    value = nullptr;
     return false;
 }
 

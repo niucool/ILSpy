@@ -91,6 +91,13 @@ private:
 bool IsLocalFunctionMethod(const MetadataFile& module,
                            std::uint32_t methodToken);
 
+// The C# `YieldReturnDecompiler.IsCompilerGeneratorEnumerator(
+// TypeDefinitionHandle, MetadataReader)`: a nested compiler-generated type
+// implementing System.Collections.IEnumerator (the .cpp keeps the full
+// implementation; this declaration lets YieldReturnDecompiler consume it).
+bool IsCompilerGeneratorEnumerator(const MetadataFile& metadata,
+                                   std::uint32_t typeDefToken);
+
 std::shared_ptr<CodeMappingInfo> GetCodeMappingInfo(const MetadataFile& module,
                                                     std::uint32_t memberToken);
 

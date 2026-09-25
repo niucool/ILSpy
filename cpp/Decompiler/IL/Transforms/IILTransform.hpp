@@ -80,6 +80,10 @@ struct ILTransformSettings {
     // Whether to use C# 8.0 index/range syntax.
     // DecompilerSettings.Ranges (default true; IndexRangeTransform's gate).
     bool Ranges = true;
+    // Whether to decompile yield-return enumerators.
+    // DecompilerSettings.YieldReturn (default true;
+    // YieldReturnDecompiler's gate).
+    bool YieldReturn = true;
     // Whether to deconstruct tuples into separate variables.
     // DecompilerSettings.Deconstruction (default true;
     // DeconstructionTransform's gate).
