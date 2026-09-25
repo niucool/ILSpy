@@ -1,4 +1,4 @@
-# ILSpy C++ Port -- Session Handoff (written after `e6ee1d822`)
+# ILSpy C++ Port -- Session Handoff (written after `d936b1f81`)
 
 Read this + `PORT_PLAN.md` + `cpp/README.md` (and the sibling
 `cpp/PORT_LOG_BAML.md` / `cpp/PORT_LOG_DISASM.md` logs) at the start of a
@@ -11,33 +11,35 @@ skipped` (filters below).
 
 - **PatternStatementTransform: shell + four arms landed** (`93f1f9bd2`,
   `dfcba6e08`); see the previous handoffs' notes in git for the arm list.
-- **DeclareVariables: the ANALYSIS half landed** (`e6ee1d822`):
-  InsertionPoint/VariableToDeclare/VariableNeedsDeclaration/
-  FindInsertionPoints (incl. the local-function CapturedVariables arm and the
-  expression-bodied-lambda scope tracking over the BlockContainer
-  annotations)/ResolveCollisions/FindCommonParent/Analyze/
-  ClearAnalysisResults/GetDeclarationPoint/WasMerged.
-  PatternStatementTransform::Run now calls Analyze + ClearAnalysisResults
-  around its visit, and the TransformFor
-  IteratorVariablesDeclaredInsideLoopBody bail is live over GetDeclarationPoint
-  (the former loud deferral is gone). ILVariable.InitialValueIsInitialized
-  landed with it (TransformDisplayClassUsage.GetOrDeclare sets it now).
-- RED discipline held (9 analysis tests RED against a no-op stub; the bail
-  test RED against the firing reshape; 33/33 GREEN after).
+- **DeclareVariables: COMPLETE** (`e6ee1d822` analysis, `d936b1f81`
+  mutation): the IAstTransform Run with EnsureExpressionStatementsAreValid
+  (direction unwrap + discard; the temporary arm deferred on
+  AssignVariableNames.GenerateVariableName), InsertVariableDeclarations
+  (combine / out-var / separate arms), UpdateAnnotations, and the
+  GetAstTransforms slot. The TransformContext carries the
+  TypeSystemAstBuilder slot (RunAstTransforms builds it via the new
+  CSharpDecompiler::CreateAstBuilder -- the C# line-722 static).
+  Sub-deferrals, loud in DeclareVariables.cpp:
+  InsertDeconstructionVariableDeclarations (needs
+  TranslateDeconstructionDesignation), the SkipInit forms (a live
+  context.TypeSystem), the anonymous-type `var` decision (NRExtensions
+  ContainsAnonymousType), IsRefReadOnly (the ILVariable flag).
+- RED discipline held (16 DeclareVariables cases total; 42/42 across the
+  three AST-transform suites).
 - **Design notes for the landed code (read before extending):**
   - The void-visitor re-visit loop carries the C# `ContextTrackingVisitor<
-    AstNode>` return value in the visitor's `lastResult` slot; every Visit
-    override records there the node the C# method returns.
+    AstNode>` return value in the visitor's `lastResult` slot.
   - Patterns are lazily built process-lifetime singletons with pattern
     children embedded through `Expression::ToExpression` /
     `Statement::ToStatement`.
   - The C# Dictionary<ILVariable, VariableToDeclare> ports as an
-    insertion-ordered vector + a reference-identity index (the enumeration
-    order the collision resolution relies on).
-  - `node.Annotation<BlockContainer>()` / `Annotation<ILFunction>()` read
-    the ILInstructionAnnotation channel (the WithILInstruction carriers);
-    see GetBlockContainerAnnotation/GetILFunctionAnnotation in
-    DeclareVariables.cpp.
+    insertion-ordered vector + a reference-identity index; VariableToDeclare
+    holds a NON-OWNING shared-handle alias (no-op deleter) over the
+    IL-function-tree-owned variable so the annotation constructions copy it
+    safely.
+  - Trees handed to RunAstTransforms/DeclareVariables.Run need the root
+    ILFunction annotation for the invalid-statement fixup (the C# contract;
+    the pipeline driver test attaches one now).
 - Remaining PatternStatementTransform arms, smallest-first: foreach-on-array
   (~287), foreach-on-inline-array (~410), foreach-on-multi-dim (~516),
   automatic property (~693), destructor (~931), try-catch-finally (~983),
@@ -46,33 +48,16 @@ skipped` (filters below).
 
 ## Next steps (in order)
 
-1. **DeclareVariables mutation half** (the class's Run + the C# lines
-   ~405-510/540-860): EnsureExpressionStatementsAreValid,
-   InsertDeconstructionVariableDeclarations, InsertVariableDeclarations
-   (the combine-declaration-and-initializer arm, the out-var arm with
-   CanBeDeclaredAsOutVariable + IsReferencedWithinDeclaringCall, the separate
-   declaration arm with the NeedsDefaultValue/NeedsSkipInit forms),
-   UpdateAnnotations, the IAstTransform derivation, and the GetAstTransforms
-   slot (after AddCheckedBlocks, before
-   TransformFieldAndConstructorInitializers -- currently a loud comment).
-   Dependency survey already done:
-   - READY: OutVarResolveResult (Semantics/), TypeSystemAstBuilder.ConvertType,
-     the settings (SeparateLocalVariableDeclarations/AnonymousTypes/Discards/
-     OutVariables), DeconstructInstruction (IL/Instructions/),
-     VariableDeclarationStatement/OutVarDeclarationExpression/DeclarationExpression/
-     DirectionExpression/Comment + the trivia channel, RemoveAnnotations<T>,
-     ILVariable.LoadCount/StoreCount/AddressCount.
-   - MISSING: TransformContext's TypeSystemAstBuilder member (the C# ctor
-     carries one; the port's TransformContext is minimal), a live
-     context.TypeSystem for the SkipInit arm's FindType(KnownTypeCode.Unsafe)
-     (sub-arm deferral candidate), StatementBuilder.TranslateDeconstruction
-     Designation (blocks InsertDeconstructionVariableDeclarations -- sub-
-     transform deferral candidate), and ContainsAnonymousType (the IType
-     extension behind the `var` decision in the combine arm).
-2. The foreach arms (the `ForStatement` patterns at ~287/410/516; they
-   also need `VisitForStatement`).
-3. Then: the remaining arms above, the facade completion items, the
-   deferred GetAstTransforms slots as their transforms land.
+1. **The foreach arms** (PatternStatementTransform.cs lines ~287-690):
+   forOnArrayPattern / forOnInlineArrayPattern / forOnArrayMultiDimPattern
+   + `VisitForStatement` + TransformForeachOnArray/
+   TransformForeachOnInlineArray/TransformForeachOnMultiDimArray +
+   `ExpressionBuilder.IsMovable`-family helpers as needed. RED-first.
+2. The remaining PatternStatementTransform arms (automatic property,
+   destructor, try-catch-finally, fixed, enhanced using, Identifier
+   rewrite).
+3. Then: the facade completion items, the deferred GetAstTransforms slots
+   as their transforms land.
 
 ## Hazard-ledger highlights (keep)
 
