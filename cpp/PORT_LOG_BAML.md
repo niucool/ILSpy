@@ -1206,3 +1206,189 @@ Interpretation per cohort:
 3. **The mixed-mode corpus pair runs**: VisualC/STLCLR prove the
    port's --csharp pipeline executes on real corpus bodies; their
    diffs are convention-level, not structural.
+
+---
+
+# Design exploration: the promise/thread + detach-on-timeout pattern for
+# the LoadedAssembly/ResolveAsync surface
+
+Reference: bennu `src/session.cpp` fix, commit `0dedade` ("session: fix
+deadline defeat by blocking ~future in run_tool"). That fix addresses
+the same problem class this port created when it collapsed the C#
+async surface: `std::async` is not the C# `Task`. This doc states the
+pattern, what it must preserve from the C# contract, where it differs
+from the bennu shape, and what the main line should and should not
+adopt. No main-line files were edited.
+
+## 1. The current port state (the collapse, restated)
+
+`cpp/ILSpyX/LoadedAssembly.hpp` ports `Lazy<Task<LoadResult>>` +
+`Task.Run(LoadAsync)` as a synchronous guarded-once load: the first
+demand (GetLoadResult / GetMetadataFile / ...) runs the whole load
+under a mutex, `IsLoaded` collapses to "the load has run" (no
+in-flight window), and the Loaded event fires inline at the end of
+that same load. The port tree contains zero `std::async` /
+`std::future` / `std::thread` uses in `cpp/ILSpyX` and `cpp/ILSpyCmd`.
+For the CLI (ilspy_cli) that collapse is correct and should stay.
+
+## 2. Where the async surface actually returns
+
+Three call sites in the C# make the load surface asynchronous for
+reasons that survive the port:
+
+* **The Avalonia host's assembly-list load** (AssemblyList / the
+  assembly tree pane): the C# GUI starts loads off the UI thread and
+  learns completion through the Loaded event; a C++ GUI port needs a
+  real worker, not a synchronous load on the UI thread.
+* **The resolve chain** (`LoadedAssembly.ResolveCoreAsync`, the C#
+  lines ~640+): resolving one reference can trigger
+  `OpenAssembly(file, isAutoLoaded: true)` -> that assembly's load ->
+  its tfm detection -> further resolves. The chain is recursive and
+  the C# relies on `ConfigureAwait(false)` (pool continuations, no
+  thread affinity) plus two explicit sync-over-async bridges
+  (`LoadedAssembly.cs:221` `GetMetadataFileOrThrow`'s
+  `loadingTask.GetAwaiter().GetResult()` and `:614` MyAssemblyResolver's
+  `Resolve(...)` -> `ResolveAsync(...).GetAwaiter().GetResult()`).
+* **Any future deadline feature** (a load/resolve timeout in a host
+  tool, the shape bennu needed for its tool deadline).
+
+## 3. The bennu pattern distilled (commit 0dedade)
+
+The session.cpp fix encodes five rules; quote-checking against the
+diff:
+
+1. **Never use `std::async` for cancellable/abandonable work.** A
+   `std::async` future's destructor BLOCKS until the task completes,
+   so any timeout branch that falls off the end of scope blocks inside
+   `~future` -- the deadline is defeated exactly when it matters (a
+   hung decompile leg). The bennu commit's bug was precisely this.
+2. **`std::promise`/`std::future` (or `std::shared_future`) + a plain
+   `std::thread`.** A promise-backed future does not block in its
+   destructor; abandoning it is safe.
+3. **The worker catches everything and always satisfies the promise**
+   (`try { task(); } catch (...) {} pr->set_value();` in bennu). The
+   future therefore always becomes ready.
+4. **The normal path joins; the timeout path detaches and returns
+   immediately.** In bennu the detached worker dies at process exit
+   (`_Exit(1)` bypasses destructors) -- that is what makes detach
+   *sound* there.
+5. Apply the same mechanics to both the single-task and the
+   fan-out/`--parallel` variants, with `join()` for completed workers
+   and `detach()` only on the timed-out arm.
+
+## 4. The mapping onto LoadedAssembly (the C++ shape)
+
+### 4.1 The load state (the `Lazy<Task>` analogue)
+
+The C# `Lazy<Task<LoadResult>>` has TWO properties the port must
+recover together: (a) the work starts once, on first demand; (b) all
+demanders share ONE in-flight task -- a second caller arriving
+mid-load awaits the same work instead of re-loading. A synchronous
+guard gives (a) only. The C++ shape that gives both:
+
+```cpp
+struct LoadState {
+    std::mutex mtx;
+    std::shared_future<LoadResult> fut;   // shared: many waiters
+    bool started = false;
+};
+// demand:
+//   lock, if !started { started = true;
+//     auto pr = std::make_shared<std::promise<LoadResult>>();
+//     state.fut = pr->get_future().share();
+//     std::thread([pr, this]{ LoadResult r; try { r = LoadCore(); }
+//       catch (...) { r.exception = std::current_exception(); }
+//       pr->set_value(std::move(r)); }).detach-or-keep;
+//   }
+//   fut = state.fut;  unlock;
+//   return fut.get();  // blocks only this caller
+```
+
+Notes on the deliberate divergences from bennu:
+
+* **Exceptions are captured, not swallowed.** bennu's workers swallow
+  because their tools log errors elsewhere; here the C# contract is
+  that the faulted Task IS the result surface
+  (`HasLoadError` = the faulted arm, `GetLoadResultAsync` rethrows,
+  `FileLoadException` slots carry the message). The worker stores
+  `std::exception_ptr` into the LoadResult slot and satisfies the
+  promise unconditionally; the rethrow moves to the accessor (the
+  C# await-rethrow).
+* **`std::shared_future`, not a bare future**: the in-flight dedup
+  means multiple demanders `.get()` the same state; a bare
+  `std::future` is move-only and single-shot.
+* **The status arms restore their C# windows**: `IsLoaded` =
+  `wait_for(0) == ready` (the in-flight window EXISTS again --
+  strictly closer to the C# than the current synchronous collapse);
+  `HasLoadError` = ready AND the exception slot set.
+
+### 4.2 The thread lifetime rule
+
+For a **CLI/tool host** (the ilspy_cli shape, and the bennu case):
+detach on deadline is sound because the host exits the process on the
+timeout path (`_Exit`-style escape), killing the stray worker with
+its half-built state. Keep bennu's rule verbatim there.
+
+For a **long-running GUI host** the `_Exit` escape does not exist, and
+a detached worker keeps mutating LoadedAssembly state after the host
+"abandoned" it. The design rule for that host:
+
+* detach ONLY on a hard deadline, and only into a terminal **abandoned
+  load state** (`LoadOutcome::Abandoned`); the abandoned
+  LoadedAssembly is never re-entered -- a retry creates a NEW
+  LoadedAssembly via the list (OpenAssembly already creates fresh
+  instances), and the old one leaks by design (the C# leaks the
+  abandoned Task identically; nothing observes it).
+* the worker must not touch UI-adjacent structures after detach: the
+  Loaded event listeners run under the load state's mutex on the
+  worker thread, so the host receives them by polling
+  (`IsLoaded`/`HasLoadError`) or must marshal them itself. Nothing in
+  the C# contract promises the listener's thread either
+  (`TaskScheduler.Default` continuation), so this matches.
+
+### 4.3 The lock discipline (the deadlock rules)
+
+Two invariants keep the recursive resolve chain deadlock-free; both
+are already pinned by the port's synchronous slices and MUST survive
+any async rework:
+
+1. **Never wait on a load/resolve future while holding the
+   assembly-list or resolver mutex.** The C# shape this mirrors:
+   `alreadyLoadedAssemblies.TryGetModuleAsync` awaits OUTSIDE the list
+   lock (the snapshot pattern from the resolver slice); the port's
+   `AssemblyListSnapshot` lookups must be taken by value before any
+   `fut.get()`.
+2. **The load mutex guards only the state transition** (started flag +
+   future slot), never the load itself: `LoadCore()` runs unlocked so
+   a load that recursively demands another assembly's load cannot
+   self-deadlock. The C# equivalent: `LoadAsync` runs as a pool task,
+   and the per-assembly state it mutates (`referenceLoadInfo`, the
+   resolver caches) is separately synchronized.
+
+### 4.4 The ResolveAsync arm specifically
+
+`ResolveCoreAsync`'s chain (provided-resolver -> tfm -> list lookup ->
+universal resolver -> on-demand `GetMetadataFileOrNullAsync`) ports
+unchanged as a function that AWAITS other assemblies' load futures at
+the two marked points; in C++ terms it becomes a synchronous function
+that blocks on `fut.get()` -- legal ONLY under rule 4.3.1. The bennu
+pattern adds nothing inside the chain; it applies at the EDGES: the
+assembly-list's bulk load fan-out (the C# `Task.WhenAll` over the
+list's assemblies maps to bennu's `--parallel` arm verbatim: one
+worker per assembly, `join` the completed, `detach` the overran) and
+any host-level deadline wrapping the whole resolve session.
+
+## 5. What NOT to adopt
+
+* **`std::async` anywhere on this surface** -- rule 3.1; the bennu
+  commit exists because of it.
+* **Promise satisfaction skipped on the exception path** (bennu's
+  literal `catch (...) {}` without capture) -- it would turn every
+  failed load into a lost result instead of the C#'s faulted-task
+  semantics.
+* **Detached workers in a host without a process-exit reclaim** unless
+  the abandoned-load state of 4.2 is implemented first.
+* **Re-entering an abandoned LoadedAssembly** (waiting again on its
+  future): the future IS ready for the waiter (the promise was
+  satisfied), so a naive re-demand would read "loaded, with error" --
+  the abandoned state must gate the accessors instead.
