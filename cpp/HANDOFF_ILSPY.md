@@ -3,8 +3,10 @@
 Read this + `PORT_PLAN.md` + `cpp/README.md` (and the sibling
 `cpp/PORT_LOG_BAML.md` / `cpp/PORT_LOG_DISASM.md` logs) at the start of a
 fresh session.
-Standing baseline: **connid_csharp sha256 `b15a4355a745bc88`** (re-pinned
-DELIBERATELY across the body-name simplification slices: the own-type
+Standing baseline: **connid_csharp sha256 `aa0c70560a254275`** (re-pinned
+DELIBERATELY at the whole-module using set -- the header carries the
+module-wide required namespaces; prior: `1349c3bf...` the event +=/
+delegate foldings, `b15a4355...` the body-name simplification slices: the own-type
 static member accesses render unqualified (`f532f2d0...` -- the .cctor's
 `StaticReadonlyField = 42;`, the bare method groups) and the
 new-expression types render short (`b15a4355...` -- `new
@@ -523,6 +525,33 @@ the nested-type short forms in base lists (`TemplateContent+Frame` ->
 `Frame` inside the parent), and the `+=` operator rewrite for the
 event add/remove calls (ReplaceMethodCallsWithOperators -- the flat
 renderer renders `add_Click(...)` where the oracle renders `.Click +=`).
+
+### The operator-rename and using-header slices (commits 0a58a7c83/79ad77a2f)
+
+- **The event add/remove compound assignments** (`0a58a7c83`): the
+  compiler-generated event accessors render `recv.Click += handler`
+  (the ReplaceMethodCallsWithOperators event arm); the delegate
+  construction (a newobj over the (target, method-group) pair -- only
+  delegate ctors take a native function pointer second) folds the
+  target away, and the event-handler position folds the whole
+  new-expression to the bare method group. The connid's Page1 matches
+  the oracle's forms.
+- **The whole-module using set** (`79ad77a2f`): the header builds from
+  the per-type required-namespace walks -- a namespace emits iff some
+  type OUTSIDE it references it (a name inside `namespace N { }`
+  resolves without a using for N) plus the attribute namespaces. The
+  per-block resolver filtering rides with the resolver surface; the
+  approximation over-collects two namespaces on the connid (documented
+  in the commit).
+
+THE REMAINING NAME-QUALIFICATION WORK, refined: the -t single-type
+renders already match the oracle (no qualification -- the per-type
+using scopes do not collide); the whole-module base-list
+qualification (the oracle's `System.Collections.IEnumerable` when
+System.Collections.Generic is in the file's using set) needs the
+per-block scope + the name-collision check over the FILE's using set
+(the resolver's LookupSimpleNameOrTypeName over a UsingScope -- the
+ported resolver surface exists; the wiring is the work).
 
 NOTE (the stale-queue catches): TransformFieldAndConstructorInitializers
 was ALREADY PORTED via the master merge (885 lines + 17 tests, the
