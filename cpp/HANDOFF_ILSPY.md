@@ -431,8 +431,54 @@ Facade instance surface.
   (Object..String + NullableOfT) -- an unregistered code falls to the
   non-shared unknownType_ stub whose shared_from_this throws bad_weak_ptr
   (the CSharpResolverBinaryOperator_Test fixture precedent).
-- ProxyCallReplacer -- deferred on the resolved-IMethod call surfaces +
-  `EarlyILTransforms` + `MatchLeave`.
+- ~~ProxyCallReplacer~~ DONE: ported with the established bridges. The C#'s
+  `context.CreateILReader().ReadIL(...)` mid-transform body decode routes
+  through the context's DelegateBodyResolver hook (the CreateILReader
+  bridge the delegate-construction path established; the facade already
+  wires it to ReadIL over the module); `EarlyILTransforms` is the ported
+  triple (ControlFlowSimplification + SplitVariables + ILInlining) run
+  over the decoded proxy with a copied context; the specialized target's
+  `shared_ptr<IMethod>` comes from the last slice's AliasMethod surface
+  (Specialize returns the module-registry-owned raw). ONE documented
+  divergence: the C# decodes with the callee's GENERIC CONTEXT
+  (`new GenericContext(inst.Method)`), which the port's reader has no
+  surface for -- the hook decodes uninstantiated bodies (the same
+  limitation DelegateConstruction records for generic targets). Wired at
+  its C# driver slot (after the last per-block group, before
+  FixRemainingIncrements). TEST TRAP (the D66/D94 precedent): the C#
+  out-form `MatchLdLoc(out var)` must stay FILE-LOCAL -- adding it to
+  PatternMatching.hpp alongside the match-against-v overload hijacks
+  every non-const compare caller (an ILVariable* lvalue binds the out-form
+  identity-better); a full-suite sweep caught it as a
+  BlockMatchInlineAssignBlock regression.
+- ~~THE MERGE'S ORPHANED TRANSFORM CLUSTER (SplitVariables + 9 more)~~
+  PARTIALLY DONE -- a systematic merge gap discovered while porting
+  ProxyCallReplacer: the merge's wholesale --theirs on the shared
+  CMakeLists and GetILTransforms.hpp dropped ~10 of this lineage's
+  transform registrations, their tests, AND their driver calls (master
+  never had them; the links stayed green because the merged driver never
+  calls them; every post-merge baseline was pinned under the reduced
+  pipeline). The audit command: `for f in $(git ls-files
+  'Decompiler/**/*.cpp'); do base=$(basename "$f"); grep -rq "$base"
+  --include=CMakeLists.txt . || echo "ORPHAN: $f"; done`. SplitVariables
+  is RE-REGISTERED and adapted (this slice -- its
+  GetAddressLoadForRefLocalUse now walks the tree for the single store,
+  the CachedDelegateInitialization precedent for the missing
+  StoreInstructions list; AddressInstructions iterates the merged
+  generic-ILInstruction entries). The remaining 9 (DeconstructionTransform,
+  IndexRangeTransform, InlineArrayTransform, IntroduceNativeIntTypeOnLocals,
+  LocalFunctionDecompiler, SwitchOnStringTransform,
+  TransformArrayInitializers, DeconstructInstruction,
+  UserDefinedLogicOperator -- all .cpp + their tests + their driver calls)
+  are STILL ORPHANED: the repair is one slice per the
+  TransformExpressionTrees-restoration pattern (re-register, re-graft the
+  dropped surfaces, re-add the driver calls at the C# slots, re-pin the
+  connid baseline and the affected golds -- the connid 16-line merge diff
+  suggests most are render-no-ops on that corpus but SplitVariables in the
+  MAIN driver may rename variables). NOTE: the deliberately-dropped
+  RunTransforms_Test.cpp / GetILTransforms_Test.cpp are NOT part of this
+  (they test pre-merge surfaces the merge removed; leave their
+  registrations dropped).
 - IntroduceDynamicTypeOnLocals -- deferred on
   `DynamicInstruction.GetArgumentInfoOfChild`.
 - ~~Attribute enum-argument decode (DebuggableAttribute's `DebuggingModes`)~~

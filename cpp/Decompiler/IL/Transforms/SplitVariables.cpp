@@ -140,9 +140,15 @@ AddressUse DetermineAddressUse(ILInstruction* addressLoadingInstruction) {
 bool IsCandidateVariable(const ILVariable& v) {
     switch (v.Kind) {
         case VariableKind::Local:
-            for (const LdLoca* ldloca : v.AddressInstructions) {
-                if (DetermineAddressUse(const_cast<LdLoca*>(ldloca)) ==
-                    AddressUse::Unknown) {
+            // The merged AddressInstructions list stores generic
+            // ILInstructions (the C# IReadOnlyList<LdLoca> as the port's
+            // non-typed list); every entry is an LdLoca node -- the
+            // dynamic_cast recovers the typed view.
+            for (ILInstruction* addr : v.AddressInstructions) {
+                auto* ldloca = dynamic_cast<LdLoca*>(addr);
+                if (ldloca == nullptr)
+                    continue;
+                if (DetermineAddressUse(ldloca) == AddressUse::Unknown) {
                     return false;
                 }
             }
@@ -213,14 +219,33 @@ private:
     // The C# GetAddressLoadForRefLocalUse: `ldloca target; stloc ref_local`
     // -- the ref local's single store's value, unwrapped from the LdFlda
     // chain, must be the LdLoca itself.
+    // The per-variable store-list walk (the C# reads
+    // `ldloc.Variable.StoreInstructions`; the port does not maintain the
+    // list, D11/D62/D68, so the single store is gathered by a tree walk
+    // from the function root -- the CachedDelegateInitialization
+    // precedent).
+    static void CollectStoresTo(ILInstruction* node, const ILVariable* v,
+                                std::vector<StLoc*>& stores) {
+        if (auto* stloc = dynamic_cast<StLoc*>(node)) {
+            if (stloc->Variable != nullptr && stloc->Variable.get() == v)
+                stores.push_back(stloc);
+        }
+        for (int i = 0; i < node->ChildCount(); i++) {
+            if (ILInstruction* child = node->GetChild(i))
+                CollectStoresTo(child, v, stores);
+        }
+    }
+
     LdLoca* GetAddressLoadForRefLocalUse(LdLoc* ldloc) {
         if (ldloc->Variable == nullptr ||
             !ldloc->Variable->IsSingleDefinition())
             return nullptr;
-        const auto& stores = ldloc->Variable->StoreInstructions;
+        ILInstruction* root = ldloc;
+        while (root->Parent != nullptr) root = root->Parent;
+        std::vector<StLoc*> stores;
+        CollectStoresTo(root, ldloc->Variable.get(), stores);
         if (stores.size() != 1) return nullptr;
-        auto* stloc = dynamic_cast<StLoc*>(stores[0]);
-        if (stloc == nullptr) return nullptr;
+        StLoc* stloc = stores[0];
         ILInstruction* value = stloc->Value.get();
         while (value != nullptr && value->Op == OpCode::LdFlda)
             value = value->GetChild(0);

@@ -54,6 +54,7 @@
 #include "Decompiler/IL/Transforms/EarlyExpressionTransforms.hpp"
 #include "Decompiler/IL/Transforms/ExpressionTransforms.hpp"
 #include "Decompiler/IL/Transforms/FixRemainingIncrements.hpp"
+#include "Decompiler/IL/Transforms/ProxyCallReplacer.hpp"
 #include "Decompiler/IL/Transforms/HighLevelLoopTransform.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/Transforms/InlineReturnTransform.hpp"
@@ -280,12 +281,18 @@ inline void RunGetILTransforms(ILFunction& function, ILTransformContext& context
     // `while (cond)` container. Runs after the StatementTransform
     // (per GetILTransforms()).
     HighLevelLoopTransform::Run(function, context);
+    // ProxyCallReplacer: rewrite compiler-generated pass-through calls to
+    // the methods they forward to (the C# slot after the last per-block
+    // transform group and before FixRemainingIncrements). No-ops when the
+    // AsyncAwait setting is off, when the callee is not a compiler-generated
+    // same-class method, or when no DelegateBodyResolver hook is wired (the
+    // bare CLI path).
+    ProxyCallReplacer().Run(function, context);
     // FixRemainingIncrements: the user-defined `op_Increment`/
     // `op_Decrement` calls TransformAssignment did not fold. Runs
     // after the StatementTransform + HighLevelLoopTransform and before
     // CopyPropagation (per GetILTransforms: ProxyCallReplacer,
-    // FixRemainingIncrements, CopyPropagation; ProxyCallReplacer is
-    // deferred).
+    // FixRemainingIncrements, CopyPropagation).
     FixRemainingIncrements().Run(function, context);
     // CopyPropagation: drop dead stores to stack slots and propagate
     // single-def stack slots. Runs late, after the StatementTransform +

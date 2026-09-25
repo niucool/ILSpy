@@ -492,6 +492,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Transforms/AddCheckedBlocks_Test.cpp
     Decompiler/CSharp/Transforms/IntroduceUnsafeModifier_Test.cpp
     Decompiler/CSharp/Transforms/ContextTrackingVisitor_Test.cpp
+    Decompiler/IL/Transforms/ProxyCallReplacer_Test.cpp
     Decompiler/CSharp/Transforms/PatternStatementTransform_Test.cpp
     Decompiler/CSharp/Transforms/PrettifyAssignments_Test.cpp
     Decompiler/CSharp/Transforms/ReplaceMethodCallsWithOperators_Test.cpp
