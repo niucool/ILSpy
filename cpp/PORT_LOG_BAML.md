@@ -981,3 +981,228 @@ write error marks it) -- re-verify any non-IDENTICAL verdict by re-running
 the single pair before trusting it; the ilspycmd_self row here was
 quota-truncated on the first pass and re-verified IDENTICAL on a clean
 disk.
+
+---
+
+# The metadata-only emission spec (the T3 blocker; for the main-line agent)
+
+The port's whole-module `--csharp` fails on every reference assembly
+with `ilspycmd: no method bodies found`. This spec documents the C#
+machinery that makes `ilspycmd mscorlib.dll` work today, the exact
+gates, and the smallest proving test. No main-line files were edited.
+
+## 1. Where the port bails
+
+`cpp/ILSpyCmd/main.cpp` (the whole-module `--csharp` loop) iterates
+types -> methods and skips every method with `RVA == 0`
+("abstract/extern/pinvoke-only"), decompiles only bodies, and fails
+when zero methods printed. For the net48 reference corpus every
+managed method body is a **zero-length body at a non-zero RVA**
+(see below), and the `DecompileMethodToString` path yields nothing
+printable, so `methodsPrinted == 0` -> the failure. The `-t` type path
+bails the same way ("no method bodies found for type '...'").
+
+## 2. The C# machinery (the trace)
+
+`IlspyCmdProgram` (ICSharpCode.ILSpyCmd/IlspyCmdProgram.cs): the
+whole-assembly command calls
+`decompiler.DecompileWholeModuleAsString()` (line ~658); `-p` calls
+`DecompileProject(module, dir, writer)` (line ~649); `-t <type>` calls
+`DecompileTypeAsString(typeDefinition.FullTypeName)` (line ~668). All
+three funnel into the same per-type core:
+
+* `CSharpDecompiler.DecompileWholeModuleAsSingleFile()`
+  (CSharpDecompiler.cs ~900): `DoDecompileModuleAndAssemblyAttributes`
+  + `DoDecompileTypes(metadata.GetTopLevelTypeDefinitions(), ...)`.
+* `DoDecompileTypes` (~868): per type,
+  `<Module>` with no members is skipped,
+  `MemberIsHidden(module, handle, settings)` gates the accessor/backing
+  members (the -lv filtering; NOT an RVA gate), and the type is
+  grouped under its namespace declaration.
+* Per member: `DoDecompileMember` dispatches
+  field/property/event/method/type. **`DoDecompile(IMethod)`
+  (line ~2088) is the whole trick**:
+  1. `methodDecl = typeSystemAstBuilder.ConvertEntity(method)` -- the
+     declaration is built from the METADATA/type system (the
+     signature, the modifiers, the attributes); **no body consulted**.
+  2. `methodDefinition.HasBody()` (the SRM `MethodDefinition.HasBody`
+     -- `RelativeVirtualAddress != 0` gated on not-abstract) decides
+     the BODY arm: when true, `DecompileBody(method, ...)` runs the
+     ILReader pipeline; when false,
+     `else if (!method.IsAbstract && method.DeclaringType.Kind !=
+     TypeKind.Interface) methodDecl.Modifiers |= Modifiers.Extern;`.
+  3. **The zero-length body is a first-class case**: a reference
+     assembly's methods carry `RVA != 0` with `Code size: 0` (the
+     ref-pack's convention) -- `HasBody()` is TRUE, `DecompileBody`
+     runs, `GetMethodBody(RVA)` yields a zero-byte IL body, and the
+     ILReader (`ILReader.cs` ~489) hits `reader.Length == 0` and
+     plants `InvalidBranch("Empty body found. Decompiled assembly
+     might be a reference assembly.")` -- which the transform pipeline
+     renders as the body
+     `{ /*Error: Empty body found. Decompiled assembly might be a
+     reference assembly.*/; }`. That is the exact text in the oracle's
+     mscorlib capture (ref-count: the ZipFile methods show it; the
+     P/Invoke methods instead carry `extern` from the false-`HasBody`
+     arm).
+
+The distinguishing observation: **`extern` appears only for the true
+RVA==0 methods (P/Invoke imports and abstract members), while the
+zero-length RVA!=0 bodies render the Empty-body comment.** Both must
+be reproduced; conflating them (e.g. skipping all RVA==0 methods)
+loses half the surface.
+
+## 3. The corpus observation that motivates this
+
+The net48 reference mscorlib carries 20,906 zero-length bodies (the
+`--il` oracle capture counts `Code size: 0` that many times), and the
+port's `--il` already renders them byte-identically to the oracle
+(the corpus --il runs are exact). So the metadata reading, the
+zero-length-body detection, and the IL rendering all exist; the gap is
+exclusively the `--csharp` declaration emission path (the
+metadata-driven `ConvertEntity` surface) plus the Empty-body comment
+rendering in the C# pipeline.
+
+## 4. The smallest proving tests (fixture-prep done)
+
+Two gold captures are checked into `cpp/tests/fixtures/metadata_only/`
+(the oracle's raw output, LF line endings; the port pins CRLF --
+compare CR-stripped, the established convention):
+
+1. **`Facades_System.AppContext.gold.txt`** (16 lines): a pure
+   type-forwarding facade -- the usings, the assembly-attribute block
+   ending in `[assembly: ReferenceAssembly]` +
+   `[assembly: TypeForwardedTo(typeof(AppContext))]`, and NO type
+   declarations. The whole output is:
+   ```csharp
+   using System;
+   using System.Reflection;
+   using System.Runtime.CompilerServices;
+
+   [assembly: AssemblyTitle("System.AppContext")]
+   [assembly: AssemblyDescription("System.AppContext")]
+   [assembly: AssemblyDefaultAlias("System.AppContext")]
+   [assembly: AssemblyCompany("Microsoft Corporation")]
+   [assembly: AssemblyProduct("Microsoft® .NET Framework")]
+   [assembly: AssemblyCopyright("© Microsoft Corporation.  All rights reserved.")]
+   [assembly: AssemblyMetadata("", "")]
+   [assembly: AssemblyFileVersion("4.8.3761.0")]
+   [assembly: AssemblyInformationalVersion("4.8.3761.0")]
+   [assembly: ReferenceAssembly]
+   [assembly: AssemblyVersion("4.1.2.0")]
+   [assembly: TypeForwardedTo(typeof(AppContext))]
+   ```
+   Pass criterion: `ilspy_cli --csharp
+   <corpus>/Facades/System.AppContext.dll` reproduces these 16 lines
+   CR-insensitively, exit 0.
+2. **`System.IO.Compression.ZipFile_type_csharp.gold.txt`** (268
+   lines): the `-t System.IO.Compression.ZipFile` decompile of
+   `System.IO.Compression.FileSystem.dll` -- the declared static class
+   with the doc comments, the parameters, and the zero-length bodies
+   rendered as the Empty-body comment. Pass criterion: `ilspy_cli
+   --csharp -t System.IO.Compression.ZipFile <corpus>/System.IO.
+   Compression.FileSystem.dll` matches CR-stripped; the critical
+   excerpt:
+   ```csharp
+   public static ZipArchive OpenRead(string archiveFileName)
+   {
+       /*Error: Empty body found. Decompiled assembly might be a reference assembly.*/;
+   }
+   ```
+
+The full-assembly gold for the broader sweep is recoverable with
+`ilspycmd <corpus>/System.IO.Compression.FileSystem.dll` (>457 lines).
+
+## 5. The port-side checklist (for the main-line agent)
+
+1. Replace the bodies-only iteration with the C# shape: per type,
+   the declaration emission via the metadata surface (the ported
+   `TypeSystemAstBuilder.ConvertEntity` family), gated members through
+   the `MemberIsHidden` semantics, then the body arm.
+2. `HasBody()` semantics: port the SRM predicate exactly (`RVA != 0`
+   plus the not-abstract gate as SRM defines it) -- NOT `RVA == 0`
+   skipping. The zero-length-RVA-present bodies are `HasBody() == true`
+   and follow the DecompileBody path (the Empty-body InvalidBranch
+   comment).
+3. The `extern` arm: `!IsAbstract && DeclaringType.Kind != Interface`
+   -> `Modifiers.Extern`.
+4. Keep the `MemberIsHidden` accessor/backing-field gating (the C#
+   ~337 region) so the auto-events and the accessor pairs match.
+5. The acceptance test: the two golds above; then
+   `ilspy_cli --csharp <corpus>/mscorlib.dll` should produce the
+   227,308-line declaration surface (the oracle capture is the gold
+   capture of record; the previous differential runs archived it).
+
+---
+
+# Phase 11 exit artifact: the full-corpus --csharp text-match matrix
+
+`MODE=csharp ALL_CORPUS=1` over the complete net48 corpus (133 top-level
+assemblies + 49 capa samples + ilspycmd_self), run against the tip of
+`port-baml` (= `cpp` after the integrated merge, `dc41b4214`). Log:
+`/tmp/tm_cs_full/summary.tsv`, run transcript `/tmp/tm_cs_full.log`.
+
+## The matrix (corpus 133 / capa 49 / self 1)
+
+| Verdict | corpus | capa | self |
+|---|---|---|---|
+| IDENTICAL | 0 | 0 | 0 |
+| CONVENTION-DIFF | 2 | 33 | 0 |
+| PORT-FAIL(1) | 118 | 0 | 0 |
+| ORACLE-THROWS | 12 | 3 | 0 |
+| PORT-CRASH(134) | 1 | 13 | 1 |
+
+Interpretation per cohort:
+
+* **118 PORT-FAIL(1)** -- the metadata-only reference assemblies: the
+  port's bodies-only `--csharp` loop prints nothing and bails with
+  `no method bodies found`. This is the T3 blocker; the spec and the
+  proving fixtures are in the preceding section. Every one of these
+  becomes runnable once the main line lands the metadata-driven
+  declaration path.
+* **2 CONVENTION-DIFF** -- `Microsoft.VisualC.dll` and
+  `Microsoft.VisualC.STLCLR.dll`: the mixed-mode C++/CLI assemblies,
+  the only corpus members with real method bodies, where the port's
+  existing pipeline already runs and emits text (STLCLR: the port 2800
+  lines vs the oracle 4263; VisualC: 67 vs 132). The verbatim
+  statement-level overlap is small (2 of 381 unique code lines for
+  STLCLR) -- the C++/CLI surface (the iterator templates, the
+  properties-with-fields shape, the ctor chains) exercises convention
+  differences the port has not yet closed. These two are the best
+  small-scale --csharp targets with real bodies.
+* **12 ORACLE-THROWS** -- 11 of them (System.Windows.Forms, System.Web,
+  System.Web.Extensions, System.ServiceModel, System.ServiceModel.
+  Discovery, System.ServiceModel.Activation, System.Data.SqlXml,
+  System.Data.Entity, System.Activities, System.Activities.Presentation,
+  Microsoft.Build) die on the **C# oracle's own bug**:
+  `CSharpDecompiler.IsAccessorInterfaceImplementationRuntimeHelper`
+  -> `ILParser.DecodeOpCode` -> `BlobReader.ReadByte()` throws
+  `BadImageFormatException: Read out of bounds` on a method body whose
+  blob ends mid-instruction; the exception aborts the WHOLE
+  assembly (rc 70, `Error decompiling @02000009 ...`). The port
+  instead emits its rc-1 bail. For these the differential exit
+  criterion cannot be "matches the oracle" -- the oracle cannot
+  produce output; the criterion becomes "both engines fail, and the
+  port's failure is clean". The 12th is the known native
+  `System.EnterpriseServices.Thunk.dll`.
+* **1 PORT-CRASH + 13 capa crashes + self**: the Wrapper --csharp run
+  trips the same `std::vector::operator[]` `__n < this->size()`
+  assertion on `ILInstruction` as the capa crashers -- the
+  IndexRangeTransform-family OOB, now confirmed to fire on real
+  mixed-mode corpus content too, not just the capa fixtures.
+
+## What the expansion surfaced (new since the 15-sample baseline)
+
+1. **The 11-assembly oracle-bug cohort** (above): an upstream C#
+   limitation in the accessor-sniffing helper (no bounds guard before
+   reading the body's opcodes). Flag for the main line: a future port
+   of `IsAccessorInterfaceImplementationRuntimeHelper` must add the
+   bounds check the C# lacks, and the Phase-11 criterion for these 11
+   assemblies should be re-framed accordingly.
+2. **The Wrapper's third pathology**: --il renders mismatched
+   pseudo-IL for the pinvoke/native thunks, and --csharp crashes with
+   the ILInstruction-vector OOB assertion. One assembly, two engines'
+   worth of divergence; the minimal repro set for the main line is
+   this single file.
+3. **The mixed-mode corpus pair runs**: VisualC/STLCLR prove the
+   port's --csharp pipeline executes on real corpus bodies; their
+   diffs are convention-level, not structural.
