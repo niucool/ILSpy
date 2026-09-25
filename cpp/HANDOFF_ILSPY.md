@@ -392,12 +392,63 @@ Facade instance surface.
   `EarlyILTransforms` + `MatchLeave`.
 - IntroduceDynamicTypeOnLocals -- deferred on
   `DynamicInstruction.GetArgumentInfoOfChild`.
-- Attribute enum-argument decode (DebuggableAttribute's `DebuggingModes`):
-  needs the referenced-core-library resolver (the connid-only compilation
-  cannot resolve the nested TypeRef); the C#-faithful decode-error comment
-  form IS ported (`07f7b95f0`).
+- ~~Attribute enum-argument decode (DebuggableAttribute's `DebuggingModes`)~~
+  DONE (`49cfdfcc9`): the blocker was the reference-set SHAPE, not the
+  resolver's search arms -- DecompilerTypeSystem loaded only the main
+  module's direct AssemblyRefs. Ported the C# InitializeCoreAsync queue
+  closure (DecompilerTypeSystem.cs lines 326-372): every loaded assembly
+  contributes its ExportedTypes' implementations (an AssemblyRef
+  implementation queues the forwarder's target -- System.Runtime's
+  forwarders pull in System.Private.CoreLib; an AssemblyFile implementation
+  queues the sibling module file), plus the implicit-references tail for
+  .NETCoreApp/.NETStandard/.NET (System.Runtime.InteropServices +
+  System.Runtime.CompilerServices.Unsafe, queued by parsed name). ONE
+  documented divergence: the implicit tail arms ONCE (the C# re-arms per
+  queue drain and would spin forever on an unresolvable implicit
+  reference). The connid Debuggable row decodes to the member form when
+  the reference set resolves; the test env-gates on System.Runtime loading
+  (dotnet on PATH -- `PATH=/home/jim/.dotnet:$PATH`; the default bash env
+  lacks it). Without it the decode-error comment form remains -- the
+  standing CLI render.
 - `DetermineAddressUse` deferred arms (LdFlda chains, Await, call-argument,
   ref-local shapes) in SplitVariables.
+- The two recorded render-layer follow-ups (the enum member's nested
+  qualification + the attribute argument-list space) BOTH DONE
+  (`6c232b405`), and shared a root cause: NOT ConvertType bugs -- the C#
+  facade's own builder sets AlwaysUseShortTypeNames=true and renders the
+  short `DebuggingModes.X` pre-transform (verified with a C# probe over the
+  repo's own ICSharpCode.Decompiler); the qualification comes from
+  IntroduceUsingDeclarations's FullyQualifyAmbiguousTypeNamesVisitor, which
+  the facade never ran because its GetAstTransforms still carried pre-merge
+  "deferred" comments for the eight transforms master had ported. The space
+  came from the render's Mono-default policy; the C# facade passes
+  settings.CSharpFormattingOptions (Allman-derived) -- the facade now builds
+  that policy (SettingsFormattingOptions in CSharpDecompiler.cpp). All
+  eight transforms are wired at their C# slots; the attribute block
+  byte-matches the repo C# render; the connid baseline re-pinned
+  (abf6a844eba7c0b3).
+- The IL driver's DetectExitPoints placement -- analyzed, candidate slice:
+  the C# runs DetectExitPoints TWICE (CSharpDecompiler.cs line 103 -- after
+  DetectCatchWhenConditionBlocks, before LdLocaDupInitObjTransform -- and
+  line 128, the re-run after LoopDetection). The port's driver has only
+  the SECOND, its comment at the first slot still reads "the deferred
+  DetectExitPoints would sit here" though the transform is ported and
+  registered (ControlFlow/DetectExitPoints.cpp). The port also runs the
+  re-run AFTER PatternMatchingTransform where the C# runs it BEFORE. The
+  swap is likely behaviorally unobservable (DetectExitPoints rewrites
+  unconditional branch-to-exit; PatternMatching matches conditional
+  block-final branches), but the first call's effect runs through the
+  early transforms -- a behavioral RED over RunGetILTransforms needs a
+  crafted branch-to-exit-inside-the-early-phase fixture. The
+  ported-but-unwired class is otherwise exhausted: ProxyCallReplacer,
+  YieldReturnDecompiler, AsyncAwaitDecompiler, DynamicCallSiteTransform,
+  IntroduceRefReadOnlyModifierOnLocals are NOT ported (no files) --
+  genuine port projects.
+- The foreach-on-multi-dim arms: VERIFIED COMPLETE after the merge (the
+  merged PatternStatementTransform carries the full
+  TransformForeachOnMultiDimArray + MatchForeachOnMultiDimArray +
+  MatchLowerBound + the four patterns, line-for-line with
+  PatternStatementTransform.cs lines 516-700; 7 tests green).
 - PatternStatementTransform's remaining arms + the
   IteratorVariablesDeclaredInsideLoopBody bail (see above).
 
