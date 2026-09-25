@@ -583,15 +583,43 @@ int RunMain(int argc, char** argv) {
 
     // The C# default branch's -o writer (`output = File.CreateText(
     // Path.Combine(outputDirectory, outputName) + ".decompiled.cs")`, or
-    // the -t TypeName-based name) is deferred with the real decompiler back
-    // end: the port's --ilast/--csharp paths are the Phase-5 seed scaffold
-    // (not the C# engine's output), so with -o set they still write to
-    // stdout (a documented divergence until the -t/-m decompile paths
-    // land).
+    // the -t TypeName-based name) is still a documented divergence: with -o
+    // set the port writes to stdout. The --csharp render itself now rides
+    // the facade's type-level entries (this slice).
     auto typeMatch = [&](const std::string& ns, const std::string& name) {
         if (typeFilter.empty()) return true;
         return (ns.empty() ? name : ns + "." + name) == typeFilter;
     };
+
+    if (wantCSharp) {
+        // The C# whole-module path (`output.Write(
+        // decompiler.DecompileWholeModuleAsString())`, IlspyCmdProgram.cs
+        // line 658) with no -t; the -t filter renders the matched types
+        // through the type-level entry (the C# DecompileTypes path -- no
+        // module/assembly attribute sections).
+        if (typeFilter.empty()) {
+            std::cout << ILSpy::Decompiler::CSharp::CSharpDecompiler::
+                DecompileWholeModuleToString(file);
+            return 0;
+        }
+        int typesPrinted = 0;
+        for (const auto& t : file.TypeDefs()) {
+            if (t.Name == "<Module>") continue;
+            if (!typeMatch(t.Namespace, t.Name)) continue;
+            std::string text;
+            if (ILSpy::Decompiler::CSharp::CSharpDecompiler::
+                    DecompileTypeToString(file, t.Token, text)) {
+                std::cout << text << '\n';
+                ++typesPrinted;
+            }
+        }
+        if (typesPrinted == 0) {
+            std::cerr << "ilspycmd: no members found for type '"
+                      << typeFilter << "'\n";
+            return 1;
+        }
+        return 0;
+    }
 
     int methodsPrinted = 0;
     for (const auto& t : file.TypeDefs()) {
@@ -600,24 +628,6 @@ int RunMain(int argc, char** argv) {
         auto methods = file.GetMethods(t.Token);
         for (const auto& m : methods) {
             if (m.RVA == 0) continue;  // abstract/extern/pinvoke-only
-            if (wantCSharp) {
-                // IL -> ILAst -> C#-ish text, end to end, through the
-                // CSharpDecompiler facade (the C# Decompile path's shape:
-                // the decode, the transform pipeline, the render). The
-                // signature strings come from the metadata reader (the
-                // facade's metadata entry derives them in the C#; the port
-                // keeps the reader calls at the call site until the
-                // metadata-surface slice lands).
-                std::string text;
-                if (ILSpy::Decompiler::CSharp::CSharpDecompiler::
-                        DecompileMethodToString(file, m.Token, m.RVA, m.Name,
-                                                text)) {
-                    std::cout << "// " << t.Namespace << "." << t.Name << "\n"
-                              << text << '\n';
-                    ++methodsPrinted;
-                }
-                continue;
-            }
             if (wantIlAstAll) {
                 auto fn = ILSpy::Decompiler::IL::ReadIL(file, m.Token, m.RVA);
                 if (!fn) continue;

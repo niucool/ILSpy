@@ -25,6 +25,8 @@
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
 #include "Decompiler/CSharp/Syntax/SyntaxTree.hpp"
 #include "Decompiler/TypeSystem/INamespace.hpp"
+#include "Decompiler/TypeSystem/StringComparer.hpp"
+#include "Decompiler/Util/CacheManager.hpp"
 #include "Decompiler/DecompileRun.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/CSharp/Transforms/ReplaceMethodCallsWithOperators.hpp"
@@ -332,9 +334,59 @@ const Metadata::PartialTypeInfo* CSharpDecompiler::FindPartialTypeInfo(
     return it == PartialTypes().end() ? nullptr : &it->second;
 }
 
+void CSharpDecompiler::ClearPartialTypes() {
+    PartialTypes().clear();
+}
+
 namespace {
 
 namespace TS = ::ILSpy::Decompiler::TypeSystem;
+
+// The C# instance ctor's type-system wiring (`typeSystem = new
+// DecompilerTypeSystem(module, settings)`, CSharpDecompiler.cs line 218):
+// the port's static entries build it per call -- a minimal single-module
+// compilation over the metadata file (the MainModule set after the module
+// binds the compilation reference, the MetadataModule_Test pattern). The
+// hand-rolled shape rides until the instance surface lands (the C#
+// PEFile-as-IModuleReference resolution needs no compilation; the port's
+// MetadataModule ctor takes the compilation reference first).
+class SingleModuleCompilation : public TS::ICompilation {
+public:
+    void SetMainModule(const TS::IModule* module) { mainModule_ = module; }
+
+    const TS::IModule& MainModule() const override { return *mainModule_; }
+    std::vector<const TS::IModule*> Modules() const override {
+        return std::vector<const TS::IModule*>{mainModule_};
+    }
+    std::vector<const TS::IModule*> ReferencedModules() const override {
+        return {};
+    }
+    const TS::INamespace& RootNamespace() const override {
+        return mainModule_->RootNamespace();
+    }
+    const TS::INamespace* GetNamespaceForExternAlias(
+        const std::string&) const override {
+        return nullptr;
+    }
+    const TS::IType& FindType(TS::KnownTypeCode) const override {
+        return knownType_;
+    }
+    const TS::StringComparer& NameComparer() const override {
+        return TS::StringComparer::Ordinal();
+    }
+    const ::ILSpy::Decompiler::Util::CacheManager& CacheManager()
+        const override {
+        return cacheManager_;
+    }
+    TS::TypeSystemOptions TypeSystemOptions() const override {
+        return TS::TypeSystemOptions::Default;
+    }
+
+private:
+    const TS::IModule* mainModule_ = nullptr;
+    ::ILSpy::Decompiler::Util::CacheManager cacheManager_;
+    TS::KnownType knownType_{TS::KnownTypeCode::Object};
+};
 
 // The C# `typeSystem.GetNamespaceByFullName(ns)` (CreateDecompileRun's
 // resolver, line 758): the root-namespace walk over the dotted name.
@@ -443,6 +495,36 @@ std::string CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
     std::unique_ptr<Syntax::SyntaxTree> syntaxTree(
         DecompileModuleAndAssemblyAttributes(module));
     return syntaxTree->ToString(nullptr);
+}
+
+// The C# `public string DecompileWholeModuleAsString()` (line 1220):
+// `SyntaxTreeToString(DecompileWholeModuleAsSingleFile())` -- the
+// module/assembly attribute sections, then every type in metadata order
+// (the `<Module>` placeholder skipped, the C# DoDecompileTypes gate at
+// line 874). The type bodies render through the flat type entry; the C#
+// composes one SyntaxTree and runs the transforms over it, which lands
+// with the statement-building back end.
+std::string CSharpDecompiler::DecompileWholeModuleToString(
+    const ::ILSpy::Decompiler::Metadata::MetadataFile& file) {
+    // The C# instance's type-system wiring (the SingleModuleCompilation
+    // note above).
+    SingleModuleCompilation compilation;
+    TS::MetadataModule module{compilation, &file, TS::TypeSystemOptions::Default};
+    compilation.SetMainModule(&module);
+
+    std::string out;
+    // The leading attribute sections (the whole-module path's
+    // DoDecompileModuleAndAssemblyAttributes call at line 917).
+    out += DecompileModuleAndAssemblyAttributesToString(module);
+    // The types (the C# DoDecompileTypes loop in metadata order).
+    for (const auto& t : file.TypeDefs()) {
+        if (t.Name == "<Module>")
+            continue;
+        std::string text;
+        if (DecompileTypeToString(file, t.Token, text))
+            out += text;
+    }
+    return out;
 }
 
 std::vector<std::unique_ptr<Transforms::IAstTransform>>

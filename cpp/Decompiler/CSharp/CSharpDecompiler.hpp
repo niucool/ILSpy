@@ -164,6 +164,12 @@ public:
     static std::string DecompileModuleAndAssemblyAttributesToString(
         const ::ILSpy::Decompiler::TypeSystem::MetadataModule& module);
 
+    // The C# `public string DecompileWholeModuleAsString()` (line 1220):
+    // the whole-module render -- the module/assembly attribute sections,
+    // then every type in metadata order.
+    static std::string DecompileWholeModuleToString(
+        const ::ILSpy::Decompiler::Metadata::MetadataFile& file);
+
     // The C# `public SyntaxTree DecompileModuleAndAssemblyAttributes()`
     // (CSharpDecompiler.cs line 823): the AST path -- the attribute
     // sections built through the TypeSystemAstBuilder's ConvertAttribute
@@ -194,6 +200,13 @@ public:
     static const ::ILSpy::Decompiler::Metadata::PartialTypeInfo*
         FindPartialTypeInfo(
         std::uint32_t declaringTypeToken);
+
+    // The registry lifecycle (the port's addition for the static
+    // placeholder): the C# registry lives on the CSharpDecompiler INSTANCE
+    // (fresh per decompiler); the port's process-global static needs an
+    // explicit reset so one consumer's registrations do not leak into
+    // another's decompilation.
+    static void ClearPartialTypes();
 };
 
 } // namespace ILSpy::Decompiler::CSharp

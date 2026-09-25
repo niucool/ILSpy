@@ -3,10 +3,13 @@
 Read this + `PORT_PLAN.md` + `cpp/README.md` (and the sibling
 `cpp/PORT_LOG_BAML.md` / `cpp/PORT_LOG_DISASM.md` logs) at the start of a
 fresh session.
-Standing baseline: **connid_csharp sha256 `8358d5c1d6ff7ad3`** (re-baselined
-deliberately at `164dd1a9b`; byte-verified stable). Sweep: `168 passed + 1
-skipped` (filters below; grew by one test per landed arm -- 118 at
-`01dd3aea7`, 168 after the six arms through `6f27d7110`).
+Standing baseline: **connid_csharp sha256 `7ee1614849b6c8c3`** (re-pinned
+DELIBERATELY at the whole-module-adoption slice: the --csharp output moved
+from per-method comment blocks to the C# ilspycmd shape -- the leading
+[assembly]/[module] sections plus `public partial class` type bodies with
+fields/properties/constructors/method members. The pre-facade hash was
+`8358d5c1d6ff7ad3`, re-baselined deliberately at `164dd1a9b`). Sweep:
+`181 passed + 1 skipped` (filters below).
 
 ## Current position
 
@@ -70,6 +73,15 @@ skipped` (filters below; grew by one test per landed arm -- 118 at
 1. **The facade completion items** (PORT_PLAN.md's remaining facade
    checklist) and the deferred GetAstTransforms slots as their transforms
    land; the PatternStatementTransform work is done.
+   LANDED this session: the AST-path DecompileModuleAndAssemblyAttributes
+   (`c24930d38`), the property/constructor member surfaces
+   (`067366fd9`), and the whole-module CLI adoption
+   (DecompileWholeModuleToString; the --csharp path routes through the
+   facade, -t through the type entry -- the connid re-pin above). The
+   remaining facade gaps: the event member surface (deferred loudly in
+   DecompileTypeToString -- needs an event-carrying fixture), the -o
+   file-writer, and the instance surface (the per-instance type-system
+   wiring and the partial-types registry lifetime).
 
 ## Hazard-ledger highlights (keep)
 

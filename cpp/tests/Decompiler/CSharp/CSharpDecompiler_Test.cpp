@@ -273,6 +273,9 @@ TEST(CSharpDecompilerTest, PartialTypeInfoSkipsDeclaredMembers)
             module, t.Token, text));
         EXPECT_EQ(text.find(firstMethod), std::string::npos)
             << "the declared member is skipped in the type render";
+        // The registry is process-global (the static placeholder): clear
+        // the registration so the later corpus-driven tests do not see it.
+        CSharp::CSharpDecompiler::ClearPartialTypes();
         SUCCEED();
         return;
     }
@@ -289,15 +292,20 @@ TEST(CSharpDecompilerTest, PartialTypeInfosMergeForTheSameType)
     b.AddDeclaredMember(0x06000002);
     CSharp::CSharpDecompiler::AddPartialTypeDefinition(a);
     CSharp::CSharpDecompiler::AddPartialTypeDefinition(b);
-    // The merged registry holds both members: the accessors answer
-    // through the registry's copy (the C# `partialTypes.TryGetValue` shape;
-    // the lookup surface is the static FindPartialTypeInfo probe).
+    // The registry lookup surface is the static FindPartialTypeInfo
+    // probe.
     EXPECT_TRUE(CSharp::CSharpDecompiler::FindPartialTypeInfo(0x02000001)
                     ->IsDeclaredMember(0x06000001));
     EXPECT_TRUE(CSharp::CSharpDecompiler::FindPartialTypeInfo(0x02000001)
                     ->IsDeclaredMember(0x06000002));
     EXPECT_FALSE(CSharp::CSharpDecompiler::FindPartialTypeInfo(0x02000001)
                      ->IsDeclaredMember(0x06000003));
+    // The registry is process-global (the static placeholder for the C#
+    // instance field): clear it so the later corpus-driven tests (the
+    // whole-module render) do not see this test's registrations.
+    CSharp::CSharpDecompiler::ClearPartialTypes();
+    EXPECT_EQ(CSharp::CSharpDecompiler::FindPartialTypeInfo(0x02000001),
+              nullptr);
     EXPECT_EQ(CSharp::CSharpDecompiler::FindPartialTypeInfo(0x02000009),
               nullptr)
         << "an unregistered type has no partial info";
@@ -346,6 +354,32 @@ TEST(CSharpDecompilerTest, DecompileModuleAndAssemblyAttributesBuildsTree)
         << "the corpus assembly carries assembly attributes";
     EXPECT_GT(moduleSections, 0)
         << "the corpus module carries the RefSafetyRules attribute";
+}
+
+// The C# `public string DecompileWholeModuleAsString()` (line 1220): the
+// whole-module render -- the module/assembly attribute sections (the AST
+// path), then every type in metadata order (the `<Module>` placeholder
+// skipped, the C# DoDecompileTypes gate).
+TEST(CSharpDecompilerTest, DecompileWholeModuleRendersAttributesAndTypes)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+    std::string text =
+        CSharp::CSharpDecompiler::DecompileWholeModuleToString(file);
+    // The module/assembly attribute sections lead the output.
+    EXPECT_NE(text.find("[assembly:"), std::string::npos);
+    EXPECT_NE(text.find("[module:"), std::string::npos);
+    // Every type renders (metadata order); the <Module> placeholder is
+    // skipped.
+    EXPECT_NE(text.find("public partial class Page1"), std::string::npos);
+    EXPECT_EQ(text.find("<Module>"), std::string::npos);
+    // The members ride the type bodies (the property surface lands with
+    // this same entry's type loop).
+    EXPECT_NE(text.find("InitializeComponent()"), std::string::npos);
+    // The constructor renders with the type name (not the raw .ctor).
+    EXPECT_EQ(text.find(".ctor"), std::string::npos);
 }
 
 TEST(CSharpDecompilerTest, DecompileModuleAndAssemblyAttributesRender)
