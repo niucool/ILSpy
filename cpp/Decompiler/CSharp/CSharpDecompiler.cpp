@@ -250,6 +250,49 @@ std::string MemberModifiersText(const TS::IMember* member) {
     return out;
 }
 
+// The C# literal syntax of a constant field's value (the ConvertField
+// ShowConstantValues arm over GetConstantValue; the floating-point forms
+// ride the ConvertFloatingPointLiteral fraction logic with the
+// statement-building back end -- the integer, boolean, char, string, and
+// null arms cover the metadata constants). The empty string means "no
+// literal" (a null std::any over a value type renders the default-value
+// form; a null over a reference type renders null).
+std::string ConstantFieldLiteral(const TS::IField& field) {
+    std::any value;
+    try {
+        value = field.GetConstantValue();
+    } catch (const std::exception&) {
+        return std::string();
+    }
+    if (value.has_value()) {
+        if (auto* b = std::any_cast<bool>(&value))
+            return *b ? "true" : "false";
+        if (auto* i8 = std::any_cast<std::int8_t>(&value))
+            return std::to_string(static_cast<int>(*i8));
+        if (auto* u8 = std::any_cast<std::uint8_t>(&value))
+            return std::to_string(static_cast<unsigned>(*u8));
+        if (auto* i16 = std::any_cast<std::int16_t>(&value))
+            return std::to_string(static_cast<int>(*i16));
+        if (auto* u16 = std::any_cast<std::uint16_t>(&value))
+            return std::to_string(static_cast<unsigned>(*u16));
+        if (auto* i32 = std::any_cast<std::int32_t>(&value))
+            return std::to_string(*i32);
+        if (auto* u32 = std::any_cast<std::uint32_t>(&value))
+            return std::to_string(*u32) + "U";
+        if (auto* i64 = std::any_cast<std::int64_t>(&value))
+            return std::to_string(*i64) + "L";
+        if (auto* u64 = std::any_cast<std::uint64_t>(&value))
+            return std::to_string(*u64) + "UL";
+        if (auto* str = std::any_cast<std::string>(&value))
+            return "\"" + *str + "\"";
+        if (auto* ch = std::any_cast<char16_t>(&value))
+            return std::string("'") + static_cast<char>(*ch) + "'";
+    } else if (field.Type().IsReferenceType()) {
+        return "null";
+    }
+    return std::string();
+}
+
 } // namespace
 
 // The render body the static and instance DecompileTypeToString entries
@@ -494,10 +537,16 @@ bool DecompileTypeToStringBody(
         std::string fieldTypeName =
             fieldType ? IL::CSharpTypeName(fieldType)
                       : std::string("var");
-        out += MemberModifiersText(module.GetDefinitionField(f.Token));
+        const TS::IField* fieldEntity = module.GetDefinitionField(f.Token);
+        out += MemberModifiersText(fieldEntity);
         out += fieldTypeName;
         out += ' ';
         out += f.Name;
+        if (fieldEntity != nullptr && fieldEntity->IsConst()) {
+            std::string literal = ConstantFieldLiteral(*fieldEntity);
+            if (!literal.empty())
+                out += " = " + literal;
+        }
         out += ";\n";
         rendered = true;
     }

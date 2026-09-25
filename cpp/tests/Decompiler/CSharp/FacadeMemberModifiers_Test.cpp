@@ -114,7 +114,17 @@ TEST(FacadeMemberModifiersTest, FieldModifiersRender)
     EXPECT_NE(text.find("public static readonly int StaticReadonlyField;"),
               std::string::npos)
         << text;
-    EXPECT_NE(text.find("private const int ConstField;"), std::string::npos)
+    EXPECT_NE(text.find("private const int ConstField = 7;"),
+              std::string::npos)
+        << text;
+    EXPECT_NE(text.find("public const string ConstStringField = \"hello\";"),
+              std::string::npos)
+        << text;
+    EXPECT_NE(text.find("public const bool ConstBoolField = true;"),
+              std::string::npos)
+        << text;
+    EXPECT_NE(text.find("public const long ConstLongField = 42L;"),
+              std::string::npos)
         << text;
     EXPECT_NE(text.find("internal int InternalField;"), std::string::npos)
         << text;
