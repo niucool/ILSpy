@@ -3,8 +3,12 @@
 Read this + `PORT_PLAN.md` + `cpp/README.md` (and the sibling
 `cpp/PORT_LOG_BAML.md` / `cpp/PORT_LOG_DISASM.md` logs) at the start of a
 fresh session.
-Standing baseline: **connid_csharp sha256 `51ae0b55e6017c2e`** (re-pinned
-DELIBERATELY at the member/type-modifier slices: the type-level render now
+Standing baseline: **connid_csharp sha256 `b2a7f7cfc3d5a7f5`** (re-pinned
+DELIBERATELY at the implicit-base-call elision -- the constructor bodies
+no longer carry the spurious `base();`; see the member/type-modifier
+slices below for the surrounding re-pins. Prior pins: `51ae0b55e6017c2e`
+(the type modifiers + base types), `af05cf1b7861f69b` (the member
+modifiers), `abf6a844eba7c0b3` (the facade-transform wiring): the type-level render now
 carries the member declaration modifiers -- the oracle's `public Button
 _okButton;` / `private void OKButton_Click(...)` -- the body-less
 abstract/interface method declarations that previously vanished, and the
@@ -383,7 +387,11 @@ hand-built render arms + the three facade end-to-ends + the
 hidden-state-machine whole-module pair). The sweep baseline moved to
 13016 ran / same failure set; the connid hash is unchanged.
 
-### The facade member/type modifiers (commits fb66d3a22/7f46ba335)
+### The facade member/type modifiers (commits fb66d3a22/7f46ba335 + 878..)
+
+(plus the implicit-base-call elision: a constructor's no-argument base
+call renders nothing -- the C# constructor-initializer convention; the
+`base();` line was the seed's render of the decoded base .ctor call.)
 
 The type-level render's declaration surfaces, composed from the ported
 TypeSystemAstBuilder pieces (GetMemberModifiers /
