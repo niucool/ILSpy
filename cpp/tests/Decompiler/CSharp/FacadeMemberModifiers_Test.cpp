@@ -855,6 +855,25 @@ TEST(FacadeMemberModifiersTest, ParameterModifiersRender)
         << text;
 }
 
+// The parameter default values (the C# ConvertParameter's
+// IsDefaultValueAssignmentAllowed + ConvertConstantValue): an optional
+// parameter with a signature constant renders `= value`; the optional
+// parameters must be trailing (a later non-optional parameter suppresses
+// the earlier defaults).
+TEST(FacadeMemberModifiersTest, ParameterDefaultValuesRender)
+{
+    constexpr const char* kNestedFixture =
+        "/home/jim/ilspy-test-fixtures/nested_fixture/NestedBase.dll";
+    std::string text;
+    if (!RenderType(kNestedFixture, "RefOut", text))
+        GTEST_SKIP() << "the nested-base fixture is not provisioned";
+    EXPECT_NE(
+        text.find("public void Def(int x = 5, string s = null, "
+                  "double d = 1.5)"),
+        std::string::npos)
+        << text;
+}
+
 // The whole-module render's using header carries the module-wide
 // required set (the C# IntroduceUsingDeclarations over the whole-module
 // tree), not just the assembly-attribute namespaces: the connid module's

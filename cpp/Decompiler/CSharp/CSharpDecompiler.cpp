@@ -133,6 +133,11 @@ std::string RenderBaseTypeName(
     const ::ILSpy::Decompiler::TypeSystem::ITypePtr& instantiation,
     const ::ILSpy::Decompiler::CSharp::Resolver::CSharpResolver* resolver);
 
+// The boxed constant's literal spelling (the shared field-constant and
+// parameter-default renderer), the same forward-declaration pattern.
+std::string ConstantValueText(const std::any& value,
+                              const ::ILSpy::Decompiler::TypeSystem::IType& type);
+
 } // namespace
 
 // The C# Decompile path's parameter-declaration builder (the CLI's inline
@@ -205,6 +210,38 @@ std::string CSharpDecompiler::MethodDeclString(
             paramDecl += parameterNames[i];
         else
             paramDecl += "arg_" + std::to_string(base + static_cast<int>(i));
+        // The C# IsDefaultValueAssignmentAllowed: an optional parameter
+        // with a signature constant renders `= value` (the reference
+        // kind None/in/ref-readonly gate), and only when every LATER
+        // parameter is itself optional-or-params (the optional
+        // parameters must be trailing).
+        bool defaultValueAllowed =
+            parameter->IsOptional() &&
+            parameter->HasConstantValueInSignature() &&
+            (parameter->ReferenceKind() == TS::ReferenceKind::None ||
+             parameter->ReferenceKind() == TS::ReferenceKind::In ||
+             parameter->ReferenceKind() == TS::ReferenceKind::RefReadOnly);
+        if (defaultValueAllowed) {
+            for (std::size_t j = i + 1; j < parameters.size(); ++j) {
+                const TS::IParameter* other = parameters[j];
+                if (other == nullptr || other->IsParams())
+                    continue;
+                if (!(other->IsOptional() &&
+                      other->HasConstantValueInSignature()))
+                    defaultValueAllowed = false;
+            }
+        }
+        if (defaultValueAllowed) {
+            std::string literal;
+            try {
+                literal = ConstantValueText(parameter->GetConstantValue(),
+                                             parameter->Type());
+            } catch (const std::exception&) {
+                literal = std::string();
+            }
+            if (!literal.empty())
+                paramDecl += " = " + literal;
+        }
     }
     return paramDecl;
 }
@@ -389,13 +426,13 @@ std::string MemberModifiersText(const TS::IMember* member) {
 // null arms cover the metadata constants). The empty string means "no
 // literal" (a null std::any over a value type renders the default-value
 // form; a null over a reference type renders null).
-std::string ConstantFieldLiteral(const TS::IField& field) {
-    std::any value;
-    try {
-        value = field.GetConstantValue();
-    } catch (const std::exception&) {
-        return std::string();
-    }
+// The boxed constant's literal spelling (the C# ConvertConstantValue
+// over the TextWriterTokenWriter literal forms): the integer family with
+// the C# suffixes, bool, the quoted string, the char, the float/double
+// forms, and the reference-type null (the empty any is the null
+// constant, not a decode failure).
+std::string ConstantValueText(const std::any& value,
+                              const TS::IType& type) {
     if (value.has_value()) {
         if (auto* b = std::any_cast<bool>(&value))
             return *b ? "true" : "false";
@@ -415,14 +452,34 @@ std::string ConstantFieldLiteral(const TS::IField& field) {
             return std::to_string(*i64) + "L";
         if (auto* u64 = std::any_cast<std::uint64_t>(&value))
             return std::to_string(*u64) + "uL";
+        if (auto* f = std::any_cast<float>(&value)) {
+            char buffer[64];
+            std::snprintf(buffer, sizeof(buffer), "%g", *f);
+            return std::string(buffer) + "f";
+        }
+        if (auto* d = std::any_cast<double>(&value)) {
+            char buffer[64];
+            std::snprintf(buffer, sizeof(buffer), "%g", *d);
+            return buffer;
+        }
         if (auto* str = std::any_cast<std::string>(&value))
             return "\"" + *str + "\"";
         if (auto* ch = std::any_cast<char16_t>(&value))
             return std::string("'") + static_cast<char>(*ch) + "'";
-    } else if (field.Type().IsReferenceType()) {
+    } else if (type.IsReferenceType()) {
         return "null";
     }
     return std::string();
+}
+
+std::string ConstantFieldLiteral(const TS::IField& field) {
+    std::any value;
+    try {
+        value = field.GetConstantValue();
+    } catch (const std::exception&) {
+        return std::string();
+    }
+    return ConstantValueText(value, field.Type());
 }
 
 // The C# MemberIsHidden's state machine arms (the whole-type skip): the
