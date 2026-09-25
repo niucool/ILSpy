@@ -233,10 +233,45 @@ class CEmitter {
 public:
     explicit CEmitter(std::string& out) : out_(out) {}
 
+    // The C# name lookup's unqualified resolution (the common case): a
+    // static member of the current function's declaring type is nameable
+    // unqualified inside the type. The comparison is by the reflection
+    // names (the nested-type '+' separator normalized to '.'); a null
+    // Method (the delegate-body reads and the hand-built fixtures) leaves
+    // the context empty and the qualified render stands.
+    void SetCurrentTypeName(const ILFunction& fn) {
+        if (fn.Method == nullptr || fn.Method->DeclaringType() == nullptr)
+            return;
+        std::string name = fn.Method->DeclaringType()->ReflectionName();
+        for (char& c : name) {
+            if (c == '+') c = '.';
+        }
+        currentTypeName_ = std::move(name);
+    }
+
+    // A flattened `Type.Member` (or deeper `NS.Type.Member`) renders as the
+    // bare member when the type prefix names the current function's
+    // declaring type.
+    std::string SimplifyQualifiedMember(const std::string& name) const {
+        if (currentTypeName_.empty())
+            return name;
+        if (name.size() <= currentTypeName_.size() + 1 ||
+            name.compare(0, currentTypeName_.size(), currentTypeName_) != 0 ||
+            name[currentTypeName_.size()] != '.')
+            return name;
+        std::string member = name.substr(currentTypeName_.size() + 1);
+        // The remainder is the member name (a further '.' means the
+        // prefix matched a longer nesting chain, not the member's type).
+        if (member.find('.') != std::string::npos)
+            return name;
+        return member;
+    }
+
     void EmitMethod(const ILFunction& fn, std::string_view returnType,
                     std::string_view methodName, std::string_view paramDecl,
                     bool isConstructor = false) {
         fn_ = &fn;
+        SetCurrentTypeName(fn);
         returnTypeName_ = std::string(returnType);
         methodName_ = std::string(methodName);
         // A constructor header carries no return type: the methodName holds
@@ -263,6 +298,7 @@ public:
 private:
     std::string& out_;
     const ILFunction* fn_ = nullptr;
+    std::string currentTypeName_;
     std::string returnTypeName_;  // the C# name of the function's return type
     std::string methodName_;  // the method's display name (for diagnostics)
     std::set<std::string> declared_;          // locals already introduced with `var`
@@ -1968,8 +2004,12 @@ private:
             (call.IsNewObj && call.DeclaringType)
                 ? dynamic_cast<const TypeSystem::ParameterizedType*>(call.DeclaringType.get())
                 : nullptr;
-        std::string typeName = genDecl ? CSharpTypeName(call.DeclaringType)
-                                       : FlattenMetadataName(std::move(name));
+        std::string typeName =
+            genDecl ? CSharpTypeName(call.DeclaringType)
+                    : (prefix.empty()
+                           ? SimplifyQualifiedMember(
+                                 FlattenMetadataName(std::move(name)))
+                           : FlattenMetadataName(std::move(name)));
         std::string text = prefix + typeName + "(";
         for (std::size_t i = 0; i < call.Arguments.size(); ++i) {
             if (i) text += ", ";
@@ -2157,7 +2197,8 @@ private:
             return obj == "this" ? SimpleName(field) : obj + "." + SimpleName(field);
         }
         if (target.Op == OpCode::LdsFlda) {
-            return FlattenMetadataName(static_cast<const LdsFlda&>(target).FieldName);
+            return SimplifyQualifiedMember(FlattenMetadataName(
+                static_cast<const LdsFlda&>(target).FieldName));
         }
         if (target.Op == OpCode::LdElema) return ElementAccess(static_cast<const LdElema&>(target));
         auto byref = ByRefVarName(target);
@@ -2468,7 +2509,8 @@ private:
                 return obj == "this" ? SimpleName(field) : obj + "." + SimpleName(field);
             }
             case OpCode::LdsFlda:
-                return FlattenMetadataName(static_cast<const LdsFlda&>(inst).FieldName);
+                return SimplifyQualifiedMember(FlattenMetadataName(
+                    static_cast<const LdsFlda&>(inst).FieldName));
             case OpCode::LdElema:
                 return ElementAccess(static_cast<const LdElema&>(inst));
             case OpCode::NewArr: {
@@ -2482,7 +2524,8 @@ private:
                 return text;
             }
             case OpCode::LdFtn:
-                return FlattenMetadataName(static_cast<const LdFtn&>(inst).MethodName);
+                return SimplifyQualifiedMember(FlattenMetadataName(
+                    static_cast<const LdFtn&>(inst).MethodName));
             case OpCode::LdVirtFtn:
                 return FlattenMetadataName(static_cast<const LdVirtFtn&>(inst).MethodName);
             case OpCode::LdVirtDelegate: {

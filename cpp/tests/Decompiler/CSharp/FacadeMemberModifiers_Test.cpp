@@ -519,6 +519,26 @@ TEST(FacadeMemberModifiersTest, NestedTypesRenderInsideTheirDeclaringType)
         << "the nested type renders once: " << whole.substr(0, 200);
 }
 
+// The body's static member accesses render unqualified within the
+// declaring type (the C# name lookup's unqualified resolution: the
+// oracle's .cctor renders `StaticReadonlyField = 42;`).
+TEST(FacadeMemberModifiersTest, StaticMemberAccessesRenderUnqualifiedInsideTheType)
+{
+    std::string text;
+    if (!RenderType(kModifierFixture, "ModifierShapes", text))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    // The .cctor's static field store.
+    EXPECT_NE(text.find("StaticReadonlyField = 42;"), std::string::npos)
+        << text;
+    EXPECT_EQ(text.find("ModifierFixture.ModifierShapes.StaticReadonlyField"),
+              std::string::npos)
+        << "the own-type static access renders unqualified: " << text;
+    // The conditional getter's static field read.
+    EXPECT_NE(text.find("if (StaticField > 0)"), std::string::npos) << text;
+    // The static method's return reads the field unqualified.
+    EXPECT_NE(text.find("return StaticField;"), std::string::npos) << text;
+}
+
 // The single-type render carries the required using directives (the C#
 // -t flow's IntroduceUsingDeclarations over the collected namespaces):
 // `using System;` before the namespace header, the type's own namespace
