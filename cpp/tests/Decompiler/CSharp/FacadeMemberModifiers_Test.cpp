@@ -519,6 +519,40 @@ TEST(FacadeMemberModifiersTest, NestedTypesRenderInsideTheirDeclaringType)
         << "the nested type renders once: " << whole.substr(0, 200);
 }
 
+// The event add/remove calls render as the C# compound assignment (the
+// ReplaceMethodCallsWithOperators event arm): `recv.add_Click(handler)`
+// -> `recv.Click += handler`, the delegate construction folding to the
+// bare method group in the handler position.
+TEST(FacadeMemberModifiersTest, EventAddRemoveCallsRenderAsCompoundAssignment)
+{
+    std::string path = ::ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    Metadata::MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+    std::string text;
+    for (const auto& t : file.TypeDefs()) {
+        if (std::string(t.Name) != "Page1")
+            continue;
+        ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
+            file, t.Token, text, /*wrapNamespace=*/false));
+        break;
+    }
+    ASSERT_FALSE(text.empty());
+    EXPECT_NE(text.find(".Click += OKButton_Click;"), std::string::npos)
+        << text;
+    EXPECT_EQ(text.find("add_Click"), std::string::npos)
+        << "the add_ call form is gone: " << text;
+    // A delegate construction in a non-event argument position renders
+    // the method group inside the new-expression (the target argument
+    // folds away).
+    EXPECT_NE(text.find("new RoutedEventHandler(AttachedHandler_Click)"),
+              std::string::npos)
+        << text;
+    EXPECT_EQ(text.find("this, AttachedHandler_Click"),
+              std::string::npos)
+        << "the delegate construction's target argument folds: " << text;
+}
+
 // The new-expression's type renders its short name (the C# name lookup
 // through the using directives; the oracle's `new RoutedEventHandler(...)`
 // over the full `new System.Windows.RoutedEventHandler(...)`).
@@ -537,7 +571,10 @@ TEST(FacadeMemberModifiersTest, NewExpressionTypesRenderShortNames)
         break;
     }
     ASSERT_FALSE(text.empty());
-    EXPECT_NE(text.find("new RoutedEventHandler(this, OKButton_Click)"),
+    // The event-handler position folds to the bare method group (the +=
+    // rewrite), so the short type name asserts over the remaining
+    // delegate constructions (the AddHandler argument position).
+    EXPECT_NE(text.find("new RoutedEventHandler(AttachedHandler_Click)"),
               std::string::npos)
         << text;
     EXPECT_EQ(text.find("new System.Windows.RoutedEventHandler"),

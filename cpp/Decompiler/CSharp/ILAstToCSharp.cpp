@@ -1931,7 +1931,61 @@ private:
     // (op_Equality etc.) renders as `(arg0 op arg1)`; a unary operator as
     // `op arg0`; a conversion operator (op_Explicit/op_Implicit) as
     // `(TargetType)arg0`.
+    // The delegate-construction shape: a newobj whose constructor takes
+    // the (target, method-group) pair -- only delegate ctors take a native
+    // function pointer as their second argument, so the shape identifies
+    // the construction. The C# HandleDelegateConstruction folds the pair
+    // into the method group; the new-expression keeps the delegate type
+    // (`new RoutedEventHandler(M)`), the target argument dropping.
+    static bool IsDelegateConstruction(const Call& call) {
+        return call.IsNewObj && call.Arguments.size() == 2 &&
+               call.Arguments[1] != nullptr &&
+               (call.Arguments[1]->Op == OpCode::LdFtn ||
+                call.Arguments[1]->Op == OpCode::LdVirtFtn);
+    }
+
+    // The event add/remove accessors (the compiler-generated add_X /
+    // remove_X methods -- only events produce them): the C#
+    // ReplaceMethodCallsWithOperators event arm renders the compound
+    // assignment (`recv.X += handler`), the handler's delegate
+    // construction folding to the bare method group in the event-handler
+    // position. Empty when the call is not an event accessor.
+    std::string EventAddRemoveText(const Call& call) {
+        std::string_view name(call.MethodName);
+        auto sep = name.rfind("::");
+        if (sep == std::string_view::npos)
+            return std::string();
+        std::string_view member = name.substr(sep + 2);
+        const bool isAdd = member.size() > 4 &&
+                           member.compare(0, 4, "add_") == 0;
+        const bool isRemove = member.size() > 7 &&
+                              member.compare(0, 7, "remove_") == 0;
+        if (!isAdd && !isRemove)
+            return std::string();
+        if (!call.IsInstanceCall || call.Arguments.size() != 2 ||
+            call.Arguments[0] == nullptr || call.Arguments[1] == nullptr)
+            return std::string();
+        std::string eventName(member.substr(isAdd ? 4 : 7));
+        std::string receiver = Expr(*call.Arguments[0]);
+        // The handler: a delegate construction folds to its method group
+        // (the event's handler type makes the conversion implicit).
+        std::string handler;
+        if (auto* ctor = dynamic_cast<const Call*>(call.Arguments[1].get());
+            ctor != nullptr && IsDelegateConstruction(*ctor)) {
+            handler = Expr(*ctor->Arguments[1]);
+        } else {
+            handler = Expr(*call.Arguments[1]);
+        }
+        return receiver + "." + eventName + (isAdd ? " += " : " -= ") +
+               handler;
+    }
+
     std::string CallText(const Call& call) {
+        {
+            std::string eventText = EventAddRemoveText(call);
+            if (!eventText.empty())
+                return eventText;
+        }
         if (!call.IsInstanceCall) {
             // A static conversion operator: op_Explicit/op_Implicit(value) ->
             // (TargetType)value. The target type is the declaring type.
@@ -2024,8 +2078,13 @@ private:
             }
         }
         std::string text = prefix + typeName + "(";
-        for (std::size_t i = 0; i < call.Arguments.size(); ++i) {
-            if (i) text += ", ";
+        // The delegate construction: the (target, method-group) pair folds
+        // to the method group alone (`new RoutedEventHandler(M)`).
+        std::size_t firstArgument = 0;
+        if (prefix == "new " && IsDelegateConstruction(call))
+            firstArgument = 1;
+        for (std::size_t i = firstArgument; i < call.Arguments.size(); ++i) {
+            if (i > firstArgument) text += ", ";
             text += call.Arguments[i] ? Expr(*call.Arguments[i]) : "(default)";
         }
         text += ')';
@@ -2119,6 +2178,13 @@ private:
                 text += ')';
                 return text;
             }
+        }
+        // The event add/remove accessors rewrite ahead of the
+        // instance/static split (the compound-assignment form).
+        {
+            std::string eventText = EventAddRemoveText(call);
+            if (!eventText.empty())
+                return eventText;
         }
         return call.IsInstanceCall ? InstanceCallText(call) : CallText(call);
     }
