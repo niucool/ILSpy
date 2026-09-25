@@ -33,9 +33,9 @@
 //
 // The remaining methods are DEFERRED until their consumers port: `IsBitwise`
 // (BinaryOperatorType -- the unported CSharpResolver/OutputVisitor binary-operator
-// tiebreaks), `GetNextStatement` (Statement -- the unported statement-flow stages),
-// `IsArgList` / `AddNamedArgument` / `UnwrapInDirectionExpression`
-// (the unported CSharpResolver/TypeSystemAstBuilder stages).
+// tiebreaks), and `IsArgList` / `AddNamedArgument` /
+// `UnwrapInDirectionExpression` (the unported
+// CSharpResolver/TypeSystemAstBuilder stages).
 
 #pragma once
 
@@ -69,6 +69,17 @@ template <class T>
 T* Detach(T* node) {
     node->Remove();
     return node;
+}
+
+// The C# `public static Statement? GetNextStatement(Statement statement)`
+// (SyntaxExtensions.cs line 56): the next STATEMENT sibling, skipping
+// non-statement siblings. Consumed by the multi-dimensional foreach arm's
+// upper-bound chain walk.
+inline Statement* GetNextStatement(Statement* statement) {
+    AstNode* next = statement->NextSibling();
+    while (next != nullptr && dynamic_cast<Statement*>(next) == nullptr)
+        next = next->NextSibling();
+    return dynamic_cast<Statement*>(next);
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

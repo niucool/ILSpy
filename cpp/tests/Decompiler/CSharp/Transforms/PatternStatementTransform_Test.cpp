@@ -34,6 +34,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
@@ -910,6 +911,218 @@ TEST(PatternStatementTransformTest, ForeachOnArrayKeepsMergedItemVariable)
     ASSERT_EQ(block->Statements().Count(), 2);
     EXPECT_EQ(block->Statements().At(1), loop.forStatement)
         << "a merged item variable keeps the for loop";
+}
+
+// ---- The foreach-over-multi-dim-array reshape ----------------------------------------------
+
+// A `$result = $collection.$methodName($index);` bound-call statement
+// (the GetUpperBound/GetLowerBound shapes).
+Syntax::ExpressionStatement* MakeBoundCall(
+    const std::string& methodName, int index, const IL::ILVariablePtr& result,
+    const IL::ILVariablePtr& collection,
+    Syntax::IdentifierExpression** collectionOut = nullptr) {
+    auto* collectionIdentifier = Var(collection->Name, collection);
+    if (collectionOut != nullptr)
+        *collectionOut = collectionIdentifier;
+    auto* call = new Syntax::InvocationExpression(
+        new Syntax::MemberReferenceExpression(collectionIdentifier, methodName));
+    call->Arguments().Add(
+        new Syntax::PrimitiveExpression(Syntax::PrimitiveValue(index)));
+    return new Syntax::ExpressionStatement(new Syntax::AssignmentExpression(
+        Var(result->Name, result), Syntax::AssignmentOperatorType::Assign, call));
+}
+
+// A multi-dim for round: `for (; $index <= $upperBound; $index = $index + 1)`
+// (empty initializers -- the lower-bound assignment precedes the loop).
+Syntax::ForStatement* MakeMultiDimFor(const IL::ILVariablePtr& index,
+                                      const IL::ILVariablePtr& upperBound) {
+    auto* forStatement = new Syntax::ForStatement();
+    forStatement->Condition(new Syntax::BinaryOperatorExpression(
+        Var(index->Name, index), Syntax::BinaryOperatorType::LessThanOrEqual,
+        Var(upperBound->Name, upperBound)));
+    forStatement->Iterators().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            Var(index->Name, index), Syntax::AssignmentOperatorType::Assign,
+            new Syntax::BinaryOperatorExpression(
+                Var(index->Name, index), Syntax::BinaryOperatorType::Add,
+                new Syntax::PrimitiveExpression(Syntax::PrimitiveValue(1))))));
+    return forStatement;
+}
+
+// The convertible 2-d foreach-over-multi-dimensional-array shape:
+//   ub0 = arr.GetUpperBound(0); ub1 = arr.GetUpperBound(1);
+//   lb0 = arr.GetLowerBound(0);
+//   for (; i0 <= ub0; i0 = i0 + 1) {
+//       lb1 = arr.GetLowerBound(1);
+//       for (; i1 <= ub1; i1 = i1 + 1) { item = arr[i0, i1]; work; }
+//   }
+struct ForeachMultiDimLoop {
+    IL::ILVariablePtr collection;
+    IL::ILVariablePtr item;
+    IL::ILVariablePtr lower1;
+    Syntax::ExpressionStatement* entry = nullptr;
+    Syntax::Statement* work = nullptr;
+    Syntax::IdentifierExpression* collectionInUpper1 = nullptr;
+    std::unique_ptr<Syntax::BlockStatement> block;
+};
+
+ForeachMultiDimLoop MakeForeachMultiDimLoop(TS::ITypePtr collectionType = nullptr) {
+    ForeachMultiDimLoop loop;
+    auto boundVar = [](const std::string& name) {
+        auto v = LocalOf(name, TS::UnknownType());
+        v->StoreCount = 1;
+        v->LoadCount = 1;
+        return v;
+    };
+    auto lowerVar = [](const std::string& name) {
+        auto v = LocalOf(name, TS::UnknownType());
+        v->StoreCount = 2;
+        v->LoadCount = 3;
+        return v;
+    };
+    loop.collection = LocalOf(
+        "arr", collectionType != nullptr
+                     ? std::move(collectionType)
+                     : TS::ITypePtr(std::make_shared<TS::ArrayType>(
+                           TS::ITypePtr(std::make_shared<TS::KnownType>(
+                               TS::KnownTypeCode::Int32)),
+                           2)));
+    IL::ILVariablePtr upper0 = boundVar("ub0");
+    IL::ILVariablePtr upper1 = boundVar("ub1");
+    IL::ILVariablePtr lower0 = lowerVar("lb0");
+    IL::ILVariablePtr lower1 = lowerVar("lb1");
+    IL::ILVariablePtr index0 = LocalOf("i0", TS::UnknownType());
+    IL::ILVariablePtr index1 = LocalOf("i1", TS::UnknownType());
+    loop.item = LocalOf("item", TS::ITypePtr(std::make_shared<TS::KnownType>(
+                                     TS::KnownTypeCode::Int32)));
+    loop.item->StoreCount = 1;
+
+    loop.entry = MakeBoundCall("GetUpperBound", 0, upper0, loop.collection);
+    auto* upper1Statement =
+        MakeBoundCall("GetUpperBound", 1, upper1, loop.collection,
+                      &loop.collectionInUpper1);
+    auto* lower0Statement =
+        MakeBoundCall("GetLowerBound", 0, lower0, loop.collection);
+
+    auto* outerFor = MakeMultiDimFor(index0, upper0);
+    auto* outerBody = new Syntax::BlockStatement();
+    outerBody->Statements().Add(
+        MakeBoundCall("GetLowerBound", 1, lower1, loop.collection));
+    auto* innerFor = MakeMultiDimFor(index1, upper1);
+    auto* innerBody = new Syntax::BlockStatement();
+    auto* elementAccess = new Syntax::IndexerExpression(
+        Var(loop.collection->Name, loop.collection));
+    elementAccess->Arguments().Add(Var(index0->Name, index0));
+    elementAccess->Arguments().Add(Var(index1->Name, index1));
+    innerBody->Statements().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            Var(loop.item->Name, loop.item),
+            Syntax::AssignmentOperatorType::Assign, elementAccess)));
+    loop.work = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            new Syntax::IdentifierExpression("x"),
+            Syntax::AssignmentOperatorType::Assign,
+            new Syntax::IdentifierExpression("y")));
+    innerBody->Statements().Add(loop.work);
+    innerFor->EmbeddedStatement(innerBody);
+    outerBody->Statements().Add(innerFor);
+    outerFor->EmbeddedStatement(outerBody);
+
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    block->Statements().Add(loop.entry);
+    block->Statements().Add(upper1Statement);
+    block->Statements().Add(lower0Statement);
+    block->Statements().Add(outerFor);
+    loop.lower1 = lower1;
+    loop.block = std::move(block);
+    return loop;
+}
+
+// The shape above becomes `foreach (int item in arr) { work; }`: the
+// upper-bound chain, the first lower-bound assignment, and the whole nested
+// for-loop structure are absorbed (the entry statement is replaced).
+TEST(PatternStatementTransformTest, ForeachOnMultiDimArrayIsIntroduced)
+{
+    PatternStatementFixture fx;
+    auto loop = MakeForeachMultiDimLoop();
+
+    RunTransform(*loop.block, fx);
+
+    ASSERT_EQ(loop.block->Statements().Count(), 1)
+        << "the upper-bound chain, the lower-bound assignment, and the nested"
+        " fors are absorbed";
+    auto* foreachStmt =
+        dynamic_cast<Syntax::ForeachStatement*>(loop.block->Statements().At(0));
+    ASSERT_NE(foreachStmt, nullptr);
+    ASSERT_NE(foreachStmt->VariableType(), nullptr);
+    auto* designation = dynamic_cast<Syntax::SingleVariableDesignation*>(
+        foreachStmt->VariableDesignation());
+    ASSERT_NE(designation, nullptr);
+    EXPECT_EQ(designation->Identifier(), "item");
+    const auto* designationAnnotation =
+        designation->Annotation<CS::ILVariableResolveResult>();
+    ASSERT_NE(designationAnnotation, nullptr);
+    EXPECT_EQ(designationAnnotation->Variable(), loop.item.get());
+    EXPECT_EQ(foreachStmt->InExpression(), loop.collectionInUpper1)
+        << "the in-expression is the collection identifier of the last"
+        " upper-bound match";
+    auto* body = dynamic_cast<Syntax::BlockStatement*>(
+        foreachStmt->EmbeddedStatement());
+    ASSERT_NE(body, nullptr);
+    ASSERT_EQ(body->Statements().Count(), 1);
+    EXPECT_EQ(body->Statements().At(0), loop.work);
+    EXPECT_EQ(loop.item->Kind, IL::VariableKind::ForeachLocal);
+}
+
+// The collection must be an array type.
+TEST(PatternStatementTransformTest, ForeachOnMultiDimRequiresArrayType)
+{
+    PatternStatementFixture fx;
+    auto loop = MakeForeachMultiDimLoop(
+        TS::ITypePtr(std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32)));
+
+    RunTransform(*loop.block, fx);
+
+    EXPECT_EQ(loop.block->Statements().Count(), 4)
+        << "a non-array collection keeps the loop structure";
+    EXPECT_EQ(loop.block->Statements().At(0), loop.entry);
+}
+
+// The lower-bound variables must have the pure-counter counts (2 stores,
+// 3 loads, no addresses).
+TEST(PatternStatementTransformTest, ForeachOnMultiDimRequiresLowerBoundCounts)
+{
+    PatternStatementFixture fx;
+    auto loop = MakeForeachMultiDimLoop();
+    loop.lower1->StoreCount = 1;
+
+    RunTransform(*loop.block, fx);
+
+    EXPECT_EQ(loop.block->Statements().Count(), 4)
+        << "an impure lower-bound variable keeps the loop structure";
+    EXPECT_EQ(loop.block->Statements().At(0), loop.entry);
+}
+
+// The upper-bound variables must be single-definition single-load.
+TEST(PatternStatementTransformTest, ForeachOnMultiDimRequiresUpperBoundCounts)
+{
+    PatternStatementFixture fx;
+    auto loop = MakeForeachMultiDimLoop();
+    // Give the entry's upper-bound variable a second load.
+    auto* entryAssignment = dynamic_cast<Syntax::AssignmentExpression*>(
+        loop.entry->Expression());
+    ASSERT_NE(entryAssignment, nullptr);
+    IL::ILVariable* upper0 =
+        CS::GetILVariable(*dynamic_cast<Syntax::IdentifierExpression*>(
+            entryAssignment->Left()));
+    ASSERT_NE(upper0, nullptr);
+    upper0->LoadCount = 2;
+
+    RunTransform(*loop.block, fx);
+
+    EXPECT_EQ(loop.block->Statements().Count(), 4)
+        << "an impure upper-bound variable keeps the loop structure";
+    EXPECT_EQ(loop.block->Statements().At(0), loop.entry);
 }
 
 // ---- The Run shell ---------------------------------------------------------------------
