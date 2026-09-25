@@ -1,11 +1,12 @@
-# ILSpy C++ Port -- Session Handoff (written after `01dd3aea7`)
+# ILSpy C++ Port -- Session Handoff (written after `6f27d7110`)
 
 Read this + `PORT_PLAN.md` + `cpp/README.md` (and the sibling
 `cpp/PORT_LOG_BAML.md` / `cpp/PORT_LOG_DISASM.md` logs) at the start of a
 fresh session.
 Standing baseline: **connid_csharp sha256 `8358d5c1d6ff7ad3`** (re-baselined
-deliberately at `164dd1a9b`; byte-verified stable). Sweep: `118 passed + 1
-skipped` (filters below).
+deliberately at `164dd1a9b`; byte-verified stable). Sweep: `168 passed + 1
+skipped` (filters below; grew by one test per landed arm -- 118 at
+`01dd3aea7`, 168 after the six arms through `6f27d7110`).
 
 ## Current position
 
@@ -17,6 +18,19 @@ skipped` (filters below).
   the resolved-IMethod surface). The Annotation<BlockContainer>/
   Annotation<ILFunction> queries now live on the shared Annotations surface
   (CS::GetBlockContainerAnnotation / CS::GetILFunctionAnnotation).
+- **PatternStatementTransform: EIGHT of nine arms landed** (through
+  `6f27d7110`): the logic arms (`93f1f9bd2`), TransformFor (`dfcba6e08`),
+  foreach-on-array (`01dd3aea7`), foreach-on-multi-dim (`b4e892ad2`:
+  GetNextStatement + the GetUpperBound/GetLowerBound chain),
+  foreach-on-inline-array (`df98f5c45`: GetSymbol/MemberResolveResult +
+  GetInlineArrayLength), destructor (`77a8695af`), try-catch-finally
+  (`b40d74d57`), C# 8.0 enhanced using (`e87a68ff8`), C# 7.3 pattern-based
+  fixed (`6f27d7110`). The only remaining family is the automatic-property
+  pair (~693 TransformAutomaticProperty + ~840 ReplaceBackingFieldUsage).
+  Pattern-placeholder surfaces landed along the way: BlockStatement and
+  AttributeSection (`77a8695af`) and CatchClause (`b40d74d57`) -- each the
+  C# generator's `implicit operator X(Pattern)` + nested PatternPlaceholder
+  (the Statement/Expression/AstType precedents).
 - **DeclareVariables: COMPLETE** (`e6ee1d822` analysis, `d936b1f81`
   mutation): the IAstTransform Run with EnsureExpressionStatementsAreValid
   (direction unwrap + discard; the temporary arm deferred on
@@ -30,8 +44,8 @@ skipped` (filters below).
   TranslateDeconstructionDesignation), the SkipInit forms (a live
   context.TypeSystem), the anonymous-type `var` decision (NRExtensions
   ContainsAnonymousType), IsRefReadOnly (the ILVariable flag).
-- RED discipline held (16 DeclareVariables cases total; 42/42 across the
-  three AST-transform suites).
+- RED discipline held (16 DeclareVariables cases total; 60+ across the
+  AST-transform suites after the six arms above).
 - **Design notes for the landed code (read before extending):**
   - The void-visitor re-visit loop carries the C# `ContextTrackingVisitor<
     AstNode>` return value in the visitor's `lastResult` slot.
@@ -46,28 +60,42 @@ skipped` (filters below).
   - Trees handed to RunAstTransforms/DeclareVariables.Run need the root
     ILFunction annotation for the invalid-statement fixup (the C# contract;
     the pipeline driver test attaches one now).
-- Remaining PatternStatementTransform arms, smallest-first: foreach-on-
-  multi-dim (~516, needs SyntaxExtensions.GetNextStatement -- a small port
-  -- plus ArrayType.Dimensions and the GetUpperBound/GetLowerBound patterns),
-  foreach-on-inline-array (~410, needs the resolved-IMethod GetSymbol checks
-  + GetInlineArrayLength), automatic property (~693), destructor (~931),
-  try-catch-finally (~983), C# 7.3 pattern-based fixed (~1087), C# 8.0
-  enhanced using (~1119), the Identifier backing-field rewrite (~840).
+- Remaining PatternStatementTransform arms: ONLY the automatic-property
+  pair -- TransformAutomaticProperty (~693) and the VisitIdentifier/
+  ReplaceBackingFieldUsage backing-field rewrite (~840). Dependency map
+  (all surveyed, all feasible with the existing surfaces):
+  - Symbols: `propertyDeclaration.GetSymbol() as IProperty` via a
+    MemberResolveResult annotation (the TypeResolveResult-on-TypeDeclaration
+    precedent in the destructor tests); field references via a
+    MemberResolveResult over an IField. The test rig:
+    TSImpl::FakeProperty/FakeMethod + LookupTypeDefinition::
+    SetProperties/SetFields (the IsBackingFieldOfAutomaticProperty
+    enumeration + the `Fields.Any(f => f.Name == "_" + property.Name ...)`
+    check read exactly those).
+  - TS::IsCompilerGeneratedOrIsInCompilerGeneratedClass /
+    TS::HasReadonlyModifier already ported (TypeSystemExtensions).
+  - NameCouldBeBackingFieldOfAutomaticProperty: the regex
+    `^(<(?<name>.+)>k__BackingField|_(?<name>.+))$` -- port as a hand
+    matcher (no std::regex in the port conventions; two alternates).
+  - RemoveCompilerGeneratedAttribute(section list, full names): the
+    attribute Type's GetSymbol() as IType -- the port has no IType.FullName,
+    compose Namespace()+"."+Name() (empty-namespace → Name() only, the
+    inline-array PID precedent).
+  - CSharpDecompiler.RemoveAttribute(EntityDeclaration, KnownAttribute)
+    is NOT ported yet -- port it (or a local static) with the C# shape.
+  - currentMethod.AccessorOwner: the visitor already tracks currentMethod
+    (the tracking overrides); IMethod::AccessorOwner exists (FakeMethod
+    SetAccessorOwner).
+  - The GetterOnlyAutomaticProperties and AutomaticProperties settings
+    exist on DecompilerSettings.
 
 ## Next steps (in order)
 
-1. **The remaining foreach arms**: multi-dim first (the
-   GetUpperBound/GetLowerBound/element-assign patterns + MatchLowerBound/
-   MatchForeachOnMultiDimArray + TransformForeachOnMultiDimArray via
-   VisitExpressionStatement; port SyntaxExtensions.GetNextStatement -- a
-   6-line walk to the next Statement sibling -- and check ArrayType's
-   Dimensions), then inline-array (survey its GetSymbol/IMethod
-   DeclaringType.FullName + GetInlineArrayLength dependencies; the
-   resolved-IMethod checks may need a loud deferral). RED-first.
-2. The remaining PatternStatementTransform arms (automatic property,
-   destructor, try-catch-finally, fixed, enhanced using, Identifier
-   rewrite).
-3. Then: the facade completion items, the deferred GetAstTransforms slots
+1. **The automatic-property pair** (the last PatternStatementTransform
+   family): TransformAutomaticProperty (~693) then
+   ReplaceBackingFieldUsage (~840), using the dependency map above.
+   RED-first, one arm per commit.
+2. Then: the facade completion items, the deferred GetAstTransforms slots
    as their transforms land.
 
 ## Hazard-ledger highlights (keep)
