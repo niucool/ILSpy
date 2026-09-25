@@ -667,10 +667,14 @@ TEST(IlspyCmdProgramTest, ExtractResourceBamlGarbagePropagates)
 }
 
 // The real mscorlib resources: a container string entry, byte-exact
-// against the real tool over the same row.
+// against the real tool over the same row. Env-gated like the other
+// mscorlib-fixture rows (the fixture is absent on the lean CI image).
 TEST(IlspyCmdProgramTest, ExtractResourceMscorlib)
 {
-    MetadataFile mscorlib(MscorlibPath());
+    std::string mscorlibPath = MscorlibPath();
+    if (!fs::exists(mscorlibPath))
+        GTEST_SKIP() << "mscorlib fixture not present";
+    MetadataFile mscorlib(mscorlibPath);
     ASSERT_TRUE(mscorlib.IsValid());
     {
         auto value = Cmd::TryGetResource(
