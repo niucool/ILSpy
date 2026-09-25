@@ -640,11 +640,13 @@ TEST(CSharpDecompilerTest, DecompileTypeRendersGetterOnlyProperties)
         std::string text;
         ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
             module, t.Token, text));
-        // The getter-only property has a real body (no backing field), so
-        // the accessor renders as its block; only the auto-property shape
-        // (or a body-less accessor) keeps the stub form.
-        EXPECT_NE(text.find("Setters"), std::string::npos);
-        EXPECT_NE(text.find("get"), std::string::npos) << text;
+        // The getter-only property has a real body (no backing field);
+        // its single-return getter renders the C# expression-bodied form
+        // (the oracle's `Setters => new SetterBaseCollection();`); only
+        // the auto-property shape (or a body-less accessor) keeps the
+        // stub form.
+        EXPECT_NE(text.find("Setters => new "), std::string::npos)
+            << text;
         EXPECT_EQ(text.find("Setters { get; }"), std::string::npos)
             << "a real accessor body does not render the stub: " << text;
         SUCCEED();

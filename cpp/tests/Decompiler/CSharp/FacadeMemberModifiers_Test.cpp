@@ -436,25 +436,43 @@ TEST(FacadeMemberModifiersTest, AccessorVisibilityRenders)
         << text;
 }
 
-// A property whose accessor has a real body renders the body (the C#
-// renders the decompiled accessor as its block): the auto-property stub
-// form only applies when the property has its compiler-generated
-// `<Name>k__BackingField` field.
+// A property whose accessor has a real multi-statement body renders the
+// accessor block (the C# renders the decompiled accessor as its block):
+// the auto-property stub form only applies when the property has its
+// compiler-generated `<Name>k__BackingField` field, and the
+// single-return getter takes the expression-bodied form.
 TEST(FacadeMemberModifiersTest, AccessorBodyRenders)
 {
     std::string text;
     if (!RenderType(kModifierFixture, "ModifierShapes", text))
         GTEST_SKIP() << "the modifier fixture is not provisioned";
-    // The manual getter body renders its statements.
-    std::size_t propPos = text.find("protected virtual int VirtualPropertyValue");
+    // The conditional getter's multi-statement body renders as the
+    // accessor block.
+    std::size_t propPos = text.find("public int ConditionalProperty");
     ASSERT_NE(propPos, std::string::npos) << text;
-    std::size_t getPos = text.find("get", propPos);
-    ASSERT_NE(getPos, std::string::npos) << text;
     std::string accessorRegion = text.substr(propPos);
-    EXPECT_NE(accessorRegion.find("return 5;"), std::string::npos)
-        << "the getter body renders: " << accessorRegion;
-    EXPECT_EQ(text.find("VirtualPropertyValue { get; }"), std::string::npos)
+    EXPECT_NE(accessorRegion.find("get"), std::string::npos)
+        << "the getter renders: " << accessorRegion;
+    EXPECT_NE(accessorRegion.find("if ("), std::string::npos)
+        << "the getter body's statements render: " << accessorRegion;
+    EXPECT_NE(accessorRegion.find("> 0)"), std::string::npos)
+        << "the condition renders: " << accessorRegion;
+    EXPECT_EQ(text.find("ConditionalProperty { get; }"), std::string::npos)
         << "a real body does not render the stub form: " << text;
+}
+
+// The getter-only property with a single-return body renders the C#
+// expression-bodied form (NormalizeBlockStatements's
+// SimplifyPropertyDeclaration under
+// UseExpressionBodyForCalculatedGetterOnlyProperties).
+TEST(FacadeMemberModifiersTest, CalculatedGetterOnlyPropertyRendersArrowBody)
+{
+    std::string text;
+    if (!RenderType(kModifierFixture, "ModifierShapes", text))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    EXPECT_NE(text.find("protected virtual int VirtualPropertyValue => 5;"),
+              std::string::npos)
+        << text;
 }
 
 // The interface property (no backing field, body-less accessors) keeps the

@@ -694,7 +694,33 @@ bool DecompileTypeToStringBody(
                 anyAccessor = true;
             }
             out += "}\n";
-        } else {
+        } else if (accessors.SetterToken == 0 && !getterBody.empty()) {
+            // The C# expression-bodied form (NormalizeBlockStatements's
+            // SimplifyPropertyDeclaration under
+            // UseExpressionBodyForCalculatedGetterOnlyProperties, on by
+            // default): a getter-only property whose body is a single
+            // `return <expr>;` statement renders `=> <expr>;`.
+            std::size_t bodyStart =
+                getterBody.find_first_not_of(" \t\n");
+            std::size_t bodyEnd = getterBody.find_last_not_of(" \t\n");
+            std::string trimmedBody =
+                bodyStart == std::string::npos
+                    ? std::string()
+                    : getterBody.substr(bodyStart,
+                                        bodyEnd - bodyStart + 1);
+            bool singleReturn =
+                trimmedBody.rfind("return ", 0) == 0 &&
+                trimmedBody.size() > 7 + 1 &&
+                trimmedBody.find(';') ==
+                    trimmedBody.size() - 1;
+            if (singleReturn) {
+                out += " => " +
+                       trimmedBody.substr(7, trimmedBody.size() - 7 - 1) +
+                       ";\n";
+                anyAccessor = true;
+            }
+        }
+        if (!anyAccessor) {
             out += "\n{\n";
             if (accessors.GetterToken != 0) {
                 out += AccessorVisibilityText(
