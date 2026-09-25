@@ -22,6 +22,7 @@
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/UniversalAssemblyResolver.hpp"
 #include "Decompiler/TypeSystem/IEvent.hpp"
+#include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/MetadataModule.hpp"
 #include "Decompiler/TypeSystem/TypeKind.hpp"
@@ -143,4 +144,32 @@ TEST(DecompilerTypeSystemTest, ModulesIsTheMainModuleFirst)
         << "the main module leads the compilation's module list";
     EXPECT_EQ(modules.size(), ts.ReferencedModules().size() + 1)
         << "Modules() is the main module plus the referenced set";
+}
+
+// The C# SimpleCompilation.FindType forwards to the KnownTypeCache: the
+// known type resolves through the compilation's module set (the main
+// module + the reference set -- mscorlib's System.Object over the corpus),
+// a real ITypeDefinition, not a stand-in.
+TEST(DecompilerTypeSystemTest, FindTypeResolvesThroughTheKnownTypeCache)
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::exists(kNet48PresentationFramework, ec))
+        GTEST_SKIP() << "the net48 fixture set is not provisioned";
+    ::ILSpy::Decompiler::Metadata::MetadataFile pf(kNet48PresentationFramework);
+    ASSERT_TRUE(pf.IsValid());
+
+    ::ILSpy::Decompiler::Metadata::UniversalAssemblyResolver resolver(
+        std::string(kNet48PresentationFramework), false,
+        ::ILSpy::Decompiler::Metadata::DetectTargetFrameworkId(pf));
+    ::ILSpy::Decompiler::TypeSystem::DecompilerTypeSystem ts(pf, resolver);
+
+    // System.Object: found in the referenced mscorlib's type definitions
+    // (the KnownTypeCache's SearchType module scan).
+    const TS::IType& object =
+        ts.FindType(TS::KnownTypeCode::Object);
+    EXPECT_EQ(object.Namespace(), "System");
+    EXPECT_EQ(object.Name(), "Object");
+    EXPECT_NE(dynamic_cast<const TS::ITypeDefinition*>(&object), nullptr)
+        << "the known type is the real module entity, not a stand-in";
 }

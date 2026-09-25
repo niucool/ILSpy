@@ -21,8 +21,10 @@
 #include "Decompiler/Metadata/AssemblyNameReference.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/KnownTypeReference.hpp"
 #include "Decompiler/TypeSystem/MetadataModule.hpp"
 #include "Decompiler/TypeSystem/StringComparer.hpp"
+#include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
 #include "Decompiler/Util/CacheManager.hpp"
 
 namespace ILSpy::Decompiler::TypeSystem {
@@ -43,13 +45,44 @@ bool VersionAtLeast(const Metadata::MetadataFile::AssemblyDefinitionInfo& v,
     return v.RevisionNumber >= w.RevisionNumber;
 }
 
+// The C# SimpleCompilation's Init-resolve context: the partially
+// constructed compilation (the `IModuleReference.Resolve` contract -- no
+// user code observes it; the MinimalCorlib resolution is the one consumer).
+class CompilationResolveContext final : public ITypeResolveContext {
+public:
+    explicit CompilationResolveContext(const ICompilation& compilation)
+        : compilation_(&compilation) {}
+
+    const ICompilation& Compilation() const override { return *compilation_; }
+    const IModule* CurrentModule() const override { return nullptr; }
+    const ITypeDefinition* CurrentTypeDefinition() const override {
+        return nullptr;
+    }
+    const IMember* CurrentMember() const override { return nullptr; }
+    // The With* factories are unreachable on the Init-resolve context
+    // (the C# SimpleTypeResolveContext arms); the null-object returns
+    // carry the slots over.
+    std::unique_ptr<ITypeResolveContext> WithCurrentTypeDefinition(
+        const ITypeDefinition*) const override {
+        return std::make_unique<CompilationResolveContext>(*compilation_);
+    }
+    std::unique_ptr<ITypeResolveContext> WithCurrentMember(
+        const IMember*) const override {
+        return std::make_unique<CompilationResolveContext>(*compilation_);
+    }
+
+private:
+    const ICompilation* compilation_;
+};
+
 } // namespace
 
 DecompilerTypeSystem::DecompilerTypeSystem(
     const ::ILSpy::Decompiler::Metadata::MetadataFile& mainModule,
     const ::ILSpy::Decompiler::Metadata::IAssemblyResolver& assemblyResolver,
     ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions typeSystemOptions)
-    : mainFile_(&mainModule), options_(typeSystemOptions) {
+    : mainFile_(&mainModule), options_(typeSystemOptions),
+      knownTypeCache_(*this) {
     // The C# InitializeCoreAsync's main-module seeds: every
     // AssemblyReference row resolves through the resolver (`AddToQueue(true,
     // mainModule, refs)` + the queue drain). The null resolutions drop (the
@@ -98,8 +131,44 @@ DecompilerTypeSystem::DecompilerTypeSystem(
         modules_.push_back(loaded.module.get());
         referencedModules_.push_back(loaded.module.get());
     }
-    // The FindType placeholder (see the header note).
-    knownType_ = std::make_unique<KnownType>(KnownTypeCode::Object);
+    // The C# missing-known-types arm (InitializeCoreAsync's tail):
+    // `KnownTypeReference.AllKnownTypes.Where(IsMissing)` -- a type is
+    // missing when neither the main module nor any referenced assembly
+    // defines it; the MinimalCorlib net fills the gaps (the C#
+    // `referencedAssembliesWithOptions.Concat(new[] {
+    // MinimalCorlib.CreateWithTypes(missingKnownTypes) })`) so the known
+    // types stay resolvable when the reference set misses them (the
+    // attribute literals keep the uncast form -- the resolved Int32 kinds
+    // as Struct rather than the Unknown fallback).
+    std::vector<const KnownTypeReference*> missingKnownTypes;
+    for (const KnownTypeReference* ktr : KnownTypeReference::AllKnownTypes()) {
+        // The C# IsMissing: `!mainModule.GetTypeDefinition(name).IsNil`
+        // over the main file, then every referenced file.
+        if (mainModule_->GetTypeDefinition(ktr->TypeName()) != nullptr)
+            continue;
+        bool found = false;
+        for (auto& loaded : referenced_) {
+            if (loaded.module->GetTypeDefinition(ktr->TypeName())
+                    != nullptr) {
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+            missingKnownTypes.push_back(ktr);
+    }
+    if (!missingKnownTypes.empty()) {
+        minimalCorlib_ = Implementation::MinimalCorlib::CreateWithTypes(
+            std::move(missingKnownTypes));
+        // The C# Init resolves the module reference against the partially
+        // constructed compilation (the IModuleReference contract; the
+        // reference owns the resolved module -- the CorlibModuleReference
+        // keep-alive vector).
+        CompilationResolveContext resolveContext(*this);
+        const IModule* minimalCorlib = minimalCorlib_->Resolve(resolveContext);
+        modules_.push_back(minimalCorlib);
+        referencedModules_.push_back(minimalCorlib);
+    }
 }
 
 DecompilerTypeSystem::~DecompilerTypeSystem() = default;
@@ -132,13 +201,13 @@ const INamespace* DecompilerTypeSystem::GetNamespaceForExternAlias(
 }
 
 const IType& DecompilerTypeSystem::FindType(
-    ::ILSpy::Decompiler::TypeSystem::KnownTypeCode) const {
-    // The C# resolves the known types through the MinimalCorlib safety net
-    // when the reference set misses them (KnownTypeReference.AllKnownTypes);
-    // the port's placeholder answers every code with the single cached
-    // KnownType (the SingleModuleCompilation arm it replaces -- the
-    // MinimalCorlib net rides deferred).
-    return *knownType_;
+    ::ILSpy::Decompiler::TypeSystem::KnownTypeCode typeCode) const {
+    // The C# SimpleCompilation: `knownTypeCache.FindType(typeCode)` -- the
+    // module scan over the compilation's Modules() (the main module + the
+    // reference set this ctor loaded) with the UnknownType fallback (the
+    // C# MinimalCorlib net fills the gaps the reference set leaves; that
+    // arm rides deferred).
+    return knownTypeCache_.FindType(typeCode);
 }
 
 const StringComparer& DecompilerTypeSystem::NameComparer() const {

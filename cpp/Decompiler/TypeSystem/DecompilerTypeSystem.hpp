@@ -28,6 +28,8 @@
 // SimpleCompilation.Init the DecompilerTypeSystem ctor drives).
 
 #include "Decompiler/TypeSystem/ICompilation.hpp"
+#include "Decompiler/TypeSystem/IModuleReference.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCache.hpp"
 #include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
 #include "Decompiler/Util/CacheManager.hpp"
 
@@ -45,6 +47,9 @@ namespace ILSpy::Decompiler::TypeSystem {
 
 class MetadataModule;
 class KnownType;
+namespace Implementation {
+class MinimalCorlib;
+}
 
 class DecompilerTypeSystem final : public ICompilation {
 public:
@@ -85,8 +90,7 @@ public:
         const std::string& alias) const override;
     const IType& FindType(
         ::ILSpy::Decompiler::TypeSystem::KnownTypeCode typeCode) const
-        override;
-    const StringComparer& NameComparer() const override;
+        override;    const StringComparer& NameComparer() const override;
     const ::ILSpy::Decompiler::Util::CacheManager& CacheManager()
         const override;
     ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions
@@ -114,12 +118,15 @@ private:
     // consume them on every resolution).
     std::vector<const IModule*> modules_;
     std::vector<const IModule*> referencedModules_;
+    // The MinimalCorlib net (the C# missing-known-types arm): the module
+    // reference owns its resolved module, so the reference lives with the
+    // compilation.
+    std::unique_ptr<IModuleReference> minimalCorlib_;
     ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions options_;
     ::ILSpy::Decompiler::Util::CacheManager cacheManager_;
-    // The FindType placeholder (the MinimalCorlib arm rides deferred; the
-    // SingleModuleCompilation arm it replaces answers every code with the
-    // single cached Object KnownType).
-    std::unique_ptr<KnownType> knownType_;
+    // The C# SimpleCompilation's `knownTypeCache` (the FindType backing --
+    // the module scan over Modules() with the UnknownType fallback).
+    KnownTypeCache knownTypeCache_;
 };
 
 } // namespace ILSpy::Decompiler::TypeSystem
