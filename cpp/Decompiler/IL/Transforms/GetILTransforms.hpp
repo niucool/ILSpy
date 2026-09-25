@@ -147,11 +147,19 @@ inline void RunILTransformsThroughBlockTransforms(ILFunction& function, ILTransf
     // when-condition block. Must run after inlining and before loop
     // detection (per the C# GetILTransforms() order).
     DetectCatchWhenConditionBlocks().Run(function, context);
+    // DetectExitPoints (the C#'s FIRST call, CSharpDecompiler.cs line 103):
+    // convert the branches exiting the containers the reader emitted
+    // (try regions, the root body) into leave instructions, so the
+    // transforms below -- through the second CFS, SwitchDetection and
+    // LoopDetection -- see leave-shaped exits (the C# history: "Run
+    // IntroduceExitPoints before loop detection, and let loop detection
+    // introduce its own exit points" -- the re-run after loop detection
+    // handles the loops LoopDetection constructs).
+    DetectExitPoints().Run(function, context);
     // ldloca; dup; initobj (Roslyn >= 2 codegen for `var v = default;`
     // + a use of &v): rewrite `stloc s(ldloca v); stobj(ldloc s, default T)`
     // to `stloc v(default T); stloc s(ldloca v)` so `s` can be inlined into
-    // its subsequent uses. Runs after DetectCatchWhenConditionBlocks (the
-    // deferred DetectExitPoints would sit here in the C# order) and before
+    // its subsequent uses. Runs after the first DetectExitPoints and before
     // the second CFS, per GetILTransforms().
     LdLocaDupInitObjTransform().Run(function, context);
     // Early expression-level rewrites the rest of the pipeline
@@ -184,17 +192,18 @@ inline void RunILTransformsThroughBlockTransforms(ILFunction& function, ILTransf
     // positional fall-through. Gated on LiftNullables (default true).
     SwitchOnNullableTransform().Run(function, context);
     LoopDetection().Run(function, context);
+    // DetectExitPoints (the re-run after loop detection, the C# comment at
+    // CSharpDecompiler.cs line 127): replace inner Branch-to-loop-exit with
+    // Leave(loop) so the following transforms can restructure
+    // `if (cond) leave` patterns (invert to `if (!cond) { body }`).
+    DetectExitPoints().Run(function, context);
     // PatternMatching: detect the C# 7.0 `is` patterns Roslyn emits
     // (a type test plus a variable capture) and rewrite the isinst +
     // null-test block tail into a single MatchInstruction condition
-    // (`if (expr is T x) ...`). Runs after LoopDetection and before
-    // ConditionDetection (per GetILTransforms()), so ifs are still
+    // (`if (expr is T x) ...`). Runs after the DetectExitPoints re-run and
+    // before ConditionDetection (per GetILTransforms()), so ifs are still
     // block finals with positional fall-through.
     PatternMatchingTransform().Run(function, context);
-    // DetectExitPoints: replace inner Branch-to-loop-exit with
-    // Leave(loop) so the following ConditionDetection can restructure
-    // `if (cond) leave` patterns (invert to `if (!cond) { body }`).
-    DetectExitPoints().Run(function, context);
     ConditionDetection().Run(function, context);
     // LockTransform: detect the Monitor.Enter/Exit try/finally pattern
     // and fold it into a `lock (expr) { body }`. Runs after

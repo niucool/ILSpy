@@ -427,23 +427,21 @@ Facade instance surface.
   eight transforms are wired at their C# slots; the attribute block
   byte-matches the repo C# render; the connid baseline re-pinned
   (abf6a844eba7c0b3).
-- The IL driver's DetectExitPoints placement -- analyzed, candidate slice:
-  the C# runs DetectExitPoints TWICE (CSharpDecompiler.cs line 103 -- after
-  DetectCatchWhenConditionBlocks, before LdLocaDupInitObjTransform -- and
-  line 128, the re-run after LoopDetection). The port's driver has only
-  the SECOND, its comment at the first slot still reads "the deferred
-  DetectExitPoints would sit here" though the transform is ported and
-  registered (ControlFlow/DetectExitPoints.cpp). The port also runs the
-  re-run AFTER PatternMatchingTransform where the C# runs it BEFORE. The
-  swap is likely behaviorally unobservable (DetectExitPoints rewrites
-  unconditional branch-to-exit; PatternMatching matches conditional
-  block-final branches), but the first call's effect runs through the
-  early transforms -- a behavioral RED over RunGetILTransforms needs a
-  crafted branch-to-exit-inside-the-early-phase fixture. The
-  ported-but-unwired class is otherwise exhausted: ProxyCallReplacer,
-  YieldReturnDecompiler, AsyncAwaitDecompiler, DynamicCallSiteTransform,
-  IntroduceRefReadOnlyModifierOnLocals are NOT ported (no files) --
-  genuine port projects.
+- ~~The IL driver's DetectExitPoints placement~~ DONE: the driver now runs
+  the C#'s TWO DetectExitPoints passes at their C# slots (the line-103
+  first call after DetectCatchWhenConditionBlocks; the re-run after
+  LoopDetection and BEFORE PatternMatchingTransform, where the port had it
+  after). A behavioral RED does not exist by construction: DetectExitPoints
+  rewrites unconditional branch-to-exit and nothing between the two call
+  sites in the port's driver distinguishes those shapes. The change is
+  pure C#-order fidelity, verified unobservable by A/B: the connid render
+  byte-identical, three real net48 corpus assemblies (WindowsBase,
+  System.Core, System.Configuration -- ~12k rendered lines,
+  reference-resolved) byte-identical against the pre-change build, and the
+  full 12856-test suite unchanged. The remaining deferred IL transforms
+  (ProxyCallReplacer, YieldReturnDecompiler, AsyncAwaitDecompiler,
+  DynamicCallSiteTransform, IntroduceRefReadOnlyModifierOnLocals) are NOT
+  ported (no files) -- genuine port projects.
 - The foreach-on-multi-dim arms: VERIFIED COMPLETE after the merge (the
   merged PatternStatementTransform carries the full
   TransformForeachOnMultiDimArray + MatchForeachOnMultiDimArray +
