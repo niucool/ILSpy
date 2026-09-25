@@ -1,4 +1,4 @@
-# ILSpy C++ Port -- Session Handoff (written after `e70667c46`)
+# ILSpy C++ Port -- Session Handoff (written after `46a269370`)
 
 Read this + `PORT_PLAN.md` + `cpp/README.md` (and the sibling
 `cpp/PORT_LOG_BAML.md` / `cpp/PORT_LOG_DISASM.md` logs) at the start of a
@@ -74,21 +74,65 @@ env-gated test for two slices.
 
 ## Next steps (in order)
 
-1. The reference-set wiring: the C# DecompilerTypeSystem over a real
-   assembly resolver (the port's SingleModuleCompilation placeholder
-   lives in the CSharpDecompiler instance state now -- the CLI and the
-   instance entries ride it; the next deepening is resolving
-   TypeRefs against the referenced-core-library set so cross-assembly
-   member targets stop falling back to name-only renders).
+1. The SkipInit forms in DeclareVariables -- UNBLOCKED by the
+   reference-set wiring: the recorded blocker was a live
+   context.TypeSystem for FindType(KnownTypeCode.Unsafe) (the
+   MinimalCorlib net answers it when the reference set misses Unsafe).
+   The remaining work: wire TransformContext::TypeSystem (the slot
+   exists, null today; the callers that hold a module can pass
+   &module.Compilation()), then port the C# DeclareVariables lines
+   717-770 (the SkipInit call statement in both the out-var and the
+   plain-declaration forms).
 2. The deferred GetAstTransforms slots as their transforms land
    (ReplaceMethodCallsWithOperators, IntroduceUnsafeModifier,
    AddCheckedBlocks, TransformFieldAndConstructorInitializers,
    IntroduceUsingDeclarations, ...).
-3. The remaining loud sub-deferrals: UseImplicitlyTypedOutAnnotation,
-   DeclareVariables' InsertDeconstructionVariableDeclarations, the
-   SkipInit forms, IsRefReadOnly.
+3. GetOptions (the DecompilerSettings -> TypeSystemOptions mapping in
+   DecompilerTypeSystem.cs) -- deliberately deferred: the settings
+   defaults could shift the render; port with its own baseline
+   evaluation.
+4. The remaining loud sub-deferrals: UseImplicitlyTypedOutAnnotation,
+   DeclareVariables' InsertDeconstructionVariableDeclarations,
+   IsRefReadOnly.
 
-## LANDED this session (the facade completion + sub-deferrals)
+## LANDED this session (the reference-set wiring)
+
+- `b3cc5f1f4` -- the reference-set wiring: the DecompilerTypeSystem
+  (Decompiler/TypeSystem/) resolves every AssemblyReference row
+  through the existing UniversalAssemblyResolver (the C# CLI
+  GetDecompiler shape: the main file's own directory as the first
+  search path, throwOnError FALSE -- an unresolved reference degrades
+  to the name-only fallback, never a ResolutionException), dedups
+  same-name to the highest version, and fills the compilation's
+  Modules()/ReferencedModules(). A TypeRef scoped to an AssemblyRef now
+  lands on the real entity: PresentationFramework's
+  FrameworkContentElement.Loaded resolves to the PresentationCore
+  RoutedEventHandler delegate. The CSharpDecompiler instance state
+  and the static scaffold entries construct it (the resolver rides
+  FIRST in InstanceState -- its keep-alive registry owns the loaded
+  files); the SingleModuleCompilation placeholder is DELETED. The
+  connid renders are unchanged (its references resolve to nothing in
+  the temp dir -- the baseline holds at 7c269b8e). The deferred queue
+  arms are loud on the ctor: the ExportedTypes BFS, the
+  implicit-references set, GetOptions.
+- `9691fdf08` -- FindType through the KnownTypeCache + the
+  missing-known-types MinimalCorlib net (the ported synthetic module's
+  first production consumer): the connid primitives resolve (the
+  attribute literals keep the uncast form -- without the net,
+  Int32/Boolean/String args render as ((Int32)8) casts through the
+  ConvertValue unknown-underlying arm; the real tool avoids them
+  through this exact net).
+- `46a269370` -- derive DecompilerTypeSystem from the ported
+  SimpleCompilation (the C# hierarchy): the ctor resolves the refs and
+  calls the inherited Init through FileModuleReference adapters (the
+  C# file.WithOptions shape); the merged root namespace, the
+  KnownTypeCache FindType, and the module snapshots now come from the
+  base class.
+- Earlier this session (the facade completion): the event member
+  surface `5be3dc557` (the connid re-pin to 7c269b8e -- the corpus's
+  Button.Click), the -o file-writer `7b6396247`, the CSharpDecompiler
+  instance surface `ab5ed80f0`, the mscorlib test env-gate
+  `e70667c46`.
 
 - `5be3dc557` -- the event member surface in DecompileTypeToString:
   `event Type Name;` via the module's event entity (the C#
