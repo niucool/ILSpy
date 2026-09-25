@@ -67,6 +67,7 @@
 #include "Decompiler/IL/Transforms/GetILTransforms.hpp"
 #include "Decompiler/IL/ILReader.hpp"
 
+#include <algorithm>
 #include <functional>
 #include <map>
 #include <optional>
@@ -338,6 +339,34 @@ std::string RootNamespaceOf(const Metadata::MetadataFile& file,
             return info->Namespace;
         current = info->DeclaringTypeToken;
     }
+}
+
+// The -t render's using directives: the type entity's required namespace
+// set (the unseeded, implicit-base-skipping walk -- the C# resolver's
+// IntroduceUsingDeclarations filtering approximated by the walk's own
+// references), sorted, the type's own namespace excluded.
+std::string UsingDirectivesText(const Metadata::MetadataFile& file,
+                                const TS::MetadataModule& module,
+                                std::uint32_t typeToken) {
+    const TS::ITypeDefinition* typeDef = module.GetDefinition(typeToken);
+    if (typeDef == nullptr)
+        return std::string();
+    std::unordered_set<std::string> namespaces;
+    CollectRequiredNamespaces(
+        *typeDef, const_cast<TS::MetadataModule&>(module), namespaces);
+    const std::string own = RootNamespaceOf(file, typeToken);
+    std::vector<std::string> sorted;
+    for (const std::string& ns : namespaces) {
+        if (!ns.empty() && ns != own)
+            sorted.push_back(ns);
+    }
+    std::sort(sorted.begin(), sorted.end());
+    std::string out;
+    for (const std::string& ns : sorted)
+        out += "using " + ns + ";\n";
+    if (!out.empty())
+        out += "\n";
+    return out;
 }
 
 // The C# TypeDefinitionNameableInBaseList (the f41b12c01 fix for #3230):
@@ -1096,12 +1125,16 @@ bool CSharpDecompiler::DecompileTypeToString(
         },
         typeToken, out);
     if (rendered && wrapNamespace) {
-        // The single-type namespace header (the C# -t render's
-        // file-scoped form: `namespace X;` before the declaration; a
-        // type with no namespace renders bare).
+        // The single-type render's leading using directives + the
+        // namespace header (the C# -t render's file-scoped form:
+        // `using ...;` then `namespace X;` before the declaration; a type
+        // with no namespace renders the bare header).
         std::string ns = RootNamespaceOf(file, typeToken);
         if (!ns.empty())
             out = "namespace " + ns + ";\n\n" + out;
+        out = UsingDirectivesText(file, typeSystem.MainMetadataModule(),
+                                 typeToken) +
+             out;
     }
     return rendered;
 }
@@ -1243,6 +1276,10 @@ bool CSharpDecompiler::DecompileTypeToString(
         std::string ns = RootNamespaceOf(*state_->file, typeToken);
         if (!ns.empty())
             out = "namespace " + ns + ";\n\n" + out;
+        out = UsingDirectivesText(*state_->file,
+                                  state_->typeSystem->MainMetadataModule(),
+                                  typeToken) +
+             out;
     }
     return rendered;
 }

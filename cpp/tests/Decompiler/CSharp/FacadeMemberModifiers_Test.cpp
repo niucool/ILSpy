@@ -519,6 +519,28 @@ TEST(FacadeMemberModifiersTest, NestedTypesRenderInsideTheirDeclaringType)
         << "the nested type renders once: " << whole.substr(0, 200);
 }
 
+// The single-type render carries the required using directives (the C#
+// -t flow's IntroduceUsingDeclarations over the collected namespaces):
+// `using System;` before the namespace header, the type's own namespace
+// excluded, nothing when the type references nothing outside it.
+TEST(FacadeMemberModifiersTest, SingleTypeRenderCarriesUsingDirectives)
+{
+    std::string text;
+    if (!RenderType(kModifierFixture, "ModifierShapes", text))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    EXPECT_EQ(text.find("using System;\n\nnamespace ModifierFixture;\n\n"
+                        "public class ModifierShapes"),
+              0u)
+        << text.substr(0, 200);
+    // A type with no outside references carries no using lines.
+    std::string color;
+    if (!RenderType(kModifierFixture, "Color", color))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    EXPECT_EQ(color.find("namespace ModifierFixture;\n\npublic enum Color"),
+              0u)
+        << color.substr(0, 200);
+}
+
 // The single-type render carries its namespace header (the file-scoped
 // form the oracle renders for a single type: `namespace X;` before the
 // declaration).

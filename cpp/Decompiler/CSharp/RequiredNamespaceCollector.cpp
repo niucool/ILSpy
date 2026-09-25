@@ -33,14 +33,21 @@ namespace TS = ::ILSpy::Decompiler::TypeSystem;
 } // namespace
 
 RequiredNamespaceCollector::RequiredNamespaceCollector(
-    std::unordered_set<std::string>& namespaces)
-    : namespaces_(namespaces) {
+    std::unordered_set<std::string>& namespaces,
+    bool seedKnownTypeNamespaces, bool minimalUsingSet)
+    : namespaces_(namespaces),
+      minimalUsingSet_(minimalUsingSet) {
     // The C# ctor loop: every known type's namespace is a `using` seed (the
     // System / System.Collections.Generic / ... roots the emitted file may
     // reference through known-type spellings). The C#
     // `KnownTypeReference.Get((KnownTypeCode)i)` walks the table indices and
     // skips the null slots; the port's AllKnownTypes snapshot is the same
-    // walk minus the nulls.
+    // walk minus the nulls. The unseeded form serves the flat -t render's
+    // minimal using set (the C#'s candidate pool exists for the resolver's
+    // IntroduceUsingDeclarations filtering; without a resolver the walk's
+    // own references ARE the required set).
+    if (!seedKnownTypeNamespaces)
+        return;
     for (const TS::KnownTypeReference* ktr : TS::KnownTypeReference::AllKnownTypes()) {
         namespaces_.emplace(std::string(ktr->Namespace()));
     }
@@ -91,8 +98,14 @@ void RequiredNamespaceCollector::CollectTypeReference(const TS::IType* type) {
     }
     // The default arm + the base-type sweep.
     namespaces_.emplace(type->Namespace());
-    for (const TS::ITypePtr& baseType : type->DirectBaseTypes()) {
-        namespaces_.emplace(baseType->Namespace());
+    if (!minimalUsingSet_) {
+        // The candidate-pool behavior (the C#'s resolver filters the
+        // pool against the rendered names); the minimal using set skips
+        // the sweep -- a referenced type's base types never render in the
+        // referencing position, so their namespaces are not required.
+        for (const TS::ITypePtr& baseType : type->DirectBaseTypes()) {
+            namespaces_.emplace(baseType->Namespace());
+        }
     }
 }
 

@@ -65,7 +65,14 @@ public:
     // the caller owns the set (the C# reference); the ctor seeds it with every
     // known type's namespace (the C# KnownTypeReference loop).
     explicit RequiredNamespaceCollector(
-        std::unordered_set<std::string>& namespaces);
+        std::unordered_set<std::string>& namespaces,
+        bool seedKnownTypeNamespaces = true,
+        // The flat -t render's minimal using set: skip the attribute
+        // types the transforms strip from every render (the
+        // auto-property's CompilerGenerated/DebuggerBrowsable, the
+        // de-sugar's state machine attributes, the closure debugger
+        // attributes) -- a using for their namespaces is never required.
+        bool minimalUsingSet = false);
 
     // The C# `void CollectNamespacesForTypeReference(IType type)` is private;
     // the port exposes the type-reference walk for the caller-side entity
@@ -92,6 +99,7 @@ private:
     void HandleAttributeValue(const TypeSystem::IType* type, const std::any& value);
 
     std::unordered_set<std::string>& namespaces_;
+    bool minimalUsingSet_ = false;
     std::unordered_set<const TypeSystem::IType*, std::hash<const void*>,
                        std::equal_to<>>
         visitedTypes_;
@@ -102,6 +110,16 @@ private:
 // walk over the given definition. The C# CodeMappingInfo plumbing (the
 // method-body IL scan) runs through the ported Metadata walk.
 void CollectNamespaces(
+    const TypeSystem::IEntity& entity,
+    TypeSystem::MetadataModule& module,
+    std::unordered_set<std::string>& namespaces);
+
+// The flat -t render's minimal using set: the entity walk without the
+// known-type candidate seeding and without the implicit base types
+// (System.Object / System.ValueType / System.Enum -- the render elides
+// them from every base list, so a using for their namespace is never
+// required).
+void CollectRequiredNamespaces(
     const TypeSystem::IEntity& entity,
     TypeSystem::MetadataModule& module,
     std::unordered_set<std::string>& namespaces);

@@ -28,6 +28,7 @@
 #include <cstring>
 #include <vector>
 #include <optional>
+#include <set>
 #include <string>
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/MethodSemanticsLookup.hpp"
@@ -192,7 +193,8 @@ void CollectNamespacesFromMethodBody(RequiredNamespaceCollector& collector,
 void CollectNamespacesEntity(RequiredNamespaceCollector& collector,
                              const TS::IEntity* entity,
                              TS::MetadataModule& module,
-                             MD::CodeMappingInfo* mappingInfo) {
+                             MD::CodeMappingInfo* mappingInfo,
+                             bool skipImplicitBaseTypes) {
     if (entity == nullptr || entity->MetadataToken() == 0) return;
     const MD::MetadataFile* metadata = module.MetadataFile();
     if (metadata == nullptr) return;
@@ -206,22 +208,45 @@ void CollectNamespacesEntity(RequiredNamespaceCollector& collector,
         collector.HandleAttributes(td->GetAttributes());
         HandleTypeParameters(collector, td->TypeParameters());
         for (const TS::ITypePtr& baseType : td->DirectBaseTypes()) {
+            if (skipImplicitBaseTypes && baseType != nullptr &&
+                (TS::IsKnownType(*baseType, TS::KnownTypeCode::Object) ||
+                 TS::IsKnownType(*baseType, TS::KnownTypeCode::ValueType) ||
+                 TS::IsKnownType(*baseType, TS::KnownTypeCode::Enum))) {
+                continue;
+            }
             collector.CollectTypeReference(baseType.get());
         }
         for (const TS::ITypeDefinition* nested : td->NestedTypes()) {
-            CollectNamespacesEntity(collector, nested, module, mappingInfo);
+            CollectNamespacesEntity(collector, nested, module, mappingInfo,
+                                    skipImplicitBaseTypes);
         }
         for (const TS::IField* field : td->Fields()) {
-            CollectNamespacesEntity(collector, field, module, mappingInfo);
+            // The minimal using set: the enum's special value__ field
+            // never renders (the enum member list skips it), so its type
+            // contributes no using.
+            if (skipImplicitBaseTypes && field->Name() == "value__")
+                continue;
+            CollectNamespacesEntity(collector, field, module, mappingInfo,
+                                    skipImplicitBaseTypes);
         }
         for (const TS::IProperty* property : td->Properties()) {
-            CollectNamespacesEntity(collector, property, module, mappingInfo);
+            CollectNamespacesEntity(collector, property, module, mappingInfo,
+                                    skipImplicitBaseTypes);
         }
         for (const TS::IEvent* event : td->Events()) {
-            CollectNamespacesEntity(collector, event, module, mappingInfo);
+            CollectNamespacesEntity(collector, event, module, mappingInfo,
+                                    skipImplicitBaseTypes);
         }
         for (const TS::IMethod* method : td->Methods()) {
-            CollectNamespacesEntity(collector, method, module, mappingInfo);
+            // The minimal using set: the enum's compiler-emitted .ctor (a
+            // void instance constructor no C# enum declaration carries)
+            // never renders.
+            if (skipImplicitBaseTypes &&
+                td->Kind() == TS::TypeKind::Enum &&
+                method->Name() == ".ctor")
+                continue;
+            CollectNamespacesEntity(collector, method, module, mappingInfo,
+                                    skipImplicitBaseTypes);
         }
         return;
     }
@@ -276,11 +301,11 @@ void CollectNamespacesEntity(RequiredNamespaceCollector& collector,
         collector.CollectTypeReference(&property->ReturnType());
         if (property->Getter() != nullptr) {
             CollectNamespacesEntity(collector, property->Getter(), module,
-                                    mappingInfo);
+                                    mappingInfo, skipImplicitBaseTypes);
         }
         if (property->Setter() != nullptr) {
             CollectNamespacesEntity(collector, property->Setter(), module,
-                                    mappingInfo);
+                                    mappingInfo, skipImplicitBaseTypes);
         }
         return;
     }
@@ -289,11 +314,11 @@ void CollectNamespacesEntity(RequiredNamespaceCollector& collector,
         collector.CollectTypeReference(&event->ReturnType());
         if (event->AddAccessor() != nullptr) {
             CollectNamespacesEntity(collector, event->AddAccessor(), module,
-                                    mappingInfo);
+                                    mappingInfo, skipImplicitBaseTypes);
         }
         if (event->RemoveAccessor() != nullptr) {
             CollectNamespacesEntity(collector, event->RemoveAccessor(), module,
-                                    mappingInfo);
+                                    mappingInfo, skipImplicitBaseTypes);
         }
         return;
     }
@@ -303,6 +328,25 @@ void RequiredNamespaceCollector::HandleAttributes(
     const std::vector<const TS::IAttribute*>& attributes) {
     for (const TS::IAttribute* attr : attributes) {
         if (attr == nullptr) continue;
+        if (minimalUsingSet_) {
+            // The stripped attribute families (the auto-property's
+            // backing-field pair, the state machine attributes the
+            // de-sugar removes, the closure debugger attributes) never
+            // render, so a using for their namespaces is not required.
+            static const std::set<std::string> kStripped = {
+                "System.Runtime.CompilerServices.CompilerGeneratedAttribute",
+                "System.Diagnostics.DebuggerBrowsableAttribute",
+                "System.Diagnostics.DebuggerHiddenAttribute",
+                "System.Diagnostics.DebuggerStepThroughAttribute",
+                "System.Diagnostics.DebuggerDisplayAttribute",
+                "System.Runtime.CompilerServices.AsyncStateMachineAttribute",
+                "System.Runtime.CompilerServices.IteratorStateMachineAttribute",
+                "System.Runtime.CompilerServices."
+                "AsyncIteratorStateMachineAttribute",
+            };
+            if (kStripped.count(attr->AttributeType().ReflectionName()) != 0)
+                continue;
+        }
         namespaces_.emplace(attr->AttributeType().Namespace());
         for (const TS::CustomAttributeTypedArgument& arg :
              attr->FixedArguments()) {
@@ -338,7 +382,19 @@ void RequiredNamespaceCollector::HandleAttributeValue(
 void CollectNamespaces(const TS::IEntity& entity, TS::MetadataModule& module,
                        std::unordered_set<std::string>& namespaces) {
     RequiredNamespaceCollector collector(namespaces);
-    CollectNamespacesEntity(collector, &entity, module, nullptr);
+    CollectNamespacesEntity(collector, &entity, module, nullptr,
+                            /*skipImplicitBaseTypes=*/false);
+}
+
+// The flat -t render's minimal using set (see the header).
+void CollectRequiredNamespaces(
+    const TS::IEntity& entity, TS::MetadataModule& module,
+    std::unordered_set<std::string>& namespaces) {
+    RequiredNamespaceCollector collector(
+        namespaces, /*seedKnownTypeNamespaces=*/false,
+        /*minimalUsingSet=*/true);
+    CollectNamespacesEntity(collector, &entity, module, nullptr,
+                            /*skipImplicitBaseTypes=*/true);
 }
 
 // The C# `public static void CollectAttributeNamespaces(MetadataModule,
@@ -358,7 +414,8 @@ void CollectNamespaces(TS::MetadataModule& module,
     RequiredNamespaceCollector collector(namespaces);
     for (const TS::ITypeDefinition* type : module.TypeDefinitions()) {
         if (type == nullptr) continue;
-        CollectNamespacesEntity(collector, type, module, nullptr);
+        CollectNamespacesEntity(collector, type, module, nullptr,
+                                /*skipImplicitBaseTypes=*/false);
     }
     collector.HandleAttributes(module.GetAssemblyAttributes());
     collector.HandleAttributes(module.GetModuleAttributes());
