@@ -3,8 +3,13 @@
 Read this + `PORT_PLAN.md` + `cpp/README.md` (and the sibling
 `cpp/PORT_LOG_BAML.md` / `cpp/PORT_LOG_DISASM.md` logs) at the start of a
 fresh session.
-Standing baseline: **connid_csharp sha256 `8944c06b3e316e71`** (re-pinned
-DELIBERATELY at the whole-module namespace grouping -- the types nest
+Standing baseline: **connid_csharp sha256 `b15a4355a745bc88`** (re-pinned
+DELIBERATELY across the body-name simplification slices: the own-type
+static member accesses render unqualified (`f532f2d0...` -- the .cctor's
+`StaticReadonlyField = 42;`, the bare method groups) and the
+new-expression types render short (`b15a4355...` -- `new
+RoutedEventHandler(...)`). Prior pins: `8944c06b3e316e71` (the
+whole-module namespace grouping -- the types nest
 under `namespace X { }` blocks; the single-type -t header rides the
 entry and does not move the whole-module hash). Prior pins:
 `025b55b938356763` (the render-fidelity slices: the enum keyword +
@@ -493,6 +498,31 @@ type's NestedTypes concat leads the member list).
   pool + resolver filtering approximated by restricting the walk to
   what the render names). The modifier fixture matches the oracle
   exactly (`using System;` on ModifierShapes, none on Color).
+
+### The body-name simplification slices (commits c1f999948/6e0cfcf72)
+
+The corpus's body-level qualification family (~540 lines), two
+commits:
+- **The own-type static member accesses render unqualified**
+  (`c1f999948`): the emitter derives the current function's declaring
+  type from ILFunction.Method (a null Method keeps the qualified
+  render) and simplifies the flattened member name when its type
+  prefix matches -- the static field loads/stores, the method groups
+  (LdFtn), and the static calls. The nested-type '+' separator
+  normalizes; the inherited-static case (a base's member named from a
+  derived type) stays with the name-qualification family.
+- **The new-expression types render short** (`6e0cfcf72`): the newobj
+  arm takes the flattened name's last segment (`new
+  RoutedEventHandler(...)`); the collision qualification stays with
+  the resolver family.
+
+The REMAINING name-qualification family (the resolver surface): the
+base-list collisions (79 corpus diffs -- the oracle qualifies
+`System.Collections.IEnumerable` when the short name is ambiguous),
+the nested-type short forms in base lists (`TemplateContent+Frame` ->
+`Frame` inside the parent), and the `+=` operator rewrite for the
+event add/remove calls (ReplaceMethodCallsWithOperators -- the flat
+renderer renders `add_Click(...)` where the oracle renders `.Click +=`).
 
 NOTE (the stale-queue catches): TransformFieldAndConstructorInitializers
 was ALREADY PORTED via the master merge (885 lines + 17 tests, the
