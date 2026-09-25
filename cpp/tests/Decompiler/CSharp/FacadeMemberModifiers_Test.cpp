@@ -637,6 +637,31 @@ TEST(FacadeMemberModifiersTest, SingleTypeRenderCarriesTheNamespaceHeader)
         << text.substr(0, 200);
 }
 
+// The whole-module render's using header carries the module-wide
+// required set (the C# IntroduceUsingDeclarations over the whole-module
+// tree), not just the assembly-attribute namespaces: the connid module's
+// header includes the WPF namespaces the type bodies reference, and the
+// module's own namespace never appears.
+TEST(FacadeMemberModifiersTest, WholeModuleUsingHeaderCarriesTheModuleWideSet)
+{
+    std::string path = ::ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    Metadata::MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+    std::string whole =
+        CSharp::CSharpDecompiler::DecompileWholeModuleToString(file);
+    EXPECT_NE(whole.find("using System.Windows;\n"), std::string::npos)
+        << whole.substr(0, 300);
+    EXPECT_NE(whole.find("using System.CodeDom.Compiler;\n"),
+              std::string::npos)
+        << whole.substr(0, 300);
+    EXPECT_EQ(whole.find("using MyApp;"), std::string::npos)
+        << "the module's own namespace never appears: " << whole.substr(0, 300);
+    // The header precedes the attribute sections.
+    EXPECT_LT(whole.find("using System.Windows;"),
+              whole.find("[assembly:"));
+}
+
 // The whole-module render groups the types by namespace (the C#
 // DoDecompileTypes' NamespaceDeclaration emission): consecutive
 // same-namespace types nest under one `namespace X { }` block; types

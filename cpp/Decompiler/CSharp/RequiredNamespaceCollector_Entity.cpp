@@ -397,6 +397,22 @@ void CollectRequiredNamespaces(
                             /*skipImplicitBaseTypes=*/true);
 }
 
+// The module-wide minimal using set (see the header).
+void CollectRequiredNamespaces(
+    TS::MetadataModule& module, std::unordered_set<std::string>& namespaces) {
+    RequiredNamespaceCollector collector(
+        namespaces, /*seedKnownTypeNamespaces=*/false,
+        /*minimalUsingSet=*/true);
+    for (const TS::ITypeDefinition* type : module.TypeDefinitions()) {
+        if (type == nullptr)
+            continue;
+        CollectNamespacesEntity(collector, type, module, nullptr,
+                                /*skipImplicitBaseTypes=*/true);
+    }
+    collector.HandleAttributes(module.GetAssemblyAttributes());
+    collector.HandleAttributes(module.GetModuleAttributes());
+}
+
 // The C# `public static void CollectAttributeNamespaces(MetadataModule,
 // HashSet<string>)`: the assembly + module attribute sweep only.
 void CollectAttributeNamespaces(TS::MetadataModule& module,

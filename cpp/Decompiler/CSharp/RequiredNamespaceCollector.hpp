@@ -124,6 +124,13 @@ void CollectRequiredNamespaces(
     TypeSystem::MetadataModule& module,
     std::unordered_set<std::string>& namespaces);
 
+// The module-wide form: every type definition plus the assembly/module
+// attribute sweep, under the minimal using-set restrictions (see the
+// entity form).
+void CollectRequiredNamespaces(
+    TypeSystem::MetadataModule& module,
+    std::unordered_set<std::string>& namespaces);
+
 // The C# `public static void CollectAttributeNamespaces(MetadataModule,
 // HashSet<string>)`: the assembly + module attribute sweep only.
 void CollectAttributeNamespaces(

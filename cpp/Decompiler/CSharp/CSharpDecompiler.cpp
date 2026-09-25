@@ -43,6 +43,7 @@
 #include "Decompiler/CSharp/Transforms/PatternStatementTransform.hpp"
 #include "Decompiler/CSharp/Transforms/DeclareVariables.hpp"
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
+#include "Decompiler/CSharp/Syntax/UsingDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Attribute.hpp"
 #include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
 #include "Decompiler/CSharp/Syntax/EntityDeclaration.hpp"
@@ -1219,6 +1220,64 @@ CSharpDecompiler::CSharpDecompiler(
 
 CSharpDecompiler::~CSharpDecompiler() = default;
 
+// The whole-module render's leading block: the module-wide using header
+// (the C# IntroduceUsingDeclarations over the whole-module tree -- the
+// usings cover the type bodies' references, not just the attribute
+// namespaces the attribute tree's own transform collects) followed by the
+// attribute sections. The module's own type namespaces never appear (the
+// tree's names inside them resolve through the namespace declarations).
+std::string WholeModuleHeader(
+    const ::ILSpy::Decompiler::TypeSystem::MetadataModule& module) {
+    // A namespace is emitted iff some type OUTSIDE it references it (the
+    // C# resolver's per-namespace-block resolution: a name inside
+    // `namespace N { }` resolves without a using for N, so N's own types
+    // never pull it in; a module-owned namespace referenced only by its
+    // own types -- the connid's stub types -- never appears either). The
+    // assembly/module attributes' namespaces always emit (they sit at the
+    // file root, outside every namespace block).
+    std::set<std::string> emitted;
+    const auto* metadata = module.MetadataFile();
+    for (const TS::ITypeDefinition* type : module.TypeDefinitions()) {
+        if (type == nullptr)
+            continue;
+        std::unordered_set<std::string> typeNamespaces;
+        CollectRequiredNamespaces(*type,
+                                  const_cast<TS::MetadataModule&>(module),
+                                  typeNamespaces);
+        for (const std::string& ns : typeNamespaces) {
+            if (!ns.empty() && ns != type->Namespace())
+                emitted.insert(ns);
+        }
+    }
+    std::unordered_set<std::string> attributeNamespaces;
+    CollectAttributeNamespaces(const_cast<TS::MetadataModule&>(module),
+                                attributeNamespaces);
+    for (const std::string& ns : attributeNamespaces) {
+        if (!ns.empty())
+            emitted.insert(ns);
+    }
+    std::vector<std::string> sorted(emitted.begin(), emitted.end());
+    std::sort(sorted.begin(), sorted.end());
+    std::string out;
+    for (const std::string& ns : sorted)
+        out += "using " + ns + ";\n";
+    if (!out.empty())
+        out += "\n";
+    // The attribute sections: the attribute tree rendered without its own
+    // using declarations (the module-wide header replaces them).
+    std::unique_ptr<Syntax::SyntaxTree> syntaxTree(
+        CSharpDecompiler::DecompileModuleAndAssemblyAttributes(module));
+    for (int i = syntaxTree->Members().Count() - 1; i >= 0; i--) {
+        if (dynamic_cast<Syntax::UsingDeclaration*>(
+                syntaxTree->Members().At(i)) != nullptr)
+            syntaxTree->Members().At(i)->Remove();
+    }
+    OutputVisitor::CSharpFormattingOptions options =
+        SettingsFormattingOptions();
+    out += syntaxTree->ToString(&options);
+    return out;
+}
+
 std::string CSharpDecompiler::DecompileWholeModuleToString() {
     // The C# DecompileWholeModuleAsSingleFile composition over THIS
     // instance's wiring: the attribute sections, then every type in
@@ -1228,8 +1287,7 @@ std::string CSharpDecompiler::DecompileWholeModuleToString() {
     // same-namespace types nest under one block; the empty namespace
     // renders at the root; a hidden type does not break the group).
     std::string out;
-    out += DecompileModuleAndAssemblyAttributesToString(
-        state_->typeSystem->MainMetadataModule());
+    out += WholeModuleHeader(state_->typeSystem->MainMetadataModule());
     std::string currentNamespace;
     bool namespaceOpen = false;
     for (const auto& t : state_->file->TypeDefs()) {
@@ -1449,8 +1507,7 @@ std::string CSharpDecompiler::DecompileWholeModuleToString(
     std::string out;
     // The leading attribute sections (the whole-module path's
     // DoDecompileModuleAndAssemblyAttributes call at line 917).
-    out += DecompileModuleAndAssemblyAttributesToString(
-        typeSystem.MainMetadataModule());
+    out += WholeModuleHeader(typeSystem.MainMetadataModule());
     // The types (the C# DoDecompileTypes loop in metadata order), grouped
     // by namespace (the NamespaceDeclaration emission; a hidden type does
     // not break the group).
