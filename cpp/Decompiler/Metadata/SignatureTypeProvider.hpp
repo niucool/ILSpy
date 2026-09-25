@@ -606,7 +606,6 @@ SignatureTypeProviderDecoder<TProvider>::DecodeType(
     end_ = data + size;
     context_ = &genericContext;
     TType t = DecodeTypeWithPrefixes();
-    if (cur_ != end_) Fail("trailing bytes after the type");
     context_ = nullptr;
     return t;
 }
@@ -620,7 +619,6 @@ SignatureTypeProviderDecoder<TProvider>::DecodeMethodSignature(
     end_ = data + size;
     context_ = &genericContext;
     ProviderMethodSignature<TType> sig = DecodeMethodSignatureBody();
-    if (cur_ != end_) Fail("trailing bytes after the method signature");
     context_ = nullptr;
     return sig;
 }
@@ -652,7 +650,6 @@ SignatureTypeProviderDecoder<TProvider>::DecodeMethodSpecSignature(
     for (std::uint32_t i = 0; i < count; i++) {
         result.push_back(DecodeTypeWithPrefixes());
     }
-    if (cur_ != end_) Fail("trailing bytes after the method specification");
     context_ = nullptr;
     return result;
 }
@@ -683,7 +680,6 @@ SignatureTypeProviderDecoder<TProvider>::DecodeLocalSignature(
     for (std::uint32_t i = 0; i < count; i++) {
         result.push_back(DecodeTypeWithPrefixes());
     }
-    if (cur_ != end_) Fail("trailing bytes after the local signature");
     context_ = nullptr;
     return result;
 }
