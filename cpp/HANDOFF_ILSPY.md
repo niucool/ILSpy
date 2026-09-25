@@ -1,4 +1,4 @@
-# ILSpy C++ Port -- Session Handoff (written after `6f27d7110`)
+# ILSpy C++ Port -- Session Handoff (written after `a0c5631cc`)
 
 Read this + `PORT_PLAN.md` + `cpp/README.md` (and the sibling
 `cpp/PORT_LOG_BAML.md` / `cpp/PORT_LOG_DISASM.md` logs) at the start of a
@@ -9,7 +9,9 @@ from per-method comment blocks to the C# ilspycmd shape -- the leading
 [assembly]/[module] sections plus `public partial class` type bodies with
 fields/properties/constructors/method members. The pre-facade hash was
 `8358d5c1d6ff7ad3`, re-baselined deliberately at `164dd1a9b`). Sweep:
-`181 passed + 1 skipped` (filters below).
+`192 passed + 1 skipped + 1 env-gated skip` (filters below; add
+TypeSystemExtensionsTest.IsAnonymous* and PropertyAndEventBackingFieldLookupTest.*
+to the filter as the families land).
 
 ## Current position
 
@@ -70,18 +72,53 @@ fields/properties/constructors/method members. The pre-facade hash was
 
 ## Next steps (in order)
 
-1. **The facade completion items** (PORT_PLAN.md's remaining facade
+1. **The automatic-events arm completes the events family**: port
+   PatternStatementTransform's `VisitEventDeclaration` (C# lines 128-139)
+   + `IsEventBackingFieldDeclaration` (line 917): the field-decl removal
+   under an EventDeclaration whose symbol is an IEvent, gated on the
+   AutomaticEvents setting. The metadata lookup is LANDED
+   (`a0c5631cc`: MetadataFile::GetPropertyAndEventBackingFieldLookup). The
+   BLOCKER: the local corpora carry no events (connid has none; the
+   mscorlib env-gate skips here) -- the arm's test needs either the
+   mscorlib fixture (an env-gated test) or a synthetic event-carrying
+   module (the MslSynth/TinyNetModule fixture pattern). The rig: an
+   EventDeclaration + the IEvent symbol annotation, a FieldDeclaration +
+   an IField stub whose ParentModule is a TS::MetadataModule over the
+   event-carrying file (Accessibility Private, ReturnType equal on both,
+   MetadataToken the walk-found row).
+2. **The facade completion items** (PORT_PLAN.md's remaining facade
    checklist) and the deferred GetAstTransforms slots as their transforms
-   land; the PatternStatementTransform work is done.
-   LANDED this session: the AST-path DecompileModuleAndAssemblyAttributes
+   land.
+   LANDED earlier: the AST-path DecompileModuleAndAssemblyAttributes
    (`c24930d38`), the property/constructor member surfaces
    (`067366fd9`), and the whole-module CLI adoption
-   (DecompileWholeModuleToString; the --csharp path routes through the
-   facade, -t through the type entry -- the connid re-pin above). The
-   remaining facade gaps: the event member surface (deferred loudly in
-   DecompileTypeToString -- needs an event-carrying fixture), the -o
+   (`05348dce8` -- the connid re-pin above). The
+   remaining facade gaps: the event member surface in
+   DecompileTypeToString (deferred loudly -- needs the event-carrying
+   fixture above), the -o
    file-writer, and the instance surface (the per-instance type-system
    wiring and the partial-types registry lifetime).
+
+## LANDED this session (the queued sub-deferrals)
+
+- `d52d163a8` -- AddressUsedForSingleCall: the single-call this-pointer
+  address use is acceptable as the foreach item variable (the last
+  VariableCanBeUsedAsForeachLocal deferral; both blockers had landed).
+- `7060a585b` + `fe5d33413` -- the anonymous-type `var` decision
+  everywhere it was noted: HasGeneratedName / HasOnlyReadOnlyProperties /
+  IsAnonymousType / ContainsAnonymousType in TypeSystemExtensions (the
+  NRExtensions family), the three foreach arms, and DeclareVariables'
+  combine + out-var arms (the OutVarResolveResult re-annotation; the
+  UseImplicitlyTypedOutAnnotation sub-case stays deferred -- the
+  annotation surface is not ported).
+- `a0c5631cc` -- PropertyAndEventBackingFieldLookup (the metadata
+  surface for the events arm above).
+
+The remaining known deferrals, loud in place: the automatic-events ARM
+(the item above), UseImplicitlyTypedOutAnnotation, the DeclareVariables
+sub-deferrals (InsertDeconstructionVariableDeclarations, the SkipInit
+forms, IsRefReadOnly), the event member surface in the facade, and the
+Facade instance surface.
 
 ## Hazard-ledger highlights (keep)
 
