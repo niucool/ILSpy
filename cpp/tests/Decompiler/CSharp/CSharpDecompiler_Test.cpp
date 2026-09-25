@@ -50,6 +50,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <string>
 
@@ -554,6 +555,37 @@ TEST(CSharpDecompilerTest, DecompileTypeRendersConstructors)
         return;
     }
     FAIL() << "the connid corpus has no EventSetter type";
+}
+
+// The event member surface (the C# DoDecompileMember's event arm): an
+// event renders as its `event Type Name;` declaration -- the type through
+// the module's token resolver (the C# entity.ReturnType; the add/remove
+// accessor bodies are the flat renderer's documented stand-in gap, like
+// the fields').
+TEST(CSharpDecompilerTest, DecompileTypeRendersEvents)
+{
+    std::error_code ec;
+    if (!std::filesystem::exists(
+            "/home/jim/ilspy-test-fixtures/net48/PresentationFramework.dll",
+            ec))
+        GTEST_SKIP() << "the net48 fixture set is not provisioned";
+    ::ILSpy::Decompiler::Metadata::MetadataFile file(
+        "/home/jim/ilspy-test-fixtures/net48/PresentationFramework.dll");
+    ASSERT_TRUE(file.IsValid());
+    for (const auto& t : file.TypeDefs()) {
+        if (t.Name != "FrameworkContentElement") continue;
+        std::string text;
+        ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
+            file, t.Token, text));
+        // Loaded: a RoutedEventHandler event (the WPF field-like shape).
+        if (std::getenv("TET_TRACE"))
+            std::fprintf(stderr, "TET-EV: %s\n", text.c_str());
+        EXPECT_NE(text.find("event RoutedEventHandler Loaded;"),
+                  std::string::npos)
+            << "the event renders as its declaration: " << text;
+        return;
+    }
+    FAIL() << "the corpus has no FrameworkContentElement type";
 }
 
 TEST(CSharpDecompilerTest, DecompileTypeEmitsPartialHeader)

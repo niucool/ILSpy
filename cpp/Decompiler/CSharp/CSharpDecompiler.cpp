@@ -25,6 +25,7 @@
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
 #include "Decompiler/CSharp/Syntax/SyntaxTree.hpp"
 #include "Decompiler/TypeSystem/INamespace.hpp"
+#include "Decompiler/TypeSystem/IEvent.hpp"
 #include "Decompiler/TypeSystem/StringComparer.hpp"
 #include "Decompiler/Util/CacheManager.hpp"
 #include "Decompiler/DecompileRun.hpp"
@@ -148,6 +149,55 @@ bool CSharpDecompiler::DecompileMethodToString(
     return true;
 }
 
+
+
+// The C# instance ctor's type-system wiring (`typeSystem = new
+// DecompilerTypeSystem(module, settings)`, CSharpDecompiler.cs line 218):
+// the port's static entries build it per call -- a minimal single-module
+// compilation over the metadata file (the MainModule set after the module
+// binds the compilation reference, the MetadataModule_Test pattern). The
+// hand-rolled shape rides until the instance surface lands (the C#
+// PEFile-as-IModuleReference resolution needs no compilation; the port's
+// MetadataModule ctor takes the compilation reference first).
+class SingleModuleCompilation : public TS::ICompilation {
+public:
+    void SetMainModule(const TS::IModule* module) { mainModule_ = module; }
+
+    const TS::IModule& MainModule() const override { return *mainModule_; }
+    std::vector<const TS::IModule*> Modules() const override {
+        return std::vector<const TS::IModule*>{mainModule_};
+    }
+    std::vector<const TS::IModule*> ReferencedModules() const override {
+        return {};
+    }
+    const TS::INamespace& RootNamespace() const override {
+        return mainModule_->RootNamespace();
+    }
+    const TS::INamespace* GetNamespaceForExternAlias(
+        const std::string&) const override {
+        return nullptr;
+    }
+    const TS::IType& FindType(TS::KnownTypeCode) const override {
+        return knownType_;
+    }
+    const TS::StringComparer& NameComparer() const override {
+        return TS::StringComparer::Ordinal();
+    }
+    const ::ILSpy::Decompiler::Util::CacheManager& CacheManager()
+        const override {
+        return cacheManager_;
+    }
+    TS::TypeSystemOptions TypeSystemOptions() const override {
+        return TS::TypeSystemOptions::Default;
+    }
+
+private:
+    const TS::IModule* mainModule_ = nullptr;
+    ::ILSpy::Decompiler::Util::CacheManager cacheManager_;
+    TS::KnownType knownType_{TS::KnownTypeCode::Object};
+};
+
+
 // The type-level entry: the type's decodable method bodies rendered in
 // sequence (the C# DecompileType's member iteration; the field/property
 // surfaces land with the metadata-slice work).
@@ -251,12 +301,46 @@ bool CSharpDecompiler::DecompileTypeToString(
             accessorTokens.insert(token);
         backingFieldNames.insert("<" + p.Name + ">k__BackingField");
     }
-    // The event declarations (the C# event arm) are DEFERRED: the corpus
-    // carries no event rows to test against, and the event TYPE resolves
-    // through the TypeDefOrRef token (the ReflectionDisassembler's
-    // provider path) plus the add/remove accessor bodies. The
-    // accessor-token collection below still covers the event accessors so
-    // they never render as plain methods when a fixture lands them.
+    // The event declarations (the C# DoDecompileMember's event arm): the
+    // `event Type Name;` shape -- the type through the module's event
+    // entity (the C# entity.ReturnType, the declaring type's generic
+    // context included), the add/remove accessor methods collected for
+    // the method-loop skip (the C# renders them through the event; their
+    // bodies are the flat renderer's documented stand-in gap, like the
+    // fields'). The per-call module wiring (the SingleModuleCompilation
+    // shape) rides until the instance surface.
+    if (!file.GetEvents(typeToken).empty()) {
+        SingleModuleCompilation compilation;
+        TS::MetadataModule module{compilation, &file,
+                                  TS::TypeSystemOptions::Default};
+        compilation.SetMainModule(&module);
+        for (const auto& e : file.GetEvents(typeToken)) {
+            auto accessors = file.GetEventAccessors(e.Token);
+            accessorTokens.insert(accessors.AdderToken);
+            accessorTokens.insert(accessors.RemoverToken);
+            accessorTokens.insert(accessors.RaiserToken);
+            for (std::uint32_t token : accessors.OtherTokens)
+                accessorTokens.insert(token);
+            std::string eventTypeName = "object";
+            const TS::IEvent* event = module.GetDefinitionEvent(e.Token);
+            if (event != nullptr) {
+                // A non-owning alias (the module's entity cache owns the
+                // event and its resolved return type -- the no-op-deleter
+                // convention; the const_cast is the established
+                // mutable-object-behind-the-const-ref convention).
+                TS::ITypePtr eventType(
+                    const_cast<TS::IType*>(&event->ReturnType()),
+                    [](TS::IType*) {});
+                eventTypeName = IL::CSharpTypeName(eventType);
+            }
+            out += "event ";
+            out += eventTypeName;
+            out += ' ';
+            out += e.Name;
+            out += ";\n";
+            rendered = true;
+        }
+    }
     // The field declarations (the C# DecompileType's field members): the
     // `Type name;` shape from GetFields + GetFieldSignature (the C#
     // AstBuilder renders the modifiers and the initializer from the IL --
@@ -342,51 +426,6 @@ namespace {
 
 namespace TS = ::ILSpy::Decompiler::TypeSystem;
 
-// The C# instance ctor's type-system wiring (`typeSystem = new
-// DecompilerTypeSystem(module, settings)`, CSharpDecompiler.cs line 218):
-// the port's static entries build it per call -- a minimal single-module
-// compilation over the metadata file (the MainModule set after the module
-// binds the compilation reference, the MetadataModule_Test pattern). The
-// hand-rolled shape rides until the instance surface lands (the C#
-// PEFile-as-IModuleReference resolution needs no compilation; the port's
-// MetadataModule ctor takes the compilation reference first).
-class SingleModuleCompilation : public TS::ICompilation {
-public:
-    void SetMainModule(const TS::IModule* module) { mainModule_ = module; }
-
-    const TS::IModule& MainModule() const override { return *mainModule_; }
-    std::vector<const TS::IModule*> Modules() const override {
-        return std::vector<const TS::IModule*>{mainModule_};
-    }
-    std::vector<const TS::IModule*> ReferencedModules() const override {
-        return {};
-    }
-    const TS::INamespace& RootNamespace() const override {
-        return mainModule_->RootNamespace();
-    }
-    const TS::INamespace* GetNamespaceForExternAlias(
-        const std::string&) const override {
-        return nullptr;
-    }
-    const TS::IType& FindType(TS::KnownTypeCode) const override {
-        return knownType_;
-    }
-    const TS::StringComparer& NameComparer() const override {
-        return TS::StringComparer::Ordinal();
-    }
-    const ::ILSpy::Decompiler::Util::CacheManager& CacheManager()
-        const override {
-        return cacheManager_;
-    }
-    TS::TypeSystemOptions TypeSystemOptions() const override {
-        return TS::TypeSystemOptions::Default;
-    }
-
-private:
-    const TS::IModule* mainModule_ = nullptr;
-    ::ILSpy::Decompiler::Util::CacheManager cacheManager_;
-    TS::KnownType knownType_{TS::KnownTypeCode::Object};
-};
 
 // The C# `typeSystem.GetNamespaceByFullName(ns)` (CreateDecompileRun's
 // resolver, line 758): the root-namespace walk over the dotted name.
