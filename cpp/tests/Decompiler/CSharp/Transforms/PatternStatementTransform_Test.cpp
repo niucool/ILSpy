@@ -570,6 +570,51 @@ TEST(PatternStatementTransformTest, RefLocalNotUsedAfterConverts)
         << "a ref local not used after the loop still converts";
 }
 
+// A variable used in the iterator part whose declaration point sits INSIDE
+// the loop body blocks the reshape: hoisting the initializer into the for's
+// iterator slot would move the use out of the body scope that declares it.
+// (x is declared and used only inside the body, and the iterator reads x.)
+TEST(PatternStatementTransformTest, IteratorVariableDeclaredInsideBodyKeepsWhile)
+{
+    PatternStatementFixture fx;
+    IL::ILVariablePtr v = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local, TS::UnknownType());
+    IL::ILVariablePtr x = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local, TS::UnknownType());
+    x->Name = "x";
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    block->Statements().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Var("v", v),
+                                          Syntax::AssignmentOperatorType::Assign,
+                                          Id("zero"))));
+    // body: x = one; work(x); v = v + x;   -- the iterator reads x, whose
+    // uses are all inside the body.
+    auto* iterator = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            Var("v", v), Syntax::AssignmentOperatorType::Assign,
+            new Syntax::BinaryOperatorExpression(
+                Var("v", v), Syntax::BinaryOperatorType::Add, Var("x", x))));
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Var("x", x),
+                                          Syntax::AssignmentOperatorType::Assign,
+                                          Id("one"))));
+    body->Statements().Add(new Syntax::ExpressionStatement(Var("x", x)));
+    body->Statements().Add(iterator);
+    auto* loop = new Syntax::WhileStatement(
+        new Syntax::BinaryOperatorExpression(Var("v", v),
+                                              Syntax::BinaryOperatorType::LessThan,
+                                              Id("n")),
+        body);
+    block->Statements().Add(loop);
+
+    RunTransform(*block, fx);
+
+    ASSERT_EQ(block->Statements().Count(), 2);
+    EXPECT_EQ(block->Statements().At(1), loop)
+        << "an iterator variable declared inside the body keeps the while loop";
+}
+
 // `v = 0;` immediately before an existing for statement that uses `v` in its
 // condition or iterators moves the declaration into the for's initializers.
 TEST(PatternStatementTransformTest, DeclarationMergesIntoForInitializer)

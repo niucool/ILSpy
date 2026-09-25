@@ -114,6 +114,7 @@ ILVariable* TransformDisplayClassUsage::VariableToDeclare::GetOrDeclare() {
                   field_->Name())
             : nullptr;
     if (declaredVariable_ != nullptr) {
+        declaredVariable_->InitialValueIsInitialized = true;
         declaredVariable_->UsesInitialValue = UsesInitialValue;
     }
     return declaredVariable_.get();

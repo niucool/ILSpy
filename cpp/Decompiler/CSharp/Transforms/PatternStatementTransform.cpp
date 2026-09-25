@@ -41,13 +41,12 @@
 // first order of the port plan): foreach-on-array / inline-array / multi-dim,
 // TransformAutomaticProperty, the destructor
 // TransformDestructorFinalizerWithPattern, TransformTryCatchFinally, the C# 7.3
-// pattern-based fixed, the C# 8.0 enhanced using, the Identifier
-// backing-field rewrite, and the for reshape's
-// IteratorVariablesDeclaredInsideLoopBody bail (it reads
-// declareVariables.GetDeclarationPoint, so it lands with the DeclareVariables
-// port). The `DeclareVariables declareVariables` member (the C# Run's
-// `declareVariables.Analyze(rootNode)` + `ClearAnalysisResults`) lands with
-// the DeclareVariables port; none of the ported arms read its analysis.
+// pattern-based fixed, the C# 8.0 enhanced using, and the Identifier
+// backing-field rewrite. The `DeclareVariables declareVariables` member's
+// analysis (Analyze/GetDeclarationPoint, feeding the for reshape's
+// iterator-variable bail) is ported; the DeclareVariables mutation half
+// (Run/InsertVariableDeclarations/UpdateAnnotations and its GetAstTransforms
+// slot) lands with its own slice.
 
 #include "Decompiler/CSharp/Transforms/PatternStatementTransform.hpp"
 
@@ -76,6 +75,7 @@
 #include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
 #include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
+#include "Decompiler/CSharp/Transforms/DeclareVariables.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
@@ -279,6 +279,9 @@ class PatternStatementTransformVisitor final : public Syntax::DepthFirstAstVisit
 public:
     // The C# `[AllowNull] TransformContext context`.
     TransformContext* context = nullptr;
+    // The transform's DeclareVariables analysis (the C# reads the same
+    // instance's member through the transform object).
+    DeclareVariables* declareVariables = nullptr;
 
     // The C# `protected ITypeDefinition? currentTypeDefinition` / `IMethod?
     // currentMethod` (the ContextTrackingVisitor tracking slots; the deferred
@@ -447,17 +450,15 @@ public:
         if (variable != nullptr && variable->Type->IsByRefLike() &&
             IsVariableUsedAfter(loop, variable))
             return nullptr;
-        // DEFERRED loudly with the DeclareVariables port (the
-        // `IteratorVariablesDeclaredInsideLoopBody` bail, C# line ~225): the
-        // check reads `declareVariables.GetDeclarationPoint(v)` over the
-        // Analyze-filled variableDict, which does not exist until that class
-        // ports. Until then this arm may reshape a loop whose iterator variable
-        // is declared inside the body -- the AST pipeline is not yet wired into
-        // the CLI decompilation path, so no output changes.
         std::vector<Syntax::Statement*> iteratorCaptures =
             m3.Get<Syntax::Statement>("iterator");
         assert(iteratorCaptures.size() == 1);
         Syntax::Statement* iteratorStatement = iteratorCaptures.front();
+        // Cannot convert to for loop, if any variable that is used in the
+        // "iterator" part of the pattern, will be declared in the body of
+        // the while-loop.
+        if (IteratorVariablesDeclaredInsideLoopBody(iteratorStatement))
+            return nullptr;
         // Cannot convert to for loop, because that would change the semantics of
         // the program: continue in while jumps to the condition block, whereas
         // continue in for jumps to the increment block.
@@ -483,6 +484,25 @@ public:
         // The C# `context.EndStep(forStatement)` (the step-group close) folds
         // onto the single step hook.
         return forStatement;
+    }
+
+    // The C# `bool IteratorVariablesDeclaredInsideLoopBody(Statement
+    // iteratorStatement)` (line ~266): a variable whose declaration point sits
+    // in the same block as the iterator (the loop body) would be declared in
+    // the body scope, which the for's iterator slot cannot see.
+    bool IteratorVariablesDeclaredInsideLoopBody(Syntax::Statement* iteratorStatement) {
+        for (Syntax::AstNode* node : iteratorStatement->DescendantsAndSelf()) {
+            auto* identifier = dynamic_cast<Syntax::IdentifierExpression*>(node);
+            if (identifier == nullptr)
+                continue;
+            IL::ILVariable* v = CS::GetILVariable(*identifier);
+            if (v == nullptr || !DeclareVariables::VariableNeedsDeclaration(v->Kind))
+                continue;
+            if (declareVariables->GetDeclarationPoint(v)->Parent() ==
+                iteratorStatement->Parent())
+                return true;
+        }
+        return false;
     }
 
     // The C# `public override AstNode VisitIfElseStatement(IfElseStatement ...)`.
@@ -583,17 +603,18 @@ void PatternStatementTransform::Run(Syntax::AstNode& rootNode, TransformContext&
     try {
         PatternStatementTransformVisitor visitor;
         visitor.context = &context;
+        visitor.declareVariables = &declareVariables_;
         visitor.Initialize(context);
-        // The C# `declareVariables.Analyze(rootNode)` (+ the finally's
-        // ClearAnalysisResults) is deferred with the DeclareVariables port; the
-        // ported arms read none of its analysis.
+        declareVariables_.Analyze(rootNode);
         rootNode.AcceptVisitor(visitor);
         // The C# finally also Uninitializes; the visitor's destruction covers it.
     } catch (...) {
         context_ = nullptr;
+        declareVariables_.ClearAnalysisResults();
         throw;
     }
     context_ = nullptr;
+    declareVariables_.ClearAnalysisResults();
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Transforms

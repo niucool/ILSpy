@@ -434,6 +434,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Transforms/PrettifyAssignments_Test.cpp
     Decompiler/CSharp/Transforms/NormalizeBlockStatements_Test.cpp
     Decompiler/CSharp/Transforms/PatternStatementTransform_Test.cpp
+    Decompiler/CSharp/Transforms/DeclareVariables_Test.cpp
     Decompiler/CSharp/RequiredNamespaceCollector_Test.cpp
     Decompiler/CSharp/RequiredNamespaceCollectorMetadata_Test.cpp
     Decompiler/CSharp/Syntax/Statements/UsingStatement_Test.cpp

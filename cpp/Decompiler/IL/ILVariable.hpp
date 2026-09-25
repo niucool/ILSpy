@@ -84,6 +84,12 @@ public:
     // SROA/initializer paths; RemoveDeadVariableInit resets it).
     bool UsesInitialValue = false;
 
+    // The C# `public bool InitialValueIsInitialized` (ILVariable.cs): whether
+    // the variable's initial value is already initialized (set by the
+    // display-class declaration path and the initializer analysis; read by
+    // DeclareVariables to pick NeedsDefaultValue over NeedsSkipInit).
+    bool InitialValueIsInitialized = false;
+
     // The C# `public BlockContainer? CaptureScope { get; internal set; }`
     // (ILVariable.cs): the container the variable is captured in -- the
     // closest container of its first address-taking use or initializer store,

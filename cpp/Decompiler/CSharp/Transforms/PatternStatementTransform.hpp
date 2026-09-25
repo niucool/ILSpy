@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include "Decompiler/CSharp/Transforms/DeclareVariables.hpp"
 #include "Decompiler/CSharp/Transforms/IAstTransform.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Transforms {
@@ -42,6 +43,9 @@ private:
     // The C# `[AllowNull] TransformContext context` field -- the reentrancy
     // guard's state (null between runs).
     TransformContext* context_ = nullptr;
+    // The C# `readonly DeclareVariables declareVariables` -- the analysis the
+    // iterator bail (and later the remaining arms) read.
+    DeclareVariables declareVariables_;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Transforms
