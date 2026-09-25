@@ -583,6 +583,7 @@ add_executable(ilspy_tests
     Decompiler/IL/Transforms/AccessPathElement_Test.cpp
     Decompiler/IL/Transforms/TransformCollectionAndObjectInitializers_Test.cpp
     Decompiler/IL/Transforms/TransformDisplayClassUsage_Test.cpp
+    Decompiler/IL/Transforms/TransformExpressionTrees_Test.cpp
 )
 target_include_directories(ilspy_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ilspy_tests PRIVATE

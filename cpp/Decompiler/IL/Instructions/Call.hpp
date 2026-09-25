@@ -164,7 +164,32 @@ public:
     // outside the reader (the C# default).
     bool ILStackWasEmpty = false;
 
+    // The C# `internal static StackType CallInstruction.ExpectedTypeForThisPointer(
+    // IType declaringType, IType? constrainedTo)` (CallInstruction.cs lines
+    // 107-122): Ref when the call is constrained, the declaring type is a type
+    // parameter, or a value type; O for a reference type; Unknown when the
+    // reference-ness is indeterminate.
+    static StackType ExpectedTypeForThisPointer(
+        const TypeSystem::IType& declaringType,
+        const TypeSystem::IType* constrainedTo = nullptr) {
+        if (constrainedTo != nullptr)
+            return StackType::Ref;
+        if (declaringType.Kind() == TypeSystem::TypeKind::TypeParameter)
+            return StackType::Ref;
+        std::optional<bool> isReferenceType = declaringType.IsReferenceType();
+        if (isReferenceType == std::optional<bool>(false))
+            return StackType::Ref;
+        if (isReferenceType == std::optional<bool>(true))
+            return StackType::O;
+        return StackType::Unknown;
+    }
+
     explicit Call(std::string method = std::string()) : ILInstruction(OpCode::Call), MethodName(std::move(method)) {}
+    // The C# `CallInstruction(OpCode opCode, IMethod method)` ctor family
+    // (Instructions.cs line 2163): the resolved-method form -- every
+    // stand-in field the C# derives from the method. Defined out-of-line in
+    // the .cpp (the derivation needs the display form and StackTypeOf).
+    Call(std::shared_ptr<TypeSystem::IMethod> method, bool isNewObj = false);
 
     InstructionFlags DirectFlags() const override {
         return InstructionFlags::SideEffect | InstructionFlags::MayThrow;

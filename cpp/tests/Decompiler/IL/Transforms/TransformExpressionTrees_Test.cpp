@@ -25,6 +25,7 @@
 // ExpressionTrees setting default false leaves the block untouched; enabling
 // it drives the scan).
 
+#include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/IL/Transforms/TransformExpressionTrees.hpp"
 
 #include "Decompiler/IL/ILVariable.hpp"
@@ -163,6 +164,57 @@ public:
 
 // The token dispatch: `call GetTypeFromHandle(ldtoken <T>)` extracts the
 // carried IType.
+// The KnownTypeCode-range stub the resolver's operator tables need (the
+// CSharpResolverBinaryOperator_Test precedent): the lazy table construction
+// resolves each primitive parameter/return type through FindType, and an
+// unregistered code falls to the non-shared unknownType_ stub whose
+// shared_from_this throws.
+class KindDef : public TS::TestSupport::LookupTypeDefinition {
+public:
+    using TS::TestSupport::LookupTypeDefinition::LookupTypeDefinition;
+    std::optional<bool> IsReferenceType() const override {
+        switch (Kind()) {
+            case TS::TypeKind::Struct:
+            case TS::TypeKind::Enum:
+                return false;
+            default:
+                return true;
+        }
+    }
+};
+
+void RegisterKnownTypeCodes(TS::TestSupport::LookupCompilation& compilation,
+                            std::vector<std::shared_ptr<KindDef>>& defs) {
+    auto kindForCode = [](TS::KnownTypeCode code) {
+        switch (code) {
+            case TS::KnownTypeCode::Object:
+            case TS::KnownTypeCode::DBNull:
+            case TS::KnownTypeCode::String:
+                return TS::TypeKind::Class;
+            default:
+                return TS::TypeKind::Struct;
+        }
+    };
+    for (int raw = static_cast<int>(TS::KnownTypeCode::Object);
+         raw <= static_cast<int>(TS::KnownTypeCode::String); ++raw) {
+        TS::KnownTypeCode code = static_cast<TS::KnownTypeCode>(raw);
+        std::string name = "T" + std::to_string(raw);
+        auto def = std::make_shared<KindDef>(
+            name, "", TS::FullTypeName(TS::TopLevelTypeName("", name, 0)),
+            kindForCode(code), TS::Accessibility::Public, compilation, nullptr, code);
+        compilation.RegisterKnownType(code, def.get());
+        defs.push_back(std::move(def));
+    }
+    auto nullableOfT = std::make_shared<KindDef>(
+        "Nullable", "System",
+        TS::FullTypeName(TS::TopLevelTypeName("System", "Nullable", 1)),
+        TS::TypeKind::Struct, TS::Accessibility::Public, compilation, nullptr,
+        TS::KnownTypeCode::NullableOfT);
+    compilation.RegisterKnownType(TS::KnownTypeCode::NullableOfT, nullableOfT.get());
+    defs.push_back(std::move(nullableOfT));
+}
+
+
 TEST(TransformExpressionTreesTest, MatchGetTypeFromHandleExtractsTheType)
 {
     auto target = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
@@ -477,7 +529,9 @@ TEST(TransformExpressionTreesTest, ConvertLambdaConvertsConstantBody)
     block->Add(std::move(lambdaCall));
 
     IL::ILTransformContext ctx;
-    ctx.Settings.ExpressionTrees = true;
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    ctx.CSharpSettings = &settings;  // ExpressionTrees defaults true
+
     IL::StatementTransformContext driverCtx(ctx, block.get());
     IL::TransformExpressionTrees transform;
     transform.Run(*block, 0, driverCtx);
@@ -496,10 +550,191 @@ TEST(TransformExpressionTreesTest, ConvertLambdaConvertsConstantBody)
     ASSERT_NE(fn->Body->EntryPoint(), nullptr);
 }
 
-// The settings gate: the transform's Run is gated on
-// `context.Settings.ExpressionTrees` (default false), so a default-context run
-// leaves the block untouched.
-TEST(TransformExpressionTreesTest, SettingsGateBlocksByDefault)
+
+// The ConvertCoalesce arm (the C# `case "Coalesce"`): two non-nullable
+// String constants coalesce with Kind Ref (the not-nullable path), the
+// target type the fallback's (the identity implicit conversion
+// String->String is valid, so targetType = the true side's type).
+TEST(TransformExpressionTreesTest, ConvertCoalesceReducesToNullCoalescing)
+{
+    auto compilationOwner =
+        std::make_unique<TS::TestSupport::LookupCompilation>();
+    auto& compilation = *compilationOwner;
+    auto stringType =
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
+    compilation.RegisterKnownType(TS::KnownTypeCode::String,
+                                  stringType.get());
+    auto booleanType =
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Boolean);
+    compilation.RegisterKnownType(TS::KnownTypeCode::Boolean,
+                                  booleanType.get());
+    auto expressionDef = std::make_shared<TS::SimpleType>(TS::TopLevelTypeName(
+        std::string("System.Linq.Expressions"), std::string("Expression")));
+    TS::ITypePtr lambdaMethodReturnType =
+        std::make_shared<TS::ParameterizedType>(
+            expressionDef, std::vector<TS::ITypePtr>{stringType});
+
+    // Expression.Coalesce(Expression.Constant("a", String),
+    //                     Expression.Constant("b", String))
+    auto trueConstant = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Constant"));
+    trueConstant->Arguments.push_back(std::make_unique<IL::LdStr>("a"));
+    {
+        auto innerGetTypeCall = std::make_unique<IL::Call>(
+            std::make_shared<GetTypeFromHandleStub>());
+        innerGetTypeCall->Arguments.push_back(std::make_unique<IL::LdTypeToken>(
+            stringType, std::string("System.String")));
+        trueConstant->Arguments.push_back(std::move(innerGetTypeCall));
+    }
+    auto fallbackConstant = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Constant"));
+    fallbackConstant->Arguments.push_back(std::make_unique<IL::LdStr>("b"));
+    {
+        auto innerGetTypeCall = std::make_unique<IL::Call>(
+            std::make_shared<GetTypeFromHandleStub>());
+        innerGetTypeCall->Arguments.push_back(std::make_unique<IL::LdTypeToken>(
+            stringType, std::string("System.String")));
+        fallbackConstant->Arguments.push_back(std::move(innerGetTypeCall));
+    }
+    auto coalesceCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Coalesce"));
+    coalesceCall->Arguments.push_back(std::move(trueConstant));
+    coalesceCall->Arguments.push_back(std::move(fallbackConstant));
+
+    auto lambdaCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Lambda",
+            lambdaMethodReturnType));
+    lambdaCall->Arguments.push_back(std::move(coalesceCall));
+    lambdaCall->Arguments.push_back(std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>("System", "Array", "Empty")));
+
+    auto block = std::make_unique<IL::Block>();
+    block->Kind = IL::BlockKind::ControlFlow;
+    block->Add(std::move(lambdaCall));
+
+    IL::ILTransformContext ctx;
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    ctx.CSharpSettings = &settings;  // ExpressionTrees defaults true
+    ctx.TypeSystem = &compilation;
+    IL::StatementTransformContext driverCtx(ctx, block.get());
+    IL::TransformExpressionTrees transform;
+    transform.Run(*block, 0, driverCtx);
+
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* fn = dynamic_cast<IL::ILFunction*>(block->Instructions[0].get());
+    ASSERT_NE(fn, nullptr);
+    ASSERT_NE(fn->Body, nullptr);
+    ASSERT_NE(fn->Body->EntryPoint(), nullptr);
+    auto* leave = dynamic_cast<IL::Leave*>(
+        fn->Body->EntryPoint()->Instructions[0].get());
+    ASSERT_NE(leave, nullptr);
+    auto* coalesce = dynamic_cast<IL::NullCoalescingInstruction*>(
+        leave->Value.get());
+    ASSERT_NE(coalesce, nullptr)
+        << "the Coalesce call converts to a NullCoalescingInstruction";
+    EXPECT_EQ(coalesce->Kind, IL::NullCoalescingKind::Ref);
+    auto* trueLdstr = dynamic_cast<IL::LdStr*>(coalesce->ValueInst.get());
+    ASSERT_NE(trueLdstr, nullptr);
+    EXPECT_EQ(trueLdstr->Value, "a");
+    auto* fallbackLdstr =
+        dynamic_cast<IL::LdStr*>(coalesce->FallbackInst.get());
+    ASSERT_NE(fallbackLdstr, nullptr);
+    EXPECT_EQ(fallbackLdstr->Value, "b");
+}
+
+// The ConvertComparison arm (the C# `case "Equal"`): two Int32 constants
+// with no user-defined operator resolve to the builtin Comp (Equality,
+// lifting None, signed), the result type Boolean.
+TEST(TransformExpressionTreesTest, ConvertComparisonReducesToComp)
+{
+    auto compilationOwner =
+        std::make_unique<TS::TestSupport::LookupCompilation>();
+    auto& compilation = *compilationOwner;
+    std::vector<std::shared_ptr<KindDef>> kindDefs;
+    RegisterKnownTypeCodes(compilation, kindDefs);
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto booleanType =
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Boolean);
+    auto expressionDef = std::make_shared<TS::SimpleType>(TS::TopLevelTypeName(
+        std::string("System.Linq.Expressions"), std::string("Expression")));
+    TS::ITypePtr lambdaMethodReturnType =
+        std::make_shared<TS::ParameterizedType>(
+            expressionDef, std::vector<TS::ITypePtr>{booleanType});
+
+    // Expression.Equal(Expression.Constant(1, Int32), Expression.Constant(2,
+    // Int32))
+    auto leftConstant = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Constant"));
+    leftConstant->Arguments.push_back(std::make_unique<IL::LdcI4>(1));
+    {
+        auto innerGetTypeCall = std::make_unique<IL::Call>(
+            std::make_shared<GetTypeFromHandleStub>());
+        innerGetTypeCall->Arguments.push_back(std::make_unique<IL::LdTypeToken>(
+            intType, std::string("System.Int32")));
+        leftConstant->Arguments.push_back(std::move(innerGetTypeCall));
+    }
+    auto rightConstant = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Constant"));
+    rightConstant->Arguments.push_back(std::make_unique<IL::LdcI4>(2));
+    {
+        auto innerGetTypeCall = std::make_unique<IL::Call>(
+            std::make_shared<GetTypeFromHandleStub>());
+        innerGetTypeCall->Arguments.push_back(std::make_unique<IL::LdTypeToken>(
+            intType, std::string("System.Int32")));
+        rightConstant->Arguments.push_back(std::move(innerGetTypeCall));
+    }
+    auto equalCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Equal"));
+    equalCall->Arguments.push_back(std::move(leftConstant));
+    equalCall->Arguments.push_back(std::move(rightConstant));
+
+    auto lambdaCall = std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>(
+            "System.Linq.Expressions", "Expression", "Lambda",
+            lambdaMethodReturnType));
+    lambdaCall->Arguments.push_back(std::move(equalCall));
+    lambdaCall->Arguments.push_back(std::make_unique<IL::Call>(
+        std::make_shared<NamedMethodStub>("System", "Array", "Empty")));
+
+    auto block = std::make_unique<IL::Block>();
+    block->Kind = IL::BlockKind::ControlFlow;
+    block->Add(std::move(lambdaCall));
+
+    IL::ILTransformContext ctx;
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    ctx.CSharpSettings = &settings;  // ExpressionTrees defaults true
+    ctx.TypeSystem = &compilation;
+    IL::StatementTransformContext driverCtx(ctx, block.get());
+    IL::TransformExpressionTrees transform;
+    transform.Run(*block, 0, driverCtx);
+
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* fn = dynamic_cast<IL::ILFunction*>(block->Instructions[0].get());
+    ASSERT_NE(fn, nullptr);
+    ASSERT_NE(fn->Body, nullptr);
+    ASSERT_NE(fn->Body->EntryPoint(), nullptr);
+    auto* leave = dynamic_cast<IL::Leave*>(
+        fn->Body->EntryPoint()->Instructions[0].get());
+    ASSERT_NE(leave, nullptr);
+    auto* comp = dynamic_cast<IL::Comp*>(leave->Value.get());
+    ASSERT_NE(comp, nullptr) << "the Equal call converts to a Comp";
+    EXPECT_EQ(comp->Kind, IL::ComparisonKind::Equality);
+    EXPECT_EQ(comp->LiftingKind, IL::ComparisonLiftingKind::None);
+    EXPECT_EQ(comp->InputType, IL::StackType::I4);
+}
+
+// The settings gate: the transform's Run is gated on the FULL settings'
+// `ExpressionTrees` (the C# context.Settings; the C# default is TRUE, so a
+// context without CSharpSettings -- the C# default-constructed settings --
+// passes the gate). This test exercises the explicit disable.
+TEST(TransformExpressionTreesTest, SettingsGateBlocksWhenDisabled)
 {
     auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
     auto v = MakeLocal("v", intType);
@@ -508,7 +743,9 @@ TEST(TransformExpressionTreesTest, SettingsGateBlocksByDefault)
     block->Add(std::make_unique<IL::StLoc>(v, std::make_unique<IL::LdStr>("x")));
 
     IL::ILTransformContext ctx;
-    ctx.Settings.ExpressionTrees = false;  // the C# default
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    settings.SetExpressionTrees(false);
+    ctx.CSharpSettings = &settings;
     IL::StatementTransformContext driverCtx(ctx, block.get());
     IL::TransformExpressionTrees transform;
     transform.Run(*block, 0, driverCtx);
@@ -572,7 +809,9 @@ TEST(TransformExpressionTreesTest, ConvertCallConvertsStaticMethodCallBody)
     block->Add(std::move(lambdaCall));
 
     IL::ILTransformContext ctx;
-    ctx.Settings.ExpressionTrees = true;
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    ctx.CSharpSettings = &settings;  // ExpressionTrees defaults true
+
     IL::StatementTransformContext driverCtx(ctx, block.get());
     IL::TransformExpressionTrees transform;
     transform.Run(*block, 0, driverCtx);
@@ -646,7 +885,9 @@ TEST(TransformExpressionTreesTest, ConvertFieldConvertsStaticFieldAccess)
     block->Add(std::move(lambdaCall));
 
     IL::ILTransformContext ctx;
-    ctx.Settings.ExpressionTrees = true;
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    ctx.CSharpSettings = &settings;  // ExpressionTrees defaults true
+
     IL::StatementTransformContext driverCtx(ctx, block.get());
     IL::TransformExpressionTrees transform;
     transform.Run(*block, 0, driverCtx);
@@ -725,7 +966,9 @@ TEST(TransformExpressionTreesTest, ConvertTypeAsConvertsToIsInst)
     block->Add(std::move(lambdaCall));
 
     IL::ILTransformContext ctx;
-    ctx.Settings.ExpressionTrees = true;
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    ctx.CSharpSettings = &settings;  // ExpressionTrees defaults true
+
     IL::StatementTransformContext driverCtx(ctx, block.get());
     IL::TransformExpressionTrees transform;
     transform.Run(*block, 0, driverCtx);
@@ -802,7 +1045,9 @@ TEST(TransformExpressionTreesTest, ConvertTypeIsConvertsToCompNullCheck)
     block->Add(std::move(lambdaCall));
 
     IL::ILTransformContext ctx;
-    ctx.Settings.ExpressionTrees = true;
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    ctx.CSharpSettings = &settings;  // ExpressionTrees defaults true
+
     ctx.TypeSystem = &compilation;
     IL::StatementTransformContext driverCtx(ctx, block.get());
     IL::TransformExpressionTrees transform;
@@ -880,7 +1125,9 @@ TEST(TransformExpressionTreesTest, ConvertCastConvertsToExpressionTreeCast)
     block->Add(std::move(lambdaCall));
 
     IL::ILTransformContext ctx;
-    ctx.Settings.ExpressionTrees = true;
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    ctx.CSharpSettings = &settings;  // ExpressionTrees defaults true
+
     IL::StatementTransformContext driverCtx(ctx, block.get());
     IL::TransformExpressionTrees transform;
     transform.Run(*block, 0, driverCtx);
@@ -944,7 +1191,9 @@ TEST(TransformExpressionTreesTest, ConvertNotBooleanBecomesCompLogicNot)
     block->Add(std::move(lambdaCall));
 
     IL::ILTransformContext ctx;
-    ctx.Settings.ExpressionTrees = true;
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    ctx.CSharpSettings = &settings;  // ExpressionTrees defaults true
+
     IL::StatementTransformContext driverCtx(ctx, block.get());
     IL::TransformExpressionTrees transform;
     transform.Run(*block, 0, driverCtx);
@@ -1008,7 +1257,9 @@ TEST(TransformExpressionTreesTest, ConvertBinaryNumericOperatorFoldsToAdd)
     block->Add(std::move(lambdaCall));
 
     IL::ILTransformContext ctx;
-    ctx.Settings.ExpressionTrees = true;
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    ctx.CSharpSettings = &settings;  // ExpressionTrees defaults true
+
     IL::StatementTransformContext driverCtx(ctx, block.get());
     IL::TransformExpressionTrees transform;
     transform.Run(*block, 0, driverCtx);
@@ -1074,7 +1325,9 @@ TEST(TransformExpressionTreesTest, ConvertConditionConvertsToIfInstruction)
     block->Add(std::move(lambdaCall));
 
     IL::ILTransformContext ctx;
-    ctx.Settings.ExpressionTrees = true;
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    ctx.CSharpSettings = &settings;  // ExpressionTrees defaults true
+
     IL::StatementTransformContext driverCtx(ctx, block.get());
     IL::TransformExpressionTrees transform;
     transform.Run(*block, 0, driverCtx);
@@ -1149,7 +1402,9 @@ TEST(TransformExpressionTreesTest, ConvertAndAlsoBecomesLogicAnd)
     block->Add(std::move(lambdaCall));
 
     IL::ILTransformContext ctx;
-    ctx.Settings.ExpressionTrees = true;
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    ctx.CSharpSettings = &settings;  // ExpressionTrees defaults true
+
     ctx.TypeSystem = &compilation;
     IL::StatementTransformContext driverCtx(ctx, block.get());
     IL::TransformExpressionTrees transform;
@@ -1233,7 +1488,9 @@ TEST(TransformExpressionTreesTest, ConvertInvokeResolvesTheInvokeMethod)
     block->Add(std::move(lambdaCall));
 
     IL::ILTransformContext ctx;
-    ctx.Settings.ExpressionTrees = true;
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    ctx.CSharpSettings = &settings;  // ExpressionTrees defaults true
+
     IL::StatementTransformContext driverCtx(ctx, block.get());
     IL::TransformExpressionTrees transform;
     transform.Run(*block, 0, driverCtx);
@@ -1298,7 +1555,9 @@ TEST(TransformExpressionTreesTest, ConvertNegateBuildsUnarySub)
     block->Add(std::move(lambdaCall));
 
     IL::ILTransformContext ctx;
-    ctx.Settings.ExpressionTrees = true;
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    ctx.CSharpSettings = &settings;  // ExpressionTrees defaults true
+
     IL::StatementTransformContext driverCtx(ctx, block.get());
     IL::TransformExpressionTrees transform;
     transform.Run(*block, 0, driverCtx);
@@ -1400,7 +1659,9 @@ TEST(TransformExpressionTreesTest, ConvertNewObjectBuildsNewObjFromCtorToken)
     block->Add(std::move(lambdaCall));
 
     IL::ILTransformContext ctx;
-    ctx.Settings.ExpressionTrees = true;
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    ctx.CSharpSettings = &settings;  // ExpressionTrees defaults true
+
     IL::StatementTransformContext driverCtx(ctx, block.get());
     IL::TransformExpressionTrees transform;
     transform.Run(*block, 0, driverCtx);

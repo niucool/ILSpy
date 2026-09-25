@@ -40,6 +40,10 @@ namespace ILSpy::Decompiler::Metadata {
 class MetadataFile;
 }
 
+namespace ILSpy::Decompiler::TypeSystem {
+class ICompilation;
+}
+
 namespace ILSpy::Decompiler::IL {
 
 class ILFunction;
@@ -260,6 +264,12 @@ public:
     // readers own their file handles) and in tests that wire the
     // DelegateBodyResolver hook directly; the facade sets it.
     Metadata::MetadataFile* Metadata = nullptr;
+
+    // The C# `public IDecompilerTypeSystem TypeSystem` (ILTransformContext)
+    // -- the decompilation's type system the transforms consult (the port
+    // stores the ICompilation; the port's DecompilerTypeSystem IS one). Null
+    // in the minimal construction; the facade and the tests set it.
+    ::ILSpy::Decompiler::TypeSystem::ICompilation* TypeSystem = nullptr;
 
     void StepOnce(const char* what) const {
         if (Step) Step(what);

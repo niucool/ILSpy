@@ -386,8 +386,30 @@ Facade instance surface.
 
 ## Deferred (loud, documented in code)
 
-- ConvertCoalesce / ConvertComparison (TransformExpressionTrees) -- blocked
-  on the CSharpConversions/resolver ports.
+- ~~ConvertCoalesce / ConvertComparison (TransformExpressionTrees)~~ MOSTLY
+  DONE: the blocker analysis was stale -- the merge completed both the
+  CSharpConversions and CSharpResolver ports. The bigger discovery: the
+  merge had ORPHANED the whole TransformExpressionTrees port -- neither
+  TransformExpressionTrees.cpp nor Call.cpp was in the IL CMakeLists (the
+  stale _Match/_Run object files in the build dir are pre-merge remnants),
+  so the transform was dead code and its 23 tests silently not running.
+  The slice re-registered both files and re-grafted five IL-layer surfaces
+  the merge had dropped (ILTransformContext::TypeSystem, the C# context
+  member; BlockContainer::ExpectedResultType; IfInstruction::LogicAnd/Or;
+  the LdMemberToken node; Call's resolved-method ctor family +
+  ExpectedTypeForThisPointer) -- all C#-present members, verified against
+  the reference source. ConvertCoalesce is COMPLETE;
+  ConvertComparison's 4-arg lifted form (node-sourced handle) and the
+  builtin Comp fallback are DONE, but its user-defined-operator and
+  String-arms DETECT-then-bail: building their Call needs a shared
+  IMethod handle and the port only has raw pointers for resolver-sourced
+  methods (OperatorResolveResult stores the method raw; only the
+  token-node-sourced handles are shared) -- a shared-method-handle
+  surface is the named prerequisite. TEST DISCIPLINE: the resolver-backed
+  arms need the test compilation to register the FULL KnownTypeCode range
+  (Object..String + NullableOfT) -- an unregistered code falls to the
+  non-shared unknownType_ stub whose shared_from_this throws bad_weak_ptr
+  (the CSharpResolverBinaryOperator_Test fixture precedent).
 - ProxyCallReplacer -- deferred on the resolved-IMethod call surfaces +
   `EarlyILTransforms` + `MatchLeave`.
 - IntroduceDynamicTypeOnLocals -- deferred on

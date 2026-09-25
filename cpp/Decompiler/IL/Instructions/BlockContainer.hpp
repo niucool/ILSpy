@@ -62,6 +62,12 @@ public:
         Blocks.push_back(std::move(b));
     }
 
+    // The C# `public StackType ExpectedResultType { get; set; }` (BlockContainer.cs
+    // line 46) -- the evaluation-stack type the container's `leave` values must
+    // produce. The reader leaves it Unknown for containers it builds; the
+    // expression-tree conversion sets it on the lambda containers.
+    StackType ExpectedResultType = StackType::Unknown;
+
     // The C# `public Block EntryPoint` (BlockContainer.cs line 66): the container's
     // entry point -- the first block in the Blocks collection. The C# reads a private
     // field assigned by the BlockBuilder's Normalize; the port's containers are

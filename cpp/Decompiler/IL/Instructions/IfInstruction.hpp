@@ -91,6 +91,27 @@ public:
         return false;
     }
 
+    // The C# `public static IfInstruction LogicAnd(ILInstruction lhs,
+    // ILInstruction rhs)` (IfInstruction.cs line 46): the `lhs && rhs` sugar
+    // -- if(lhs, rhs, ldc.i4 0).
+    static std::unique_ptr<IfInstruction> LogicAnd(
+        std::unique_ptr<ILInstruction> lhs,
+        std::unique_ptr<ILInstruction> rhs) {
+        return std::make_unique<IfInstruction>(
+            std::move(lhs), std::move(rhs),
+            std::make_unique<LdcI4>(0));
+    }
+
+    // The C# `public static IfInstruction LogicOr(ILInstruction lhs,
+    // ILInstruction? rhs)` (line 51): the `lhs || rhs` sugar --
+    // if(lhs, ldc.i4 1, rhs).
+    static std::unique_ptr<IfInstruction> LogicOr(
+        std::unique_ptr<ILInstruction> lhs,
+        std::unique_ptr<ILInstruction> rhs) {
+        return std::make_unique<IfInstruction>(
+            std::move(lhs), std::make_unique<LdcI4>(1), std::move(rhs));
+    }
+
     InstructionFlags DirectFlags() const override { return InstructionFlags::ControlFlow; }
     InstructionFlags Flags() const override {
         // ControlFlow | condition | CombineBranches(true, false) -- a missing

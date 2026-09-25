@@ -17,6 +17,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Instructions/ILFunction.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Instructions/CompoundAssignmentInstruction.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Instructions/TokenInstructions.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Instructions/Call.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ControlFlow/VariableUsage.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ControlFlow/ControlFlowSimplification.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ControlFlow/ControlFlowGraph.cpp
@@ -63,4 +64,5 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/AccessPathElement.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/TransformCollectionAndObjectInitializers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/TransformDisplayClassUsage.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/TransformExpressionTrees.cpp
 )

@@ -38,6 +38,7 @@
 #include "Decompiler/IL/Transforms/StatementTransform.hpp"
 
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
+#include "Decompiler/IL/Instructions/Comp.hpp"
 
 #include <functional>
 #include <map>
@@ -47,6 +48,11 @@
 
 namespace ILSpy::Decompiler::TypeSystem {
 class IParameter;
+}
+
+namespace ILSpy::Decompiler::CSharp::Resolver {
+class CSharpConversions;
+class CSharpResolver;
 }
 
 namespace ILSpy::Decompiler::IL {
@@ -59,6 +65,11 @@ class Call;
 class ILFunction;
 
 class TransformExpressionTrees final : public IStatementTransform {
+public:
+    // Out-of-line (the unique_ptr<CSharpResolver> member's destruction
+    // needs the complete type; the .cpp includes the header).
+    ~TransformExpressionTrees() override;
+
 public:
     // The C# `internal static bool MatchGetTypeFromHandle(ILInstruction inst,
     // out IType type)` (a static helper the tests use).
@@ -107,6 +118,20 @@ public:
     // The per-Run state (re-initialized at the top of Run, the C# fields
     // re-assigned there).
     State state_;
+    // The C# `CSharpConversions conversions` + `CSharpResolver resolver`
+    // fields (re-assigned at the top of Run from `context.TypeSystem`).
+    // Null when the context carries no type system -- the
+    // conversions/resolver-backed arms (ConvertCoalesce's nullable
+    // classification, ConvertComparison's user-defined shapes) then bail,
+    // the C# never runs without a type system.
+    ::ILSpy::Decompiler::CSharp::Resolver::CSharpConversions*
+        conversions_ = nullptr;
+    // The resolver is shared-held: its C# `return this` bridges call
+    // shared_from_this, so it must have a shared_ptr owner. A shared_ptr
+    // member over a forward-declared type is destruction-safe (the deleter
+    // rides the control block make_shared captures).
+    std::shared_ptr<::ILSpy::Decompiler::CSharp::Resolver::CSharpResolver>
+        resolver_;
     // The enclosing StatementTransformContext (set at the top of Run; the C#
     // `this.context` field the Convert* arms consult).
     StatementTransformContext* context_ = nullptr;
@@ -128,6 +153,21 @@ public:
     ConvertResult ConvertLambda(Call* instruction);
     ConvertResult ConvertInstruction(ILInstruction* instruction,
                                      TypeSystem::IType* typeHint = nullptr);
+
+    // The C# `(Func<ILInstruction>, IType) ConvertCoalesce(CallInstruction
+    // invocation)` (TransformExpressionTrees.cs line 729): the `a ?? b`
+    // expression-tree node -- the nullable-fallback classification over
+    // CSharpConversions.ImplicitConversion, the NullCoalescingInstruction
+    // with the underling result type.
+    ConvertResult ConvertCoalesce(Call* invocation);
+
+    // The C# `(Func<ILInstruction>, IType) ConvertComparison(
+    // CallInstruction invocation, ComparisonKind kind)` (line 758): the
+    // user-defined lifted form (the 4-arg shape), the resolver's
+    // user-defined operator, the String op_Equality/op_Inequality pair, and
+    // the builtin Comp fallback.
+    ConvertResult ConvertComparison(Call* invocation,
+                                    ComparisonKind kind);
 
     // The C# `bool IsExpressionTree(IType)` / `IType UnwrapExpressionTree(IType)`:
     // the `Expression<T>` ParameterizedType probe and its element-type unwrap.

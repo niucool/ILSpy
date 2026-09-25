@@ -27,6 +27,7 @@
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/Instructions/AddressOf.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
@@ -34,10 +35,16 @@
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
 #include "Decompiler/TypeSystem/NormalizeTypeVisitor.hpp"
 #include "Decompiler/IL/ILTypeExtensions.hpp"
+#include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
 #include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpOperators.hpp"
+#include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
+#include "Decompiler/Semantics/Conversion.hpp"
+#include "Decompiler/Semantics/OperatorResolveResult.hpp"
+#include "Decompiler/Semantics/ResolveResult.hpp"
 
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
@@ -57,6 +64,14 @@
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/IL/Instructions/CastClass.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+
+// The C# `kind.ToBinaryOperatorType()` extension (Comp.cs line 66), ported
+// in ExpressionBuilder.cpp (the CSharp::Syntax layer): forward-declared
+// here so the IL layer does not pull the whole C# syntax layer.
+namespace ILSpy::Decompiler::CSharp {
+::ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorType
+ToBinaryOperatorType(IL::ComparisonKind kind);
+}
 
 namespace ILSpy::Decompiler::IL {
 
@@ -86,11 +101,35 @@ bool TransformExpressionTrees::MatchGetTypeFromHandle(
 
 void RemoveInstruction(Block& block, ILInstruction* inst);
 
+TransformExpressionTrees::~TransformExpressionTrees() = default;
+
 void TransformExpressionTrees::Run(Block& block, int pos,
                                    StatementTransformContext& context) {
-    if (!context.Base.Settings.ExpressionTrees) return;
+    // The C# `if (!context.Settings.ExpressionTrees) return;` over the FULL
+    // DecompilerSettings (the merged context's CSharpSettings slot; a null
+    // settings is the C# default-constructed form, where ExpressionTrees is
+    // true -- the gate passes).
+    if (context.Base.CSharpSettings != nullptr
+        && !context.Base.CSharpSettings->ExpressionTrees())
+        return;
     context_ = &context;
     state_ = State();
+    // The C# `this.conversions = CSharpConversions.Get(context.TypeSystem);
+    // this.resolver = new CSharpResolver(context.TypeSystem)` -- rebuilt per
+    // Run; the arms bail when the context carries no type system (the C#
+    // never runs without one).
+    if (context.Base.TypeSystem != nullptr) {
+        conversions_ =
+            &::ILSpy::Decompiler::CSharp::Resolver::CSharpConversions::Get(
+                *context.Base.TypeSystem);
+        resolver_ =
+            std::make_shared<
+                ::ILSpy::Decompiler::CSharp::Resolver::CSharpResolver>(
+                *context.Base.TypeSystem);
+    } else {
+        conversions_ = nullptr;
+        resolver_.reset();
+    }
     for (int i = pos; i < static_cast<int>(block.Instructions.size()); i++) {
         std::shared_ptr<ILVariable> v;
         TypeSystem::ITypePtr type;
@@ -259,7 +298,10 @@ TransformExpressionTrees::ConvertResult TransformExpressionTrees::ConvertLambda(
     // is deferred with the generic-context surface.
     auto function = std::make_unique<ILFunction>();
     function->ReturnType = returnType;
-    function->Parameters = std::move(parameterList);
+    function->Parameters.clear();
+    function->Parameters.reserve(parameterList.size());
+    for (const auto& parameter : parameterList)
+        function->Parameters.push_back(parameter.get());
     function->Body = std::move(container);
     function->Kind = IsExpressionTree(*functionType)
                          ? ILFunctionKind::ExpressionTree
@@ -580,13 +622,29 @@ TransformExpressionTrees::ConvertInstruction(ILInstruction* instruction,
         if (name == "Condition") {
             return ConvertCondition(invocation);
         }
-        // The resolver- or conversions-blocked arms (the user-defined
-        // comparison resolution and the nullable-fallback classification):
-        // ConvertCoalesce needs CSharpConversions.ImplicitConversion (the
-        // conversions surface is deferred -- the CSharpConversions skeleton
-        // carries no conversion methods), and ConvertComparison needs
-        // resolver.ResolveBinaryOperator for its user-defined shapes. Both
-        // are deferred with those surfaces.
+        if (name == "Coalesce") {
+            return ConvertCoalesce(invocation);
+        }
+        if (name == "Equal") {
+            return ConvertComparison(invocation, ComparisonKind::Equality);
+        }
+        if (name == "NotEqual") {
+            return ConvertComparison(invocation, ComparisonKind::Inequality);
+        }
+        if (name == "GreaterThan") {
+            return ConvertComparison(invocation, ComparisonKind::GreaterThan);
+        }
+        if (name == "GreaterThanOrEqual") {
+            return ConvertComparison(invocation,
+                                     ComparisonKind::GreaterThanOrEqual);
+        }
+        if (name == "LessThan") {
+            return ConvertComparison(invocation, ComparisonKind::LessThan);
+        }
+        if (name == "LessThanOrEqual") {
+            return ConvertComparison(invocation,
+                                     ComparisonKind::LessThanOrEqual);
+        }
         if (name == "Convert") {
             return ConvertCast(invocation, false);
         }
@@ -638,6 +696,213 @@ TransformExpressionTrees::ConvertInstruction(ILInstruction* instruction,
 }
 
 
+
+// ---- The ConvertCoalesce / ConvertComparison arms ----
+
+// The C# `(Func<ILInstruction>, IType) ConvertCoalesce(CallInstruction
+// invocation)` (TransformExpressionTrees.cs line 729): the `a ?? b`
+// expression-tree node. The nullable-fallback classification consults
+// CSharpConversions.ImplicitConversion -- without a type system (no
+// conversions) the fallback-type arm degenerates to the true side's type
+// with Kind Ref.
+TransformExpressionTrees::ConvertResult
+TransformExpressionTrees::ConvertCoalesce(Call* invocation) {
+    if (invocation->Arguments.size() != 2)
+        return {nullptr, nullptr};
+    ConvertResult trueInst =
+        ConvertInstruction(invocation->Arguments[0].get());
+    if (!trueInst.thunk)
+        return {nullptr, nullptr};
+    ConvertResult fallbackInst =
+        ConvertInstruction(invocation->Arguments[1].get());
+    if (!fallbackInst.thunk)
+        return {nullptr, nullptr};
+    NullCoalescingKind kind = NullCoalescingKind::Ref;
+    // The C# `NullableType.GetUnderlyingType(trueInstType)` -- a reference
+    // over the converted result's type; the shared handle keeps the
+    // underlying type alive for the thunk's stack-type read.
+    const TypeSystem::IType* trueInstTypeNonNullable = trueInst.type.get();
+    if (trueInstTypeNonNullable != nullptr)
+        trueInstTypeNonNullable =
+            &TypeSystem::GetUnderlyingType(*trueInstTypeNonNullable);
+    TypeSystem::ITypePtr targetType;
+    if (trueInst.type != nullptr
+        && TypeSystem::IsNullable(*trueInst.type) && conversions_ != nullptr
+        && trueInstTypeNonNullable != nullptr
+        && fallbackInst.type != nullptr
+        && conversions_->ImplicitConversion(*fallbackInst.type,
+                                            const_cast<TypeSystem::IType&>(
+                                                *trueInstTypeNonNullable))
+               ->IsValid()) {
+        targetType = const_cast<TypeSystem::IType*>(
+                         trueInstTypeNonNullable)
+                         ->shared_from_this();
+        kind = fallbackInst.type != nullptr
+                       && TypeSystem::IsNullable(*fallbackInst.type)
+                   ? NullCoalescingKind::Nullable
+                   : NullCoalescingKind::NullableWithValueFallback;
+    } else if (conversions_ != nullptr && fallbackInst.type != nullptr
+               && trueInst.type != nullptr
+               && conversions_->ImplicitConversion(*fallbackInst.type,
+                                                  *trueInst.type)
+                      ->IsValid()) {
+        targetType = trueInst.type;
+    } else {
+        targetType = fallbackInst.type;
+    }
+    StackType underlyingResultType =
+        trueInstTypeNonNullable != nullptr
+            ? TypeSystem::GetStackType(*trueInstTypeNonNullable)
+            : StackType::Unknown;
+    return {[trueThunk = std::move(trueInst.thunk),
+             fallbackThunk = std::move(fallbackInst.thunk), kind,
+             underlyingResultType]() mutable
+                -> std::unique_ptr<ILInstruction> {
+            auto coalesce = std::make_unique<NullCoalescingInstruction>(
+                kind, trueThunk(), fallbackThunk());
+            coalesce->UnderlyingResultType = underlyingResultType;
+            return coalesce;
+        },
+            std::move(targetType)};
+}
+
+// The C# `(Func<ILInstruction>, IType) ConvertComparison(CallInstruction
+// invocation, ComparisonKind kind)` (line 758): the comparison
+// expression-tree node. The 4-arg user-defined lifted form (the
+// isLiftedToNull flag + the method handle) lifts through
+// CSharpOperators.LiftUserDefinedOperator; the 2-arg form first asks the
+// resolver for a user-defined operator, then the String
+// op_Equality/op_Inequality pair, and falls back to the builtin Comp (the
+// nullable lifting when the left operand is nullable).
+TransformExpressionTrees::ConvertResult
+TransformExpressionTrees::ConvertComparison(Call* invocation,
+                                            ComparisonKind kind) {
+    if (invocation->Arguments.size() < 2)
+        return {nullptr, nullptr};
+    ConvertResult left = ConvertInstruction(invocation->Arguments[0].get());
+    if (!left.thunk)
+        return {nullptr, nullptr};
+    ConvertResult right = ConvertInstruction(invocation->Arguments[1].get());
+    if (!right.thunk)
+        return {nullptr, nullptr};
+    if (invocation->Arguments.size() == 4) {
+        // The C# 4-arg lifted form:
+        // `invocation.Arguments[2].MatchLdcI4(out var isLiftedToNull)`.
+        auto* isLiftedToNullInst =
+            dynamic_cast<LdcI4*>(invocation->Arguments[2].get());
+        std::shared_ptr<const TypeSystem::IMethod> method;
+        if (isLiftedToNullInst == nullptr
+            || !MatchGetMethodFromHandle(invocation->Arguments[3].get(),
+                                         method)
+            || method == nullptr) {
+            return {nullptr, nullptr};
+        }
+        bool isLifted = left.type != nullptr
+                           && TypeSystem::IsNullable(*left.type);
+        std::shared_ptr<TypeSystem::IMethod> liftedMethod;
+        if (isLifted) {
+            liftedMethod =
+                ::ILSpy::Decompiler::CSharp::Resolver::CSharpOperators::
+                    LiftUserDefinedOperator(
+                        std::const_pointer_cast<TypeSystem::IMethod>(method));
+            if (liftedMethod == nullptr)
+                return {nullptr, nullptr};
+        }
+        std::int32_t isLiftedToNull = isLiftedToNullInst->Value;
+        const TypeSystem::IMethod* returnSource =
+            liftedMethod != nullptr ? liftedMethod.get() : method.get();
+        TypeSystem::ITypePtr returnType =
+            const_cast<TypeSystem::IType&>(returnSource->ReturnType())
+                .shared_from_this();
+        if (isLiftedToNull != 0) {
+            // The C# `NullableType.Create(method.Compilation,
+            // method.ReturnType)`: the nullable wrapper over the return.
+            if (context_ == nullptr || context_->Base.TypeSystem == nullptr)
+                return {nullptr, nullptr};
+            returnType = TypeSystem::Create(*context_->Base.TypeSystem,
+                                            *returnType);
+        }
+        return {[leftThunk = std::move(left.thunk),
+                 rightThunk = std::move(right.thunk),
+                 callMethod = liftedMethod != nullptr
+                                  ? liftedMethod
+                                  : std::const_pointer_cast<
+                                        TypeSystem::IMethod>(method)]() mutable
+                    -> std::unique_ptr<ILInstruction> {
+            auto call =
+                std::make_unique<Call>(std::move(callMethod));
+            call->Arguments.push_back(leftThunk());
+            call->Arguments.push_back(rightThunk());
+            return call;
+        },
+                std::move(returnType)};
+    }
+    // The C# 2-arg form: the resolver's user-defined operator.
+    if (resolver_ != nullptr) {
+        auto rr = std::dynamic_pointer_cast<
+            ::ILSpy::Decompiler::Semantics::OperatorResolveResult>(
+            resolver_->ResolveBinaryOperator(
+                ::ILSpy::Decompiler::CSharp::ToBinaryOperatorType(kind),
+                std::make_shared<
+                    ::ILSpy::Decompiler::Semantics::ResolveResult>(left.type),
+                std::make_shared<
+                    ::ILSpy::Decompiler::Semantics::ResolveResult>(
+                    right.type)));
+        if (rr != nullptr && !rr->IsError()
+            && rr->UserDefinedOperatorMethod() != nullptr) {
+            // DEFERRED loudly: the user-defined operator Call needs a shared
+            // IMethod handle, and the port's OperatorResolveResult carries
+            // only the raw pointer (the resolver-sourced methods have no
+            // shared-handle surface -- only the token-node-sourced ones do,
+            // the MatchGetMethodFromHandle route). The arm bails so the
+            // expression tree keeps its Expression.* call rather than
+            // rendering a wrong builtin Comp.
+            return {nullptr, nullptr};
+        }
+    }
+    // The C# String op_Equality/op_Inequality pair: the String/String
+    // comparison operators are the ONE user-defined form the C# resolves
+    // without the resolver. DEFERRED loudly with the rr arm above -- the
+    // operator Call needs a shared IMethod handle and
+    // IType::GetMethods hands back module-owned raw pointers.
+    if (TypeSystem::IsKnownType(*left.type, TypeSystem::KnownTypeCode::String)
+        && TypeSystem::IsKnownType(*right.type,
+                                   TypeSystem::KnownTypeCode::String)) {
+        if (kind == ComparisonKind::Equality
+            || kind == ComparisonKind::Inequality) {
+            return {nullptr, nullptr};
+        }
+        return {nullptr, nullptr};
+    }
+    // The C# builtin fallback: the Comp with the nullable lifting over the
+    // left operand's underlying type, the result Boolean.
+    TypeSystem::ITypePtr resultType;
+    if (context_ != nullptr && context_->Base.TypeSystem != nullptr) {
+        resultType = FindType(context_->Base.TypeSystem,
+                             TypeSystem::KnownTypeCode::Boolean);
+    }
+    ComparisonLiftingKind lifting =
+        left.type != nullptr && TypeSystem::IsNullable(*left.type)
+            ? ComparisonLiftingKind::CSharp
+            : ComparisonLiftingKind::None;
+    const TypeSystem::IType* utype =
+        left.type != nullptr
+            ? &TypeSystem::GetUnderlyingType(*left.type)
+            : nullptr;
+    StackType inputType = utype != nullptr
+                              ? TypeSystem::GetStackType(*utype)
+                              : StackType::Unknown;
+    TypeSystem::Sign sign = utype != nullptr
+                                ? TypeSystem::GetSign(utype)
+                                : TypeSystem::Sign::None;
+    return {[leftThunk = std::move(left.thunk),
+             rightThunk = std::move(right.thunk), kind, lifting, inputType,
+             sign]() mutable -> std::unique_ptr<ILInstruction> {
+        return std::make_unique<Comp>(leftThunk(), rightThunk(), kind,
+                                      lifting, inputType, sign);
+    },
+            std::move(resultType)};
+}
 
 // ---- The ConvertCall arm (the C# `case "Call"`) ----
 

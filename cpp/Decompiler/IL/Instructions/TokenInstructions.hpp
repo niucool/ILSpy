@@ -44,6 +44,7 @@
 // Forward declaration (the field is a shared_ptr to the incomplete type; the
 // resolved ctors live in the .cpp beside the complete-type include).
 namespace ILSpy::Decompiler::TypeSystem {
+class IMember;
 class IMethod;
 }
 
@@ -173,6 +174,31 @@ public:
     StackType ResultType() const override { return StackType::O; }
     void WriteTo(std::string& out) const override {
         out += "ldtoken("; out += TokenName; out += ')';
+    }
+};
+
+// ldmembertoken <member>: push a runtime member handle (the C#
+// `LdMemberToken : SimpleInstruction`, Instructions.cs line 3301, carrying
+// the resolved IMember -- the MethodBase.GetMethodFromHandle argument the
+// expression-tree call sites build). Result O. The member is the
+// resolved-member handle (non-owning: the metadata owns it); TokenName is
+// the display form.
+class LdMemberToken : public SimpleInstruction {
+public:
+    // The C# `LdMemberToken(IMember member)`: the member handle carries any
+    // member kind (the method-handle shape the call sites build, the
+    // field-handle shape FieldInfo.GetFieldFromHandle consumes).
+    std::shared_ptr<const TypeSystem::IMember> Member;
+    std::string TokenName;
+    explicit LdMemberToken(std::string name = std::string())
+        : SimpleInstruction(OpCode::LdMemberToken), TokenName(std::move(name)) {}
+    LdMemberToken(std::shared_ptr<const TypeSystem::IMember> member,
+                  std::string name)
+        : SimpleInstruction(OpCode::LdMemberToken), Member(std::move(member)),
+          TokenName(std::move(name)) {}
+    StackType ResultType() const override { return StackType::O; }
+    void WriteTo(std::string& out) const override {
+        out += "ldtoken "; out += TokenName;
     }
 };
 
