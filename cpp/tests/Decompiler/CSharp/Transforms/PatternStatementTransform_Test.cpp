@@ -32,6 +32,7 @@
 #include "Decompiler/CSharp/CSharpDecompiler.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
@@ -52,8 +53,14 @@
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
 #include "Decompiler/DecompileRun.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/Semantics/MemberResolveResult.hpp"
+#include "Decompiler/Semantics/TypeResolveResult.hpp"
+#include "Decompiler/TypeSystem/CustomAttributeTypedArgument.hpp"
+#include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
+#include "Decompiler/TypeSystem/LookupStubs.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
 
 #include <gtest/gtest.h>
@@ -70,7 +77,9 @@ namespace Syntax = ::ILSpy::Decompiler::CSharp::Syntax;
 namespace IL = ::ILSpy::Decompiler::IL;
 namespace Impl = ::ILSpy::Decompiler::TypeSystem::Implementation;
 namespace CSharpTS = ::ILSpy::Decompiler::CSharp::TypeSystem;
+namespace TSImpl = ::ILSpy::Decompiler::TypeSystem::Implementation;
 namespace TS = ::ILSpy::Decompiler::TypeSystem;
+namespace Sem = ::ILSpy::Decompiler::Semantics;
 using ::ILSpy::Decompiler::DecompilerSettings;
 using ::ILSpy::Decompiler::DecompileRun;
 
@@ -1123,6 +1132,236 @@ TEST(PatternStatementTransformTest, ForeachOnMultiDimRequiresUpperBoundCounts)
     EXPECT_EQ(loop.block->Statements().Count(), 4)
         << "an impure upper-bound variable keeps the loop structure";
     EXPECT_EQ(loop.block->Statements().At(0), loop.entry);
+}
+
+// ---- The foreach-over-inline-array reshape -----------------------------------------------
+
+// The `[InlineArray(N)]` attribute stub (the InlineArrayTransform_Test
+// InlineArrayTestAttribute shape).
+class PatternInlineArrayAttribute : public TS::IAttribute {
+public:
+    explicit PatternInlineArrayAttribute(int length) : length_(length) {}
+    const TS::IType& AttributeType() const override { return attrType_; }
+    const TS::IMethod* Constructor() const override { return nullptr; }
+    bool HasDecodeErrors() const override { return false; }
+    std::vector<TS::CustomAttributeTypedArgument> FixedArguments() const override {
+        return {TS::CustomAttributeTypedArgument(
+            std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32),
+            std::any(length_))};
+    }
+    std::vector<TS::CustomAttributeNamedArgument> NamedArguments() const override {
+        return {};
+    }
+
+private:
+    int length_;
+    TS::KnownType attrType_{TS::KnownTypeCode::Object};
+};
+
+// An `[InlineArray(N)]` struct type definition (the InlineArrayTypeDefinition
+// precedent in InlineArrayTransform_Test.cpp): a LookupTypeDefinition whose
+// GetAttribute surfaces the InlineArray attribute.
+class PatternInlineArrayType : public TS::TestSupport::LookupTypeDefinition {
+public:
+    PatternInlineArrayType(int length, const TS::ICompilation& compilation)
+        : TS::TestSupport::LookupTypeDefinition(
+              "Buffer8", std::string(), TS::FullTypeName("Buffer8"),
+              TS::TypeKind::Struct, TS::Accessibility::Public, compilation,
+              nullptr),
+          attr_(length) {}
+
+    using LookupTypeDefinition::GetAttribute;
+    const TS::IAttribute* GetAttribute(TS::KnownAttribute attribute) const override {
+        if (attribute == TS::KnownAttribute::InlineArray)
+            return &attr_;
+        return nullptr;
+    }
+
+private:
+    mutable PatternInlineArrayAttribute attr_;
+};
+
+// The convertible foreach-over-inline-array shape:
+//   for (i = 0; i < 8; i = i + 1) {
+//       item = <PID>.InlineArrayElementRef(ref buffer, i);
+//       work;
+//   }
+// The loop bound must equal the buffer's `[InlineArray(N)]` length (the
+// soundness argument: InlineArrayElementRef is unchecked, the C# indexer is
+// bounds-checked).
+struct ForeachInlineArrayLoop {
+    IL::ILVariablePtr item;
+    Syntax::ForStatement* forStatement = nullptr;
+    Syntax::Statement* work = nullptr;
+    std::unique_ptr<Syntax::BlockStatement> block;
+};
+
+ForeachInlineArrayLoop MakeForeachInlineArrayLoop(
+    PatternStatementFixture& fx, const std::string& helperName =
+                                       "InlineArrayElementRef",
+    int loopBound = 8, int indexStoreCount = 2, int indexLoadCount = 3,
+    bool attachSymbol = true) {
+    ForeachInlineArrayLoop loop;
+    auto bufferType = std::make_shared<PatternInlineArrayType>(8, fx.compilation);
+    IL::ILVariablePtr buffer = LocalOf("buffer", bufferType);
+    IL::ILVariablePtr index = LocalOf("i", TS::UnknownType());
+    index->StoreCount = indexStoreCount;
+    index->LoadCount = indexLoadCount;
+    loop.item = LocalOf("item", TS::ITypePtr(std::make_shared<TS::KnownType>(
+                                   TS::KnownTypeCode::Int32)));
+    loop.item->StoreCount = 1;
+
+    auto* forStatement = new Syntax::ForStatement();
+    forStatement->Initializers().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            Var(index->Name, index), Syntax::AssignmentOperatorType::Assign,
+            new Syntax::PrimitiveExpression(Syntax::PrimitiveValue(0)))));
+    forStatement->Condition(new Syntax::BinaryOperatorExpression(
+        Var(index->Name, index), Syntax::BinaryOperatorType::LessThan,
+        new Syntax::PrimitiveExpression(Syntax::PrimitiveValue(loopBound))));
+    forStatement->Iterators().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            Var(index->Name, index), Syntax::AssignmentOperatorType::Assign,
+            new Syntax::BinaryOperatorExpression(
+                Var(index->Name, index), Syntax::BinaryOperatorType::Add,
+                new Syntax::PrimitiveExpression(Syntax::PrimitiveValue(1))))));
+
+    // `item = InlineArrayElementRef(ref buffer, i);` -- the compiler's
+    // unchecked element accessor, resolved through the symbol annotation.
+    auto* helperCall = new Syntax::InvocationExpression(
+        new Syntax::IdentifierExpression(helperName));
+    auto* bufferRef = new Syntax::DirectionExpression(
+        Syntax::FieldDirection::Ref, Var(buffer->Name, buffer));
+    helperCall->Arguments().Add(bufferRef);
+    helperCall->Arguments().Add(Var(index->Name, index));
+    if (attachSymbol) {
+        auto helperMethod = std::make_shared<TSImpl::FakeMethod>(
+            fx.compilation, TS::SymbolKind::Method);
+        helperMethod->SetName(helperName);
+        helperMethod->SetDeclaringType(std::make_shared<TS::SimpleType>(
+            TS::TopLevelTypeName(std::string(),
+                                 "<PrivateImplementationDetails>")));
+        helperMethod->SetReturnType(TS::ITypePtr(std::make_shared<TS::KnownType>(
+            TS::KnownTypeCode::Int32)));
+        auto target = std::make_shared<Sem::TypeResolveResult>(
+            helperMethod->DeclaringType());
+        helperCall->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+            target,
+            // FakeMethod derives IMember twice (FakeMember and IMethod);
+            // pick the FakeMember subobject's IMember base.
+            static_cast<TSImpl::FakeMember*>(helperMethod.get())));
+        // Keep the stub method alive for the program's lifetime (the
+        // resolve-result annotation stores a raw pointer).
+        static std::vector<std::shared_ptr<TSImpl::FakeMethod>> keepAlive;
+        keepAlive.push_back(std::move(helperMethod));
+    }
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            Var(loop.item->Name, loop.item),
+            Syntax::AssignmentOperatorType::Assign, helperCall)));
+    loop.work = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            new Syntax::IdentifierExpression("x"),
+            Syntax::AssignmentOperatorType::Assign,
+            new Syntax::IdentifierExpression("y")));
+    body->Statements().Add(loop.work);
+    forStatement->EmbeddedStatement(body);
+    loop.forStatement = forStatement;
+
+    loop.block = std::make_unique<Syntax::BlockStatement>();
+    loop.block->Statements().Add(forStatement);
+    return loop;
+}
+
+// The shape above becomes `foreach (int item in buffer) { work; }` -- the
+// bounds-checked surface is sound because the loop bound equals the inline
+// array length.
+TEST(PatternStatementTransformTest, ForeachOnInlineArrayIsIntroduced)
+{
+    PatternStatementFixture fx;
+    auto loop = MakeForeachInlineArrayLoop(fx);
+
+    RunTransform(*loop.block, fx);
+
+    ASSERT_EQ(loop.block->Statements().Count(), 1);
+    auto* foreachStmt =
+        dynamic_cast<Syntax::ForeachStatement*>(loop.block->Statements().At(0));
+    ASSERT_NE(foreachStmt, nullptr);
+    auto* designation = dynamic_cast<Syntax::SingleVariableDesignation*>(
+        foreachStmt->VariableDesignation());
+    ASSERT_NE(designation, nullptr);
+    EXPECT_EQ(designation->Identifier(), "item");
+    const auto* designationAnnotation =
+        designation->Annotation<CS::ILVariableResolveResult>();
+    ASSERT_NE(designationAnnotation, nullptr);
+    EXPECT_EQ(designationAnnotation->Variable(), loop.item.get());
+    auto* inIdentifier =
+        dynamic_cast<Syntax::IdentifierExpression*>(foreachStmt->InExpression());
+    ASSERT_NE(inIdentifier, nullptr);
+    EXPECT_EQ(inIdentifier->Identifier(), "buffer");
+    auto* body = dynamic_cast<Syntax::BlockStatement*>(
+        foreachStmt->EmbeddedStatement());
+    ASSERT_NE(body, nullptr);
+    ASSERT_EQ(body->Statements().Count(), 1);
+    EXPECT_EQ(body->Statements().At(0), loop.work)
+        << "the element-access statement is dropped, the work survives";
+    EXPECT_EQ(loop.item->Kind, IL::VariableKind::ForeachLocal);
+}
+
+// Only the compiler's own InlineArrayElementRef(ReadOnly) helpers qualify.
+TEST(PatternStatementTransformTest, ForeachOnInlineArrayRequiresHelperName)
+{
+    PatternStatementFixture fx;
+    auto loop = MakeForeachInlineArrayLoop(fx, /*helperName=*/"SomeOtherHelper");
+
+    RunTransform(*loop.block, fx);
+
+    EXPECT_EQ(loop.block->Statements().Count(), 1);
+    EXPECT_EQ(loop.block->Statements().At(0), loop.forStatement);
+}
+
+// Without a resolved symbol the call keeps the (faithful) helper form.
+TEST(PatternStatementTransformTest, ForeachOnInlineArrayRequiresSymbol)
+{
+    PatternStatementFixture fx;
+    auto loop = MakeForeachInlineArrayLoop(fx, "InlineArrayElementRef",
+                                           /*loopBound=*/8, /*indexStoreCount=*/2,
+                                           /*indexLoadCount=*/3,
+                                           /*attachSymbol=*/false);
+
+    RunTransform(*loop.block, fx);
+
+    EXPECT_EQ(loop.block->Statements().Count(), 1);
+    EXPECT_EQ(loop.block->Statements().At(0), loop.forStatement);
+}
+
+// The loop bound must equal the inline array length exactly.
+TEST(PatternStatementTransformTest, ForeachOnInlineArrayRequiresLengthMatch)
+{
+    PatternStatementFixture fx;
+    // The buffer's [InlineArray(8)] length stays 8; the loop counts to 7.
+    auto loop = MakeForeachInlineArrayLoop(fx, "InlineArrayElementRef",
+                                           /*loopBound=*/7);
+
+    RunTransform(*loop.block, fx);
+
+    EXPECT_EQ(loop.block->Statements().Count(), 1);
+    EXPECT_EQ(loop.block->Statements().At(0), loop.forStatement);
+}
+
+// The index must be a pure counter (stored at init + increment, loaded at
+// the condition, the increment, and the element access).
+TEST(PatternStatementTransformTest, ForeachOnInlineArrayRequiresIndexCounts)
+{
+    PatternStatementFixture fx;
+    auto loop = MakeForeachInlineArrayLoop(fx, "InlineArrayElementRef", 8,
+                                           /*indexStoreCount=*/3);
+
+    RunTransform(*loop.block, fx);
+
+    EXPECT_EQ(loop.block->Statements().Count(), 1);
+    EXPECT_EQ(loop.block->Statements().At(0), loop.forStatement);
 }
 
 // ---- The Run shell ---------------------------------------------------------------------

@@ -57,6 +57,7 @@
 #include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
@@ -396,6 +397,63 @@ ForeachMultiDimPatternsHolder& GetForeachMultiDimPatterns() {
     return holder;
 }
 
+// The C# `forOnInlineArrayPattern` (line ~410):
+//   `for ($indexVariable = 0; $indexVariable < $length;
+//        $indexVariable = $indexVariable + 1)
+//      { $itemVariable = $elementAccess; $statements... }`
+// (the `$length` is any literal; the element access is any node -- the arm
+// checks it is the InlineArrayElementRef helper by its resolved symbol).
+struct ForeachOnInlineArrayPatternHolder {
+    Syntax::IdentifierExpression indexVariable{std::string(PatternMatching::Pattern::AnyString)};
+    PatternMatching::NamedNode indexVariableNamed{"indexVariable", indexVariable};
+    PatternMatching::IdentifierExpressionBackreference indexRef{"indexVariable"};
+    Syntax::PrimitiveExpression zero{Syntax::PrimitiveValue(0)};
+    Syntax::AssignmentExpression indexInit{
+        Syntax::Expression::ToExpression(indexVariableNamed),
+        Syntax::AssignmentOperatorType::Assign, &zero};
+    Syntax::ExpressionStatement indexInitStatement{&indexInit};
+    Syntax::PrimitiveExpression anyLength{Syntax::AnyValueTag{}};
+    PatternMatching::NamedNode lengthNamed{"length", anyLength};
+    Syntax::BinaryOperatorExpression condition{
+        Syntax::Expression::ToExpression(indexRef),
+        Syntax::BinaryOperatorType::LessThan,
+        Syntax::Expression::ToExpression(lengthNamed)};
+    Syntax::PrimitiveExpression one{Syntax::PrimitiveValue(1)};
+    Syntax::BinaryOperatorExpression increment{
+        Syntax::Expression::ToExpression(indexRef),
+        Syntax::BinaryOperatorType::Add, &one};
+    Syntax::AssignmentExpression iteratorAssign{
+        Syntax::Expression::ToExpression(indexRef),
+        Syntax::AssignmentOperatorType::Assign, &increment};
+    Syntax::ExpressionStatement iterator{&iteratorAssign};
+    Syntax::IdentifierExpression itemVariable{std::string(PatternMatching::Pattern::AnyString)};
+    PatternMatching::NamedNode itemVariableNamed{"itemVariable", itemVariable};
+    PatternMatching::AnyNode elementAccess{"elementAccess"};
+    Syntax::AssignmentExpression itemAssign{
+        Syntax::Expression::ToExpression(itemVariableNamed),
+        Syntax::AssignmentOperatorType::Assign,
+        Syntax::Expression::ToExpression(elementAccess)};
+    Syntax::ExpressionStatement itemAssignStatement{&itemAssign};
+    PatternMatching::AnyNode anyStatement{"statements"};
+    PatternMatching::Repeat statementsRepeat{anyStatement};
+    Syntax::BlockStatement body;
+    Syntax::ForStatement pattern;
+
+    ForeachOnInlineArrayPatternHolder() {
+        pattern.Initializers().Add(&indexInitStatement);
+        pattern.Condition(&condition);
+        pattern.Iterators().Add(&iterator);
+        body.Statements().Add(&itemAssignStatement);
+        body.Statements().Add(Syntax::Statement::ToStatement(statementsRepeat));
+        pattern.EmbeddedStatement(&body);
+    }
+};
+
+ForeachOnInlineArrayPatternHolder& GetForeachOnInlineArrayPattern() {
+    static ForeachOnInlineArrayPatternHolder holder;
+    return holder;
+}
+
 // The C# `bool DescendIntoStatement(AstNode node)` -- the continue-scan gate:
 // do not descend into expressions (their identifier references are not
 // statements) or into NESTED loops (a continue there targets the nested loop,
@@ -704,7 +762,11 @@ public:
             lastResult = result;
             return;
         }
-        // TransformForeachOnInlineArray -- deferred (the file header).
+        if (Syntax::AstNode* result =
+                TransformForeachOnInlineArray(forStatement)) {
+            lastResult = result;
+            return;
+        }
         Syntax::DepthFirstAstVisitor::VisitForStatement(forStatement);
     }
 
@@ -1043,6 +1105,144 @@ public:
                 Syntax::Detach(statement);
         }
         expressionStatement->ReplaceWith(foreachStmt);
+        return foreachStmt;
+    }
+
+    // The C# `Statement? TransformForeachOnInlineArray(ForStatement
+    // forStatement)` (line ~427): reconstructs a foreach over an inline array
+    // from the lowered for loop. The rewrite is only sound because the loop
+    // bound equals the inline array length, which proves the index is always
+    // in range: InlineArrayElementRef is the compiler's unchecked element
+    // accessor, whereas the C# inline-array indexer is bounds-checked.
+    Syntax::Statement* TransformForeachOnInlineArray(
+        Syntax::ForStatement* forStatement) {
+        if (!context->DecompileRun->Settings().ForEachStatement() ||
+            !context->DecompileRun->Settings().InlineArrays())
+            return nullptr;
+        PatternMatching::Match m =
+            Syntax::MatchNode(GetForeachOnInlineArrayPattern().pattern,
+                              forStatement);
+        if (!m.Success())
+            return nullptr;
+        std::vector<Syntax::IdentifierExpression*> itemCaptures =
+            m.Get<Syntax::IdentifierExpression>("itemVariable");
+        // The C# `.Single()` (exactly one capture by construction).
+        assert(itemCaptures.size() == 1);
+        std::vector<Syntax::IdentifierExpression*> indexCaptures =
+            m.Get<Syntax::IdentifierExpression>("indexVariable");
+        assert(indexCaptures.size() == 1);
+        IL::ILVariable* itemVariable = CS::GetILVariable(*itemCaptures.front());
+        IL::ILVariable* indexVariable = CS::GetILVariable(*indexCaptures.front());
+        if (itemVariable == nullptr || indexVariable == nullptr)
+            return nullptr;
+
+        // The loop body must start with
+        // `item = InlineArrayElementRef(ref buffer, index)`.
+        std::vector<Syntax::AstNode*> elementAccessCaptures =
+            m.Get<Syntax::AstNode>("elementAccess");
+        assert(elementAccessCaptures.size() == 1);
+        auto* elementAccess =
+            dynamic_cast<Syntax::InvocationExpression*>(elementAccessCaptures.front());
+        if (elementAccess == nullptr)
+            return nullptr;
+        const TS::ISymbol* symbol = CS::GetSymbol(*elementAccess);
+        auto* helper = dynamic_cast<const TS::IMethod*>(symbol);
+        if (helper == nullptr)
+            return nullptr;
+        // The C# checks `DeclaringType.FullName ==
+        // "<PrivateImplementationDetails>"` -- the port's IType surface has no
+        // FullName, and the type is top-level with an empty namespace, so
+        // Name() is the equivalent read (the InlineArrayTransform
+        // MatchInlineArrayHelper precedent).
+        TS::ITypePtr declaringType = helper->DeclaringType();
+        if (declaringType == nullptr ||
+            declaringType->Name() != "<PrivateImplementationDetails>")
+            return nullptr;
+        if (helper->Name() != "InlineArrayElementRef" &&
+            helper->Name() != "InlineArrayElementRefReadOnly")
+            return nullptr;
+        if (elementAccess->Arguments().Count() != 2)
+            return nullptr;
+        // arg0: `ref buffer`, arg1: the loop index.
+        auto* bufferDirection =
+            dynamic_cast<Syntax::DirectionExpression*>(
+                elementAccess->Arguments().At(0));
+        if (bufferDirection == nullptr)
+            return nullptr;
+        auto* bufferIdentifier =
+            dynamic_cast<Syntax::IdentifierExpression*>(
+                bufferDirection->Expression());
+        if (bufferIdentifier == nullptr)
+            return nullptr;
+        IL::ILVariable* bufferVariable = CS::GetILVariable(*bufferIdentifier);
+        if (bufferVariable == nullptr)
+            return nullptr;
+        auto* indexIdentifier = dynamic_cast<Syntax::IdentifierExpression*>(
+            elementAccess->Arguments().At(1));
+        if (indexIdentifier == nullptr ||
+            CS::GetILVariable(*indexIdentifier) != indexVariable)
+            return nullptr;
+
+        // Soundness: the loop counts 0..length-1 over exactly the inline
+        // array's length, so the index is provably in range. Any other bound
+        // (or a non-inline-array buffer) is rejected.
+        std::optional<int> arrayLength =
+            TS::GetInlineArrayLength(*bufferVariable->Type);
+        if (!arrayLength.has_value())
+            return nullptr;
+        std::vector<Syntax::PrimitiveExpression*> lengthCaptures =
+            m.Get<Syntax::PrimitiveExpression>("length");
+        assert(lengthCaptures.size() == 1);
+        const std::int32_t* loopBound =
+            std::get_if<std::int32_t>(&lengthCaptures.front()->Value());
+        if (loopBound == nullptr || *loopBound != *arrayLength)
+            return nullptr;
+
+        if (!VariableCanBeUsedAsForeachLocal(itemVariable, forStatement))
+            return nullptr;
+        // The index is a pure counter: stored at init + increment, loaded at
+        // the condition, the increment, and the element access; never
+        // captured by address.
+        if (indexVariable->StoreCount != 2 || indexVariable->LoadCount != 3 ||
+            indexVariable->AddressCount != 0)
+            return nullptr;
+
+        context->StepOnce("Introduce foreach over inline array", forStatement);
+        // Take the buffer reference for the `in` expression before dropping
+        // the element access.
+        Syntax::Expression* inExpression = Syntax::Detach(bufferIdentifier);
+        // Reuse the loop body (preserving its annotations) after removing
+        // its leading `item = InlineArrayElementRef(ref buffer, i)`
+        // statement.
+        auto* body =
+            dynamic_cast<Syntax::BlockStatement*>(
+                forStatement->EmbeddedStatement());
+        // The pattern guarantees a BlockStatement body.
+        assert(body != nullptr);
+        body->Statements().At(0)->Remove();
+        auto* foreachStmt = new Syntax::ForeachStatement();
+        // (The C# `context.Settings.AnonymousTypes &&
+        // itemVariable.Type.ContainsAnonymousType()` `var` decision is
+        // DEFERRED with the NRExtensions anonymous-type walk; the explicit
+        // ConvertType form is always used.)
+        foreachStmt->VariableType(
+            context->TypeSystemAstBuilder->ConvertType(*itemVariable->Type));
+        auto* designation = new Syntax::SingleVariableDesignation();
+        designation->Identifier(itemVariable->Name);
+        foreachStmt->VariableDesignation(designation);
+        foreachStmt->InExpression(inExpression);
+        foreachStmt->EmbeddedStatement(Syntax::Detach(body));
+        CS::CopyAnnotationsFrom(foreachStmt, *forStatement);
+        itemVariable->Kind = IL::VariableKind::ForeachLocal;
+        // A non-owning alias over the caller-owned variable (the IL function
+        // tree owns it -- the no-op-deleter convention).
+        IL::ILVariablePtr itemVariableHandle(itemVariable, [](IL::ILVariable*) {});
+        foreachStmt->VariableDesignation()->AddAnnotation(
+            std::make_shared<CS::ILVariableResolveResult>(itemVariableHandle,
+                                                           itemVariable->Type));
+        forStatement->ReplaceWith(foreachStmt);
+        // The C# `context.EndStep(foreachStmt)` (the step-group close) folds
+        // onto the single step hook.
         return foreachStmt;
     }
 
