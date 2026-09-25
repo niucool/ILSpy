@@ -46,7 +46,9 @@ constexpr const char* kModifierFixture =
     "/home/jim/ilspy-test-fixtures/modifier_fixture/ModifierFixture.dll";
 
 // Renders one named type through the static type-level entry. False when the
-// fixture is absent or the type is not found.
+// fixture is absent or the type is not found. The name comparison uses the
+// bare form (the metadata name's arity suffix stripped) so generic types
+// are found by their source name.
 bool RenderType(const char* fixturePath, const char* typeName,
                 std::string& text) {
     namespace fs = std::filesystem;
@@ -56,8 +58,16 @@ bool RenderType(const char* fixturePath, const char* typeName,
     Metadata::MetadataFile file(fixturePath);
     if (!file.IsValid())
         return false;
+    std::string requested = typeName;
+    auto tick = requested.find('`');
+    if (tick != std::string::npos)
+        requested = requested.substr(0, tick);
     for (const auto& t : file.TypeDefs()) {
-        if (std::string(t.Name) != typeName)
+        std::string name = t.Name;
+        tick = name.find('`');
+        if (tick != std::string::npos)
+            name = name.substr(0, tick);
+        if (name != requested)
             continue;
         return CSharp::CSharpDecompiler::DecompileTypeToString(file, t.Token,
                                                                 text);
@@ -683,6 +693,31 @@ TEST(FacadeMemberModifiersTest, BaseListRendersNestedTypesThroughTheNameDecision
         << far;
     EXPECT_NE(top.find("class TopImpl : Holder.INested"), std::string::npos)
         << top;
+}
+
+// The generic base-list argument goes through the same name decision as
+// the base type: a sibling nested argument resolves by its own name, a
+// nested argument of another declaring type renders the dotted form, and
+// a type-parameter argument renders its declared name (never the
+// reflection ``N`` spelling).
+TEST(FacadeMemberModifiersTest, BaseListTypeArgumentsFollowTheNameDecision)
+{
+    constexpr const char* kNestedFixture =
+        "/home/jim/ilspy-test-fixtures/nested_fixture/NestedBase.dll";
+    std::string sibling, top, param;
+    if (!RenderType(kNestedFixture, "SiblingArg", sibling))
+        GTEST_SKIP() << "the nested-base fixture is not provisioned";
+    ASSERT_TRUE(RenderType(kNestedFixture, "TopArg", top));
+    ASSERT_TRUE(RenderType(kNestedFixture, "ParamArg", param));
+    EXPECT_NE(sibling.find("class SiblingArg : Gen<INested>"),
+              std::string::npos)
+        << sibling;
+    EXPECT_NE(top.find("class TopArg : Gen<Holder.INested>"),
+              std::string::npos)
+        << top;
+    EXPECT_NE(param.find("class ParamArg<TItem> : Gen<TItem>"),
+              std::string::npos)
+        << param;
 }
 
 // The whole-module render's using header carries the module-wide

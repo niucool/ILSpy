@@ -514,6 +514,28 @@ BaseNameDecision DecideBaseName(const TS::ITypeDefinition* typeDef,
                : BaseNameDecision::Qualify;
 }
 
+// The C# UseKeywordsForBuiltinTypes over a type definition: the primitive
+// definitions render their keyword spelling (uint, string, ...) in every
+// name position. Null when the definition is not a keyword type.
+const char* BuiltinTypeKeyword(const TS::ITypeDefinition* typeDef) {
+    if (typeDef == nullptr)
+        return nullptr;
+    static const std::map<std::string, const char*> kBuiltinKeywords = {
+        {"System.Boolean", "bool"},   {"System.Char", "char"},
+        {"System.SByte", "sbyte"},   {"System.Byte", "byte"},
+        {"System.Int16", "short"},   {"System.UInt16", "ushort"},
+        {"System.Int32", "int"},     {"System.UInt32", "uint"},
+        {"System.Int64", "long"},    {"System.UInt64", "ulong"},
+        {"System.Single", "float"},  {"System.Double", "double"},
+        {"System.Decimal", "decimal"}, {"System.String", "string"},
+        {"System.Object", "object"}, {"System.IntPtr", "nint"},
+        {"System.UIntPtr", "nuint"},
+    };
+    const std::string full = typeDef->Namespace() + "." + typeDef->Name();
+    auto it = kBuiltinKeywords.find(full);
+    return it != kBuiltinKeywords.end() ? it->second : nullptr;
+}
+
 // The C# ConvertTypeHelper's name composition for a base-list entry: the
 // own name when the scope lookup resolves it (a sibling nested type
 // resolves by its own name -- the enclosing type's members are in the
@@ -526,10 +548,22 @@ BaseNameDecision DecideBaseName(const TS::ITypeDefinition* typeDef,
 std::string RenderBaseTypeName(const TS::ITypeDefinition* typeDef,
                                const TS::ITypePtr& instantiation,
                                const Resolver::CSharpResolver* resolver) {
-    if (typeDef == nullptr && instantiation != nullptr)
+    if (typeDef == nullptr && instantiation != nullptr) {
+        // A type-parameter argument renders its declared name (the C#
+        // MakeSimpleType over the parameter's Name); other non-definition
+        // types (arrays, pointers) keep the short renderer.
+        if (const auto* typeParameter =
+                dynamic_cast<const TS::ITypeParameter*>(
+                    instantiation.get()))
+            return typeParameter->Name();
         return IL::CSharpTypeName(instantiation);
+    }
     if (typeDef == nullptr)
         return std::string();
+    // The keyword spelling precedes every name decision (the C#
+    // UseKeywordsForBuiltinTypes).
+    if (const char* keyword = BuiltinTypeKeyword(typeDef))
+        return keyword;
     std::size_t outerTypeParameterCount = 0;
     for (const TS::ITypeDefinition* d = typeDef->DeclaringTypeDefinition();
          d != nullptr; d = d->DeclaringTypeDefinition())
@@ -545,7 +579,12 @@ std::string RenderBaseTypeName(const TS::ITypeDefinition* typeDef,
              i < parameterized->TypeArguments().size(); ++i) {
             if (i != outerTypeParameterCount)
                 args += ", ";
-            args += IL::CSharpTypeName(parameterized->TypeArguments()[i]);
+            // Each argument through the same name decision (the C#
+            // AddTypeArguments converts every argument through
+            // ConvertType).
+            const TS::ITypePtr& argument = parameterized->TypeArguments()[i];
+            args += RenderBaseTypeName(argument->GetDefinition(), argument,
+                                        resolver);
         }
         args += ">";
     }
@@ -780,7 +819,15 @@ bool DecompileTypeToStringBody(
     // is deferred with the resolver surface).
     for (const auto& t : file.TypeDefs()) {
         if (t.Token != typeToken) continue;
-        typeName = t.Name;
+        // The bare name (the metadata name's arity suffix stripped): the
+        // declaration renders the type-parameter list separately (the C#
+        // TypeDeclaration's TypeParameters), and the constructor headers
+        // name the type without either.
+        std::string bareName = t.Name;
+        auto tick = bareName.find('`');
+        if (tick != std::string::npos)
+            bareName = bareName.substr(0, tick);
+        typeName = bareName;
         const char* keyword = "class";
         switch (t.Kind) {
             case ::ILSpy::Decompiler::TypeSystem::TypeKind::Struct:
@@ -837,7 +884,22 @@ bool DecompileTypeToStringBody(
         }
         out += keyword;
         out += ' ';
-        out += t.Name;
+        out += bareName;
+        // The type-parameter list (the C# TypeDeclaration's
+        // TypeParameters): the declared names in declaration order.
+        if (typeDef != nullptr && typeDef->TypeParameterCount() > 0) {
+            out += '<';
+            const std::vector<const TS::ITypeParameter*>& typeParameters =
+                typeDef->TypeParameters();
+            for (std::size_t i = 0; i < typeParameters.size(); ++i) {
+                if (i != 0)
+                    out += ", ";
+                out += typeParameters[i] != nullptr
+                           ? typeParameters[i]->Name()
+                           : std::string("?");
+            }
+            out += '>';
+        }
         if (typeDef != nullptr) {
             // The C# FullyQualifyAmbiguousTypeNamesVisitor's per-type
             // resolver (the visitor's ctor threading): the render's using
