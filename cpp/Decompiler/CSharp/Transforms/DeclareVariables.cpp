@@ -34,8 +34,10 @@
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/LambdaExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/OutVarDeclarationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Slots.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
@@ -654,14 +656,82 @@ void DeclareVariables::InsertVariableDeclarations() {
             Syntax::AstNode* insertionParent = insertionNode->Parent();
             if (insertionParent == nullptr)
                 throw std::runtime_error("Variable insertion point has no parent.");
-            // (The C# NeedsSkipInit forms -- the SkipInit call statements --
-            // are DEFERRED: they need a live context.TypeSystem for
-            // FindType(KnownTypeCode.Unsafe). The plain declaration is
-            // inserted; the skip-init marker stays on the variable's
-            // DefaultInitialization value until the compilation wiring
-            // lands.)
-            insertionParent->InsertChildBefore(insertionNode, vds,
-                                                 &Syntax::Slots::Statement);
+            // The C# NeedsSkipInit forms (lines 717-770): the
+            // System.Runtime.CompilerServices.Unsafe.SkipInit call marks
+            // the uninitialized local -- with the out-variables setting the
+            // declaration folds into the call's argument (no separate
+            // declaration renders); otherwise the plain declaration is
+            // followed by the call. A null context TypeSystem (a caller that
+            // passed no decompilation context) degrades to the plain
+            // declaration -- the port's documented fallback for the bare
+            // pipeline-driver form.
+            if (v.DefaultInitialization == VariableInitKind::NeedsSkipInit
+                && context_->TypeSystem != nullptr) {
+                // The C# `context.TypeSystemAstBuilder.ConvertType(
+                // context.TypeSystem.FindType(KnownTypeCode.Unsafe))`.
+                Syntax::AstType* unsafeType =
+                    context_->TypeSystemAstBuilder->ConvertType(
+                        const_cast<TS::IType&>(
+                            context_->TypeSystem->FindType(
+                                TS::KnownTypeCode::Unsafe)));
+                Syntax::ExpressionStatement* skipInitStatement;
+                Syntax::AstNode* insertedNode;
+                if (context_->DecompileRun->Settings().OutVariables()) {
+                    // The C# `new OutVarDeclarationExpression(type.Clone(),
+                    // v.Name)` + the ILVariableResolveResult annotation.
+                    auto* outVarDecl =
+                        new Syntax::OutVarDeclarationExpression(
+                            type->Clone(), v.Name());
+                    outVarDecl->Variable()->AddAnnotation(
+                        std::make_shared<CS::ILVariableResolveResult>(
+                            v.ILVariableHandle()));
+                    skipInitStatement = new Syntax::ExpressionStatement(
+                        new Syntax::InvocationExpression(
+                            new Syntax::MemberReferenceExpression(
+                                new Syntax::TypeReferenceExpression(
+                                    unsafeType),
+                                "SkipInit")));
+                    static_cast<Syntax::InvocationExpression*>(
+                        skipInitStatement->Expression())
+                        ->Arguments()
+                        .Add(outVarDecl);
+                    insertionParent->InsertChildBefore(
+                        insertionNode, skipInitStatement,
+                        &Syntax::Slots::Statement);
+                    insertedNode = skipInitStatement;
+                } else {
+                    insertionParent->InsertChildBefore(
+                        insertionNode, vds, &Syntax::Slots::Statement);
+                    insertedNode = vds;
+                    // The C# `new DirectionExpression(FieldDirection.Out,
+                    // new IdentifierExpression(v.Name).WithRR(
+                    // new ILVariableResolveResult(ilVariable)))`.
+                    auto* identifier =
+                        new Syntax::IdentifierExpression(v.Name());
+                    identifier->AddAnnotation(
+                        std::make_shared<CS::ILVariableResolveResult>(
+                            v.ILVariableHandle()));
+                    skipInitStatement = new Syntax::ExpressionStatement(
+                        new Syntax::InvocationExpression(
+                            new Syntax::MemberReferenceExpression(
+                                new Syntax::TypeReferenceExpression(
+                                    unsafeType),
+                                "SkipInit")));
+                    static_cast<Syntax::InvocationExpression*>(
+                        skipInitStatement->Expression())
+                        ->Arguments()
+                        .Add(new Syntax::DirectionExpression(
+                            Syntax::FieldDirection::Out, identifier));
+                    insertionParent->InsertChildBefore(
+                        insertionNode, skipInitStatement,
+                        &Syntax::Slots::Statement);
+                }
+                context_->StepOnce("Insert variable declaration",
+                                   insertedNode);
+            } else {
+                insertionParent->InsertChildBefore(insertionNode, vds,
+                                                    &Syntax::Slots::Statement);
+            }
         }
     }
     // perform replacements at end, so that we don't replace a node while it

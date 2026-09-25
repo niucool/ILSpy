@@ -49,6 +49,7 @@
 #include "Decompiler/Metadata/UniversalAssemblyResolver.hpp"
 #include "Decompiler/Metadata/DotNetCorePathFinderExtensions.hpp"
 #include "Decompiler/TypeSystem/DecompilerTypeSystem.hpp"
+#include "Decompiler/TypeSystem/SimpleTypeResolveContext.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/IL/Transforms/GetILTransforms.hpp"
@@ -555,7 +556,12 @@ Syntax::SyntaxTree* CSharpDecompiler::DecompileModuleAndAssemblyAttributes(
 
     auto* syntaxTree = new Syntax::SyntaxTree();
     DoDecompileModuleAndAssemblyAttributes(decompileRun, module, *syntaxTree);
-    RunAstTransforms(*syntaxTree, decompileRun);
+    // The C# `RunTransforms(syntaxTree, decompileRun, typeSystem)` -- the
+    // IDecompilerTypeSystem as the decompilation context (its CurrentModule
+    // is the main module; the port's SimpleTypeResolveContext over the
+    // module carries the same pair).
+    TS::SimpleTypeResolveContext decompilationContext(module);
+    RunAstTransforms(*syntaxTree, decompileRun, &decompilationContext);
     return syntaxTree;
 }
 
@@ -672,7 +678,6 @@ CSharpDecompiler::GetAstTransforms() {
 
 void CSharpDecompiler::RunAstTransforms(    Syntax::AstNode& rootNode, DecompileRun& decompileRun,
     const ::ILSpy::Decompiler::TypeSystem::ITypeResolveContext* decompilationContext) {
-    (void)decompilationContext;
     // The C# RunTransforms shape: the context build, the up-front invariant
     // check, the transform loop with the per-entry step groups and invariant
     // checks, then the InsertParenthesesVisitor (the readability flag on)
@@ -686,9 +691,15 @@ void CSharpDecompiler::RunAstTransforms(    Syntax::AstNode& rootNode, Decompile
     Syntax::TypeSystemAstBuilder typeSystemAstBuilder =
         CreateAstBuilder(decompileRun.Settings());
     context.TypeSystemAstBuilder = &typeSystemAstBuilder;
-    // The C# TypeSystem slot (the IDecompilerTypeSystem the C# ctor passes)
-    // stays null in the port until the DecompileRun carries the compilation
-    // (the type-system wiring slice).
+    // The C# TransformContext ctor's third parameter (the IDecompilerTypeSystem
+    // the ctor passes): the compilation the context's TypeSystem slot carries.
+    // The C# passes the decompiler's type system -- an IDecompilerTypeSystem IS
+    // an ITypeResolveContext -- so the port reads it off the decompilation
+    // context parameter; a caller that passes none (the pipeline driver's
+    // bare form) leaves the slot null and the arm that needs it degrades.
+    context.TypeSystem = decompilationContext != nullptr
+                             ? &decompilationContext->Compilation()
+                             : nullptr;
     rootNode.CheckInvariant();
     for (const auto& transform : GetAstTransforms()) {
         context.StepOnce("AstTransform");

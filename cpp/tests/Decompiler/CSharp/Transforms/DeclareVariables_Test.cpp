@@ -35,6 +35,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/OutVarDeclarationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
@@ -373,6 +374,10 @@ void RunPipeline(Syntax::AstNode& root, RunFixture& fx) {
     CS::Transforms::TransformContext context;
     context.DecompileRun = &runStorage;
     context.TypeSystemAstBuilder = &fx.astBuilder;
+    // The C# TransformContext ctor's third parameter (the compilation the
+    // SkipInit arm's FindType consults; the MinimalCorlib reference in the
+    // fixture's SimpleCompilation answers Unsafe).
+    context.TypeSystem = &fx.compilation;
     CS::Transforms::DeclareVariables declareVariables;
     declareVariables.Run(root, context);
 }
@@ -458,6 +463,96 @@ TEST(DeclareVariablesTest, RunKeepsDeclarationSeparateUnderTheSetting)
     const auto* annotation = initializer->Annotation<CS::ILVariableResolveResult>();
     ASSERT_NE(annotation, nullptr);
     EXPECT_EQ(annotation->Variable(), v.get());
+}
+
+// The C# NeedsSkipInit forms (DeclareVariables.cs lines 717-770): a local
+// whose initial value is read before any store gets the
+// System.Runtime.CompilerServices.Unsafe.SkipInit call -- with the
+// out-variables setting, the declaration folds into the call's argument
+// (`Unsafe.SkipInit(out int v);`) and no separate declaration renders.
+TEST(DeclareVariablesTest, RunInsertsSkipInitCallForUninitializedLocals)
+{
+    RunFixture fx;
+    IL::ILVariablePtr v = LocalInt32("v");
+    v->UsesInitialValue = true;
+    v->InitialValueIsInitialized = false;
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    Syntax::Statement* use = AssignUse("w", v);
+    block->Statements().Add(use);
+
+    RunPipeline(*block, fx);
+
+    ASSERT_EQ(block->Statements().Count(), 2);
+    auto* skipInit = dynamic_cast<Syntax::ExpressionStatement*>(
+        block->Statements().At(0));
+    ASSERT_NE(skipInit, nullptr) << "the first statement is the SkipInit call";
+    auto* invocation = dynamic_cast<Syntax::InvocationExpression*>(
+        skipInit->Expression());
+    ASSERT_NE(invocation, nullptr);
+    auto* target = dynamic_cast<Syntax::MemberReferenceExpression*>(
+        invocation->Target());
+    ASSERT_NE(target, nullptr);
+    EXPECT_EQ(target->MemberName(), "SkipInit");
+    ASSERT_NE(dynamic_cast<Syntax::TypeReferenceExpression*>(target->Target()),
+              nullptr)
+        << "the target is the Unsafe type reference";
+    ASSERT_EQ(invocation->Arguments().Count(), 1);
+    auto* outVar = dynamic_cast<Syntax::OutVarDeclarationExpression*>(
+        invocation->Arguments().At(0));
+    ASSERT_NE(outVar, nullptr)
+        << "the declaration folds into the call's argument";
+    ASSERT_NE(outVar->Variable(), nullptr);
+    EXPECT_EQ(outVar->Variable()->Name(), "v");
+    const auto* annotation =
+        outVar->Variable()->Annotation<CS::ILVariableResolveResult>();
+    ASSERT_NE(annotation, nullptr);
+    EXPECT_EQ(annotation->Variable(), v.get());
+    EXPECT_EQ(block->Statements().At(1), use)
+        << "the SkipInit call is inserted before the first use";
+}
+
+// Without the out-variables setting the plain form: the separate
+// declaration is inserted, then the SkipInit call whose argument is the
+// out-direction identifier of the variable.
+TEST(DeclareVariablesTest, RunInsertsSkipInitCallWithDirectionExpression)
+{
+    RunFixture fx;
+    fx.settings.SetOutVariables(false);
+    IL::ILVariablePtr v = LocalInt32("v");
+    v->UsesInitialValue = true;
+    v->InitialValueIsInitialized = false;
+    auto block = std::make_unique<Syntax::BlockStatement>();
+    Syntax::Statement* use = AssignUse("w", v);
+    block->Statements().Add(use);
+
+    RunPipeline(*block, fx);
+
+    ASSERT_EQ(block->Statements().Count(), 3);
+    auto* declaration = dynamic_cast<Syntax::VariableDeclarationStatement*>(
+        block->Statements().At(0));
+    ASSERT_NE(declaration, nullptr)
+        << "the separate declaration leads";
+    auto* skipInit = dynamic_cast<Syntax::ExpressionStatement*>(
+        block->Statements().At(1));
+    ASSERT_NE(skipInit, nullptr) << "the SkipInit call follows it";
+    auto* invocation = dynamic_cast<Syntax::InvocationExpression*>(
+        skipInit->Expression());
+    ASSERT_NE(invocation, nullptr);
+    ASSERT_EQ(invocation->Arguments().Count(), 1);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(
+        invocation->Arguments().At(0));
+    ASSERT_NE(direction, nullptr)
+        << "the argument is the out direction over the variable";
+    EXPECT_EQ(direction->FieldDirection(), Syntax::FieldDirection::Out);
+    auto* identifier = dynamic_cast<Syntax::IdentifierExpression*>(
+        direction->Expression());
+    ASSERT_NE(identifier, nullptr);
+    EXPECT_EQ(identifier->Identifier(), "v");
+    const auto* annotation =
+        identifier->Annotation<CS::ILVariableResolveResult>();
+    ASSERT_NE(annotation, nullptr);
+    EXPECT_EQ(annotation->Variable(), v.get());
+    EXPECT_EQ(block->Statements().At(2), use);
 }
 
 // A variable whose type is a C# anonymous type combines into `var v =
