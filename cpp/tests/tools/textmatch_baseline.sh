@@ -23,6 +23,9 @@
 # Usage: textmatch_baseline.sh [out-dir]
 #   ILSPY_ORACLE / ILSPY_PORT / CORPUS_DIR / CAPA_DIR / TIMEOUT / TOP_N
 #   (the same conventions as differential_harness.sh).
+#   MODE=il switches the run to whole-module --il on both engines (the
+#   default MODE=csharp runs --csharp); ALL_CORPUS=1 ranks-and-runs every
+#   corpus .dll instead of the top-$TOP_N (the full-corpus parity sweep).
 
 set -u
 
@@ -34,6 +37,13 @@ CORPUS_DIR=${CORPUS_DIR:-/home/jim/ilspy-test-fixtures/net48}
 CAPA_DIR=${CAPA_DIR:-/home/jim/source/capa-testfiles}
 EXTRA_SAMPLE=${EXTRA_SAMPLE:-$(ls /home/jim/.dotnet/tools/.store/ilspycmd/*/ilspycmd/*/tools/net10.0/any/ilspycmd.dll 2>/dev/null | head -1)}
 TOP_N=${TOP_N:-20}
+MODE=${MODE:-csharp}
+case "$MODE" in
+  csharp) PORT_FLAGS="--csharp"; ORACLE_FLAGS="" ;;
+  il)     PORT_FLAGS="--il"; ORACLE_FLAGS="-il" ;;
+  *) echo "MODE must be csharp or il" >&2; exit 2 ;;
+esac
+ALL_CORPUS=${ALL_CORPUS:-0}
 OUT=${1:-/tmp/textmatch}
 TIMEOUT=${TIMEOUT:-180}
 
@@ -44,9 +54,9 @@ printf "tag\tcategory\toracle_rc\tport_rc\toracle_lines\tport_lines\tdiff_lines\
 run_one() {  # $1=sample $2=tag
     local sample="$1" tag="$2" dir="$OUT/$tag"
     mkdir -p "$dir"
-    timeout "$TIMEOUT" "$ORACLE" "$sample" > "$dir/oracle.txt" 2> "$dir/oracle.err"
+    timeout "$TIMEOUT" "$ORACLE" $ORACLE_FLAGS "$sample" > "$dir/oracle.txt" 2> "$dir/oracle.err"
     echo $? > "$dir/oracle.rc"
-    timeout "$TIMEOUT" "$PORT" --csharp "$sample" > "$dir/port.txt" 2> "$dir/port.err"
+    timeout "$TIMEOUT" "$PORT" $PORT_FLAGS "$sample" > "$dir/port.txt" 2> "$dir/port.err"
     echo $? > "$dir/port.rc"
     tr -d '\r' < "$dir/oracle.txt" > "$dir/oracle.n.txt"
     tr -d '\r' < "$dir/port.txt" > "$dir/port.n.txt"
@@ -99,8 +109,12 @@ for f in "$CORPUS_DIR"/*.dll; do
     n=$(timeout "$TIMEOUT" "$ORACLE" "$f" 2>/dev/null | wc -l)
     echo "$n $(basename "$f")" >> "$OUT/ranking.txt"
 done
-sort -rn "$OUT/ranking.txt" | head -"$TOP_N" | awk '{print $2}' \
-  > "$OUT/top.txt"
+if [ "$ALL_CORPUS" = "1" ]; then
+  sort -rn "$OUT/ranking.txt" | awk '{print $2}' > "$OUT/top.txt"
+else
+  sort -rn "$OUT/ranking.txt" | head -"$TOP_N" | awk '{print $2}' \
+    > "$OUT/top.txt"
+fi
 
 # --- 2. the sample list.
 : > "$OUT/samples.txt"

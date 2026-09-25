@@ -25,6 +25,7 @@
 #include "Decompiler/CSharp/Resolver/CSharpConversionsHelpers.hpp"  // Detail::IdentityConversion (the BetterParamsCollectionType span arms)
 #include "Decompiler/CSharp/Resolver/ILiftedOperator.hpp"  // ILiftedOperator (the BetterFunctionMember non-lifted-operator tiebreak)
 #include "Decompiler/CSharp/Resolver/Log.hpp"  // Log::WriteLine / Indent / Unindent (the AddMethodLists debug trail)
+#include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"  // CSharpResolver (the constant-folding arm's per-call resolver)
 #include "Decompiler/CSharp/Resolver/MethodGroupResolveResult.hpp"  // MethodListWithDeclaringType (AddMethodLists' buckets)
 #include "Decompiler/CSharp/Resolver/OverloadResolutionErrors.hpp"  // TooManyPositionalArguments / NoParameterFoundForNamedArgument
 #include "Decompiler/CSharp/Resolver/TypeInferenceHelpers.hpp"  // InferTypeArguments + TypeInferenceAlgorithm (RunTypeInference)
@@ -1340,6 +1341,7 @@ OverloadResolutionErrors BestCandidateErrors(
 }
 
 std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> GetArgumentsWithConversions(
+    const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
     const std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& targetResolveResult,
     const ILSpy::Decompiler::TypeSystem::IParameterizedMember* bestCandidateForNamedArguments,
     bool isExtensionMethodInvocation,
@@ -1382,14 +1384,20 @@ std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> GetArg
                 // .WithCheckForOverflow(CheckForOverflow).ResolveCast(parameterType, argument);`
                 // -- the constant-folding refinement (re-resolving a compile-time constant
                 // through the target type, e.g. an int literal widened to a long constant).
-                // DEFERRED: `CSharpResolver.ResolveCast` is not yet ported; the faithful
-                // fallback wraps the constant in the `ConversionResolveResult` too (the C#
-                // else branch) -- the wrapper structure (target type + the applied conversion)
-                // is preserved, only the constant is not re-folded. The arm lands with the
-                // `CSharpResolver` port; the core consequently needs no compilation parameter
-                // (that arm is its only would-be consumer).
-                argument = std::make_shared<ConversionResolveResult>(
-                    parameterType, argument, conversions[i], checkForOverflow);
+                // The resolver is constructed per call (the C# `new`), shared-managed for the
+                // WithCheckForOverflow clone (the enable_shared_from_this discipline), and the
+                // fold reads the parameter type through a NON-CONST local (the C# `IType`
+                // parameter; the port's ResolveCast takes `IType&`).
+                if (argument->IsCompileTimeConstant() && conversions[i]->IsValid()
+                    && !conversions[i]->IsUserDefined()) {
+                    ILSpy::Decompiler::TypeSystem::ITypePtr target = parameterType;
+                    argument = std::make_shared<CSharpResolver>(compilation)
+                                   ->WithCheckForOverflow(checkForOverflow)
+                                   ->ResolveCast(*target, argument);
+                } else {
+                    argument = std::make_shared<ConversionResolveResult>(
+                        parameterType, argument, conversions[i], checkForOverflow);
+                }
             }
         }
         // C# `if (bestCandidateForNamedArguments != null && argumentNames[i] != null)` -- the

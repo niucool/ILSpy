@@ -43,7 +43,14 @@ OverloadResolution::OverloadResolution(
     const CSharpConversions* conversions)
     : compilation_(&compilation),
       arguments_(std::move(arguments)),
-      conversions_(conversions)
+      // The C# `this.conversions = conversions ?? CSharpConversions.Get(compilation);`
+      // -- a null conversions resolves to the per-compilation CSharpConversions
+      // singleton (the CacheManager-cached instance; the D512 skeleton deferred
+      // this fallback pending the CSharpConversions conversion methods, which
+      // have since landed).
+      conversions_(conversions != nullptr
+              ? conversions
+              : &CSharpConversions::Get(compilation))
 {
     // The C# throws `ArgumentNullException` on null `compilation`/`arguments`. The port's `const`
     // reference + owning-vector params cannot be null at the type level (a reference can't bind to
@@ -156,9 +163,10 @@ OverloadResolution::GetArgumentsWithConversions()
     if (bestCandidate_ == nullptr)
         return arguments_;
     return Detail::GetArgumentsWithConversions(
-        /*targetResolveResult*/ nullptr, /*bestCandidateForNamedArguments*/ nullptr,
-        isExtensionMethodInvocation_, checkForOverflow_, arguments_, argumentNames_,
-        bestCandidate_, ArgumentConversions());
+        *compilation_, /*targetResolveResult*/ nullptr,
+        /*bestCandidateForNamedArguments*/ nullptr, isExtensionMethodInvocation_,
+        checkForOverflow_, arguments_, argumentNames_, bestCandidate_,
+        ArgumentConversions());
 }
 
 std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>
@@ -172,7 +180,7 @@ OverloadResolution::GetArgumentsWithConversionsAndNames()
     if (bestCandidate_ == nullptr)
         return arguments_;
     return Detail::GetArgumentsWithConversions(
-        /*targetResolveResult*/ nullptr,
+        *compilation_, /*targetResolveResult*/ nullptr,
         Detail::GetBestCandidateWithSubstitutedTypeArguments(bestCandidate_),
         isExtensionMethodInvocation_, checkForOverflow_, arguments_, argumentNames_,
         bestCandidate_, ArgumentConversions());
@@ -200,8 +208,9 @@ std::shared_ptr<CSharpInvocationResolveResult> OverloadResolution::CreateResolve
     // for the extension-method receiver swap.
     std::vector<std::shared_ptr<ResolveResult>> argumentsWithConversions =
         Detail::GetArgumentsWithConversions(
-            targetResolveResult, member, isExtensionMethodInvocation_, checkForOverflow_,
-            arguments_, argumentNames_, bestCandidate_, ArgumentConversions());
+            *compilation_, targetResolveResult, member, isExtensionMethodInvocation_,
+            checkForOverflow_, arguments_, argumentNames_, bestCandidate_,
+            ArgumentConversions());
 
     // C# `this.IsExtensionMethodInvocation ? new TypeResolveResult(member.DeclaringType ??
     // SpecialType.UnknownType) : targetResolveResult` -- the extension-method shape's target

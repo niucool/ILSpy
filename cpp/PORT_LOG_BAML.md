@@ -847,3 +847,137 @@ and they are fixture-gated, not code: they pass with
 `ILSPY_TEST_MSCORLIB=/home/jim/ilspy-test-fixtures/net48/mscorlib.dll`
 (the test asserts a parseable mscorlib and the mainline gate predates
 this cleanup -- flagged for the main line, not edited here).
+
+---
+
+# The resolver/conversions survey + the two un-blocking ports
+
+The seventh assignment: the resolver/conversions surfaces that un-block
+the deferred ExpressionTrees arms (ConvertCoalesce / ConvertComparison
+in the port's TransformExpressionTrees). Surveyed against PORT_PLAN
+Phase 5 and the D-ledger (the D-numbered entries in cpp/README.md +
+the in-code deferral notes), then ported what was actually missing.
+
+## 1. The survey: the arms' call graph is already mostly landed
+
+The stale in-code note ("the CSharpConversions skeleton carries no
+conversion methods") predates the mainline's conversions port. The
+arms' full call graph, verified against the current tree:
+
+* `CSharpConversions.ImplicitConversion(IType, IType)` -- PORTED (the
+  cached entry point + the `Detail::ImplicitConversion` core; the
+  45-helper conversion family in `CSharpConversionsHelpers.cpp`),
+* `CSharpResolver.ResolveBinaryOperator` -- PORTED (the
+  lines-594-948/995-1053 regions),
+* `CSharpOperators.LiftUserDefinedOperator` -- PORTED,
+* `OperatorResolveResult.UserDefinedOperatorMethod` -- PORTED (the
+  Semantics surface),
+* `NullableType.IsNullable` / `GetUnderlyingType` -- PORTED,
+* `NullCoalescingKind` / `NullCoalescingInstruction` -- PORTED (the IL
+  instruction surface),
+* `ComparisonKind` + `ToBinaryOperatorType` -- PORTED.
+
+## 2. What was genuinely missing, and landed
+
+1. **The OverloadResolution ctor's `conversions ??
+   CSharpConversions.Get(compilation)` fallback** -- the D512 skeleton
+   deferred it pending the conversions methods (which have since
+   landed). Ported verbatim: a null conversions resolves to the
+   per-compilation singleton (the CacheManager identity, pinned across
+   resolutions of one compilation), an explicit instance is kept.
+2. **The `GetArgumentsWithConversions` constant-folding arm** -- the
+   D-ledger's last deferred resolver piece (`IsCompileTimeConstant &&
+   IsValid && !IsUserDefined` -> the per-call
+   `CSharpResolver(compilation).WithCheckForOverflow(...).ResolveCast(...)`
+   re-fold), blocked on `ResolveCast` which has since landed. Ported
+   with the resolver constructed per call (the enable_shared_from_this
+   discipline), the non-const IType target local, and the C# else
+   branch serving the non-constant/invalid/user-defined shapes. The
+   core gained the compilation parameter exactly as the deferral note
+   predicted, and the old wrapper-fallback test updated to the folded
+   expectation (42/5 -> the long constant) plus the user-defined guard.
+
+Both slices TDD'd (compile/behavior RED, then GREEN), sweep-neutral
+(identical failure sets), and committed
+(`1d1ebd58b`, `013cfe098`).
+
+## 3. The un-blocked state
+
+With both ports in, the ConvertCoalesce / ConvertComparison arms' full
+dependency set is present: the conversions queries, the binary-operator
+resolution with its user-defined-operator surface, the lifted-operator
+helper, and the constant-folding refinement inside the argument
+wrapping. The only remaining step for each arm is the WIRING inside
+`TransformExpressionTrees.cpp` (an IL/Transforms file -- the
+mainline's lane, deliberately not touched here; the arms remain listed
+as deferred in that file's stale comment, which the wiring commit
+should replace).
+
+Also noted for the main line: the merged mainline's
+`ReflectionDisassemblerTest.DisassembleFieldInvalidRvaCommentIsComplete`
+variants need `ILSPY_TEST_MSCORLIB` set to a corpus mscorlib (they pass
+with the fixture env var; pre-existing gate, flagged not edited).
+
+---
+
+# The --il parity re-verification over the FULL net48 corpus
+
+The eighth assignment: whole-module `--il` on all 133 corpus assemblies
+plus the capa .NET set plus the ilspycmd self-sample, both engines,
+post-T12 (the merged mainline's crash-fix batch). The harness gained
+`MODE=il ALL_CORPUS=1` (`textmatch_baseline.sh`); the tallies below are
+from /tmp/tm_il (183 paired runs).
+
+## 1. The matrix (whole-module `--il`, 183 samples)
+
+| Category | Count | Samples |
+|---|---:|---|
+| IDENTICAL | 176 (+1 re-verified) | the corpus minus one; mscorlib 369,783 lines byte-exact |
+| REAL-MISMATCH | 1 | System.EnterpriseServices.Wrapper.dll (see below) |
+| ORACLE-THROWS | 4 | 3 native capa PEs + System.EnterpriseServices.Thunk.dll (a native thunk module; both engines reject) |
+| PORT-FAIL(70) | 2 | capa7/capa9 -- the two strictness aborts now exit cleanly with their messages |
+| TIMEOUT | 0 | -- |
+
+The pre/post-merge comparison: the first differential run recorded 42/64
+IL-identical with 17 divergences caused by two bugs (the truncated
+invalid-RVA comment + the missing `.entrypoint`) and 2 SIGABRTs. Post
+T6/T12: both bugs are fixed (capa1 emits `.entrypoint`, the RVA comment
+renders in full), the two aborts exit cleanly (rc 70 + the message),
+and the corpus is **132/133 identical by file count** (131 exact
+byte-identical + the Wrapper divergence, below).
+
+## 2. The one real corpus divergence: System.EnterpriseServices.Wrapper.dll
+
+A C++/CLI mixed-mode assembly whose diff decomposes into exactly two
+new bug classes (both now handed to the main line with this repro):
+
+1. **The `calli` unmanaged-signature rendering** (~213 hunks): the port
+   emits `calli @1100000E /* signature 2 */` (the raw
+   StandAloneSignature token) where the oracle renders the resolved
+   unmanaged calling convention and return type
+   (`calli unmanaged stdcall int32 modopt([mscorlib]...IsLong)`). The
+   port's calli operand path does not decode the signature blob's
+   calling convention / modopts / return+parameter types.
+2. **The `pinvokeimpl ... native unmanaged` thunk bodies** (~42 hunks):
+   the port disassembles the NATIVE thunk bytes as if they were IL
+   (`conv.ovf.u.un`, `.emitbyte 0xec`, the "Invalid method body"
+   rows) where the oracle renders only the signature + the custom
+   attributes for a `native unmanaged` pinvoke. The disassembler should
+   skip the body for `native unmanaged` bodies (or render the native
+   marker the C# prints), not walk the bytes as IL.
+
+## 3. The IL-mode state
+
+Two corpus-wide IL bugs (the differential report's #1/#2) are closed by
+the mainline's T6/T12 fixes; the corpus parity is 132/133; the capa set
+adds 33 producing --csharp samples (the post-merge re-run, above) and 2
+clean rc-70 strictness failures. The remaining IL work items are the
+two new Wrapper classes above; everything else in the corpus is
+byte-exact.
+
+Rerun: `MODE=il ALL_CORPUS=1 bash cpp/tests/tools/textmatch_baseline.sh
+/tmp/tm_il`. Note: a mid-run disk-full can truncate a capture (the tr
+write error marks it) -- re-verify any non-IDENTICAL verdict by re-running
+the single pair before trusting it; the ilspycmd_self row here was
+quota-truncated on the first pass and re-verified IDENTICAL on a clean
+disk.
