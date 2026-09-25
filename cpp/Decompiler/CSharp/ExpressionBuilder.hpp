@@ -42,13 +42,10 @@
 // ExpressionBuilder passing `this`); the port forward-declares it and takes a
 // non-owning pointer (the C# GC reference convention).
 //
-// Deferrals (each named at the member that needs it): the full `ConvertTo`
-// cast-insertion machinery on TranslatedExpression (the ~350-line C# body -- the
-// loud std::logic_error marks the unported arms and its consumers), the heavy
-// Visit arms (Call/CallVirt through CallBuilder, the Comp/BinaryNumeric/
-// compound-assignment folds, the block-family arms), and the CancellationToken
-// (the cooperative-cancel throw is a no-op in the port, the DecompileRun
-// convention).
+// Deferrals (each named at the member that needs it): the heavy Visit arms that
+// have not landed yet (the dynamic/deconstruct arms, and Await, which needs the
+// awaiter/GetResultMethod pipeline surfaces), and the CancellationToken (the
+// cooperative-cancel throw is a no-op in the port, the DecompileRun convention).
 
 #pragma once
 
@@ -57,6 +54,7 @@
 #include "Decompiler/CSharp/TranslationContext.hpp"
 #include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
 #include "Decompiler/CSharp/Resolver/TypeInferenceHelpers.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ArrayInitializerExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
@@ -84,15 +82,20 @@
 namespace ILSpy::Decompiler::IL {
 class UnboxAny;
 class BinaryInstruction;
+class Call;
 class IsInst;
 class LocAlloc;
 class LocAllocSpan;
-class LdObj;
-class StObj;
 class Comp;
 class BinaryNumericInstruction;
+class StringToInt;
 class SwitchInstruction;
+struct AccessPathElement;
 enum class ComparisonKind : std::uint8_t;
+}
+
+namespace ILSpy::Decompiler::Semantics {
+class InitializedObjectResolveResult;
 }
 
 namespace ILSpy::Decompiler::CSharp {
@@ -140,7 +143,7 @@ public:
     // interface, so the FindType consumption routes through
     // TypeSystemExtensions over the compilation); the CancellationToken is the
     // documented deferral.
-    explicit ExpressionBuilder(StatementBuilder* statementBuilder,
+    explicit ExpressionBuilder(const StatementBuilder* statementBuilder,
                                const TS::ICompilation& typeSystem,
                                const TS::ITypeResolveContext& decompilationContext,
                                IL::ILFunction* currentFunction,
@@ -175,22 +178,6 @@ public:
     // Translate post-condition in debug builds (the C# DEBUG block).
     TranslatedExpression Translate(IL::ILInstruction* inst, const TS::IType* typeHint = nullptr);
 
-    // The C# `internal (TranslatedExpression, IType, StringToInt?)
-    // TranslateSwitchValue(SwitchInstruction inst, bool isExpressionContext)`
-    // (ExpressionBuilder.cs lines 4059-4134): the switch governing-type
-    // machinery -- the value translation with the I8/I4 stack-type
-    // normalization (the small-integer interval overflow check through
-    // `Labels.ContainingInterval()`) and the GetCSharpSwitchGoverningType
-    // gate. The StringToInt arm throws loudly (the StringToInt IL node is
-    // not ported). The tuple ports to the 3-field struct
-    // (value / governingType / no map -- the StringToInt map is absent).
-    struct SwitchValue {
-        TranslatedExpression value;
-        TS::ITypePtr governingType;
-    };
-    SwitchValue TranslateSwitchValue(IL::SwitchInstruction* inst,
-                                     bool isExpressionContext);
-
     // The C# `public TranslatedExpression TranslateCondition(ILInstruction
     // condition, bool negate = false)`: translate with the Boolean hint, widen
     // through ConvertTo(StackType.I4) when the stack type is wider than 4 bytes
@@ -199,14 +186,55 @@ public:
 
     // The C# `internal TranslatedExpression TranslateTarget(ILInstruction? target,
     // bool nonVirtualInvocation, bool memberStatic, IType memberDeclaringType,
-    // IType? constrainedTo = null)` (ExpressionBuilder.cs lines 2734-2831): the
-    // call target -- `base` for a non-virtual invocation of a `this` target whose
-    // declaring type differs from the current type, else the translated target
-    // with the ref/pointer type hint (and the managed-reference unwrap), or the
-    // declaring type reference for a static member.
+    // IType? constrainedTo = null)` (ExpressionBuilder.cs lines 2734-2844): the
+    // call/field TARGET translation -- the base-reference arm over the current
+    // type definition's base types, the pointer/ref type-hint machinery for
+    // value-type receivers (the `ExpectedTypeForThisPointer == Ref` walk with
+    // the issue-#1333 reference-of-the-correct-type conversion), the
+    // DirectionExpression and null-conditional unwraps, and the static
+    // type-reference arm. `memberDeclaringType` is a non-null reference (the C#
+    // parameter has no null check); `constrainedTo` is the optional
+    // constrained-prefix type operand.
     TranslatedExpression TranslateTarget(IL::ILInstruction* target, bool nonVirtualInvocation,
-                                         bool memberStatic, TS::IType& memberDeclaringType,
+                                         bool memberStatic, const TS::IType& memberDeclaringType,
                                          const TS::IType* constrainedTo = nullptr);
+
+    // The C# `private TranslatedExpression EnsureTargetNotNullable(TranslatedExpression
+    // expr, ILInstruction inst)` (ExpressionBuilder.cs lines 2846-2873): the whole
+    // nullability-annotation body is commented out in the C# source (the TODO for
+    // the nullability support that would sprinkle `!` operators), so the member is
+    // the identity pass-through. The `inst` parameter is unused there as well.
+    TranslatedExpression EnsureTargetNotNullable(TranslatedExpression expr,
+                                                 IL::ILInstruction* inst);
+
+    // The C# `bool RequiresQualifier(IMember member, TranslatedExpression target)`
+    // (ExpressionBuilder.cs lines 293-301): whether a member reference needs an
+    // explicit qualifier (the `AlwaysQualifyMemberReferences` / variable-shadowing
+    // gates, the static-member current-or-containing-type check, and the
+    // instance-member this/base receiver check). `member` is a non-null reference
+    // (the C# parameter has no null check).
+    bool RequiresQualifier(const TS::IMember& member, const TranslatedExpression& target) const;
+
+    // The C# `ExpressionWithResolveResult ConvertField(IField field, ILInstruction?
+    // targetInstruction = null)` (ExpressionBuilder.cs lines 302-398): the field
+    // reference render -- the automatic-event backing-field special case (the field
+    // is printed as the field-like event), the target translation, the
+    // requires-qualifier decision (made against the backing field's property when
+    // PatternStatementTransform will hide the field), the ambiguous-access retry
+    // loop (the simple-name lookup, the member lookup, and the declaring-type
+    // cast), and the member/identifier access with the by-reference wrap for a
+    // ref-typed field.
+    ExpressionWithResolveResult ConvertField(const TS::IField& field,
+                                             IL::ILInstruction* targetInstruction = nullptr);
+
+    // The C# `bool IsBackingFieldOfAutomaticEvent(IField field,
+    // [NotNullWhen(true)] out IEvent? ev)` (ExpressionBuilder.cs lines 400-425):
+    // whether the field is the backing field of an automatic (field-like) event
+    // whose reference should be printed as the event. Gated on the
+    // PropertyAndEventBackingFieldLookup association, the current-accessor
+    // self-reference check, the AutoEventDecompiler verdict, and the backing-field
+    // identity check. `ev` is null when the field is not such a backing field.
+    bool IsBackingFieldOfAutomaticEvent(const TS::IField& field, const TS::IEvent*& ev);
 
     // -- The visitor-dispatch surface (the C# ILVisitor base) -------------------------
 
@@ -234,11 +262,281 @@ public:
     TranslatedExpression VisitThrow(IL::ILInstruction* inst, TranslationContext context);
     TranslatedExpression VisitThreeValuedBoolAnd(IL::ILInstruction* inst, TranslationContext context);
     TranslatedExpression VisitThreeValuedBoolOr(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitUserDefinedLogicOperator(UserDefinedLogicOperator inst, TranslationContext
+    // context)` (ExpressionBuilder.cs lines 1233-1257): the user-defined
+    // short-circuiting `&&`/`||` render -- convert both operands to the operator
+    // method's parameter types, derive the `&&`/`||` operator from the method name
+    // (op_BitwiseAnd/op_BitwiseOr), and emit a BinaryOperatorExpression carrying an
+    // InvocationResolveResult.
+    TranslatedExpression VisitUserDefinedLogicOperator(IL::ILInstruction* inst,
+                                                       TranslationContext context);
     // The type-operand family (the C# lines 434-483 and 712-744): the `isinst`-
     // shaped `is`/`as` expression, `sizeof T`, and `typeof(T).TypeHandle`.
     TranslatedExpression VisitIsInst(IL::ILInstruction* inst, TranslationContext context);
     TranslatedExpression VisitSizeOf(IL::ILInstruction* inst, TranslationContext context);
     TranslatedExpression VisitLdTypeToken(IL::ILInstruction* inst, TranslationContext context);
+    // The boxing/cast conversion family (the C# lines 3285-3358): the unboxing
+    // conversion (`unbox.any`, with the isinst-to-`as` shortcut over nullable
+    // value types and reference types), the managed-pointer unboxing (`unbox`),
+    // the boxing conversion (`box`), and the explicit cast (`castclass`).
+    TranslatedExpression VisitUnbox(IL::ILInstruction* inst, TranslationContext context);
+    TranslatedExpression VisitUnboxAny(IL::ILInstruction* inst, TranslationContext context);
+    TranslatedExpression VisitBox(IL::ILInstruction* inst, TranslationContext context);
+    TranslatedExpression VisitCastClass(IL::ILInstruction* inst, TranslationContext context);
+    // The memory-access load/store family (the C# lines 2857-3086): the typed
+    // managed/raw load (`ldobj`) and store (`stobj`). VisitLdObj prefers the
+    // type hint (except for a pointer hint in the unaligned/ref-address shape),
+    // renders the `unaligned.` prefix as `Unsafe.ReadUnaligned<T>` and otherwise
+    // dereferences through the LdObj helper. VisitStObj dispatches to the
+    // Unsafe.Write/WriteUnaligned helper for a `unaligned.` prefix or a
+    // non-ref non-unmanaged target, else dereferences the pointer and renders
+    // the assignment (with the `ref (a = ref b)` re-assignment shape).
+    TranslatedExpression VisitLdObj(IL::ILInstruction* inst, TranslationContext context);
+    TranslatedExpression VisitStObj(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitLdLen(LdLen inst,
+    // TranslationContext context)` (ExpressionBuilder.cs lines 3088-3116): the array
+    // length render -- translate the array with the System.Array type hint (converting
+    // a non-array expression to System.Array), pick the `Length`/`LongLength` member
+    // name and the Int32/Int64 result type from the load's StackType, look the property
+    // up on System.Array, and render `array.Member` with the member resolve result (or a
+    // plain Int32/Int64 resolve result when System.Array exposes no such property).
+    TranslatedExpression VisitLdLen(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitLdElema(LdElema
+    // inst, TranslationContext context)` (ExpressionBuilder.cs lines 3203-3229): the
+    // array-element-address render -- translate the array (converting a non-array or
+    // element-type-mismatched expression to a fresh array of `inst.Type` and the
+    // index count), then index through TranslateArrayIndex (or the System.Index
+    // conversion when `withsystemindex` is set) and wrap in a `ref` DirectionExpression
+    // carrying a ByReferenceResolveResult over the element type.
+    TranslatedExpression VisitLdElema(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitLdsFlda(LdsFlda
+    // inst, TranslationContext context)` (ExpressionBuilder.cs lines 3196-3201): the
+    // static field-address render -- resolve the field reference through ConvertField
+    // and wrap it in a `ref` DirectionExpression carrying a ByReferenceResolveResult.
+    TranslatedExpression VisitLdsFlda(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitLdFlda(
+    // LdFlda inst, TranslationContext context)` (ExpressionBuilder.cs lines
+    // 3118-3194): the `&target.field` render -- the fixed-buffer rewrite
+    // (`TupleTransform` + `CSharpDecompiler.IsFixedField`), the tuple-element
+    // access, and the base ConvertField render wrapped in a `ref`
+    // DirectionExpression (or an `&` UnaryOperatorExpression for a native
+    // pointer result).
+    TranslatedExpression VisitLdFlda(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitNullableRewrap(NullableRewrap inst, TranslationContext context)`
+    // (ExpressionBuilder.cs lines 4298-4309): the null-conditional join point --
+    // translate the Argument and, when its type is a non-nullable value type, lift
+    // it into `Nullable<T>` (NullableType.Create); the render is a
+    // NullConditionalRewrap UnaryOperatorExpression carrying a plain ResolveResult of
+    // that type.
+    TranslatedExpression VisitNullableRewrap(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitNullableUnwrap(NullableUnwrap inst, TranslationContext context)`
+    // (ExpressionBuilder.cs lines 4311-4321): the `?.` dereference -- translate the
+    // Argument; for a RefInput (and non-RefOutput) argument whose render is a ref
+    // DirectionExpression, strip the direction (the managed reference is dereferenced
+    // by removing the `ref`); the render is a NullConditional UnaryOperatorExpression
+    // carrying a plain ResolveResult of the underlying type
+    // (NullableType.GetUnderlyingType).
+    TranslatedExpression VisitNullableUnwrap(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitNullCoalescingInstruction(NullCoalescingInstruction inst, TranslationContext
+    // context)` (ExpressionBuilder.cs lines 3912-3953): the `a ?? b` render -- translate
+    // both operands, constant-adjust the fallback to the value's type, resolve the
+    // null-coalescing operator, and on an error recover the target type (a throw
+    // fallback over NoType uses the value's underlying type, two differing non-null
+    // types fall back to `inst.UnderlyingResultType`, else the non-null operand's
+    // type) and convert the operands (the nullable wrap for the non-ref kinds); the
+    // render is a BinaryOperatorExpression with the NullCoalescing operator.
+    TranslatedExpression VisitNullCoalescingInstruction(IL::ILInstruction* inst,
+                                                        TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitAddressOf(AddressOf
+    // inst, TranslationContext context)` (ExpressionBuilder.cs lines 4231-4266): the
+    // `&value` render -- classify the wrapped value (an ILInlining.ClassifyExpression
+    // call), translate and convert it to the address's type, and when the value is a
+    // mutable lvalue whose address would let a mutating call modify the original
+    // (unless the parent is an ldobj) insert a redundant cast so the C# compiler
+    // copies; the render is a ref DirectionExpression carrying a
+    // ByReferenceResolveResult.
+    TranslatedExpression VisitAddressOf(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitRefAnyType(
+    // RefAnyType inst, TranslationContext context)` (ExpressionBuilder.cs lines
+    // 3386-3394): the `__reftype(typedReference).TypeHandle` render -- the RefType
+    // UndocumentedExpression over the translated argument, wrapped in a `TypeHandle`
+    // member reference with a TypeResolveResult for System.RuntimeTypeHandle.
+    TranslatedExpression VisitRefAnyType(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitMakeRefAny(MakeRefAny inst, TranslationContext context)`
+    // (ExpressionBuilder.cs lines 3371-3384): the `__makeref(arg)` render -- the
+    // translated argument (a DirectionExpression is stripped to its inner
+    // expression) as the single argument of a MakeRef UndocumentedExpression,
+    // carrying a TypeResolveResult for System.TypedReference.
+    TranslatedExpression VisitMakeRefAny(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitRefAnyValue(RefAnyValue inst, TranslationContext context)`
+    // (ExpressionBuilder.cs lines 3396-3404): the `ref __refvalue(arg, T)` render
+    // -- a RefValue UndocumentedExpression over the translated argument and a
+    // TypeReferenceExpression for the node's type, wrapped in a ref
+    // DirectionExpression with a ByReferenceResolveResult.
+    TranslatedExpression VisitRefAnyValue(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitArglist(Arglist
+    // inst, TranslationContext context)` (ExpressionBuilder.cs lines 3274-3280):
+    // the `__arglist` render -- the ArgListAccess UndocumentedExpression carrying
+    // a TypeResolveResult for System.RuntimeArgumentHandle.
+    TranslatedExpression VisitArglist(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitIfInstruction(IfInstruction inst, TranslationContext context)`
+    // (ExpressionBuilder.cs lines 3956-4049): the if-as-expression render -- the
+    // short-circuit &&/|| shapes and the `?:` conditional with its type
+    // unification and the by-reference result wrap.
+    TranslatedExpression VisitIfInstruction(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitSwitchInstruction(SwitchInstruction inst, TranslationContext context)`
+    // (ExpressionBuilder.cs lines 4176-4229): the switch-expression render -- the
+    // switch value through TranslateSwitchValue (expression context), the result
+    // type from the type hint or the instruction's stack type, the per-section
+    // arm patterns (the null label, the typed case constants, the skipped
+    // compiler-generated default), and the `_` default arm.
+    TranslatedExpression VisitSwitchInstruction(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression
+    // VisitMatchInstruction(MatchInstruction inst, TranslationContext context)`
+    // (ExpressionBuilder.cs lines 4989-5005): the `is`-pattern render -- translate
+    // the tested operand (unwrapping a boxing cast when the pattern does not need
+    // it), translate the pattern through TranslatePattern, and emit a
+    // BinaryOperatorExpression with the IsPattern operator carrying a boolean
+    // ResolveResult. The pattern translation is the recursive helper below.
+    TranslatedExpression VisitMatchInstruction(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `ExpressionWithILInstruction TranslatePattern(ILInstruction pattern,
+    // IType leftHandType)` (ExpressionBuilder.cs lines 5007-5118): the pattern
+    // render -- a MatchInstruction becomes a recursive/declaration/type pattern,
+    // a Comp becomes a constant or relational pattern, and a string/decimal
+    // op_Equality call becomes the constant pattern's value. The port returns a
+    // TranslatedExpression (the C# returns the ExpressionWithILInstruction base,
+    // which TranslatedExpression derives from; the port wrappers are flat). The
+    // deconstruct-pattern guards throw NotImplementedException in the C# but the
+    // port's MatchInstruction node does not carry the deconstruct flags, so the
+    // corresponding arms cannot arise.
+    TranslatedExpression TranslatePattern(IL::ILInstruction* pattern,
+                                          const TS::IType* leftHandType);
+    // The C# `protected internal override TranslatedExpression VisitInvalidBranch(
+    // InvalidBranch inst, TranslationContext context)` (ExpressionBuilder.cs lines
+    // 5121-5133): the ErrorExpression with the "Error" prefix, an optional
+    // ' near IL_xxxx' suffix (non-zero StartILOffset), and an optional ': message'.
+    TranslatedExpression VisitInvalidBranch(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitInvalidExpression(
+    // InvalidExpression inst, TranslationContext context)` (ExpressionBuilder.cs lines
+    // 5135-5146): the same error text with the node's Severity as the prefix.
+    TranslatedExpression VisitInvalidExpression(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitBlock(Block
+    // block, TranslationContext context)` (ExpressionBuilder.cs lines 3406-3428):
+    // the special-kind block dispatch -- the array/stackalloc/object-collection/
+    // with-initializer, inline-assign, named-argument and interpolated-string
+    // arms, else the "Unknown block type" ErrorExpression. Every kind the ported
+    // BlockKind enum carries has its render arm; the IL-side transforms that
+    // synthesize the CollectionInitializer / ObjectInitializer / WithInitializer
+    // kinds have not landed, so those arms are reachable only through hand-built
+    // blocks; the default arm (a plain ControlFlow block) is faithfully the C#
+    // default's ErrorExpression.
+    TranslatedExpression VisitBlock(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `private TranslatedExpression TranslateCallWithNamedArgs(Block
+    // block)` (ExpressionBuilder.cs lines 3470-3475): the named-argument call
+    // render through CallBuilder.CallWithNamedArgs, wrapped in ref when the
+    // called method returns a by-reference type.
+    TranslatedExpression TranslateCallWithNamedArgs(IL::Block& block);
+    // The C# `private TranslatedExpression TranslateInterpolatedString(Block
+    // block)` (ExpressionBuilder.cs lines 3430-3468): the C# 10/.NET 6
+    // `$"..."` block render -- the AppendLiteral text runs and the
+    // AppendFormatted interpolations of the DefaultInterpolatedStringHandler
+    // calls, producing the InterpolatedStringExpression with a System.String
+    // resolve result.
+    TranslatedExpression TranslateInterpolatedString(IL::Block& block);
+    // The C# `private TranslatedExpression TranslateSetterCallAssignment(Block
+    // block)` (ExpressionBuilder.cs lines 3477-3488): the inline property/indexer
+    // setter assignment render -- deconstruct the BlockKind.CallInlineAssign
+    // block through MatchInlineAssignBlock, replace the setter call's last
+    // argument (the temporary stloc) with the extracted value, and route the
+    // call through CallBuilder.Build. A block that does not match renders the C#
+    // "Error: MatchInlineAssignBlock() returned false" ErrorExpression.
+    TranslatedExpression TranslateSetterCallAssignment(IL::Block& block);
+    // The C# `private TranslatedExpression TranslateArrayInitializer(Block
+    // block)` (ExpressionBuilder.cs lines 3685-3771): the C# array-initializer
+    // render over the BlockKind.ArrayInitializer block shape -- the
+    // `stloc v(newarr T [dims])` target plus the `stobj T(ldelema T(ldloc v,
+    // [idx]), value)` element stores, nested into the ArrayInitializerExpression
+    // tree by the container stack and sized by the newarr dimensions. A block
+    // that does not match the C# shape is the ArgumentException (mapped to
+    // std::invalid_argument).
+    TranslatedExpression TranslateArrayInitializer(IL::Block& block);
+    // The C# `private TranslatedExpression TranslateStackAllocInitializer(Block
+    // block, IType typeHint)` (ExpressionBuilder.cs lines 3773-3844): the C#
+    // `stackalloc` initializer render over the BlockKind.StackAllocInitializer
+    // block shape -- the `stloc v(localloc/locallocspan)` target plus the
+    // `stobj T(ldloc v [+ elementCount], value)` stores, laid into the
+    // StackAllocExpression's initializer with the skipped offsets filled by
+    // TransformArrayInitializers.GetNullExpression. A block that does not match
+    // the C# shape is the ArgumentException (mapped to std::invalid_argument).
+    TranslatedExpression TranslateStackAllocInitializer(IL::Block& block,
+                                                        const TS::IType* typeHint);
+    // The C# `private TranslatedExpression TranslateObjectAndCollectionInitializer(
+    // Block block)` (ExpressionBuilder.cs lines 3491-3528): the object/collection
+    // initializer render over the BlockKind.ObjectInitializer / CollectionInitializer
+    // block shape -- the `stloc v(...)` head (a newobj, a default(T), a
+    // CallWithNamedArgs block, or `Activator.CreateInstance<T>()`) becomes the
+    // ObjectCreateExpression, and the member stores/Add calls (Instructions[1..])
+    // are laid into its initializer through the AccessPathElement walk. A block
+    // that does not match the C# shape is the ArgumentException (mapped to
+    // std::invalid_argument).
+    TranslatedExpression TranslateObjectAndCollectionInitializer(IL::Block& block);
+    // The C# `private TranslatedExpression TranslateWithInitializer(Block block)`
+    // (ExpressionBuilder.cs lines 3841-3858): the C# 9 `with` initializer render
+    // over the BlockKind.WithInitializer block shape -- the `stloc v(<target
+    // expression>)` head becomes the WithInitializerExpression's Expression and
+    // the member stores are laid into its initializer. A block that does not
+    // match the C# shape is the ArgumentException (mapped to
+    // std::invalid_argument).
+    TranslatedExpression TranslateWithInitializer(IL::Block& block);
+    // The C# `private ArrayInitializerExpression BuildArrayInitializerExpression(
+    // Block block, InitializedObjectResolveResult initObjRR)` (ExpressionBuilder.cs
+    // lines 3533-3623): the shared element-tree builder for the object/collection/
+    // with initializers -- walks Instructions[1..] as access paths, nests the
+    // stores into ArrayInitializerExpression lists by the common-path prefix,
+    // renders the Setter tail as a NamedExpression (or the dictionary-initializer
+    // assignment through CallBuilder) and the Adder tail through
+    // BuildCollectionInitializerExpression, and folds the finished element lists
+    // into their parents through MakeInitializerAssignment. The `initObjRR` is
+    // the C# by-reference `InitializedObjectResolveResult`; the port threads the
+    // owning shared handle (the MemberResolveResults and the CallBuilder entries
+    // share it).
+    Syntax::ArrayInitializerExpression* BuildArrayInitializerExpression(
+        IL::Block& block, std::shared_ptr<Sem::InitializedObjectResolveResult> initObjRR);
+    // The C# `IEnumerable<ILInstruction> GetIndices(IEnumerable<ILInstruction>
+    // indices, Dictionary<ILVariable, ILInstruction> indexVariables)`
+    // (ExpressionBuilder.cs lines 3625-3634): the C# 6 dictionary-initializer
+    // index substitution -- an `ldloc` of a variable that had an index-store
+    // earlier in the block is replaced by that store's value, any other
+    // instruction passes through.
+    std::vector<IL::ILInstruction*> GetIndices(
+        const std::vector<IL::ILInstruction*>& indices,
+        const std::unordered_map<IL::ILVariable*, IL::ILInstruction*>& indexVariables);
+    // The C# `private TranslatedExpression MakeInitializerAssignment(
+    // InitializedObjectResolveResult rr, AccessPathElement memberPath,
+    // AccessPathElement valuePath, List<TranslatedExpression> values,
+    // Dictionary<ILVariable, ILInstruction> indexVariables)` (ExpressionBuilder.cs
+    // lines 3636-3669): the finished element-list fold -- an `Add` path member
+    // wraps the values in an ArrayInitializerExpression, a single plain value
+    // passes through, and the result is named by the value path's member (a
+    // NamedExpression) or its indexed AssignmentExpression.
+    TranslatedExpression MakeInitializerAssignment(
+        std::shared_ptr<Sem::InitializedObjectResolveResult> rr,
+        const IL::AccessPathElement& memberPath, const IL::AccessPathElement& valuePath,
+        std::vector<TranslatedExpression> values,
+        const std::unordered_map<IL::ILVariable*, IL::ILInstruction*>& indexVariables);
+    // The C# `private TranslatedExpression StObjViaHelperCall(StObj inst)`
+    // (ExpressionBuilder.cs lines 3087-3125): the `Unsafe.Write` /
+    // `Unsafe.WriteUnaligned` intrinsic rewrite for a store that cannot be a
+    // plain dereference assignment.
+    TranslatedExpression StObjViaHelperCall(IL::ILInstruction* inst);
     // The C# `protected internal override TranslatedExpression VisitStLoc(StLoc inst,
     // TranslationContext context)` (ExpressionBuilder.cs lines 809-870): the
     // assignment arm -- the stack-slot type refinement, the by-ref re-assignment
@@ -279,98 +577,26 @@ public:
     // 523-528): the Span<T> stackalloc render -- TranslateLocAllocSpan's element type
     // over the span's own type as the resolve result.
     TranslatedExpression VisitLocAllocSpan(IL::ILInstruction* inst, TranslationContext context);
-    // The C# `protected internal override TranslatedExpression VisitLdObj(LdObj
-    // inst, TranslationContext context)` (ExpressionBuilder.cs lines 2857-2887):
-    // the typed memory load -- the TypeHint override of the load type (when it is
-    // a compatible memory-access type and not a pointer-into-generic case), then
-    // the shared `LdObj` dereference helper. The C# `inst.UnalignedPrefix` arm is
-    // UNREACHABLE in the port (the LdObj node carries no IL prefix field).
-    TranslatedExpression VisitLdObj(IL::ILInstruction* inst, TranslationContext context);
-    // The C# `protected internal override TranslatedExpression VisitStObj(StObj
-    // inst, TranslationContext context)` (ExpressionBuilder.cs lines 2968-3046):
-    // the typed memory store -- the StObjViaHelperCall arm for a non-managed-
-    // reference store of a non-unmanaged type, the pointer/byref target
-    // dereference, the plain Assignment, or the `ref (a = ref b)` re-assignment.
-    // The C# `inst.UnalignedPrefix` disjuncts are UNREACHABLE in the port.
-    TranslatedExpression VisitStObj(IL::ILInstruction* inst, TranslationContext context);
-    // The C# `protected internal override TranslatedExpression VisitLdLen(LdLen
-    // inst, TranslationContext context)` (ExpressionBuilder.cs lines 3088-3116):
-    // the `arr.Length` / `arr.LongLength` member-reference render -- the array
-    // operand translated with the System.Array hint (converted when it is not
-    // already array-kind), then the Int32 `Length` / Int64 `LongLength` member by
-    // the I4 / non-I4 result type.
-    TranslatedExpression VisitLdLen(IL::ILInstruction* inst, TranslationContext context);
-    // The C# `protected internal override TranslatedExpression VisitLdElema(LdElema
-    // inst, TranslationContext context)` (ExpressionBuilder.cs lines 3203-3229):
-    // the managed-reference `ref arr[i]` render -- the array operand (re-typed to a
-    // rebuilt element array type when its element type is not memory-access
-    // compatible with the node's type), the indexer over the translated indices,
-    // and the DirectionExpression(Ref) wrapper. The C# `inst.WithSystemIndex` arm
-    // is UNREACHABLE in the port (the LdElema node carries no such field).
-    TranslatedExpression VisitLdElema(IL::ILInstruction* inst, TranslationContext context);
-    // The C# `protected internal override TranslatedExpression
-    // VisitUnboxAny(UnboxAny inst, TranslationContext context)` (ExpressionBuilder.cs
-    // lines 3285-3320): the `unbox.any T(isinst T(expr))` -> `expr as T` rewrite
-    // (when the node type equals the isinst type and is nullable or a reference
-    // type), else the `(T)expr` cast -- the TypeParameter arm converting through
-    // the effective base class when the resolver's ResolveCast errors, the general
-    // arm converting the operand to object -- with the UnboxingConversion resolve
-    // result.
-    TranslatedExpression VisitUnboxAny(IL::ILInstruction* inst, TranslationContext context);
-    // The C# `protected internal override TranslatedExpression VisitBox(Box inst,
-    // TranslationContext context)` (ExpressionBuilder.cs lines 3332-3352): the
-    // `(object)expr` render -- the NativeIntegers IntPtr/UIntPtr -> nint/nuint
-    // substitution, the ConvertTo(targetType), and the BoxingConversion resolve
-    // result over the object cast.
-    TranslatedExpression VisitBox(IL::ILInstruction* inst, TranslationContext context);
-    // The C# `protected internal override TranslatedExpression
-    // VisitCastClass(CastClass inst, TranslationContext context)`
-    // (ExpressionBuilder.cs lines 3354-3357): the ConvertTo(inst.Type) passthrough.
-    TranslatedExpression VisitCastClass(IL::ILInstruction* inst, TranslationContext context);
-    // The C# `protected internal override TranslatedExpression
-    // VisitNullableRewrap(NullableRewrap inst, TranslationContext context)`
-    // (ExpressionBuilder.cs lines 4298-4309): the `?.` join-point render -- the
-    // NullConditionalRewrap operator over the argument, with the result type
-    // wrapped into Nullable<T> when the argument's type is a non-nullable value
-    // type.
-    TranslatedExpression VisitNullableRewrap(IL::ILInstruction* inst, TranslationContext context);
-    // The C# `protected internal override TranslatedExpression
-    // VisitNullableUnwrap(NullableUnwrap inst, TranslationContext context)`
-    // (ExpressionBuilder.cs lines 4311-4321): the `?.` dereference render -- the
-    // NullConditional operator with the GetUnderlyingType result, stripping the
-    // managed reference when RefInput holds and RefOutput does not.
-    TranslatedExpression VisitNullableUnwrap(IL::ILInstruction* inst, TranslationContext context);
-    // The C# `protected internal override TranslatedExpression
-    // VisitNullCoalescingInstruction(NullCoalescingInstruction inst, TranslationContext
-    // context)` (ExpressionBuilder.cs lines 3912-3954): the `a ?? b` render -- the
-    // constant-adjusted fallback, the resolver's ResolveBinaryOperator(NullCoalescing),
-    // and the IsError fallback re-typing (the throw-fallback underlying type, the
-    // UnderlyingResultType lookup, or the non-null operand) with the Kind-dependent
-    // Nullable<T> conversions.
-    TranslatedExpression VisitNullCoalescingInstruction(IL::ILInstruction* inst,
-                                                        TranslationContext context);
-    // The C# `protected internal override TranslatedExpression
-    // VisitUserDefinedLogicOperator(UserDefinedLogicOperator inst, TranslationContext
-    // context)` (ExpressionBuilder.cs lines 1233-1257): the user-defined `&&`/`||`
-    // render -- both operands translated with their parameter type hints and
-    // converted to them, the ConditionalAnd/ConditionalOr operator by the
-    // op_BitwiseAnd/op_BitwiseOr method name (else the C# InvalidOperationException),
-    // and the InvocationResolveResult over the resolved method.
-    TranslatedExpression VisitUserDefinedLogicOperator(IL::ILInstruction* inst,
-                                                       TranslationContext context);
-    // The C# `protected internal override TranslatedExpression VisitRefAnyType(
-    // RefAnyType inst, TranslationContext context)` (ExpressionBuilder.cs lines
-    // 3386-3394): the `__reftype(arg).TypeHandle` render -- the
-    // UndocumentedExpression(RefType) over the translated argument, the TypeHandle
-    // member reference, and the RuntimeTypeHandle resolve result.
-    TranslatedExpression VisitRefAnyType(IL::ILInstruction* inst,
-                                         TranslationContext context);
-    // The C# `protected internal override TranslatedExpression VisitBlock(Block
-    // block, TranslationContext context)` (ExpressionBuilder.cs lines 3406-3421):
-    // the BlockKind dispatch. Only the InterpolatedString arm is ported; the other
-    // arms depend on the unported Match* helpers / CallBuilder and fall to an
-    // ErrorExpression (the Visit Default convention).
-    TranslatedExpression VisitBlock(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitLdFtn(LdFtn
+    // inst, TranslationContext context)` (ExpressionBuilder.cs lines
+    // 4774-4832): the function-pointer render -- the CallBuilder method-group
+    // reference, the instance `__ldftn` intrinsic fallback, and the static
+    // FunctionPointerType address-of + cast over the method-group conversion.
+    TranslatedExpression VisitLdFtn(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `VisitLdVirtFtn` (lines 4834-4841): the `__ldvirtftn` intrinsic.
+    TranslatedExpression VisitLdVirtFtn(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `VisitLdVirtDelegate` (line 497-500): the CallBuilder.Build
+    // virtual-delegate delegation.
+    TranslatedExpression VisitLdVirtDelegate(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitCall(Call
+    // inst, TranslationContext context)` / `VisitCallVirt` siblings
+    // (ExpressionBuilder.cs lines 2455-2462): the CallBuilder render over the
+    // call's resolved method, wrapped in the byref direction expression when
+    // the return type is a by-reference type. The port's one-Call-node model
+    // (the reader reuses Call for call/callvirt/newobj with the IsNewObj flag)
+    // routes every opcode here; CallBuilder.Build dispatches the newobj shape
+    // internally.
+    TranslatedExpression VisitCall(IL::ILInstruction* inst, TranslationContext context);
     // The C# `StackAllocExpression TranslateLocAllocSpan(LocAllocSpan inst, IType
     // typeHint, out IType elementType)` (ExpressionBuilder.cs lines 530-539): the
     // span's element type, the count converted to int32, and the StackAllocExpression.
@@ -413,10 +639,6 @@ public:
     // arithmetic type.
     TranslatedExpression ConvertArrayIndex(TranslatedExpression input, IL::StackType stackType,
                                            bool allowIntPtr);
-    // The C# `private TranslatedExpression TranslateInterpolatedString(Block block)`
-    // (ExpressionBuilder.cs lines 3423-3462): the AppendLiteral/AppendFormatted
-    // handler-call sequence over the DefaultInterpolatedStringHandler block.
-    TranslatedExpression TranslateInterpolatedString(IL::Block& block);
     // The C# `TranslatedExpression IsType(IsInst inst)` helper (ExpressionBuilder.cs
     // line 425): the `expr is T` expression the comp/unbox.any special cases build.
     TranslatedExpression IsType(IL::IsInst& inst);
@@ -484,6 +706,15 @@ public:
     std::unordered_map<const IL::ILVariable*, std::vector<IL::ILInstruction*>> storeInstructions;
     IL::ILFunction* storeScanFunction = nullptr;
 
+    // The C# `internal ILFunction? ResolveLocalFunction(IMethod method)`
+    // (ExpressionBuilder.cs lines 278-292): the local-function lookup -- the
+    // method's member definition's ReducedFrom's member definition is matched
+    // against every ILFunction ancestor's (this one first) LocalFunctions by
+    // their own method's member definition. Null when no ancestor declares the
+    // local function (the C# `FirstOrDefault` shape -- the Debug.Assert only
+    // covers the call's own assertion that the method IS one).
+    IL::ILFunction* ResolveLocalFunction(const TS::IMethod& method) const;
+
     // The C# `internal bool HidesVariableWithName(string name)` / static overload:
     // whether any enclosing ILFunction (the ancestor walk INCLUDES the function
     // itself) declares a variable or a local function with that name.
@@ -491,21 +722,19 @@ public:
     static bool HidesVariableWithName(const IL::ILFunction& currentFunction, const std::string& name);
 
     // The C# `internal bool IsCurrentOrContainingType(ITypeDefinition? type)`
-    // (ExpressionBuilder.cs lines 2476-2486): whether `type` is the
-    // decompilation context's current type definition or one of its
-    // containers (the `DeclaringTypeDefinition` walk; the port answers false
-    // when the context carries no current type definition -- the C# context
-    // always carries one, so the port's null is the "no context" case). The
-    // GetRequiredTransformationsForCall static-call target arm consults it.
+    // (ExpressionBuilder.cs lines 2476-2487): the null-tolerant
+    // declaring-chain walk -- `type` is the current type definition or any of
+    // its enclosing type definitions.
     bool IsCurrentOrContainingType(const TS::ITypeDefinition* type) const;
 
     // The C# `internal bool IsBaseTypeOfCurrentType(ITypeDefinition? type)`
-    // (ExpressionBuilder.cs lines 2488-2491): whether `type` appears among
-    // the current type definition's base types (GetAllBaseTypeDefinitions).
-    // The C# NREs on a null current type definition; the port answers false
-    // (no current type -> no base-type relation), the same inputs that
-    // matter. The GetRequiredTransformationsForCall skipTargetCast arm
-    // consults it.
+    // (ExpressionBuilder.cs lines 2488-2491): whether the decompilation
+    // context's current type definition derives from `type` (the
+    // GetAllBaseTypeDefinitions extension over the context's slot). The C#
+    // NREs when the context carries no current type definition (a null
+    // receiver on the extension call); the port answers false there -- the
+    // degenerate-stub shape no caller reaches (every decompilation context
+    // carries the current type definition).
     bool IsBaseTypeOfCurrentType(const TS::ITypeDefinition* type) const;
 
     // The C# `internal ExpressionWithResolveResult LogicNot(TranslatedExpression
@@ -520,7 +749,7 @@ public:
 
     // The C# `private bool ShouldDisplayAsHex(long value, IType type)`: the
     // binary-numeric hex-literal gate.
-    bool ShouldDisplayAsHex(std::int64_t value, const TS::IType& type) const;
+    bool ShouldDisplayAsHex(long long value, const TS::IType& type) const;
 
     // The C# `private ResolveResult AdjustConstantToType(ResolveResult rr, IType
     // typeHint)`: the lossless constant re-typing (the 0/1 boolean, enum/char/
@@ -643,8 +872,8 @@ public:
     // right)` (lines 1386-1484): the managed-pointer (ref) arithmetic -- the
     // ref-ref ByteOffset intrinsic, the ref +/- int Add/Subtract(+ByteOffset)
     // intrinsics over the detected element offset, the int + ref named-argument
-    // arms, and the fixed-buffer indexer direction (the FixedBuffers setting; the
-    // ConvertField/IsFixedField machinery deferred).
+    // arms, and the fixed-buffer indexer direction (the FixedBuffers setting plus
+    // the LdFlda-of-LdFlda fixed-field shape, rendered as `ref buffer[index]`).
     std::optional<TranslatedExpression> HandleManagedPointerArithmetic(
         IL::BinaryNumericInstruction& inst, TranslatedExpression left,
         TranslatedExpression right);
@@ -769,6 +998,15 @@ public:
     // the port's no-visibility-level convention.)
     static TranslatedExpression WrapInRef(Syntax::Expression& expression, const TS::IType& type);
 
+    // The C# `TranslatedExpression WrapInRef(TranslatedExpression expr, IType
+    // type)` (ExpressionBuilder.cs lines 2464-2474, the sibling of the static
+    // helper above): when `type` is a by-reference type, wraps the translated
+    // call in a `ref <expr>` DirectionExpression whose resolve result is a
+    // ByReferenceResolveResult over the call's own resolve result; every other
+    // type passes the translated expression through unchanged. VisitCall and
+    // VisitCallVirt are the call sites.
+    static TranslatedExpression WrapInRef(TranslatedExpression expr, const TS::IType& type);
+
     // The C# `static TranslatedExpression LdcI4(ICompilation compilation, int val)`
     // (a private TranslatedExpression helper): the int32 literal over its constant.
     static TranslatedExpression LdcI4(const TS::ICompilation& compilation, std::int32_t val);
@@ -782,29 +1020,34 @@ public:
     // Declared private in the C#; the port's no-visibility-level convention.
     ExpressionWithResolveResult LdObj(IL::ILInstruction* address, const TS::IType& loadType);
 
-    // The C# `TranslatedExpression StObjViaHelperCall(StObj inst)` (a private helper,
-    // ExpressionBuilder.cs lines 3048-3086): the `Unsafe.Write<T>(void*, T)` store
-    // render for a non-managed-reference store of a non-unmanaged type. The C#
-    // `WriteUnaligned` arm is UNREACHABLE in the port (the StObj node carries no IL
-    // prefix field). Declared private in the C#; the port's no-visibility-level
-    // convention.
-    TranslatedExpression StObjViaHelperCall(IL::StObj& inst);
+    // -- The switch-value translation (the switch arms' shared entry) ------------------
 
-    // The C# `private TranslatedExpression EnsureTargetNotNullable(TranslatedExpression
-    // expr, ILInstruction inst)` (ExpressionBuilder.cs lines 2832-2852): a no-op in
-    // the C# too -- the body is entirely commented out (the TODO for improved
-    // nullability support) and returns `expr` unchanged. Ported as-is so the
-    // VisitLdLen call site keeps its shape.
-    TranslatedExpression EnsureTargetNotNullable(TranslatedExpression expr,
-                                                 IL::ILInstruction* inst);
+    // The C# `internal (TranslatedExpression, IType, StringToInt?)
+    // TranslateSwitchValue(SwitchInstruction inst, bool isExpressionContext)`
+    // (ExpressionBuilder.cs line 4059): the switch governing value -- the
+    // StringToInt arm (a string switch), the governing-type validation over the
+    // value's stack type (I8/I4 re-finding, the small-integer range bail), the
+    // context-aware ConvertTo, and the C# governing-type compatibility double
+    // conversion. The C# tuple ports to the struct below (the StringToInt member
+    // name shadows the IL class name after its declaration -- the CaseLabel
+    // `Expression()` crux convention; no later use of the type in the struct).
+    struct SwitchValueTranslation {
+        TranslatedExpression Value;
+        const TS::IType* CaseType = nullptr;
+        IL::StringToInt* StringToInt = nullptr;
+    };
+    SwitchValueTranslation TranslateSwitchValue(IL::SwitchInstruction& inst,
+                                                bool isExpressionContext);
+
+    // The C# `static IType GetCSharpSwitchGoverningType(IType type)` (inside
+    // TranslateSwitchValue): the governing type C# switch allows (the compatible
+    // primitive set), else the single op_Implicit conversion's return type when
+    // exactly one is switch-compatible, else the type unchanged.
+    const TS::IType* GetCSharpSwitchGoverningType(const TS::IType& type) const;
 
     // -- The field surface (the C# `internal readonly` fields) ------------------------
 
-    // The C# `internal readonly ExpressionBuilder exprBuilder` holds the
-    // StatementBuilder as a GC reference the CallBuilder writes the
-    // EmitAsRefReadOnly flag through (the EnforceExplicitIn arm); the port
-    // keeps the non-owning pointer NON-CONST for that write.
-    StatementBuilder* statementBuilder = nullptr;
+    const StatementBuilder* statementBuilder = nullptr;
     const TS::ITypeResolveContext* decompilationContext = nullptr;
     IL::ILFunction* currentFunction = nullptr;
     const TS::ICompilation* compilation = nullptr;

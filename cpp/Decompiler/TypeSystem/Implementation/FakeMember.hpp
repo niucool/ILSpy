@@ -159,7 +159,13 @@ public:
     // The C# `bool IMember.IsExplicitInterfaceImplementation => false`.
     bool IsExplicitInterfaceImplementation() const override { return false; }
     // The C# `bool IMember.IsVirtual => false`.
-    bool IsVirtual() const override { return false; }
+    bool IsVirtual() const override { return isVirtual_; }
+    // Configurable `IsVirtual` for the call-builder tests (the
+    // BaseReferenceExpression arm of the C# GetRequiredTransformationsForCall
+    // requireTarget block reads the resolved method's IsVirtual). The default
+    // false preserves the prior hardcoded behavior (the additive-setter
+    // convention).
+    void SetIsVirtual(bool value) { isVirtual_ = value; }
     // The C# `bool IMember.IsOverride => false`.
     bool IsOverride() const override { return false; }
     // The C# `bool IMember.IsOverridable => false`.
@@ -239,6 +245,7 @@ protected:
     ::ILSpy::Decompiler::TypeSystem::Accessibility accessibility_
         = ::ILSpy::Decompiler::TypeSystem::Accessibility::Public;
     bool isStatic_ = false;
+    bool isVirtual_ = false;
 };
 
 // The `abstract` members each leaf provides:
@@ -515,8 +522,13 @@ public:
     // The C# `IReadOnlyList<IType> IMethod.TypeArguments => TypeParameters` --
     // the shared-handle snapshot (the MetadataMethod convention (k)).
     std::vector<ITypePtr> TypeArguments() const override;
-    // The C# `bool IMethod.IsExtensionMethod => false`.
-    bool IsExtensionMethod() const override { return false; }
+    // The C# `bool IMethod.IsExtensionMethod => false`. A settable field so
+    // a test fixture can construct the extension-method shape the
+    // delegate-reference family's CanUseDelegateConstruction matrix drives
+    // (the real MetadataMethod reads the attribute; the default false
+    // preserves the prior hardcoded behavior, the additive-setter convention).
+    bool IsExtensionMethod() const override { return isExtensionMethod_; }
+    void SetIsExtensionMethod(bool value) { isExtensionMethod_ = value; }
     // The C# `bool IMethod.IsLocalFunction => false`.
     bool IsLocalFunction() const override { return false; }
     // The C# `bool IMethod.IsConstructor => symbolKind == SymbolKind.Constructor`.
@@ -546,6 +558,7 @@ private:
     std::vector<std::shared_ptr<const ITypeParameter>> typeParameters_;
     std::vector<std::shared_ptr<const IParameter>> parameters_;
     const IMember* accessorOwner_ = nullptr;
+    bool isExtensionMethod_ = false;
     ::ILSpy::Decompiler::TypeSystem::MethodSemanticsAttributes accessorKind_
         = ::ILSpy::Decompiler::TypeSystem::MethodSemanticsAttributes::None;
 

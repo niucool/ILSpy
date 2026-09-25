@@ -154,6 +154,7 @@ enum class AssignmentOperatorType;
 // a scoped-enum forward declaration needs the underlying type, the
 // CSharpConversionsHelpers.hpp precedent).
 namespace ILSpy::Decompiler::Semantics {
+class ArrayCreateResolveResult;
 class Conversion;
 class ForEachResolveResult;
 class NamespaceResolveResult;
@@ -1515,6 +1516,81 @@ public:
     // an underlying; the port's null check returns the null default (the D516
     // safe-fallback convention).
     static std::any GetDefaultValue(const ILSpy::Decompiler::TypeSystem::IType& type);
+
+    // ---- ResolveArrayCreation ----------------------------------------------------------------
+    // (The `ResolveArrayCreation` region, CSharpResolver.cs lines 2880-2935: the two public
+    // overloads -- the `int[]` size convenience (line 2881) delegating to the core entry
+    // (line 2910). Every prerequisite is already ported: `ErrorResolveResult::UnknownError`
+    // (the non-overloadable arms' singleton), `ConstantResolveResult`, the
+    // `ICompilation.FindType(KnownTypeCode)` accessor, `TypeInference`'s `GetBestCommonType`
+    // free function (the Fixing region), `ArrayType`, `AdjustArrayAccessArguments` (the
+    // ResolveIndexer region), `Convert` (the convert region), and `ArrayCreateResolveResult`
+    // (D424).)
+
+    // The C# `public ArrayCreateResolveResult ResolveArrayCreation(IType elementType,
+    // int[] sizeArguments, ResolveResult[] initializerElements = null)` (line 2881) -- the
+    // `int[]` convenience overload: each size argument materializes as a resolve result --
+    // a NEGATIVE size is the `ErrorResolveResult.UnknownError` singleton (the C# static
+    // field; the port's non-owning aliasing handle over the program-lifetime singleton),
+    // anything else a `ConstantResolveResult` over the REGISTERED `System.Int32` carrying
+    // the value -- then the core overload runs over the synthesized list.
+    //
+    // PORT CONVENTIONS for this member:
+    //  * The C# `IType elementType` is passed through to the core overload, whose docs
+    //    allow null -- the port threads a by-value `ITypePtr` (an empty handle is the C#
+    //    null) so the null shape stays expressible end to end.
+    //  * The C# `int[] sizeArguments` (a by-value array; the C# never mutates it) ports to
+    //    a by-value `std::vector<int>`.
+    //  * The C# `ResolveResult[] initializerElements = null` ports to the nullable
+    //    `std::optional<std::vector<...>>` (nullopt = no initializer), handed through
+    //    unchanged.
+    //  * The return ports to an owning `std::shared_ptr<ArrayCreateResolveResult>` (the C#
+    //    non-null reference return).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ArrayCreateResolveResult> ResolveArrayCreation(
+        ILSpy::Decompiler::TypeSystem::ITypePtr elementType,
+        std::vector<int> sizeArguments,
+        std::optional<std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>>
+            initializerElements = std::nullopt) const;
+
+    // The C# `public ArrayCreateResolveResult ResolveArrayCreation(IType elementType,
+    // ResolveResult[] sizeArguments, ResolveResult[] initializerElements = null)` (line
+    // 2910) -- the core array-creation resolution: zero size arguments is the C#
+    // `ArgumentException` (the rank comes from the count); a NULL element type infers the
+    // best common type of the initializers through a fresh `TypeInference` instance (the
+    // C# internal ctor over the resolver's own `conversions` -- NOT the per-compilation
+    // cached pair -- with the default CSharp4 algorithm; the C# `GetBestCommonType(null)`
+    // on a no-initializer shape throws `ArgumentNullException`, so the port throws
+    // `std::invalid_argument` there); the array type is a fresh multi-dimensional
+    // `ArrayType` over the element type with rank == dimensions (a rank-1 array is the
+    // port's SZ-array shape -- the ExpressionBuilder `newArr` convention, observationally
+    // identical to the C# rank-1 `ArrayType` whose `[` + 0 commas + `]` suffix the port's
+    // SZ `ReflectionName` reproduces); the size arguments are adjusted in place
+    // (`AdjustArrayAccessArguments`, the int32/uint32/int64/uint64 chain); each initializer
+    // element is re-bound through `Convert` to the (possibly inferred) element type; and
+    // the result composes over the (possibly mutated) lists.
+    //
+    // PORT CONVENTIONS for this member:
+    //  * The C# `ResolveResult[] sizeArguments` ("The resolver may mutate this array to
+    //    wrap elements in ConversionResolveResults") ports to a by-value `std::vector`
+    //    handed to the by-reference `AdjustArrayAccessArguments` -- the mutation is
+    //    observable through the RESULT's `SizeArguments` (the ResolveIndexer
+    //    by-value-array convention).
+    //  * The C# `ResolveResult[] initializerElements = null` (also possibly mutated by
+    //    the `Convert` re-bind loop) ports to a by-value `std::optional<std::vector<...>>`;
+    //    the Convert loop re-binds the caller's elements inside the local copy, and the
+    //    conversion wraps are observed through the RESULT's `InitializerElements` (the C#
+    //    array mutation is invisible to callers when the result carries the re-bound
+    //    elements -- the port reproduces the C# observable, the RESULT).
+    //  * The C# `elementType` parameter REBINDS when null (the `GetBestCommonType`
+    //    result); the port's by-value `ITypePtr` rebinds freely, and every later read
+    //    (`*elementType`) sees the re-bound value. `Convert` takes a non-const `IType&`;
+    //    the by-value handle's pointee is non-const (the FindType results the handle may
+    //    alias were recovered through `const_pointer_cast` -- the D517 convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ArrayCreateResolveResult> ResolveArrayCreation(
+        ILSpy::Decompiler::TypeSystem::ITypePtr elementType,
+        std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> sizeArguments,
+        std::optional<std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>>
+            initializerElements = std::nullopt) const;
 
     // The C# `public ResolveResult ResolveAssignment(AssignmentOperatorType op,
     // ResolveResult lhs, ResolveResult rhs)` (line 2941) -- the assignment resolution:

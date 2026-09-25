@@ -1,7 +1,7 @@
 // Copyright (c) 2026 ILSpy Contributors
 //
-// Permission is hereby granted, free of charge, to any person obtaining a copy of this
-// software and associated documentation files (the "Software"), to deal in
+// Permission is hereby granted, free of charge, to any person obtaining a copy of
+// this software and associated documentation files (the "Software"), to deal in
 // the Software without restriction, including without limitation the rights to
 // use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
 // of the Software, and to permit persons to whom the Software is furnished to do
@@ -22,123 +22,141 @@
 
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
-
-#include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/Syntax/AstNode.hpp"
+#include "Decompiler/CSharp/Syntax/AstType.hpp"
+#include "Decompiler/CSharp/Syntax/EntityDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/FieldDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/Identifier.hpp"
 #include "Decompiler/CSharp/Syntax/Slots.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/VariableInitializer.hpp"
+#include "Decompiler/TypeSystem/Accessibility.hpp"
 #include "Decompiler/TypeSystem/IField.hpp"
+#include "Decompiler/TypeSystem/ISymbol.hpp"
 
-#include <map>
 #include <string>
-#include <vector>
+#include <unordered_map>
 
 namespace ILSpy::Decompiler::CSharp::Transforms {
-namespace {
 
-namespace Syntax = ::ILSpy::Decompiler::CSharp::Syntax;
+using Syntax::AstNode;
+using Syntax::AstType;
+using Syntax::EntityDeclaration;
+using Syntax::FieldDeclaration;
+using Syntax::Identifier;
+using Syntax::IdentifierExpression;
+using Syntax::MemberReferenceExpression;
+using Syntax::TypeDeclaration;
+using Syntax::VariableInitializer;
+
+// The port's `TypeSystem` names live under `ILSpy::Decompiler::TypeSystem`; the C#
+// `TypeSystem` sub-namespace of `CSharp` (pulled in by `TransformContext.hpp`) would shadow
+// the unqualified name here, so the alias makes the intent explicit.
 namespace TS = ::ILSpy::Decompiler::TypeSystem;
+using TS::Accessibility;
+using TS::IField;
+using TS::ISymbol;
 
-// The C# `string PickNewName(ISet<string> memberNames, string name)` (a
-// private instance method -- the port's free function; the set is read-only
-// here so the const std::map& carries it).
-std::string PickNewName(const std::map<std::string, bool, std::less<>>& memberNames,
-                        const std::string& name) {
-    if (memberNames.find("m_" + name) == memberNames.end())
-        return "m_" + name;
+std::string FixNameCollisions::PickNewName(const std::set<std::string>& memberNames,
+                                           const std::string& name) {
+    // The C# `if (!memberNames.Contains("m_" + name)) return "m_" + name;`.
+    const std::string prefixed = "m_" + name;
+    if (memberNames.find(prefixed) == memberNames.end())
+        return prefixed;
+    // The C# `for (int num = 2; ; num++) { string newName = name + num; if
+    // (!memberNames.Contains(newName)) return newName; }` -- an unbounded loop (a free
+    // candidate always exists since the set is finite). `memberNames` is NOT updated with
+    // the newly picked name during the walk, matching the C# (a later collision with a
+    // re-used candidate is impossible within one type because `memberNames` is the fixed
+    // pre-rename snapshot).
     for (int num = 2;; num++) {
-        std::string newName = name + std::to_string(num);
+        const std::string newName = name + std::to_string(num);
         if (memberNames.find(newName) == memberNames.end())
             return newName;
     }
 }
 
-} // namespace
+void FixNameCollisions::Run(AstNode& rootNode, TransformContext& context) {
+    // The C# `var renamedSymbols = new Dictionary<ISymbol, string>();` -- keyed by symbol
+    // IDENTITY (the C# dictionary's default reference comparer). The port keys on the
+    // `ISymbol*` the resolve-result annotation carries, which is stable across the
+    // declaration and its references for one entity.
+    std::unordered_map<const ISymbol*, std::string> renamedSymbols;
 
-void FixNameCollisions::Run(Syntax::AstNode& rootNode, TransformContext& context) {
-    // The C# `Dictionary<ISymbol, string>` keyed by the symbol pointer (the
-    // port's ISymbol has no Equals-based dictionary key; the symbol instances
-    // are singletons per compilation the C# reference equality maps onto).
-    std::map<const TS::ISymbol*, std::string, std::less<>> renamedSymbols;
-    for (Syntax::AstNode* node : rootNode.DescendantsAndSelf()) {
-        auto* typeDecl = dynamic_cast<Syntax::TypeDeclaration*>(node);
-        if (typeDecl == nullptr) continue;
-        // The C# `typeDecl.Members.Select(m => m.GetChild(Slots.
-        // PrivateImplementationType) is null ? m.Name : type + "." + m.Name)`
-        // -- the explicit-interface members carry the "Iface.Member" shape.
-        // The port's GetChild is index-based, so the scan walks the member's
-        // children and matches the slot kind.
-        std::map<std::string, bool, std::less<>> memberNames;
-        for (int mi = 0; mi < typeDecl->Members().Count(); ++mi) {
-            Syntax::EntityDeclaration* m = typeDecl->Members().At(mi);
-            bool hasPrivateImplementationType = false;
-            for (int ci = 0; ci < m->GetChildCount(); ++ci) {
-                const Syntax::CSharpSlotInfo* slot = m->GetChildSlotInfo(ci);
-                if (slot != nullptr &&
-                    slot->Kind() == &Syntax::Slots::PrivateImplementationType &&
-                    m->GetChild(ci) != nullptr) {
-                    hasPrivateImplementationType = true;
-                    break;
-                }
-            }
-            memberNames[hasPrivateImplementationType
-                            ? std::string("")  // the C# `type + "." + m.Name`;
-                                               // the prefixed name cannot equal a
-                                               // bare field name
-                            : m->Name()] = true;
+    // The C# `foreach (var typeDecl in rootNode.DescendantsAndSelf.OfType<TypeDeclaration>())`.
+    for (AstNode* node : rootNode.DescendantsAndSelf()) {
+        auto* typeDecl = dynamic_cast<TypeDeclaration*>(node);
+        if (typeDecl == nullptr)
+            continue;
+
+        // The C# `var memberNames = typeDecl.Members.Select(m => { var type =
+        // m.GetChild(Slots.PrivateImplementationType); return type is null ? m.Name :
+        // type + "." + m.Name; }).ToHashSet();` -- an explicit-interface member is keyed by
+        // its `I.Name` form, so a private field named `Name` still collides with it below
+        // (the field name is a bare identifier, the member key is prefixed by the interface
+        // type).
+        std::set<std::string> memberNames;
+        auto& members = typeDecl->Members();
+        for (int i = 0; i < members.Count(); i++) {
+            EntityDeclaration* member = members.At(i);
+            AstType* privateImplementationType =
+                member->GetChildByKind(&Syntax::Slots::PrivateImplementationType);
+            if (privateImplementationType == nullptr)
+                memberNames.insert(member->Name());
+            else
+                memberNames.insert(privateImplementationType->ToString() + "." + member->Name());
         }
-        // memberNames does not include fields or non-custom events because
-        // those don't have a single name, but a list of VariableInitializers.
-        for (int mi = 0; mi < typeDecl->Members().Count(); ++mi) {
-            auto* fieldDecl = dynamic_cast<Syntax::FieldDeclaration*>(typeDecl->Members().At(mi));
-            if (fieldDecl == nullptr) continue;
-            if (fieldDecl->Variables().Count() != 1) continue;
-            const std::string oldName = fieldDecl->Variables().At(0)->Name();
-            const TS::ISymbol* symbol = ::ILSpy::Decompiler::CSharp::GetSymbol(*fieldDecl);
-            const auto* field = symbol != nullptr
-                                    ? dynamic_cast<const TS::IField*>(symbol)
-                                    : nullptr;
-            if (memberNames.find(oldName) != memberNames.end() && field != nullptr &&
-                field->Accessibility() == TS::Accessibility::Private) {
+
+        // The C# `foreach (var fieldDecl in typeDecl.Members.OfType<FieldDeclaration>())`:
+        // memberNames does not include fields (or non-custom events), because those do not
+        // have a single name but a list of `VariableInitializer`s, so the collision is
+        // resolved field-side only.
+        for (int i = 0; i < members.Count(); i++) {
+            auto* fieldDecl = dynamic_cast<FieldDeclaration*>(members.At(i));
+            if (fieldDecl == nullptr)
+                continue;
+            // The C# `if (fieldDecl.Variables.Count != 1) continue;`.
+            if (fieldDecl->Variables().Count() != 1)
+                continue;
+            VariableInitializer* variable = fieldDecl->Variables().At(0);
+            const std::string oldName = variable->Name();
+            // The C# `ISymbol? symbol = fieldDecl.GetSymbol();`.
+            const ISymbol* symbol = GetSymbol(*fieldDecl);
+            // The C# `if (memberNames.Contains(oldName) && symbol is IField { Accessibility:
+            // Accessibility.Private })`: the symbol's `Accessibility` is the C# `Accessibility.Private`
+            // value; the C++ `Accessibility()` override reports the raw column value.
+            const auto* field = dynamic_cast<const IField*>(symbol);
+            if (memberNames.find(oldName) != memberNames.end() && field != nullptr
+                && field->Accessibility() == Accessibility::Private) {
                 const std::string newName = PickNewName(memberNames, oldName);
-                context.StepOnce("Rename field '" + oldName + "' to '" + newName + "'",
-                                 fieldDecl);
-                fieldDecl->Variables().At(0)->Name(newName);
+                context.Step("Rename field '" + oldName + "' to '" + newName + "'", fieldDecl);
+                variable->Name(newName);
                 renamedSymbols[symbol] = newName;
             }
         }
     }
 
-    for (Syntax::AstNode* node : rootNode.DescendantsAndSelf()) {
-        if (dynamic_cast<Syntax::IdentifierExpression*>(node) != nullptr ||
-            dynamic_cast<Syntax::MemberReferenceExpression*>(node) != nullptr) {
-            const TS::ISymbol* symbol = ::ILSpy::Decompiler::CSharp::GetSymbol(*node);
-            if (symbol != nullptr) {
-                auto it = renamedSymbols.find(symbol);
-                if (it != renamedSymbols.end()) {
-                    // An IdentifierExpression / MemberReferenceExpression
-                    // always carries its name identifier.
-                    context.StepOnce("Rename field reference to '" + it->second + "'",
-                                     node);
-                    // The C# `node.GetChild(Slots.Identifier)!.Name = newName`:
-                    // walk the children for the Identifier-kind slot.
-                    for (int ci = 0; ci < node->GetChildCount(); ++ci) {
-                        const Syntax::CSharpSlotInfo* slot = node->GetChildSlotInfo(ci);
-                        if (slot != nullptr &&
-                            slot->Kind() == &Syntax::Slots::Identifier) {
-                            if (auto* identifier = dynamic_cast<Syntax::Identifier*>(
-                                    node->GetChild(ci))) {
-                                identifier->Name(it->second);
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-        }
+    // The C# `foreach (var node in rootNode.DescendantsAndSelf)`: retarget every reference
+    // to a renamed field -- `node.GetChild(Slots.Identifier)!.Name = newName` mutates the
+    // reference's name token in place (an IdentifierExpression / MemberReferenceExpression
+    // always carries its name identifier).
+    for (AstNode* node : rootNode.DescendantsAndSelf()) {
+        if (dynamic_cast<IdentifierExpression*>(node) == nullptr
+            && dynamic_cast<MemberReferenceExpression*>(node) == nullptr)
+            continue;
+        // The C# `ISymbol? symbol = node.GetSymbol();`.
+        const ISymbol* symbol = GetSymbol(*node);
+        if (symbol == nullptr)
+            continue;
+        auto it = renamedSymbols.find(symbol);
+        if (it == renamedSymbols.end())
+            continue;
+        context.Step("Rename field reference to '" + it->second + "'", node);
+        Identifier* identifier = node->GetChildByKind(&Syntax::Slots::Identifier);
+        // The C# `node.GetChild(Slots.Identifier)!` (non-null for both node kinds).
+        identifier->Name(it->second);
     }
 }
 

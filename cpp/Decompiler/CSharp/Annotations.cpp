@@ -23,7 +23,6 @@
 #include "Decompiler/CSharp/Annotations.hpp"
 
 #include "Decompiler/CSharp/Resolver/MethodGroupResolveResult.hpp"
-#include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/Semantics/ErrorResolveResult.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
@@ -128,14 +127,6 @@ const Sem::ResolveResult* GetResolveResult(const Syntax::AstNode& node) {
     return rr != nullptr ? rr : &Sem::ErrorResolveResult::UnknownError();
 }
 
-std::shared_ptr<Sem::ResolveResult> GetSharedResolveResult(const Syntax::AstNode& node) {
-    for (const auto& a : node.SharedAnnotations()) {
-        if (dynamic_cast<Sem::ResolveResult*>(a.get()) != nullptr)
-            return std::static_pointer_cast<Sem::ResolveResult>(a);
-    }
-    return nullptr;
-}
-
 IL::ILVariable* GetILVariable(
     const Syntax::IdentifierExpression& expression) {
     if (const auto* rr = expression.Annotation<ILVariableResolveResult>())
@@ -169,14 +160,47 @@ Syntax::ForeachStatement* WithILVariable(Syntax::ForeachStatement& loop,
     return &loop;
 }
 
-IL::BlockContainer* GetBlockContainerAnnotation(const Syntax::AstNode& node) {
-    for (IL::ILInstruction* instruction : GetILInstructions(node)) {
-        if (auto* container = dynamic_cast<IL::BlockContainer*>(instruction))
-            return container;
+// The C# `ide.AddAnnotation(localFunction)` over the holder channel.
+void WithILFunction(Syntax::AstNode& node, IL::ILFunction* function) {
+    node.AddAnnotation(std::make_shared<ILFunctionAnnotation>(function));
+}
+
+// The C# `node.Annotation<ILFunction>()` over the holder channel.
+IL::ILFunction* GetILFunction(const Syntax::AstNode& node) {
+    const auto* annotation = node.Annotation<ILFunctionAnnotation>();
+    return annotation ? annotation->Function : nullptr;
+}
+
+// The C# `node.Annotation<BlockContainer>()` over the holder channel.
+IL::BlockContainer* GetBlockContainer(const Syntax::AstNode& node) {
+    const auto* annotation = node.Annotation<BlockContainerAnnotation>();
+    return annotation ? annotation->Container : nullptr;
+}
+
+// The C# `UseImplicitlyTypedOutAnnotation.Instance` shared handle (the port's
+// annotation channel owns via shared_ptr; the aliasing-shared_ptr convention --
+// the static Instance() object aliased with a no-op deleter).
+std::shared_ptr<UseImplicitlyTypedOutAnnotation>
+UseImplicitlyTypedOutAnnotation::SharedInstance() {
+    return std::shared_ptr<UseImplicitlyTypedOutAnnotation>(
+        const_cast<UseImplicitlyTypedOutAnnotation*>(&Instance()),
+        [](UseImplicitlyTypedOutAnnotation*) {});
+}
+
+// The C# `expr.GetResolveResult()` shared form (the Annotations.hpp
+// declaration): the first resolve-result annotation as a shared handle, or
+// null when the node carries none (the callers that need the error fallback
+// use the pointer form).
+std::shared_ptr<Sem::ResolveResult> GetSharedResolveResult(const Syntax::AstNode& node) {
+    for (const auto& a : node.SharedAnnotations()) {
+        if (dynamic_cast<Sem::ResolveResult*>(a.get()) != nullptr)
+            return std::static_pointer_cast<Sem::ResolveResult>(a);
     }
     return nullptr;
 }
 
+// The C# `node.Annotations.OfType<ILFunction>().FirstOrDefault()` read: the
+// root ILFunction annotation among the node's IL-instruction annotations.
 IL::ILFunction* GetILFunctionAnnotation(const Syntax::AstNode& node) {
     for (IL::ILInstruction* instruction : GetILInstructions(node)) {
         if (auto* function = dynamic_cast<IL::ILFunction*>(instruction))

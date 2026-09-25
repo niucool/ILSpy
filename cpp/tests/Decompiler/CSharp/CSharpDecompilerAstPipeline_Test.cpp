@@ -13,6 +13,7 @@
 #include "Decompiler/CSharp/Transforms/IAstTransform.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/DecompileRun.hpp"
+#include "Decompiler/TypeSystem/SimpleTypeResolveContext.hpp"
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
 #include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
@@ -90,7 +91,10 @@ TEST(AstTransformPipeline, RunAppliesThePortedPipeline) {
     AstPipelineFixture fx;
     DecompilerSettings settings;
     DecompileRun runStorage(&settings, fx.usingScope);
-    CS::CSharpDecompiler::RunAstTransforms(*whileStatement, runStorage);
+    TS::SimpleTypeResolveContext decompilationContext(
+        fx.compilation.MainModule());
+    CS::CSharpDecompiler::RunAstTransforms(*whileStatement, runStorage,
+                                           decompilationContext);
     ASSERT_NE(whileStatement->EmbeddedStatement(), nullptr);
     EXPECT_NE(dynamic_cast<Syntax::BlockStatement*>(
                   whileStatement->EmbeddedStatement()),

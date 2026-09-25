@@ -26,16 +26,21 @@
 #include <cstdlib>
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/DefaultValue.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <functional>
 #include <string>
+#include <utility>
+#include <vector>
 
 using namespace ILSpy::Decompiler::IL;
 using ILSpy::Decompiler::Metadata::MetadataFile;
@@ -549,4 +554,179 @@ TEST(ILReader, MscorlibBinaryNumericSignSweep) {
     EXPECT_GT(noneSites, 0) << "corpus must have Sign.None binaries (plain add/sub/..)";
     EXPECT_GT(signedSites, 0) << "corpus must have Sign.Signed binaries (div/rem/shr)";
     EXPECT_GT(unsignedSites, 0) << "corpus must have Sign.Unsigned binaries (_un forms)";
+}
+// The ILStackWasEmpty reader flags (the C# CallInstruction.ILStackWasEmpty /
+// DefaultValue.ILStackWasEmpty / StLoc.ILStackWasEmpty fields, set from
+// CurrentStackIsEmpty() after the operands were popped). The expectations are
+// hand-derived from the byte-verified flat disassembly of the same mscorlib
+// fixtures (the port's --il dump is byte-identical to the real tool's):
+//
+//   String.Copy (RVA 0x1330c): every statement is self-contained, so every
+//     Call (incl. the newobj) and every StLoc decodes with an empty stack
+//     beneath -- 12 flagged nodes, all TRUE (the stloc.0/1 stores of the
+//     length/allocation, the stloc.3/2/5/4 pinned-pointer stores, the two
+//     stloc.s stores of the null terminators, get_Length, FastAllocateString,
+//     wstrcpy and the ArgumentNullException newobj).
+//
+//   Registry.GetBaseKeyFromKeyName (RVA 0x2614): the two
+//     `callvirt ToUpper(..., call get_InvariantCulture())` sites leave the
+//     pending receiver beneath the zero-argument static call, so the
+//     get_InvariantCulture calls carry FALSE; the nested get_Length calls
+//     inside the Substring argument trees and the Substring feeding ToUpper
+//     likewise sit above a pending value. Every StLoc is statement-level and
+//     TRUE.
+//
+//   AsyncTaskMethodBuilder.Create (RVA 0x14a98c): the lone `initobj` pops its
+//     target address as the only pending value, so the DefaultValue node
+//     carries TRUE.
+
+TEST(ILReader, StringCopyDecodesAllStatementNodesWithEmptyStack)
+{
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    std::uint32_t token = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0x1330c) { token = m.Token; break; }
+    }
+    ASSERT_NE(token, 0u) << "String.Copy fixture method not found";
+    auto fn = ReadIL(f, token, 0x1330c);
+    ASSERT_NE(fn, nullptr);
+
+    int calls = 0, stlocs = 0, newobjs = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::Call) {
+            auto* call = static_cast<Call*>(inst);
+            ++calls;
+            if (call->IsNewObj) ++newobjs;
+            EXPECT_TRUE(call->ILStackWasEmpty)
+                << "call must sit on an empty stack: " << call->MethodName;
+        } else if (inst->Op == OpCode::StLoc) {
+            ++stlocs;
+            EXPECT_TRUE(static_cast<StLoc*>(inst)->ILStackWasEmpty)
+                << "store must sit on an empty stack";
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i)
+            walk(inst->GetChild(i));
+    };
+    ASSERT_NE(fn->Body, nullptr);
+    for (auto& b : fn->Body->Blocks) {
+        for (auto& ins : b->Instructions) walk(ins.get());
+        walk(b->FinalInstruction.get());
+    }
+    // The exact census from the hand-derived trace: 4 calls (get_Length,
+    // FastAllocateString, wstrcpy and the ArgumentNullException newobj) and 8
+    // stores (stloc.0, stloc.1, the four pointer stores, and the two stloc.s
+    // terminator stores).
+    EXPECT_EQ(calls, 4);
+    EXPECT_EQ(newobjs, 1);
+    EXPECT_EQ(stlocs, 8);
+}
+
+TEST(ILReader, NestedCallsCarryNonEmptyStackFlag)
+{
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    std::uint32_t token = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0x2614) { token = m.Token; break; }
+    }
+    ASSERT_NE(token, 0u) << "GetBaseKeyFromKeyName fixture method not found";
+    auto fn = ReadIL(f, token, 0x2614);
+    ASSERT_NE(fn, nullptr);
+
+    // Collect every call's (flag, short method name) pair.
+    std::vector<std::pair<bool, std::string>> calls;
+    int stlocs = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::Call) {
+            auto* call = static_cast<Call*>(inst);
+            // The reader records "Namespace.Type::Method" -- keep the
+            // type-qualified tail.
+            std::string name = call->MethodName;
+            calls.emplace_back(call->ILStackWasEmpty, std::move(name));
+        } else if (inst->Op == OpCode::StLoc) {
+            auto* store = static_cast<StLoc*>(inst);
+            ++stlocs;
+            // The port's dup arm commits the duplicated value into a synthetic
+            // `dup_<offset>` stack-slot store (the C# Push(Peek()) aliasing the
+            // tree node instead); those synthetic stores carry the C# default
+            // false like every non-IL store. Every store decoded from an IL
+            // stloc opcode is statement-level here and must be true.
+            if (store->Variable == nullptr
+                || store->Variable->Name.rfind("dup_", 0) != 0) {
+                EXPECT_TRUE(store->ILStackWasEmpty)
+                    << "every statement-level store sits on an empty stack";
+            }
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i)
+            walk(inst->GetChild(i));
+    };
+    ASSERT_NE(fn->Body, nullptr);
+    for (auto& b : fn->Body->Blocks) {
+        for (auto& ins : b->Instructions) walk(ins.get());
+        walk(b->FinalInstruction.get());
+    }
+
+    // The exact FALSE set from the hand-derived trace: the two
+    // get_InvariantCulture sites (the pending ToUpper receiver beneath), the
+    // two get_Length calls inside the Substring argument trees, and the
+    // Substring feeding one ToUpper (its receiver is pending beneath).
+    std::vector<std::string> notEmpty;
+    for (const auto& [wasEmpty, name] : calls) {
+        if (!wasEmpty) notEmpty.push_back(name);
+    }
+    auto countName = [&](std::string_view needle) {
+        return static_cast<int>(std::count_if(notEmpty.begin(), notEmpty.end(),
+            [&](const std::string& n) { return n.find(needle) != std::string::npos; }));
+    };
+    EXPECT_EQ(notEmpty.size(), std::size_t(5));
+    EXPECT_EQ(countName("CultureInfo::get_InvariantCulture"), 2);
+    EXPECT_EQ(countName("String::get_Length"), 2);
+    EXPECT_EQ(countName("String::Substring"), 1);
+    EXPECT_GT(stlocs, 0) << "the fixture has statement-level stores";
+}
+
+TEST(ILReader, InitObjSetsDefaultValueStackWasEmpty)
+{
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    // AsyncTaskMethodBuilder.Create: ldloca.s 0; initobj T; ldloc.0; ret --
+    // the lone default-value construction pops the address as the only
+    // pending value, so the flag is true.
+    std::uint32_t token = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0x14a98c) { token = m.Token; break; }
+    }
+    ASSERT_NE(token, 0u) << "AsyncTaskMethodBuilder.Create fixture method not found";
+    auto fn = ReadIL(f, token, 0x14a98c);
+    ASSERT_NE(fn, nullptr);
+
+    int defaultValues = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::DefaultValue) {
+            ++defaultValues;
+            EXPECT_TRUE(static_cast<DefaultValue*>(inst)->ILStackWasEmpty)
+                << "the initobj target is the only pending value";
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i)
+            walk(inst->GetChild(i));
+    };
+    ASSERT_NE(fn->Body, nullptr);
+    for (auto& b : fn->Body->Blocks) {
+        for (auto& ins : b->Instructions) walk(ins.get());
+        walk(b->FinalInstruction.get());
+    }
+    EXPECT_EQ(defaultValues, 1);
 }

@@ -26,6 +26,7 @@
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
 #include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
@@ -325,4 +326,165 @@ TEST(CopyPropagation, MscorlibSweepPreservesInvariant) {
         if (processed >= 3000) break;
     }
     EXPECT_GT(processed, 2000);
+}
+
+
+TEST(CopyPropagation, PropagateReplacesSlotLoadsWithLdlocaClones) {
+    // The TransformCollectionAndObjectInitializers.Run shape: a single-definition
+    // stack slot assigned an 'ldloca' of the initializer variable. Propagate
+    // replaces every 'ldloc S_0' with a clone of the 'ldloca v' and drops the
+    // store (the address-load source has no child instructions, so no
+    // un-inlining happens and nothing re-inlines afterwards).
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto v = MakeLocal("v", VariableKind::Local);
+    auto S = MakeLocal("S_0", VariableKind::StackSlot);
+    auto dst = MakeLocal("dst", VariableKind::Local);
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(S);
+    fn->Variables.push_back(dst);
+    fn->Body->AddBlock(std::make_unique<Block>());
+    auto* block = fn->Body->Blocks[0].get();
+    auto* store = new StLoc(S, std::make_unique<LdLoca>(v));
+    block->Add(std::unique_ptr<ILInstruction>(store));
+    block->Add(std::make_unique<StLoc>(dst, std::make_unique<LdLoc>(S)));
+    block->Add(std::make_unique<StLoc>(dst, std::make_unique<LdLoc>(S)));
+    block->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+    ComputeVariableUsage(*fn);
+    ASSERT_TRUE(S->IsSingleDefinition());
+
+    CopyPropagation::Propagate(store, Ctx());
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ASSERT_EQ(block->Instructions.size(), 2u) << "the S_0 store is dropped";
+    for (auto& inst : block->Instructions) {
+        auto* st = dynamic_cast<StLoc*>(inst.get());
+        ASSERT_NE(st, nullptr);
+        ASSERT_NE(st->Value, nullptr);
+        auto* lda = dynamic_cast<LdLoca*>(st->Value.get());
+        ASSERT_NE(lda, nullptr) << "each ldloc S_0 became an ldloca";
+        EXPECT_EQ(lda->Variable.get(), v.get()) << "the clone points at v";
+        EXPECT_TRUE(lda->IsILRangeEmpty()) << "the clone carries an empty IL range";
+    }
+    EXPECT_EQ(CountLoads(*fn, S.get()), 0) << "S_0 has no remaining loads";
+    EXPECT_FALSE(HasStoreOf(*fn, S.get())) << "S_0 has no remaining store";
+}
+
+TEST(CopyPropagation, PropagateUnInlinesChildrenAndReInlinesSingleUse) {
+    // An ldelema source (two child instructions): Propagate un-inlines the
+    // array and index into fresh 'C_<offset>' stack-slot stores, replaces the
+    // single load with a clone reading those stores, drops the original store,
+    // and the InlineInto tail folds both stores back into the clone -- the
+    // round trip reconstructs the original expression over the single use.
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto arr = MakeLocal("arr", VariableKind::Local);
+    auto S = MakeLocal("S_0", VariableKind::StackSlot);
+    auto dst = MakeLocal("dst", VariableKind::Local);
+    fn->Variables.push_back(arr);
+    fn->Variables.push_back(S);
+    fn->Variables.push_back(dst);
+    fn->Body->AddBlock(std::make_unique<Block>());
+    auto* block = fn->Body->Blocks[0].get();
+    std::vector<std::unique_ptr<ILInstruction>> indices;
+    indices.push_back(std::make_unique<LdcI4>(5));
+    auto* store = new StLoc(
+        S, std::make_unique<LdElema>(nullptr, std::make_unique<LdLoc>(arr), std::move(indices)));
+    block->Add(std::unique_ptr<ILInstruction>(store));
+    block->Add(std::make_unique<StLoc>(dst, std::make_unique<LdLoc>(S)));
+    block->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+    ComputeVariableUsage(*fn);
+    ASSERT_TRUE(S->IsSingleDefinition());
+
+    CopyPropagation::Propagate(store, Ctx());
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // The un-inlined stores were folded back by the re-inline tail: only the
+    // reconstructed element access over the single use remains.
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* st = dynamic_cast<StLoc*>(block->Instructions[0].get());
+    ASSERT_NE(st, nullptr);
+    ASSERT_EQ(st->Variable.get(), dst.get());
+    auto* elem = dynamic_cast<LdElema*>(st->Value.get());
+    ASSERT_NE(elem, nullptr) << "the propagated clone is the element access";
+    ASSERT_NE(elem->Array, nullptr);
+    EXPECT_EQ(elem->Array->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(elem->Array.get())->Variable.get(), arr.get())
+        << "the array store was re-inlined into the clone";
+    ASSERT_EQ(elem->Indices.size(), 1u);
+    ASSERT_NE(elem->Indices[0], nullptr);
+    EXPECT_EQ(elem->Indices[0]->Op, OpCode::LdcI4) << "the index store was re-inlined";
+    // The fresh C_ variables were registered in the function's variable list.
+    int cVars = 0;
+    for (auto& var : fn->Variables)
+        if (var->Name.rfind("C_", 0) == 0) {
+            cVars++;
+            EXPECT_TRUE(var->HasGeneratedName) << "the un-inlined variables are generated";
+        }
+    EXPECT_EQ(cVars, 2) << "one fresh variable per un-inlined child";
+}
+
+TEST(CopyPropagation, PropagateKeepsUninlinedStoresForMultiUse) {
+    // With two loads of the slot, each un-inlined store is loaded twice, so the
+    // re-inline tail cannot fold them and the C_ stores stay visible -- the
+    // faithful DoPropagate shape (operands evaluated once, before both copies).
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto arr = MakeLocal("arr", VariableKind::Local);
+    auto S = MakeLocal("S_0", VariableKind::StackSlot);
+    auto d1 = MakeLocal("d1", VariableKind::Local);
+    auto d2 = MakeLocal("d2", VariableKind::Local);
+    fn->Variables.push_back(arr);
+    fn->Variables.push_back(S);
+    fn->Variables.push_back(d1);
+    fn->Variables.push_back(d2);
+    fn->Body->AddBlock(std::make_unique<Block>());
+    auto* block = fn->Body->Blocks[0].get();
+    std::vector<std::unique_ptr<ILInstruction>> indices;
+    indices.push_back(std::make_unique<LdcI4>(5));
+    auto* store = new StLoc(
+        S, std::make_unique<LdElema>(nullptr, std::make_unique<LdLoc>(arr), std::move(indices)));
+    block->Add(std::unique_ptr<ILInstruction>(store));
+    block->Add(std::make_unique<StLoc>(d1, std::make_unique<LdLoc>(S)));
+    block->Add(std::make_unique<StLoc>(d2, std::make_unique<LdLoc>(S)));
+    block->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+    ComputeVariableUsage(*fn);
+    ASSERT_TRUE(S->IsSingleDefinition());
+
+    CopyPropagation::Propagate(store, Ctx());
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // [stloc C_a(ldloc arr), stloc C_b(ldc 5), stloc d1(clone), stloc d2(clone)]
+    ASSERT_EQ(block->Instructions.size(), 4u);
+    auto* stA = dynamic_cast<StLoc*>(block->Instructions[0].get());
+    auto* stB = dynamic_cast<StLoc*>(block->Instructions[1].get());
+    ASSERT_NE(stA, nullptr);
+    ASSERT_NE(stB, nullptr);
+    EXPECT_EQ(stA->Variable->Name, "C_0") << "the array operand store (offset 0)";
+    EXPECT_EQ(stB->Variable->Name, "C_0") << "the index operand store (offset 0)";
+    EXPECT_NE(stA->Variable.get(), stB->Variable.get()) << "distinct fresh variables";
+    for (int i = 2; i < 4; ++i) {
+        auto* st = dynamic_cast<StLoc*>(block->Instructions[static_cast<std::size_t>(i)].get());
+        ASSERT_NE(st, nullptr);
+        auto* elem = dynamic_cast<LdElema*>(st->Value.get());
+        ASSERT_NE(elem, nullptr) << "the propagated clone";
+        ASSERT_NE(elem->Array, nullptr);
+        ASSERT_EQ(elem->Array->Op, OpCode::LdLoc);
+        EXPECT_EQ(static_cast<LdLoc*>(elem->Array.get())->Variable.get(),
+                  stA->Variable.get()) << "the clone reads the un-inlined array store";
+        ASSERT_EQ(elem->Indices.size(), 1u);
+        ASSERT_NE(elem->Indices[0], nullptr);
+        ASSERT_EQ(elem->Indices[0]->Op, OpCode::LdLoc);
+        EXPECT_EQ(static_cast<LdLoc*>(elem->Indices[0].get())->Variable.get(),
+                  stB->Variable.get()) << "the clone reads the un-inlined index store";
+    }
 }

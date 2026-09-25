@@ -17,18 +17,21 @@
 // OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-// Port of the AddCheckedBlocks ANNOTATION half
-// (ICSharpCode.Decompiler/CSharp/Transforms/AddCheckedBlocks.cs): the
-// CheckedUncheckedAnnotation object and the three `static readonly object`
-// annotations the translation layer attaches to cast/assignment expressions to
-// drive the `checked`/`unchecked` block insertion. The transform itself (the
-// block-rewriting IAstTransform) is deferred with the rest of the AST-transform
-// layer; the annotation objects are what every expression-builder site reads
-// and writes.
+// Port of AddCheckedBlocks (ICSharpCode.Decompiler/CSharp/Transforms/AddCheckedBlocks.cs):
+// the `CheckedUncheckedAnnotation` object and the three `static readonly object`
+// annotations the translation layer attaches to cast/assignment expressions to drive the
+// `checked`/`unchecked` block insertion, plus the `AddCheckedBlocks` IAstTransform that
+// consumes them.
+//
+// The annotation half carries the annotation objects every expression-builder site reads
+// and writes; the transform half (declared below) runs the cost-based dynamic program that
+// decides which annotated expressions get an explicit `checked(...)`/`unchecked(...)`
+// expression and which contiguous statement ranges get a `checked`/`unchecked` block.
 
 #pragma once
 
 #include "Decompiler/CSharp/Syntax/AbstractAnnotatable.hpp"
+#include "Decompiler/CSharp/Transforms/IAstTransform.hpp"
 
 #include <memory>
 
@@ -73,5 +76,16 @@ const CheckedUncheckedAnnotation& ExplicitUncheckedAnnotation();
 std::shared_ptr<CheckedUncheckedAnnotation> CheckedAnnotationHandle();
 std::shared_ptr<CheckedUncheckedAnnotation> UncheckedAnnotationHandle();
 std::shared_ptr<CheckedUncheckedAnnotation> ExplicitUncheckedAnnotationHandle();
+
+// The C# `public class AddCheckedBlocks : IAstTransform`. See the .cpp for the algorithm.
+// The transform is stateless; a single instance runs over a whole syntax tree.
+class AddCheckedBlocks : public IAstTransform {
+public:
+    // The C# `public void Run(AstNode node, TransformContext context)`: a non-block node
+    // recurses into its children; a `BlockStatement` runs the checked/unchecked placement
+    // dynamic program and inserts the winning nodes (checked context when
+    // `Settings.CheckForOverflowUnderflow` is on, unchecked context otherwise).
+    void Run(Syntax::AstNode& node, TransformContext& context) override;
+};
 
 } // namespace ILSpy::Decompiler::CSharp::Transforms

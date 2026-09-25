@@ -1,55 +1,72 @@
 // Copyright (c) 2026 ILSpy Contributors
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy of this
-// software and associated documentation files (the "Software"), to deal in
-// the Software without restriction, including without limitation the rights to
-// use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
-// of the Software, and to permit persons to whom the Software is furnished to do
-// so, subject to the following conditions:
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+// to whom the Software is furnished to do so, subject to the following conditions:
 //
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
 //
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
 
-// Port of the second/third classes of
-// ICSharpCode.Decompiler/CSharp/Transforms/EscapeInvalidIdentifiers.cs --
-// `RemoveCompilerGeneratedAssemblyAttributes` (strips the compiler-emitted
-// assembly-/module-level attributes the output should not carry) and
-// `RemoveEmbeddedAttributes` (drops the embedded-compiler-attributes type
-// declarations). Both are IAstTransforms over the port's AST (the
-// EscapeInvalidIdentifiers file's peer classes).
+// Port of ICSharpCode.Decompiler/CSharp/Transforms/EscapeInvalidIdentifiers.cs -- the
+// `RemoveCompilerGeneratedAssemblyAttributes` class (the same source file also carries
+// `EscapeInvalidIdentifiers` and `RemoveEmbeddedAttributes`; this port splits the third
+// class into its own header, mirroring how the ported `RemoveCLSCompliantAttribute`
+// already lives beside the `EscapeInvalidIdentifiers` port).
+//
+// The project-export AST transform that drops the compiler-emitted assembly- and
+// module-level attributes (the ones the compiler bakes into every assembly), so a
+// whole-project recompile does not see them twice or conflict with the emitted
+// `AssemblyInfo.cs`. It walks the DIRECT `AttributeSection` children of the tree root and
+// inspects only the `assembly`- and `module`-targeted sections.
+//
+// The `assembly` arm removes a fixed set of attributes with argument-shape guards:
+// `DebuggableAttribute` and `TargetFrameworkAttribute` unconditionally;
+// `CompilationRelaxationsAttribute` only when it carries the single literal `8`;
+// `RuntimeCompatibilityAttribute` only for `WrapNonExceptionThrows = true`; and
+// `SecurityPermissionAttribute` only for `SecurityAction.RequestMinimum, SkipVerification =
+// true`. The `module` arm removes `UnverifiableCodeAttribute` and `RefSafetyRulesAttribute`
+// unconditionally. A section left empty by the removals is dropped; a section with any
+// other target is left untouched (the C# `continue` before the empty-section cleanup).
+//
+// It is the third concrete `IAstTransform` over the iteration-160 `TransformContext`
+// foundation, following `EscapeInvalidIdentifiers` and `RemoveCLSCompliantAttribute` in the
+// `WholeProjectDecompiler` project-export order (`EscapeInvalidIdentifiers`, then
+// `RemoveCLSCompliantAttribute`, then `RemoveCompilerGeneratedAssemblyAttributes`). It
+// matches on the resolved type's full name (the C# `trr.Type.FullName`) and reads the
+// argument nodes through the ported `PrimitiveExpression`/`NamedExpression`/
+// `MemberReferenceExpression` (the `object Value` ports as the `PrimitiveValue` variant, so
+// the C# `expr.Value is int value` tests use `std::get_if<std::int32_t>` and the
+// `expr.Value is bool` ones `std::get_if<bool>`).
+//
+// The `RemoveEmbeddedAttributes` sibling in the same source file stays deferred: it needs
+// the `TypeDeclaration.GetSymbol()` / `KnownAttribute.Embedded` surfaces the type-declaration
+// writer slices carry.
 
 #pragma once
 
 #include "Decompiler/CSharp/Transforms/IAstTransform.hpp"
 
-#include <set>
-#include <string>
-
 namespace ILSpy::Decompiler::CSharp::Transforms {
 
-class RemoveCompilerGeneratedAssemblyAttributes final : public IAstTransform {
+// The C# `public class RemoveCompilerGeneratedAssemblyAttributes : IAstTransform`. "This
+// transform is used to remove assembly-attributes that are generated by the compiler, thus
+// don't need to be declared. (We have to remove them, in order to avoid conflicts while
+// compiling.)" (the C# remark); "only enabled, when exporting a full assembly as project".
+class RemoveCompilerGeneratedAssemblyAttributes : public IAstTransform {
 public:
-    void Run(::ILSpy::Decompiler::CSharp::Syntax::AstNode& rootNode,
-             TransformContext& context) override;
-};
-
-class RemoveEmbeddedAttributes final : public IAstTransform {
-public:
-    void Run(::ILSpy::Decompiler::CSharp::Syntax::AstNode& rootNode,
-             TransformContext& context) override;
-
-    // The C# `internal static readonly HashSet<string> attributeNames` / the
-    // non-embedded sibling: exposed for the tests.
-    static const std::set<std::string>& AttributeNames();
-    static const std::set<std::string>& NonEmbeddedAttributeNames();
+    // The C# `public void Run(AstNode rootNode, TransformContext context)`: the direct
+    // `AttributeSection` children walk with the `assembly`/`module` arm dispatch, the
+    // per-attribute name-and-argument guards, and the empty-section cleanup.
+    void Run(Syntax::AstNode& rootNode, TransformContext& context) override;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Transforms

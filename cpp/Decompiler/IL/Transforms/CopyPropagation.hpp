@@ -35,9 +35,23 @@
 
 namespace ILSpy::Decompiler::IL {
 
+class StLoc;
+
 class CopyPropagation : public IILTransform {
 public:
     void Run(ILFunction& function, ILTransformContext& context) override;
+
+    // The C# `public static void Propagate(StLoc store, ILTransformContext
+    // context)` (CopyPropagation.cs lines 44-49): the standalone entry point
+    // the statement-level transforms call -- TransformCollectionAndObject-
+    // Initializers.Run copy-propagates a stack slot holding an 'ldloca' of the
+    // initializer variable before scanning the initializer statements. Asserts
+    // the store's variable is single-definition (the C# Debug.Assert), finds the
+    // owning block and the store's position, and runs the shared DoPropagate
+    // core (the un-inline-arguments + clone-per-load rewrite below). Callers
+    // must keep the usage counts fresh (the C# maintains them through the
+    // instruction events; this port's callers run ComputeVariableUsage).
+    static void Propagate(StLoc* store, ILTransformContext& context);
 };
 
 } // namespace ILSpy::Decompiler::IL

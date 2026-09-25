@@ -25,11 +25,8 @@
 // Transforms that synthesize a non-control-flow block (e.g.
 // InterpolatedStringTransform) set the Kind so the back end can render it as the
 // matching C# construct instead of a braced statement list. This port carries
-// only the values the ported code consults; the full C# enum (ArrayInitializer,
-// CollectionInitializer, ObjectInitializer, StackAllocInitializer,
-// CallInlineAssign, CallWithNamedArgs, DeconstructionConversions,
-// DeconstructionAssignments, WithInitializer) is added as the transforms that
-// produce them land.
+// only the values the ported code consults; the full C# enum (the two
+// Deconstruction values) is added as the transforms that produce them land.
 
 #pragma once
 
@@ -49,34 +46,57 @@ enum class BlockKind : std::uint8_t {
     // call ToStringAndClear(ldloca v) that yields the string. Constructed by
     // InterpolatedStringTransform.
     InterpolatedString,
-    // ---- The remaining C# BlockKind values (the C# `enum BlockKind`,
-    // Block.cs): the initializer/call-with-named-args kinds are consulted by
-    // `Block.CanInlineIntoSlot` and the transforms that build them.
-    ArrayInitializer,
-    CollectionInitializer,
-    ObjectInitializer,
-    CallInlineAssign,
-    // A call whose arguments were promoted to named arguments (the C#
-    // BlockKind.CallWithNamedArgs): Instructions[0] is the this-pointer store
-    // for an instance call (the C# always inserts the receiver store at slot 0
-    // for instance calls); Instructions[1..] are the named-argument stores
-    // (StLoc(v, arg)); the FinalInstruction is the call whose argument slots
-    // now carry LdLoc loads. Constructed by NamedArgumentTransform.
+    // A call with named arguments (the C# BlockKind.CallWithNamedArgs). The
+    // FinalInstruction is the call; Instructions holds the promoted argument
+    // stlocs (the `this` pointer first for an instance call) plus any remaining
+    // argument expressions. Constructed by NamedArgumentTransform when a load
+    // cannot be reached by re-ordering the call arguments.
     CallWithNamedArgs,
-    // A `with`-expression body (the C# BlockKind.WithInitializer):
-    // Instructions[0] is the stloc v(newobj/clonetype) construction;
-    // Instructions[1..] are the property setter stores; the FinalInstruction
-    // is the ldloc v that yields the record. Constructed by the record-clone
-    // arm of TransformCollectionAndObjectInitializers.
+    // An inline assignment to a property or indexer setter, e.g.
+    // `Use(this.Property = value);`. Instructions holds the single setter call
+    // whose last argument is an `stloc tmp(value)`; the FinalInstruction is the
+    // `ldloc tmp` that yields the setter's result. Constructed by
+    // TransformAssignment (the C# TransformInlineAssignmentStObjOrCall);
+    // deconstructed through Block.MatchInlineAssignBlock.
+    CallInlineAssign,
+    // A C# array initializer. Instructions[0] is the
+    // `stloc v(newarr T [dimensions])` target; Instructions[1..] are the
+    // `stobj T(ldelema T(ldloc v, [indices]), value)` element stores; the
+    // FinalInstruction is the `ldloc v`. Constructed by
+    // TransformArrayInitializers; rendered by
+    // ExpressionBuilder.TranslateArrayInitializer.
+    ArrayInitializer,
+    // A C# `stackalloc` initializer. Instructions[0] is the
+    // `stloc v(localloc ...)` / `stloc v(locallocspan ...)` target;
+    // Instructions[1..] are the `stobj T(ldloc v + offset, value)` element stores;
+    // the FinalInstruction is the `ldloc v`. Constructed by
+    // TransformArrayInitializers (DoTransformStackAllocInitializer); rendered by
+    // ExpressionBuilder.TranslateStackAllocInitializer.
+    StackAllocInitializer,
+    // A C# collection initializer: `new List<int>() { 1, 2 }`. Instructions[0]
+    // is the `stloc v(...)` construction of the initialized object; the rest
+    // are the `call Add(v, ...)` member calls (and, for nested collection
+    // initializers, the inner stores) collected by
+    // TransformCollectionAndObjectInitializers through AccessPathElement;
+    // the FinalInstruction is the `ldloc v`. Rendered by
+    // ExpressionBuilder.TranslateObjectAndCollectionInitializer (the
+    // Adder arm of the access-path walk).
+    CollectionInitializer,
+    // A C# object initializer: `new C() { Field = 1, Prop = 2 }` (including
+    // the C# 6 dictionary `new C() { [key] = value }` form). The same block
+    // shape as CollectionInitializer (the `stloc v(construction)` head plus
+    // the member stores and the `ldloc v` final); the stores go through
+    // AccessPathElement's Setter arm. Rendered by
+    // ExpressionBuilder.TranslateObjectAndCollectionInitializer.
+    ObjectInitializer,
+    // A C# 9 `with` initializer: the target expression's member assignments
+    // (`obj with { Prop = value }` lowered to a clone + stores). Instructions[0]
+    // is the `stloc v(<any expression>)` target; the rest are the member
+    // stores (the same AccessPathElement shape); the FinalInstruction is the
+    // `ldloc v`. Constructed by TransformCollectionAndObjectInitializers for
+    // the record-clone shape; rendered by
+    // ExpressionBuilder.TranslateWithInitializer.
     WithInitializer,
-    // The conversion-run block of a folded deconstruction assignment (the C#
-    // BlockKind.DeconstructionConversions): the stloc conv(conv(...)) stores
-    // in flat leaf order. Constructed by DeconstructionTransform.
-    DeconstructionConversions,
-    // The assignment-run block of a folded deconstruction assignment (the C#
-    // BlockKind.DeconstructionAssignments): the designator stores in flat
-    // leaf order. Constructed by DeconstructionTransform.
-    DeconstructionAssignments,
 };
 
 } // namespace ILSpy::Decompiler::IL

@@ -174,11 +174,11 @@ public:
     // the result was constructed with a null target.
     ResolveResult* TargetResult() const noexcept { return targetResult_.get(); }
 
-    // The owning shared handle behind the stored target (the port's addition):
-    // the C# re-uses `mrr.TargetResult` when re-pointing a resolve result at
-    // another member (the GC reference); the port's ctor takes the shared
-    // handle, so this exposes it for the re-point call sites.
-    std::shared_ptr<ResolveResult> SharedTargetResult() const noexcept {
+    // The shared handle behind `TargetResult()` -- the port's shared-ownership
+    // accessor for the call sites that must build a new result sharing this
+    // target (the `new MemberResolveResult(mrr.TargetResult, ...)` pattern; the
+    // C# keeps the reference through the GC, the port through the shared_ptr).
+    const std::shared_ptr<ResolveResult>& TargetResultHandle() const noexcept {
         return targetResult_;
     }
 

@@ -256,6 +256,27 @@ public:
         SetChildNode(namespaceName_, value, 0);
     }
 
+    // The C# `public IEnumerable<string> Identifiers` (NamespaceDeclaration.cs line 86) --
+    // the namespace name's dotted parts in outermost-to-innermost order (`namespace A.B.C`
+    // yields `A`, `B`, `C`). The C# walks the `NamespaceName` `MemberType` chain pushing
+    // each `MemberName` onto a `Stack<string>` (so the outermost name ends on top) and
+    // finally pushes the base `SimpleType.Identifier` (null coerced to the empty string),
+    // then enumerates the stack top-to-bottom. The port walks the same chain into a
+    // `std::vector<std::string>` and reverses it into enumeration order (no stack needed).
+    // `[ExcludeFromMatch]` in the C#, so it takes no part in `DoMatch`. A computed read
+    // consumed by `IntroduceExtensionMethods`' namespace-scope descent.
+    std::vector<std::string> Identifiers() const {
+        std::vector<std::string> outerFirst;
+        const AstType* type = namespaceName_;
+        while (const auto* memberType = dynamic_cast<const MemberType*>(type)) {
+            outerFirst.push_back(memberType->MemberName());
+            type = memberType->Target();
+        }
+        if (const auto* simpleType = dynamic_cast<const SimpleType*>(type))
+            outerFirst.push_back(simpleType->Identifier().value_or(std::string()));
+        return std::vector<std::string>(outerFirst.rbegin(), outerFirst.rend());
+    }
+
     // ---- The `Members` collection slot ----------------------------------------------------
     // The generated `[Slot("Member")] public partial AstNodeCollection<AstNode> Members` -- the
     // collection of namespace-body members (the `{ namespace_member* }` of a block-scoped

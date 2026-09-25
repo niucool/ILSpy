@@ -98,13 +98,14 @@
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
-// The C# `public partial class AttributeSection : AstNode` (the `[DecompilerAstNode(
-// hasPatternPlaceholder: true)]` generator attribute -- NOT sealed: the class hosts the nested
-// `PatternPlaceholder`, the `Statement::PatternPlaceholder` precedent; the earlier port marked it
-// `final`, corrected with this slice's placeholder). A structural container (a bracketed group
-// of attributes on a target), not an `AstType` and not an `Expression`. The second ported
-// `GeneralScope`-sub-namespace node, and the first ported node to combine an optional
-// (nullable) single `Identifier` child with a collection.
+// The C# `public sealed partial class AttributeSection : AstNode`. `final` (the C# `sealed`):
+// no further derivation. A structural container (a bracketed group of attributes on a
+// target), not an `AstType` and not an `Expression`. The second ported `GeneralScope`-sub-
+// namespace node, and the first ported node to combine an optional (nullable) single
+// `Identifier` child with a collection.
+// Not `final`: the `[DecompilerAstNode(hasPatternPlaceholder: true)]` attribute makes the C#
+// generator emit a nested `PatternPlaceholder` subclass, so the base must be inheritable (the
+// port's `PatternPlaceholderNode<AttributeSection>`).
 class AttributeSection : public AstNode {
 public:
     ~AttributeSection() override = default;
@@ -279,15 +280,6 @@ public:
     // base fields set by the unported output visitor), so they are not copied (the
     // ConditionalExpression/SimpleType/MemberType/ArraySpecifier/Attribute precedent for nodes
     // without derived locations).
-    // wraps a Pattern so it can occupy an AttributeSection-typed slot (the C# generator's
-    // `implicit operator AttributeSection(Pattern)`). Defined out-of-line below the class
-    // (the nested class derives from the enclosing one, which must be complete).
-    class PatternPlaceholder;
-
-    // The C# `public static implicit operator AttributeSection(Pattern? pattern)` -- the
-    // PatternExtensions `ToAttributeSection(this Pattern)` call-site form.
-    static AttributeSection* ToAttributeSection(PatternMatching::Pattern& pattern);
-
     AttributeSection* Clone() const override {
         auto* node = new AttributeSection();
         node->CloneAnnotationsFrom(*this);
@@ -331,47 +323,6 @@ private:
 namespace Slots {
 inline const CSharpSlotInfoT<AttributeSection> AttributeSection{"AttributeSection", false, nullptr, false};
 } // namespace Slots
-
-// The out-of-line nested-class definition (the enclosing AttributeSection must be complete for
-// the nested class deriving from it).
-class AttributeSection::PatternPlaceholder final : public AttributeSection {
-public:
-    explicit PatternPlaceholder(PatternMatching::Pattern& child) : child_(&child) {}
-
-    // The shallow-copy equivalent of the C# inherited MemberwiseClone: a fresh
-    // placeholder over the same child reference.
-    AttributeSection* Clone() const override { return new PatternPlaceholder(*child_); }
-
-    void AcceptVisitor(IAstVisitor& visitor) override {
-        visitor.VisitPatternPlaceholder(this, child_);
-    }
-
-    bool AcceptVisitorBool(IAstVisitorBool& visitor) override {
-        return visitor.VisitPatternPlaceholder(this, child_);
-    }
-
-    bool DoMatch(AstNode* other, PatternMatching::Match match) override {
-        return child_->DoMatch(other, match);
-    }
-
-    bool DoMatchCollection(const std::vector<PatternMatching::INode*>& other, int pos,
-                           PatternMatching::Match match,
-                           PatternMatching::BacktrackingInfo& backtrackingInfo) override {
-        return child_->DoMatchCollection(other, pos, match, backtrackingInfo);
-    }
-
-    PatternMatching::Pattern& Child() const { return *child_; }
-
-private:
-    PatternMatching::Pattern* child_;
-};
-
-// The C# `public static implicit operator AttributeSection(Pattern? pattern)` /
-// the PatternExtensions `ToAttributeSection(this Pattern)`: the call-site form.
-inline AttributeSection* AttributeSection::ToAttributeSection(
-    PatternMatching::Pattern& pattern) {
-    return new PatternPlaceholder(pattern);
-}
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 

@@ -55,15 +55,15 @@ bool DelegateConstruction::MatchDelegateConstruction(ILInstruction* inst,
 
         out.target = call->Arguments[0].get();
         out.delegateType = call->DeclaringType;
-        if (opArg->Op == OpCode::LdFtn) {
-            auto* ftn = static_cast<LdFtn*>(opArg);
-            out.targetMethod = ftn->MethodName;
-            out.method = ftn->Method.get();
-        } else {
-            auto* vftn = static_cast<LdVirtFtn*>(opArg);
-            out.targetMethod = vftn->MethodName;
-            out.method = vftn->Method.get();
-        }
+        // The C# `((IInstructionWithMethodOperand)call.Arguments[1]).Method` --
+        // the resolved method handle the node carries; the display string
+        // derives from it (or keeps the seed reader's standalone string).
+        auto* ftn = static_cast<LdFtn*>(opArg);
+        auto* virtFtn = static_cast<LdVirtFtn*>(opArg);
+        out.targetMethodRef = (opArg->Op == OpCode::LdFtn) ? ftn->Method : virtFtn->Method;
+        out.targetMethod = (opArg->Op == OpCode::LdFtn)
+            ? static_cast<LdFtn*>(opArg)->MethodName
+            : static_cast<LdVirtFtn*>(opArg)->MethodName;
     } else if (inst->Op == OpCode::LdVirtDelegate) {
         // The `case LdVirtDelegate ldVirtDelegate:` branch -- a virtual delegate
         // construction already folded by TransformDelegateCtorLdVirtFtnToLdVirtDelegate.
@@ -74,9 +74,9 @@ bool DelegateConstruction::MatchDelegateConstruction(ILInstruction* inst,
         (void)allowTransformed;
         auto* ldv = static_cast<LdVirtDelegate*>(inst);
         out.target = ldv->Argument.get();
+        out.targetMethodRef = ldv->Method;
         out.targetMethod = ldv->MethodName;
         out.delegateType = ldv->Type;
-        out.method = ldv->Method.get();
     } else {
         return false;
     }

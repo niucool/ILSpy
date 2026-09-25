@@ -106,6 +106,14 @@ struct InvalidCastException : std::runtime_error {
 std::any Cast(ILSpy::Decompiler::TypeSystem::TypeCode targetType, const std::any& input,
               bool checkForOverflow);
 
+// Read a boxed C# `long`/`ulong` regardless of the C++ spelling the box carries. On
+// LP64 GCC `std::int64_t` is `long` while much of the port boxes C# longs as `long
+// long` (the two spellings coincide on MSVC), so a raw `std::any_cast<std::int64_t>`
+// would throw on one spelling or the other depending on the producer. Every read of
+// a 64-bit integral box goes through these.
+std::int64_t UnboxInt64(const std::any& input);
+std::uint64_t UnboxUInt64(const std::any& input);
+
 // The C# `Type.GetTypeCode(input.GetType())` over the port's boxed constant-value types
 // (the C# boxed object becomes the std::any holding the C++ counterpart of each C#
 // primitive). A held type without a primitive counterpart maps to Object -- the C#

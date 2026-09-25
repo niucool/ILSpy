@@ -39,12 +39,16 @@ class ILInstruction;
 // Match result for MatchDelegateConstruction. Mirrors the C# out-params
 // (targetMethod, target, delegateType): target is the NewObj's first argument
 // (the receiver captured by the delegate), delegateType is the delegate type
-// (the constructor's declaring type), and targetMethod is this port's stand-in
-// for the C# IMethod -- the resolved display name of the ldftn/ldvirtftn
-// argument (empty when the call is not a delegate construction).
+// (the constructor's declaring type), and targetMethod is the C# IMethod --
+// the resolved-method handle the CallBuilder's delegate-reference family
+// consumes. The display-name string stays beside it as the seed's stand-in
+// for the dump path (the CompoundAssignmentInstruction/UserDefinedCompoundAssign
+// precedent); it is populated from the resolved method when present.
 struct DelegateConstructionMatch {
     ILInstruction* target = nullptr;
     TypeSystem::ITypePtr delegateType;
+    // The C# `IMethod targetMethod` -- null for the string-stand-in form.
+    std::shared_ptr<TypeSystem::IMethod> targetMethodRef;
     std::string targetMethod;
     // The resolved method the matched ldftn/ldvirtftn/ldvirtdelegate node
     // carries (the C# `((IInstructionWithMethodOperand)...).Method`). Null on

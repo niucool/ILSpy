@@ -7,27 +7,39 @@ add_subdirectory(TypeSystem)
 add_subdirectory(ProjectDecompiler)
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/ILAstToCSharp.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/RequiredNamespaceCollector.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/RequiredNamespaceCollector_Entity.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/CSharpDecompiler.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/AutoEventDecompiler.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Annotations.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/TranslatedExpression.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ExpressionBuilder.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/CallBuilder.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/StatementBuilder.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/CallBuilder.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/AddCheckedBlocks.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/ReplaceMethodCallsWithOperators.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/IntroduceUnsafeModifier.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/FlattenSwitchBlocks.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/FixNameCollisions.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/ReplaceMethodCallsWithOperators.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/EscapeInvalidIdentifiers.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/RemoveCLSCompliantAttribute.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/RemoveCompilerGeneratedAssemblyAttributes.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/PrettifyAssignments.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/FlattenSwitchBlocks.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/NormalizeBlockStatements.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/RenameVisualBasicAnonymousTypes.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/FixNameCollisions.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/AddXmlDocumentationTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/PatternStatementTransform.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/PrettifyAssignments.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/CustomPatterns.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/CombineQueryExpressions.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/IntroduceQueryExpressions.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/IntroduceExtensionMethods.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/IntroduceUsingDeclarations.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/TransformFieldAndConstructorInitializers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/DeclareVariables.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/RequiredNamespaceCollector.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/RequiredNamespaceCollector_Entity.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/AstNode.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/AstNodeVisitorAstNode.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/AstType.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/PatternPlaceholder.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/TypeSystemAstBuilder.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/OutputVisitor/TokenWriter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/OutputVisitor/CSharpOutputVisitor.cpp
@@ -43,5 +55,6 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Resolver/CSharpConversionsHelpers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Resolver/CSharpOperators.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Resolver/CSharpResolver.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Resolver/LambdaResolveResult.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Resolver/TypeInferenceHelpers.cpp
 )

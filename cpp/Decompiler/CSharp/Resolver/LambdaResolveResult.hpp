@@ -60,14 +60,25 @@
 //       - `override bool IsImplicit => true`
 //     It overrides NOTHING else (notably not `Equals`/`GetHashCode`: the base
 //     reference-equality applies).
-//   * DEFERRED: `sealed class DecompiledLambdaResolveResult : LambdaResolveResult` (the
-//     concrete subclass the decompiler's back end constructs) -- blocked on two unported
-//     prerequisites: (1) `ILFunction.IsAsync` / `ILFunction.Parameters` (as
-//     `IReadOnlyList<IParameter>`) / `ILFunction.ReturnType` (as `IType`) -- the port's
-//     `ILFunction` (Phase 3) carries none of these surfaces; and (2) `CSharpConversions`
-//     (the ~2500-line conversion controller) whose `IdentityConversion` / `ImplicitConversion`
-//     / `Conversion.None` results `DecompiledLambdaResolveResult.IsValid` composes. The
-//     deferred subclass introduces those surfaces when it lands.
+//   * PORTED: `sealed class DecompiledLambdaResolveResult : LambdaResolveResult` (the
+//     concrete subclass the decompiler's back end constructs). The C# surface:
+//       - the ctor `(ILFunction function, IType delegateType, IType inferredReturnType,
+//         bool hasParameterList, bool isAnonymousMethod, bool isImplicitlyTyped)` -- the
+//         C# `?? throw new ArgumentNullException` guards port to `assert`s (the D424 ctor
+//         convention); the `Body` is a fresh `new ResolveResult(SpecialType.UnknownType)`.
+//       - the `public readonly IType DelegateType` field and the `public IType
+//         InferredReturnType` field (the latter MUTABLE -- `CallBuilder.ModifyReturnTypeOfLambda`
+//         assigns it).
+//       - the three ctor-captured bools (`HasParameterList` / `IsAnonymousMethod` /
+//         `IsImplicitlyTyped`), the `IsAsync` / `Parameters` / `ReturnType` projections over
+//         the held `ILFunction`, the `GetInferredReturnType` (which returns the stored
+//         `InferredReturnType` -- "we don't know how to compute which type would be inferred
+//         if given other parameter types"), and the `IsValid` conversion check.
+//     `ILFunction.Parameters` (the new `IReadOnlyList<IParameter>` field) and
+//     `CSharpConversions` (landed) are the prerequisites that previously blocked this class;
+//     `IsValid` reads the conversions through the `Detail::IdentityConversion` free function
+//     (the port has no public `IdentityConversion` method, the D547 precedent) and the public
+//     `CSharpConversions::ImplicitConversion`.
 //
 // All other deps are already ported: `ResolveResult` (D424, the base), `SpecialType.NoType`
 // (the D433 `NoType()` `IType.hpp` convenience), `IType`/`ITypePtr` (D271), `IParameter`
@@ -76,7 +87,8 @@
 //
 // KEY PORT CONVENTIONS:
 //  * The C# `abstract class LambdaResolveResult` ports to a C++ class with PURE-VIRTUAL
-//     members (mirroring the C# `abstract` members one-to-one). Unlike the D406
+//     members (mirroring the C# `abstract` members one-to-one); the concrete
+//     `DecompiledLambdaResolveResult` subclass is below. Unlike the D406
 //     `Conversion` base (which uses a pure-virtual destructor to keep every method
 //     defaulted), EVERY declared member here is pure-virtual -- the C# declares them all
 //     `abstract` -- so the class stays abstract without the pure-virtual-destructor idiom.
@@ -112,14 +124,12 @@
 //     convention), `returnType` to a const-ref `ITypePtr`, and the C#
 //     `CSharpConversions conversions` (a mutable service object the implementation calls
 //     `IdentityConversion` / `ImplicitConversion` on) to a NON-const `CSharpConversions&`.
-//     `CSharpConversions` is FORWARD-DECLARED in this header (the class is unported --
-//     ~2500 lines); a reference parameter of a pure-virtual needs only the forward
-//     declaration. Callers cannot yet invoke `IsValid` (no `CSharpConversions` instance
-//     exists); the deferred `CSharpConversions` port unblocks them.
+//     `CSharpConversions` (landed) now exists; the base `IsValid` remains callable only by
+//     concrete subclasses (the abstract base cannot construct one).
 //  * The C# `ResolveResult Body { get; }` (a non-null reference -- the C#
 //     `GetChildResults()` returns `new[] { this.Body }` unconditionally) ports to
 //     `virtual Semantics::ResolveResult& Body() const = 0` (a never-null reference return).
-//     The concrete `DecompiledLambdaResolveResult` (deferred) holds the body as a
+//     The concrete `DecompiledLambdaResolveResult` holds the body as a
 //     `shared_ptr<ResolveResult>` member and returns `*body_`.
 //  * The C# `override IEnumerable<ResolveResult> GetChildResults()` => `new[] { this.Body }`
 //     ports to the D424 `std::vector<const ResolveResult*>` snapshot (non-owning pointers)
@@ -132,8 +142,8 @@
 //     itself (`make_unique<LambdaResolveResult>` is ill-formed). The C#
 //     `MemberwiseClone`-based `ShallowClone` preserves the runtime type through the
 //     inheritance chain; in C++ each concrete subclass MUST override `ShallowClone` itself
-//     (the D424 slicing-prevention convention), as the deferred
-//     `DecompiledLambdaResolveResult` will.
+//     (the D424 slicing-prevention convention), as
+//     `DecompiledLambdaResolveResult` does.
 //  * The C# `class LambdaConversion : Conversion` (assembly-`internal`, NOT sealed) ports
 //     to a PUBLIC C++ subclass (NOT `final`) of `Semantics::Conversion` (the D445
 //     `internal`-to-public precedent; pinned by `static_assert(!std::is_final_v)`). The C#
@@ -154,11 +164,8 @@
 #ifndef ILSPY_DECOMPILER_CSHARP_RESOLVER_LAMBDARESOLVERESULT_HPP
 #define ILSPY_DECOMPILER_CSHARP_RESOLVER_LAMBDARESOLVERESULT_HPP
 
-#include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"
-#include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/Semantics/Conversion.hpp"
 #include "Decompiler/Semantics/ResolveResult.hpp"
-#include "Decompiler/Semantics/ConversionFactories.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
 #include <memory>
@@ -168,15 +175,9 @@ namespace ILSpy::Decompiler::TypeSystem {
 class IParameter;
 } // namespace ILSpy::Decompiler::TypeSystem
 
-namespace ILSpy::Decompiler::CSharp::Resolver {
-namespace Detail {
-bool IdentityConversion(ILSpy::Decompiler::TypeSystem::IType& fromType,
-                        ILSpy::Decompiler::TypeSystem::IType& toType);
-} // namespace Detail
-
-using ::ILSpy::Decompiler::TypeSystem::IParameter;
-using ::ILSpy::Decompiler::Semantics::Conversions;
-} // namespace ILSpy::Decompiler::CSharp::Resolver
+namespace ILSpy::Decompiler::IL {
+class ILFunction;
+} // namespace ILSpy::Decompiler::IL
 
 namespace ILSpy::Decompiler::CSharp::Resolver {
 
@@ -189,8 +190,8 @@ class CSharpConversions;
 // The C# `public abstract class LambdaResolveResult : ResolveResult` -- the result of an
 // anonymous method or lambda expression. Note: the lambda has no type (the base type is
 // `SpecialType.NoType`); to retrieve the delegate type, look at the anonymous-function
-// conversion. Abstract: the C# decompiler back end constructs the (deferred)
-// `DecompiledLambdaResolveResult` concrete subclass.
+// conversion. Abstract: the C# decompiler back end constructs the concrete
+// `DecompiledLambdaResolveResult` subclass.
 class LambdaResolveResult : public ILSpy::Decompiler::Semantics::ResolveResult {
 public:
     // The C# `abstract bool HasParameterList` -- always true for C# 3.0 lambdas, but may be
@@ -279,183 +280,111 @@ public:
 
     // The C# `override bool IsImplicit => true`.
     bool IsImplicit() const override { return true; }
+
+    // An owning handle to the same process-wide singleton, for callers that model the C#
+    // `Conversion` reference as a `shared_ptr` (the D406 Conversion-handle convention --
+    // `DecompiledLambdaResolveResult.IsValid` returns it). The `shared_ptr` shares the
+    // never-destroyed function-local static `Instance()` returns, its no-op deleter leaves
+    // that static untouched, and every call yields a handle to the same object, so the
+    // C# singleton reference-identity is preserved.
+    static std::shared_ptr<LambdaConversion> InstancePtr()
+    {
+        static std::shared_ptr<LambdaConversion> instance(
+            const_cast<LambdaConversion*>(&Instance()), [](LambdaConversion*) {});
+        return instance;
+    }
 };
 
-// The C# `sealed class DecompiledLambdaResolveResult : LambdaResolveResult` (the
-// concrete subclass the decompiler's back end constructs from a decompiled
-// ILFunction). The two prerequisites the original deferral named have since
-// landed: (1) the `ILFunction` surfaces (the pre-resolved `ReturnType`/
-// `AsyncReturnType`/`Parameters` fields -- the C# `Parameters`/`ReturnType`
-// access the `ILFunction.Method`'s surfaces, the pre-resolved-fields precedent)
-// and (2) the `CSharpConversions` controller (the `IdentityConversion`/
-// `ImplicitConversion` helpers its `IsValid` composes). The C# is `sealed`, so
-// the port is `final` (the is-final static_assert below).
-namespace TS = ::ILSpy::Decompiler::TypeSystem;
-namespace Sem = ::ILSpy::Decompiler::Semantics;
-
+// The C# `sealed class DecompiledLambdaResolveResult : LambdaResolveResult` -- the concrete
+// lambda resolve result the decompiler's back end constructs. It projects the lambda's async /
+// parameter / return-type surface over the held `ILFunction` and answers `IsValid` through the
+// `CSharpConversions` controller.
 class DecompiledLambdaResolveResult final : public LambdaResolveResult {
 public:
-    // The C# ctor: `function ?? throw ArgumentNullException`,
-    // `delegateType ?? throw`, `inferredReturnType ?? throw` (the C#
-    // ArgumentNullException guards port to the assert-then-store convention,
-    // the D424 base-ctor convention), then the three flags and the
-    // `SpecialType.UnknownType` Body stub. The C# `IL.ILFunction function` (a
-    // non-null reference) ports to a non-owning `const IL::ILFunction*` (the
-    // C# GC reference is a mutable handle; the function outlives the result --
-    // the decompiler's per-function decompile run owns both).
-    DecompiledLambdaResolveResult(const IL::ILFunction& function,
-                                  TS::ITypePtr delegateType,
-                                  TS::ITypePtr inferredReturnType,
-                                  bool hasParameterList, bool isAnonymousMethod,
-                                  bool isImplicitlyTyped)
-        : function_(&function),
-          delegateType_(std::move(delegateType)),
-          inferredReturnType_(std::move(inferredReturnType)),
-          hasParameterList_(hasParameterList),
-          isAnonymousMethod_(isAnonymousMethod),
-          isImplicitlyTyped_(isImplicitlyTyped)
-    {
-        assert(function_ != nullptr
-               && "DecompiledLambdaResolveResult: function must not be null");
-        assert(delegateType_ != nullptr
-               && "DecompiledLambdaResolveResult: delegateType must not be null");
-        assert(inferredReturnType_ != nullptr
-               && "DecompiledLambdaResolveResult: inferredReturnType must not be null");
-        body_ = std::make_shared<Sem::ResolveResult>(TS::UnknownType());
-    }
+    // The C# `public readonly IType DelegateType` field -- the delegate type the lambda body is
+    // converted to (the anonymous-function conversion target).
+    const ILSpy::Decompiler::TypeSystem::ITypePtr DelegateType;
 
-    // The C# `public readonly IType DelegateType` field -- the target delegate
-    // type (public in the C# source).
-    const TS::IType& DelegateType() const { return *delegateType_; }
+    // The C# `public IType InferredReturnType` field -- the return type inferred from the lambda
+    // body, which can differ from `ReturnType` when a return statement performs an implicit
+    // conversion. MUTABLE: `CallBuilder.ModifyReturnTypeOfLambda` assigns it.
+    ILSpy::Decompiler::TypeSystem::ITypePtr InferredReturnType;
 
-    // The C# `public IType InferredReturnType` field (public, mutable in the C#
-    // -- the return-type inference may refine it before consumption). The port
-    // exposes the read-only reference; the C# field write sites are the
-    // type-inference steps that run before the result is consumed.
-    const TS::IType& InferredReturnType() const { return *inferredReturnType_; }
+    // The C# ctor. The `?? throw new ArgumentNullException` guards on `function` / `delegateType`
+    // / `inferredReturnType` port to `assert`s (the D424 ctor convention); `Body` is a fresh
+    // `new ResolveResult(SpecialType.UnknownType)`.
+    DecompiledLambdaResolveResult(const ILSpy::Decompiler::IL::ILFunction* function,
+                                  ILSpy::Decompiler::TypeSystem::ITypePtr delegateType,
+                                  ILSpy::Decompiler::TypeSystem::ITypePtr inferredReturnType,
+                                  bool hasParameterList,
+                                  bool isAnonymousMethod,
+                                  bool isImplicitlyTyped);
 
+    // The C# `override bool HasParameterList { get; }` -- the ctor-captured value.
     bool HasParameterList() const override { return hasParameterList_; }
+
+    // The C# `override bool IsAnonymousMethod { get; }` -- the ctor-captured value.
     bool IsAnonymousMethod() const override { return isAnonymousMethod_; }
+
+    // The C# `override bool IsImplicitlyTyped { get; }` -- the ctor-captured value.
     bool IsImplicitlyTyped() const override { return isImplicitlyTyped_; }
 
     // The C# `override bool IsAsync => function.IsAsync`.
-    bool IsAsync() const override { return function_->IsAsync(); }
+    bool IsAsync() const override;
 
-    // The C# `override IReadOnlyList<IParameter> Parameters => function.Parameters`
-    // -- a non-owning pointer snapshot (the IParameterizedMember::Parameters
-    // convention; the parameters are owned by the ILFunction's pre-resolved
-    // Parameters list).
-    std::vector<const TS::IParameter*> Parameters() const override
-    {
-        std::vector<const TS::IParameter*> result;
-        result.reserve(function_->Parameters.size());
-        for (const auto& parameter : function_->Parameters)
-            result.push_back(parameter.get());
-        return result;
-    }
+    // The C# `override IType GetInferredReturnType(IType[] parameterTypes)` -- the stored
+    // `InferredReturnType` (the parameter types are ignored: "We don't know how to compute which
+    // type would be inferred if given other parameter types.").
+    ILSpy::Decompiler::TypeSystem::ITypePtr GetInferredReturnType(
+        const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& parameterTypes) const override;
+
+    // The C# `override IReadOnlyList<IParameter> Parameters => function.Parameters`.
+    std::vector<const ILSpy::Decompiler::TypeSystem::IParameter*> Parameters() const override;
 
     // The C# `override IType ReturnType => function.ReturnType`.
-    const TS::IType& ReturnType() const override { return *function_->ReturnType; }
+    const ILSpy::Decompiler::TypeSystem::IType& ReturnType() const override;
 
-    TS::ITypePtr GetInferredReturnType(
-        const std::vector<TS::ITypePtr>& /*parameterTypes*/) const override
-    {
-        // We don't know how to compute which type would be inferred if given
-        // other parameter types. Let's hope this is good enough:
-        return inferredReturnType_;
-    }
+    // The C# `override Conversion IsValid(IType[] parameterTypes, IType returnType,
+    // CSharpConversions conversions)`: with a parameter list, a count mismatch yields
+    // `Conversion.None` and a parameter-type identity mismatch yields `LambdaConversion.Instance`
+    // for an implicitly typed lambda (another parameter typing might still be valid) or
+    // `Conversion.None` for an explicitly typed one; otherwise an identity conversion between the
+    // lambda return type and `returnType`, or an implicit conversion from the inferred return
+    // type, yields `LambdaConversion.Instance`, else `Conversion.None`.
+    std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion> IsValid(
+        const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& parameterTypes,
+        const ILSpy::Decompiler::TypeSystem::ITypePtr& returnType,
+        CSharpConversions& conversions) const override;
 
-    // The C# `override Conversion IsValid(IType[] parameterTypes, IType
-    // returnType, CSharpConversions conversions)`: the parameter-count/identity
-    // gates, then the return-type gates. The C# `Conversion.None` /
-    // `LambdaConversion.Instance` singletons port to the D406 `Conversions::None()`
-    // factory and the `LambdaConversion::Instance()` reference (the return is a
-    // NON-OWNING aliasing `shared_ptr` over the singleton -- the C# GC reference
-    // is a non-owning handle to the singleton object).
-    std::shared_ptr<Sem::Conversion> IsValid(
-        const std::vector<TS::ITypePtr>& parameterTypes,
-        const TS::ITypePtr& returnType, CSharpConversions& conversions) const override
-    {
-        // Anonymous method expressions without parameter lists are applicable to
-        // any parameter list.
-        if (hasParameterList_) {
-            if (Parameters().size() != parameterTypes.size())
-                return Conversions::None();
-            for (std::size_t i = 0; i < parameterTypes.size(); ++i) {
-                const TS::IParameter* parameter = Parameters()[i];
-                if (parameter == nullptr)
-                    return Conversions::None();
-                // The port's IdentityConversion takes non-const IType& (the
-                // AcceptVisitor is non-const, the D514 convention); the
-                // IParameter::Type() accessor is const.
-                if (!Detail::IdentityConversion(
-                        const_cast<TS::IType&>(parameter->Type()),
-                        *parameterTypes[i])) {
-                    if (isImplicitlyTyped_) {
-                        // it's possible that different parameter types also
-                        // lead to a valid conversion
-                        return LambdaConversionShared();
-                    }
-                    else {
-                        return Conversions::None();
-                    }
-                }
-            }
-        }
-        TS::IType& inferred = *inferredReturnType_;
-        TS::IType& target = *returnType;
-        if (Detail::IdentityConversion(*function_->ReturnType, target)) {
-            return LambdaConversionShared();
-        }
-        auto implicitConversion = conversions.ImplicitConversion(inferred, target);
-        if (implicitConversion != nullptr && implicitConversion->IsValid()) {
-            return LambdaConversionShared();
-        }
-        else {
-            return Conversions::None();
-        }
-    }
+    // The C# `override ResolveResult Body { get; }` -- the ctor-created unknown-type result.
+    ILSpy::Decompiler::Semantics::ResolveResult& Body() const override { return *body_; }
 
-    // The C# `override ResolveResult Body` (assigned in the ctor:
-    // `new ResolveResult(SpecialType.UnknownType)`).
-    Sem::ResolveResult& Body() const override { return *body_; }
-
-    // The C# `ShallowClone` (the D424 slicing-prevention convention): the
-    // default copy ctor shares the function handle and the type handles and
-    // copies the flags.
-    std::unique_ptr<Sem::ResolveResult> ShallowClone() const override
+    // The C# `ShallowClone` (inherited `MemberwiseClone`) preserves the runtime type and
+    // shallow-copies the fields (the `body_` shared_ptr is shared, the `ITypePtr` fields are
+    // shared, the held `ILFunction` pointer and the three bools are copied, the base `type_`
+    // shared_ptr is shared). The default copy ctor reproduces this.
+    std::unique_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ShallowClone() const override
     {
         return std::make_unique<DecompiledLambdaResolveResult>(*this);
     }
 
-private:
-    // The `LambdaConversion.Instance()` reference wrapped as a NON-OWNING
-    // `shared_ptr` (the aliasing-constructor idiom with a null owner -- the C#
-    // return of the process-lifetime singleton is a non-owning reference).
-    static std::shared_ptr<Sem::Conversion> LambdaConversionShared()
-    {
-        // A NON-OWNING shared_ptr over the process-lifetime singleton (the
-        // no-op deleter idiom -- the C# return of the static-readonly singleton
-        // is a non-owning reference; the process-lifetime object is never
-        // destroyed through it).
-        static const LambdaConversion* const singleton = &LambdaConversion::Instance();
-        return std::shared_ptr<Sem::Conversion>(
-            std::shared_ptr<Sem::Conversion>(),
-            const_cast<LambdaConversion*>(singleton));
-    }
+protected:
+    // The runtime class name the C# `GetType().Name` yields (the C# does NOT override
+    // `ToString`; the inherited `ResolveResult::ToString` reads this).
+    std::string ClassName() const override { return "DecompiledLambdaResolveResult"; }
 
-    const IL::ILFunction* function_;
-    TS::ITypePtr delegateType_;
-    TS::ITypePtr inferredReturnType_;
+private:
+    // The lambda body's `ILFunction` (the C# `readonly IL.ILFunction function`). Non-owning:
+    // the tree owns it, the resolve result observes it (the C# lambda resolve result lives as
+    // an annotation on an AST node built from the same function).
+    const ILSpy::Decompiler::IL::ILFunction* function_;
     bool hasParameterList_;
     bool isAnonymousMethod_;
     bool isImplicitlyTyped_;
-    std::shared_ptr<Sem::ResolveResult> body_;
+    // The C# `override ResolveResult Body { get; }` (`new ResolveResult(SpecialType.UnknownType)`).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> body_;
 };
 
-static_assert(std::is_final_v<DecompiledLambdaResolveResult>,
-              "DecompiledLambdaResolveResult ports the C# sealed class");
-
-} // namespace ILSpy::Decompiler::CSharp::Resolver} // namespace ILSpy::Decompiler::CSharp::Resolver
+} // namespace ILSpy::Decompiler::CSharp::Resolver
 
 #endif // ILSPY_DECOMPILER_CSHARP_RESOLVER_LAMBDARESOLVERESULT_HPP

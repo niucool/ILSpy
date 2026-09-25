@@ -22,11 +22,9 @@
 // 130 per-node `Visit` methods as THROWING STUBS (each calls `NotImplemented()`); the stubs are
 // replaced with real bodies one node-family at a time in subsequent iterations.
 
-#include <cstdio>
 #include "Decompiler/CSharp/OutputVisitor/CSharpOutputVisitor.hpp"
 
 #include <cassert>
-#include <typeinfo>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -269,19 +267,6 @@ CSharpOutputVisitor::~CSharpOutputVisitor() = default;
 // The throwing-stub body shared by every not-yet-ported `Visit` method.
 [[noreturn]] void CSharpOutputVisitor::NotImplemented() {
 	throw std::logic_error("CSharpOutputVisitor: Visit method not yet implemented");
-}
-
-// The C# `public virtual void VisitPatternPlaceholder(AstNode placeholder, Pattern
-// pattern)` (CSharpOutputVisitor.cs line 2963): the pattern-node rendering (the
-// "Pattern Nodes" region -- AnyNode/NamedNode/Choice/... written as the annotated
-// structure for the PatternStatementTransform diagnostics). Deferred loudly with the
-// pattern-output surface (see the header note): a pattern node never reaches the
-// output path in the ported pipeline.
-void CSharpOutputVisitor::VisitPatternPlaceholder(Syntax::AstNode* placeholder,
-                                                  Syntax::PatternMatching::Pattern* pattern) {
-    (void)placeholder;
-    (void)pattern;
-    NotImplemented();
 }
 
 // ---- StartNode/EndNode ----------------------------------------------------
@@ -1227,6 +1212,16 @@ void CSharpOutputVisitor::VisitErrorExpression(Syntax::ErrorExpression* errorExp
 	// records the span onto `ErrorExpression::Location` from `StartNode`'s `ILocatable` position).
 	StartNode(errorExpression);
 	EndNode(errorExpression);
+}
+void CSharpOutputVisitor::VisitPatternPlaceholder(Syntax::AstNode* placeholder, Syntax::PatternMatching::Pattern& /*pattern*/) {
+	// The C# `public virtual void VisitPatternPlaceholder(AstNode placeholder, Pattern pattern)`
+	// renders the wrapped pattern between a StartNode/EndNode span (its `VisitNodeInPattern`
+	// dispatch over the pattern node classes). A pattern placeholder only ever appears inside a
+	// pattern tree built by an AST transform -- never in decompiler output -- so the port
+	// records the node span and defers the pattern rendering with the rest of the pattern-output
+	// visitor arms.
+	StartNode(placeholder);
+	EndNode(placeholder);
 }
 void CSharpOutputVisitor::VisitOutVarDeclarationExpression(Syntax::OutVarDeclarationExpression* outVarDeclarationExpression) {
 	StartNode(outVarDeclarationExpression);

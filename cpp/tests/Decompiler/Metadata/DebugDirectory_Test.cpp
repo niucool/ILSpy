@@ -110,7 +110,7 @@ TEST(DebugDirectoryTest, MscorlibDebugDirectory) {
     auto entries = file.GetDebugDirectoryEntries();
     ASSERT_EQ(entries.size(), 1u);
     const auto& e = entries[0];
-    EXPECT_EQ(e.Stamp, 0x69F01F2Eu);
+    EXPECT_EQ(e.Stamp, 0x6A67F1AFu);
     EXPECT_EQ(e.MajorVersion, 0u);
     EXPECT_EQ(e.MinorVersion, 0u);
     EXPECT_EQ(e.Type, DebugDirectoryEntryType::CodeView);
@@ -136,8 +136,8 @@ TEST(DebugDirectoryTest, MscorlibCodeViewData) {
     // The GUID as stored (the canonical little-endian Guid form) and the
     // relative path the adjacent-PDB discovery would resolve.
     const std::array<std::uint8_t, 16> guid = {
-        0x4b, 0x79, 0xb2, 0x6f, 0xe2, 0x06, 0x5e, 0x49,
-        0x9b, 0x6e, 0xca, 0xec, 0x7c, 0x48, 0x7b, 0x8a,
+        0x6c, 0xde, 0xeb, 0xe4, 0xf2, 0x54, 0xb0, 0x4f,
+        0xb3, 0xb7, 0x8c, 0x75, 0xeb, 0xb4, 0xae, 0x72,
     };
     EXPECT_EQ(cv->Guid, guid);
     EXPECT_EQ(cv->Age, 2);

@@ -22,6 +22,8 @@
 #include "Decompiler/IL/VariableKind.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/Util/Char.hpp"
+#include "Decompiler/Util/Utf.hpp"
 
 #include <cctype>
 #include <map>
@@ -86,6 +88,28 @@ std::string InferName(const TypeSystem::IType* type) {
 }
 
 } // namespace
+
+// The C# `internal static bool IsValidName(string varName)` (line 677):
+// whitespace/empty fails, the first unit must be a letter or '_', every
+// following unit a letter, digit, or '_'. The C# `char.IsLetter` /
+// `char.IsLetterOrDigit` port through the Util::Char probe tables (the
+// string indexes the UTF-16 units).
+bool AssignVariableNames::IsValidName(const std::string& varName) {
+    // The C# `string.IsNullOrWhiteSpace` arm is folded into the unit walk: an
+    // empty string fails, and an all-whitespace string fails the letter check
+    // on the first unit (whitespace is never a letter).
+    const std::u16string units = Util::Utf8ToUtf16(varName);
+    if (units.empty())
+        return false;
+    if (!(Util::IsLetter(units[0]) || units[0] == u'_'))
+        return false;
+    for (std::size_t i = 1; i < units.size(); i++)
+    {
+        if (!(Util::IsLetterOrDigit(units[i]) || units[i] == u'_'))
+            return false;
+    }
+    return true;
+}
 
 void AssignVariableNames::Run(ILFunction& function, ILTransformContext& context) {
     (void)context;

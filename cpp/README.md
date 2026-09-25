@@ -2412,539 +2412,836 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   the 2 standing skips / zero failures, and all four CLI baselines unchanged
   (--csharp mscorlib 10106366 bytes, --il byte-identical to the
   41246545-byte real-ilspycmd gold, -l c 109438, --json-alone rc 64).
-- **`ExpressionBuilder` VisitLdObj/VisitStObj arms + the StObjViaHelperCall
-  helper** -- `VisitLdObj` (ExpressionBuilder.cs lines 2857-2887: the node's
-  `LdObj.Type` as the load type; the `loadTypeUsedInGeneric` flag from
-  `Target.ResultType == StackType.Ref` -- the C# `UnalignedPrefix != 0`
-  disjunct is unreachable because the port's `LdObj` node carries no IL prefix
-  field; the `context.TypeHint` override gate -- a known hint kind, an
-  `IsCompatibleTypeForMemoryAccess(hint, loadType)` match, and the NOT
-  `(loadTypeUsedInGeneric && IsAnyPointer(hint.Kind))` veto -- then the shared
-  private `LdObj(Target, loadType)` dereference render and the
-  `WithILInstruction` annotation), and `VisitStObj` (lines 2968-3046: the
-  `StObjViaHelperCall` branch for a non-`ref` target whose type is not
-  unmanaged; the `ByReferenceType`/`PointerType` hint by target stack type;
-  the `IsCompatiblePointerTypeForMemoryAccess` gate choosing the memory type
-  from the pointer/by-ref element -- the C# `TypeWithElementType` cast ported
-  as the `PointerType`/`ByReferenceType` dynamic-cast pair -- or, in the
-  incompatible arm, translating the value first and taking the value's
-  compatible type or the node type before casting the pointer; the
-  `DirectionExpression`/`AddressOf` `UnwrapChild` strip else a `*pointer`
-  render; the value translated on demand against the target type; the
-  ref-reassignment `ref (a = ref b)` shape through the
-  `SharedResolveResultAnnotation` handle and a `ByReferenceResolveResult` lhs;
-  and the final `AssignmentExpression` through the `Assignment` helper), plus
-  the private `StObjViaHelperCall` (lines 3048-3086: the pointer translate, the
-  `Byte`-ref vs `void*` cast, the value's `IsCompatibleTypeForMemoryAccess`
-  conversion, and the `Unsafe.Write(pointer, value)` intrinsic through
-  `CallUnsafeIntrinsic`). Every C# `UnalignedPrefix`-driven branch
-  (`Unsafe.ReadUnaligned`/`WriteUnaligned`) is unreachable in the port -- the
-  `LdObj`/`StObj` IL nodes carry no prefix field -- and is deliberately not
-  ported. The arms are dead in the CLI path (the Phase-5 seed still drives
-  `--csharp`), so the output is unchanged. Verified by **8** new gtest cases in
-  1 suite over the MinimalCorlib fixture (the pointer-dereference render and
-  the managed-ref strip for LdObj; the TypeHint override to a managed load
-  type producing `Unsafe.Read<string>(byte*)` and the no-hint
-  incompatible-pointer arm; the pointer and managed-ref `StObj` assignments
-  with their `AssignmentExpression` shape; the non-unmanaged `Unsafe.Write`
-  arm; and the `Visit` dispatch for both opcodes), proven with a 3-behavior
-  neuter RED round (3 failures: the TypeHint-override gate and the
-  `StObjViaHelperCall` gate for the pointer and non-unmanaged shapes) then
-  restored green. Full suite in this environment 12097 ran / 12034 passed / 13
-  failed / 101 skipped -- the 13 failures are the pre-existing
-  environment-dependent real-fixture/gold tests (a missing
-  `System.Private.CoreLib` 10.0.8 fixture, a corelib-version mismatch against
-  the 10.0 gold, missing .NET Framework v4.7.2 facades / SDK Roslyn paths, and
-  differing machine GAC-count and PDB-build-path snapshots) that do not touch
-  the C# ExpressionBuilder path; the 8 new tests pass. The standing CLI
-  baselines are unchanged (`--csharp mscorlib` 10106366 bytes, `--il`
-  41246545 bytes, `-l c` 109438; the `--json`-mode argument-parsing path is
-  untouched).
-- **`ExpressionBuilder` VisitLdLen arm + the no-op EnsureTargetNotNullable
-  helper** -- `VisitLdLen` (ExpressionBuilder.cs lines 3088-3116: the
-  `System.Array` hint translate of the array operand, the `ConvertTo(arrayType)`
-  when the operand's kind is not Array, the no-op `EnsureTargetNotNullable`, the
-  `ResultType == StackType.I4` gate selecting `Length` / `Int32` versus the
-  non-I4 `LongLength` / `Int64` -- so the raw native-int `ldlen` also renders
-  `LongLength` -- the `arrayType.GetProperties(p => p.Name == memberName)`
-  first-or-default lookup, the null-member `ResolveResult(Int32/Int64)` fallback
-  versus the `MemberResolveResult(arrayExpr.ResolveResult, member)` arm, and the
-  `MemberReferenceExpression(arrayExpr.Expression, memberName)` render with the
-  LdLen annotation), plus the private `EnsureTargetNotNullable`
-  (lines 2832-2852: the C# body is entirely commented out and returns `expr`
-  unchanged, so the port is a no-op that keeps the call-site shape). The arm is
-  dead in the CLI path (the Phase-5 seed still drives `--csharp`), so the output
-  is unchanged. The MinimalCorlib `System.Array` declares no properties, so the
-  unit tests pin the null-member fallback arm; a real corlib's `Array.Length` /
-  `LongLength` properties would take the `MemberResolveResult` arm. Verified by
-  **4** new gtest cases in 1 suite over the MinimalCorlib fixture (the I4 ->
-  `Length`/Int32 render with the identifier target and the IL annotation, the
-  I8 -> `LongLength`/Int64 arm, the native-I -> `LongLength`/Int64 arm, and the
-  `Visit` dispatch), proven with a branch-swap neuter RED round (3 failures: the
-  I4 / I8 / native-I member-name and result-type pins) then restored green.
-  Full suite in this environment 12101 ran / 12038 passed / 13 failed / 101
-  skipped -- the 13 failures are the same pre-existing environment-dependent
-  real-fixture/gold tests recorded for gnhf 112 (missing `System.Private.CoreLib`
-  10.0.8, corelib-version mismatch, missing .NET Framework v4.7.2 facades / SDK
-  Roslyn paths, and GAC-count / PDB-build-path snapshots) that never touch the
-  C# ExpressionBuilder path; the 4 new tests pass. The standing CLI baselines
-  are unchanged (`--csharp mscorlib` 10106366 bytes, `--il` 41246545 bytes,
-  `-l c` 109438).
-- **`ExpressionBuilder` VisitLdElema arm** -- `VisitLdElema`
-  (ExpressionBuilder.cs lines 3203-3229: the array operand translate, the
-  `arrayExpr.Type as ArrayType` dynamic-cast, the
-  `TypeUtils.IsCompatibleTypeForMemoryAccess(arrayType.ElementType, inst.Type)`
-  gate rebuilding `new ArrayType(compilation, inst.Type, inst.Indices.Count)`
-  (the port's `ArrayType(element, rank)` -- no compilation field) and
-  `ConvertTo`-ing the operand when the element types are incompatible, the
-  `IndexerExpression` over the `TranslateArrayIndex`-translated indices, the
-  `ResolveResult(arrayType.ElementType)` annotation, and the
-  `DirectionExpression(Ref)` / `ByReferenceResolveResult` managed-reference
-  wrapper). The C# `inst.WithSystemIndex` arm is UNREACHABLE in the port (the
-  LdElema node carries no such field), so every index goes through
-  `TranslateArrayIndex`. The arm is dead in the CLI path (the Phase-5 seed still
-  drives `--csharp`), so the output is unchanged. Verified by **5** new gtest
-  cases in 1 suite over the MinimalCorlib fixture (the single-index `ref arr[0]`
-  shape -- DirectionExpression(Ref) over the IndexerExpression with the
-  identifier target and the int32 index, the multi-index argument list, the
-  incompatible-element `object[]`-as-`int` arm inserting the array-type cast, the
-  LdElema annotation on the indexer, and the `Visit` dispatch), proven with a
-  direction-flip neuter RED round (4 failures) then restored green. Full suite in
-  this environment 12106 ran / 12043 passed / 13 failed / 101 skipped -- the 13
-  failures are the same pre-existing environment-dependent real-fixture/gold
-  tests recorded for gnhf 112/113 that never touch the C# ExpressionBuilder
-  path; the 5 new tests pass. The standing CLI baselines are unchanged
-  (`--csharp mscorlib` 10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
-- **`ExpressionBuilder` unbox/box/cast arms** -- `VisitUnboxAny`
-  (ExpressionBuilder.cs lines 3285-3320: the
-  `inst.Argument is IsInst isInst && IsUnboxAnyWithIsInst(inst, isInst.Type)`
-  rewrite to `expr as T` through `UnwrapBoxingConversion`, the general arm's
-  TypeParameter `ResolveCast`/`EffectiveBaseClass` fallback versus the
-  object-convert, and the `CastExpression` with the UnboxingConversion resolve
-  result), `VisitBox` (lines 3332-3352: the NativeIntegers IntPtr/UIntPtr ->
-  nint/nuint substitution, the `ConvertTo(targetType)`, and the object
-  `CastExpression` with the BoxingConversion resolve result), and `VisitCastClass`
-  (lines 3354-3357: the `Translate(inst.Argument).ConvertTo(inst.Type)`
-  passthrough). The port has no separate `Unbox` IL node -- the IL reader folds
-  `unbox` into `UnboxAny` -- so there is no `VisitUnbox` arm to port; the
-  `IsUnboxAnyWithIsInst` and `UnwrapBoxingConversion` static helpers were already
-  present. The arms are dead in the CLI path (the Phase-5 seed still drives
-  `--csharp`), so the output is unchanged. Verified by **5** new gtest cases in 1
-  suite over the MinimalCorlib fixture (the same-reference-type isinst rewrite to
-  AsExpression with its IL annotation, the general object -> Int32 cast with the
-  UnboxingConversion resolve result, the Int32 -> object box with the
-  BoxingConversion resolve result, the Object -> String castclass ConvertTo, and
-  the `Visit` dispatch for all three opcodes), proven with a 4-behavior neuter
-  RED round (4 failures: the isinst condition, both conversion kinds, and the
-  castclass ConvertTo) then restored green. Full suite in this environment 12111
-  ran / 12048 passed / 13 failed / 101 skipped -- the 13 failures are the same
-  pre-existing environment-dependent real-fixture/gold tests recorded for
-  gnhf 112/113/114 that never touch the C# ExpressionBuilder path; the 5 new
-  tests pass. The standing CLI baselines are unchanged (`--csharp mscorlib`
-  10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
-- **`ExpressionBuilder` nullable `?.` rewrap/unwrap arms** -- `VisitNullableRewrap`
-  (ExpressionBuilder.cs lines 4298-4309: the
-  `UnaryOperatorExpression(NullConditionalRewrap)` over the argument, with the
-  result type wrapped through `NullableType.Create(compilation, type)` when
-  `NullableType.IsNonNullableValueType(arg.Type)` holds) and
-  `VisitNullableUnwrap` (lines 4311-4321: the
-  `UnaryOperatorExpression(NullConditional)` over the argument -- the
-  `RefInput && !RefOutput` managed-reference strip via `UnwrapChild` -- with the
-  `NullableType.GetUnderlyingType(arg.Type)` result). The debug `Translate`
-  post-condition enforces the rewrap's nullable result type and the unwrap's
-  unwrapped result type, so a neuter that skips the Nullable wrap or the
-  RefInput strip trips the assert rather than failing gracefully; the RED round
-  therefore swaps the two operators. The arms are dead in the CLI path (the
-  Phase-5 seed still drives `--csharp`), so the output is unchanged. Verified by
-  **5** new gtest cases in 1 suite over the MinimalCorlib fixture (the
-  non-nullable `int` -> `Nullable<int>` rewrap, the reference-type passthrough
-  rewrap, the `Nullable<int>` unwrap to `int`, the RefInput DirectionExpression
-  strip leaving the inner indexer, and the `Visit` dispatch for both opcodes),
-  proven with a two-operator-swap neuter RED round (4 failures) then restored
-  green. Full suite in this environment 12116 ran / 12053 passed / 13 failed /
-  101 skipped -- the 13 failures are the same pre-existing
-  environment-dependent real-fixture/gold tests recorded for gnhf 112-115 that
-  never touch the C# ExpressionBuilder path; the 5 new tests pass. The standing
-  CLI baselines are unchanged (`--csharp mscorlib` 10106366 bytes, `--il`
-  41246545 bytes, `-l c` 109438).
-- **`ExpressionBuilder` VisitNullCoalescingInstruction arm** --
-  `VisitNullCoalescingInstruction` (ExpressionBuilder.cs lines 3912-3954: the value
-  and fallback translates, the `AdjustConstantExpressionToType(fallback, value.Type)`
-  constant re-typing, the resolver's `ResolveBinaryOperator(NullCoalescing)` over
-  the two resolve results, and the `rr.IsError` fallback -- the ThrowExpression
-  NoType fallback recovering `NullableType.GetUnderlyingType(value.Type)`, the
-  differing-non-null operand types taking the `FindType(inst.UnderlyingResultType)`
-  lookup, else the non-null operand; then the Kind-dependent conversions (a
-  non-Ref kind converting the value to `NullableType.Create(compilation, targetType)`,
-  the Nullable kind converting it again, the other kinds converting the fallback
-  to `targetType`) and the final `BinaryOperatorExpression(NullCoalescing)` with the
-  resolver result or the `ResolveResult(targetType)`). The arm is dead in the CLI
-  path (the Phase-5 seed still drives `--csharp`), so the output is unchanged.
-  Verified by **4** new gtest cases in 1 suite over the MinimalCorlib fixture (the
-  Ref kind's `a ?? b` render with the identifier operands and IL annotation, the
-  Nullable kind's `Nullable<int> ?? Nullable<int>` render, the ThrowExpression
-  fallback recovering the underlying Int32, and the `Visit` dispatch), proven with
-  an operator-swap neuter RED round (3 failures) then restored green. Full suite in
-  this environment 12120 ran / 12057 passed / 13 failed / 101 skipped -- the 13
-  failures are the same pre-existing environment-dependent real-fixture/gold tests
-  recorded for gnhf 112-116 that never touch the C# ExpressionBuilder path; the 4
-  new tests pass. The standing CLI baselines are unchanged (`--csharp mscorlib`
-  10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
-- **`ExpressionBuilder` VisitUserDefinedLogicOperator arm + the node IMethod form**
-  -- `VisitUserDefinedLogicOperator` (ExpressionBuilder.cs lines 1233-1257: both
-  operands translated with their `Method.Parameters[n].Type` hints and converted to
-  them, the `op_BitwiseAnd`/`op_BitwiseOr` name dispatch to the
-  ConditionalAnd/ConditionalOr operator (else the C# `InvalidOperationException`,
-  ported to `std::logic_error`), and the `InvocationResolveResult(null, Method,
-  [left, right])` over the converted operand resolve results), plus the
-  `UserDefinedLogicOperator` IL node's real-`IMethod` construction form (the
-  `UserDefinedCompoundAssign` gnhf-110 precedent: a `std::shared_ptr<IMethod>
-  Method` field and an IMethod-taking ctor that derives the `ReflectionName::Name`
-  dump stand-in; the new `Instructions/UserDefinedLogicOperator.cpp`). The seed
-  string-stand-in node (no resolved method) throws the loud `std::logic_error`
-  deferral, since the C# Visit consumes the method's parameters unconditionally.
-  The arm is dead in the CLI path (the Phase-5 seed still drives `--csharp`), so
-  the output is unchanged. Verified by **5** new gtest cases in 1 suite over the
-  MinimalCorlib fixture (the op_BitwiseAnd -> `&&` and op_BitwiseOr -> `||` renders
-  over real FakeMethods returning their operand type, the InvocationResolveResult's
-  two arguments, the invalid-method-name throw, the seed deferral throw, and the
-  `Visit` dispatch), proven with a name-dispatch neuter RED round (2 failures) then
-  restored green. Full suite in this environment 12125 ran / 12062 passed / 13
-  failed / 101 skipped -- the 13 failures are the same pre-existing
-  environment-dependent real-fixture/gold tests recorded for gnhf 112-117 that
-  never touch the C# ExpressionBuilder path; the 5 new tests pass. The standing
-  CLI baselines are unchanged (`--csharp mscorlib` 10106366 bytes, `--il`
-  41246545 bytes, `-l c` 109438).
-- **`ExpressionBuilder` VisitRefAnyType arm** -- `VisitRefAnyType`
-  (ExpressionBuilder.cs lines 3386-3394: the `__reftype(arg).TypeHandle` render --
-  an UndocumentedExpression(RefType) over the translated argument, the TypeHandle
-  `MemberReferenceExpression`, and the `TypeResolveResult` over the resolved
-  System.RuntimeTypeHandle (the same modules-scan `FullTypeName` lookup the
-  VisitLdTypeToken arm uses)). The neighboring reference-family arms
-  (`VisitArglist`/`VisitMakeRefAny`/`VisitRefAnyValue`) stay deferred (their IL
-  nodes are unported), as does the `RefAnyType` source form's C# `Detach()` -- the
-  port's translated argument is an unparented root, so it is added directly. The
-  arm is dead in the CLI path (the Phase-5 seed still drives `--csharp`), so the
-  output is unchanged. Verified by **2** new gtest cases in 1 suite over the
-  MinimalCorlib fixture (the RefType UndocumentedExpression with its single
-  identifier argument, the TypeHandle member, the RuntimeTypeHandle result, and
-  the IL annotation; plus the `Visit` dispatch), proven with a RefType -> RefValue
-  neuter RED round (1 failure) then restored green. Per the standing
-  faster-partial-test policy the full suite was not re-run this iteration; the
-  targeted run is **178/178** ExpressionBuilder tests green plus the broader
-  `*CSharp*:*Resolver*:*OutputVisitor*` filter (52s) with only the known
-  environment GAC-snapshot failure, and the standing CLI baselines are unchanged
-  (`--csharp mscorlib` 10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
-  The build also gains `gtest_discover_tests(ilspy_tests DISCOVERY_TIMEOUT 120)`:
-  the default 5s discovery timeout is exceeded by the 12k-test `--gtest_list_tests`
-  enumeration, which had been failing the post-link discovery step.
-- **`ExpressionBuilder` VisitBlock InterpolatedString arm +
-  TranslateInterpolatedString** -- `VisitBlock` (ExpressionBuilder.cs lines
-  3406-3421: the BlockKind dispatch) with the
-  `TranslateInterpolatedString` arm (lines 3423-3462: the
-  DefaultInterpolatedStringHandler AppendLiteral/AppendFormatted call sequence --
-  the `{`/`}` brace escaping, the AppendFormatted value converted to the handler
-  call's parameter type, and the alignment/suffix overloads -- rendered as an
-  `InterpolatedStringExpression` over `InterpolatedStringText`/`Interpolation`
-  with the String resolve result). The C# reads `call.Method.Name` /
-  `call.GetParameter(1).Type`; the port reads the short name after `::` off the
-  Call node's `MethodName` and the parameter type off `ParameterIType` (the Call
-  node carries no resolved IMethod). Only this BlockKind is ported: the other
-  arms depend on the unported `Match*` helper family (`TranslateArrayInitializer`,
-  `TranslateStackAllocInitializer`, `TranslateWithInitializer`) or
-  `CallBuilder::Build` (`TranslateObjectAndCollectionInitializer`,
-  `TranslateSetterCallAssignment`, `TranslateCallWithNamedArgs`) and fall to the
-  Visit-Default error expression. The arm is dead in the CLI path (the Phase-5
-  seed still drives `--csharp`), so the output is unchanged. **CallBuilder is the
-  named next big unlock but is NOT a single manageable slice:** its `Build` path
-  needs unported prerequisites (`ExpressionBuilder::TranslateTarget`, the
-  `ILInstruction::Match*` family, `CallInstruction.ExpectedTypeForThisPointer`,
-  and a resolved `IMethod` on the `Call` node) -- it is a multi-iteration
-  sequence, of which this is the first reachable in-order piece. Verified by
-  **4** new gtest cases in 1 suite over the MinimalCorlib fixture (the literal +
-  formatted content with the brace escaping, the alignment/suffix overload, the
-  `Visit` dispatch, and the unsupported-BlockKind error), proven with a two-arm
-  neuter RED round (2 failures) then restored green. Partial-test policy: the
-  targeted run is **182/182** `ExpressionBuilder*` tests green plus the broader
-  `*CSharp*:*Resolver*:*OutputVisitor*` filter (74s) with only the known
-  environment GAC-snapshot failure, and the standing CLI baselines are unchanged
-  (`--csharp mscorlib` 10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
-- **CallBuilder prerequisite: `TranslateTarget` + `ExpectedTypeForThisPointer` +
-  the `Match*` subset** -- `ExpressionBuilder::TranslateTarget`
-  (ExpressionBuilder.cs lines 2734-2831: the `base`-reference arm -- a
-  non-virtual `this` target whose declaring type differs from the current type,
-  with the non-interface `DirectBaseTypes.FirstOrDefault()` and the
-  `ThisResolveResult`; the instance arm -- the
-  `Call::ExpectedTypeForThisPointer`-driven ref/pointer type hint, the
-  value-type `ByReferenceType` re-typing via `NormalizeTypeVisitor.TypeErasure`,
-  the `(ref x).member => x.member` DirectionExpression unwrap, and the
-  `(ref x)?.member => x?.member` NullConditional rewrite; and the static arm --
-  the declaring-type `TypeReferenceExpression`), `IL::Call::ExpectedTypeForThisPointer`
-  (the C# `CallInstruction` static, lines 107-122: Ref for constrained /
-  type-parameter / value types, O for reference types, Unknown otherwise), and
-  the file-local `MatchLdThis` / `MatchBox` / `MatchLdObj` helpers (the generated
-  `PatternMatching.cs` out-parameter forms). The IL reader is aligned to the C#
-  `CreateILVariable` convention so `MatchLdThis` is faithful and unambiguous: the
-  `this` parameter now carries `Index = -1` and the declared parameters carry
-  0-based semantic indices (the raw `s.parameters` array slots are unchanged; the
-  IL dump and the full transform pipeline are byte-identical). These are the
-  first three prerequisites of the CallBuilder `Build` path; the next pieces are
-  `BuildArgumentList` then the `Build(OpCode, IMethod, ...)` core. Verified by
-  **8** new gtest cases in 1 suite over the MinimalCorlib fixture (the four
-  `ExpectedTypeForThisPointer` arms -- reference / value / constrained / unknown;
-  the instance-identifier, static-type-reference, value-type managed-reference
-  unwrap, and `base`-reference `TranslateTarget` arms), proven with a two-arm
-  neuter RED round (4 failures: the O/Ref swap and the base-reference gate) then
-  restored green. Partial-test policy: **190/190** `ExpressionBuilder*` tests
-  green; the broader `*CSharp*:*Resolver*:*OutputVisitor*` filter (57s) with only
-  the known environment GAC-snapshot failure; and the IL/transform safety filter
-  `*Transform*:*ILAst*:*ILReader*:*ILFunction*:*Variable*` (968 tests / 967
-  passed / 1 skipped / 0 failed) covering the reader change. The standing CLI
-  baselines are unchanged (`--csharp mscorlib` 10106366 bytes, `--il` 41246545
-  bytes, `-l c` 109438).
-- **CallBuilder prerequisite: `ArgumentList` + `ExpectedTargetDetails`** -- the
-  `CallBuilder` nested data holders (CallBuilder.cs lines 42-200):
-  `ExpectedTargetDetails` (the call opcode + the
-  `NeedsBoxingConversion` flag) and `ArgumentList` (the translated arguments,
-  expected parameters, parameter/argument names, the `FirstOptionalArgumentIndex`
-  truncation, the `IsPrimitiveValue` `BitSet`, and the named/optional/
-  expanded-form bookkeeping) with its accessors `GetActualArgumentCount`,
-  `GetArgumentNames` (the primitive-value name fill), `GetArgumentResolveResults`
-  (the out-parameter `OutVarResolveResult` substitution),
-  `GetArgumentResolveResultsDirect`, `GetArgumentExpressions` (the
-  `NamedArgumentExpression` wrapping and the implicit-typed-out annotation),
-  `CanInferAnonymousTypePropertyNamesFromArguments`, and
-  `CheckNoNamedOrOptionalArguments`. The name arrays port to
-  `std::vector<std::string>` with empty-as-null (the `IsNullOrEmpty` convention).
-  The port also gains the public `CSharp::GetSharedResolveResult(node)` (the
-  owning shared handle behind a node's resolve-result annotation, mirroring the
-  ExpressionBuilder's file-local `SharedResolveResultAnnotation`) and
-  `UseImplicitlyTypedOutAnnotationHandle()` (the non-owning shared handle to the
-  annotation singleton, the `CheckedAnnotationHandle` convention). This is the
-  data-holder prerequisite `BuildArgumentList` constructs; the remaining blocker
-  for `BuildArgumentList` itself is a resolved `IMethod` on the `Call` node (the
-  reader is deliberately type-system-free, so the method must be resolved at
-  visit time). Verified by **8** new gtest cases in 1 suite over the MinimalCorlib
-  fixture (the length / optional-index truncation, the primitive-value name fill,
-  the out-var substitution, the direct resolve results, the named-argument
-  wrapping, the implicit-out annotation, the anonymous-type name inference, and
-  the no-named-or-optional assert), proven with a three-arm neuter RED round
-  (3 failures: the optional-index truncation, the out-var substitution, and the
-  named-argument wrapping) then restored green. Partial-test policy: **198/198**
-  `ExpressionBuilder*` + `CallBuilder*` tests green; the broader
-  `*CSharp*:*Resolver*:*OutputVisitor*` filter (59s) with only the known
-  environment GAC-snapshot failure; the standing CLI baselines are unchanged
-  (`--csharp mscorlib` 10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
-- **Call resolved-method construction form** -- the `Call` node gains the C#
-  `CallInstruction.Method` (`std::shared_ptr<IMethod> Method`, null on the seed
-  string stand-in form) and the `Call(IMethod, bool isNewObj)` ctor
-  (CallInstruction.cs), out-of-line in a new
-  `Decompiler/IL/Instructions/Call.cpp`. The ctor derives every stand-in field
-  the C# derives from the method: `MethodName`
-  (`DeclaringType.ReflectionName()::Name`), `DeclaringType`, `ReturnIType`,
-  `ParameterIType` (the `Method.Parameters` types, no implicit `this`),
-  `IsInstanceCall` (`!(Method.IsStatic || NewObj)`), `IsNewObj`, `IsOperator`
-  (the real `Method.IsOperator`, replacing the reader's name heuristic for the
-  resolved form), `TypeArgumentsCount` (`Method.TypeArguments.Count`), and
-  `ReturnType` (the C# `ResultType`: `DeclaringType.GetStackType()` for a
-  `newobj`, else `Method.ReturnType.GetStackType()`). This is the resolved
-  `IMethod` the `CallBuilder::Build` path and the
-  VisitCall/VisitCallVirt/VisitNewObj arms consume (the
-  UserDefinedCompoundAssign gnhf-110 / UserDefinedLogicOperator gnhf-118 node
-  upgrade precedent). The reader keeps the string form (it stays type-system-free
-  per D78); a future visitor resolves its token to an `IMethod` and uses this
-  ctor. Verified by **6** new gtest cases in 1 suite in
-  `CallResolvedMethod_Test.cpp` over a `FakeMethod` (the derived-field shape, the
-  static non-instance call, the newobj value-type declaring-type stack type, the
-  operator flag, the type-argument count, and the seed string form), proven with
-  a three-arm neuter RED round (3 failures: the static instance-call gate, the
-  newobj ResultType, and the type-argument count) then restored green.
-  Partial-test policy: the new 6 green; the
-  `*CSharp*:*ExpressionBuilder*:*Resolver*:*OutputVisitor*` filter (64s) with
-  only the known environment GAC-snapshot failure; the IL-layer safety filter
-  `*Call*:*Transform*:*ILAst*:*ILReader*:*ILFunction*:*Clone*` (1356 tests, all
-  passed); the standing CLI baselines are unchanged (`--csharp mscorlib`
-  10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
-- **CallBuilder instance + `BuildArgumentList`** -- the `CallBuilder` gains its
-  C# instance shape (the `(ExpressionBuilder&, DecompilerSettings&)` ctor) and
-  the positional path of `BuildArgumentList` (CallBuilder.cs lines 941-1052):
-  per-argument `expressionBuilder.Translate` with the parameter type hint, the
-  `IsPrimitiveValueThatShouldBeNamedArgument` boolean-constant flag, the
-  `IsOptionalArgument` gate (compile-time constant / null-literal-conversion,
-  the caller-info-attribute exclusion, the boxed-default equality), the
-  `FirstOptionalArgumentIndex` bookkeeping (the `OptionalArguments` setting
-  gate: -2 none / -1 forbidden / index), the dynamic-to-object parameter type
-  swap, the `ConvertTo` with the dynamic implicit-conversion gate, the
-  `ChangeDirectionExpressionTo` for a referenced parameter, and the
-  `ArgumentList` fill (`ParameterNames`, `UseImplicitlyTypedOut`,
-  `AddNamesToPrimitiveValues` from `NamedArguments && NonTrailingNamedArguments`).
-  The named-argument (`argumentToParameterMap`) path and the params-expansion
-  path (`TransformParamsArgument`, which needs the unported overload-resolution
-  `IsUnambiguousCall` plus the array/invocation resolve-result arms) throw the
-  loud deferral. The boxed-default comparison is a local
-  `BoxedConstantEquals` covering the empty-any null case plus the primitive /
-  string / decimal / boxed-type set (the CSharpOperators EqualsBoxedValues set);
-  the rest of the class is untouched. Verified by **8** new gtest cases in 1
-  suite in `CallBuilderBuildArgumentList_Test.cpp` over a real ExpressionBuilder
-  + `FakeMethod` (the positional fill, the instance-call `this` skip, the
-  boolean-constant primitive flag, the optional-index tracked / reset /
-  setting-forbidden arms, and the two deferred-path throws), proven with a
-  three-arm neuter RED round (3 failures: the primitive flag, the optional
-  match, and the params throw) then restored green. Partial-test policy:
-  **206/206** `CallBuilder*` + `ExpressionBuilder*` tests green; the broader
-  `*CSharp*:*ExpressionBuilder*:*Resolver*:*OutputVisitor*` filter (51s) with
-  only the known environment GAC-snapshot failure; the standing CLI baselines
-  are unchanged (`--csharp mscorlib` 10106366 bytes, `--il` 41246545 bytes,
-  `-l c` 109438).
-- **CallBuilder static call-shape helpers** -- the next leaves of the `Build`
-  core (CallBuilder.cs): `IsStringToReadOnlySpanCharImplicitConversion(IMethod)`
-  (the `string` -> `ReadOnlySpan<char>` `op_Implicit`; the deferred sibling of
-  the first-slice `IsSpanBasedStringConcat`, now read off the return type's
-  `ParameterizedType` instantiation), `IsNullConditional(Expression)` (the `?.`
-  operator, which gates the delegate-`Invoke` re-render),
-  `IsDelegateEqualityComparison(IMethod, arguments)` (the `Delegate.op_Equality`/
-  `op_Inequality` on two delegate-kind operands that renders as the C# builtin),
-  and `HandleDelegateEqualityComparison` (the `==`/`!=` render). The
-  `IsInterpolatedStringCreation` helper stays deferred: the C#
-  `method.DeclaringType.Namespace == "System.Runtime.CompilerServices"` arm needs
-  an `IType::Namespace` the port does not yet model (the port's `IType` carries
-  only `Name`/`ReflectionName`, not `INamedElement`). Verified by **3** new
-  gtest cases in 1 suite in `CallBuilderStatics_Test.cpp` (the implicit-conversion
-  matrix, the null-conditional matrix, and the delegate-equality matrix + the
-  `==`/`!=` render over test-local delegate-kind stub types), proven with a
-  three-arm neuter RED round (3 failures: the implicit conversion, the
-  null-conditional, and the delegate-equality gate) then restored green.
-  Partial-test policy: **209/209** `CallBuilder*` + `ExpressionBuilder*` tests
-  green; the broader `*CSharp*:*ExpressionBuilder*:*Resolver*:*OutputVisitor*`
-  filter (43s) with only the known environment GAC-snapshot failure; the standing
-  CLI baselines are unchanged (`--csharp mscorlib` 10106366 bytes, `--il`
-  41246545 bytes, `-l c` 109438).
-- **`IType::Namespace()` surface + `IsInterpolatedStringCreation`** -- the port's
-  `IType` gains the `AbstractType` `Namespace` default (a virtual-with-default
-  returning the empty string, the D406 flattened-AbstractType convention),
-  overridden where the C# carries a real namespace: `KnownType` (the
-  `KnownTypeReference` metadata namespace), `SimpleType` (`TopLevelTypeName`),
-  `ParameterizedType` (the generic), the decorator family (`ArrayType` /
-  `ByReferenceType` / `PointerType` / `PinnedType` / `ModifiedType` /
-  `NullabilityAnnotatedType` -> the element; `TupleType` -> the underlying
-  `ValueTuple`), and `UnknownType` (the stored `FullTypeName`). The
-  `ITypeDefinition`-vs-`INamedElement` `Namespace` diamond is resolved by the
-  same pure-virtual redeclaration the port already uses for `Name` /
-  `ReflectionName`, and `NullabilityAnnotatedTypeParameter` gets the matching
-  final overrider for its two `IType` subobjects. This clears the gnhf-125
-  `IsInterpolatedStringCreation` deferral, which is now ported
-  (CallBuilder.cs lines 755-766: the `string.Format` / `FormattableStringFactory
-  .Create` shapes with the argument-name / expanded-form / params / array-literal
-  gates). Note: `TypeSystemAstBuilder.cpp`'s file-local `NamespaceOf` helper is
-  now equivalent to the virtual and is left as-is (a future cleanup can collapse
-  it). Verified by **7** new `ITypeNamespace_Test.cpp` cases (the KnownType /
-  SimpleType / ParameterizedType / decorator / TupleType / UnknownType overrides
-  and the resolved-type-definition double dispatch) plus the restored
-  `IsInterpolatedStringCreation` matrix in `CallBuilderStatics_Test.cpp`, proven
-  with a three-arm neuter RED round (the KnownType namespace, the
-  ParameterizedType delegation, and the FormattableStringFactory namespace gate)
-  then restored green. Partial-test policy: **217/217** `CallBuilder*` +
-  `ExpressionBuilder*` + `ITypeNamespace*` tests green; the broader
-  `*CSharp*:*ExpressionBuilder*:*Resolver*:*OutputVisitor*` filter (55s) with
-  only the known environment GAC-snapshot failure; the type-system safety filter
-  `*IType*:*NamedElement*:*TypeDefinition*:*KnownType*:*Namespace*:*TypeParameter*
-  :*TypeVisitor*:*TypeSystem*:*TypeUtils*:*Specialized*:*Metadata*` (4m) with
-  only the known machine-mscorlib MVID/gold-digest environment failures (the
-  `ModuleHeader` MVID, the mscorlib module-table rows, and the field sweep
-  digest -- all machine-assembly snapshots, none touching the namespace surface);
-  and the standing CLI baselines are unchanged (`--csharp mscorlib` 10106366
-  bytes, `--il` 41246545 bytes, `-l c` 109438).
-- **Collapse `TypeSystemAstBuilder::NamespaceOf` onto `IType::Namespace()`** -- the
-  gnhf-126 follow-up: the file-local `NamespaceOf(const IType&)` helper (the
-  `IEntity` / `ParameterizedType` / `UnknownType` dispatch the builder used
-  because `IType` had no namespace surface) is deleted, and its four call sites
-  (`ConvertTypeHelper`'s top-level namespace, `TypeDefMatches`, the record
-  `IEquatable<R>` base-list omission, the function-pointer `CallConv*` custom
-  calling convention) now read `IType::Namespace()` directly. The virtual's
-  overrides dispatch identically to the helper (the `IEntity`-carrying definition
-  reports `INamedElement::Namespace`, `ParameterizedType` delegates to its
-  generic, `UnknownType` reads its `FullTypeName`, everything else the empty
-  default), so the change is behavior-preserving. Verified by the existing
-  `*TypeSystemAstBuilder*` suite (**364** tests, all green) and the broader
-  `*CSharp*:*ExpressionBuilder*:*Resolver*:*OutputVisitor*:*Ambience*` filter
-  (23s) with only the known environment GAC-snapshot failure; the standing CLI
-  baselines are unchanged (`--csharp mscorlib` 10106366 bytes, `--il` 41246545
-  bytes, `-l c` 109438).
-- **CallBuilder::IsAppropriateCallTarget** -- the overload-resolution gate the
-  `GetRequiredTransformationsForCall` / `IsUnambiguousCall` helpers consult
-  (CallBuilder.cs lines 1816-1835): a type-erasure `Equals` match is appropriate;
-  otherwise a `CallVirt` to an override is appropriate when the base-member chain
-  (via `InheritanceHelper::GetBaseMembers`) contains the expected target, with the
-  early rejection when the expected call needed a boxing conversion and the
-  actual declaring type is not a reference type. Verified by **6** new gtest
-  cases in `CallBuilderIsAppropriateCallTarget_Test.cpp` over name+declaring-type
-  equality method stubs (the default `FakeMember` pointer-identity `Equals` does
-  not survive the base-chain walk, which re-views the member through the
-  `IMethod` `IMember` subobject) and a hand-wired `LookupTypeDefinition`
-  base/derived graph: the identity arm, the base-chain walk (true), the
-  boxing-on-non-reference rejection, and the non-override / non-CallVirt /
-  no-matching-base fall-throughs. Proven with a RED round (the identity arm
-  returning false and the base-walk `Equals` arm disabled failed
-  `SameMemberIsAppropriate` + `WalkFindsTheBaseMember`; the boxing gate is
-  distinguished from the walk by the green pair, where the same graph returns
-  true without `NeedsBoxingConversion` and false with it) then restored green.
-  Partial-test policy: **216/216** `CallBuilder*` + `ExpressionBuilder*` tests
-  green; the broader `*CSharp*:*ExpressionBuilder*:*Resolver*:*OutputVisitor*
-  :*Ambience*` filter (21s) with only the known environment GAC-snapshot
-  failure; the standing CLI baselines are unchanged (`--csharp mscorlib`
-  10106366 bytes, `--il` 41246545 bytes, `-l c` 109438).
-- **CallBuilder::HandleImplicitConversion** -- the user-defined `op_Implicit`
-  render arm (CallBuilder.cs lines 1534-1556): re-query the implicit conversion
-  via `CSharpConversions::Get(compilation).ImplicitConversion`, cast the argument
-  to the operator's source (parameter) type when the cached conversion is not the
-  operator itself (`IsUserDefined && IsValid && Method.Equals(method, TypeErasure)`),
-  unwrap an `in` `DirectionExpression`, and emit the `CastExpression` to the
-  target type with a `ConversionResolveResult`. Verified by **2** new gtest cases
-  in `CallBuilderHandleImplicitConversion_Test.cpp` over a real ExpressionBuilder
-  + a `FakeMethod` `op_Implicit(Int32) -> Int64` (the cast + result-type shape
-  and the `in`-direction unwrap), proven with a two-arm neuter RED round (both
-  failed: the `in`-unwrap gate disabled and the result RR downgraded to a plain
-  `ResolveResult`) then restored green. Partial-test policy: **218/218**
-  `CallBuilder*` + `ExpressionBuilder*` tests green; the broader
-  `*CSharp*:*ExpressionBuilder*:*Resolver*:*OutputVisitor*:*Ambience*` filter
-  (44s) with only the known environment GAC-snapshot failure; the standing CLI
-  baselines are unchanged (`--csharp mscorlib` 10106366 bytes, `--il` 41246545
-  bytes, `-l c` 109438).
-- **CallBuilder core completion (gnhf 133-138)** -- the `CallBuilder` is now
-  functionally complete on its ported surface: the overload-resolution front
-  end (the `CallTransformation` flags, `IsUnambiguousCall` over the ctor /
-  operator-candidate / simple-name / `MemberLookup` arms, and the
-  `GetRequiredTransformationsForCall` fallback cascade), the render arms
-  (`HandleStringInterpolation` + its tokenizer, `IsSpanBasedStringConcat` +
-  `BuildStringConcat`, `HandleAccessorCall` + `IsUnambiguousAccess`,
-  `BuildCollectionInitializerExpression` /
-  `BuildDictionaryInitializerExpression`, `HandleRangeConstruction` with the
-  new `SyntheticRangeIndexAccessor` wrapper, the delegate-reference family
-  (`BuildDelegateReference` / `DisambiguateDelegateReference` /
-  `IsUnambiguousMethodReference` / `HandleDelegateConstruction` /
-  `CanUseDelegateConstruction` / `BuildMethodReference` /
-  `Build(LdVirtDelegate)`), the main `Build(OpCode, IMethod, ...)`
-  integrator with `HandleConstructorCall`, and the `Build(CallInstruction)`
-  dispatch with the tail-comment marker). The FakeMember reference-equality
-  fix (the `dynamic_cast<void*>` most-derived identity) landed with the
-  SyntheticRangeIndexAccessor work. Deferred loudly: the local-function
-  arms (the `ResolveLocalFunction` surface), the named-argument
-  (`argumentToParameterMap`) `BuildArgumentList` path + `CallWithNamedArgs`,
-  the `TupleTransform.MatchTupleConstruction` arm, the InlineArrays arm,
-  and the EmitAsRefReadOnly flag-write (the StatementBuilder port).
-  Verified by **26** new gtest cases across 4 new suites
-  (`CallBuilderTransformations_Test` (13, includes the gnhf-134 initializer
-  + accessor cases), `CallBuilderDelegateReference_Test` (4),
-  `CallBuilderRangeConstruction_Test` (5) + the
-  `SyntheticRangeIndexAccessorTest` surface test, `CallBuilderBuild_Test`
-  (4), `CallBuilderBuildCall_Test` (2)), each crux proven with a
-  neuter-RED round then restored green. Partial-test policy: the standing
-  `*CSharp*:*ExpressionBuilder*:*Resolver*:*OutputVisitor*:*Ambience*:
-  *CallBuilder*:*ILInlining*:*UserDefinedCompoundAssign*` filter (6518
-  tests) green except the 5 known environment failures (the GAC trio + the
-  2 XAML gold-stream cases); the sweep and ASan builds green on their
-  focused runs; the `connid_res` `--csharp` CLI output byte-identical to
-  the standing baseline.
+- **`CallBuilder` slice 3 -- the call-build composition** -- `CallBuilder.{hpp,cpp}` now carries the
+  mainline `Build(OpCode, ...)` body (CallBuilder.cs lines 332-594) and the `Build(CallInstruction)`
+  entry (lines 202-241): the EII sealed-class rewrite (the interface-member re-bind + CallVirt),
+  the local-function target arm (with the new `ExpressionBuilder.ResolveLocalFunction` -- the
+  member-definition identity lookup over the ancestor ILFunction walk -- and `ToMethodGroup` over
+  the ported `MethodGroupResolveResult`), the TranslateTarget + boxing-conversion unwrap (the
+  NeedsBoxingConversion flag), BuildArgumentList, the VarArgInstanceMethod arm (the
+  `UndocumentedExpression` `__arglist` block with the converted tail arguments), the
+  delegate-invoke arm (`isDelegateInvocation` over a Delegate-kind declaring type), the
+  delegate-equality and op_Implicit special cases (the HandleImplicitConversion cast over the
+  re-looked-up conversion with the `in`-DirectionExpression unwrap), the HandleRangeConstruction
+  arms (the four Range forms + the Index caret form over the new
+  `TypeSystem/Implementation/SyntheticRangeIndexer.hpp` port and the slicing indexer), the
+  InlineArrayAsSpan arm (GetInlineArrayLength/GetInlineArrayElementType over the ported extensions)
+  and the GetValueOrDefault(Boolean) arm, the GetRequiredTransformationsForCall fix ladder with the
+  parameter-name update, and the final RequireTarget/RequireTypeArguments invocation render (the EII
+  `((IDisposable)this).Dispose()` cast and the constrained. cast comment included). The accessor-call
+  slice (IsUnambiguousAccess + HandleAccessorCall, CallBuilder.cs lines 1665-1831) is ported -- the
+  null-target simple-name arm over ResolveSimpleName, the member-lookup arms (the indexer arm over
+  LookupIndexers + OverloadResolution, the property/event arm over Lookup), the requireTarget/isSetter
+  pre-computation, the fix loop with one transformation per failed attempt (CastArguments ->
+  requireTarget -> the target cast -> the accessor-owner fallback), and the setter/getter render
+  matrix over the Indexer/MemberReference/Identifier forms (the setter's event +=/-= assignment
+  operators included, compared through the canonical MemberDefinition views -- the C#
+  `method.Equals(parentEvent.AddAccessor)` binds to object.Equals reference equality). The remaining
+  big render arms (HandleDelegateConstruction, the tuple-expression render, HandleConstructorCall,
+  HandleStringInterpolation) are the loud deferrals behind their real C# gate
+  conditions. Supporting pieces: the `LdObjIfRef` IL node class (the constrained this-argument
+  wrapper the mainline unwraps) with its clone case, the `ILFunction.Method` field (the C#
+  IMethod handle the seed reader does not yet populate), the `ILFunctionAnnotation` holder (the
+  C# `ide.AddAnnotation(localFunction)` channel) with the WithILFunction/GetILFunction helpers,
+  and the MatchDelegateConstruction/MatchTupleConstruction gates over the ported transforms.
+  Verified by the 20-test Build-composition suite (ResolveLocalFunction, ToMethodGroup,
+  IsNullConditional, the delegate-equality/op_Implicit/interpolation/range matrices, the LdObjIfRef
+  node+clone, the Build entry routing/deferrals, and the mainline invoke/static/member-reference/newobj
+  renders) wired into the existing CallBuilder tests; full suite 12206 ran / 12204 passed / the 2
+  standing skips / zero failures, and all four CLI baselines unchanged (--csharp mscorlib 10106366
+  bytes, --il whole-module byte-identical to the 41246545-byte real-ilspycmd gold, -l c 109438, the
+  --json-alone usage check rc 64).
+- **`CallBuilder` slice 5 -- the constructor-call render** -- `CallBuilder.{hpp,cpp}` now carries
+  `HandleConstructorCall` (CallBuilder.cs lines 1836-1900), lifting the NewObj loud deferral in
+  `Build(OpCode)` (the constructor-call slice): the anonymous-type arm over
+  `AnonymousTypeCreateExpression` (the inferred-name shape rendering the plain argument
+  expressions and the fallback wrapping every argument in a `NamedExpression` over the
+  converted expression), the `IsUnambiguousCall` fix loop (one transformation per failed attempt:
+  the `AddNamesToPrimitiveValues` reset, the `FirstOptionalArgumentIndex` `-1` reset, then
+  `CastArguments` with the loop-breaking comment carried verbatim), the
+  `NativeIntegersWithoutAttribute` n(u)int return-type override (read through the port's
+  compilation-level `TypeSystemOptions` accessor -- the C# reads the narrowed main-module
+  options carrying the same settings-derived value), and the `ObjectCreateExpression` render
+  over a `CSharpInvocationResolveResult` (the null-target alias over the raw resolve-result
+  pointer -- the `KnownTypeCache` convention (d)). `IsAppropriateCallTarget` gained the
+  C#-faithful null-tolerant `actualTarget` pointer shape (the no-candidate overload resolution
+  answers a null `foundMember`; the C# `expectedTarget.Equals(null, ...)` answers false through
+  reference equality -- the first neuter round of the slice surfaced it as the AV the stale
+  reference signature crashed on). Verified by 5 new `HandleConstructorCallTest` tests (the
+  plain object-create shape incl. the null target and no-map invariants, both anonymous-type
+  initializer shapes over the real `IsAnonymousType` predicate fixture, the fix-loop cast
+  render, and the nint override over a compilation-options subclass) plus the rebuilt
+  `BuildEntryTest.DefersDelegateConstructionLoudly` (its declaring type is now the delegate-KIND
+  stub the match's final gate requires -- the old fixture's `KnownType(Delegate)` is Class-kind
+  over the minimal corlib, so the deferral it caught was really the NewObj one) and the
+  `IsAppropriateCallTarget` null-argument drive; neuter-proven (the anonymous-type gate and the
+  nint override failing exactly their 3 predicted tests); full suite 12234 passed + the 2
+  standing skips (+5, zero regressions), and all four CLI baselines hold (--csharp mscorlib
+  10106366 bytes, --il whole-module byte-identical to the 41246545-byte real-ilspycmd gold,
+  -l c 109438, the --json-alone usage check rc 64).
+- **`CallBuilder` slice 4 -- the string-interpolation render** -- `CallBuilder.{hpp,cpp}` now carries
+  `HandleStringInterpolation` + `TryGetStringInterpolationTokens` + `TokenizeFormatString`
+  (CallBuilder.cs lines 595-648 + 766-935), lifting the interpolation loud deferral in
+  `Build(OpCode)`: the `TokenKind` enum + `FormatToken` struct (the C# anonymous tuple), the
+  `{`/`}`/`:`/`,` state-machine tokenizer over the C# `Peek`/`Next` locals (byte-faithful over
+  UTF-8: every tested character is ASCII; the run yields only at `}` or a following `{` -- an
+  unterminated run yields the Error token with the pending text still carried by the tail), the
+  token gate (the first argument a String-typed compile-time constant, no later argument a
+  string literal, no argument names or map, the slots consecutive from 0 and exactly filling the
+  remaining arguments over a faithful `int.TryParse` port), and the render (`InterpolatedString`
+  over the token stream with the `Interpolation`/`InterpolatedStringText` contents, the one-element
+  array-literal unwrap reading `ArrayCreateResolveResult.InitializerElements`, the `string.Format`
+  arm answering the bare interpolation and the `FormattableStringFactory.Create` arm the cast over
+  `Conversion.ImplicitInterpolatedStringConversion`; the default (null) shape when the tokens do
+  not parse or the token list is empty). The gate `IsInterpolatedStringCreation` was completed to
+  the C# shape (the ArgumentNames check + the expanded/params/array-literal chain with the .NET
+  `Last()` empty-list throw), and the header now DECLARES the gate (the C129 HEAD build was broken
+  -- the .cpp definition had no in-class declaration). Two latent port bugs the new tests exposed:
+  `ArgumentList::GetArgumentResolveResults`/`GetArgumentResolveResultsDirect` seeked past
+  `end()` on the skipCount slice (the C# `.Skip(n).Take(m)` caps -- the clamp now happens before
+  the iterator arithmetic), and `HandleStringInterpolation` indexed `Arguments[1]` before the
+  C# short-circuit `argumentList.Length == 2` could gate it (the shorter-call arms would abort
+  on the MSVC debug-iterator assertion). Verified by 11 new tests (the tokenizer matrix, the
+  tokens happy path + format-suffix shapes + the ten-arm failure matrix, the Format/Create/unpack
+  render arms, the empty/unparsable default shapes, the Build-mainline interpolation drive, and
+  the params-overload gate arm); full suite 12229 passed + the 2 standing skips (+11, zero
+  regressions), and all four CLI baselines hold (--csharp mscorlib 10106366 bytes, --il whole-module
+  byte-identical to the 41246545-byte real-ilspycmd gold, -l c 109438, the --json-alone usage check
+  rc 64).
+- **`CallBuilder` slice 2 -- the overload-resolution driver `GetRequiredTransformationsForCall`** -- `CallBuilder.{hpp,cpp}` now carries the C# nested `[Flags]` enum `CallTransformation` (None / RequireTarget / RequireTypeArguments / NoOptionalArgumentAllowed / EnforceExplicitIn / NoNamedArgsForPrettiness / All, with the bitwise-operator surface) and the driver itself (CallBuilder.cs lines 1152-1343): the requireTarget block (`AlwaysQualifyMemberReferences` / `HidesVariableWithName` / local-function / static + `.cctor` / `.ctor` / `BaseReferenceExpression` virtual-vs-callvirt / this-reference arms over the new `ExpressionBuilder` members `IsCurrentOrContainingType` / `IsBaseTypeOfCurrentType`), the requireTypeArguments block over the new static `CanInferTypeArgumentsFromArguments` (the unspecialized-member `(IMethod)MemberDefinition` cast with the two-IMember-subobject normalization; the parameter types from the argument-to-parameter map with `SpecialType.UnknownType` for the unmapped positions, run through the ported `Detail::InferTypeArguments` over the TypeInference instance's own compilation conversions -- the C# TypeInference ctor's `CSharpConversions.Get(compilation)`, NOT the resolver's cached pair), the fix ladder over `IsUnambiguousCall` (the `goto case` chain ported as the if-ladder: the out-var `UseImplicitlyTypedOut` disable, the TypeInferenceFailed -> WrongNumberOfTypeArguments / default split, the missing-required-argument `-1` reset, and the default arm's AddNamesToPrimitiveValues -> FirstOptionalArgumentIndex -> CastArguments -> requireTarget -> targetCasted (with the `skipTargetCast` protected-base reversal) -> requireTypeArguments -> EnforceExplicitIn -> give-up ladder), and the final transformation-flag aggregation. Supporting helpers landed: `CastArguments` (the explicit-cast insertion with the dynamic-Object substitution and the `in`-parameter element unwrap; the lambda-return-type arm is the documented `ModifyReturnTypeOfLambda` deferral), `EnforceExplicitIn` / `WrapInAsRefReadOnly` (the `ILSpyHelper_AsRefReadOnly` invocation wrapped in the `in` DirectionExpression over a ByReferenceResolveResult; the C# `statementBuilder.EmitAsRefReadOnly = true` write is deferred with the StatementBuilder slice), `IsPossibleExtensionMethodCallOnNull`, `PinTypesOfNullArguments` and `NewAnonymousTypeInstance` (the newobj-shaped Call factory over the port's IsNewObj flag with the DefaultValue arguments; unreachable over the port's type system until anonymous types land). The anonymous-type predicates it composes landed as the NRExtensions port (`cpp/Decompiler/NRExtensions.{hpp,cpp}`, the C# root-namespace extension class): `IsCompilerGenerated`, `HasGeneratedName` (the IMember `'<'`-prefix overload and the IType `SRMExtensions.IsGeneratedName` overload -- the new `'<'`/`'$'` classifier in SRMExtensions), `HasOnlyReadOnlyProperties`, `IsAnonymousTypeDeclaredAsNamedType`, `IsAnonymousType` (through a new file-local `NamespaceOf` IType-namespace copy), and `ContainsAnonymousType` (the `ContainsAnonTypeVisitor` TypeVisitor walk). `FakeMember` gained the `SetIsVirtual` additive setter the BaseReferenceExpression arm drives. Verified by the 24-test `GetRequiredTransformationsTest` suite over the `TransformFixture` (the requireTarget matrix incl. the two prettiness flags -- `NoNamedArgsForPrettiness` is NOT set over the default settings because `AddNamesToPrimitiveValues` starts true -- the generic inferable/uninferable inference arms, and the CastArguments/WrapInAsRefReadOnly/EnforceExplicitIn/PinTypesOfNullArguments/NewAnonymousTypeInstance/CanInferTypeArgumentsFromArguments unit matrices) plus the 11-test `NRExtensionsTest` suite (the full anonymous-type shape matrix), proven with a stub-RED round then green; full suite 12186 ran / 12184 passed / the 2 standing skips / zero failures, and all four CLI baselines unchanged (--csharp mscorlib 10106366 bytes, --il whole-module byte-identical to the 41246545-byte real-ilspycmd gold, -l c 109438, the --json-alone usage check rc 64).
+- **`CallBuilder` slice 1 -- the data carriers + the span-based string-concat
+  family** -- `CallBuilder.{hpp,cpp}` now carries the C# nested structs
+  (`ExpectedTargetDetails`, the `ArgumentList` with its full helper surface:
+  `GetArgumentNames` with the primitive-fill rule whose C# local ALIASES the
+  field's array (the fills mutate the stored array in place when engaged; a
+  fresh never-stored-back local when disengaged -- the port reproduces the
+  aliasing), `GetArgumentResolveResults` with the implicitly-typed-out rule
+  (an Out parameter over a `ByReferenceType` argument answers a FRESH
+  `OutVarResolveResult` over the reference's element type -- a resolve
+  result NOT attached to the node, so the returned shared handles own the
+  fresh instances and alias the annotation channel for the plain ones),
+  `GetArgumentResolveResultsDirect`, `GetArgumentExpressions` with the
+  `NamedArgumentExpression` wrapping + the `UseImplicitlyTypedOutAnnotation`
+  application, `CanInferAnonymousTypePropertyNamesFromArguments`, and the
+  DEBUG `CheckNoNamedOrOptionalArguments`), plus the string-concat family:
+  the `IsSpanBasedStringConcat(Call, out operands)` argument walk (the
+  `op_Implicit string -> ReadOnlySpan<char>` conversion-call arm and the
+  `newobj ReadOnlySpan<char>(&c)`-over-`AddressOf` arm, with the C#
+  out-parameter shape -- the collected operand list SURVIVES a failing count
+  check, only a failing method check leaves the out param null),
+  `IsStringToReadOnlySpanCharImplicitConversion`, and `BuildStringConcat`
+  (the `s1 + s2 + ...` left-associative fold whose ONE
+  `MemberResolveResult(null, method)` annotation is reused for every node).
+  Enabling pieces: the `Call` IL node gained the C# `Method`/`IsTail`/
+  `ConstrainedTo` surface (the resolved `IMethod` optional on the seed path;
+  the reader wires it when the type-system plumbing reaches it), the new
+  `IL/Instructions/AddressOf.hpp` node class (the generated `AddressOf`:
+  one Value child, the Type operand, ResultType Ref, DirectFlags None with
+  the child-flags delegation -- plus the clone case), and
+  `ILInlining::IsReadOnlySpanCharCtor` (the 6-line static the concat walk
+  consumes). The `UseImplicitlyTypedOutAnnotation` gained the owning
+  `SharedInstance()` handle the annotation channel needs. Verified by the
+  24-test `ArgumentListTest` / `StringConcatDetectionTest` /
+  `BuildStringConcatTest` suites over the MinimalCorlib fixture (the
+  argument-count slices, the fill matrix incl. the field-aliasing mutation,
+  the out-var rule, the named-argument wrapping + annotation, the inference
+  matrix, the conversion/ctor matrices, the call walk incl. the surviving
+  -operand shapes, and the fold with the shared resolve result), proven
+  with a 3-behavior neuter RED round (the index bound, the shared result,
+  the expanded-form gate) then restored green; full suite 12113 ran /
+  12111 passed / the 2 standing skips / zero failures, and all four CLI
+  baselines unchanged (--csharp mscorlib 10106366 bytes, --il whole-module
+  41246545 bytes, -l c 109438, --json-alone rc 64).
+- **`CallBuilder` slice 6 -- the delegate-reference family** -- `CallBuilder.{hpp,cpp}` now carries
+  the full CallBuilder.cs lines 1905-2212 delegate-reference chain, lifting the
+  delegate-construction loud deferral in `Build(CallInstruction)`: `CanUseDelegateConstruction`
+  (the accessors-are-not-method-groups gate, the static arm's parameter-count dance over the
+  known/unknown Invoke method with the extension minus-one, and the instance arm's
+  matching-count gate), the `HandleDelegateConstruction(CallInstruction)` entry (the ldftn ->
+  Call / ldvirtftn -> CallVirt switch with the exact .NET `ArgumentException` arm for an
+  unknown function-pointer opcode, and the not-usable fallback routing through BuildArgumentList
+  + HandleConstructorCall over the delegate ctor), the render
+  `HandleDelegateConstruction(IType, IMethod, ...)` (the ObjectCreateExpression over the
+  delegate type with the `ConversionResolveResult` over the `Conversion.MethodGroupConversion`
+  -- CallVirt selecting isVirtualMethodLookup), `BuildDelegateReference` +
+  `DisambiguateDelegateReference` (the local-function arm over ToMethodGroup, the extension arm
+  over ResolveMemberAccess + PerformOverloadResolution(allowExtensionMethods) with the
+  `box`-argument unwrap, and the general arm over TranslateTarget + the requireTarget gate with
+  the add-type-arguments / add-target / cast-target fix ladder and the `WithChosenMethod` re-wrap),
+  `IsUnambiguousMethodReference` (both arms over the ported OverloadResolution engine with the
+  `IsAppropriateCallTarget` oracle), `Build(LdVirtDelegate)`, and `BuildMethodReference` (the
+  resolve-result annotation REPLACED with the plain `MemberResolveResult(null, method)`).
+  Supporting upgrades: the `LdFtn`/`LdVirtFtn`/`LdVirtDelegate` IL nodes now carry the C#
+  `readonly IMethod Method` beside the seed display strings (the
+  CompoundAssignmentInstruction/UserDefinedCompoundAssign precedent -- a resolved ctor
+  populating the stand-in, the clone carrying the field, and the
+  `DelegateConstructionMatch.targetMethodRef` feeding the entry), and the `ExpressionBuilder`
+  gained the `VisitLdFtn` (the static function-pointer render over the UnmanagedCallersOnly
+  decode + `FunctionPointerType` address-of cast, the instance `__ldftn` fallback) /
+  `VisitLdVirtFtn` (`__ldvirtftn`) / `VisitLdVirtDelegate` arms the fallback route translates.
+  Verified by 16 new tests over the MinimalCorlib fixture (the 8-arm CanUse matrix, both
+  function-pointer shapes with the conversion's IsVirtualMethodLookup pin, the
+  unknown-opcode throw, the static render `new H.MyDelegate(H.Host.Foo)` over the resolved
+  method group, the identifier method-reference render with the member resolve result, the
+  virtual-delegate entry, and the not-usable fallback resolving through the DELEGATE
+  CONSTRUCTOR), proven with a 2-behavior neuter RED round (the accessor gate + the CallVirt
+  virtual-lookup mapping) then restored green; full suite 12249 ran / 12247 passed / the 2
+  standing skips / zero regressions, and all four CLI baselines unchanged (--csharp mscorlib
+  10106366 bytes, --il whole-module byte-identical to the 41246545-byte real-ilspycmd gold,
+  -l c 109438, the --json usage check rc 64).
+- **`CallBuilder` slice 7 -- the tuple-expression render** -- the LAST `Build(CallInstruction)`
+  loud deferral lifted (`CallBuilder.cs` lines 209-240): over a matching
+  `TupleTransform.MatchTupleConstruction` newobj (arity >= 2, the `TupleTypes` setting on),
+  the render builds a `Syntax::TupleExpression` whose elements are the translated tuple
+  elements (`Translate` against the declaring type's type argument as the hint, then
+  `ConvertTo(..., allowImplicitConversion: true)`), wrapped in `NamedArgumentExpression`
+  where the `typeHint is TupleType` element names carry a non-empty name, annotated with
+  a `TupleResolveResult` over the element resolve results. The companion change lifts the
+  `TupleResolveResult` ctor to the C#-faithful signature `(ICompilation, elements,
+  elementNames, valueTupleAssembly)` -- the D405 pre-built-underlying deferral
+  (`GetTupleType` now resolves the underlying `System.ValueTuple<...>` chain through the
+  ported `CreateTupleType` factory, the value-tuple-assembly definition first and the
+  compilation-wide lookup fallback second), with the existing `TranslatedExpression.
+  ConvertTo` tuple-arm call site re-shaped onto it (the C# passes NO elementNames there).
+  Verified by 5 new tests over the MinimalCorlib fixture (the bare render with element
+  structure/type/IL-annotation pins, the named-hint render with the resolve-result
+  ElementNames pin, the non-tuple hint rendering bare elements, the below-two-elements
+  fall-through to the mainline constructor call, and the `TupleTypes` setting gate),
+  proven with a 2-behavior neuter RED round (the typeHint names read + the
+  NamedArgumentExpression arm) then restored green; full suite 12253 ran / 12251 passed /
+  the 2 standing skips / zero regressions.
+- **`CSharpResolver` region 20 -- `ResolveArrayCreation` (the LAST CSharpResolver
+  region)** -- `CSharp.{hpp,cpp}` now carries the two public `ResolveArrayCreation`
+  overloads (CSharpResolver.cs lines 2880-2935), completing the 2986-line `CSharpResolver`
+  class's region set (every C# `Resolve*` / helper region of the mega-class is now ported):
+  the `int[]` size convenience (each non-negative size materializes as a
+  `ConstantResolveResult` over the REGISTERED `System.Int32`, a NEGATIVE size the
+  `ErrorResolveResult.UnknownError` singleton as the non-owning aliasing handle) delegating
+  to the core entry (zero size arguments is the C# `ArgumentException` analog
+  `std::invalid_argument`; a NULL element type infers the best common type of the
+  initializers through the `TypeInference` `GetBestCommonType` free function over the
+  resolver's OWN `conversions` instance with the CSharp4 default -- the no-initializer
+  shape is the C# `GetBestCommonType(null)` `ArgumentNullException` analog; the array type
+  is a fresh multi-dimensional `ArrayType` with rank == dimensions, a rank-1 creation the
+  port's SZ-array shape per the ExpressionBuilder `newArr` convention; the size arguments
+  are adjusted IN PLACE through `AdjustArrayAccessArguments`'s
+  int32/uint32/int64/uint64 chain with the non-convertible size the Convert-under-None wrap
+  over Int32; each initializer re-binds through `Convert`, an identity match returning the
+  SAME instance). Verified by 11 new tests over the fresh-`LookupCompilation` fixture with
+  the registered codes the conversion machinery resolves through FindType (the
+  CSharpResolverIndexer four-size-code set + Object + NullableOfT -- the unregistered-code
+  `bad_weak_ptr` trap reconfirmed through three `PROBE` bisect rounds), proven with a
+  2-behavior neuter RED round (the negative-size singleton arm + the initializer `Convert`
+  re-bind: exactly the 4 predicted failures) then restored green; full suite 12264 ran /
+  12262 passed / the 2 standing skips / zero regressions, and all four CLI baselines
+  unchanged (--csharp mscorlib 10106366 bytes byte-identical run-over-run, --il whole-module
+  byte-identical to the 41246545-byte real-ilspycmd gold, -l c 109438, the --json-without-
+  dump-table usage check rc 64).
+- **`ExpressionBuilder` TranslateTarget call-target arm + the IL match helpers**
+  -- `ExpressionBuilder::TranslateTarget` (ExpressionBuilder.cs lines 2734-2844:
+  the call/field target translation the `CallBuilder.Build` entry and the
+  `ConvertField` family share): the base-reference arm over the current type
+  definition's non-interface base types (`ShouldUseBaseReference`'s three
+  guards + the `baseReferenceType ?? memberDeclaringType` fallback), the
+  pointer/ref type-hint machinery for value-type receivers (`CallInstruction.
+  ExpectedTypeForThisPointer == Ref` selects the by-ref hint for a Ref receiver
+  and the pointer hint otherwise, then the issue-#1333 reference-of-the-
+  correct-type re-conversion through `ConvertTo(ByReferenceType(...))`), the
+  `(ref x).member => x.member` DirectionExpression unwrap, the
+  `(ref x)?.member => x?.member` null-conditional unwrap (the new resolve
+  result over the underlying type), the `EnsureTargetNotNullable` identity
+  pass-through (the C# body is fully commented out), and the static
+  type-reference arm (the `constrainedTo ?? memberDeclaringType` precedence).
+  The local `MatchLdThis` closure (the direct `ldloc this` match + the struct
+  `box T(ldobj T(ldloc this))` shape, gated on the current type definition's
+  struct kind) and its null-`CurrentTypeDefinition` NullReferenceException arm
+  are pinned. Supporting ports: the shared `Decompiler/IL/PatternMatching.hpp`
+  (the C# `ILInstruction.MatchLdThis` / `MatchBox` / `MatchLdObj` extension
+  methods as free functions over the port's node pointers -- the child `out`
+  params are non-owning raw pointers, the type `out` params alias the node's
+  own `ITypePtr`) with `ExpectedTypeForThisPointer` beside the `Call` node
+  (the constrained-to-Ref / type-parameter-Ref / reference-O / value-Ref /
+  unknown-Unknown matrix over the `IsReferenceType` tri-state). The C# local
+  functions are visible throughout their method, so `ShouldUseBaseReference`
+  calls the local `MatchLdThis` (the struct-box arm is reachable from the
+  base-reference gate too). Verified by the 12-test
+  `ExpressionBuilderTranslateTargetTest` suite over the MinimalCorlib fixture
+  with the decompilation context's current-type-definition slot configurable
+  (the CSharpTypeResolveContext With* clone factories: the static arms, the
+  base-reference matrix incl. the empty-DirectBaseTypes fallback and the
+  same-declaring-type suppression, the reference-type `this` receiver, the
+  value-type constrained arms incl. the dereference-of-pointer-cast final
+  shape, and the null-NRE arm) plus the 7-test `PatternMatchingTest` /
+  5-test `ExpectedTypeForThisPointerTest` matrices, proven with a
+  3-behavior neuter RED round (the base-arm gate, the DirectionExpression
+  unwrap, the static-arm constrainedTo preference: exactly the 7 predicted
+  failures) then restored green; full suite 12137 ran / 12135 passed / the
+  2 standing skips / zero failures, and all four CLI baselines unchanged.
+- **`StatementBuilder` skeleton** -- `cpp/Decompiler/CSharp/StatementBuilder.{hpp,cpp}`
+  now carries the C# `sealed class StatementBuilder : ILVisitor<TranslatedStatement>`
+  skeleton (StatementBuilder.cs lines 53-153): the ctor (the ExpressionBuilder built
+  over `this` -- the mutual reference the C# GC roots through the field; the
+  `currentReturnContainer` body cast the port's statically-typed `ILFunction::Body`
+  makes unreachable in its cast form; `currentIsIterator`; the `currentResultType`
+  `IsAsync ? AsyncReturnType! : ReturnType` source; the invalid_argument guards for
+  the pointer parameters -- the D424 convention), the `Convert` / `ConvertAsBlock`
+  entry family (the re-attached IL-instruction annotation with the C#
+  `AddAnnotation`-does-not-dedupe duplicate the entry produces over an already-
+  annotated arm -- pinned by the test), the REAL C# `Default` fallback (an
+  `ExpressionStatement` over `exprBuilder.Translate(inst)` -- unlike the
+  ExpressionBuilder's error-expression fallback, this one is the C#'s own behavior),
+  and the first five Visit arms: `VisitIsInst` (the unused-result `expr is T` over
+  the boxing-unwrapped argument with the boolean `ResolveResult` -- both the inner
+  and the outer IL-instruction annotation the C# statement carries), `VisitStLoc`
+  / its `VisitStObj` sibling (the assignment statement with the top-level ref strip
+  on ref re-assignment), `VisitNop` (the empty statement with the nop's comment as
+  trailing trivia), and `VisitIfInstruction` (the if/else over the translated
+  condition, the Nop false arm the C#'s no-else shape). Supporting IL-node surface:
+  the port's `Nop` gained the C# partial's `NopKind` (Normal/Pop) + `Comment`
+  (nullable) fields with the faithful `.pop` / ` // comment` dump render, and the
+  `ILFunction` gained the C# `IsIterator` / `AsyncReturnType` / `ReturnType` fields
+  with the derived `IsAsync()` property. Verified by the 14-test
+  `StatementBuilderTest` suite over the MinimalCorlib fixture with an ILFunction
+  whose Body is a BlockContainer, proven with a 5-behavior neuter RED round (the
+  ref strip, the comment trivia, the isinst resolve result, the Nop-false-arm
+  gate, the iterator copy: exactly the 5 predicted failures) then restored green;
+  full suite 12278 ran / 12276 passed / the 2 standing skips / zero regressions,
+  and all four CLI baselines unchanged.
+- **`StatementBuilder` slice 2 -- the branch/leave/goto leaf arms** -- the leaf statement
+  family landed (`StatementBuilder.cs` lines 338-373 + 347-455 + 1578-1597):
+  `VisitBranch` (the continue / goto-case / goto-label fix, the continue-target arm first
+  so a continue-target branch never renders as a goto; `continueCount` increments), its
+  `VisitLeave` sibling (the break / yield-break / return / goto-end fix with the
+  lambda/expr-tree possible-loss cast -- `IsPossibleLossOfTypeInformation` over
+  `ContainsAnonymousType` / `NormalizeTypeVisitor::IgnoreNullability().EquivalentTypes` /
+  the named-tuple / `dynamic` / null-literal arms, and the `end_<label>` naming with the
+  `_<n>` duplicate suffix the shared `duplicateLabels` count produces; the port's nullable
+  `Leave::Value` maps the C#'s Nop value so a null value IS the value-less leave),
+  `VisitThrow` / `VisitRethrow` (the throw statement with and without the expression),
+  and `VisitYieldReturn` (the element type the `AsyncReturnType ?? GetElementTypeFromIEnumerable`
+  read supplies). Supporting state (the C# fields are private; the port's
+  no-visibility-level convention keeps them public for the tests): the
+  `labels`/`duplicateLabels` maps + `EnsureUniqueLabel`, the `breakTarget`/
+  `endContainerLabels` pair, the `continueTarget`/`continueCount` pair, and the
+  `caseLabelMapping` (an `optional<unordered_map<Block*, shared_ptr<ConstantResolveResult>>>`
+  -- nullopt is not-translating-a-switch, a mapped null value is 'goto default'). IL-node
+  surface: `Block::Label()` (the C# `Block.Label` -- `DisassemblerHelpers::OffsetToString`,
+  a new `Block.cpp` so the Disassembler include graph stays out of the IL headers),
+  `BlockContainer::EntryPoint()` (the statically-normalized first block the C# field
+  stores), `Leave::TargetLabel()` (the C# property -- the entry-point label or empty), and
+  the new `YieldReturn` node (one Value child, Void result, `MayBranch|SideEffect`, the
+  `yield.return` dump render, the clone case) beside the `ILFunctionKind` enum +
+  `ILFunction::Kind` field (TopLevelFunction default; the clone carries it) the
+  lambda/expr-tree gate reads. Verified by 19 new `StatementBuilderTest` tests (the goto /
+  continue / case-mapping branch matrix, the break / yield-break / bare-return /
+  value-return / loss-cast / top-level-skips-cast leave matrix, the end-label reuse +
+  duplicate-suffix + EnsureUniqueLabel matrix, throw/rethrow, both yield shapes incl. the
+  IEnumerable unwrap over a MinimalCorlib `IEnumerable<int>` parameterized type, the
+  accessor + clone pins), proven with a 5-behavior neuter RED round (the continue gate,
+  the case-mapping arm, the duplicate suffix, the loss-cast gate, the yield render:
+  exactly the 6 predicted failures) then restored green; full suite 12297 ran / 12295
+  passed / the 2 standing skips / zero regressions, and all four CLI baselines unchanged
+  (--csharp mscorlib 10106366 bytes, --il whole-module byte-identical to the 41246545-byte
+  real-ilspycmd gold, -l c 109438, the --json usage check rc 64).
+- **`StatementBuilder` slice 3 -- the initblk/cpblk/ckfinite leaf arms** -- the three
+  small statement arms the C# keeps at the file end (`StatementBuilder.cs` lines
+  1609-1670): `VisitInitblk` (the `Unsafe.InitBlock` / `Unsafe.InitBlockUnaligned`
+  intrinsic call over the (address, value, size) translations -- the nonzero
+  `UnalignedPrefix` selects the *Unaligned spelling -- with the
+  `// IL initblk instruction` comment as leading trivia), its `VisitCpblk` sibling
+  (`CopyBlock`/`CopyBlockUnaligned`, the `// IL cpblk instruction` comment), and
+  `VisitCkfinite` (the `if (!float.IsFinite(<arg>)) throw new ArithmeticException();`
+  guard: the `UnaryOperatorExpression(Not)` condition over a
+  `TypeReferenceExpression(PrimitiveType("float"))`.`IsFinite` invocation, the
+  `ObjectCreateExpression` over a `SimpleType("ArithmeticException")` annotated with
+  the type-system `FindType(compilation, FullTypeName("System.ArithmeticException"))`
+  resolve result -- an UnknownType over the minimal corlib -- and no else arm).
+  Supporting IL-node surface: the new `Ckfinite` node (a Void-result
+  `UnaryInstruction` with `MayThrow`; the seed reader keeps its no-op placeholder,
+  tests drive the node by hand) and the `Initblk`/`Cpblk` block-memory nodes (three
+  inlineable children in Address/Value/Size resp. DestAddress/SourceAddress/Size
+  slot order, Void result, `MayThrow|SideEffect` direct flags, the
+  `volatile.`/`unaligned(<n>).` prefixes rendered before the lowercase opcode in the
+  dump, the clone cases carrying every scalar). Verified by 7 new `StatementBuilderTest`
+  tests (4 Visit drives + the node/dump/clone matrix), proven by a RED round where
+  exactly the 4 Visit tests failed before the switch cases were wired, then restored
+  green; full suite 12304 ran / 12302 passed / the 2 standing skips / zero
+  regressions, and all four CLI baselines unchanged (--csharp mscorlib 10106366
+  bytes, --il whole-module byte-identical to the 41246545-byte real-ilspycmd gold,
+  -l c 109438, the --json usage check rc 64).
+- **`StatementBuilder` slice 4 -- the try-construction region + the lock arm** -- the C#
+  try region (`StatementBuilder.cs` lines 445-532): the `MakeTryCatch` helper (converts the
+  try block once; a nested try-catch statement whose finally block is absent IS the result --
+  the extend-existing path -- and everything else wraps in a fresh `TryCatchStatement` whose
+  try block is the converted `BlockStatement` or a new block holding it), `VisitTryCatch`
+  (one `CatchClause` per handler, the handler instruction riding the clause as the bare-IL
+  annotation plus the `ILVariableResolveResult`; a variable with a store besides its use is
+  named and typed, a single-stored non-`object` variable is typed only, the `object`-typed
+  bare catch renders neither; a filter that is not the ldc.i4 1 constant translates to the
+  `when` condition over `TranslateCondition`), `VisitTryFinally` (the finally block over the
+  reused-or-wrapped try statement -- the C# `try { try { } catch { } } finally { }` flattens
+  to one statement carrying both IL annotations, the C# `AddAnnotation` non-dedup),
+  `VisitTryFault` (the fault block becomes a catch-clause body carrying the 'try-fault'
+  empty statement inserted before the block's first statement -- `FirstOrDefault()` == null
+  inserts at the head of an empty block -- plus the appended bare throw), and
+  `VisitLockInstruction` (the lock statement over the translated monitor expression and the
+  converted body block). The shared `IL::MatchLdcI4(int)` extension landed in
+  `cpp/Decompiler/IL/PatternMatching.hpp` (the C# `PatternMatching.cs` home; the
+  ExpressionBuilder file-local anonymous-namespace copy was deleted so the unqualified call
+  sites resolve through ADL -- the iteration-51 scaffold-deletion precedent, since the lib
+  function next to the local shadow is ambiguous otherwise). Verified by 9 new
+  `StatementBuilderTest` tests (the bare-catch shape with the annotation channels, the named
+  and typed variable matrix, the `when`-filter translate, the finally render, the
+  nested-try-catch extend with the double IL annotation, the try-fault statement layout,
+  and the lock render), proven by a clean RED round (all 9 failed through the `Default`
+  fallback before the switch cases were wired) then green; full suite 12313 ran / 12311
+  passed / the 2 standing skips / zero regressions, and all four CLI baselines unchanged
+  (--csharp mscorlib 10106366 bytes, --il whole-module byte-identical to the 41246545-byte
+  real-ilspycmd gold, -l c 109438, the --json usage check rc 64);
+  re-verified at landing against the refreshed 4.8.9345.0 golds, the following entry).
+- **Machine gold refresh -- the 2026-09 Windows Update .NET Framework servicing
+  build** -- Windows Update replaced the machine fixtures between iterations 137
+  and 138: the .NET Framework 4.8 mscorlib.dll went 4.8.9337.0 -> 4.8.9345.0
+  (debug-directory stamp 0x69F01F2E -> 0x6A67F1AF, the 2026-04-28 -> 2026-07-28
+  PDB build date; MVID cfbe3cd1-8651-4c71-ae57-6a8663cf2300 ->
+  f16ad90e-81d0-45df-a341-0e50bb08ed27; CodeView PDB GUID ->
+  e4ebde6c-54f2-4fb0-b3b7-8c75ebb4ae72) and System.dll went to 4.8.9340.0; the
+  GAC System.Runtime facade and the .NET 10 CoreLib are UNCHANGED. The update is
+  a version-resource-only servicing delta -- the regenerated real ilspycmd 11.0
+  whole-module gold differs from the previous one in exactly one line pair (the
+  InformationalVersion literal "4.8.9337.0" -> "4.8.9345.0"); every code body,
+  the field corpora, and the type surface are identical. All nine real-fixture
+  gold pins were re-read from the new files (the mscorlib debug-directory stamp
+  + CodeView GUID, the Module-table MVID bytes and both the module-header and
+  dump-table MVID renders, the AttributeGold AA17/AA18 file-version literals, the
+  MetadataField whole-corpus FNV mscorlib digest E5326509C430BB40 ->
+  3C86A462A41B4387 -- System.dll's field corpus is untouched -- and the
+  CustomAttributeDecoder partition digests: that FNV is a running hash across
+  the mscorlib/System/facade/CoreLib sections, so all four shifted even though
+  only the first two files changed), and the real ilspycmd 11.0 gold was
+  regenerated over the new mscorlib (C:/temp-probe/cp_65001_full_9345.il,
+  byte-compared as before under the UTF-8 console). Every CLI baseline NUMBER is
+  unchanged over the new fixture (--csharp mscorlib 10106366 bytes, --il
+  whole-module byte-identical to the 41246545-byte gold, -l c 109438, the --json
+  usage check rc 64 -- the changed strings are all equal-length); the full suite
+  is green again at 12304 ran / 12302 passed / the 2 standing skips (zero
+  regressions). Landed ahead of the completed try/lock StatementBuilder slice
+  (the next entry) so each commit's HEAD verifies green.
+- **`StatementBuilder` slice 5 -- the switch region** -- the C# switch construction
+  (StatementBuilder.cs lines 156-346): the `CreateTypedCaseLabel` helper (the typed
+  case-label constant per switch value -- the boolean re-box, the string-map
+  one-label-per-key where a null key boxes as the null literal, the enum underlying-
+  type cast, the primitive TypeCode cast, the raw-long fallback), `TranslateSwitch`
+  (the full switch-statement render: TranslateSwitchValue's governing expression, the
+  per-section case labels with the default section's bare label and the
+  `case null:` label, the branch-body inlining gate -- all branches to the target
+  block must sit in this switch container, FindClosestSwitchContainer checked per
+  branch -- the caseLabelMapping writes the VisitBranch goto-case arm consumes, the
+  default-only Leave-section removal, the remaining-blocks trailing labels with the
+  nested BlockStatement flattening, and the end-container label + break pair; the
+  breakTarget and caseLabelMapping save/restore wrap the whole translation), and
+  `ConvertSwitchSectionBody` (the converted body plus the EndPointUnreachable-gated
+  break insertion -- into the body block when the body converted to one, else as a
+  trailing section statement). The `VisitSwitchInstruction` arm dispatches over
+  TranslateSwitch with no switch container (the container-driven shape comes with
+  the VisitBlockContainer arm, still deferred). The IL-side surface landed with it:
+  the `StringToInt` node (the string-switch desugaring: the single Argument child,
+  the Map key->label list with the null-key `case null:` arm, the ExpectedType
+  governing type, the `string.to.int` dump render, the clone case),
+  `SwitchInstruction::GetDefaultSection` (the most-labels section IS the default),
+  `Branch::TargetContainer` (the computed container-owning-target-block property),
+  and `BlockContainer::FindClosestSwitchContainer` (the parent-chain walk for the
+  closest Switch-kind container). The shared expression-side entry landed beside
+  them: `ExpressionBuilder::TranslateSwitchValue` (the StringToInt arm with the
+  ExpectedType-or-string governing type, the I8/I4 governing-type validation over
+  the value's stack type, the small-integer range bail -- case values outside the
+  small governing type widen it to Int32 -- the context-aware ConvertTo, and the
+  C# governing-type compatibility double conversion through
+  `GetCSharpSwitchGoverningType`, the op_Implicit single-conversion lookup) over
+  the SwitchValueTranslation struct the C# tuple ports to. Verified by 14 new
+  `StatementBuilderTest` tests (the StringToInt node/clone/dump matrix,
+  GetDefaultSection, the computed TargetContainer, FindClosestSwitchContainer's
+  parent-chain walk, the four CreateTypedCaseLabel arms, the three
+  TranslateSwitchValue arms -- the StringToInt governing type, the I8 re-find, the
+  small-integer bail -- the null-container Visit render, and the two container
+  shapes: the section inlining + live-mapping goto case through a leftover block's
+  branch + the default-only-Leave removal), proven by a clean RED round (exactly the
+  Visit test failed through the Default fallback before the switch case was wired
+  while the 13 structural tests passed) then green; full suite 12327 ran / 12325
+  passed / the 2 standing skips / zero regressions, and all four CLI baselines
+  unchanged (--csharp mscorlib 10106366 bytes, --il whole-module byte-identical to
+  the 41246545-byte real-ilspycmd gold, -l c 109438, the --json usage check rc 64).
+- **`StatementBuilder` slice 6 -- the block-container region (the statement
+  finale)** -- the C# control-flow container translation (StatementBuilder.cs
+  lines 1280-1608): `VisitBlock` (the ControlFlow block as a BlockStatement over
+  its instructions plus the non-Nop final instruction; a non-ControlFlow kind
+  degrades to the Default fallback -- the foreach arm inside the loop is the
+  documented TransformToForeach deferral), `VisitBlockContainer` (the dispatch:
+  a non-Normal container whose entry point has multiple incoming edges converts
+  through ConvertLoop with the continue/break state saved and restored around it
+  and the container annotated directly alongside the WithILInstruction wrap;
+  an entry point holding a single SwitchInstruction drives TranslateSwitch with
+  the container; everything else converts through ConvertBlockContainer),
+  `ConvertLoop` (the four loop kinds: the while-true Loop shape with the
+  entry-point-label removal when every jump became a continue and the trailing
+  continue strip, the While condition-block shape with the reachability break,
+  the Skip/Except block walk and the not-continue entry label, the DoWhile
+  last-block condition shape with the two-jump entry-label removal and the
+  not-continue condition label, and the For shape with the increment-block
+  iterators and the increment label), `ConvertBlockContainer` (the wrapper with
+  the ref-readonly `ILSpyHelper_AsRefReadOnly` helper emission over
+  MethodDeclaration/TypeParameterDeclaration/ParameterDeclaration/ComposedType
+  for the EmitAsRefReadOnly gate -- the DeclareLocalFunctions call is the
+  documented TypeSystemAstBuilder.ConvertEntity deferral) and the worker (the
+  per-block labels for multi-edge or non-entry blocks, the final-leave skip with
+  the ImplicitReturnAnnotation, the nested BlockStatement flattening, the non-Nop
+  final instruction, and the end-container label with the loop's continue/break
+  pair), plus the static `IsFinalLeave` helper (the value-less leave that is the
+  container's last block's last instruction -- the function's implicit return).
+  The IL-side surface landed with it: the shared `MatchBranch` (both forms) /
+  `MatchLeave` (both forms) / `MatchIfInstruction` / `MatchNop` pattern matchers
+  in `PatternMatching.hpp` (the target forms take const pointers -- the
+  ReduceNestingTransform precedent: a plain pointer parameter is ambiguous with
+  the out-reference form for rvalue call sites under MSVC's rvalue-to-lvalue-ref
+  binding extension), `BlockContainer::MatchConditionBlock` /
+  `MatchIncrementBlock` (defined out-of-line in Block.cpp -- the matcher include
+  chain reaches BlockContainer.hpp through Branch.hpp, so in-class bodies would
+  recurse the include guards), and `AstNodeCollectionT::LastOrNull` (the
+  documented land-with-consumer collection member the trailing-continue removals
+  consume). Verified by 11 new `StatementBuilderTest` tests (the pattern-matcher
+  arms, the condition/increment block shapes, the VisitBlock render with the
+  non-ControlFlow degrade, the Normal container's labels + the skipped final
+  leave + the ImplicitReturnAnnotation, the switch entry point driving
+  TranslateSwitch, the four loop kinds end-to-end through Convert's dispatch,
+  and the end-container label), proven by a clean RED round (exactly the 9
+  Visit-driven tests failed through the Default fallback while the 2 pure
+  matcher tests passed) then green; full suite 12338 ran / 12336 passed / the 2
+  standing skips / zero regressions, and all four CLI baselines unchanged
+  (--csharp mscorlib 10106366 bytes, --il whole-module byte-identical to the
+  41246545-byte real-ilspycmd gold, -l c 109438, the --json usage check rc 64).
+- **`StatementBuilder` slice 7 -- the pinned-region arm (`fixed` statements)** --
+  the C# `VisitPinnedRegion` (`StatementBuilder.cs` lines 1201-1278) and its two
+  private static helpers landed: the `fixed` statement over the pinned variable
+  and its init expression -- the `GetPinnableReference` unwrap (the pinning
+  method's expected type for a static method, the declaring type for an instance
+  method, the bare trimmed argument when the method operand is null), the plain
+  init translated at the ref type (a pointer pinned variable retypes to a
+  by-reference), the `DirectionExpression` address-of surgery (`&*ptr` collapses
+  to `ptr`; otherwise the operand is re-wrapped in `&` with the pinned variable's
+  resolve result), and the `Unsafe.AsRef<T>` fallback for an init that is already
+  an unmanaged pointer (C# cannot pin one), plus `IsAddressOfMoveableVar` (the
+  `PointerArithmeticOffset.IsFixedVariable` gate over the address-of operand's IL
+  annotation) and `IsFixedSizeBuffer` (the `CSharpDecompiler.IsFixedField`
+  predicate over the init's member resolve result: the `FixedBufferAttribute`'s
+  `(type, length)` fixed arguments). The IL-side node `IL::GetPinnableReference`
+  landed with it (`cpp/Decompiler/IL/Instructions/GetPinnableReference.hpp`): the
+  `UnaryInstruction` over the pinning argument (ResultType `Ref`, no direct flags
+  -- the port's bottom-up `Flags()` already composes the argument's), the
+  optional resolved-method operand beside its display string (the `LdFtn`
+  precedent), the `get.pinnable.reference(<arg>)` dump with the optional method,
+  and the clone case. Verified by 4 new `StatementBuilderTest` tests (the node
+  shape/dump/clone, the `GetPinnableReference` `fixed` render with the variable
+  annotation and the converted body, the plain-ref address-of render, and the
+  helper rejections) -- the plain-ref test caught the `else`-nesting bug (the
+  C#'s `else` belongs to the `dirExpr.Expression is UnaryOperatorExpression`
+  test, not to the outer `is DirectionExpression` one) at runtime, then green;
+  full suite 12342 ran / 12340 passed / the 2 standing skips / zero regressions,
+  and all four CLI baselines unchanged (--csharp mscorlib 10106366 bytes, --il
+  whole-module byte-identical to the 41246545-byte real-ilspycmd gold, -l c
+  109438, the --json usage check rc 64).
+- **`StatementBuilder` slice 8 -- the using-statement arm** -- the C#
+  `VisitUsingInstruction` (`StatementBuilder.cs` lines 533-598) landed: the
+  resource expression translation, the `IsValidInCSharp` predicate (the
+  `MatchLdNull` resource, a ref-struct resource, or a resource whose underlying
+  type -- through `NullableType.GetUnderlyingType` and `GetAllBaseTypes` --
+  implements the known dispose interface: `IDisposable`, or `IAsyncDisposable`
+  for an `await using`), and the `UsingStatement` render -- the
+  `VariableDeclarationStatement` resource acquisition when the using variable is
+  loaded or address-taken (the anonymous-type `var` spelling under
+  `settings.AnonymousTypes`, else `ConvertType`, with the
+  `ILVariableResolveResult` annotation on the initializer), otherwise the bare
+  resource expression, and the converted body through `ConvertAsBlock`. The
+  `TransformToForeach` first arm stays the documented foreach-machinery deferral
+  (it answers null), and the not-valid-in-C# try/finally fallback is a loud
+  deferral named at `AssignVariableNames.GenerateVariableName` (the port's
+  simplified `AssignVariableNames` transform carries no scope/member-conflict
+  resolution). Verified by 4 new `StatementBuilderTest` tests (the declaration
+  resource with the annotation pin, the bare-resource render for an unused
+  variable, the `await using` async flag, and the invalid-resource deferral
+  throw), proven by a 2-behavior neuter RED round (the validity check forced
+  true + the async flag forced false: exactly the invalid-fallback and async
+  tests failed) then restored green; the full Debug suite is green and the CLI
+  baselines are unchanged.
+- **`ExpressionBuilder` VisitCall/VisitCallVirt dispatch + WrapInRef** -- the
+  C# `VisitCall` / `VisitCallVirt` (`ExpressionBuilder.cs` lines 2455-2462)
+  and the sibling `WrapInRef(TranslatedExpression, IType)` (lines 2464-2474)
+  landed, wiring the fully-ported `CallBuilder` into the expression dispatch
+  for the first time. The port's `Visit` OpCode switch now routes `Call` /
+  `CallVirt` / `NewObj` to `VisitCall` (the one-Call-node model: the reader
+  reuses `Call` for all three with the `IsNewObj` flag, and `CallBuilder.Build`
+  dispatches the newobj shape internally). `VisitCall` constructs a
+  `CallBuilder` over `this`, renders through `Build`, and wraps the result in
+  the by-reference `DirectionExpression` when the resolved method's return type
+  is a by-reference type; the new `WrapInRef` overload checks
+  `type.Kind() == TypeKind::ByReference`, builds the `ref <expr>` direction
+  expression, and attaches a `ByReferenceResolveResult` over the call's own
+  resolve result (the port's `ResolveResult` is not `enable_shared_from_this`,
+  so the existing file-local `AliasResolveResult` no-op-deleter alias is
+  reused). A call whose resolved `Method` is null (the port's `Call` carries an
+  optional method the reader has not wired; the C# assumes non-null) degrades
+  to the `Default` error expression instead of dereferencing null. Verified by
+  4 new `VisitCallDispatchTest` tests (the static-call route to
+  `CallBuilder.Build` over a `TransformFixture`, the `newobj` route to the
+  `ObjectCreateExpression`, the by-reference-return direction-expression wrap
+  with the `ByReferenceResolveResult` pin, and the null-method degradation),
+  proven by a dispatch neuter RED round (the three opcode cases routed to
+  `Default`: exactly the 3 routed tests failed) then restored green; full Debug
+  suite 12350 ran / 12348 passed / the 2 standing skips / zero failures (the
+  new 4 plus the restored `IsInstOverValueTypeWithImpureArgumentIsError`, whose
+  impure `Call` argument now takes the null-method degradation rather than the
+  old ErrorExpression fallthrough), and all four CLI baselines unchanged
+  (--csharp mscorlib 10106366 bytes, --il byte-identical to the 41246545-byte
+  real-ilspycmd gold, -l c 109438, --json-alone rc 64).
+- **`ExpressionBuilder` boxing/cast conversion arms** -- the C# `VisitUnboxAny`
+  / `VisitBox` / `VisitCastClass` (`ExpressionBuilder.cs` lines 3285-3358)
+  landed and are routed from the `Visit` OpCode switch (`unbox.any` / `box` /
+  `castclass`). `VisitUnboxAny` renders the
+  `unbox.any T(isinst T(expr))` shortcut over a nullable value type or a
+  reference type as `expr as T` with the `TryCast` conversion (through the
+  already-ported `IsUnboxAnyWithIsInst` + `UnwrapBoxingConversion`), else a
+  cast from object -- the type-parameter target goes through `ResolveCast`
+  with the `EffectiveBaseClass` fallback -- with the `UnboxingConversion`.
+  `VisitBox` prefers the `nint` / `nuint` target under `NativeIntegers`, then
+  casts the converted argument to object with the `BoxingConversion`.
+  `VisitCastClass` translates the argument and `ConvertTo`s the target type
+  (the resolver-driven explicit cast). The `Unbox` sibling landed next (see
+  the managed-pointer unboxing slice below); the `ExpressionTreeCast` /
+  `Arglist` / `MakeRefAny` / `RefAnyValue` siblings stay deferred, and the
+  reader creates no nodes for them. Verified by
+  4 new `ExpressionBuilderCastTest` tests (the unboxing cast, the
+  isinst-to-`as` shortcut with the `TryCast` pin, the boxing cast over a
+  constant with the object result, and the `castclass` explicit cast), proven
+  by a RED round where exactly those 4 tests failed through the `Default`
+  fallback before the dispatch cases were wired, then restored green; full
+  Debug suite 12354 ran / 12352 passed / the 2 standing skips / zero failures,
+  and the CLI baselines are structurally unchanged (the Phase-5 back end is
+  not yet wired into the `--csharp` CLI path).
+- **`ExpressionBuilder` managed-pointer unboxing arm + the dedicated `Unbox`
+  node** -- the C# `VisitUnbox` (`ExpressionBuilder.cs` lines 3322-3330) landed
+  and is routed from the `Visit` OpCode switch, and the reader no longer folds
+  the CIL `unbox T` opcode onto `UnboxAny`: a new `IL::Unbox` node
+  (`cpp/Decompiler/IL/Instructions/Unbox.hpp`) carries the C# Unbox shape --
+  `ResultType` is `StackType.Ref` (the managed pointer to the boxed data) and
+  `DirectFlags` is only `MayThrow` (unlike `UnboxAny`'s `SideEffect | MayThrow`),
+  with the `unbox(Type, arg)` dump spelling. The reader maps
+  `ILOpCode::Unbox` to `Unbox` and `ILOpCode::Unbox_any` to `UnboxAny` (the C#
+  `ILReader.cs` lines 1270-1273 split), and the clone case is wired. `VisitUnbox`
+  renders `ref (T)arg` -- a `DirectionExpression` over a `CastExpression` of the
+  boxed argument with the `UnboxingConversion`, whose resolve result is a
+  `ByReferenceResolveResult` (`ReferenceKind.Ref`). The seed `ILAstToCSharp`
+  renders `Unbox` like its `UnboxAny` sibling, so the `--csharp` output over
+  mscorlib is byte-identical at 10106366 bytes; the `--il` whole-module dump is
+  byte-identical to the 41246545-byte real-ilspycmd gold; `--ilast-all` now
+  shows the dedicated `unbox(System.IntPtr, ...)` node at the real `unbox`
+  sites. Verified by 2 new tests (the ref/cast/ByReference render shape and the
+  reader mapping producing an `Unbox` node) plus extended node-invariant
+  assertions; full Debug suite 12404 ran / 12402 passed / the 2 standing skips /
+  zero failures.
+- **`ExpressionBuilder` memory-access load/store arms** -- the C# `VisitLdObj`
+  / `VisitStObj` + the `StObjViaHelperCall` helper (`ExpressionBuilder.cs`
+  lines 2857-3125) landed and are routed from the `Visit` OpCode switch
+  (`ldobj` / `stobj`). `VisitLdObj` prefers the type hint when it is
+  compatible for the memory access (skipping the hint for a pointer hint when
+  the load type is used in the generic unaligned/ref-address shape), renders
+  an `unaligned.` prefix as `Unsafe.ReadUnaligned<T>(void*)` (or `(ref byte)`
+  when the address is a `DirectionExpression`), and otherwise dereferences
+  through the already-ported `LdObj` helper (which had no dispatch arm until
+  now). `VisitStObj` routes a `unaligned.` prefix or a non-ref target of a
+  managed type through `StObjViaHelperCall` (`Unsafe.WriteUnaligned<T>` /
+  `Unsafe.Write<T>`), else casts the pointer to the memory type, dereferences
+  it (stripping a `ref` or `&`), and renders the assignment -- including the
+  `ref (a = ref b)` re-assignment shape over a `ByReferenceResolveResult`. The
+  `LdObj` / `StObj` IL nodes gained the `ISupportsVolatilePrefix.IsVolatile` +
+  `ISupportsUnalignedPrefix.UnalignedPrefix` operands (rendered before the
+  opcode, the `Initblk`/`Cpblk` convention) with their clone cases. The
+  `LdFlda` / `LdsFlda` / `LdElema` siblings stay deferred (they need
+  `ConvertField`, `GetProperties`, and the indexer machinery). Verified by 10
+  new `ExpressionBuilderMemoryTest` tests (the pointer/ref load renders, the
+  unaligned `ReadUnaligned` with the type argument, the type-hint preference,
+  the pointer/ref store assignments, the `WriteUnaligned`/`Write` helper
+  routes, and the node prefix dump/clone), proven by a dispatch neuter RED
+  round (the two opcode cases removed: exactly the 8 visit tests failed while
+  the 2 dump/clone tests stayed green) then restored green; full Debug suite
+  12364 ran / 12362 passed / the 2 standing skips / zero failures, and the CLI
+  baselines are structurally unchanged (the Phase-5 back end is not yet wired
+  into the `--csharp` CLI path).
+- **`ExpressionBuilder` array-length arm (`VisitLdLen`)** -- the C# `VisitLdLen`
+  (`ExpressionBuilder.cs` lines 3088-3116) landed and is routed from the `Visit`
+  OpCode switch (`ldlen`). The array operand is translated against the
+  `System.Array` type hint, converting a non-array expression to `System.Array`
+  and applying `EnsureTargetNotNullable`; the load's `StackType` selects the
+  member name and result type (`I4` -> `Length`/`Int32`, every other stack type
+  -> `LongLength`/`Int64`). The property is looked up on `System.Array` and the
+  member access carries the `MemberResolveResult` (or a plain `Int32`/`Int64`
+  result when the type exposes no such property -- the MinimalCorlib fixture).
+  The `LdFlda` / `LdsFlda` siblings stay deferred (they need `ConvertField`
+  and the `TupleTransform.MatchTupleFieldAccess` helper). Verified by 3 new
+  `ExpressionBuilderLdLenTest` tests (the `I4` `Length` render, the `I8`
+  `LongLength` render, and the raw-`I` `LongLength` fallback), proven by a
+  dispatch neuter RED round (exactly those 3 tests failed through the `Default`
+  fallback) then restored green; full Debug suite 12367 ran / 12365 passed /
+  the 2 standing skips / zero failures, and the CLI baselines are structurally
+  unchanged (the Phase-5 back end is not yet wired into the `--csharp` CLI path).
+- **`ExpressionBuilder` array-element-address arm (`VisitLdElema`)** -- the C#
+  `VisitLdElema` (`ExpressionBuilder.cs` lines 3203-3229) landed and is routed
+  from the `Visit` OpCode switch (`ldelema`). The array operand is translated and,
+  when its type is not an array of the access type (`inst.Type`), converted to a
+  fresh `ArrayType` of the access type and the index count (the one-dimension
+  SZArray shape vs the multi-dimensional rank, the `VisitNewArr` convention).
+  Each index then goes through `TranslateArrayIndex`, or -- when the node's
+  `withsystemindex` prefix is set -- through a `System.Index`-hinted translate and
+  convert. The result is an `IndexerExpression` wrapped in a `ref`
+  `DirectionExpression` whose resolve result is a `ByReferenceResolveResult` over
+  the element type. The `LdElema` IL node gained the `WithSystemIndex` operand
+  (with the `withsystemindex.` dump prefix and the clone carry). Verified by 4
+  new `ExpressionBuilderLdElemaTest` tests (the plain ref-indexer render with the
+  element-type and annotation pins, the mismatched-element-type conversion, the
+  `withsystemindex` `System.Index` conversion, and the node dump/clone), proven
+  by a dispatch neuter RED round (exactly the 3 Visit tests failed through the
+  `Default` fallback while the node test passed) then restored green.
+- **`ExpressionBuilder` null-conditional arms (`VisitNullableRewrap` /
+  `VisitNullableUnwrap`)** -- the C# `VisitNullableRewrap` / `VisitNullableUnwrap`
+  (`ExpressionBuilder.cs` lines 4298-4321) landed and are routed from the `Visit`
+  OpCode switch (`nullable.rewrap` / `nullable.unwrap`). `VisitNullableRewrap`
+  translates the Argument and, when its type is a non-nullable value type, lifts
+  it into `Nullable<T>` via `NullableType.Create`, rendering a
+  `NullConditionalRewrap` `UnaryOperatorExpression` with a plain `ResolveResult`
+  of that type (a reference-type operand stays unlifted). `VisitNullableUnwrap`
+  translates the Argument and, for a `RefInput` (`!RefOutput`) argument rendered
+  as a ref `DirectionExpression`, strips the direction (the managed reference is
+  dereferenced by removing the `ref`), rendering a `NullConditional`
+  `UnaryOperatorExpression` whose resolve result is a plain `ResolveResult` of
+  `NullableType.GetUnderlyingType(arg.Type)`. The `NullableRewrap` /
+  `NullableUnwrap` IL nodes already existed (tested-but-not-wired); no node changes
+  were needed. Verified by 5 new `ExpressionBuilderNullableTest` tests (the
+  `Nullable<int>` lift, the unlifted reference type, the `Nullable<int>` unwrap
+  over the underlying `Int32`, the `RefInput` direction strip, and the node
+  dump/clone), proven by a clean RED round (exactly the 4 Visit tests failed
+  through the `Default` fallback while the node test passed) then restored green;
+  full Debug suite 12376 ran / 12374 passed / the 2 standing skips / zero failures,
+  and the CLI baselines are structurally unchanged (the Phase-5 back end is not yet
+  wired into the `--csharp` CLI path).
+- **`ExpressionBuilder` null-coalescing arm
+  (`VisitNullCoalescingInstruction`)** -- the C#
+  `VisitNullCoalescingInstruction` (`ExpressionBuilder.cs` lines 3912-3953) landed
+  and is routed from the `Visit` OpCode switch. Both operands are translated and
+  the fallback is constant-adjusted to the value's type; the resolver's
+  `ResolveBinaryOperator(NullCoalescing, ...)` result becomes the resolve result
+  when it succeeds. On an error the target type is recovered -- a `throw` fallback
+  over `NoType` uses `NullableType.GetUnderlyingType(value.Type)`, two differing
+  non-null-literal types fall back to `inst.UnderlyingResultType`, else the
+  non-null operand's type -- and the operands are converted (a `Nullable<T>` wrap
+  of the value for the non-`Ref` kinds, plus a second nullable wrap of the value
+  for the `Nullable` kind, else the fallback to the target type) before a fresh
+  `ResolveResult` replaces the error. The render is a `BinaryOperatorExpression`
+  with the `NullCoalescing` operator. The `NullCoalescingInstruction` IL node
+  already existed (and was already dump/clone-tested); no node changes were needed.
+  Verified by 4 new `ExpressionBuilderNullCoalescingTest` tests (the `Ref` string
+  render, the `Nullable` kind keeping its nullable result, the
+  `NullableWithValueFallback` int recovery, and the throw-over-`NoType` underlying-
+  type recovery), proven by a clean dispatch-neuter RED round (all 4 failed through
+  the `Default` fallback) then restored green; full Debug suite 12380 ran / 12378
+  passed / the 2 standing skips / zero failures, and the CLI baselines are
+  structurally unchanged (the Phase-5 back end is not yet wired into the
+  `--csharp` CLI path).
+- **`ExpressionBuilder` address-of arm (`VisitAddressOf`) + the
+  `ILInlining.ClassifyExpression` helper** -- the C# `VisitAddressOf`
+  (`ExpressionBuilder.cs` lines 4231-4266) landed and is routed from the `Visit`
+  OpCode switch, enabled by porting the `ILInlining.ClassifyExpression` /
+  `IsReadonlyReference` helpers (`ILInlining.cs` lines 557-645) it consults. The
+  wrapped value is classified, translated with the address's type as hint, and
+  converted to the address type; when the classification is a mutable lvalue
+  whose ldflda chain does not end under an `ldobj` (the C# local `CanIgnoreCopy`)
+  and the value is not already a cast, a redundant `CastExpression` with an
+  identity `ConversionResolveResult` is inserted so the C# compiler also copies
+  the value. The render is a `ref` `DirectionExpression` carrying a
+  `ByReferenceResolveResult` over the value's resolve result. Alongside,
+  `ILVariable` gained the C# `IsRefReadOnly` field (the ref-readonly local
+  classification), `LdFlda`/`LdsFlda` gained `FieldIsReadOnly` (populated by the
+  IL reader from the field's `FieldAttributes.InitOnly` bit; the clone cases carry
+  it), and `ExpressionClassification` (RValue/MutableLValue/ReadonlyLValue) landed
+  with `ClassifyExpression`. Verified by 9 new tests -- 4
+  `ExpressionBuilderAddressOfTest` (the mutable-local cast + ref direction + IL
+  annotation, the readonly-local no-cast, the constant-rvalue no-cast, and the
+  `ldobj`-parent `CanIgnoreCopy` no-cast) and 5
+  `ILInliningClassifyExpressionTest` (the local-kind matrix, the
+  readonly/mutable field load/store matrix, the array-call mutable vs plain-call
+  rvalue, the default rvalue, and the `IsReadonlyReference` arms); full Debug suite
+  12389 ran / 12387 passed / the 2 standing skips / zero failures, and all four
+  CLI baselines unchanged (`--csharp` mscorlib 10106366 bytes, `--il` whole-module
+  byte-identical to the 41246545-byte gold, `-l c` 109438, `--json` with input rc
+  64). The `IsReadonlyReference` default arm (a field's ref-readonly return type
+  via `MatchLdFld`) stays deferred with the port's `IField` surface.
+- **`ExpressionBuilder` ref-any-type arm (`VisitRefAnyType`)** -- the C#
+  `VisitRefAnyType` (`ExpressionBuilder.cs` lines 3386-3394) landed and is
+  routed from the `Visit` OpCode switch (the `refanytype` opcode, which the IL
+  reader decodes into the pre-existing `RefAnyType` node). The render is
+  `__reftype(typedReference).TypeHandle`: the translated argument becomes the
+  sole argument of a `RefType` `UndocumentedExpression`, wrapped in a
+  `MemberReferenceExpression` whose resolve result is a `TypeResolveResult` for
+  `System.RuntimeTypeHandle` (resolved through the modules-scan `FindType`
+  extension, the `VisitLdTypeToken` precedent); the IL annotation sits on the
+  member reference. Verified by 1 new `ExpressionBuilderRefAnyTypeTest` test
+  (the `TypeHandle` member over the `RefType` undocumented expression with the
+  translated local argument, the `refanytype` IL annotation, and the
+  `TypeResolveResult`), proven with a dispatch-removal RED round; full Debug
+  suite 12390 ran / 12388 passed / the 2 standing skips / zero failures. The
+  sibling `__makeref`/`__refvalue` arms stay deferred because the IL reader
+  models `mkrefany` as a degenerate `LdTypeToken` (no `MakeRefAny` node) and no
+  `RefAnyValue` node exists.
+- **`ExpressionBuilder` if-expression arm (`VisitIfInstruction`)** -- the C#
+  `VisitIfInstruction` (`ExpressionBuilder.cs` lines 3956-4049) landed and is
+  routed from the `Visit` OpCode switch: the short-circuit `&&`/`||` shapes (an
+  if whose unused arm is the 0/1 constant), gated on the rhs being boolean or
+  the if sitting in a condition slot via the new
+  `IfInstruction::IsInConditionSlot` predicate, render as the binary conditional
+  operators; otherwise the arms are translated as the two branches of a `?:`
+  conditional, their types united through `ResolveConditional` (with the
+  `GetBestCommonType` / ResultType-directed target-type recovery on resolver
+  error) and the result re-wrapped in a ref direction expression when the
+  conditional produces a by-reference value. The two matchers
+  `IL::MatchLogicAnd` / `IL::MatchLogicOr` (`PatternMatching.cs` lines 287-319)
+  landed in `PatternMatching.hpp`. Verified by 7 new tests
+  (`IfInstructionConditionSlotTest` + `ExpressionBuilderIfInstructionTest`): the
+  condition-slot predicate matrix (the 0-comparison's non-constant operand, the
+  root if's condition vs arms, the nested chain) and the four render shapes
+  (plain `?:`, boolean `&&`, boolean `||`, the non-boolean logic-and fallback
+  and the null-false-arm Nop error). Full Debug suite 12397 ran / 12395 passed /
+  the 2 standing skips / zero failures; the CLI baselines unchanged (`--csharp`
+  mscorlib 10106366 bytes, `-l c` 109438 chars, the `--json`-without-`--dump-table`
+  usage check rc 64). The `VisitSwitchInstruction` arm stays deferred; the
+  by-reference conditional-target arm of the render is implemented but has no
+  fixture yet.
+- **`ExpressionBuilder` switch-expression arm (`VisitSwitchInstruction`)** -- the
+  C# `VisitSwitchInstruction` (`ExpressionBuilder.cs` lines 4176-4229) landed
+  and is routed from the `Visit` OpCode switch: the governing value through
+  `TranslateSwitchValue(inst, true)` (expression context -- no implicit
+  conversions), the result type taken from a matching type hint or the
+  instruction's stack type, the non-default sections rendering as arms (the
+  `null` pattern for a `HasNullLabel` section, the typed case constant from
+  `StatementBuilder::CreateTypedCaseLabel` for a labelled one), and the `_`
+  default arm unless the section is compiler-generated. The `SwitchInstruction`
+  node gained the C# `SetResultType` / `ResultType` pair (default `Void`, the
+  switch-expression result once the transform shapes a body) and the
+  `SwitchSection.IsCompilerGeneratedDefaultSection` flag with its `generated.`
+  dump prefix; both are carried through `ILInstructionClone`. Verified by 5 new
+  tests (the node result-type/clone, the arms-plus-`_`-default render, the
+  skipped compiler-generated default, the null label, the matching type hint)
+  with a dispatch-neuter RED round where exactly the 4 Visit tests failed while
+  the node test and the pre-existing `TranslateSwitch` statement test stayed
+  green. Full Debug suite 12402 ran / 12400 passed / the 2 standing skips / zero
+  failures. The switch-expression transform that synthesizes these nodes
+  (`ExpressionTransforms.HandleSwitchExpression`) stays deferred.
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
@@ -4349,6 +4646,1655 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   jumps (needs DetectExitPoints + HighLevelLoopTransform), full type names
   (no `using` directives), and overload-resolved casts -- these land as the
   Phase 5 C# AST + resolver back end (above) is wired in to replace the seed.
+- **`ExpressionBuilder` static field-address arm (`VisitLdsFlda` + `ConvertField` /
+  `RequiresQualifier`)** -- the C# `VisitLdsFlda` (`ExpressionBuilder.cs` lines
+  3196-3201) landed and is routed from the `Visit` OpCode switch (`ldsflda`),
+  enabled by the C# `ConvertField` (lines 302-398) and its `RequiresQualifier`
+  helper (lines 293-301). `ConvertField` translates the target (the static
+  type-reference arm for `ldsflda`), decides whether the member reference needs
+  an explicit qualifier (the `AlwaysQualifyMemberReferences` / variable-shadowing
+  gates, the static-member current-or-containing-type check, and the
+  instance-member this/base receiver check), runs the ambiguous-access retry loop
+  (the `ResolveSimpleName` or `MemberLookup::Lookup` probe, the `requireTarget`
+  flip, and the declaring-type cast), builds the `MemberResolveResult` over the
+  target, renders a `MemberReferenceExpression` or `IdentifierExpression`, and
+  wraps a by-reference-typed field in a `ref` `DirectionExpression`. The
+  `LdsFlda` / `LdFlda` IL nodes gained the C# `public readonly IField Field`
+  shared handle (populated by tests/transforms under the `Call::Method`
+  convention -- the port's IL reader only records the raw token/name/deferred
+  metadata, so `VisitLdsFlda` degrades an unresolved field to the `Default`
+  error expression rather than dereferencing null, preserving the previous
+  behaviour); the clone cases carry it. The `ConvertField` automatic-event and
+  automatic-property backing-field special cases and the `LdFlda` arm with its
+  `TupleTransform.MatchTupleFieldAccess` / `CSharpDecompiler.IsFixedField`
+  branches stay deferred. Verified by 5 new `ExpressionBuilderFieldTest` tests
+  (the static member-reference render with the `MemberResolveResult` pin, the
+  by-reference field's ref-direction wrap, the routed `ldsflda` render with the
+  inner-expression IL-annotation pin, the unresolved-field `Default` error, and
+  the clone field carry), proven with a `ConvertField`-neuter RED round (exactly
+  the 3 `ConvertField`-dependent tests failed while the other 2 stayed green)
+  then restored green; full Debug suite 12409 ran / 12407 passed / the 2 standing
+  skips / zero failures, and the CLI baselines are structurally unchanged (the
+  Phase-5 back end is not yet wired into the `--csharp` CLI path).
+- **`ExpressionBuilder` instance field-address arm (`VisitLdFlda` + `TupleTransform`
+  + `CSharpDecompiler.IsFixedField`)** -- the C# `VisitLdFlda` (`ExpressionBuilder.cs`
+  lines 3118-3194) landed and is routed from the `Visit` OpCode switch (`ldflda`),
+  completing the `ldflda`/`ldsflda` pair. The fixed-buffer arm rewrites
+  `ldflda FixedElementField(ldflda target)` into a pointer-typed field access
+  (through the `ConvertField` render), converting to a by-reference when the
+  result feeds a `PinnedRegion.Init` or a `conv.u`, else rendering the movable-safe
+  `ref target.field[0]` indexer; the tuple arm renders `target.ItemN` (or the
+  tuple's declared element name) with the tuple's own element type when the target
+  type erasure-matches the underlying tuple; otherwise the base `ConvertField`
+  render is wrapped in a `ref` `DirectionExpression` (or an `&`
+  `UnaryOperatorExpression` for a native-pointer result). The two new helpers are
+  `TupleTransform::MatchTupleFieldAccess` (the `Item<N>` parse plus the `Rest`
+  chain unwrap, `TupleTransform.cs` lines 36-64) and `CSharp::IsFixedField`
+  (`CSharpDecompiler.cs` line 2522, the `[FixedBuffer(typeof(T), N)]` decode; the
+  sliced `CSharpDecompiler.hpp` is the future home of the class's static helpers).
+  `MemberResolveResult` gained the `TargetResultHandle()` shared-ownership accessor
+  so the rebuilt pointer-typed result can share the target (the port's `shared_ptr`
+  stand-in for the C# GC reference). Verified by 5 new `ExpressionBuilderFieldTest`
+  tests (the `IsFixedField` decode and miss, the `Item`/`Rest` match and non-Item
+  rejection, the named tuple-element member reference with its inner
+  `MemberResolveResult` pin, the unresolved-field `Default` error, and the
+  fixed-buffer indexer render), with a RED round (a use-after-free in the
+  fixed-buffer arm -- `mrr` is owned by the annotation the C# code removes --
+  caught by the SEH crash and fixed by capturing the target handle/member first,
+  plus the tuple test reading the outer by-reference result instead of the inner
+  member reference) then restored green; full Debug suite 12414 ran / 12411 passed
+  / the 2 standing skips / 1 pre-existing flaky `SyntheticWpfModuleTest` failure
+  (a stale-pointer comparison that fails ~1 in 5 in isolation on the unmodified
+  test), and the CLI baselines are unchanged (the Phase-5 back end is not yet
+  wired into the `--csharp` CLI path).
+- **`ExpressionBuilder` arglist arm (`VisitArglist`) + the dedicated `IL::Arglist`
+  node** -- the C# `VisitArglist` (`ExpressionBuilder.cs` lines 3274-3280) landed
+  and is routed from the `Visit` OpCode switch (`arglist`). The arm renders the
+  `ArgListAccess` `UndocumentedExpression` (`__arglist`) with a `TypeResolveResult`
+  over `System.RuntimeArgumentHandle` (the `VisitRefAnyType` / `VisitLdTypeToken`
+  modules-scan `FindType` precedent). The dedicated node (`Arglist`, a
+  `SimpleInstruction`: no children, result `StackType.O`, `DirectFlags` None) is
+  faithful to the C# generated `Arglist` in `Instructions.cs`; the IL reader's
+  `ILOpCode::Arglist` arm no longer collapses the opcode onto a degenerate
+  `LdTypeToken("arglist")` and pushes the real node instead (`ILReader.cs` line
+  821). The clone case and the seed `ILAstToCSharp` render (`__arglist`, replacing
+  the bogus `typeof(arglist)`) are wired. Verified by 3 tests -- the node
+  dump/result/flag assertions in `ILAstInstructions.SimpleInstructions`, the
+  reader split (`ReadIL.ArglistDecodesToDedicatedNode` over mscorlib's vararg
+  `String::Concat`, the only `arglist` site), and the render
+  (`ExpressionBuilderArglistTest`, the UndocumentedExpression kind, the empty
+  argument list, the IL annotation, the `TypeResolveResult`) -- with a
+  dispatch-neuter RED round where only the render test failed through `Default`
+  and the reader/node tests stayed green; full Debug suite 12416 ran / 12414
+  passed / the 2 standing skips / zero failures, `--il` byte-identical to the
+  41246545-byte gold, `-l c` 109438, `--json`-alone rc 64, and the `--csharp`
+  mscorlib baseline dropped from 10106366 to 10106348 bytes because the three
+  real `arglist` sites now render `__arglist` (9 chars) instead of
+  `typeof(arglist)` (15).
+- **`ExpressionBuilder` user-defined-logic arm
+  (`VisitUserDefinedLogicOperator`)** -- the C# `VisitUserDefinedLogicOperator`
+  (`ExpressionBuilder.cs` lines 1233-1257) landed and is routed from the `Visit`
+  OpCode switch. Both operands are translated with the operator method's parameter
+  types as hints and converted to those types, the `&&`/`||` operator is derived
+  from the method name (`op_BitwiseAnd`/`op_BitwiseOr`), and the render is a
+  `BinaryOperatorExpression` carrying an `InvocationResolveResult` over the
+  method. The `UserDefinedLogicOperator` node gained the C# `public readonly
+  IMethod Method` operand (the `UserDefinedCompoundAssign` precedent), populated
+  by the already-ported `UserDefinedLogicTransform` from the folded call's method
+  and carried through the clone case; the seed string-stand-in construction form
+  stays for nodes without a resolved method, and `InferType` now returns
+  `Method.ReturnType` for a resolved node. Verified by 4
+  `ExpressionBuilderUserDefinedLogicOperatorTest` tests (the op_BitwiseAnd
+  `&&`/op_BitwiseOr `||` renders with the InvocationResolveResult and IL-annotation
+  pins, the invalid-method-name `invalid_argument`, and the no-method
+  `logic_error`); full Debug suite 12420 ran / 12418 passed / the 2 standing
+  skips / zero failures, and all four CLI baselines unchanged (`--csharp` mscorlib
+  10106348 bytes, `--il` whole-module byte-identical to the 41246545-byte gold,
+  `-l c` 109438, the `--json`-alone usage check rc 64).
+- **`ExpressionBuilder` `is`-pattern arm (`VisitMatchInstruction` +
+  `TranslatePattern` + `PatternMatching.MatchAddressOf`/`MatchLdFld`)** -- the C#
+  `VisitMatchInstruction` (`ExpressionBuilder.cs` lines 4989-5005) and its
+  `TranslatePattern` helper (lines 5007-5118) landed and are routed from the
+  `Visit` OpCode switch. `VisitMatchInstruction` translates the tested operand,
+  unwraps a boxing cast the pattern does not need (the value-type-pattern
+  condition), and emits a `BinaryOperatorExpression` with the `IsPattern` operator
+  carrying a boolean `ResolveResult`. `TranslatePattern` renders a
+  `MatchInstruction` as a recursive pattern (`RecursivePatternExpression`, with the
+  sub-patterns' `NamedArgumentExpression`s resolved through the accessor's
+  `AccessorOwner` / an `ldfld` chain and the designator as a
+  `SingleVariableDesignation` carrying the `ILVariableResolveResult`), a
+  declaration pattern (`DeclarationExpression`, `T x`/`var x`), or a bare type test
+  (`TypeReferenceExpression`); a `Comp` becomes the constant/relational pattern
+  (the `PatternNot`/`PatternRelational*` `UnaryOperatorExpression` forms); and a
+  string/decimal `op_Equality` call becomes the constant value. The
+  deconstruct-pattern guards throw `NotImplementedException` in the C# but the
+  port's `MatchInstruction` node carries no deconstruct flags, so those arms
+  cannot arise. `MatchInstruction.IsCallToOpEquality` was added (the C#
+  `internal static` helper), and `PatternMatching.hpp` gained `MatchAddressOf`
+  and `MatchLdFld` (the `ldobj`-over-`ldflda` field-load matcher). Verified by 9
+  `ExpressionBuilderMatchInstructionTest` tests (the declaration/pure-type/var/
+  null-check/recursive-sub-pattern renders, the relational `Comp` render, the
+  unsupported-pattern `logic_error`, the boxing unwrap, and the node dump/clone),
+  with a dispatch-neuter RED round where exactly the 6 `Translate`-driven tests
+  failed through the `Default` fallback while the 3 direct/node tests stayed green;
+  full Debug suite 12429 ran / 12427 passed / the 2 standing skips / zero failures,
+  and all four CLI baselines unchanged (`--csharp` mscorlib 10106348 bytes, `--il`
+  whole-module byte-identical to the 41246545-byte gold, `-l c` 109438, the
+  `--json`-alone usage check rc 64).
+- **`ExpressionBuilder` typed-reference arms (`VisitMakeRefAny` +
+  `VisitRefAnyValue` + the `MakeRefAny`/`RefAnyValue` IL nodes)** -- the C#
+  `VisitMakeRefAny` (`ExpressionBuilder.cs` lines 3371-3384) and `VisitRefAnyValue`
+  (lines 3396-3404) landed and are routed from the `Visit` OpCode switch, and the
+  reader no longer collapses `mkrefany` onto `LdTypeToken`. A new
+  `TypedReferenceInstructions.hpp` carries the two `UnaryInstruction` nodes beside
+  `RefAnyType`: `MakeRefAny` (type + argument, result `O`, no direct flags) and
+  `RefAnyValue` (type + argument, result `Ref`, `MayThrow`), each with its
+  `ILInstructionClone` case, its `ILAstToCSharp` seed render (`__makeref(arg)`,
+  `__refvalue(arg, T)`), and its `ILReader` mapping (`mkrefany`/`refanyval` with the
+  resolved type token). `VisitMakeRefAny` renders the argument (a `DirectionExpression`
+  is stripped to its inner expression) as the single argument of a `MakeRef`
+  `UndocumentedExpression` with a System.TypedReference `TypeResolveResult`;
+  `VisitRefAnyValue` renders a `RefValue` `UndocumentedExpression` over the translated
+  argument and a `TypeReferenceExpression` for the node's type, wrapped in a ref
+  `DirectionExpression` with a `ByReferenceResolveResult` (the port's unresolved-token
+  null type degrades to the error expression). Verified by 6 tests (the two
+  `MakeRefAny` renders incl. the direction strip, the two `RefAnyValue` shapes, the
+  node flags/dump/clone, and the real-mscorlib `ReadIL.MkrefanyDecodesToDedicatedNode`
+  over `System.Threading.Interlocked::_Exchange`), with a dispatch-neuter RED round
+  where exactly the 3 `Translate`-driven tests failed through the `Default` fallback
+  (the null-type test returns the error expression on either path); full Debug suite
+  12435 ran /
+  12433 passed / the 2 standing skips / zero failures. The `--il` whole-module output
+  is byte-identical to the 41246545-byte gold, `-l c` is 109438, and `--json` with an
+  assembly still returns rc 64; `--csharp` mscorlib is now 10106360 bytes, +12 over
+  the prior 10106348 because the four decoded `mkrefany` sites render the correct
+  `__makeref(...)` instead of the old token stand-in `typeof(0x1B0000F9)`.
+- **`ExpressionBuilder` invalid-IL arms (`VisitInvalidBranch` +
+  `VisitInvalidExpression` + the `InvalidBranch`/`InvalidExpression` IL nodes)** --
+  the last two `ExpressionBuilder.cs` Visit overrides (lines 5121-5146) landed and
+  are routed from the `Visit` OpCode switch. A new `InvalidInstructions.hpp`
+  carries the two `SimpleInstruction` leaves: `InvalidBranch` (Message,
+  `ExpectedResultType` default `Void`, `DirectFlags = MayThrow | SideEffect |
+  EndPointUnreachable`) and `InvalidExpression` (Severity default `"Error"`,
+  Message, `ExpectedResultType` default `Unknown`, `DirectFlags = MayThrow |
+  SideEffect`), each with its dump (`InvalidBranch`/`InvalidBranch("msg")`), its
+  `ILInstructionClone` case, and the `OpCodeName` entries already in place.
+  `VisitInvalidBranch` renders the `ErrorExpression` text `Error[ near IL_xxxx][:
+  message]`; `VisitInvalidExpression` is identical with the node's Severity as the
+  prefix. Verified by 6 tests (the node flags/dump matrix, the clone scalar
+  carry, and four exact error-text renders incl. the lowercase-hex non-zero offset
+  and the Severity prefix), and the full Debug suite is green at 12440 ran / 12438
+  passed / the 2 standing skips / zero failures. The nodes are not yet synthesized
+  by the port's minimal reader/BlockBuilder (which keep their documented graceful
+  degradations), so the CLI baselines are unchanged: `--il` is byte-identical to
+  the 41246545-byte gold and `--csharp` mscorlib is still 10106360 bytes.
+- **AST-transform layer foundation (`IAstTransform` + `TransformContext`) and the
+  `EscapeInvalidIdentifiers` transform** -- the C# AST-transform contract and its
+  per-pass state bag landed, the named deferral the two earlier transforms
+  (`AddCheckedBlocks`/`ReplaceMethodCallsWithOperators`) documented. `IAstTransform`
+  (`Transforms/IAstTransform.hpp`) is the C# `void Run(AstNode, TransformContext)`
+  contract over the port's `Syntax::AstNode&` / `TransformContext&`.
+  `TransformContext` (`Transforms/TransformContext.hpp`) carries the C# read
+  surface: the type system (the port's narrower `ICompilation&` -- the C#
+  `IDecompilerTypeSystem` has no ported counterpart and every consumer only reads
+  `FindType`/`MainModule`/`RootNamespace`), the shared `TypeSystemAstBuilder`, the
+  `DecompileRun` (`Settings` plus the `RequiredNamespacesSuperset` copy), the
+  position accessors (`CurrentMember`/`CurrentTypeDefinition`/`CurrentModule`
+  delegating to the `ITypeResolveContext`), and the `[Conditional("STEP")]`
+  debug-step methods as no-ops (they compile out of a normal C# build). The first
+  concrete pass, `EscapeInvalidIdentifiers` (`Transforms/EscapeInvalidIdentifiers.*`),
+  walks every `Identifier` descendant and rewrites names whose UTF-16 units are not
+  letters/digits/underscore, escaping each invalid unit as its uppercase-hex
+  `_XXXX` and prefixing `_` on a leading non-letter (the `Util::IsLetterOrDigit`
+  probe table over `Util::Utf8ToUtf16`). Verified by 5 tests (the context's
+  compilation/run/position read surface, the `RequiredNamespacesSuperset`
+  empty-to-populated transition, the `IsValid`/`ReplaceInvalid` escape matrix incl.
+  the leading-digit guard and the non-ASCII `_00A9` arm, and an in-place tree
+  rewrite), and the full Debug suite is 12445 ran / 12442 passed / the 2 standing
+  skips / the one pre-existing flaky `SyntheticWpfModuleTest` failure (passes in
+  isolation). The CLI baselines are unchanged (the new transform is not wired into
+  the seed `--csharp` path): `-l c` is 109438 and `--il`/`--csharp` mscorlib are
+  unaffected.
+- **`RemoveCLSCompliantAttribute` project-export transform** -- the second concrete
+  `IAstTransform`, ported per `PORT_PLAN.md`'s Phase 5 and following
+  `EscapeInvalidIdentifiers` in the `WholeProjectDecompiler` project-export order. The
+  transform (`Transforms/RemoveCLSCompliantAttribute.{hpp,cpp}`) walks the DIRECT
+  `AttributeSection` children of the tree root, skips the `assembly`-targeted sections
+  (the assembly identity is emitted by the project file, not `AssemblyInfo.cs`), removes
+  every attribute whose `Type` node's `TypeResolveResult` annotation resolves to
+  `System.CLSCompliantAttribute`, and drops a section left empty. The resolved type's
+  full name is read through the definition's `FullName` (the port's `IType` does not yet
+  carry the `AbstractType.FullName` property) with `ReflectionName()` as the fallback for
+  an unresolved type; the two coincide for the top-level, non-generic attribute types the
+  transform matches. Removals happen during the walk through the mutation-tolerant
+  `ChildEnumerator`, so the empty-section cleanup and the `assembly` skip compose in one
+  pass. Verified by 6 tests (the attribute-and-empty-section removal, the assembly-target
+  skip, the mixed-section partial removal, the unannotated-type keep, the module-target
+  removal, and a same-simple-name-different-namespace keep), and the full Debug suite is
+  12451 ran / 12449 passed / the 2 standing skips / zero failures. The CLI baselines are
+  unchanged (the transform is not wired into the seed `--csharp` path).
+- **`RemoveCompilerGeneratedAssemblyAttributes` project-export transform** -- the third
+  concrete `IAstTransform`, ported per `PORT_PLAN.md`'s Phase 5 and following
+  `RemoveCLSCompliantAttribute` in the `WholeProjectDecompiler` project-export order. The
+  transform (`Transforms/RemoveCompilerGeneratedAssemblyAttributes.{hpp,cpp}`) walks the
+  DIRECT `AttributeSection` children of the tree root and inspects only the `assembly`- and
+  `module`-targeted sections. The `assembly` arm drops `DebuggableAttribute` and
+  `TargetFrameworkAttribute` unconditionally, `CompilationRelaxationsAttribute` only for
+  the single literal `8`, `RuntimeCompatibilityAttribute` only for
+  `WrapNonExceptionThrows = true`, and `SecurityPermissionAttribute` only for
+  `SecurityAction.RequestMinimum, SkipVerification = true`; the `module` arm drops
+  `UnverifiableCodeAttribute` and `RefSafetyRulesAttribute`. A section emptied by the
+  removals is dropped; any other target reaches the C# `continue` and is never cleaned.
+  The argument guards read the ported `PrimitiveExpression`/`NamedExpression`/
+  `MemberReferenceExpression` (the C# `object Value` ports as the `PrimitiveValue` variant,
+  so the `is int`/`is bool` tests use `std::get_if<std::int32_t>`/`std::get_if<bool>`) and
+  the `MemberReferenceExpression.NextSibling` navigation. Verified by 16 tests (the
+  `assembly` name-and-argument guard matrix, the `module` removals, the non-assembly/module
+  target skip, the unannotated keep, the mixed-section partial removal, and a
+  same-simple-name-different-namespace keep) proven with a Run-neuter RED round (8 removal
+  tests failed, then all 16 green after restore), and the full Debug suite is 12467 ran /
+  12465 passed / the 2 standing skips / zero failures. The CLI baselines are unchanged (the
+  transform is not wired into the seed `--csharp` path).
+- **`FlattenSwitchBlocks` AST transform** -- the fourth concrete `IAstTransform` over the
+  iteration-160 `TransformContext` foundation, ported per `PORT_PLAN.md`'s Phase 5 from the
+  `CSharpDecompiler.GetAstTransforms()` order (after `NormalizeBlockStatements`). The
+  transform (`Transforms/FlattenSwitchBlocks.{hpp,cpp}`) walks every `SwitchSection`
+  descendant; when a section has exactly one statement and that statement is a
+  `BlockStatement` carrying no local declaration, it removes the block and `MoveTo`s its
+  statements up into the section (the `case x: { ... }` braces elided). The local-declaration
+  guard (`ContainsLocalDeclaration`) returns true for a `VariableDeclarationStatement`,
+  `LocalFunctionDeclarationStatement`, or `OutVarDeclarationExpression` and recurses into
+  children, but stops at a nested `BlockStatement` (whose own scope keeps the declaration
+  valid), so only declarations that the flatten would hoist out of their scope suppress it.
+  The port's `Descendants()` returns a materialized vector, so reparenting during the walk
+  cannot disturb the iteration -- stricter than the C# lazy LINQ sequence and behaviourally
+  equivalent for this transform. Verified by 8 tests (the single-block flatten with node
+  identity and order, the multiple-statement / non-block-single-statement keeps, the three
+  declaration guards, the nested-declaration-block flatten, and two sections processed
+  independently) proven with a Run-neuter RED round (exactly the 3 flatten tests failed,
+  then all 8 green after restore), and the full Debug suite is 12475 ran / 12473 passed /
+  the 2 standing skips / zero failures; the `-l c` CLI baseline is unchanged at 109438 (the
+  transform is not wired into the seed `--csharp` path).
+- **`NormalizeBlockStatements` AST transform** -- the fifth concrete `IAstTransform` over the
+  iteration-160 `TransformContext` foundation, ported per `PORT_PLAN.md`'s Phase 5 from the
+  `CSharpDecompiler.GetAstTransforms()` order (the transform directly before
+  `FlattenSwitchBlocks`). The transform (`Transforms/NormalizeBlockStatements.{hpp,cpp}`) is a
+  `DepthFirstAstVisitor` that normalizes embedded-statement braces: an `if`/`using` arm goes
+  through `DoTransform` (with `AlwaysUseBraces` on, every non-`else` arm is wrapped in a
+  block; otherwise a single-statement block is unwrapped when its inner statement is legal as
+  an embedded statement, and an illegal arm is wrapped), while the loop/`fixed`/`lock` bodies
+  are always wrapped via `InsertBlock` (an existing block is kept). `IsAllowedAsEmbeddedStatement`
+  rejects a variable declaration and every loop/switch/lock/fixed kind, permits an `else`-if
+  and a non-enhanced `using` in the matching parent position, and otherwise rejects a
+  statement whose parent is itself an `if` arm (the dangling-else guard). A childless `;` body
+  is dropped and the new block stays empty. The transform also marks the first-seen single
+  namespace file-scoped when `FileScopedNamespaces` is on and rewrites a calculated
+  getter-only property/indexer to an expression body when
+  `UseExpressionBodyForCalculatedGetterOnlyProperties` is on. Divergence: the C# matches the
+  getter with the generated `CalculatedGetterOnlyPropertyPattern`/`...IndexerPattern`, but the
+  concrete pattern nodes (`AnyNode`/`Repeat`/`AnyNodeOrNull`) are not ported yet, so the port
+  recognizes the same shape with direct structural checks (a present getter whose body is a
+  single `return <expr>;` block, no accessor modifier beyond `readonly`). Verified by 23 tests
+  (the legal-bare keep, the redundant-block unwrap, the loop/`do`/`lock` wraps, the empty-body
+  drop, the variable-declaration and nested-if wraps, the dangling-else else-arm wrap, the
+  `AlwaysUseBraces` true/else matrix, the `using` unwrap/keep pair, the file-scoped
+  single/off/multiple matrix, and the property/indexer simplify/keep matrix) proven with a
+  Run-neuter RED round (14 of the 23 failed with the visitor disabled, then all 23 green after
+  restore), and the full Debug suite is 12498 ran / 12496 passed / the 2 standing skips / zero
+  failures; the `--csharp` CLI baseline is unchanged at 10106360 bytes (the transform is not
+  wired into the seed `--csharp` path).
+- **`RenameVisualBasicAnonymousTypes` AST transform** -- the sixth concrete `IAstTransform` over
+  the iteration-160 `TransformContext` foundation, ported per `PORT_PLAN.md`'s Phase 5 from the
+  `CSharpDecompiler.GetAstTransforms()` order (the transform directly after `FlattenSwitchBlocks`).
+  The transform (`Transforms/RenameVisualBasicAnonymousTypes.{hpp,cpp}`) gives the anonymous
+  types of a VB assembly a C#-legal name: it walks every `Identifier` whose name contains `$`,
+  resolves the entity the node refers to through the port's `GetSymbol` resolve-result
+  annotation (the `FindEntity` helper reads the node's own symbol and falls back to its parent's,
+  so a field declaration's symbol is found from the `VariableInitializer` holding the name),
+  and replaces the `$` separators with `_` when the entity's declaring type (or the entity
+  itself, when it is an `ITypeDefinition`) passes `NRExtensions.IsAnonymousTypeDeclaredAsNamedType`.
+  It then attaches the three-line explanatory leading comment to every such type declaration.
+  Verified by 12 tests (the field-name rename, the type-reference rename, the every-`$`
+  replacement, the no-`$` / no-symbol / name-mismatch / non-anonymous-declaring-type /
+  read-only-properties keeps, the non-anonymous type-reference keep, the three-comment
+  declaration, and the no-symbol / non-anonymous declaration keeps) proven with a Run-neuter
+  RED round (exactly the 4 positive tests failed with the transform disabled, then all 12 green
+  after restore), and the full Debug suite is unchanged apart from the 12 new tests; the
+  `--csharp` CLI baseline is unaffected (the transform is not wired into the seed `--csharp`
+  path).
+- **`FixNameCollisions` AST transform** -- the seventh concrete `IAstTransform` over
+  the iteration-160 `TransformContext` foundation, ported per `PORT_PLAN.md`'s Phase 5 from the
+  `CSharpDecompiler.GetAstTransforms()` order (the transform directly after
+  `RenameVisualBasicAnonymousTypes`). The transform (`Transforms/FixNameCollisions.{hpp,cpp}`)
+  renames a private field whose name collides with a single-named member of the same type
+  (the motivating case is a compiler-generated event that was not detected as a pattern, so
+  its backing field and the event share a name). It walks every `TypeDeclaration`, builds the
+  type's member-name set (keying an explicit-interface member by its `I.Name` form so a bare
+  field name does not collide with it), and renames each single-variable private field whose
+  name is in the set to `m_` + name or the first free name+number. A second walk retargets
+  every `IdentifierExpression` / `MemberReferenceExpression` whose symbol is a renamed field.
+  The rename dictionary keys on the `ISymbol*` identity the resolve-result annotation carries
+  (the C# dictionary's reference comparer). Verified by 12 tests (the member-collision rename,
+  the prefixed and two numbered fallbacks, the IdentifierExpression and MemberReferenceExpression
+  reference retargets, the no-collision / non-private / multi-variable keeps, the unrenamed and
+  symbol-less reference keeps, the explicit-interface no-collision, and the nested-type
+  descent) proven with a Run-neuter RED round (exactly the 6 positive rename tests failed with
+  the transform disabled, then all 12 green after restore), and the full Debug suite is now
+  12522 ran / 12520 passed / the 2 standing skips / zero failures; the `--csharp` CLI baseline
+  is unaffected (the transform is not wired into the seed `--csharp` path).
+- **`AddXmlDocumentationTransform`** -- the eighth concrete `IAstTransform` over the
+  iteration-160 `TransformContext` foundation, ported per `PORT_PLAN.md`'s Phase 5 from the
+  `CSharpDecompiler.GetAstTransforms()` order (the LAST transform in the list, after
+  `FixNameCollisions`). The transform (`Transforms/AddXmlDocumentationTransform.{hpp,cpp}`)
+  asks the run's `DocumentationProvider` for each `EntityDeclaration`'s XML documentation
+  and prepends the doc's lines as `CommentType.Documentation` trivia: the first non-blank
+  line fixes the shared indentation (stripped from every line), interior blank lines are
+  restored as empty documentation comments, and trailing blank lines are dropped. A
+  parameterized property decompiles to its accessor methods, so the property's
+  documentation is shown on its first accessor (getter else setter). The slice also landed
+  the `IDocumentationProvider` interface (`Decompiler/Documentation/IDocumentationProvider
+  .hpp`, a nullable `std::optional<std::string> GetDocumentation`) and the
+  `DecompileRun.DocumentationProvider` reader (the concrete `XmlDocumentationProvider`
+  stays with a later Decompiler slice). Verified by 12 tests (the settings/provider
+  early-outs, the single-line and multi-line renders with indentation stripping and blank
+  retention, the carriage-return line splitting, the no-symbol skip, the getter and setter
+  parameterized-property fallbacks, the non-first-accessor and non-parameterized-owner
+  keeps, the resolve-result annotation carried by every comment, and the `XmlException`
+  reporting) proven with a Run-neuter RED round (exactly the 7 positive tests failed with
+  the transform disabled, then all 12 green after restore); the full Debug suite is now
+  12534 ran / 12532 passed / the 2 standing skips / zero failures, and the `--csharp` CLI
+  baseline is unaffected (the transform is not wired into the seed `--csharp` path).
+- **`AddCheckedBlocks` AST transform** -- the ninth concrete `IAstTransform` over the
+  iteration-160 foundation and the next ported transform in the `CSharpDecompiler
+  .GetAstTransforms()` order (the second entry, after `ReplaceMethodCallsWithOperators`;
+  the earlier tail was ported first, and this one needs only the already-ported annotation
+  half). The transform (`Transforms/AddCheckedBlocks.{hpp,cpp}`) runs the cost-based
+  dynamic program from the C# to place `checked(...)`/`unchecked(...)` expressions and
+  `checked { ... }`/`unchecked { ... }` blocks: `Cost` (blocks + expressions, with the
+  expression-nesting penalty and the `<`/`<=` tie-breaks that prefer expressions and
+  open/close blocks as late as possible), the lazily composed `InsertedNode` list
+  (`InsertedExpression`, `InsertedBlock`, `InsertedNodeList`), and the four-state
+  `GetResultFromBlock`/`GetResult` walking every child (a nested block runs its own
+  program, and an enclosing block can subsume the inner one's need). An explicit
+  `unchecked` annotation always forces an unchecked expression; labels and local function
+  declarations block statement movement, so their block starts after them. The C#
+  `expr.Slot?.ChildType is Type ct && ct.IsAssignableFrom(typeof(Expression))` ports to a
+  slot's `IsInstanceOfType` predicate tested against a representative `Expression`
+  (`CheckedExpression`), so a slot that cannot hold the wrapper (a `Statement`, a
+  `PrimitiveExpression` collection element) is skipped. The slice also landed
+  `SyntaxExtensions::GetNextStatement` (the next `Statement` sibling, skipping non-statement
+  siblings). Verified by 9 tests (the checked/unchecked-expression wraps in the opposite
+  context, the matching-annotation no-ops, the explicit-unchecked force, the multi-statement
+  block grouping, the label and local-function block starts, the nested-block subsumption,
+  and the matching top-level no-op) proven with a Run-neuter RED round (exactly the 7
+  positive tests failed with the transform disabled, the 2 no-op tests staying green, then
+  all 9 green after restore); the full Debug suite is now 12543 ran / 12541 passed / the 2
+  standing skips / zero failures, and the `--csharp` (10106360), `--il` (41246545), and
+  `-l c` (109438) CLI baselines are all unchanged (the transform is not wired into the seed
+  paths).
+- **`IntroduceUnsafeModifier` AST transform** -- the tenth concrete `IAstTransform` over
+  the iteration-160 foundation and the next ported transform in the `CSharpDecompiler
+  .GetAstTransforms()` order (the third entry, after `ReplaceMethodCallsWithOperators`).
+  The transform (`Transforms/IntroduceUnsafeModifier.{hpp,cpp}`) is the `bool`-returning
+  visitor that marks the declaring entity of any pointer / function-pointer / by-ref /
+  array-typed expression (and the syntactic `sizeof`, `*`, `&`, composed pointer type,
+  `->`, and `fixed` forms) with `Modifiers.Unsafe`. `Run` stores the context and drives
+  the visitor; the static `IsUnsafe` is the context-less one-shot query. The overridden
+  `VisitChildren` ORs the children's results and, when any child reported unsafe, adds the
+  modifier to the enclosing `EntityDeclaration` that is not an `Accessor` (an accessor's
+  report propagates to its owner). `HasUnsafeResolveResult` reads the node's resolve
+  result -- the result type, or a `MemberResolveResult`'s parameterized member's parameter
+  types, or a `MethodGroupResolveResult`'s chosen method's return and parameter types --
+  through `IsUnsafeType` (pointer/function-pointer true, array/by-reference recurse into
+  the element, everything else false; the C# `TypeWithElementType` cast ports to the
+  concrete `ArrayType`/`ByReferenceType` leaves). Two pointer-syntax rewrites land too:
+  `*(ptr + int)` becomes `ptr[int]` (gated on the addition's `OperatorResolveResult` first
+  operand being a pointer) and `(*p).x` becomes `p->x`. Verified by 16 tests (the resolve-
+  result shapes, the syntactic shapes, both rewrites, the `Accessor` exclusion, and the
+  no-unsafe keep) proven with a Run-neuter RED round (exactly the 7 resolve-result tests
+  failed with `HasUnsafeResolveResult` disabled, the syntactic tests staying green, then
+  all 16 green after restore); the full Debug suite is now 12559 ran / 12557 passed / the 2
+  standing skips / zero failures. The transform is not wired into the seed paths, so the
+  CLI baselines are unchanged.
+- **Concrete pattern-matching nodes** -- the `PatternNodes.hpp` home for the `Pattern`
+  subclasses the C# `PatternMatching` namespace is built from: `AnyNode`, `AnyNodeOrNull`,
+  `NamedNode`, `OptionalNode`, `Repeat`, `Backreference`, `IdentifierExpressionBackreference`,
+  and `Choice`, plus the `PatternExtensions` `Match`/`IsMatch` entry points from `INode.cs`.
+  The matching engine (`Pattern`/`Match`/`BacktrackingInfo`) and the AST nodes' generated
+  `DoMatch` were already ported, but the nodes a pattern tree is built from had not been
+  (the earlier engine tests used local `TestAnyNode`/`TestOptionalNode` stubs), so this is
+  the unblocking step for the pattern-based AST transforms (the next in-order
+  `CSharpDecompiler.GetAstTransforms()` entry, `PatternStatementTransform`, is built almost
+  entirely from these nodes). The port holds non-owning `INode*` children (C# patterns are
+  `static readonly`, i.e. process-lifetime, exactly what a non-owning pointer needs); the
+  two convenience ctors that allocate a `NamedNode` on the caller's behalf (`OptionalNode
+  (string, INode)` and `Choice.Add(string, INode)`) own the node they create. The
+  `ToType`/`ToExpression`/`ToStatement`/`WithName` shims of `PatternExtensions` landed in the
+  next slice (below). Verified by 30
+  tests (`PatternNodes_Test.cpp`: each node's `DoMatch`/`DoMatchCollection`, the `Repeat`
+  greedy-count and `MinCount`/`MaxCount` arms over real AST candidates, the `Choice`
+  checkpoint restore, the two backreferences against real `IdentifierExpression`s including
+  the type-argument rejection, and `PatternExtensions::Match`/`IsMatch`); the full Debug
+  suite is 12589 ran / 12587 passed / the 2 standing skips / zero failures, and the CLI
+  baselines are unchanged (the nodes are not reachable from the seed paths).
+- **Generated pattern-placeholder machinery** -- `Syntax/PatternPlaceholder.hpp` lands the
+  port of the code the C# generator emits for every `[DecompilerAstNode(hasPatternPlaceholder:
+  true)]` base (`AstNode`, `AstType`, `Expression`, `Statement`, `ArrayInitializerExpression`,
+  `AttributeSection`, `BlockStatement`, `SwitchStatement`, `TryCatchStatement`, `ParameterDeclaration`,
+  `VariableInitializer`): the generated `implicit operator <Base>(Pattern)` plus the
+  `sealed class PatternPlaceholder : <Base>, INode, IPatternPlaceholder`. C++ has no user-defined
+  conversion from `Pattern` and no requirement that each placeholder be a nested class, so a single
+  class template `PatternPlaceholderNode<TNode>` plays every role: it derives from the AST base and
+  delegates `DoMatch`/`DoMatchCollection` to the wrapped `std::shared_ptr<Pattern>` (so a
+  non-deterministic `Repeat`/`OptionalNode` in a collection slot keeps its backtracking), routes
+  `AcceptVisitor`/`AcceptVisitorBool` to the new `VisitPatternPlaceholder` arm on the visitor
+  interfaces (`IAstVisitor`/`IAstVisitorBool` pure, `DepthFirstAstVisitor`/`DepthFirstAstVisitorBool`
+  default to `VisitChildren`, `CSharpOutputVisitor` records the node span -- the pattern-rendering
+  `VisitNodeInPattern` arms stay deferred), and `Clone`s by sharing the pattern. The C#
+  `implicit operator` call sites port to the `PatternExtensions` factories `ToType`/`ToExpression`/
+  `ToStatement` (out-of-line in `PatternPlaceholder.cpp` so the AST bases need not be pulled into
+  `PatternNodes.hpp`) and the `WithName` shims. `IPatternPlaceholder` marks the placeholder (the
+  output visitor's nesting-order assertion). Three `hasPatternPlaceholder` bases that the port had
+  marked `final` (`AttributeSection`, `SwitchStatement`, `TryCatchStatement`) lose `final`, matching
+  the non-sealed C# (their `std::is_final_v` test pins flip to the non-final expectation). Verified
+  by 14 tests (`PatternPlaceholder_Test.cpp`: the three factories + null handling, `WithName`
+  capture and reject, the `NamedNode` delegation, the void/bool `VisitPatternPlaceholder` dispatch,
+  the default walk, the `Repeat` collection delegation, clone-pattern sharing, the marker cast, and
+  a placeholder over every other `hasPatternPlaceholder` base); the full Debug suite is 12603 ran /
+  12599 passed / the 2 standing skips / zero failures, and the CLI baselines are unchanged (the
+  machinery is not reachable from the seed paths).
+- **Result-returning visitor infrastructure + `ContextTrackingVisitor`** -- the
+  `<AstNode>` instantiation of the C# generic visitor (`IAstVisitor<out S>` with
+  `S = AstNode`), needed by the pattern-based transforms (`PatternStatementTransform`
+  derives from `ContextTrackingVisitor<AstNode>` and uses each visit's returned node to
+  keep iterating a replaced node). `IAstVisitorAstNode.hpp` is the result-returning
+  counterpart of `IAstVisitorBool.hpp`, `DepthFirstAstVisitorAstNode.hpp` the
+  `DepthFirstAstVisitor<AstNode>` default walk (its `VisitChildren` returns null -- the C#
+  `default(T)` -- and recurses through `AstNode::AcceptVisitorAstNode`), and
+  `ContextTrackingVisitor.hpp` is the `ContextTrackingVisitor<TResult>` port (instantiated
+  `TResult = AstNode`) whose six per-declaration visits set
+  `currentTypeDefinition`/`currentMethod` from the node's resolved symbol for the child
+  walk and restore it afterwards (a small RAII guard stands in for the C# `finally`).
+  Rather than add a second per-node virtual to every concrete node, the `<AstNode>`
+  dispatch reuses the already-virtualized `bool` dispatch: `AstNode::AcceptVisitorAstNode`
+  runs `AcceptVisitorBool` through a private adapter (AstNodeVisitorAstNode.cpp) that
+  forwards each per-node call to `IAstVisitorAstNode::Visit<NodeName>` and captures the
+  result. Verified by 11 tests (`ContextTrackingVisitor_Test.cpp`: the dispatch result
+  propagation, the null default, the recursive walk, the placeholder arm, and the
+  context slots across a method, a nested type, a constructor, and an accessor, plus
+  `Initialize`/`Uninitialize`) proven with an `AcceptVisitorAstNode`-neuter RED round
+  (7/11 failed, then all 11 green after restore); the full Debug suite is 12614 ran /
+  12612 passed / the 2 standing skips / zero failures, and the `--csharp` (10106360),
+  `--il` (41246545), and `-l c` (109438) CLI baselines are unchanged (the machinery is
+  not wired into the seed paths).
+- **`PatternStatementTransform` skeleton + structural sub-transforms** -- the first slice of
+  the `CSharpDecompiler.GetAstTransforms()` entry `PatternStatementTransform` (the
+  pattern-matching pass that rewrites the compiler's lowered statement shapes back to the
+  high-level language forms). This slice lands the transform shell (`Run` with the C#
+  reentrancy guard and `Initialize`/`Uninitialize` around the root walk, and the overridden
+  `VisitChildren` replace-and-revisit loop that keeps visiting a child while the visit
+  returns a different node) plus the two sub-transforms that need no pattern tree: the
+  conditional-logic reassociation (`a && (b && c)` -> `(a && b) && c`, the same for `||`)
+  and the negated-equality rewrite (`!(a == b)` -> `a != b`). The remaining pattern-based
+  sub-transforms (`for`/`foreach`/automatic property/automatic event/using/fixed) and the
+  `DeclareVariables` analysis they compose stay deferred -- the destructor, try-catch-finally
+  merge, and cascading `if` sub-transforms landed in the next slice (below). Verified by 11 tests
+  (`PatternStatementTransform_Test.cpp`: both reassociation operators, the mixed and
+  non-conditional keeps, the negated-equality rewrite and its inequality/relational/plain
+  keeps, the nested rewrite, the fully-left-associative flattening the revisit loop
+  produces, and an unrelated-tree identity check); the full Debug suite is 12625 ran /
+  12623 passed / the 2 standing skips / zero failures, and the transform is not wired into
+  the seed paths, so the CLI baselines are unchanged. The
+  `SyntheticWpfModuleTest.AssemblyAttributesInvalidatedByNewNamespace` test's dangling
+  pointer-identity assertions (it compared rebuilt pointers against the cache instances the
+  invalidation frees) were replaced with a content check, since the allocator may reuse the
+  freed addresses -- this surfaced when the added translation units shifted the heap layout.
+- **`PatternStatementTransform` pattern-based sub-transforms** -- the second slice of the
+  `PatternStatementTransform` pass lands the pattern-based sub-transforms that need no
+  `DeclareVariables` analysis and no resolver: the destructor rewrite (`Finalize` method to
+  `DestructorDeclaration`, and the `try { ... } finally { base.Finalize(); }` body shape to
+  the hoisted try body), the nested `try { try {} catch {} } finally {}` merge, and the
+  cascading `if`/`else { if }` simplification (`else if`). Each is built from the C#
+  `static readonly` pattern trees; the C# pattern nodes hold non-owning child references and
+  its patterns are process-lifetime, so the port builds an equivalent tree per call into a
+  small `PatternTree` owner (nodes owned through `INode`, which both `Pattern` and `AstNode`
+  derive from; a pattern wrapped in a `PatternPlaceholderNode` is owned by the placeholder
+  instead) and keeps it alive for the match. The new visitor overrides
+  `VisitIfElseStatement`/`VisitTryCatchStatement`/`VisitMethodDeclaration`/
+  `VisitDestructorDeclaration` delegate to those helpers and fall through to the
+  `ContextTrackingVisitor` walk. Verified by 10 new tests (total 21;
+  `PatternStatementTransform_Test.cpp`: the cascading `if` rewrite and its
+  non-`if`/two-statement keeps, the nested try-catch-finally merge and its no-finally and
+  non-nested-body keeps, and the `Finalize`-method-to-destructor rewrite, the not-matching
+  body/name keeps, and the destructor-body simplification) proven with a neuter RED round
+  (exactly the 4 positive tests failed with the four helpers disabled, the 6 negative tests
+  staying green, then all 21 green after restore); the full Debug suite is now 12635 ran /
+  12633 passed / the 2 standing skips / zero failures, and the transform is not wired into
+  the seed paths, so the CLI baselines are unchanged.
+- **`PatternStatementTransform` fixed/using sub-transforms** -- the third slice adds the two
+  remaining visitor overrides that need neither `DeclareVariables` nor a resolver:
+  `VisitFixedStatement` (with `PatternBasedFixedStatement` on, a `&target.GetPinnableReference()`
+  initializer whose resolved `target` is a value type -- `Type.IsReferenceType == false` --
+  becomes the detached `target`, the C# 7.3 pattern-based `fixed` form) and
+  `VisitUsingStatement` (the child walk first, then -- with `UseEnhancedUsing` on, the
+  statement the last in a `BlockStatement`, and a `VariableDeclarationStatement` resource --
+  sets `IsEnhanced` for the C# 8 using-declaration form). The `addressOfPinnableReference`
+  pattern is built per call through the same `PatternTree` owner as the other slices. Verified
+  by 9 new tests (total 30; `PatternStatementTransform_Test.cpp`: the value-type rewrite and
+  its reference-type/non-shape/setting-off keeps, and the enhanced-using flag with its
+  followed-by-statement, expression-resource, setting-off and non-block-parent keeps) proven
+  with a neuter RED round (exactly the 2 positive tests failed, the 7 negative tests staying
+  green, then all 30 green after restore).
+- **`PrettifyAssignments` compound-assignment rewrite** -- the first slice of the
+  `CSharpDecompiler.GetAstTransforms()` entry after `AddCheckedBlocks` lands the
+  side-effect-free part of `PrettifyAssignments`: `x = x op y` becomes `x op= y` when the
+  left-hand side is safe to evaluate twice (an identifier, `this`/`base`, a type reference,
+  or a member access / indexer / pointer dereference whose parts are all safe) and the
+  binary operator has a compound form (`GetAssignmentOperatorForBinaryOperator`). The cast
+  form `x = (T)(x op y)` (accepting it needs the resolver's implicit-conversion check) and
+  the resolver-driven increment/decrement rewrite (`IntroduceIncrementAndDecrement`) are
+  deferred at the visit. Verified by 20 tests (`PrettifyAssignments_Test.cpp`: the full
+  operator-mapping table and its non-compound defaults, the add/subtract/multiply/bitwise
+  rewrites, the side-effect-free member/base/type-reference/indexer/dereference rewrites and
+  their side-effecting keeps, the already-compound, non-binary-right, non-matching-left,
+  non-compound-operator, and null-right keeps, and a two-statement block walk) proven with an
+  operator-mapping neuter RED round (exactly the 9 positive tests failed, the 9 negative
+  tests staying green, then all 20 green after restore); the full Debug suite is 12664 ran /
+  12662 passed / the 2 standing skips / zero failures, and the transform is not referenced
+  from the seed paths (`grep` finds no use outside its own translation unit and test), so
+  the CLI baselines are unchanged.
+- **`ReplaceMethodCallsWithOperators` operator-name maps + `UnwrapInDirectionExpression`** --
+  the next resolver-free prerequisites of the `CSharpDecompiler.GetAstTransforms()` entry
+  `ReplaceMethodCallsWithOperators` (the second transform in the list, after
+  `PatternStatementTransform`; only its statics are ported so far). This slice lands the two
+  name-mapping tables the instance `ProcessInvocationExpression` consumes
+  (`GetBinaryOperatorTypeFromMetadataName`: `op_Addition` &c. to `BinaryOperatorType`, with
+  the four `op_Checked...` names and `op_UnsignedRightShift` gated by the
+  `CheckedOperators`/`UnsignedRightShift` settings flags; and
+  `GetUnaryOperatorTypeFromMetadataName`: `op_LogicalNot` &c. to `UnaryOperatorType`, with
+  the checked negation/increment/decrement gated the same way), and
+  `IsInstantiableTypeParameter` (a type parameter carrying the `new()` constraint, the
+  `Activator.CreateInstance<T>()` to `new T()` gate). The shared `SyntaxExtensions
+  .UnwrapInDirectionExpression` also lands (the `in`-direction wrapper is stripped and its
+  operand detached, leaving `ref`/`out` wrappers alone), which the instance machinery uses
+  to unwrap operator-method arguments. Verified by 8 tests
+  (`ReplaceMethodCallsWithOperators_Test.cpp`: the complete binary and unary name tables, the
+  unknown-name nullopt shapes, the checked-binary / checked-unary / `UnsignedRightShift`
+  settings gates, `IsInstantiableTypeParameter` over a constrained type parameter, an
+  unconstrained one and a real `Int32`, and the `UnwrapInDirectionExpression` in/ref/out/
+  plain matrix) proven with a binary/unary-map neuter RED round (exactly the 5 mapping tests
+  failed, the unknown-name and type-parameter tests staying green, then all 8 green after
+  restore). The `DecompilerSettings` `checkedOperators_`/`unsignedRightShift_` defaults are
+  BOTH true, so a "settings off" test must call `SetCheckedOperators(false)` /
+  `SetUnsignedRightShift(false)` explicitly (the first test run failed on exactly this).
+- **`ReplaceMethodCallsWithOperators` instance transform** -- the `Run` /
+  `VisitInvocationExpression` / `ProcessInvocationExpression` machinery of the transform
+  (its operator-name maps landed in the previous slice). A resolved invocation whose
+  method symbol reaches one of the recognized shapes is rewritten: the three special
+  methods (`System.Type.GetTypeFromHandle(typeof(T).TypeHandle)` to `typeof(T)`, the
+  `new()`-constrained `System.Activator.CreateInstance<T>()` to `new T()` under
+  `UseObjectCreationOfGenericTypeParameter`, and
+  `RuntimeHelpers.GetSubArray(array, range)` to `array[range]` under `Ranges`), the binary
+  operator methods (with the checked/unchecked annotation from the checked name or the
+  `HasCheckedEquivalent` twin), the unary operator methods (the increment/decrement decimal
+  reversal to `a + 1m` / `a - 1m`; other increments keep the call), the explicit conversion
+  operators to a cast, and `op_True(x)` in a `Condition` slot to `x`. The `String.Concat`
+  reduction (with `IsStringConcat`/`CheckArgumentsForStringConcat`) and the
+  `VisitCastExpression` methodof rewrite (needing the unported generated
+  `TypePattern`/`LdTokenPattern` nodes) are DEFERRED, each named at its would-be call site.
+  Verified by 16 tests (`ReplaceMethodCallsWithOperatorsInstanceTest`: each rewrite plus
+  the settings-off and non-matching-shape keeps, the checked/unchecked annotations, and
+  the unresolved-invocation keep) proven with a `ProcessInvocationExpression`-neuter RED
+  round (exactly the 9 positive tests failed, the 7 keep-tests staying green, then all 16
+  green after restore).
+- **`ReplaceMethodCallsWithOperators` `String.Concat` reduction** -- the remaining
+  resolver-backed piece of the transform: `IsStringConcat` (a `Concat` method on
+  `System.String`) and `CheckArgumentsForStringConcat` (the reduction pre-conditions --
+  two or more arguments, no named arguments, every non-last argument of a known
+  effect-free type, no nested `String.Concat` argument whose evaluation order would be
+  corrupted by the compiler's flattening, no by-ref-like argument, and a string-typed
+  first or second argument), driving the `String.Concat(a, b)` -> `a + b` rewrite in
+  `ProcessInvocationExpression`. The rewrite also lands the `params`-array single-argument
+  expansion (`arguments is [ArrayCreateExpression { Initializer: ... }]` with a single
+  array-typed parameter), the expression-tree guard (`Ancestors`-walked `LambdaExpression`
+  with an `ILFunctionKind.ExpressionTree` annotation suppresses the `ToString`
+  elimination), and the `RemoveRedundantToStringInConcat` calls (ported in the previous
+  slice, now exercised) that strip compiler-generated `ToString()` calls where the type is
+  effect-free. Faithfulness fix along the way: `IsStringParameter` now unwraps a `params`
+  array parameter's element type (the port's `IParameter` does carry `IsParams`). Verified
+  by 9 new tests (`ReplaceMethodCallsWithOperatorsInstanceTest`, total 25: the two-argument
+  reduction, the settings-off keep, and the named-argument / non-string-first-two /
+  side-effecting-argument / by-ref-like-argument / nested-`Concat` keeps, plus the
+  `params` expansion and the redundant-`ToString` elimination) proven with an
+  `IsStringConcat`-neuter RED round (exactly the 3 positive tests failed, the 6 keep-tests
+  staying green, then all 25 green after restore). The full Debug suite was then 12697 ran /
+  12695 passed / the 2 standing skips / zero failures.
+- **`CustomPatterns` + the `ReplaceMethodCallsWithOperators` methodof rewrite** -- the three
+  hand-written patterns from `CustomPatterns.cs` (`TypePattern`, `LdTokenPattern`,
+  `TypeOfPattern`) land in `Transforms/CustomPatterns.{hpp,cpp}`, and `VisitCastExpression`
+  now matches the methodof shape
+  `(MethodInfo | ConstructorInfo)MethodBase.GetMethodFromHandle(ldtoken(method).MethodHandle,
+  typeof(declaringType).TypeHandle)` and rewrites it to the
+  `ldtoken(declaringType.Method(parameters)).MethodHandle` form, completing the
+  `ReplaceMethodCallsWithOperators` instance transform. `TypePattern` checks the
+  resolve-result type's namespace (the `IType.Namespace` accessor the port flattens off
+  `IType`, resolved by a helper mirroring `TypeSystemAstBuilder`'s) and short name, with
+  the modifier-less-`ComposedType` `BaseType` fallback; `LdTokenPattern` gates on the
+  `LdTokenAnnotation` marker and a single argument; `TypeOfPattern` builds the expanded
+  `typeof` tree. The methodof pattern tree is rebuilt per call into a local owner (the C#
+  `static readonly` lifetime). Verified by 8 `CustomPatternsTest` and 3 methodof tests (the
+  declaring-type rewrite with the `TypeReferenceExpression` parameter references, the
+  no-declaring-type cast-only replacement, and the non-reflection-type keep), proven with
+  a `TypePattern`-neuter RED round (exactly the 5 positive tests failed, the 6 keep-tests
+  staying green, then all 11 green after restore). The full Debug suite is now 12708 ran /
+  12706 passed / the 2 standing skips / zero failures, and the transform is not wired into
+  the seed paths, so the CLI baselines are unchanged (`--csharp` 10106360, `--il`
+  41246545, `-l c` 109438 bytes).
+- **`CombineQueryExpressions`** -- the resolver-free LINQ query flattener lands in
+  `Transforms/CombineQueryExpressions.{hpp,cpp}`: a nested query in a from clause becomes
+  a query continuation (`from x in (from y in src ...) ...` -> `... into x ...`) or, when
+  the from identifier is a transparent identifier (`<>h__TransparentIdentifier0` /
+  `<>TranspIdent` / `$VB$It`) and the inner query ends in an anonymous-type select, the
+  from/select pair is removed, the inner clauses are hoisted, the anonymous-type members
+  become `let` clauses (a bare identifier records its `ILVariableResolveResult`, a bare
+  member reference or a named expression adds a `let`), and every transparent-identifier
+  reference is replaced by the underlying member (moving type arguments and copying
+  annotations). The `expr.Cast<T>()`-in-a-from shape moves the cast's type argument into
+  the from clause. `CSharpDecompiler.IsTransparentIdentifier` has no ported home yet, so it
+  is a file-local predicate (its other C# consumer is the IL-stage `AssignVariableNames`
+  transform, not `IntroduceQueryExpressions`).
+  Verified by 11 tests (the cast move, the continuation and its three guards, the
+  transparent-identifier removal with the let clauses and the reference replacement, the
+  type-argument move and resolve-result propagation, and the settings-off no-op), proven
+  with a `Run`-neuter RED round (exactly the 9 positive tests failed, the 2 no-op tests
+  staying green, then all 11 green after restore). The full Debug suite is now 12719 ran /
+  12717 passed / the 2 standing skips / zero failures, and the transform is not wired into
+  the seed paths, so the CLI baselines are unchanged (`--csharp` 10106360, `--il`
+  41246545, `-l c` 109438 bytes).
+- **`IntroduceQueryExpressions`** -- the LINQ method-chain to query-expression rewriter lands
+  in `Transforms/IntroduceQueryExpressions.{hpp,cpp}`: `DecompileQueries` walks the tree and
+  turns the compiler's `Select`/`Where`/`GroupBy`/`SelectMany`/`OrderBy`/`ThenBy`/`Join`/
+  `GroupJoin` calls back into `from`/`where`/`group`/`orderby`/`join` clauses (the C# 4.0
+  spec 7.16.2 query translation), wrapping a query in an expression-statement position in
+  `_ = query` when `Discards` is on; after the rewrite `Run` walks every `QueryExpression`
+  to add the missing degenerate `select` and to combine a nested degenerate inner query into
+  its consumer (hoisting the inner clauses and rebinding the inner range variable through the
+  `ILVariableResolveResult` annotation). The `ApplyAnnotationVisitor` nested class in the C#
+  source is dead code (declared but never instantiated) and is deliberately not ported. The
+  port is resolver-free (it reads only the `ILVariableResolveResult` annotation the
+  `DeclareVariables` analysis attaches and the `ILFunction` annotations on query group/join
+  clauses); it added the `ILVariableResolveResult::VariableHandle()` owning-handle accessor
+  the range-variable rebinding needs. Verified by 18 tests (the degenerate-select insertion,
+  the non-degenerate keep, the eight method-chain rewrites including the parenthesized
+  range-variable select body and the single-query consumption of an `OrderBy`/`ThenBy` chain,
+  the range-variable rebinding, the discard wrap, and the argument-count / bare-query /
+  null-conditional-source / non-query-method guards), proven with a `DecompileQuery`-neuter
+  RED round (exactly the 10 query-building tests failed, the 8 keep/guard/combine tests
+  staying green, then all 18 green after restore). The transform has no call site in the seed
+  pipeline, so the CLI baselines are unchanged.
+- **`IntroduceExtensionMethods`** -- the static-extension-call to extension-syntax rewriter
+  lands in `Transforms/IntroduceExtensionMethods.{hpp,cpp}`: `Run` builds a per-run
+  `CSharpResolver` from the syntax-tree root's `UsingScope` annotation (attached by
+  `IntroduceUsingDeclarations`, now landed -- the caller/tests attach it through the
+  `UsingScopeAnnotation` holder) and the current type definition's namespace, then walks the
+  tree; `VisitNamespaceDeclaration` descends the resolver's using scope by the declaration's
+  dotted name (the previously deferred `NamespaceDeclaration.Identifiers` computed read,
+  now landed), `VisitTypeDeclaration` switches the resolver's current type definition, and
+  `VisitInvocationExpression` rewrites an eligible `C.M(x, args)`/`M(x, args)` call to
+  `x.M(args)`: the first argument becomes the receiver (a `ref`/`in`-unwrapped operand or a
+  constant-null argument wrapped in a cast to the `this` parameter type), the static
+  target's type arguments move to the new member reference, and the
+  `CSharpInvocationResolveResult` annotation is replaced by an `IsExtensionMethodInvocation`
+  copy. All prerequisites (the resolver's `CanTransformToExtensionMethodCall`,
+  `CSharpInvocationResolveResult`, `CSharpConversions`, `UsingScope`/
+  `CSharpTypeResolveContext`) were already ported. The `UsingScopeAnnotation` holder lives in
+  its own header so the widely-included `Annotations.hpp` does not declare the sibling
+  `CSharp::TypeSystem` namespace (which would shadow unqualified `TypeSystem::` lookups), and
+  the transform header type-erases its `InitializeContext` parameter for the same reason.
+  Verified by 19 tests (the `Identifiers` walk, the static shape gate incl. the
+  constant-null -> `ConversionResolveResult` and `DirectionExpression` target rewrites, the
+  identifier-/member-reference-target rewrites, the `ref` unwrap and `out`/
+  `RefExtensionMethods`-off keeps, the null-argument cast wrap, the resolve-result update,
+  and the missing-annotation throw), proven with a `VisitInvocationExpression`-neuter RED
+  round (exactly the 5 positive rewrite tests failed, the 14 predicate/keep tests staying
+  green), the full Debug suite at 12756 ran / 12754 passed / the 2 standing skips, and the
+  unchanged CLI baselines (`--csharp` 10106360, `--il` 41246545, `-l c` 109438 bytes).
+- **`IntroduceUsingDeclarations`** -- the required-import collector and `using`-declaration
+  writer lands in `Transforms/IntroduceUsingDeclarations.{hpp,cpp}` (header free of the
+  `CSharp::TypeSystem` namespace; both nested visitors live in the .cpp). `Run` walks the
+  tree with `FindRequiredImports` (the namespaces an annotated `SimpleType` resolves to,
+  plus an extension-method `foreach` enumerator or collection-initializer `Add`
+  declaring type; namespaces that are a parent of the current type's namespace are
+  excluded), inserts the `using` declarations in the C# order (non-`System` first,
+  culture-linguistically descending, each inserted at the list head so the final order
+  is ascending with the `System` imports first), attaches the root `UsingScope`
+  annotation, then runs `FullyQualifyAmbiguousTypeNamesVisitor` to re-render every still
+  annotated `SimpleType` through the `TypeSystemAstBuilder` at the resolver position
+  where it sits. Landed the prerequisites `AstType.IsVar` / `AstType.GetNameLookupMode`
+  (the deferred hand-written reads) and `TypeSystemExtensions.GetNamespaceByFullName`.
+  Deferred at named call sites: the `MatchInstruction.Method` arms of
+  `FindRequiredImports` (the port's `MatchInstruction` carries no resolved method yet)
+  and the `DefaultVariable` arm of `CreateAstBuilder`. Verified by 16 tests (the `IsVar`
+  and `GetNameLookupMode` matrices, the namespace walk, the `System`-first insertion
+  order, the settings-off no-op, the scope annotation, and the full-qualify
+  replacement), proven with a `GetNameLookupMode`/insertion-neuter RED round (exactly
+  the 4 positive tests failed, the 12 negative/utility tests staying green), and wired
+  into both CMakeLists; it has no call site in the seed pipeline, so the CLI baselines
+  are unchanged.
+- **`TransformFieldAndConstructorInitializers`** -- the analysis and mutation phases land in
+  `Transforms/TransformFieldAndConstructorInitializers.{hpp,cpp}`: the this/base-ctor-call
+  patterns (`this..ctor(...)`, `base..ctor(...)`, the cast-wrapped target, and the value-type
+  `this = new TSelf(...)`), the leading-member-assignment pattern, `IsGeneratedPrimaryConstructorBackingField`,
+  the `InitializerSequence` analysis (`Analyze` / `IsMatch` / `CanHaveInitializer`, with the
+  `CoversFullBody` and duplicate-assignment tracking), the `ConstructorInitializerAnalyzer`
+  (constructor classification, `IsBeforeFieldInit`, the static/instance sequence extraction,
+  `MoveConstructorInitializer` moving arguments into a `: this(...)`/`: base(...)` initializer,
+  `MoveFieldInitializersToDeclarations`, and the implicit/empty-static-constructor removal), and
+  `Run`/`TransformDeclaration`. Landed the previously deferred `PropertyDeclaration.IsAutomaticProperty`
+  helper. Deferred at named call sites: the record support (`RecordDecompiler`),
+  the non-record primary-constructor conversion block, the XML-documentation retention checks,
+  the `MemberInitializerInOtherConstructorsAnnotation`, and `TryEvaluateDecimalConstant`.
+  Verified by 17 tests (the backing-field gate, `IsAutomaticProperty`, the leading-assignment
+  analysis with the full-body/duplicate/non-const-static shapes, the cross-constructor match,
+  the static/instance analyzer classification, and the this/base/default-constructor moves);
+  wired into both CMakeLists, with no seed-pipeline call site so the CLI baselines are unchanged.
+- **`DeclareVariables` analysis phase** -- the resolver-free variable-to-declaration placement
+  analysis lands in `Transforms/DeclareVariables.{hpp,cpp}`: `VariableNeedsDeclaration` (the
+  kind matrix the higher-level constructs declare themselves), `IsValidInStatementExpression`
+  (the invocation/object-creation/assignment/error/post-inc-dec/await forms and the
+  null-conditional rewrap recursion), the `InsertionPoint` common-parent computation
+  (`FindInsertionPoints` / `IsRelevantScope` / `FindCommonParent`, with the loop-scope
+  `UsesInitialValue` hoist and the local-function `CapturedVariables` walk), and
+  `ResolveCollisions` (the same-name / nested-block collision merge with the `SourceOrder` /
+  `FirstUse` transfer and the `DefaultInitialization` flag combination). This is the surface
+  `PatternStatementTransform` consumes (`declareVariables.Analyze(rootNode)` and
+  `declareVariables.GetDeclarationPoint(v)`). The mutation phase (`Run`'s
+  `EnsureExpressionStatementsAreValid`, `InsertDeconstructionVariableDeclarations`,
+  `InsertVariableDeclarations`, `CanBeDeclaredAsOutVariable`, `UpdateAnnotations`,
+  `CombineDeclarationAndInitializer`, `IsReferencedWithinDeclaringCall`) is DEFERRED, with
+  `Run` throwing a loud `std::logic_error` rather than silently skipping the insertion. Landed
+  the prerequisites the analysis reads: `ILVariable.CaptureScope` / `UsesInitialValue` /
+  `InitialValueIsInitialized`, `ILFunction.CapturedVariables`,
+  `BlockContainer::FindClosestContainer`, and the `BlockContainerAnnotation` holder +
+  `GetBlockContainer` (the C# `node.Annotation<BlockContainer>()` the scope walk reads).
+  Verified by 15 tests (the kind matrix, the statement-expression matrix, the insertion-point
+  navigation, the common-parent analysis, the loop-scope hoist, the local-function capture
+  walk, the same-name collision merge and its separate-name keep, the `DefaultInitialization`
+  matrix, and the unknown-variable throws) proven with a `ResolveCollisions`-neuter RED round
+  (exactly the 4 collision/record tests failed, the 11 static/navigation tests staying green),
+  and the full Debug suite is 12804 ran / 12802 passed / the 2 standing skips / zero failures.
+  The analysis has no seed-pipeline call site, so the CLI baselines are unchanged (`--csharp`
+  10106360, `--il` 41246545, `-l c` 109438 bytes).
+- **`PatternStatementTransform` `for` rewrite** -- with the `DeclareVariables` analysis available,
+  the `for` slice of `PatternStatementTransform` lands: `VisitExpressionStatement` and
+  `TransformFor` (the `variableAssignPattern` match, the declaration-move into an existing
+  `for` initializer, and the `forPattern` while-to-for rewrite), the `DescendIntoStatement`
+  descendant predicate (stop at expressions and nested loops), `ForStatementUsesVariable`,
+  `IsVariableUsedAfter` (the by-ref-local guard), and `IteratorVariablesDeclaredInsideLoopBody`
+  (the `declareVariables.GetDeclarationPoint` gate). `Run` now runs the `declareVariables.Analyze`
+  / `ClearAnalysisResults` pair. The `TransformForeachOnMultiDimArray`, the other `foreach`
+  rewrites, and the automatic property/event rewrites stay deferred at their would-be call sites.
+  Verified by 9 tests (the while-to-for rewrite with the for-initializer/condition/iterator/body
+  placement, the declaration move into a for initializer, and the settings-off / differing-variable
+  / continue / iterator-declared-inside / by-ref-used-after / non-assignment-first / for-not-using
+  keeps) proven with a `TransformFor`-neuter RED round (exactly the 2 positive tests failed, the
+  7 keep-tests staying green).
+- **`PatternStatementTransform` `foreach`-over-array rewrite** -- the next slice adds
+  `VisitForStatement` and `TransformForeachOnArray`: the `forOnArrayPattern` match of
+  `for (i = 0; i < array.Length; i = i + 1) { item = array[i]; ... }`, the collection gate
+  (an array or a `string`), the `VariableCanBeUsedAsForeachLocal` item gate (a local/stack-slot
+  with a single definition, not captured outside the loop, not merged, and declared inside the
+  loop), and the index-counter profile (stored twice, loaded three times, never addressed); the
+  matched body is moved into a `ForeachStatement` whose variable designation carries the item
+  variable's `ILVariableResolveResult` and whose item variable becomes a `ForeachLocal`. The
+  address-taken item path (`AddressUsedForSingleCall`) landed in a later slice (the
+  `ILVariable.AddressInstructions` list plus the `IsInstanceCall` this-pointer match), as did the
+  inline-array `foreach` rewrite. Verified
+  by 9 tests (the array and `string` rewrites, plus the
+  settings-off / wrong-index-profile / non-single-definition item / non-array-or-string
+  collection / parameter item / captured item / `<=` condition keeps) proven with a
+  `TransformForeachOnArray`-neuter RED round (exactly the 2 positive tests failed, the 7
+  keep-tests staying green).
+- **`PatternStatementTransform` `foreach`-over-multidimensional-array rewrite** -- the next
+  slice adds `TransformForeachOnMultiDimArray` plus `MatchLowerBound` / `MatchForeachOnMultiDimArray`:
+  the compiler's nested `$u = array.GetUpperBound(dim)` / `$i = array.GetLowerBound(dim)` /
+  `for (; $i <= $u; $i = $i + 1)` / `$item = array[$i0, $i1, ...]` nest over a rank-N array is
+  reconstructed as `foreach (var item in array)`, gated on `ForEachStatement`, an array-typed
+  collection, sequential bound indices from 0, single-definition/single-load upper bounds, the
+  index-counter profile, and the `VariableCanBeUsedAsForeachLocal`/single-definition item
+  checks. The `int.TryParse(Value.ToString())` bound-index read ports as an invariant
+  integer-alternative render plus `std::from_chars`. Verified by 7 tests (the rank-2 rewrite
+  plus the settings-off / non-array collection / wrong bound index / multi-load upper bound /
+  wrong index profile / non-single-definition item keeps) proven with a
+  `TransformForeachOnMultiDimArray`-neuter RED round (exactly the 1 positive test failed, the 6
+  keep-tests staying green). The inline-array `foreach` rewrite, the automatic
+  property/event rewrites, and the backing-field replacement stay deferred.
+- **`PatternStatementTransform` `foreach`-over-inline-array rewrite** -- the next slice adds
+  `TransformForeachOnInlineArray`: the compiler's
+  `for ($i = 0; $i < N; $i = $i + 1) { $item =
+  <PrivateImplementationDetails>.InlineArrayElementRef(ref buffer, $i); ... }` over an
+  `[InlineArray(N)]` buffer is reconstructed as `foreach (var item in buffer)`, gated on
+  `ForEachStatement` + `InlineArrays`, the helper's declaring type being
+  `<PrivateImplementationDetails>` with the `InlineArrayElementRef`/
+  `InlineArrayElementRefReadOnly` name, a two-argument call whose first argument is
+  `ref <buffer>` and whose second is the loop index, an inline-array buffer type whose length
+  equals the loop bound (the soundness condition: the helper is the compiler's unchecked
+  accessor, the C# indexer is bounds-checked), the index-counter profile, and the
+  `VariableCanBeUsedAsForeachLocal` item check. The loop body is reused (its leading element
+  assignment removed) and the buffer identifier is detached into the `in` expression. Verified
+  by 11 tests (the inline-array rewrite plus the `InlineArrays`/`ForEachStatement`-off /
+  non-invocation element access / wrong declaring type / wrong helper name / bound-mismatch /
+  wrong index argument / non-inline-array buffer / wrong index profile / non-single-definition
+  item keeps) proven with a `TransformForeachOnInlineArray`-neuter RED round (exactly the 1
+  positive test failed, the 10 keep-tests staying green). The automatic property/event
+  rewrites and the backing-field replacement stay deferred.
+- **`PatternStatementTransform` automatic-property rewrite** -- the next slice adds
+  `VisitPropertyDeclaration` / `TransformAutomaticProperty` / `CanTransformToAutomaticProperty`:
+  the compiler-generated backing-field getter/setter pair (the `automaticPropertyPattern`) and
+  the getter-only read-only pair (`automaticReadonlyPropertyPattern`) are recognized, the
+  backing-field name (`<Property>k__BackingField` / VB `_Property`) is decoded by a hand-rolled
+  match of the C# regex, the accessor `[CompilerGenerated]` attributes and bodies are cleared,
+  the property/accessor `readonly` modifiers are dropped, and the backing-field declaration is
+  removed with its remaining attributes moved onto the property with the `field` target. The
+  guard chain is faithful: `CanGet`, compiler-generated accessors (unless the declaring type
+  carries a `_Name` compiler-generated field), the backing-field shape, the `readonly set` /
+  `readonly` property rejections, and the field's compiler-generated flag plus declaring-type
+  identity. Verified by 10 tests (the getter-setter and getter-only rewrites plus the
+  `AutomaticProperties`/`GetterOnlyAutomaticProperties`-off, non-compiler-generated accessors,
+  non-compiler-generated field, missing property symbol, `readonly set`, differing field
+  declaring type, and unrecognized field-name keeps) proven with a `TransformAutomaticProperty`
+  -neuter RED round (exactly the 2 positive tests failed, the 9 keep-tests staying green). The
+  automatic-EVENT rewrite lands in a later slice (the `VisitEventDeclaration` bullet below).
+- **`PatternStatementTransform` backing-field reference replacement** -- the next slice adds
+  `VisitIdentifier` / `ReplaceBackingFieldUsage` and the shared
+  `IsBackingFieldOfAutomaticProperty`: with `AutomaticProperties` on, an `Identifier` token that
+  names an automatic property's compiler backing field is replaced by a fresh token carrying the
+  property name and the parent expression's `MemberResolveResult` is re-pointed at the property
+  (the C# `parent.RemoveAnnotations<MemberResolveResult>()` +
+  `AddAnnotation(new MemberResolveResult(mrr.TargetResult, property))`, built before the removal
+  to avoid the port's annotation use-after-free). The guard chain is faithful: the
+  backing-field name, the compiler-generated flag, the same-type property lookup (`GetProperties`
+  with `IgnoreInheritedMembers`), `CanTransformToAutomaticProperty` with the
+  compiler-generated-accessor requirement inferred from the `_Name` VB naming, the
+  `currentMethod.AccessorOwner != property` self-reference guard, and the `GetterOnlyAutomatic`
+  `CanSet` gate. Verified by 12 tests (the C#/VB reference replacements, the static
+  `IsBackingFieldOfAutomaticProperty` shape matrix, and the `AutomaticProperties`-off,
+  non-backing-field name, missing resolve result, member-not-a-field, non-compiler-generated
+  field, non-compiler-generated accessor, `GetterOnlyAutomaticProperties`-off, and own-accessor
+  keeps) proven with a `ReplaceBackingFieldUsage`-neuter RED round (exactly the 2 positive tests
+  failed, the 10 keep-tests staying green).
+- **`PropertyAndEventBackingFieldLookup` metadata machinery** -- the metadata class the
+  automatic-EVENT rewrite consumes lands (the `PropertyAndEventBackingFieldLookup.cs` port):
+  one walk over every TypeDef indexes the type's fields by name, maps the
+  `<Property>k__BackingField` / compiler-generated `_Property` field to the property, and maps
+  the same-named / `Event`-suffixed field to the event (the property arm requires the field's
+  own `[CompilerGenerated]` only on the VB `_Property` spelling). The per-type field-name map
+  and event-name set are scratch state, so same-named backing fields in different types never
+  collide. Exposed through the `MetadataFile::GetPropertyAndEventBackingFieldLookup()` lazy
+  pimpl cache (the `GetMethodSemanticsLookup` shape). Verified by 8 tests (a synthetic
+  `BfSynth.dll` built with the real .NET 10 MetadataBuilder pinning the `<P>k__BackingField`,
+  compiler-generated `_Q`, non-compiler-generated `_R`, same-named event field, and the
+  `FEvent`-named-event fallback skip; three real-mscorlib association fixtures; a
+  whole-mscorlib naming-shape invariant sweep; the invalid-file empty lookup; and the lazy
+  accessor identity) proven with a ctor-neuter RED round (5 positive tests failed, the 3
+  negative/lazy tests staying green).
+- **`PatternStatementTransform` automatic-event rewrite** -- the `VisitEventDeclaration` wiring
+  that consumes the lookup lands: with `AutomaticEvents` on, a sibling `FieldDeclaration` that
+  is the event's compiler backing field -- a single-variable private field whose type matches
+  the event's and whose metadata token the `PropertyAndEventBackingFieldLookup` associates with
+  the event -- is removed, so a field-like event declaration hides its backing field. The
+  `IsEventBackingFieldDeclaration` gate reads the field's `ParentModule` / `MetadataFile` and
+  the token association, so it is driven by a metadata-backed fixture (a real mscorlib
+  `MetadataModule` over `System.AppDomain.AssemblyLoad`). Verified by 5 tests (the backing-field
+  removal plus the `AutomaticEvents`-off, unassociated-private-field, multi-variable-field, and
+  missing-event-symbol keeps) proven with a removal-neuter RED round (exactly the positive test
+  failed, the 4 keeps staying green). The full Debug gtest suite is now 12874 ran / 12872
+  passed / the 2 standing skips / zero failures.
+- **`PatternStatementTransform` address-taken-item special case** -- the previously deferred
+  `AddressUsedForSingleCall` lands, completing the `foreach`-over-array item gate for a variable
+  that is not single-definition but whose address is taken exactly once for a single instance
+  method call (`StoreCount == 1`, `AddressCount == 1`, `LoadCount == 0`, a non-reference type,
+  the `LdLoca` passed as the this pointer at `ChildIndex == 0`, and the call not inside a nested
+  loop). The `ILVariable.AddressInstructions` list (the C# `IReadOnlyList<LdLoca>`) is added and
+  populated by `ComputeVariableUsage` (the reader-event equivalent, cleared on every recompute)
+  and kept current by `ILFunction::RecombineVariables`; the transform's `IsInstanceCall` flag is
+  the stand-in for the C# `!call.Method.IsStatic` (the `InterpolatedStringTransform` convention,
+  since the port's IL reader does not resolve the `IMethod` onto `Call`). Verified by 6 tests
+  (the address-taken rewrite plus the reference-typed item / static call / non-first-argument /
+  nested-container / additional-load keeps) and by strengthened `RecombineVariables` assertions
+  (the list population, the transfer, the drain, and the duplicate-free recompute), proven with
+  an `AddressUsedForSingleCall`-neuter RED round (exactly the 1 positive test failed, the 5
+  keep-tests staying green). The full Debug gtest suite is now 12880 ran / 12878 passed / the
+  2 standing skips / zero failures, and the CLI baselines are unchanged (`--csharp` 10106360,
+  `--il` 41246545 bytes).
+- **`ExpressionBuilder.ConvertField` automatic-property requires-qualifier special case** --
+  the previously deferred half of `ConvertField`'s automatic backing-field handling lands: when
+  `AutomaticProperties` is on and the field is the compiler-generated backing field of an
+  automatic property (`PatternStatementTransform.IsBackingFieldOfAutomaticProperty`), the
+  property is not the current member, and the property is settable (or
+  `GetterOnlyAutomaticProperties` is on), the requires-qualifier decision is made against the
+  property instead of the field (the C# `RequiresQualifier(property, target)`); the property
+  identity is the canonical `IMember` subobject (the `ReplaceBackingFieldUsage` convention).
+  The automatic-EVENT backing-field arm at the top of the C# method stays deferred with
+  `AutoEventDecompiler` / `DecompileBodyForAnalysis`. Verified by 5 tests (the property-based
+  qualifier positive plus the `AutomaticProperties`-off, own-accessor, non-settable-property,
+  and non-backing-field keeps), proven with a `RequiresQualifier(*backingProperty, target)`
+  -neuter RED round (exactly the 1 positive test failed, the 4 keep-tests staying green).
+- **`DeclareVariables` mutation-phase helpers** -- the deferred argument-shaping helpers land:
+  `CombineDeclarationAndInitializer` (by-ref-like / for-initializer / the inverse of
+  `SeparateLocalVariableDeclarations`), `CanBeDeclaredAsOutVariable` (the first use in an `out`
+  direction, gated on `OutVariables` / no required initialization, and the ancestor walk that
+  permits promotion from an expression-statement or lambda body but denies it across an embedded
+  statement), and `IsReferencedWithinDeclaringCall` (the CS8196 sibling-argument scan through
+  `ResolveVariableToDeclare`). The C# reads its `context` field in these methods; the port passes
+  the `TransformContext` explicitly because the `Run` lifecycle is not ported yet. `Run`,
+  `EnsureExpressionStatementsAreValid`, `InsertDeconstructionVariableDeclarations`,
+  `InsertVariableDeclarations` and `UpdateAnnotations` stay deferred (they need
+  `AssignVariableNames.GenerateVariableName`, the deconstruction designation, and the `ILVariable`
+  shared handle on `VariableToDeclare`). Verified by 8 tests with a `TransformContext` fixture
+  (the `AddCheckedBlocks` shape), all 23 `DeclareVariablesTest` cases green.
+- **`ExpressionBuilder` fixed-buffer pointer arithmetic** -- the deferred arm of
+  `HandleManagedPointerArithmetic` lands: `&buffer.field + offset` where the nested
+  `LdFlda` is a `[FixedBuffer(typeof(T), N)]` field (the C# `settings.FixedBuffers &&
+  Add && LdFlda-of-LdFlda && IsFixedField` shape) renders as `ref buffer[index]` --
+  the fixed field access re-types to a pointer of the declared element type through a
+  fresh `MemberResolveResult`, the detected byte offset goes through
+  `TranslateArrayIndex` to become the element index, and the indexer is wrapped in a
+  `ref` `DirectionExpression` carrying a `ByReferenceResolveResult`. A by-ref field
+  (whose `ConvertField` returns a `ByReferenceResolveResult` rather than a
+  `MemberResolveResult`) falls through to the general element-offset intrinsic render.
+  Verified by 3 tests (the `ref buffer[1]` indexer from a 4-byte offset over an int32
+  element, the `FixedBuffers`-off keep, and the non-fixed-nested-field keep), proven
+  with a `settings->FixedBuffers()`-neuter RED round (exactly the positive test failed,
+  the 2 keeps staying green). The full Debug gtest suite is 12896 ran / 12894 passed /
+  the 2 standing skips / zero failures, and all three CLI baselines are unchanged
+  (`--csharp` 10106360, `--il` 41246545, `-l c` 109438 bytes).
+- **`CombineExitsTransform`** -- the compact early fold `if (cond) leave(a);
+  leave(b)` -> `leave (cond ? a : b)` that the C# `DecompileBodyForAnalysis`
+  prefix appends so a release-mode `return a && b` body is a single statement.
+  A true-branch nested block of the same shape is folded recursively (the
+  `if (cond) { if (cond2) leave(a); leave(b) } leave(c)` decision tree becomes
+  one leave whose value is a nested conditional), and the combined leave is run
+  through `ExpressionTransforms` (the condition `comp(x != 0)` folds to `x`).
+  Block-model adaptation: the C# reads the if and the following leave from
+  `block.Instructions` (if second-to-last, leave last); this port stores the
+  terminator in `Block.FinalInstruction`, so the shape is "the if is the last
+  non-final instruction, the leave is the final" and the fold installs the
+  combined leave as the block's new final. The shared
+  `ExpressionTransforms::RunOnSingleStatement` entry (the C# static the other
+  multi-pass callers use) is ported alongside. Verified by 8 tests (the simple
+  fold, the nested recursion, the post-fold expression rewrite, and the
+  multi-block / non-empty-else / non-leave-arm / Nop-value / non-function-target
+  keeps), proven with a `CombineExits`-neuter RED round (exactly the 3 positive
+  tests failed, the 5 keeps staying green). The full Debug gtest suite is 12904
+  ran / 12902 passed / the 2 standing skips / zero failures, and all three CLI
+  baselines are unchanged (`--csharp` 10106360, `--il` 41246545, `-l c` 109438
+  bytes). The transform stays unwired in the CLI pipeline -- it is consumed by
+  the `RunILTransformsForAnalysis` prefix below.
+- **`CSharpDecompiler.DecompileBodyForAnalysis`** -- the read-and-run analysis
+  path the compiler-generated-code recognizers (`AutoEventDecompiler`,
+  `RecordDecompiler`) use. `GetILTransforms.hpp` now factors the
+  `GetILTransforms()` list into the shared block-transform prefix
+  (`RunILTransformsThroughBlockTransforms`, the C# list truncated after the
+  last `BlockILTransform`), which `RunGetILTransforms` extends with the late
+  transforms and `RunILTransformsForAnalysis` extends with
+  `CombineExitsTransform`; `DecompileBodyForAnalysis` reads a method body
+  (`ILReader.ReadIL`) and runs that prefix with the fixed C# 1.0
+  `AnalysisTransformSettings` (the `DecompilerSettings(LanguageVersion.CSharp1)`
+  feature gates the port models: nullables, anonymous methods, null propagation,
+  string interpolation, throw expressions, the C# 7/8/9 pattern gates, native
+  integers, unsigned right shift, checked operators), so the analysis shape is
+  independent of the caller's user-visible settings. Verified by 6 tests (the
+  settings matrix, the CombineExits fold present in the analysis list and
+  absent from the full pipeline, the real-body read, the nil-body null, and a
+  200-body analysis sweep), proven with a `CombineExits`/`LiftNullables`-neuter
+  RED round (exactly the 2 targeted tests failed, the 4 negatives staying
+  green). The full Debug gtest suite is 12910 ran / 12908 passed / the 2
+  standing skips / zero failures, and all three CLI baselines are unchanged
+  (`--csharp` 10106360, `--il` 41246545, `-l c` 109438 bytes).
+- **The variable/field IL match helpers** -- `PatternMatching.hpp` gained the
+  remaining shared match extensions the `AutoEventDecompiler` accessor
+  recognizers compose: `MatchLdLoc`/`MatchStLoc` (both out-forms, the
+  variable-equality test and the stored-value out), `MatchLdsFld`,
+  `MatchStsFld`/`MatchStFld` (the `ldobj`/`stobj`-over-`ldsflda`/`ldflda`
+  shapes with the unaligned/volatile rejection), and `MatchLdsFlda`/
+  `MatchLdFlda`. The C# `IField.Equals` field-identity test the accessor
+  matchers add on top stays at their call sites. Verified by 6 tests (the
+  variable identity/out matrix and the static/instance load/store/address
+  field shapes), proven with a `MatchLdsFld`/`MatchLdFlda`-neuter RED round
+  (exactly the 2 positive tests failed, the 13 others staying green). The
+  full Debug gtest suite is 12918 ran / 12916 passed / the 2 standing skips /
+  zero failures, and all three CLI baselines are unchanged (`--csharp`
+  10106360, `--il` 41246545, `-l c` 109438 bytes).
+- **`AutoEventDecompiler`** -- recognizing automatic (field-like) events by
+  structurally matching the compiler-generated add/remove accessor ILAst. The
+  three recognized shapes land: the csc 4 / Roslyn compare-exchange loop, the
+  mcs compare-exchange loop (the combined delegate passed straight to
+  `Interlocked.CompareExchange`), and the pre-4.0 non-thread-safe combine
+  assignment (including the mcs `dup` `this`-alias form). `FindBackingField`
+  reads the declaring type's private, same-static-ness field the
+  `PropertyAndEventBackingFieldLookup` associates with the event;
+  `IsAutomaticEvent` checks explicit-interface-implementation / declaring type /
+  both accessors' `HasBody`, the type-erasure return-type equivalence, and both
+  accessor bodies, memoizing the verdict in the new `DecompileRun.AutomaticEvents`
+  map (the C# `Dictionary<IEvent, IField?>`); `IsAutomaticAccessor` reads the body
+  through the landed `DecompileBodyForAnalysis` analysis prefix. Divergence: the
+  port's IL reader does not resolve `Call::Method` / `LdFlda::Field`, so the
+  matchers read the resolved handle when set and fall back to
+  `MethodName`/`IsInstanceCall` and the node's `Field`; and the port's
+  Loop/ConditionDetection produces a different block shape than the C# for a real
+  automatic-event accessor, so the structural matchers are pinned by synthetic
+  tests and the real `IsAutomaticEvent` verdict is only exercised through
+  `FindBackingField`/memoization. `AddFieldLikeEventAttributes` stays deferred
+  with the type-declaration renderer. Verified by 11 tests (the three matcher
+  shapes plus the wrong-combine-kind / missing-init / wrong-field keeps, the real
+  mscorlib `AppDomain.AssemblyLoad` backing field, the memoization entry, and the
+  fake-event no-field shape), proven with a `MatchAutomaticAccessorBody`-neuter
+  RED round (exactly the 4 positive matcher tests failed, the 7 others staying
+  green). The full Debug gtest suite is 12929 ran / 12927 passed / the 2 standing
+  skips / zero failures, and all three CLI baselines are unchanged (`--csharp`
+  10106360, `--il` 41246545, `-l c` 109438 bytes).
+- **`AutoEventDecompiler.AddFieldLikeEventAttributes`** -- the field-like event
+  attribute conversion, the last deferred member of `AutoEventDecompiler`. The
+  add-accessor's attributes and the backing field's attributes are rendered as
+  `method:` and `field:` attribute sections on the event declaration (the C#
+  `ConvertAttributes(attributes, "method"/"field")`), dropping the
+  compiler-generated attributes (`[CompilerGenerated]`,
+  `[DebuggerBrowsable]` and, on the accessor only, `[MethodImpl]`) by exact
+  attribute-type full name. The full name is read through a file-local
+  `TypeFullNameOf` helper (the port's `IType` has no `FullName`; the
+  `INamedElement`/`ParameterizedType`/`ReflectionName` fallback the other
+  transforms use). The C# non-null `AddAccessor` is asserted (guaranteed by the
+  `IsAutomaticEvent` verdict the caller checks first). Verified by 6 tests (the
+  `method`-then-`field` section order and targets, the accessor
+  `[CompilerGenerated]`/`[MethodImpl]` drops, the field
+  `[CompilerGenerated]`/`[DebuggerBrowsable]` drop, the all-dropped empty shape,
+  and the kept-attribute order preservation) proven with an early-return RED
+  round (exactly the 5 positive tests failed, the all-dropped negative staying
+  green). The full Debug gtest suite is 12935 ran / 12933 passed / the 2 standing
+  skips / zero failures, and all three CLI baselines are unchanged (`--csharp`
+  10106360, `--il` 41246545, `-l c` 109438 bytes).
+- **`ExpressionBuilder.ConvertField` automatic-event arm** -- the last deferred
+  piece of `ConvertField` (the auto-event backing-field special case), wiring the
+  just-ported `AutoEventDecompiler` into its consumer. `IsBackingFieldOfAutomaticEvent`
+  narrows the field's `ParentModule` to a `MetadataModule` and reads the
+  `PropertyAndEventBackingFieldLookup` association, declines inside the event's own
+  accessor (the `AccessorOwner` self-reference check), and requires the memoized
+  `AutoEventDecompiler.IsAutomaticEvent` verdict plus the backing-field identity
+  check. On a hit `ConvertField` renders the reference as the event (the
+  event-target qualifier decision, the event `MemberResolveResult`), else falls
+  through to the field path. The port's `AutoEventDecompiler.hpp` gained the `TS::`
+  namespace alias so it is self-contained under the `CSharp::TypeSystem` shadowing
+  (the header was previously only includable before `UsingScope.hpp`). Verified by
+  5 tests over the real `System.AppDomain.AssemblyLoad` fixture (the helper's
+  positive, the non-automatic memoized verdict, the own-accessor decline, the
+  unassociated-field decline, and the `ConvertField` render carrying the event
+  resolve result) proven with an early-return RED round (exactly the 2 positives
+  failed, the 3 negatives staying green). The full Debug gtest suite is 12940 ran /
+  12938 passed / the 2 standing skips / zero failures, and all three CLI baselines
+  are unchanged (`--csharp` 10106360, `--il` 41246545, `-l c` 109438 bytes).
+- **`MetadataTypeDefinition.GetNestedTypes` GetMembersHelper routing** -- the last
+  deferred arm of the metadata type-definition member surface: the
+  `(IgnoreInheritedMembers | ReturnMemberDefinitions)` short-circuit stays the real
+  `NestedTypes`-only projection, and every other arm now routes
+  `GetMembersHelper::GetNestedTypes` (the base-type walk plus the parameterized
+  nested-type construction that landed as D493 and was already tested directly).
+  Both the filter overload and the typeArguments overload route, so
+  `MemberLookup.LookupType`/`Lookup` no longer throws on a real metadata type and
+  the ordinary `ConvertField` field path resolves simple names through it. Verified
+  by extending the `MetadataTypeDefinitionTest` nested-types case (the routed
+  no-bits and empty-typeArguments arms) and re-adding the previously dropped
+  `ConvertField` automatic-events-off test, which now exercises the field path over
+  the real `System.AppDomain.AssemblyLoad` fixture. The full Debug gtest suite is
+  12941 ran / 12939 passed / the 2 standing skips / zero failures, and all three
+  CLI baselines are unchanged (`--csharp` 10106360, `--il` 41246545, `-l c`
+  109438 bytes).
+- **`MetadataTypeParameter` attribute/constraint surface** -- the three deferred
+  members of the GenericParam-backed type parameter land over the already-ported
+  `AttributeListBuilder` / `CustomAttributeDecoder` / `MetadataModule.ResolveType`:
+  `GetAttributes` builds the row's custom-attribute list (the
+  `SymbolKind.TypeParameter` target, cached), `NullabilityConstraint` decodes the
+  row's `[Nullable]` byte behind `ShouldDecodeNullableAttributes` with the
+  MetadataMethod / ITypeDefinition `NullableContext` fallback, and
+  `TypeConstraints` composes each GenericParamConstraint row's resolved type
+  (with its own attribute rows) plus the ValueType / Object tail, keeping the
+  owning attribute rows alive for the non-owning `TypeConstraint` snapshots.
+  The `AbstractTypeParameter` `DirectBaseTypes` / `EffectiveBaseClass` /
+  `EffectiveInterfaceSet` projection now reads real constraints. Verified by a
+  new 8-test `MetadataTypeParameterTest` (mscorlib's empty attribute lists and
+  Oblivious fallback, CoreLib's `DynamicallyAccessedMembers` attribute and
+  `[Nullable(2)]` decode, the ValueType / Object tails, the interface-only
+  constraint's Object tail, and the Constraint caching) plus the updated
+  `MetadataTypeDefinitionTest.DeferralContracts`, with a 4/7-positive RED
+  round. The full Debug gtest suite is 12949 ran / 12947
+  passed / the 2 standing skips / zero failures, and the CLI baselines are
+  unchanged (`--csharp` 10106360, `--il` 41246545, `-l c` 109438 bytes).
+- **`DecompiledLambdaResolveResult`** -- the concrete lambda resolve result the
+  C# back end constructs (the third class in `LambdaResolveResult.cs`) now lands,
+  closing the last deferral of that file. It captures the three ctor bools, holds
+  the `DelegateType` (public readonly) and mutable `InferredReturnType` fields,
+  projects `IsAsync` / `Parameters` / `ReturnType` over the held `ILFunction`, and
+  answers `IsValid` through the conversion controller. The prerequisites are the
+  new `ILFunction.Parameters` field (the `IReadOnlyList<IParameter>` the C# ctor
+  assigns from `method.Parameters`; non-owning, symmetric with the already-ported
+  `ReturnType` field) and the landed `CSharpConversions`: `IsValid` reads
+  `Detail::IdentityConversion` (the port has no public `IdentityConversion`
+  method, the established D547 convention) and the public
+  `CSharpConversions::ImplicitConversion`. `LambdaConversion` gained an
+  `InstancePtr()` owning handle (a no-op-deleter `shared_ptr` over the same
+  `Instance()` singleton) so `IsValid` can return the C# `Conversion` reference
+  as a `shared_ptr` while preserving the singleton's reference identity. Verified
+  by 11 new tests (ctor flags + function projections, `IsAsync`, the
+  `GetInferredReturnType` stored-field pass-through plus the mutable-field
+  assignment, the inherited `ToString` concrete-class-name form, `ShallowClone`
+  sharing `Body`, and the six-arm `IsValid` matrix) proven with a `IsValid`-neuter
+  RED round (exactly the 3 positive tests failed, the 8 negatives stayed green).
+  The full Debug gtest suite is 12960 ran / 12958 passed / the 2 standing skips /
+  zero failures, and the CLI baselines are unchanged (`--csharp` 10106360, `--il`
+  41246545, `-l c` 109438 bytes).
+- **`AccessPathElement.GetAccessPath`** -- the shared static machinery from
+  `TransformCollectionAndObjectInitializers.cs` (lines 325-608) that decomposes a
+  store or `Add` call into the member-access path it writes through -- the named
+  prerequisite for the two remaining `ExpressionBuilder.VisitBlock` arms
+  (`TranslateObjectAndCollectionInitializer` / `TranslateWithInitializer`, both of
+  which consume it through `BuildArrayInitializerExpression`). The
+  `AccessPathKind` enum (Invalid/Setter/Adder), the `AccessPathElement` struct
+  (the `OpCode`/`Member`/`Indices` triple, renamed `ElementOpCode` because a C++
+  member named `OpCode` would shadow the type in struct scope), the 5-tuple
+  `GetAccessPath` result (as the nested `Info` struct), `CanBeUsedInInitializer`,
+  `IsAccessorAccessible`, `IsMethodApplicable` (with the nested
+  `CanInferTypeArgumentsFromParameters` over `Detail::InferTypeArguments`),
+  `GetReturnTypeFromInstruction`, and the `Equals`/`GetHashCode`/`ToString`
+  surface land as `IL/Transforms/AccessPathElement.{hpp,cpp}`. PORT
+  CONVENTIONS: the C# takes an optional `CSharpResolver` (the C# layer's
+  resolver) -- the header forward-declares
+  `ILSpy::Decompiler::CSharp::Resolver::CSharpResolver` and only the .cpp pulls
+  the CSharp-layer headers (the applicability checks run only when a resolver is
+  passed); the C# `ILInstruction[]? Indices` ports to
+  `std::optional<std::vector<ILInstruction*>>` because the null-vs-empty
+  distinction is observable (a plain property accessor call always carries an
+  EMPTY array while the field arms carry null, and `Equals` reference-compares
+  the arrays first so null != empty); `Equals` compares members by REFERENCE
+  equality (the C# single-argument `Member.Equals` binds `object.Equals`, the
+  iteration-191 precedent); and the `ILInstructionMatchComparer`'s structural arm
+  is the conservative `StructurallyEquals` approximation (the port has no
+  generated Match/PerformMatch machinery, so pure leaf kinds -- variable loads,
+  constants, ldnull -- plus the ldobj/field/call composites compare structurally
+  while unhandled kinds compare UNEQUAL, the ReduceNestingTransform convention).
+  Documented divergences at their sites: a `Call` with a null `Method` or empty
+  `Arguments` degrades to Invalid (the C# dereferences/NREs on the always-resolved
+  `Method`), an `LdFlda` without a resolved `Field` likewise, a negative
+  accessor-arity `Take` clamps to the empty list (the C# `Take` throws), and the
+  readonly-field gate reads the node's reader-populated `FieldIsReadOnly`
+  stand-in (the `ILInlining::IsReadonlyReference` convention). Verified by 30 new
+  tests (the field-store and nested-`ldflda` walks, the ldobj/ldobj_ifref arms
+  with the readonly gate both ways, the plain/indexer/getter accessor-call
+  shapes with the values-`Last()` getter quirk, the Adder shapes, the newoj /
+  unresolved-method / empty-Add rejections, the values-referencing-target guard
+  including the strict-descendants quirk (a value that IS an `ldloc` of the
+  target does not invalidate), the nested get-only-property rejection, the
+  resolver-driven applicability matrix (static Add, non-Enumerable vs Enumerable
+  root type, the accessor early-return, the DictionaryInitializers and
+  ExtensionMethodsInCollectionInitializers setting gates, the generic-Add
+  inference failure), and the Equals/GetHashCode/ToString matrix including the
+  C# ToString array-render quirk) proven with a three-behavior neuter RED round
+  (the readonly gate, the values-referencing-target check, the null-vs-empty
+  indices collapse: exactly the 3 predicted tests failed, the 27 negatives
+  stayed green) then restored green. The full Debug gtest suite is 13042 ran /
+  13040 passed / the 2 standing skips / zero failures, and all three Release
+  CLI baselines are byte-identical (`--csharp` 10106360, `--il` 41246545,
+  `-l c` 109438) because the machinery has no caller in the seed pipeline yet.
+- **`ExpressionBuilder.TranslateStackAllocInitializer` (+ `BlockKind.StackAllocInitializer`,
+  the `TransformArrayInitializers.GetNullExpression` helper)**
+  -- the C# `stackalloc` initializer block translation lands, closing another of
+  the remaining `VisitBlock` arms. `TranslateStackAllocInitializer`
+  (`ExpressionBuilder.cs` lines 3773-3844) deconstructs the
+  `BlockKind.StackAllocInitializer` shape -- `stloc v(localloc ...)` /
+  `stloc v(locallocspan ...)` into an `InitializerTarget` variable whose
+  FinalInstruction is the matching `ldloc v`, followed by the
+  `stobj T(ldloc v [+ count], value)` element stores. The element type comes from
+  `TranslateLocAlloc` / `TranslateLocAllocSpan` (the same `sizeof`-operand / type
+  hint / byte fallback as the bare `stackalloc` render), the type hint adjusted to
+  a `PointerType(storedType)` when it does not pin the element type down, and a
+  store's byte offset is converted to an element index through
+  `PointerArithmeticOffset.Detect`; the skipped slots are filled with the
+  `TransformArrayInitializers.GetNullExpression` zero (`LdcI4(0)` for an integer
+  element type, `LdcI8`/`LdcF4`/`LdcF8`/`LdcDecimal`, else `default(T)`). The C#
+  `ArgumentException` for any shape mismatch maps to `std::invalid_argument`
+  (the D196 convention). Adding the `BlockKind.StackAllocInitializer` value to the
+  enum (appended after `ArrayInitializer` so no existing value is renumbered) and
+  the file-local `GetNullExpression` (the `TransformArrayInitializers` transform
+  itself has not landed yet) completes the slice. Verified by 6 new tests (the
+  sequential-element render with its type/count/initializer pins and pointer
+  resolve result, the missing-element gap fill, the type-hint-plus-constant-byte-
+  count arm, and the wrong-variable-kind / non-`localloc` / incompatible-store
+  rejections) proven with a positive-render-neuter RED round where exactly the 3
+  positive tests failed and the 3 negatives stayed green. The full Debug gtest
+  suite is 13012 ran / 13010 passed / the 2 standing skips / zero failures, and
+  all three Release CLI baselines are byte-identical (`--csharp` 10106360, `--il`
+  41246545, `-l c` 109438) because no transform produces `StackAllocInitializer`
+  blocks yet.
+- **`ExpressionBuilder.TranslateArrayInitializer` (+ the `MatchNewArr` / `MatchStObj` / `MatchLdElema` matchers, `BlockKind.ArrayInitializer`)**
+  -- the C# array-initializer block translation lands, closing another of the
+  remaining `VisitBlock` arms. `TranslateArrayInitializer`
+  (`ExpressionBuilder.cs` lines 3685-3771) deconstructs the
+  `BlockKind.ArrayInitializer` shape -- `stloc v(newarr T[dims])` into an
+  `InitializerTarget` variable whose final instruction is the matching
+  `ldloc v`, followed by the `stobj T(ldelema T(ldloc v, [idx]), value)`
+  element stores -- translates each dimension size as a compile-time constant,
+  and nests the element values into an `ArrayInitializerExpression` tree through
+  a stack of `(Expression, CurrentElementCount)` pairs sized by the
+  `newarr` dimensions. The element type expression is `ConvertType`'d, any
+  trailing `[...]`s are moved off a `ComposedType` onto
+  `AdditionalArraySpecifiers`, special constants are disabled for non-integer
+  element types during the value translation, and the result carries the size
+  arguments and element resolve results in an `ArrayCreateResolveResult`.
+  Adding the three array match helpers to the shared `PatternMatching.hpp`
+  (with `ArrayInstructions.hpp` now included there) completes the IL matcher
+  surface the translation composes; the new `BlockKind.ArrayInitializer` value
+  is appended to the enum (the port never relies on the C# ordinals). Verified
+  by 6 new tests (the one-dimensional render with its `Arguments`/`Initializer`
+  and `ArrayCreateResolveResult` pins, the 2x2 nested render, and the
+  non-`newarr` / wrong-variable-kind / non-constant-dimension / mismatched-
+  element-type rejections) proven with a `TranslateArrayInitializer`-neuter RED
+  round where all 6 failed. The full Debug gtest suite is 13006 ran / 13004
+  passed / the 2 standing skips / zero failures, and the CLI baselines are
+  unchanged by construction (no transform produces `ArrayInitializer` blocks
+  yet, so the new code is unreachable from the CLI).
+- **`Block.MatchInlineAssignBlock` + `ExpressionBuilder.TranslateSetterCallAssignment`**
+  -- the `BlockKind.CallInlineAssign` block translation lands, closing one more
+  of the remaining `VisitBlock` arms. `Block.MatchInlineAssignBlock`
+  (`Block.cs` lines 436-452) recognizes a single-instruction
+  `CallInlineAssign` block whose setter call's last argument is an
+  `stloc tmp(value)` with a single-definition/single-load `tmp` and whose
+  final instruction is `ldloc tmp`, answering the setter call and the extracted
+  value. `TranslateSetterCallAssignment` (`ExpressionBuilder.cs` lines
+  3477-3488) replaces the call's last argument with that value and routes the
+  call through `CallBuilder.Build`, with the C#
+  `"Error: MatchInlineAssignBlock() returned false"` fallback for an invalid
+  block. The `CallInstruction` parameter cast ports to a `std::logic_error`
+  when the call carries no resolved method (the C# assumes non-null), and the
+  decoded opcode follows the port's one-Call-node convention
+  (`IsNewObj ? NewObj : Call`). Verified by 10 new tests: 7
+  `BlockMatchInlineAssignBlockTest` cases (the positive extraction plus the
+  wrong-kind / instruction-count / non-call / non-stloc-last / multi-load /
+  wrong-final rejections) and 3 `ExpressionBuilderVisitBlockTest` cases (the
+  setter-call render with the substituted value, the call annotation, and the
+  invalid-shape error), proven with a `MatchInlineAssignBlock`-neuter RED round
+  where exactly the 3 positive tests failed and the 7 negatives stayed green.
+  The full Debug gtest suite is 13000 ran / 12998 passed / the 2 standing skips
+  / zero failures, and the CLI baselines are unchanged by construction (no
+  transform produces `CallInlineAssign` blocks yet, so the new code is
+  unreachable from the CLI).
+- **`ExpressionBuilder.VisitBlock` + `TranslateCallWithNamedArgs` / `TranslateInterpolatedString`**
+  -- the special-kind block dispatch lands (`ExpressionBuilder.cs` lines
+  3406-3468), making the just-ported `CallBuilder.CallWithNamedArgs` render
+  reachable from the visitor. `VisitBlock` switches on `Block.Kind`:
+  `CallWithNamedArgs` routes through `TranslateCallWithNamedArgs` (the
+  `CallBuilder` render wrapped in `WrapInRef` when the called method returns a
+  by-reference type), `InterpolatedString` routes through
+  `TranslateInterpolatedString`, and everything else is the C# default's
+  `ErrorExpression("Unknown block type: " + block.Kind)`. Only the
+  `CallWithNamedArgs` and `InterpolatedString` kinds exist in the ported
+  `BlockKind` enum (the initializer transforms that synthesize the C#
+  `ArrayInitializer` / `CollectionInitializer` / `ObjectInitializer` /
+  `StackAllocInitializer` / `WithInitializer` / `CallInlineAssign` kinds have
+  not landed), so those arms are absent rather than stubbed.
+  `TranslateInterpolatedString` walks `Instructions[1..]` (skipping the
+  `DefaultInterpolatedStringHandler` construction), renders `AppendLiteral`'s
+  `LdStr` argument with the braces doubled, and renders `AppendFormatted` as an
+  `Interpolation` over its value argument (converted to the call's parameter-1
+  type) with the optional `LdcI4` alignment and `LdStr` suffix, throwing the C#
+  `NotSupportedException` (mapped to `std::logic_error`) on anything else. The
+  port's `CallInstruction.GetParameter(i)` has no counterpart, so a file-local
+  helper resolves the parameter type from the resolved `IMethod`'s parameter
+  list and falls back to the IL reader's `Call.ParameterIType` vector, shifting
+  the argument index by the instance-call `this`. Verified by 5 new tests (the
+  `ControlFlow` default error text, the `CallWithNamedArgs` dispatch reordering
+  `b` then `a` with the block annotation preserved, the literal-escape +
+  alignment interpolation, the four-argument alignment-and-suffix
+  interpolation, and the unsupported-call throw) proven with a
+  dispatch-neuter RED round (all 5 failed). The full Debug gtest suite is 12990
+  ran / 12988 passed / the 2 standing skips / zero failures, and the CLI
+  baselines are byte-identical (`--csharp` 10106360, `--il` 41246545, `-l c`
+  109438).
+- **`CallBuilder.ModifyReturnTypeOfLambda` / `ModifyReturnStatementInsideLambda`**
+  -- the previously deferred `CastArguments` anonymous-type lambda-return arm now
+  lands. `ModifyReturnTypeOfLambda` reads the lambda's
+  `DecompiledLambdaResolveResult` annotation, rewrites an expression body through
+  `new TranslatedExpression(body.Detach()).ConvertTo(ReturnType)` or recurses a
+  block body's returns through `ModifyReturnStatementInsideLambda` (which skips
+  nested lambdas / anonymous methods), and records `InferredReturnType =
+  ReturnType`. The C# unchecked `(DecompiledLambdaResolveResult)` cast ports to a
+  loud `std::logic_error` on a lambda with no such annotation. Verified by 6 new
+  tests (expression-body conversion, identity no-op, block-body return
+  conversion, nested-function skip, bare-return pass-through, missing-annotation
+  throw) proven with a conversion-neuter RED round (exactly the 3 positives
+  failed, the 3 negatives stayed green). The full Debug gtest suite is 12966 ran /
+  12964 passed / the 2 standing skips / zero failures, and the CLI baselines are
+  unchanged (`--csharp` 10106360, `--il` 41246545, `-l c` 109438 bytes).
+- **`CallBuilder.CallWithNamedArgs`** -- the named-argument block render lands
+  (`CallBuilder.cs` lines 2213-2240), completing the `CallBuilder` public
+  surface. The render lays the block's `StLoc` entries (the promoted arguments,
+  one per `VariableKind.NamedArgument` variable, the instance call's `this_arg`
+  included) into a fresh argument vector, maps each to its parameter slot by its
+  load's `ChildIndex` shifted by `firstParamIndex` (`1` for an instance call),
+  then appends the remaining call arguments (skipping the promoted
+  `NamedArgument` loads), and routes the result through the mainline `Build`
+  with that explicit argument-to-parameter map. The output therefore names the
+  arguments from the first out-of-place one onward, exactly as the C# `
+  BuildArgumentList` map does, and the result carries both the call's and the
+  block's IL-instruction annotations. The `CallInstruction` cast ports to a
+  `dynamic_cast` with a loud `std::logic_error` on a call with no resolved
+  method (the C# assumes non-null). Verified by 5 new tests (the promoted-
+  argument reorder that names `b` then `a`, the in-order promotion that emits no
+  names, the instance-call `firstParamIndex` shift, the call+block annotation
+  pair, and the missing-method throw) proven with a throw-neuter RED round
+  (exactly the 4 positive tests failed, the throw test stayed green). The full
+  Debug gtest suite is 12985 ran / 12983 passed / the 2 standing skips / zero
+  failures, and the CLI baselines are byte-identical (`--csharp` 10106360,
+  `--il` 41246545, `-l c` 109438).
+- **`NamedArgumentTransform` + the `ILInlining` named-argument search** -- the
+  named-argument promotion that unblocks the `CallWithNamedArgs` block render
+  lands (`NamedArgumentTransform.cs`). The transform has the C# three static
+  members (`CanIntroduceNamedArgument` / `CanExtendNamedArgument` /
+  `IntroduceNamedArgument`) plus its `IStatementTransform` `Run`; the port reuses
+  them from the extended `ILInlining.FindLoadInNext`, which now carries the C#
+  `InliningOptions` flags and the `FindResultType.NamedArgument` case with the
+  `FindResult.CallArgument` field, and from the options-aware
+  `InlineOneIfPossible` overload whose NamedArgument arm promotes the argument
+  before the ordinary inlining. `IntroduceNamedArgument` wraps the call in a new
+  `BlockKind.CallWithNamedArgs` block (the block kind and the
+  `ILTransformSettings::NamedArguments` gate are added), registers the
+  `VariableKind.NamedArgument` temporary and the `this_arg` variable for an
+  instance call (the `CallInstruction.ExpectedTypeForThisPointer` by-ref rule),
+  and moves the promoted argument into an early `StLoc`; the stack type is mapped
+  to an `IType` with the standalone-`KnownType` convention because the transform
+  context carries no compilation (the `context.TypeSystem.FindType` divergence).
+  The C# `OptionsForBlock` aggressive/ordering heuristics are not modeled, so
+  only the `IntroduceNamedArguments` flag is set. The transform is NOT wired into
+  `GetILTransforms()`: the `CallWithNamedArgs` block render has since landed in
+  `CallBuilder`, but the seed back end (`ILAstToCSharp`) has no block-kind arm
+  for `CallWithNamedArgs`, so emitting such blocks would break it. Verified by
+  a 10-test `NamedArgumentTransformTest` suite (the static-call and instance-call
+  promotion structures, the setting-off keep, the existing-block extension, the
+  operator / delegate-constructor / empty-parameter-name / this-pointer /
+  no-later-load guards, and the `FindLoadInNext` NamedArgument result), proven
+  with an `InlineOneIfPossible`-neuter RED round where exactly the 3 positive
+  tests failed and the 7 negatives stayed green. The full Debug gtest suite is
+  12980 ran / 12978 passed / the 2 standing skips / zero failures, and all three
+  Release CLI baselines are byte-identical (`--csharp` 10106360, `--il`
+  41246545, `-l c` 109438).
+- **`CallBuilder.BuildCollectionInitializerExpression` / `BuildDictionaryInitializerExpression`**
+  -- the two object/collection-initializer entry points land (`CallBuilder.cs`
+  lines 667-753), completing the `CallBuilder` public surface apart from the
+  `CallWithNamedArgs` block render that has since landed.
+  `BuildCollectionInitializerExpression` builds the `Add(...)` argument list
+  (inserting a Nop target for an extension method), forces positional/unnamed
+  arguments, runs the overload-resolution fix ladder, and answers either the
+  single argument (a one-argument call needs no wrapper) or an
+  `ArrayInitializerExpression` annotated with a `CSharpInvocationResolveResult`
+  whose target is the `InitializedObjectResolveResult`.
+  `BuildDictionaryInitializerExpression` builds the `[null, indices..., value]`
+  accessor call, renders it through `HandleAccessorCall` against the
+  initialized-object target, drops the indexer target, and answers the
+  assignment (a value supplied) or the detached indexer (the C# 6 `{ key }`
+  shape). The owning shared handle for the C# by-reference
+  `InitializedObjectResolveResult` is threaded explicitly (the annotation
+  channel stores it). Verified by 4 tests over a `LookupTypeDefinition`
+  collection (single/multi-argument `Add`, the array-initializer wrap and its
+  `CSharpInvocationResolveResult` target/member pins) and the indexer fixture
+  (the assignment render and the detached-indexer arm), proven with an
+  early-return-neuter RED round (all 4 failed, then restored green). The full
+  Debug gtest suite is 12970 ran / 12968 passed / the 2 standing skips / zero
+  failures, and all three CLI baselines are byte-identical (`--csharp`
+  10106360, `--il` 41246545, `-l c` 109438).
+- **`ExpressionBuilder.TranslateObjectAndCollectionInitializer` / `TranslateWithInitializer` (+ `BlockKind.CollectionInitializer` / `ObjectInitializer` / `WithInitializer`)**
+  -- the last two `VisitBlock` arms land, consuming the iteration-216
+  `AccessPathElement` machinery. `TranslateObjectAndCollectionInitializer`
+  (ExpressionBuilder.cs lines 3491-3528) deconstructs the
+  `BlockKind.ObjectInitializer` / `CollectionInitializer` shape -- the
+  `stloc v(<construction>)` head into an `InitializerTarget` variable whose
+  final is the matching `ldloc v` -- where the construction is a newobj
+  (rendered through `CallBuilder.Build`'s constructor path; the port has no
+  NewObj node, so the C# `case NewObj` arm is the `IsNewObj` call test and
+  must precede the plain-Call Activator arm), a `default(T)`, a nested
+  `CallWithNamedArgs` block, or `System.Activator.CreateInstance<T>()`
+  (matched by the declaring type's FULL name through the new file-local
+  `TypeFullNameOf` helper -- the port's `IType` has no `FullName`, the
+  AutoEventDecompiler convention), each answered as the
+  `ObjectCreateExpression`. `BuildArrayInitializerExpression` (lines
+  3533-3623) walks `Instructions[1..]` as access paths: `StLoc` index stores
+  feed the C# 6 dictionary-initializer index map, the path difference against
+  the previous instruction pops the finished element-list stack (folding
+  through `MakeInitializerAssignment`), the Setter tail renders a
+  `NamedExpression` over the member (or the dictionary-initializer assignment
+  through `CallBuilder.BuildDictionaryInitializerExpression` with the
+  substituted indices when the path element carries indexer arguments), and
+  the Adder tail routes through `BuildCollectionInitializerExpression`.
+  `MakeInitializerAssignment` (lines 3636-3669) wraps an `Add` path member's
+  values in an `ArrayInitializerExpression` over the unknown type and names
+  the result by the value path's member (or the indexed
+  `AssignmentExpression`). `TranslateWithInitializer` (lines 3841-3858)
+  renders the `BlockKind.WithInitializer` shape as the
+  `WithInitializerExpression` over the target expression. The three new
+  `BlockKind` values are appended to the enum (no existing value renumbered)
+  with `BlockKindName` entries. Verified by 7 new tests (the newobj-head
+  field-assignment render with its `MemberResolveResult` pins, the
+  `[Items, Add]` nested-path fold into `Items = { 1, 2 }`, the
+  `Activator.CreateInstance<T>` head, the dictionary-initializer
+  index-substitution assignment, the invalid-head/variable-kind/Activator-
+  arity rejections, the block annotation, and the with-initializer render)
+  proven with an `invalid_argument`-throw neuter RED round where exactly the 6
+  positive tests failed and the reject-test stayed green (vacuously, as
+  predicted). The full Debug gtest suite is 13049 ran / 13047 passed / the 2
+  standing skips / zero failures, and all three Release CLI baselines are
+  byte-identical (`--csharp` 10106360, `--il` 41246545, `-l c` 109438)
+  because no transform produces these block kinds yet; the next in-order
+  Phase-5 piece is the `TransformCollectionAndObjectInitializers` transform
+  itself (the producer of these blocks).
+- **Phase-5 slice (RUN/218): the TransformCollectionAndObjectInitializers
+  member-shape helpers** -- `Decompiler/IL/Transforms/
+  TransformCollectionAndObjectInitializers.{hpp,cpp}` land the class skeleton
+  with the four static helpers the statement-transform body composes:
+  `TypeContainsInitOnlyProperties` (the C# 9 `init`-setter scan that makes Run
+  keep object-initializer statements on the statement level),
+  `IsRecordCloneMethodCall` (the `<Clone>$`-on-a-record head recognition feeding
+  the WithInitializer arm), `IsMethodCallOnVariable` (the
+  MatchLdLocRef/call-receiver/field-target recursive use test that refuses the
+  fold when the variable is still used directly), and
+  `IsValidObjectInitializerTarget` (the C# 6 nested-indexer rule -- an indexer
+  container requires the previous element's return type to be equivalent to
+  the indexer's declaring type), plus the three Run-gate settings flags on
+  `ILTransformSettings` (`ObjectOrCollectionInitializers`,
+  `UseObjectCreationOfGenericTypeParameter`, `WithExpressions`, all default
+  true) and the `MatchLdLoca` / `MatchLdLocRef` pair in the shared
+  `PatternMatching.hpp` (the ldloc-vs-ldloca reference-ness gate, including
+  the TypeParameter ldloca quirk). `Run` itself stays a loud `std::logic_error`
+  deferral -- its remaining prerequisites are the `IsPartOfInitializer`
+  path-stack state machine (which needs the C#-layer settings/resolver
+  threading into `AccessPathElement::GetAccessPath`), `ILInlining::
+  InlineIfPossible` (a one-line wrapper over the ported Aggressive
+  `InlineOneIfPossible`) and `CopyPropagation::Propagate`. Verified by 14 new
+  tests (the helper matrices over the AccessPathElement-style fake fixtures,
+  the settings defaults, the Run deferral contract) proven with a four-way
+  neuter RED round where exactly the 6 positive tests failed, plus a
+  `SetIsInitOnly` additive setter on the test-support `LookupMethod` (the
+  FakeMethod hardcodes false). The full Debug gtest suite is 13063 ran /
+  13061 passed / the 2 standing skips / zero failures, and all three Release
+  CLI baselines are byte-identical (`--csharp` 10106360, `--il` 41246545,
+  `-l c` 109438) because the new code is unreachable from the seed pipeline.
+- **Phase-5 slice (RUN/219): the two named TransformCollectionAndObject-
+  Initializers Run prerequisites** -- the standalone inlining/copy-propagation
+  entry points the statement-transform body calls. `ILInlining.{hpp,cpp}` gain
+  `InlineIfPossible` (the C# one-line Aggressive wrapper over
+  `InlineOneIfPossible`; the Aggressive option's C# meaning -- skipping the
+  NonAggressiveInlineInto restrictions for non-stack-slot variables -- has no
+  counterpart in this port's inliner, a documented divergence, so the wrapper
+  delegates with the flag set for call-shape fidelity) and `InlineInto` (the
+  backward `while (--pos >= 0)` walk inlining the instructions before `pos`
+  into `block.Instructions[pos]`, stopping at the first failure and returning
+  the inlined count; the C# counts the block final inside Instructions, so
+  the port maps the `pos >= Count` bound to `pos > Instructions.size()` --
+  `pos == size` is the final's logical index and a legitimate target the
+  loop does fold into). `CopyPropagation.{hpp,cpp}` gain the static
+  `Propagate(StLoc*, ILTransformContext&)` (the C# lines 44-49 entry the
+  statement-level transforms call: the IsSingleDefinition assert, the
+  `(Block)store.Parent` cast, the store's ChildIndex) driving the faithful
+  `DoPropagate` core (the C# lines 154-178): un-inlines the copied
+  expression's direct child instructions into fresh `"C_<StartILOffset>"`
+  stack-slot variables (HasGeneratedName, registered in the function's
+  Variables list -- the whole-function loads snapshot walks the body because
+  the port has no per-variable LoadInstructions list), replaces every load of
+  the variable with a clone of the expression whose direct children are the
+  fresh loads (the port clones BEFORE moving the children out -- the C# GC
+  aliases the children between the inserted stores and the original while
+  unique ownership cannot), clears the clone's IL range, drops the store,
+  runs the `InlineInto` re-inline tail, and adjusts the caller's loop index
+  by `-(count + 1)` exactly as the C# does; the usage counts the C# maintains
+  through instruction events are recomputed before the re-inline (the fresh
+  C_ variables start at zero counts) and once more after it. The
+  `FindTypeForStackType` helper (the C# `context.TypeSystem.FindType(arg.
+  ResultType)` mapping) is copied next to this second consumer per the
+  established convention. The port's existing whole-function `Run` arms are
+  unchanged (their simplified re-point/`PropagateAddressSource` shapes keep
+  the seed pipeline byte-identical; consolidating them onto `DoPropagate` is a
+  possible follow-up). With these landed, the only remaining Run blockers are
+  the `IsPartOfInitializer` path-stack state machine with its C#-layer
+  settings/resolver threading and the remaining head-shape pieces
+  (`MatchCastClass`, the Call node's `ILStackWasEmpty`, the context-shaped
+  `TransformDisplayClassUsage.IsPotentialClosure` overload,
+  `TupleTransform.MatchTupleConstruction`). Verified by 8 new tests (the
+  `InlineIfPossible` fold, the `InlineInto` chain/count/stop-at-first-failure
+  matrix incl. the final-index target and the beyond-bounds zero, and the
+  three `Propagate` drives: the ldloca clone-per-load shape with the empty IL
+  range, the ldelema un-inline + re-inline round trip reconstructing the
+  single-use element access, and the two-load shape keeping the `C_` operand
+  stores) proven with a two-behavior neuter RED round where exactly the 6
+  positive tests failed and the negative/prior tests stayed green. The full
+  Debug gtest suite is 13071 ran / 13069 passed / the 2 standing skips / zero
+  failures (exactly +8 over RUN/218), and all four Release CLI baselines are
+  byte-identical (`--csharp` 10106360, `--il` 41246545 byte-identical to the
+  real-ilspycmd gold, `-l c` 109438, the `--json`-with-assembly usage check
+  rc 64) because the new entry points have no call site in the seed pipeline.
+- **Phase-5 slice (RUN/220): the three named head-shape prerequisites for the
+  TransformCollectionAndObjectInitializers statement fold** (the pieces the
+  previous slice's Run deferral list named): the reader-populated
+  `ILStackWasEmpty` flags, the shared `MatchCastClass` matcher, and the
+  context-shaped `TransformDisplayClassUsage.IsPotentialClosure`. The IL node
+  classes gain the C# `public bool ILStackWasEmpty` fields -- `Call`
+  (CallInstruction.cs line 61, covering call/callvirt/newobj), `StLoc`
+  (the internal field, StLoc.cs line 37) and `DefaultValue`
+  (DefaultValue.cs line 32) -- carried through their Clone cases, and
+  `ILReader.cpp` populates them through the new
+  `ReaderState::CurrentStackIsEmpty()` (the C# ILReader.cs line 599
+  `currentStack.IsEmpty && expressionStack.Count == 0` equivalent over the
+  port's reader state): after the argument pops at the call/callvirt/newobj
+  decode point (the C# PrepareArguments-then-CurrentStackIsEmpty order), after
+  the value pop at the stloc.0-3/stloc.s arms (the C# Stloc() helper), and
+  after the target pop at the initobj arm (the C# InitObj helper). The
+  stores the reader synthesizes itself keep the C# default false -- the
+  FlushExpressionStack commits, the dup-arm stack-slot stores and the starg
+  arms (the C# `new StLoc(...)` sites that do not set the flag).
+  `PatternMatching.hpp` gains `MatchCastClass` (the Instructions.cs line
+  8807 matcher, the castclass node with its argument and target type as the
+  non-owning out-parameters). The new
+  `Transforms/TransformDisplayClassUsage.{hpp,cpp}` lands the context-shaped
+  `IsPotentialClosure` leaf (TransformDisplayClassUsage.cs lines 718-722):
+  the C# builds a SimpleTypeResolveContext over the ROOT function's method
+  and consults the type-shaped `IsPotentialClosure` (already ported in
+  TypeSystemExtensions) with `method.DeclaringTypeDefinition` and
+  `inst.Method.DeclaringTypeDefinition`; the port's ILTransformContext
+  carries no Function (D78), so the signature takes the root ILFunction
+  directly, and the C# `Method!` null-forgiving dereferences map to null
+  current-type/display-class shapes that answer false (D516). The
+  TransformCollectionAndObjectInitializers.hpp Run deferral note is updated:
+  only the `IsPartOfInitializer` path-stack state machine with its C#-layer
+  settings/resolver threading remains. Verified by 12 new tests: the three
+  reader drives hand-derived from the byte-verified flat disassembly of the
+  same mscorlib fixtures (String.Copy's 12 statement-level nodes all true
+  incl. the newobj; Registry.GetBaseKeyFromKeyName's exact 5-call false set --
+  the two `get_InvariantCulture` sites over their pending ToUpper receiver,
+  the two nested `get_Length` and the receiver-feeding `Substring`; and the
+  lone `initobj` of AsyncTaskMethodBuilder.Create true, with the port's
+  synthetic dup_ stores documented as the false-by-model divergence), the
+  clone-carry matrix over all three node kinds, the two MatchCastClass
+  matchers, and the six IsPotentialClosure drives (nested display struct,
+  non-compiler-generated, foreign nesting tree, shared ancestor,
+  interface-bearing display class, and the null function/method/newobj
+  shapes) -- proven with a six-behavior neuter RED round (7 failures: the
+  three reader tests, the clone test, the two positive closure tests and the
+  positive matcher, with every negative test staying green). The full Debug
+  gtest suite is 13083 ran / 13081 passed / the 2 standing skips / zero
+  failures (exactly +12 over RUN/219), and all four Release CLI baselines
+  are byte-identical (`--csharp` 10106360, `--il` 41246545 byte-identical to
+  the real-ilspycmd gold, `-l c` 109438, the `--json`-with-assembly usage
+  check rc 64) because the flags/matchers are additive fields with no render
+  effect.
+- **Phase-5 slice (RUN/221): the `IsPartOfInitializer` statement-scan state
+  machine** -- the named last prerequisite of the
+  TransformCollectionAndObjectInitializers Run body (TransformCollectionAnd
+  ObjectInitializers.cs lines 63-67 + 262-323) -- plus the C#-layer
+  settings/resolver threading the previous slices deferred. The transform
+  class gains the C# private per-scan instance state as public members (the
+  port's testability convention): `possibleIndexVariables` (the
+  Dictionary<ILVariable, (int Index, ILInstruction Value)> of
+  single-definition local stores accepted as possible dictionary-initializer
+  index variables, mapped to the PossibleIndexVariableInfo struct),
+  `currentPath` (the shared member path), `isCollection`, and `pathStack`
+  (the Stack<HashSet<AccessPathElement>> over the new
+  AccessPathElementHash functor -- a vector used as a stack). The new
+  `ResetInitializerScanState()` reproduces Run's per-scan reset (the four
+  Clear calls plus the initial empty-set push), and `MarkUsedIndices` flips
+  the used index variables' recorded Index to -1 (the C# tuple reassignment
+  keeping the Value). `IsPartOfInitializer` itself ports the full state
+  machine: the index-variable arm (a single-definition-local StLoc whose
+  value's strict descendants do not load the initializer variable is recorded
+  with its ChildIndex; a non-matching StLoc falls through to the
+  access-path walk, which rejects it), the `AccessPathElement::GetAccessPath`
+  call threaded with the C#-layer settings and resolver, the
+  target-mismatch and Invalid-kind rejections, the last-element split, the
+  first-difference walk with the pop loop (an `isCollection = false` on every
+  pop) and the push loop (the sibling-set insert, rejecting duplicates and
+  members below an entered collection), and the Adder/Setter arms (the
+  Adder requires an empty top set and sets collection mode; the Setter
+  rejects collection mode, requires exactly one value and a valid target
+  path, upgrades CollectionInitializer to ObjectInitializer unless the head
+  already decided WithInitializer, and ORs the init-only-setter flag through
+  the property's Setter). The threading lands as the design decision the
+  earlier slices named: `ILTransformSettings` gains
+  `DictionaryInitializers` (default true), and `ILTransformContext` gains
+  the two nullable forward-declared C#-layer handles the C# context carries
+  natively -- `CSharpSettings` (the full DecompilerSettings) and `Resolver`
+  (the lazily-created CSharpResolver, named to avoid the self-named-member
+  trap) -- following D78: the IL-layer pipeline callers leave them null
+  (reproducing the C# default-constructed-settings gates and skipping the
+  resolver-driven applicability checks, the divergence pinned by a test),
+  while the C#-layer pipeline and the tests set them; IsPartOfInitializer
+  reads the threaded settings for the direct gate when present and falls
+  back to the subset field. The stray `struct ILTransformContext` forward
+  declaration in HighLevelLoopTransform.hpp (struct-vs-class, C4099) is
+  fixed to `class`. Verified by 12 new tests (the suite is 22): the
+  index-variable arm (the recorded ChildIndex/Value pair, the
+  DictionaryInitializers-off rejection through both the subset gate and the
+  threaded-settings precedence, the subtree-loading-target rejection -- a
+  bare ldloc/ldloca value has no strict descendants so it IS recorded, the
+  faithful C# Descendants semantics -- and the non-single-definition
+  fall-through), the field-store Setter arm with the blockKind upgrade and
+  the last-element-never-in-currentPath invariant, the duplicate-leaf
+  rejection, the nested-path push/pop sequence (B pushed then popped, the
+  sibling sets at both levels), the Adder arm (collection mode, the
+  setter-after-adder and adder-after-setter rejections, and the pop-loop
+  isCollection reset), the accessor-setter's MarkUsedIndices flip, the
+  init-only accessor setting initializerContainsInitOnlyItems (with its own
+  property, since the flag reads the property's Setter), the Invalid-kind
+  and target-mismatch rejections, and the resolver-threaded applicability
+  matrix (a non-Add name rejected with the resolver, a static Add rejected,
+  a real Add accepted over the IEnumerable root type, and the no-resolver
+  divergence pinned: even a non-Add call is folded as an Adder) -- proven
+  with a three-behavior neuter RED round (exactly the DictionaryInitializers
+  gate, the MarkUsedIndices flip, and the pop-loop reset each failing their
+  predicted test, 19 staying green) then restored green.
 - Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
   ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.

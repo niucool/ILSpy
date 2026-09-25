@@ -1,167 +1,348 @@
 // Copyright (c) 2026 ILSpy Contributors
 //
-// Permission is hereby granted, free of charge, to any person obtaining a copy of this
-// software and associated documentation files (the "Software"), to deal in the Software
-// without restriction, including without limitation the rights to use, copy, modify, merge,
-// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
-// to whom the Software is furnished to do so, subject to the following conditions:
+// Permission is hereby granted, free of charge, to any person obtaining a copy of
+// this software and associated documentation files (the "Software"), to deal in
+// the Software without restriction, including without limitation the rights to
+// use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+// the Software, and to permit persons to whom the Software is furnished to do so,
+// subject to the following conditions:
 //
-// The above copyright notice and this permission notice shall be included in all copies or
-// substantial portions of the Software.
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
 //
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
-// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
-// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
-// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
-// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-// DEALINGS IN THE SOFTWARE.
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+// FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+// COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+// IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+// CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-// Port of the concrete pattern nodes from
-// ICSharpCode.Decompiler/CSharp/Syntax/PatternMatching/ (the C# one-class-per-file
-// layout groups here per the multi-class hand-written-node convention -- the
-// TryInstructions.hpp precedent):
+// Ports of the concrete pattern nodes in
+// ICSharpCode.Decompiler/CSharp/Syntax/PatternMatching/ (AnyNode.cs, AnyNodeOrNull.cs,
+// Backreference.cs, Choice.cs, IdentifierExpressionBackreference.cs, NamedNode.cs,
+// OptionalNode.cs, Repeat.cs) plus the `PatternExtensions` static class from INode.cs.
 //
-//   AnyNode                      (AnyNode.cs)          -- matches any non-null node
-//   AnyNodeOrNull                (AnyNodeOrNull.cs)    -- matches any node or absence
-//   NamedNode                    (NamedNode.cs)        -- names a child pattern's captures
-//   Choice                       (Choice.cs)           -- first alternative that matches
-//   OptionalNode                 (OptionalNode.cs)     -- matches a node or its absence
-//   Repeat                       (Repeat.cs)           -- matches a repetition (min/max)
-//   Backreference                (Backreference.cs)    -- re-matches an earlier capture
-//   IdentifierExpressionBackreference (IdentifierExpressionBackreference.cs)
+// `Pattern`/`Match`/`BacktrackingInfo` (the matching engine) were ported earlier; the
+// concrete node classes -- the nodes a pattern tree is built from -- had not been, so the
+// engine tests used local `TestAnyNode`/`TestOptionalNode` stubs. This header lands the real
+// nodes.
 //
-// The C# `PatternExtensions` (INode.cs: the `Match`/`IsMatch` extension methods) ports
-// as the `MatchNode`/`IsMatchPattern` free functions below; the `ToType`/`ToExpression`
-// casts are implicit in C++ (Pattern subclasses ARE AstTypes/Expressions where the C#
-// needs the cast).
+// Every node is a `Pattern` subclass, so a non-deterministic node overrides
+// `DoMatchCollection` (Repeat, OptionalNode) and every node supplies `DoMatch`; a
+// deterministic node inherits the base `DoMatchCollection` (match the single candidate at
+// `pos`).
+//
+// Ownership: the C# nodes are garbage-collected and freely share child references. The port
+// holds non-owning `INode*` children (pattern definitions are `static readonly` in the C#
+// transforms and therefore live for the process, exactly the lifetime a non-owning pointer
+// needs). The two convenience constructors that allocate a `NamedNode` on the caller's
+// behalf (`OptionalNode(string, INode)` and `Choice.Add(string, INode)`) own the node they
+// create so no leak is introduced.
 
 #pragma once
 
-#include "Decompiler/CSharp/Syntax/AstNode.hpp"
-#include "Decompiler/CSharp/Syntax/Identifier.hpp"
-#include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
-#include "Decompiler/CSharp/Syntax/PatternMatching/BacktrackingInfo.hpp"
-#include "Decompiler/CSharp/Syntax/PatternMatching/Match.hpp"
 #include "Decompiler/CSharp/Syntax/PatternMatching/Pattern.hpp"
 
-#include <cassert>
+#include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Identifier.hpp"
+#include "Decompiler/CSharp/Syntax/Slots.hpp"
+
 #include <limits>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
+
+namespace ILSpy::Decompiler::CSharp::Syntax {
+// Forward declarations: the pattern-placeholder factories' return/parameter types
+// (`Expression` is complete via IdentifierExpression.hpp; these two need only a pointer
+// or reference declaration).
+class AstType;
+class Statement;
+}
 
 namespace ILSpy::Decompiler::CSharp::Syntax::PatternMatching {
 
-// The C# `groupName` fields are `string?` -- the port carries the nullable string
-// (the `std::optional<std::string>` convention) and forwards it to `Match::Add`,
-// which ignores an absent group name.
-using PatternGroupName = std::optional<std::string>;
+// Converts an owned optional group name to the `optional<string_view>` `Match` captures
+// under. The C# captures a `string`; the port's `Match` stores the group name as a view,
+// so the node must keep the backing storage alive (it does -- the field owns the string).
+inline std::optional<std::string_view> AsGroupNameView(const std::optional<std::string>& name) {
+    if (name)
+        return std::string_view(*name);
+    return std::nullopt;
+}
 
-// ---- AnyNode (AnyNode.cs) -----------------------------------------------------------
+// The C# `public static class PatternExtensions` from INode.cs: the `Match`/`IsMatch`
+// entry points. The `ToType`/`ToExpression`/`ToStatement`/`WithName` helpers of the C#
+// class are not ported -- they are conversion shims for the generated placeholder
+// machinery (not yet ported) and are unused by the matching engine itself.
+class PatternExtensions {
+public:
+    // The C# `static Match Match(this INode pattern, INode? other)`: runs the match and
+    // returns the populated result, or the failure sentinel when the pattern rejects.
+    static ILSpy::Decompiler::CSharp::Syntax::PatternMatching::Match Match(INode& pattern, INode* other) {
+        ILSpy::Decompiler::CSharp::Syntax::PatternMatching::Match match =
+            PatternMatching::Match::CreateNew();
+        if (pattern.DoMatch(other, match))
+            return match;
+        return ILSpy::Decompiler::CSharp::Syntax::PatternMatching::Match();
+    }
 
-// Matches any node. Does not match null nodes (the C# remark).
-class AnyNode final : public Pattern {
-    PatternGroupName groupName;
+    // The C# `static bool IsMatch(this INode pattern, INode? other)`.
+    static bool IsMatch(INode& pattern, INode* other) {
+        return pattern.DoMatch(other, PatternMatching::Match::CreateNew());
+    }
+
+    // The C# `static AstType ToType(this Pattern pattern)` / `static Expression
+    // ToExpression(this Pattern pattern)` / `static Statement ToStatement(this Pattern
+    // pattern)` -- the generated `implicit operator <Base>(Pattern)` shims. Each wraps the
+    // pattern in a `PatternPlaceholderNode<Base>` (PatternPlaceholder.hpp); a null pattern
+    // yields null (the generated `pattern != null ? new PatternPlaceholder(pattern) : null`).
+    // The definition lives in PatternPlaceholder.cpp (the placeholder template needs the AST
+    // base complete, which this header does not include).
+    static ILSpy::Decompiler::CSharp::Syntax::AstType* ToType(
+        std::shared_ptr<Pattern> pattern);
+    static ILSpy::Decompiler::CSharp::Syntax::Expression* ToExpression(
+        std::shared_ptr<Pattern> pattern);
+    static ILSpy::Decompiler::CSharp::Syntax::Statement* ToStatement(
+        std::shared_ptr<Pattern> pattern);
+
+    // The C# `static Expression WithName(this Expression node, string patternGroupName)` /
+    // `static Statement WithName(this Statement node, string patternGroupName)` -- wrap the
+    // node in a `NamedNode` and then in a pattern placeholder, so the result can occupy an
+    // AST slot while capturing the node under `patternGroupName`.
+    static ILSpy::Decompiler::CSharp::Syntax::Expression* WithName(
+        ILSpy::Decompiler::CSharp::Syntax::Expression& node, const std::string& patternGroupName);
+    static ILSpy::Decompiler::CSharp::Syntax::Statement* WithName(
+        ILSpy::Decompiler::CSharp::Syntax::Statement& node, const std::string& patternGroupName);
+};
+
+// The C# `public class AnyNode : Pattern` (AnyNode.cs): matches any non-null node,
+// optionally capturing it under a group name.
+class AnyNode : public Pattern {
+    std::optional<std::string> groupName_;
 
 public:
-    explicit AnyNode(PatternGroupName groupName = std::nullopt)
-        : groupName(std::move(groupName)) {}
+    explicit AnyNode(std::optional<std::string> groupName = std::nullopt)
+        : groupName_(std::move(groupName)) {}
 
-    // The C# `public string? GroupName` -- the accessor the pattern declarations
-    // could consult; kept for parity.
-    const PatternGroupName& GroupName() const { return groupName; }
+    const std::optional<std::string>& GroupName() const { return groupName_; }
 
+    // The C# `DoMatch`: records the capture (a null group does not capture) and matches
+    // only a non-null candidate.
     bool DoMatch(INode* other, Match match) override {
-        match.Add(groupName.has_value() ? std::optional<std::string_view>(*groupName)
-                                        : std::optional<std::string_view>(),
-                  other);
+        match.Add(AsGroupNameView(groupName_), other);
         return other != nullptr;
     }
 };
 
-// ---- AnyNodeOrNull (AnyNodeOrNull.cs) ------------------------------------------------
-
-// Matches any node or the node's absence (records a null capture for the group).
-class AnyNodeOrNull final : public Pattern {
-    PatternGroupName groupName;
+// The C# `public class AnyNodeOrNull : Pattern` (AnyNodeOrNull.cs): matches any node,
+// including null; a null candidate records a null capture for the group.
+class AnyNodeOrNull : public Pattern {
+    std::optional<std::string> groupName_;
 
 public:
-    explicit AnyNodeOrNull(PatternGroupName groupName = std::nullopt)
-        : groupName(std::move(groupName)) {}
+    explicit AnyNodeOrNull(std::optional<std::string> groupName = std::nullopt)
+        : groupName_(std::move(groupName)) {}
 
-    const PatternGroupName& GroupName() const { return groupName; }
+    const std::optional<std::string>& GroupName() const { return groupName_; }
 
     bool DoMatch(INode* other, Match match) override {
-        if (other == nullptr) {
-            match.AddNull(groupName.has_value()
-                              ? std::optional<std::string_view>(*groupName)
-                              : std::optional<std::string_view>());
-        } else {
-            match.Add(groupName.has_value()
-                          ? std::optional<std::string_view>(*groupName)
-                          : std::optional<std::string_view>(),
-                      other);
-        }
+        if (other == nullptr)
+            match.AddNull(AsGroupNameView(groupName_));
+        else
+            match.Add(AsGroupNameView(groupName_), other);
         return true;
     }
 };
 
-// ---- NamedNode (NamedNode.cs) ---------------------------------------------------------
-
-// Wraps a child pattern and records every match under `groupName`.
-class NamedNode final : public Pattern {
-    PatternGroupName groupName;
-    INode* childNode = nullptr;
+// The C# `public class NamedNode : Pattern` (NamedNode.cs): captures the candidate under a
+// group name and requires the wrapped pattern to match it.
+class NamedNode : public Pattern {
+    std::string groupName_;
+    INode* childNode_;
 
 public:
-    // The C# ctor throws ArgumentNullException for a null child (the C#
-    // ArgumentNullException -> assert convention).
-    NamedNode(PatternGroupName groupName, INode& childNode)
-        : groupName(std::move(groupName)), childNode(&childNode) {
-        assert(&childNode != nullptr);
+    NamedNode(std::string groupName, INode* childNode)
+        : groupName_(std::move(groupName)), childNode_(childNode) {
+        if (childNode == nullptr)
+            throw std::invalid_argument("childNode");
     }
 
-    const PatternGroupName& GroupName() const { return groupName; }
-    INode& ChildNode() const { return *childNode; }
+    const std::string& GroupName() const { return groupName_; }
+    INode* ChildNode() const { return childNode_; }
 
     bool DoMatch(INode* other, Match match) override {
-        match.Add(groupName.has_value() ? std::optional<std::string_view>(*groupName)
-                                        : std::optional<std::string_view>(),
-                  other);
-        return childNode->DoMatch(other, match);
+        match.Add(groupName_, other);
+        return childNode_->DoMatch(other, match);
     }
 };
 
-// ---- Choice (Choice.cs) -----------------------------------------------------------------
-
-// Matches the first alternative that succeeds; a failed alternative restores
-// the match checkpoint (the C# `match.RestoreCheckPoint`).
-class Choice final : public Pattern {
-    std::vector<INode*> alternatives;
-    // The named `Add` overload's NamedNode wrappers are owned here (the C# lets
-    // the GC own the wrapper it allocates inside `Add`).
-    std::vector<std::unique_ptr<NamedNode>> ownedAlternatives;
+// The C# `public class OptionalNode : Pattern` (OptionalNode.cs): matches nothing (succeeds
+// against an absent candidate) or delegates to the wrapped pattern. As a collection element
+// it pushes the "absent" alternative (resume the following pattern node at the same
+// position) before trying to consume the candidate.
+class OptionalNode : public Pattern {
+    std::unique_ptr<INode> ownedChild_;
+    INode* childNode_;
 
 public:
-    // The C# `void Add(INode alternative)` -- the added pattern stays
-    // caller-owned (the C# static-readonly convention).
-    void Add(INode& alternative) {
-        alternatives.push_back(&alternative);
+    explicit OptionalNode(INode* childNode) : childNode_(childNode) {
+        if (childNode == nullptr)
+            throw std::invalid_argument("childNode");
     }
-    // The C# `void Add(string name, INode alternative)` -- wraps a NamedNode
-    // (owned by this Choice).
-    void Add(std::string_view name, INode& alternative) {
-        ownedAlternatives.push_back(
-            std::make_unique<NamedNode>(std::string(name), alternative));
-        alternatives.push_back(ownedAlternatives.back().get());
+
+    // The C# `OptionalNode(string groupName, INode childNode) : this(new NamedNode(...))`.
+    OptionalNode(const std::string& groupName, INode* childNode)
+        : ownedChild_(std::make_unique<NamedNode>(groupName, childNode)),
+          childNode_(ownedChild_.get()) {}
+
+    INode* ChildNode() const { return childNode_; }
+
+    bool DoMatchCollection(const std::vector<INode*>& other, int pos, Match match,
+                           BacktrackingInfo& backtrackingInfo) override {
+        // Push the "absent" alternative (resume the following pattern node at the same
+        // position), then try to consume the element here.
+        backtrackingInfo.BacktrackingStack.push(PossibleMatch(pos, match.CheckPoint()));
+        return childNode_->DoMatch(
+            pos < static_cast<int>(other.size()) ? other[static_cast<std::size_t>(pos)] : nullptr,
+            match);
     }
 
     bool DoMatch(INode* other, Match match) override {
-        const int checkPoint = match.CheckPoint();
-        for (INode* alternative : alternatives) {
-            if (alternative->DoMatch(other, match))
+        if (other == nullptr)
+            return true;
+        return childNode_->DoMatch(other, match);
+    }
+};
+
+// The C# `public class Repeat : Pattern` (Repeat.cs): greedily matches the wrapped pattern
+// as many times as possible (subject to MinCount/MaxCount), pushing every count as a
+// backtracking alternative. It never matches a single element directly; the caller always
+// resolves it through the backtracking stack.
+class Repeat : public Pattern {
+    INode* childNode_;
+
+public:
+    int MinCount = 0;
+    int MaxCount = std::numeric_limits<int>::max();
+
+    explicit Repeat(INode* childNode) : childNode_(childNode) {
+        if (childNode == nullptr)
+            throw std::invalid_argument("childNode");
+    }
+
+    INode* ChildNode() const { return childNode_; }
+
+    bool DoMatchCollection(const std::vector<INode*>& other, int pos, Match match,
+                           BacktrackingInfo& backtrackingInfo) override {
+        std::stack<PossibleMatch>& backtrackingStack = backtrackingInfo.BacktrackingStack;
+        int matchCount = 0;
+        if (MinCount <= 0)
+            backtrackingStack.push(PossibleMatch(pos, match.CheckPoint()));
+        while (matchCount < MaxCount && pos < static_cast<int>(other.size())
+               && childNode_->DoMatch(other[static_cast<std::size_t>(pos)], match)) {
+            matchCount++;
+            pos++;
+            if (matchCount >= MinCount)
+                backtrackingStack.push(PossibleMatch(pos, match.CheckPoint()));
+        }
+        // Never do a normal (single-element) match; always make the caller look at the
+        // results on the backtracking stack.
+        return false;
+    }
+
+    bool DoMatch(INode* other, Match match) override {
+        if (other == nullptr)
+            return MinCount <= 0;
+        return MaxCount >= 1 && childNode_->DoMatch(other, match);
+    }
+};
+
+// The C# `public class Backreference : Pattern` (Backreference.cs): matches the last
+// capture of the referenced group (an absent group matches only a null candidate).
+class Backreference : public Pattern {
+    std::string referencedGroupName_;
+
+public:
+    explicit Backreference(std::string referencedGroupName)
+        : referencedGroupName_(std::move(referencedGroupName)) {
+        if (referencedGroupName_.empty())
+            throw std::invalid_argument("referencedGroupName");
+    }
+
+    const std::string& ReferencedGroupName() const { return referencedGroupName_; }
+
+    bool DoMatch(INode* other, Match match) override {
+        std::vector<INode*> captured = match.Get(referencedGroupName_);
+        INode* last = captured.empty() ? nullptr : captured.back();
+        if (last == nullptr)
+            return other == nullptr;
+        return PatternExtensions::IsMatch(*last, other);
+    }
+};
+
+// The C# `public class IdentifierExpressionBackreference : Pattern`
+// (IdentifierExpressionBackreference.cs): matches an `IdentifierExpression` (with no type
+// arguments) whose identifier equals the name of the referenced group's captured node.
+class IdentifierExpressionBackreference : public Pattern {
+    std::string referencedGroupName_;
+
+public:
+    explicit IdentifierExpressionBackreference(std::string referencedGroupName)
+        : referencedGroupName_(std::move(referencedGroupName)) {
+        if (referencedGroupName_.empty())
+            throw std::invalid_argument("referencedGroupName");
+    }
+
+    const std::string& ReferencedGroupName() const { return referencedGroupName_; }
+
+    bool DoMatch(INode* other, Match match) override {
+        auto* ident = dynamic_cast<IdentifierExpression*>(other);
+        if (ident == nullptr || ident->TypeArguments().Count() != 0)
+            return false;
+        std::vector<INode*> captured = match.Get(referencedGroupName_);
+        INode* last = captured.empty() ? nullptr : captured.back();
+        auto* referenced = dynamic_cast<AstNode*>(last);
+        if (referenced == nullptr)
+            return false;
+        Identifier* referencedIdentifier = referenced->GetChildByKind(&Slots::Identifier);
+        if (referencedIdentifier == nullptr)
+            return false;
+        return ident->Identifier() == referencedIdentifier->Name();
+    }
+};
+
+// The C# `public class Choice : Pattern` (Choice.cs): matches the first alternative that
+// accepts the candidate, restoring the match checkpoint after each failed alternative.
+class Choice : public Pattern {
+    std::vector<INode*> alternatives_;
+    std::vector<std::unique_ptr<INode>> ownedAlternatives_;
+
+public:
+    // The C# `Add(string name, INode alternative)` wraps the alternative in a `NamedNode`.
+    void Add(const std::string& name, INode* alternative) {
+        if (alternative == nullptr)
+            throw std::invalid_argument("alternative");
+        ownedAlternatives_.push_back(std::make_unique<NamedNode>(name, alternative));
+        alternatives_.push_back(ownedAlternatives_.back().get());
+    }
+
+    void Add(INode* alternative) {
+        if (alternative == nullptr)
+            throw std::invalid_argument("alternative");
+        alternatives_.push_back(alternative);
+    }
+
+    const std::vector<INode*>& Alternatives() const { return alternatives_; }
+
+    bool DoMatch(INode* other, Match match) override {
+        int checkPoint = match.CheckPoint();
+        for (INode* alt : alternatives_) {
+            if (alt->DoMatch(other, match))
                 return true;
             match.RestoreCheckPoint(checkPoint);
         }
@@ -169,192 +350,4 @@ public:
     }
 };
 
-// ---- OptionalNode (OptionalNode.cs) ------------------------------------------------------
-
-// Matches a node or its absence. Non-deterministic over collections: the absent
-// alternative is pushed for backtracking before the node is matched in place.
-class OptionalNode final : public Pattern {
-    INode* childNode = nullptr;
-
-public:
-    explicit OptionalNode(INode& childNode) : childNode(&childNode) {
-        assert(&childNode != nullptr);
-    }
-    // The C# `OptionalNode(string groupName, INode childNode) : this(new
-    // NamedNode(groupName, childNode))` -- the wrapper is owned by this node
-    // (the C# lets the GC own it).
-    OptionalNode(std::string_view groupName, INode& childNode)
-        : ownedChild(new NamedNode(std::string(groupName), childNode)),
-          childNode(ownedChild.get()) {
-        assert(&childNode != nullptr);
-    }
-
-    INode& ChildNode() const { return *childNode; }
-
-    bool DoMatchCollection(const std::vector<INode*>& other, int pos, Match match,
-                           BacktrackingInfo& backtrackingInfo) override {
-        // Push the "absent" alternative (resume the following pattern node at
-        // the same position), then try to consume the element here.
-        backtrackingInfo.BacktrackingStack.push(
-            PossibleMatch(pos, match.CheckPoint()));
-        return childNode->DoMatch(
-            pos < static_cast<int>(other.size()) ? other[static_cast<std::size_t>(pos)]
-                                                 : nullptr,
-            match);
-    }
-
-    bool DoMatch(INode* other, Match match) override {
-        if (other == nullptr)
-            return true;
-        return childNode->DoMatch(other, match);
-    }
-
-private:
-    // The `(string, INode)` ctor's NamedNode wrapper is owned (the C# lets the
-    // GC own it; the port needs an explicit owner to keep it alive).
-    std::unique_ptr<NamedNode> ownedChild;
-};
-
-// ---- Repeat (Repeat.cs) -------------------------------------------------------------------
-
-// Matches a repetition of the child pattern between MinCount and MaxCount
-// occurrences; every admissible count is pushed for backtracking.
-class Repeat final : public Pattern {
-    INode* childNode = nullptr;
-    int minCount = 0;
-    int maxCount = std::numeric_limits<int>::max();
-
-public:
-    explicit Repeat(INode& childNode) : childNode(&childNode) {
-        assert(&childNode != nullptr);
-    }
-
-    int MinCount() const { return minCount; }
-    void MinCount(int value) { minCount = value; }
-    int MaxCount() const { return maxCount; }
-    void MaxCount(int value) { maxCount = value; }
-    INode& ChildNode() const { return *childNode; }
-
-    bool DoMatchCollection(const std::vector<INode*>& other, int pos, Match match,
-                           BacktrackingInfo& backtrackingInfo) override {
-        std::stack<PossibleMatch>& backtrackingStack = backtrackingInfo.BacktrackingStack;
-        int matchCount = 0;
-        if (minCount <= 0)
-            backtrackingStack.push(PossibleMatch(pos, match.CheckPoint()));
-        while (matchCount < maxCount && pos < static_cast<int>(other.size())
-               && childNode->DoMatch(
-                   other[static_cast<std::size_t>(pos)], match)) {
-            matchCount++;
-            pos++;
-            if (matchCount >= minCount)
-                backtrackingStack.push(PossibleMatch(pos, match.CheckPoint()));
-        }
-        // Never do a normal (single-element) match; always make the caller look
-        // at the results on the backtracking stack.
-        return false;
-    }
-
-    bool DoMatch(INode* other, Match match) override {
-        if (other == nullptr)
-            return minCount <= 0;
-        return maxCount >= 1 && childNode->DoMatch(other, match);
-    }
-};
-
-// ---- Backreference (Backreference.cs) -------------------------------------------------------
-
-// Re-matches the last capture of an earlier group (structural equality via the
-// captured node's own DoMatch).
-class Backreference final : public Pattern {
-    std::string referencedGroupName;
-
-public:
-    explicit Backreference(std::string referencedGroupName)
-        : referencedGroupName(std::move(referencedGroupName)) {}
-
-    const std::string& ReferencedGroupName() const { return referencedGroupName; }
-
-    bool DoMatch(INode* other, Match match) override {
-        const std::vector<INode*> captures = match.Get(referencedGroupName);
-        if (captures.empty() || captures.back() == nullptr)
-            return other == nullptr;
-        // The C# `last.IsMatch(other)` (the PatternExtensions IsMatch over the
-        // captured pattern node).
-        return captures.back()->DoMatch(other, Match::CreateNew());
-    }
-};
-
-// ---- IdentifierExpressionBackreference (IdentifierExpressionBackreference.cs) ----
-
-// Matches identifier expressions that have the same identifier as the referenced
-// variable/type definition/method definition: the candidate must be an
-// IdentifierExpression without type arguments, and its identifier token must
-// carry the same name as the Identifier-slot child of the referenced group's
-// last capture.
-class IdentifierExpressionBackreference final : public Pattern {
-    std::string referencedGroupName;
-
-public:
-    explicit IdentifierExpressionBackreference(std::string referencedGroupName)
-        : referencedGroupName(std::move(referencedGroupName)) {}
-
-    const std::string& ReferencedGroupName() const { return referencedGroupName; }
-
-    bool DoMatch(INode* other, Match match) override {
-        auto* ident = dynamic_cast<IdentifierExpression*>(other);
-        if (ident == nullptr || ident->TypeArguments().Count() > 0)
-            return false;
-        const std::vector<INode*> captures = match.Get(referencedGroupName);
-        if (captures.empty())
-            return false;
-        // The C# `match.Get(referencedGroupName).Last() is not AstNode` -- the
-        // last capture must be an AstNode (the C# `is not` with a null last
-        // capture also fails).
-        auto* referenced = dynamic_cast<AstNode*>(captures.back());
-        if (referenced == nullptr)
-            return false;
-        // The C# `referenced.GetChild(Slots.Identifier)` -- the node's single
-        // Identifier-slot child. The port walks the flattened child list for
-        // the first `Identifier` node (every node carrying an Identifier slot
-        // stores the token there).
-        const Identifier* referencedIdentifier = nullptr;
-        for (int i = 0; i < referenced->GetChildCount(); i++) {
-            if (auto* token = dynamic_cast<Identifier*>(referenced->GetChild(i))) {
-                referencedIdentifier = token;
-                break;
-            }
-        }
-        if (referencedIdentifier == nullptr)
-            return false;
-        return ident->Identifier() == referencedIdentifier->Name();
-    }
-};
-
 } // namespace ILSpy::Decompiler::CSharp::Syntax::PatternMatching
-
-// ---- The C# PatternExtensions (INode.cs) ----------------------------------------------------
-
-// The C# `public static Match Match(this INode pattern, INode? other)` and
-// `public static bool IsMatch(this INode pattern, INode? other)`: run the pattern
-// against a candidate. A failed match returns the default (failure-sentinel) Match.
-// Free functions in the enclosing namespace (the C# extension-method convention).
-namespace ILSpy::Decompiler::CSharp::Syntax {
-
-// The C# `pattern.Match(other)` -- named `MatchNode` (a free function named
-// `Match` would shadow the `Match` class). The pattern is non-const (the C#
-// extension takes the node by reference; `DoMatch` is a non-const member).
-inline PatternMatching::Match MatchNode(PatternMatching::INode& pattern,
-                                        PatternMatching::INode* other) {
-    PatternMatching::Match match = PatternMatching::Match::CreateNew();
-    if (pattern.DoMatch(other, match))
-        return match;
-    return PatternMatching::Match();
-}
-
-// The C# `pattern.IsMatch(other)`.
-inline bool IsMatchPattern(PatternMatching::INode& pattern,
-                           PatternMatching::INode* other) {
-    return pattern.DoMatch(other, PatternMatching::Match::CreateNew());
-}
-
-} // namespace ILSpy::Decompiler::CSharp::Syntax

@@ -7,6 +7,7 @@
 
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/MetadataFile.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/CodeMappingInfo.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/AssemblyNameReference.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/AssemblyNameInfo.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/TypeName.cpp
@@ -21,7 +22,6 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/MetadataExtensions.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/MethodSemanticsLookup.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/PropertyAndEventBackingFieldLookup.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/CodeMappingInfo.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/NamespaceDefinition.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/CustomAttributeDecoder.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/DotNetCorePathFinderExtensions.cpp

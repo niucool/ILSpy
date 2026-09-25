@@ -34,11 +34,10 @@
 // (no `sealed`) because `[DecompilerAstNode(hasPatternPlaceholder: true)]` emits a sealed nested
 // `PatternPlaceholder : BlockStatement` that derives from it (the `ArrayInitializerExpression`
 // D250 precedent). The port therefore does NOT use `final` (faithful to the C# not being
-// sealed), and the pattern placeholder is DEFERRED (the D226 deferral: `hasPatternPlaceholder`
-// emits an `implicit operator BlockStatement(Pattern)` plus a sealed `PatternPlaceholder` nested
-// class implementing `INode`/`IPatternPlaceholder`; it lands with the concrete pattern nodes and
-// `VisitPatternPlaceholder` on `IAstVisitor`). `Clone` is a per-concrete-node override
-// regardless (no `MemberwiseClone` in C++).
+// sealed), and the generated placeholder is ported as the generic
+// `PatternPlaceholderNode<BlockStatement>` (Syntax/PatternPlaceholder.hpp), which implements
+// `INode`/`IPatternPlaceholder`. `Clone` is a per-concrete-node override regardless (no
+// `MemberwiseClone` in C++).
 //
 // Its generated `DoMatch` has a single term: the collection recursive match
 // `this.Statements.DoMatch(o.Statements, match)` (the generator emits the collection-typed
@@ -322,11 +321,11 @@ public:
     BlockStatement* Clone() const override { return new PatternPlaceholder(*child_); }
 
     void AcceptVisitor(IAstVisitor& visitor) override {
-        visitor.VisitPatternPlaceholder(this, child_);
+        visitor.VisitPatternPlaceholder(this, *child_);
     }
 
     bool AcceptVisitorBool(IAstVisitorBool& visitor) override {
-        return visitor.VisitPatternPlaceholder(this, child_);
+        return visitor.VisitPatternPlaceholder(this, *child_);
     }
 
     bool DoMatch(AstNode* other, PatternMatching::Match match) override {

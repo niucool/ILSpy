@@ -1,2486 +1,2958 @@
 // Copyright (c) 2026 ILSpy Contributors
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy of this
-// software and associated documentation files (the "Software"), to deal in the
-// Software without restriction, including without limitation the rights to use, copy,
-// modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
-// and to permit persons to whom the Software is furnished to do so, subject to the
-// following conditions:
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+// to whom the Software is furnished to do so, subject to the following conditions:
 //
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
 //
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
-// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-// PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
-// HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-// OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
-// SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
 
-// Port of the first PatternStatementTransform arms' tests
-// (ICSharpCode.Decompiler/CSharp/Transforms/PatternStatementTransform.cs): the
-// cascading if-else simplification (`if (a) A else { if (b) B }` collapses the
-// else block to a bare `else if`), the conditional-logic reassociation
-// (`a && (b && c)` becomes `(a && b) && c`, same for `||`), and the negated
-// equality rewrite (`!(a == b)` becomes `a != b`). The deep-nesting case pins
-// the ContextTrackingVisitor re-visit loop (a replacement is visited again
-// until it stops changing).
+// Tests for the `PatternStatementTransform` skeleton and the two purely-structural
+// sub-transforms landed so far: the conditional-logic reassociation (`a && (b && c)` ->
+// `(a && b) && c`) and the negated-equality rewrite (`!(a == b)` -> `a != b`). The
+// pattern-based sub-transforms are not ported yet, so this suite drives the structure the
+// `VisitChildren` replace-and-revisit walk depends on. The transform rewrites the tree
+// structurally, so the tests assert node identity and shape rather than rendered text.
 
 #include "Decompiler/CSharp/Transforms/PatternStatementTransform.hpp"
+#include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 
 #include "Decompiler/CSharp/Annotations.hpp"
-#include "Decompiler/CSharp/CSharpDecompiler.hpp"
-#include "Decompiler/IL/Instructions/Block.hpp"
-#include "Decompiler/IL/Instructions/BlockContainer.hpp"
-#include "Decompiler/IL/Instructions/Call.hpp"
-#include "Decompiler/IL/Instructions/LdLoca.hpp"
+#include "Decompiler/CSharp/Syntax/Accessor.hpp"
+#include "Decompiler/CSharp/Syntax/Attribute.hpp"
 #include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
 #include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/EventDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BaseReferenceExpression.hpp"
-#include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/FieldDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/MethodDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
-#include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
+#include "Decompiler/CSharp/Syntax/PropertyDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/FixedStatement.hpp"
-#include "Decompiler/CSharp/Syntax/Statements/ForeachStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ForeachStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/UsingStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
-#include "Decompiler/CSharp/Syntax/Accessor.hpp"
-#include "Decompiler/CSharp/Syntax/Attribute.hpp"
-#include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
-#include "Decompiler/CSharp/Syntax/FieldDeclaration.hpp"
-#include "Decompiler/CSharp/Syntax/PropertyDeclaration.hpp"
-#include "Decompiler/CSharp/Syntax/SimpleType.hpp"
-#include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
-#include "Decompiler/CSharp/Syntax/VariableInitializer.hpp"
-#include "Decompiler/CSharp/Transforms/TransformContext.hpp"
+#include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
+#include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
 #include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
 #include "Decompiler/DecompileRun.hpp"
+#include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
+#include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Semantics/MemberResolveResult.hpp"
+#include "Decompiler/Semantics/ResolveResult.hpp"
 #include "Decompiler/Semantics/TypeResolveResult.hpp"
-#include "Decompiler/TypeSystem/CustomAttributeTypedArgument.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
-#include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/CustomAttributeNamedArgument.hpp"
+#include "Decompiler/TypeSystem/IEvent.hpp"
+#include "Decompiler/TypeSystem/IField.hpp"
+#include "Decompiler/TypeSystem/IProperty.hpp"
+#include "Decompiler/TypeSystem/KnownAttribute.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCache.hpp"
+#include "Decompiler/TypeSystem/MetadataModule.hpp"
+#include "Decompiler/TypeSystem/StringComparer.hpp"
+#include "Decompiler/TypeSystem/TopLevelTypeName.hpp"
+#include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
+#include "Decompiler/Util/CacheManager.hpp"
 #include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
-#include "Decompiler/TypeSystem/LookupStubs.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
-#include "Decompiler/CSharp/Syntax/EventDeclaration.hpp"
-#include "Decompiler/CSharp/Syntax/FieldDeclaration.hpp"
-#include "Decompiler/Metadata/MetadataFile.hpp"
-#include "Decompiler/TypeSystem/MetadataModule.hpp"
+#include "Decompiler/TypeSystem/LookupStubs.hpp"
 
-#include <gtest/gtest.h>
-
-#include <filesystem>
 #include <memory>
-#include <set>
-#include <stdexcept>
+#include <initializer_list>
+#include <filesystem>
 #include <string>
 #include <vector>
 
+#include <gtest/gtest.h>
+
+namespace TS = ::ILSpy::Decompiler::TypeSystem;
+namespace Impl = ::ILSpy::Decompiler::TypeSystem::Implementation;
+namespace Sem = ::ILSpy::Decompiler::Semantics;
+namespace Syntax = ::ILSpy::Decompiler::CSharp::Syntax;
+namespace TM = ::ILSpy::Decompiler::Metadata;
+namespace Transforms = ::ILSpy::Decompiler::CSharp::Transforms;
+namespace TestSupport = ::ILSpy::Decompiler::TypeSystem::TestSupport;
+namespace IL = ::ILSpy::Decompiler::IL;
+using ::ILSpy::Decompiler::DecompileRun;
+using ::ILSpy::Decompiler::DecompilerSettings;
+
 namespace {
 
-namespace CS = ::ILSpy::Decompiler::CSharp;
-namespace Syntax = ::ILSpy::Decompiler::CSharp::Syntax;
-namespace IL = ::ILSpy::Decompiler::IL;
-namespace Impl = ::ILSpy::Decompiler::TypeSystem::Implementation;
-namespace CSharpTS = ::ILSpy::Decompiler::CSharp::TypeSystem;
-namespace TSImpl = ::ILSpy::Decompiler::TypeSystem::Implementation;
-namespace TS = ::ILSpy::Decompiler::TypeSystem;
-namespace Sem = ::ILSpy::Decompiler::Semantics;
-using ::ILSpy::Decompiler::DecompilerSettings;
-using ::ILSpy::Decompiler::DecompileRun;
-
-// The fixture: the compilation + the using scope the DecompileRun requires (the
-// NormalizeBlockStatements_Test pattern), plus the type renderer the foreach
-// arms consume.
-struct PatternStatementFixture {
-    TS::SimpleCompilation compilation{Impl::MinimalCorlib::Instance(), {}};
-    std::shared_ptr<CSharpTS::CSharpTypeResolveContext> scopelessContext;
-    std::shared_ptr<CSharpTS::UsingScope> usingScope;
+// The TransformContext fixture (the NormalizeBlockStatements suite shape).
+struct TransformFixture {
+    TS::SimpleCompilation compilation;
+    DecompilerSettings settings;
+    std::shared_ptr<::ILSpy::Decompiler::CSharp::TypeSystem::UsingScope> usingScope;
+    DecompileRun run;
+    std::shared_ptr<::ILSpy::Decompiler::CSharp::TypeSystem::CSharpTypeResolveContext> context;
     Syntax::TypeSystemAstBuilder astBuilder;
 
-    PatternStatementFixture()
-        : scopelessContext(std::make_shared<CSharpTS::CSharpTypeResolveContext>(
-              compilation.MainModule())),
-          usingScope(std::make_shared<CSharpTS::UsingScope>(
-              scopelessContext, compilation.RootNamespace(),
-              std::vector<const TS::INamespace*>{})) {}
+    TransformFixture()
+        : compilation(Impl::MinimalCorlib::Instance(), {}),
+          usingScope(MakeScope()),
+          run(&settings, usingScope),
+          context(std::make_shared<::ILSpy::Decompiler::CSharp::TypeSystem::CSharpTypeResolveContext>(
+              compilation.MainModule(), usingScope))
+    {
+    }
+
+    std::shared_ptr<::ILSpy::Decompiler::CSharp::TypeSystem::UsingScope> MakeScope() {
+        auto root = std::make_shared<::ILSpy::Decompiler::CSharp::TypeSystem::CSharpTypeResolveContext>(
+            compilation.MainModule());
+        return std::make_shared<::ILSpy::Decompiler::CSharp::TypeSystem::UsingScope>(
+            root, compilation.RootNamespace(), std::vector<const TS::INamespace*>{});
+    }
+
+    Transforms::TransformContext MakeContext() {
+        return Transforms::TransformContext(compilation, run, *context, astBuilder);
+    }
+
+    TS::ITypePtr FindType(TS::KnownTypeCode code) {
+        return std::const_pointer_cast<TS::IType>(
+            compilation.FindType(code).shared_from_this());
+    }
 };
 
-// A `name` identifier reference (the AnyNode stand-in on the candidate side).
-Syntax::IdentifierExpression* Id(const std::string& name) {
+Syntax::Expression* Ref(const char* name) {
     return new Syntax::IdentifierExpression(name);
 }
 
-// A bare `name();` call statement (an arbitrary embedded statement).
-Syntax::ExpressionStatement* Call(const std::string& name) {
-    return new Syntax::ExpressionStatement(Id(name));
-}
-
-// `a OP b`.
-Syntax::BinaryOperatorExpression* Bin(Syntax::Expression* left,
-                                      Syntax::BinaryOperatorType op,
+Syntax::BinaryOperatorExpression* Bin(Syntax::Expression* left, Syntax::BinaryOperatorType op,
                                       Syntax::Expression* right) {
     return new Syntax::BinaryOperatorExpression(left, op, right);
 }
 
-// The identifier name of an expression (`"a"` for an `a` reference).
-std::string NameOf(const Syntax::Expression* expression) {
-    const auto* identifier = dynamic_cast<const Syntax::IdentifierExpression*>(expression);
-    if (identifier == nullptr)
-        return "<not-an-identifier>";
-    return identifier->Identifier();
-}
-
-// Runs the transform over a root node with the fixture's context.
-void RunTransform(Syntax::AstNode& root, const PatternStatementFixture& fx,
-                  bool forStatementSetting = true,
-                  bool forEachStatementSetting = true,
-                  const TS::ITypeDefinition* currentTypeDefinition = nullptr,
-                  bool useEnhancedUsingSetting = true,
-                  bool getterOnlyAutomaticPropertiesSetting = true) {
-    DecompilerSettings settings;
-    settings.SetForStatement(forStatementSetting);
-    settings.SetForEachStatement(forEachStatementSetting);
-    settings.SetUseEnhancedUsing(useEnhancedUsingSetting);
-    settings.SetGetterOnlyAutomaticProperties(getterOnlyAutomaticPropertiesSetting);
-    DecompileRun runStorage(&settings, fx.usingScope);
-    CS::Transforms::TransformContext context;
-    context.DecompileRun = &runStorage;
-    context.CurrentTypeDefinition = currentTypeDefinition;
-    context.TypeSystemAstBuilder = &const_cast<PatternStatementFixture&>(fx).astBuilder;
-    CS::Transforms::PatternStatementTransform transform;
-    transform.Run(root, context);
+// Runs the transform over a fresh block holding one expression statement and returns the
+// (possibly replaced) statement expression afterward.
+Syntax::Expression* RunOnExpression(TransformFixture& fixture, Syntax::Expression* expression) {
+    Transforms::TransformContext context = fixture.MakeContext();
+    auto* block = new Syntax::BlockStatement();
+    auto* statement = new Syntax::ExpressionStatement(expression);
+    block->Statements().Add(statement);
+    Transforms::PatternStatementTransform transform;
+    transform.Run(*block, context);
+    return statement->Expression();
 }
 
 } // namespace
 
-// ---- The cascading if-else simplification ---------------------------------------------
-
-// `if (c1) A; else { if (c2) B; }` becomes `if (c1) A; else if (c2) B;`: the
-// else slot holds the nested if directly (the wrapper block is gone).
-TEST(PatternStatementTransformTest, CascadingIfElseIsSimplified)
+// `!(a == b)` becomes `a != b`: the unary is replaced by the inner binary with the operator
+// flipped to inequality.
+TEST(PatternStatementTransformTest, RewritesNegatedEquality)
 {
-    PatternStatementFixture fx;
-    auto outer = std::make_unique<Syntax::IfElseStatement>(Id("c1"), Call("A"));
-    auto* elseBlock = new Syntax::BlockStatement();
-    auto* inner = new Syntax::IfElseStatement(Id("c2"), Call("B"));
-    elseBlock->Statements().Add(inner);
-    outer->FalseStatement(elseBlock);
+    TransformFixture fixture;
+    auto* a = Ref("a");
+    auto* b = Ref("b");
+    auto* equality = Bin(a, Syntax::BinaryOperatorType::Equality, b);
+    auto* negated = new Syntax::UnaryOperatorExpression(equality, Syntax::UnaryOperatorType::Not);
 
-    RunTransform(*outer, fx);
+    Syntax::Expression* result = RunOnExpression(fixture, negated);
 
-    ASSERT_NE(outer->FalseStatement(), nullptr);
-    EXPECT_EQ(outer->FalseStatement(), inner)
-        << "the else block collapses to the nested if-else";
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(result);
+    ASSERT_NE(binary, nullptr);
+    EXPECT_EQ(binary, equality);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::InEquality);
+    EXPECT_EQ(binary->Left(), a);
+    EXPECT_EQ(binary->Right(), b);
 }
 
-// The nested if keeping its own else branch still simplifies (the
-// OptionalNode matches a present FalseStatement).
-TEST(PatternStatementTransformTest, CascadingIfElseKeepsNestedElse)
+// `!(a != b)` is left alone (the inner operator is not equality).
+TEST(PatternStatementTransformTest, KeepsNegatedInequality)
 {
-    PatternStatementFixture fx;
-    auto outer = std::make_unique<Syntax::IfElseStatement>(Id("c1"), Call("A"));
-    auto* elseBlock = new Syntax::BlockStatement();
-    auto* inner = new Syntax::IfElseStatement(Id("c2"), Call("B"));
-    auto* innerElse = Call("C");
-    inner->FalseStatement(innerElse);
-    elseBlock->Statements().Add(inner);
-    outer->FalseStatement(elseBlock);
+    TransformFixture fixture;
+    auto* inequality = Bin(Ref("a"), Syntax::BinaryOperatorType::InEquality, Ref("b"));
+    auto* negated = new Syntax::UnaryOperatorExpression(inequality, Syntax::UnaryOperatorType::Not);
 
-    RunTransform(*outer, fx);
+    Syntax::Expression* result = RunOnExpression(fixture, negated);
 
-    ASSERT_NE(outer->FalseStatement(), nullptr);
-    EXPECT_EQ(outer->FalseStatement(), inner);
-    EXPECT_EQ(inner->FalseStatement(), innerElse)
-        << "the nested if keeps its own else branch";
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(result);
+    ASSERT_NE(unary, nullptr);
+    EXPECT_EQ(unary, negated);
+    EXPECT_EQ(unary->Operator(), Syntax::UnaryOperatorType::Not);
+    EXPECT_EQ(unary->Expression(), inequality);
 }
 
-// An else block with two statements does not match the pattern.
-TEST(PatternStatementTransformTest, TwoStatementElseBlockIsNotSimplified)
+// `!(a < b)` is left alone (the inner operator is a relational operator).
+TEST(PatternStatementTransformTest, KeepsNegatedRelational)
 {
-    PatternStatementFixture fx;
-    auto outer = std::make_unique<Syntax::IfElseStatement>(Id("c1"), Call("A"));
+    TransformFixture fixture;
+    auto* lessThan = Bin(Ref("a"), Syntax::BinaryOperatorType::LessThan, Ref("b"));
+    auto* negated = new Syntax::UnaryOperatorExpression(lessThan, Syntax::UnaryOperatorType::Not);
+
+    Syntax::Expression* result = RunOnExpression(fixture, negated);
+
+    ASSERT_NE(dynamic_cast<Syntax::UnaryOperatorExpression*>(result), nullptr);
+    EXPECT_EQ(result, negated);
+}
+
+// A non-negated equality is not touched.
+TEST(PatternStatementTransformTest, KeepsPlainEquality)
+{
+    TransformFixture fixture;
+    auto* equality = Bin(Ref("a"), Syntax::BinaryOperatorType::Equality, Ref("b"));
+
+    Syntax::Expression* result = RunOnExpression(fixture, equality);
+
+    EXPECT_EQ(result, equality);
+    EXPECT_EQ(equality->Operator(), Syntax::BinaryOperatorType::Equality);
+}
+
+// `a && (b && c)` becomes `(a && b) && c`: the right operand becomes the parent and the
+// visited expression its left operand.
+TEST(PatternStatementTransformTest, ReassociatesConditionalAnd)
+{
+    TransformFixture fixture;
+    auto* a = Ref("a");
+    auto* b = Ref("b");
+    auto* c = Ref("c");
+    auto* inner = Bin(b, Syntax::BinaryOperatorType::ConditionalAnd, c);
+    auto* outer = Bin(a, Syntax::BinaryOperatorType::ConditionalAnd, inner);
+
+    Syntax::Expression* result = RunOnExpression(fixture, outer);
+
+    auto* top = dynamic_cast<Syntax::BinaryOperatorExpression*>(result);
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(top, inner);
+    ASSERT_NE(top->Left(), nullptr);
+    ASSERT_NE(top->Right(), nullptr);
+    EXPECT_EQ(top->Right(), c);
+    auto* left = dynamic_cast<Syntax::BinaryOperatorExpression*>(top->Left());
+    ASSERT_NE(left, nullptr);
+    EXPECT_EQ(left, outer);
+    EXPECT_EQ(left->Left(), a);
+    EXPECT_EQ(left->Right(), b);
+}
+
+// `a || (b || c)` becomes `(a || b) || c` the same way.
+TEST(PatternStatementTransformTest, ReassociatesConditionalOr)
+{
+    TransformFixture fixture;
+    auto* a = Ref("a");
+    auto* b = Ref("b");
+    auto* c = Ref("c");
+    auto* inner = Bin(b, Syntax::BinaryOperatorType::ConditionalOr, c);
+    auto* outer = Bin(a, Syntax::BinaryOperatorType::ConditionalOr, inner);
+
+    Syntax::Expression* result = RunOnExpression(fixture, outer);
+
+    auto* top = dynamic_cast<Syntax::BinaryOperatorExpression*>(result);
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(top, inner);
+    EXPECT_EQ(top->Right(), c);
+    auto* left = dynamic_cast<Syntax::BinaryOperatorExpression*>(top->Left());
+    ASSERT_NE(left, nullptr);
+    EXPECT_EQ(left, outer);
+    EXPECT_EQ(left->Left(), a);
+    EXPECT_EQ(left->Right(), b);
+}
+
+// A mixed pair (`a && (b || c)`) is not associative, so it stays as-is.
+TEST(PatternStatementTransformTest, KeepsMixedConditionalOperators)
+{
+    TransformFixture fixture;
+    auto* inner = Bin(Ref("b"), Syntax::BinaryOperatorType::ConditionalOr, Ref("c"));
+    auto* outer = Bin(Ref("a"), Syntax::BinaryOperatorType::ConditionalAnd, inner);
+
+    Syntax::Expression* result = RunOnExpression(fixture, outer);
+
+    EXPECT_EQ(result, outer);
+    EXPECT_EQ(outer->Right(), inner);
+}
+
+// A non-conditional binary operator with a nested conditional right operand is not
+// reassociated.
+TEST(PatternStatementTransformTest, KeepsNonConditionalWithNestedConditional)
+{
+    TransformFixture fixture;
+    auto* inner = Bin(Ref("b"), Syntax::BinaryOperatorType::ConditionalAnd, Ref("c"));
+    auto* outer = Bin(Ref("a"), Syntax::BinaryOperatorType::LessThan, inner);
+
+    Syntax::Expression* result = RunOnExpression(fixture, outer);
+
+    EXPECT_EQ(result, outer);
+    EXPECT_EQ(outer->Right(), inner);
+}
+
+// The `VisitChildren` walk descends: a negated equality nested as the left operand of a
+// conditional-and is rewritten while the outer node is left in place.
+TEST(PatternStatementTransformTest, RewritesNestedNegatedEquality)
+{
+    TransformFixture fixture;
+    auto* a = Ref("a");
+    auto* b = Ref("b");
+    auto* equality = Bin(a, Syntax::BinaryOperatorType::Equality, b);
+    auto* negated = new Syntax::UnaryOperatorExpression(equality, Syntax::UnaryOperatorType::Not);
+    auto* outer = Bin(negated, Syntax::BinaryOperatorType::ConditionalAnd, Ref("c"));
+
+    Syntax::Expression* result = RunOnExpression(fixture, outer);
+
+    EXPECT_EQ(result, outer);
+    auto* left = dynamic_cast<Syntax::BinaryOperatorExpression*>(outer->Left());
+    ASSERT_NE(left, nullptr);
+    EXPECT_EQ(left, equality);
+    EXPECT_EQ(left->Operator(), Syntax::BinaryOperatorType::InEquality);
+}
+
+// The `VisitChildren` replace-and-revisit walk keeps revisiting a replaced node until the
+// visit returns the same node: `a && (b && (c && d))` is flattened fully left-associative to
+// `((a && b) && c) && d`.
+TEST(PatternStatementTransformTest, FlattensFullyLeftAssociative)
+{
+    TransformFixture fixture;
+    auto* a = Ref("a");
+    auto* b = Ref("b");
+    auto* c = Ref("c");
+    auto* d = Ref("d");
+    auto* cAndD = Bin(c, Syntax::BinaryOperatorType::ConditionalAnd, d);
+    auto* bAndCAndD = Bin(b, Syntax::BinaryOperatorType::ConditionalAnd, cAndD);
+    auto* outer = Bin(a, Syntax::BinaryOperatorType::ConditionalAnd, bAndCAndD);
+
+    Syntax::Expression* result = RunOnExpression(fixture, outer);
+
+    // Final shape: ((a && b) && c) && d -- the original nodes are reused at each level.
+    auto* top = dynamic_cast<Syntax::BinaryOperatorExpression*>(result);
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(top, cAndD);
+    EXPECT_EQ(top->Right(), d);
+    auto* second = dynamic_cast<Syntax::BinaryOperatorExpression*>(top->Left());
+    ASSERT_NE(second, nullptr);
+    EXPECT_EQ(second, bAndCAndD);
+    EXPECT_EQ(second->Right(), c);
+    auto* third = dynamic_cast<Syntax::BinaryOperatorExpression*>(second->Left());
+    ASSERT_NE(third, nullptr);
+    EXPECT_EQ(third, outer);
+    EXPECT_EQ(third->Left(), a);
+    EXPECT_EQ(third->Right(), b);
+}
+
+// A tree with no matching shape is left structurally untouched (every node identity is
+// preserved by the walk).
+TEST(PatternStatementTransformTest, LeavesUnrelatedTreeUntouched)
+{
+    TransformFixture fixture;
+    auto* inner = Bin(Ref("a"), Syntax::BinaryOperatorType::Add, Ref("b"));
+    auto* outer = Bin(inner, Syntax::BinaryOperatorType::Multiply, Ref("c"));
+
+    Syntax::Expression* result = RunOnExpression(fixture, outer);
+
+    EXPECT_EQ(result, outer);
+    EXPECT_EQ(outer->Left(), inner);
+    EXPECT_EQ(inner->Operator(), Syntax::BinaryOperatorType::Add);
+}
+
+// ---- pattern-based statement sub-transforms ----------------------------------------
+
+namespace {
+
+// A minimal named `IType` for the resolve-result return slots.
+class DestructorStubType : public TS::IType {
+public:
+    explicit DestructorStubType(std::string name) : name_(std::move(name)) {}
+    TS::TypeKind Kind() const override { return TS::TypeKind::Unknown; }
+    std::string Name() const override { return name_; }
+    std::string ReflectionName() const override { return name_; }
+    int TypeParameterCount() const override { return 0; }
+    bool StructuralEquals(const TS::IType& other) const override { return &other == this; }
+
+private:
+    std::string name_;
+};
+
+std::shared_ptr<TestSupport::LookupTypeDefinition> MakeDestructorTypeDef(
+    const TS::ICompilation& compilation, const std::string& name) {
+    return std::make_shared<TestSupport::LookupTypeDefinition>(
+        name, "", TS::FullTypeName(TS::TopLevelTypeName("", name)), TS::TypeKind::Class,
+        TS::Accessibility::Public, compilation, nullptr);
+}
+
+// A `TypeDeclaration` named `name` whose resolved symbol is `definition`.
+Syntax::TypeDeclaration* MakeDestructorTypeDecl(
+    const std::string& name, const std::shared_ptr<TestSupport::LookupTypeDefinition>& definition) {
+    auto* typeDecl = new Syntax::TypeDeclaration();
+    typeDecl->Name(name);
+    typeDecl->AddAnnotation(std::make_shared<Sem::TypeResolveResult>(
+        std::static_pointer_cast<TS::IType>(definition)));
+    return typeDecl;
+}
+
+// A `MethodDeclaration` named `name` whose resolved symbol is `method`.
+Syntax::MethodDeclaration* MakeDestructorMethod(const std::string& name, const TS::IMethod* method) {
+    auto* methodDecl = new Syntax::MethodDeclaration();
+    methodDecl->Name(name);
+    methodDecl->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, method, std::make_shared<DestructorStubType>("T")));
+    return methodDecl;
+}
+
+// The `base.Finalize()` invocation the destructor-body pattern pins.
+Syntax::Expression* FinalizeCall() {
+    return new Syntax::InvocationExpression(new Syntax::MemberReferenceExpression(
+        new Syntax::BaseReferenceExpression(), std::string("Finalize")));
+}
+
+// The `base.Finalize();` statement the destructor-body pattern pins.
+Syntax::ExpressionStatement* FinalizeStatement() {
+    return new Syntax::ExpressionStatement(FinalizeCall());
+}
+
+// Runs the transform over a block holding `statement`.
+void RunOnStatement(TransformFixture& fixture, Syntax::Statement* statement) {
+    Transforms::TransformContext context = fixture.MakeContext();
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(statement);
+    Transforms::PatternStatementTransform transform;
+    transform.Run(*block, context);
+}
+
+// Runs the transform with `node` as the root.
+void RunTransform(TransformFixture& fixture, Syntax::AstNode& node) {
+    Transforms::TransformContext context = fixture.MakeContext();
+    Transforms::PatternStatementTransform transform;
+    transform.Run(node, context);
+}
+
+// Builds `try { <tryBody> } finally { base.Finalize(); }`, creating an empty try body when
+// none is supplied.
+Syntax::TryCatchStatement* MakeDestructorBodyTry(Syntax::BlockStatement* tryBody = nullptr) {
+    if (tryBody == nullptr)
+        tryBody = new Syntax::BlockStatement();
+    auto* finallyBlock = new Syntax::BlockStatement();
+    finallyBlock->Statements().Add(FinalizeStatement());
+    auto* innerTry = new Syntax::TryCatchStatement(tryBody);
+    innerTry->FinallyBlock(finallyBlock);
+    return innerTry;
+}
+
+} // namespace
+
+// ---- cascading if-else --------------------------------------------------------------
+
+// `if (a) X; else { if (b) Y; else Z; }` becomes `if (a) X; else if (b) Y; else Z;`.
+TEST(PatternStatementTransformTest, SimplifiesCascadingIfElse)
+{
+    TransformFixture fixture;
+    auto* outer = new Syntax::IfElseStatement();
+    outer->Condition(Ref("a"));
+    outer->TrueStatement(new Syntax::ExpressionStatement(Ref("x")));
+    auto* nestedIf = new Syntax::IfElseStatement();
+    nestedIf->Condition(Ref("b"));
+    nestedIf->TrueStatement(new Syntax::ExpressionStatement(Ref("y")));
+    nestedIf->FalseStatement(new Syntax::ExpressionStatement(Ref("z")));
     auto* elseBlock = new Syntax::BlockStatement();
-    elseBlock->Statements().Add(Call("B"));
-    elseBlock->Statements().Add(
-        new Syntax::IfElseStatement(Id("c2"), Call("C")));
+    elseBlock->Statements().Add(nestedIf);
     outer->FalseStatement(elseBlock);
 
-    RunTransform(*outer, fx);
+    RunOnStatement(fixture, outer);
 
-    ASSERT_NE(outer->FalseStatement(), nullptr);
-    EXPECT_EQ(outer->FalseStatement(), elseBlock)
-        << "a two-statement else block keeps its shape";
+    EXPECT_EQ(outer->FalseStatement(), static_cast<Syntax::Statement*>(nestedIf));
+    EXPECT_EQ(elseBlock->Statements().Count(), 0);
+}
+
+// An `else` block holding a non-`if` statement is not simplified.
+TEST(PatternStatementTransformTest, KeepsElseBlockWithNonIfStatement)
+{
+    TransformFixture fixture;
+    auto* outer = new Syntax::IfElseStatement();
+    outer->Condition(Ref("a"));
+    outer->TrueStatement(new Syntax::ExpressionStatement(Ref("x")));
+    auto* elseBlock = new Syntax::BlockStatement();
+    elseBlock->Statements().Add(new Syntax::ExpressionStatement(Ref("y")));
+    outer->FalseStatement(elseBlock);
+
+    RunOnStatement(fixture, outer);
+
+    EXPECT_EQ(outer->FalseStatement(), static_cast<Syntax::Statement*>(elseBlock));
+}
+
+// An `else` block holding two statements (not the single-nested-if shape) is not simplified.
+TEST(PatternStatementTransformTest, KeepsElseBlockWithTwoStatements)
+{
+    TransformFixture fixture;
+    auto* outer = new Syntax::IfElseStatement();
+    outer->Condition(Ref("a"));
+    outer->TrueStatement(new Syntax::ExpressionStatement(Ref("x")));
+    auto* nestedIf = new Syntax::IfElseStatement();
+    nestedIf->Condition(Ref("b"));
+    nestedIf->TrueStatement(new Syntax::ExpressionStatement(Ref("y")));
+    auto* elseBlock = new Syntax::BlockStatement();
+    elseBlock->Statements().Add(nestedIf);
+    elseBlock->Statements().Add(new Syntax::ExpressionStatement(Ref("z")));
+    outer->FalseStatement(elseBlock);
+
+    RunOnStatement(fixture, outer);
+
+    EXPECT_EQ(outer->FalseStatement(), static_cast<Syntax::Statement*>(elseBlock));
     EXPECT_EQ(elseBlock->Statements().Count(), 2);
 }
 
-// A single-statement else block whose statement is not an if-else does not
-// match the pattern.
-TEST(PatternStatementTransformTest, NonIfSingleStatementElseBlockIsNotSimplified)
+// ---- try-catch-finally --------------------------------------------------------------
+
+// `try { try { body } catch { ... } } finally { f }` merges into a single try-catch-finally.
+TEST(PatternStatementTransformTest, MergesNestedTryCatchFinally)
 {
-    PatternStatementFixture fx;
-    auto outer = std::make_unique<Syntax::IfElseStatement>(Id("c1"), Call("A"));
-    auto* elseBlock = new Syntax::BlockStatement();
-    auto* body = Call("B");
-    elseBlock->Statements().Add(body);
-    outer->FalseStatement(elseBlock);
-
-    RunTransform(*outer, fx);
-
-    ASSERT_NE(outer->FalseStatement(), nullptr);
-    EXPECT_EQ(outer->FalseStatement(), elseBlock);
-    ASSERT_EQ(elseBlock->Statements().Count(), 1);
-    EXPECT_EQ(elseBlock->Statements().At(0), body);
-}
-
-// An if without an else has nothing to simplify.
-TEST(PatternStatementTransformTest, IfWithoutElseIsNotSimplified)
-{
-    PatternStatementFixture fx;
-    auto outer = std::make_unique<Syntax::IfElseStatement>(Id("c1"), Call("A"));
-
-    RunTransform(*outer, fx);
-
-    EXPECT_EQ(outer->FalseStatement(), nullptr);
-}
-
-// ---- The conditional-logic reassociation ----------------------------------------------
-
-// `a && (b && c)` becomes `(a && b) && c`.
-TEST(PatternStatementTransformTest, ConditionalAndReassociatesLeft)
-{
-    PatternStatementFixture fx;
-    auto* bAndC = Bin(Id("b"), Syntax::BinaryOperatorType::ConditionalAnd, Id("c"));
-    auto* whole = Bin(Id("a"), Syntax::BinaryOperatorType::ConditionalAnd, bAndC);
-    auto statement = std::make_unique<Syntax::ExpressionStatement>(whole);
-
-    RunTransform(*statement, fx);
-
-    auto* top = dynamic_cast<Syntax::BinaryOperatorExpression*>(statement->Expression());
-    ASSERT_NE(top, nullptr);
-    EXPECT_EQ(top->Operator(), Syntax::BinaryOperatorType::ConditionalAnd);
-    EXPECT_EQ(NameOf(top->Right()), "c");
-    auto* left = dynamic_cast<Syntax::BinaryOperatorExpression*>(top->Left());
-    ASSERT_NE(left, nullptr) << "the left operand is the re-associated pair";
-    EXPECT_EQ(left->Operator(), Syntax::BinaryOperatorType::ConditionalAnd);
-    EXPECT_EQ(NameOf(left->Left()), "a");
-    EXPECT_EQ(NameOf(left->Right()), "b");
-}
-
-// `a || (b || c)` becomes `(a || b) || c`.
-TEST(PatternStatementTransformTest, ConditionalOrReassociatesLeft)
-{
-    PatternStatementFixture fx;
-    auto* bOrC = Bin(Id("b"), Syntax::BinaryOperatorType::ConditionalOr, Id("c"));
-    auto* whole = Bin(Id("a"), Syntax::BinaryOperatorType::ConditionalOr, bOrC);
-    auto statement = std::make_unique<Syntax::ExpressionStatement>(whole);
-
-    RunTransform(*statement, fx);
-
-    auto* top = dynamic_cast<Syntax::BinaryOperatorExpression*>(statement->Expression());
-    ASSERT_NE(top, nullptr);
-    EXPECT_EQ(top->Operator(), Syntax::BinaryOperatorType::ConditionalOr);
-    EXPECT_EQ(NameOf(top->Right()), "c");
-    auto* left = dynamic_cast<Syntax::BinaryOperatorExpression*>(top->Left());
-    ASSERT_NE(left, nullptr);
-    EXPECT_EQ(NameOf(left->Left()), "a");
-    EXPECT_EQ(NameOf(left->Right()), "b");
-}
-
-// `a && (b || c)` keeps its shape (the operators differ).
-TEST(PatternStatementTransformTest, MixedConditionalOperatorsAreNotReassociated)
-{
-    PatternStatementFixture fx;
-    auto* bOrC = Bin(Id("b"), Syntax::BinaryOperatorType::ConditionalOr, Id("c"));
-    auto* whole = Bin(Id("a"), Syntax::BinaryOperatorType::ConditionalAnd, bOrC);
-    auto statement = std::make_unique<Syntax::ExpressionStatement>(whole);
-
-    RunTransform(*statement, fx);
-
-    EXPECT_EQ(statement->Expression(), whole)
-        << "a mismatched inner operator is not re-associated";
-    EXPECT_EQ(whole->Right(), bOrC);
-}
-
-// `a && (b && (c && d))` becomes `((a && b) && c) && d`: the re-visit loop
-// keeps visiting the replacement until it stops changing (the first rewrite
-// yields `(a && b) && (c && d)`, whose own right operand is re-associated on
-// the second visit).
-TEST(PatternStatementTransformTest, DeepConditionalAndReassociatesThroughRevisit)
-{
-    PatternStatementFixture fx;
-    auto* cAndD = Bin(Id("c"), Syntax::BinaryOperatorType::ConditionalAnd, Id("d"));
-    auto* bNested = Bin(Id("b"), Syntax::BinaryOperatorType::ConditionalAnd, cAndD);
-    auto* whole = Bin(Id("a"), Syntax::BinaryOperatorType::ConditionalAnd, bNested);
-    auto statement = std::make_unique<Syntax::ExpressionStatement>(whole);
-
-    RunTransform(*statement, fx);
-
-    auto* top = dynamic_cast<Syntax::BinaryOperatorExpression*>(statement->Expression());
-    ASSERT_NE(top, nullptr);
-    EXPECT_EQ(top->Operator(), Syntax::BinaryOperatorType::ConditionalAnd);
-    EXPECT_EQ(NameOf(top->Right()), "d");
-    auto* mid = dynamic_cast<Syntax::BinaryOperatorExpression*>(top->Left());
-    ASSERT_NE(mid, nullptr) << "((a && b) && c) sits under the top node";
-    EXPECT_EQ(NameOf(mid->Right()), "c");
-    auto* inner = dynamic_cast<Syntax::BinaryOperatorExpression*>(mid->Left());
-    ASSERT_NE(inner, nullptr) << "(a && b) sits under the middle node";
-    EXPECT_EQ(NameOf(inner->Left()), "a");
-    EXPECT_EQ(NameOf(inner->Right()), "b");
-}
-
-// ---- The negated-equality rewrite -----------------------------------------------------
-
-// `!(a == b)` becomes `a != b`.
-TEST(PatternStatementTransformTest, NegatedEqualityBecomesInequality)
-{
-    PatternStatementFixture fx;
-    auto* equality = Bin(Id("a"), Syntax::BinaryOperatorType::Equality, Id("b"));
-    auto* negation = new Syntax::UnaryOperatorExpression(
-        equality, Syntax::UnaryOperatorType::Not);
-    auto statement = std::make_unique<Syntax::ExpressionStatement>(negation);
-
-    RunTransform(*statement, fx);
-
-    auto* top = dynamic_cast<Syntax::BinaryOperatorExpression*>(statement->Expression());
-    ASSERT_NE(top, nullptr) << "the unary wrapper is replaced by the comparison";
-    EXPECT_EQ(top, equality) << "the replacement is the detached inner node";
-    EXPECT_EQ(top->Operator(), Syntax::BinaryOperatorType::InEquality);
-    EXPECT_EQ(NameOf(top->Left()), "a");
-    EXPECT_EQ(NameOf(top->Right()), "b");
-}
-
-// `!(a != b)` keeps its shape (only equality is flipped).
-TEST(PatternStatementTransformTest, NegatedInequalityIsNotRewritten)
-{
-    PatternStatementFixture fx;
-    auto* inequality = Bin(Id("a"), Syntax::BinaryOperatorType::InEquality, Id("b"));
-    auto* negation = new Syntax::UnaryOperatorExpression(
-        inequality, Syntax::UnaryOperatorType::Not);
-    auto statement = std::make_unique<Syntax::ExpressionStatement>(negation);
-
-    RunTransform(*statement, fx);
-
-    auto* top = dynamic_cast<Syntax::UnaryOperatorExpression*>(statement->Expression());
-    ASSERT_NE(top, nullptr);
-    EXPECT_EQ(top, negation);
-    EXPECT_EQ(top->Operator(), Syntax::UnaryOperatorType::Not);
-    EXPECT_EQ(inequality->Operator(), Syntax::BinaryOperatorType::InEquality);
-}
-
-// `!(a < b)` keeps its shape (a relational operator is not equality).
-TEST(PatternStatementTransformTest, NegatedRelationalIsNotRewritten)
-{
-    PatternStatementFixture fx;
-    auto* less = Bin(Id("a"), Syntax::BinaryOperatorType::LessThan, Id("b"));
-    auto* negation = new Syntax::UnaryOperatorExpression(
-        less, Syntax::UnaryOperatorType::Not);
-    auto statement = std::make_unique<Syntax::ExpressionStatement>(negation);
-
-    RunTransform(*statement, fx);
-
-    auto* top = dynamic_cast<Syntax::UnaryOperatorExpression*>(statement->Expression());
-    ASSERT_NE(top, nullptr);
-    EXPECT_EQ(top, negation);
-    EXPECT_EQ(less->Operator(), Syntax::BinaryOperatorType::LessThan);
-}
-
-// ---- The for-loop reshape ------------------------------------------------------------------
-
-// An `name` identifier carrying the variable annotation (the variable identity the
-// reshape's checks compare through GetILVariable).
-Syntax::IdentifierExpression* Var(const std::string& name, const IL::ILVariablePtr& variable) {
-    auto* expression = new Syntax::IdentifierExpression(name);
-    expression->AddAnnotation(std::make_shared<CS::ILVariableResolveResult>(variable));
-    return expression;
-}
-
-// `v = <init>; while (v < n) { <body...>; v = v + 1; }` -- the canonical convertible shape
-// (the variable, the condition's left operand, and the iterator's left/right operands all
-// carry the same ILVariable annotation).
-Syntax::BlockStatement* MakeWhileOverVariable(const IL::ILVariablePtr& v,
-                                             Syntax::Statement* extraBody) {
-    auto* block = new Syntax::BlockStatement();
-    block->Statements().Add(new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(Var("v", v),
-                                          Syntax::AssignmentOperatorType::Assign,
-                                          Id("zero"))));
-    auto* iterator = new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(Var("v", v),
-                                          Syntax::AssignmentOperatorType::Assign,
-                                          new Syntax::BinaryOperatorExpression(
-                                              Var("v", v), Syntax::BinaryOperatorType::Add,
-                                              Id("one"))));
-    auto* body = new Syntax::BlockStatement();
-    if (extraBody != nullptr)
-        body->Statements().Add(extraBody);
-    body->Statements().Add(iterator);
-    auto* loop = new Syntax::WhileStatement(
-        new Syntax::BinaryOperatorExpression(Var("v", v),
-                                              Syntax::BinaryOperatorType::LessThan,
-                                              Id("n")),
-        body);
-    block->Statements().Add(loop);
-    return block;
-}
-
-// `v = 0; while (v < n) { work; v = v + 1; }` becomes
-// `for (v = 0; v < n; v = v + 1) { work; }`: the declaration moves into the
-// initializers, the condition and iterator detach into the for statement, and
-// the body keeps the matched statements in a fresh block.
-TEST(PatternStatementTransformTest, WhileLoopBecomesFor)
-{
-    PatternStatementFixture fx;
-    IL::ILVariablePtr v = std::make_shared<IL::ILVariable>(
-        IL::VariableKind::Local, TS::UnknownType());
-    Syntax::BlockStatement* block = MakeWhileOverVariable(v, Call("Work"));
-    auto root = std::unique_ptr<Syntax::BlockStatement>(block);
-    Syntax::Statement* declaration = block->Statements().At(0);
-    Syntax::WhileStatement* loop =
-        dynamic_cast<Syntax::WhileStatement*>(block->Statements().At(1));
-    ASSERT_NE(loop, nullptr);
-    Syntax::Expression* condition = loop->Condition();
-    auto* body = dynamic_cast<Syntax::BlockStatement*>(loop->EmbeddedStatement());
-    ASSERT_NE(body, nullptr);
-    Syntax::Statement* work = body->Statements().At(0);
-    Syntax::Statement* iterator = body->Statements().At(1);
-    // The annotation-copy channel is pinned on the replacement node.
-    loop->AddAnnotation(std::make_shared<CS::ILVariableResolveResult>(v));
-
-    RunTransform(*root, fx);
-
-    ASSERT_EQ(block->Statements().Count(), 1) << "the declaration is absorbed";
-    auto* forStatement = dynamic_cast<Syntax::ForStatement*>(block->Statements().At(0));
-    ASSERT_NE(forStatement, nullptr) << "the while is replaced by a for";
-    ASSERT_EQ(forStatement->Initializers().Count(), 1);
-    EXPECT_EQ(forStatement->Initializers().At(0), declaration);
-    EXPECT_EQ(forStatement->Condition(), condition)
-        << "the condition detaches into the for statement";
-    ASSERT_EQ(forStatement->Iterators().Count(), 1);
-    EXPECT_EQ(forStatement->Iterators().At(0), iterator);
-    auto* newBody = dynamic_cast<Syntax::BlockStatement*>(forStatement->EmbeddedStatement());
-    ASSERT_NE(newBody, nullptr);
-    EXPECT_NE(newBody, body) << "the body block is fresh (the iterator is stripped)";
-    ASSERT_EQ(newBody->Statements().Count(), 1);
-    EXPECT_EQ(newBody->Statements().At(0), work);
-    EXPECT_NE(forStatement->Annotation<CS::ILVariableResolveResult>(), nullptr)
-        << "CopyAnnotationsFrom carries the loop's annotations";
-}
-
-// The reshape requires the declared variable and the loop variable to be the
-// same ILVariable: a mismatch keeps the while.
-TEST(PatternStatementTransformTest, WhileLoopToForRequiresTheSameVariable)
-{
-    PatternStatementFixture fx;
-    IL::ILVariablePtr a = std::make_shared<IL::ILVariable>(
-        IL::VariableKind::Local, TS::UnknownType());
-    IL::ILVariablePtr b = std::make_shared<IL::ILVariable>(
-        IL::VariableKind::Local, TS::UnknownType());
-    // a = 0; while (b < n) { work; b = b + 1; }
-    auto block = std::make_unique<Syntax::BlockStatement>();
-    block->Statements().Add(new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(Var("a", a),
-                                          Syntax::AssignmentOperatorType::Assign,
-                                          Id("zero"))));
-    auto* iterator = new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(Var("b", b),
-                                          Syntax::AssignmentOperatorType::Assign,
-                                          new Syntax::BinaryOperatorExpression(
-                                              Var("b", b), Syntax::BinaryOperatorType::Add,
-                                              Id("one"))));
-    auto* body = new Syntax::BlockStatement();
-    body->Statements().Add(Call("Work"));
-    body->Statements().Add(iterator);
-    auto* loop = new Syntax::WhileStatement(
-        new Syntax::BinaryOperatorExpression(Var("b", b),
-                                              Syntax::BinaryOperatorType::LessThan,
-                                              Id("n")),
-        body);
-    block->Statements().Add(loop);
-
-    RunTransform(*block, fx);
-
-    ASSERT_EQ(block->Statements().Count(), 2);
-    EXPECT_EQ(block->Statements().At(1), loop)
-        << "a variable mismatch keeps the while loop";
-}
-
-// A `continue` in the loop body blocks the reshape (continue jumps to the
-// condition in a while but to the iterator in a for).
-TEST(PatternStatementTransformTest, ContinueInBodyBlocksTheFor)
-{
-    PatternStatementFixture fx;
-    IL::ILVariablePtr v = std::make_shared<IL::ILVariable>(
-        IL::VariableKind::Local, TS::UnknownType());
-    auto* continueIf = new Syntax::IfElseStatement(
-        Id("c"), new Syntax::ContinueStatement());
-    Syntax::BlockStatement* block = MakeWhileOverVariable(v, continueIf);
-    auto root = std::unique_ptr<Syntax::BlockStatement>(block);
-    Syntax::WhileStatement* loop =
-        dynamic_cast<Syntax::WhileStatement*>(block->Statements().At(1));
-    ASSERT_NE(loop, nullptr);
-
-    RunTransform(*root, fx);
-
-    ASSERT_EQ(block->Statements().Count(), 2);
-    EXPECT_EQ(block->Statements().At(1), loop)
-        << "a continue in the body keeps the while loop";
-}
-
-// A `continue` inside a NESTED loop does not block the reshape (it targets the
-// nested loop, not the outer one).
-TEST(PatternStatementTransformTest, ContinueInNestedLoopDoesNotBlockTheFor)
-{
-    PatternStatementFixture fx;
-    IL::ILVariablePtr v = std::make_shared<IL::ILVariable>(
-        IL::VariableKind::Local, TS::UnknownType());
-    auto* nested = new Syntax::WhileStatement(
-        Id("m"), new Syntax::ContinueStatement());
-    Syntax::BlockStatement* block = MakeWhileOverVariable(
-        v, new Syntax::ExpressionStatement(Id("work")));
-    auto root = std::unique_ptr<Syntax::BlockStatement>(block);
-    // Put the nested loop in the body before the iterator.
-    auto* body = dynamic_cast<Syntax::BlockStatement*>(
-        dynamic_cast<Syntax::WhileStatement*>(block->Statements().At(1))
-            ->EmbeddedStatement());
-    ASSERT_NE(body, nullptr);
-    body->Statements().InsertAfter(nullptr, nested);
-
-    RunTransform(*root, fx);
-
-    ASSERT_EQ(block->Statements().Count(), 1);
-    auto* forStatement = dynamic_cast<Syntax::ForStatement*>(block->Statements().At(0));
-    ASSERT_NE(forStatement, nullptr)
-        << "a continue inside a nested loop still converts";
-    ASSERT_EQ(forStatement->Initializers().Count(), 1);
-    ASSERT_EQ(forStatement->Iterators().Count(), 1);
-    auto* newBody = dynamic_cast<Syntax::BlockStatement*>(forStatement->EmbeddedStatement());
-    ASSERT_NE(newBody, nullptr);
-    ASSERT_EQ(newBody->Statements().Count(), 2);
-    EXPECT_EQ(newBody->Statements().At(0), nested);
-}
-
-// A by-ref-like iteration variable used after the loop blocks the reshape (the
-// hoisted declaration would leave a headless for whose only initialization is
-// the for-initializer ref-assignment, which cannot be split from a ref local).
-TEST(PatternStatementTransformTest, RefLocalUsedAfterLoopStaysWhile)
-{
-    PatternStatementFixture fx;
-    IL::ILVariablePtr v = std::make_shared<IL::ILVariable>(
-        IL::VariableKind::Local,
-        std::make_shared<TS::ByReferenceType>(TS::UnknownType()));
-    Syntax::BlockStatement* block = MakeWhileOverVariable(v, Call("Work"));
-    auto root = std::unique_ptr<Syntax::BlockStatement>(block);
-    // use(v); -- after the loop.
-    block->Statements().Add(
-        new Syntax::ExpressionStatement(Var("v", v)));
-    Syntax::WhileStatement* loop =
-        dynamic_cast<Syntax::WhileStatement*>(block->Statements().At(1));
-    ASSERT_NE(loop, nullptr);
-
-    RunTransform(*root, fx);
-
-    ASSERT_EQ(block->Statements().Count(), 3);
-    EXPECT_EQ(block->Statements().At(1), loop)
-        << "a ref local used after the loop keeps the while loop";
-}
-
-// A by-ref-like iteration variable NOT used after the loop still converts.
-TEST(PatternStatementTransformTest, RefLocalNotUsedAfterConverts)
-{
-    PatternStatementFixture fx;
-    IL::ILVariablePtr v = std::make_shared<IL::ILVariable>(
-        IL::VariableKind::Local,
-        std::make_shared<TS::ByReferenceType>(TS::UnknownType()));
-    Syntax::BlockStatement* block = MakeWhileOverVariable(v, Call("Work"));
-    auto root = std::unique_ptr<Syntax::BlockStatement>(block);
-
-    RunTransform(*root, fx);
-
-    ASSERT_EQ(block->Statements().Count(), 1);
-    auto* forStatement = dynamic_cast<Syntax::ForStatement*>(block->Statements().At(0));
-    ASSERT_NE(forStatement, nullptr)
-        << "a ref local not used after the loop still converts";
-}
-
-// A variable used in the iterator part whose declaration point sits INSIDE
-// the loop body blocks the reshape: hoisting the initializer into the for's
-// iterator slot would move the use out of the body scope that declares it.
-// (x is declared and used only inside the body, and the iterator reads x.)
-TEST(PatternStatementTransformTest, IteratorVariableDeclaredInsideBodyKeepsWhile)
-{
-    PatternStatementFixture fx;
-    IL::ILVariablePtr v = std::make_shared<IL::ILVariable>(
-        IL::VariableKind::Local, TS::UnknownType());
-    IL::ILVariablePtr x = std::make_shared<IL::ILVariable>(
-        IL::VariableKind::Local, TS::UnknownType());
-    x->Name = "x";
-    auto block = std::make_unique<Syntax::BlockStatement>();
-    block->Statements().Add(new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(Var("v", v),
-                                          Syntax::AssignmentOperatorType::Assign,
-                                          Id("zero"))));
-    // body: x = one; work(x); v = v + x;   -- the iterator reads x, whose
-    // uses are all inside the body.
-    auto* iterator = new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(
-            Var("v", v), Syntax::AssignmentOperatorType::Assign,
-            new Syntax::BinaryOperatorExpression(
-                Var("v", v), Syntax::BinaryOperatorType::Add, Var("x", x))));
-    auto* body = new Syntax::BlockStatement();
-    body->Statements().Add(new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(Var("x", x),
-                                          Syntax::AssignmentOperatorType::Assign,
-                                          Id("one"))));
-    body->Statements().Add(new Syntax::ExpressionStatement(Var("x", x)));
-    body->Statements().Add(iterator);
-    auto* loop = new Syntax::WhileStatement(
-        new Syntax::BinaryOperatorExpression(Var("v", v),
-                                              Syntax::BinaryOperatorType::LessThan,
-                                              Id("n")),
-        body);
-    block->Statements().Add(loop);
-
-    RunTransform(*block, fx);
-
-    ASSERT_EQ(block->Statements().Count(), 2);
-    EXPECT_EQ(block->Statements().At(1), loop)
-        << "an iterator variable declared inside the body keeps the while loop";
-}
-
-// `v = 0;` immediately before an existing for statement that uses `v` in its
-// condition or iterators moves the declaration into the for's initializers.
-TEST(PatternStatementTransformTest, DeclarationMergesIntoForInitializer)
-{
-    PatternStatementFixture fx;
-    IL::ILVariablePtr v = std::make_shared<IL::ILVariable>(
-        IL::VariableKind::Local, TS::UnknownType());
-    auto block = std::make_unique<Syntax::BlockStatement>();
-    auto* declaration = new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(Var("v", v),
-                                          Syntax::AssignmentOperatorType::Assign,
-                                          Id("zero")));
-    block->Statements().Add(declaration);
-    auto* forStatement = new Syntax::ForStatement();
-    forStatement->Condition(new Syntax::BinaryOperatorExpression(
-        Var("v", v), Syntax::BinaryOperatorType::LessThan, Id("n")));
-    forStatement->Iterators().Add(new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(Var("v", v),
-                                          Syntax::AssignmentOperatorType::Assign,
-                                          Id("one"))));
-    forStatement->EmbeddedStatement(new Syntax::BlockStatement());
-    block->Statements().Add(forStatement);
-
-    RunTransform(*block, fx);
-
-    ASSERT_EQ(block->Statements().Count(), 1);
-    EXPECT_EQ(block->Statements().At(0), forStatement);
-    ASSERT_EQ(forStatement->Initializers().Count(), 1);
-    EXPECT_EQ(forStatement->Initializers().At(0), declaration)
-        << "the declaration moves into the for initializer slot";
-}
-
-// The initializer merge requires the for statement to use the declared
-// variable: a mismatch keeps the two statements apart (and the for-pattern
-// half does not match a for statement).
-TEST(PatternStatementTransformTest, ForInitializerMergeRequiresVariableUse)
-{
-    PatternStatementFixture fx;
-    IL::ILVariablePtr a = std::make_shared<IL::ILVariable>(
-        IL::VariableKind::Local, TS::UnknownType());
-    IL::ILVariablePtr b = std::make_shared<IL::ILVariable>(
-        IL::VariableKind::Local, TS::UnknownType());
-    auto block = std::make_unique<Syntax::BlockStatement>();
-    auto* declaration = new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(Var("a", a),
-                                          Syntax::AssignmentOperatorType::Assign,
-                                          Id("zero")));
-    block->Statements().Add(declaration);
-    auto* forStatement = new Syntax::ForStatement();
-    forStatement->Condition(new Syntax::BinaryOperatorExpression(
-        Var("b", b), Syntax::BinaryOperatorType::LessThan, Id("n")));
-    forStatement->Iterators().Add(new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(Var("b", b),
-                                          Syntax::AssignmentOperatorType::Assign,
-                                          Id("one"))));
-    forStatement->EmbeddedStatement(new Syntax::BlockStatement());
-    block->Statements().Add(forStatement);
-
-    RunTransform(*block, fx);
-
-    ASSERT_EQ(block->Statements().Count(), 2);
-    EXPECT_EQ(block->Statements().At(0), declaration);
-    EXPECT_EQ(block->Statements().At(1), forStatement);
-    EXPECT_EQ(forStatement->Initializers().Count(), 0);
-}
-
-// The ForStatement setting gates the whole arm.
-TEST(PatternStatementTransformTest, ForSettingGatesTheReshape)
-{
-    PatternStatementFixture fx;
-    IL::ILVariablePtr v = std::make_shared<IL::ILVariable>(
-        IL::VariableKind::Local, TS::UnknownType());
-    Syntax::BlockStatement* block = MakeWhileOverVariable(v, Call("Work"));
-    auto root = std::unique_ptr<Syntax::BlockStatement>(block);
-    Syntax::WhileStatement* loop =
-        dynamic_cast<Syntax::WhileStatement*>(block->Statements().At(1));
-    ASSERT_NE(loop, nullptr);
-
-    RunTransform(*root, fx, /*forStatementSetting=*/false);
-
-    ASSERT_EQ(block->Statements().Count(), 2);
-    EXPECT_EQ(block->Statements().At(1), loop)
-        << "the ForStatement setting turns the arm off";
-}
-
-// ---- The foreach-over-array reshape --------------------------------------------------------
-
-// A `name`-named local of the given type.
-IL::ILVariablePtr LocalOf(const std::string& name, TS::ITypePtr type) {
-    auto variable = std::make_shared<IL::ILVariable>(IL::VariableKind::Local,
-                                                     std::move(type));
-    variable->Name = name;
-    return variable;
-}
-
-// The convertible foreach-over-array shape: `for (i = 0; i < array.Length;
-// i = i + 1) { item = array[i]; work; }` with the three ILVariables
-// annotated and the use counts the arm checks (the C# IL pipeline maintains
-// them; the test sets them directly).
-struct ForeachArrayLoop {
-    IL::ILVariablePtr index;
-    IL::ILVariablePtr array_;
-    IL::ILVariablePtr item;
-    Syntax::ForStatement* forStatement = nullptr;
-    Syntax::Statement* work = nullptr;
-    Syntax::IdentifierExpression* arrayIdentifier = nullptr;
-};
-
-ForeachArrayLoop MakeForeachArrayLoop(TS::ITypePtr arrayType = nullptr) {
-    ForeachArrayLoop loop;
-    loop.index = LocalOf("i", TS::UnknownType());
-    loop.index->StoreCount = 2;
-    loop.index->LoadCount = 3;
-    loop.array_ =
-        LocalOf("array",
-               arrayType != nullptr
-                   ? std::move(arrayType)
-                   : TS::ITypePtr(std::make_shared<TS::KnownType>(
-                         TS::KnownTypeCode::String)));
-    loop.item = LocalOf("item", TS::ITypePtr(std::make_shared<TS::KnownType>(
-                                     TS::KnownTypeCode::Int32)));
-    // The single store is the `item = array[i]` assignment (IsSingleDefinition).
-    loop.item->StoreCount = 1;
-
-    loop.forStatement = new Syntax::ForStatement();
-    loop.forStatement->Initializers().Add(new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(
-            Var("i", loop.index), Syntax::AssignmentOperatorType::Assign,
-            new Syntax::PrimitiveExpression(Syntax::PrimitiveValue(0)))));
-    loop.arrayIdentifier = Var("array", loop.array_);
-    loop.forStatement->Condition(new Syntax::BinaryOperatorExpression(
-        Var("i", loop.index), Syntax::BinaryOperatorType::LessThan,
-        new Syntax::MemberReferenceExpression(loop.arrayIdentifier, "Length")));
-    loop.forStatement->Iterators().Add(new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(
-            Var("i", loop.index), Syntax::AssignmentOperatorType::Assign,
-            new Syntax::BinaryOperatorExpression(
-                Var("i", loop.index), Syntax::BinaryOperatorType::Add,
-                new Syntax::PrimitiveExpression(Syntax::PrimitiveValue(1))))));
-    auto* body = new Syntax::BlockStatement();
-    body->Statements().Add(new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(
-            Var("item", loop.item), Syntax::AssignmentOperatorType::Assign,
-            [&]() {
-                auto* elementAccess =
-                    new Syntax::IndexerExpression(Var("array", loop.array_));
-                elementAccess->Arguments().Add(Var("i", loop.index));
-                return elementAccess;
-            }())));
-    loop.work = new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(
-            new Syntax::IdentifierExpression("x"),
-            Syntax::AssignmentOperatorType::Assign,
-            new Syntax::IdentifierExpression("y")));
-    body->Statements().Add(loop.work);
-    loop.forStatement->EmbeddedStatement(body);
-    return loop;
-}
-
-// `for (i = 0; i < array.Length; i = i + 1) { item = array[i]; work; }`
-// becomes `foreach (int item in array) { work; }`.
-TEST(PatternStatementTransformTest, ForeachOnArrayIsIntroduced)
-{
-    PatternStatementFixture fx;
-    auto loop = MakeForeachArrayLoop();
-    auto block = std::make_unique<Syntax::BlockStatement>();
-    block->Statements().Add(loop.forStatement);
-
-    RunTransform(*block, fx);
-
-    ASSERT_EQ(block->Statements().Count(), 1);
-    auto* foreachStmt =
-        dynamic_cast<Syntax::ForeachStatement*>(block->Statements().At(0));
-    ASSERT_NE(foreachStmt, nullptr) << "the for loop becomes a foreach";
-    ASSERT_NE(foreachStmt->VariableType(), nullptr);
-    auto* designation = dynamic_cast<Syntax::SingleVariableDesignation*>(
-        foreachStmt->VariableDesignation());
-    ASSERT_NE(designation, nullptr);
-    EXPECT_EQ(designation->Identifier(), "item");
-    const auto* designationAnnotation =
-        designation->Annotation<CS::ILVariableResolveResult>();
-    ASSERT_NE(designationAnnotation, nullptr);
-    EXPECT_EQ(designationAnnotation->Variable(), loop.item.get());
-    EXPECT_EQ(foreachStmt->InExpression(), loop.arrayIdentifier)
-        << "the in-expression is the array variable's identifier";
-    auto* body = dynamic_cast<Syntax::BlockStatement*>(
-        foreachStmt->EmbeddedStatement());
-    ASSERT_NE(body, nullptr);
-    ASSERT_EQ(body->Statements().Count(), 1);
-    EXPECT_EQ(body->Statements().At(0), loop.work);
-    EXPECT_EQ(loop.item->Kind, IL::VariableKind::ForeachLocal)
-        << "the item variable is re-kinded as the foreach local";
-}
-
-// The in-expression must be an array (or a string): a differently-typed
-// collection variable keeps the for loop.
-TEST(PatternStatementTransformTest, ForeachOnArrayRequiresArrayOrString)
-{
-    PatternStatementFixture fx;
-    auto loop = MakeForeachArrayLoop(
-        TS::ITypePtr(std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32)));
-    auto block = std::make_unique<Syntax::BlockStatement>();
-    block->Statements().Add(loop.forStatement);
-
-    RunTransform(*block, fx);
-
-    ASSERT_EQ(block->Statements().Count(), 1);
-    EXPECT_EQ(block->Statements().At(0), loop.forStatement)
-        << "a non-array non-string collection keeps the for loop";
-}
-
-// The item variable must be single-definition (assignable to the foreach
-// designation): a second store keeps the for loop.
-TEST(PatternStatementTransformTest, ForeachOnArrayRequiresSingleDefinitionItem)
-{
-    PatternStatementFixture fx;
-    auto loop = MakeForeachArrayLoop();
-    loop.item->StoreCount = 2;
-    auto block = std::make_unique<Syntax::BlockStatement>();
-    block->Statements().Add(loop.forStatement);
-
-    RunTransform(*block, fx);
-
-    ASSERT_EQ(block->Statements().Count(), 1);
-    EXPECT_EQ(block->Statements().At(0), loop.forStatement);
-}
-
-// The AddressUsedForSingleCall special case: an item variable whose
-// address feeds exactly one instance-method call as the this pointer
-// (the first argument) is still assignable to the foreach designation --
-// any mutation by the call cannot be observed (the address is the only
-// use).
-TEST(PatternStatementTransformTest, ForeachOnArrayAcceptsAddressUsedForSingleCall)
-{
-    PatternStatementFixture fx;
-    auto loop = MakeForeachArrayLoop();
-    // The address-taken item: one store, one address, no loads.
-    loop.item->AddressCount = 1;
-    loop.item->LoadCount = 0;
-
-    // The IL side: the loop's BlockContainer with the call taking the
-    // item's address as its first argument (the this-pointer position).
-    auto* addressOf = new IL::LdLoca(loop.item);
-    // A resolved non-static method (the FakeMethod rig).
-    auto method = std::make_shared<TSImpl::FakeMethod>(
-        fx.compilation, TS::SymbolKind::Method);
-    method->SetName("M");
-    method->SetIsStatic(false);
-    auto* call = new IL::Call(method, /*isNewObj=*/false);
-    addressOf->Parent = call;
-    addressOf->ChildIndex = 0;
-    call->Arguments.push_back(std::unique_ptr<IL::ILInstruction>(addressOf));
-    auto* block = new IL::Block();
-    block->Add(std::unique_ptr<IL::ILInstruction>(call));
-    auto* blockContainer = new IL::BlockContainer();
-    blockContainer->AddBlock(std::unique_ptr<IL::Block>(block));
-    loop.item->AddressInstructions.push_back(addressOf);
-    // Keep the method stub alive (the call holds the shared handle).
-    static std::vector<std::shared_ptr<TSImpl::FakeMethod>> keepAlive;
-    keepAlive.push_back(std::move(method));
-    // The loop statement carries its BlockContainer (the annotation the
-    // CaptureScope/AddressUsedForSingleCall walks read).
-    loop.forStatement->AddAnnotation(
-        std::make_shared<CS::ILInstructionAnnotation>(blockContainer));
-
-    auto block2 = std::make_unique<Syntax::BlockStatement>();
-    block2->Statements().Add(loop.forStatement);
-
-    RunTransform(*block2, fx);
-
-    auto* foreachStmt =
-        dynamic_cast<Syntax::ForeachStatement*>(block2->Statements().At(0));
-    ASSERT_NE(foreachStmt, nullptr)
-        << "the address-used-for-single-call item becomes the foreach local";
-    EXPECT_EQ(loop.item->Kind, IL::VariableKind::ForeachLocal);
-}
-
-// A static method does not take a this pointer: the address use is an
-// observable reference and the for loop stays.
-TEST(PatternStatementTransformTest,
-     ForeachOnArrayRejectsAddressUsedForStaticCall)
-{
-    PatternStatementFixture fx;
-    auto loop = MakeForeachArrayLoop();
-    loop.item->AddressCount = 1;
-    loop.item->LoadCount = 0;
-
-    auto* addressOf = new IL::LdLoca(loop.item);
-    auto method = std::make_shared<TSImpl::FakeMethod>(
-        fx.compilation, TS::SymbolKind::Method);
-    method->SetName("M");
-    method->SetIsStatic(true);
-    auto* call = new IL::Call(method, /*isNewObj=*/false);
-    addressOf->Parent = call;
-    addressOf->ChildIndex = 0;
-    call->Arguments.push_back(std::unique_ptr<IL::ILInstruction>(addressOf));
-    auto* block = new IL::Block();
-    block->Add(std::unique_ptr<IL::ILInstruction>(call));
-    auto* blockContainer = new IL::BlockContainer();
-    blockContainer->AddBlock(std::unique_ptr<IL::Block>(block));
-    loop.item->AddressInstructions.push_back(addressOf);
-    static std::vector<std::shared_ptr<TSImpl::FakeMethod>> keepAlive;
-    keepAlive.push_back(std::move(method));
-    loop.forStatement->AddAnnotation(
-        std::make_shared<CS::ILInstructionAnnotation>(blockContainer));
-
-    auto block2 = std::make_unique<Syntax::BlockStatement>();
-    block2->Statements().Add(loop.forStatement);
-
-    RunTransform(*block2, fx);
-
-    EXPECT_EQ(block2->Statements().At(0), loop.forStatement)
-        << "a static call's address use keeps the for loop";
-}
-
-// The call must not sit within a NESTED loop container: the parent walk
-// reaching another BlockContainer first rejects the variable.
-TEST(PatternStatementTransformTest,
-     ForeachOnArrayRejectsAddressUsedInNestedLoop)
-{
-    PatternStatementFixture fx;
-    auto loop = MakeForeachArrayLoop();
-    loop.item->AddressCount = 1;
-    loop.item->LoadCount = 0;
-
-    auto* addressOf = new IL::LdLoca(loop.item);
-    auto method = std::make_shared<TSImpl::FakeMethod>(
-        fx.compilation, TS::SymbolKind::Method);
-    method->SetName("M");
-    method->SetIsStatic(false);
-    auto* call = new IL::Call(method, /*isNewObj=*/false);
-    addressOf->Parent = call;
-    addressOf->ChildIndex = 0;
-    call->Arguments.push_back(std::unique_ptr<IL::ILInstruction>(addressOf));
-    auto* innerBlock = new IL::Block();
-    innerBlock->Add(std::unique_ptr<IL::ILInstruction>(call));
-    // The NESTED container: the call sits inside it, and the nested
-    // container itself sits inside the loop's container.
-    auto* nestedContainer = new IL::BlockContainer();
-    nestedContainer->AddBlock(std::unique_ptr<IL::Block>(innerBlock));
-    auto* outerBlock = new IL::Block();
-    outerBlock->Add(
-        std::unique_ptr<IL::ILInstruction>(nestedContainer));
-    auto* blockContainer = new IL::BlockContainer();
-    blockContainer->AddBlock(std::unique_ptr<IL::Block>(outerBlock));
-    loop.item->AddressInstructions.push_back(addressOf);
-    static std::vector<std::shared_ptr<TSImpl::FakeMethod>> keepAlive;
-    keepAlive.push_back(std::move(method));
-    loop.forStatement->AddAnnotation(
-        std::make_shared<CS::ILInstructionAnnotation>(blockContainer));
-
-    auto block2 = std::make_unique<Syntax::BlockStatement>();
-    block2->Statements().Add(loop.forStatement);
-
-    RunTransform(*block2, fx);
-
-    EXPECT_EQ(block2->Statements().At(0), loop.forStatement)
-        << "a call inside a nested loop container keeps the for loop";
-}
-
-// The anonymous-type `var` decision (the C# foreach arms' VariableType
-// form): an item whose type is a C# anonymous type (when the
-// AnonymousTypes setting is on) renders the designation's type as `var`
-// instead of the unwritable named form.
-
-// A C#-anonymous-type stub: the compiler-generated, empty-namespace
-// <>f__AnonymousType shape with a configurable property set (the
-// TypeSystemExtensions_Test CompilerGeneratedDef rig shape).
-class AutoPropertyTestAnonType : public TS::TestSupport::LookupTypeDefinition {
-public:
-    AutoPropertyTestAnonType(const TS::ICompilation& compilation)
-        : TS::TestSupport::LookupTypeDefinition(
-              "<>f__AnonymousType0", std::string(),
-              TS::FullTypeName("<>f__AnonymousType0"), TS::TypeKind::Class,
-              TS::Accessibility::Public, compilation, nullptr),
-          getter_(compilation, TS::SymbolKind::Method),
-          property_(compilation) {
-        property_.SetName("A");
-        property_.SetGetter(getter_.Member());
-    }
-    void SetSettable(bool value) {
-        property_.SetSetter(value ? getter_.Member() : nullptr);
-    }
-    bool HasAttribute(TS::KnownAttribute attribute) const override {
-        return attribute == TS::KnownAttribute::CompilerGenerated;
-    }
-    std::vector<const TS::IProperty*> GetProperties(
-        std::function<bool(const TS::IProperty*)> filter = nullptr,
-        TS::GetMemberOptions options = TS::GetMemberOptions::None)
-        const override {
-        (void)filter;
-        (void)options;
-        return {&property_};
-    }
-
-private:
-    // The accessor method stub (the raw-member accessor the property rig
-    // consumes -- the two-IMethod-subobject diamond resolved by the first
-    // base).
-    class MethodStub : public TSImpl::FakeMethod {
-    public:
-        using TSImpl::FakeMethod::FakeMethod;
-        const TS::IMethod* Member() const {
-            return static_cast<const TS::IMethod*>(
-                static_cast<const TSImpl::FakeMethod*>(this));
-        }
-    };
-    MethodStub getter_;
-    // The property over the getter (read-only by default; SetSettable
-    // adds the setter).
-    TSImpl::FakeProperty property_;
-};
-
-TEST(PatternStatementTransformTest, ForeachOnArrayUsesVarForAnonymousType)
-{
-    PatternStatementFixture fx;
-    // A C# anonymous type: compiler-generated, empty namespace, the
-    // <>f__AnonymousType name, read-only properties (the
-    // TypeSystemExtensions_Test rig shape).
-    auto anon = std::make_shared<AutoPropertyTestAnonType>(fx.compilation);
-    auto loop = MakeForeachArrayLoop();
-    loop.item->Type = anon;
-
-    auto block = std::make_unique<Syntax::BlockStatement>();
-    block->Statements().Add(loop.forStatement);
-
-    RunTransform(*block, fx);
-
-    auto* foreachStmt =
-        dynamic_cast<Syntax::ForeachStatement*>(block->Statements().At(0));
-    ASSERT_NE(foreachStmt, nullptr);
-    auto* varType =
-        dynamic_cast<Syntax::SimpleType*>(foreachStmt->VariableType());
-    ASSERT_NE(varType, nullptr)
-        << "the anonymous item renders the `var` form";
-    EXPECT_EQ(varType->Identifier(), "var");
-}
-
-// A non-anonymous item keeps the explicit type form (ConvertType).
-TEST(PatternStatementTransformTest, ForeachOnArrayUsesExplicitTypeForPlainItems)
-{
-    PatternStatementFixture fx;
-    auto loop = MakeForeachArrayLoop();
-    // A settable property makes the shape a VB anonymous type -- not a C#
-    // anonymous type (the named-declaration form).
-    auto anon = std::make_shared<AutoPropertyTestAnonType>(fx.compilation);
-    anon->SetSettable(true);
-    loop.item->Type = anon;
-
-    auto block = std::make_unique<Syntax::BlockStatement>();
-    block->Statements().Add(loop.forStatement);
-
-    RunTransform(*block, fx);
-
-    auto* foreachStmt =
-        dynamic_cast<Syntax::ForeachStatement*>(block->Statements().At(0));
-    ASSERT_NE(foreachStmt, nullptr);
-    ASSERT_NE(foreachStmt->VariableType(), nullptr);
-    EXPECT_NE(foreachStmt->VariableType()->ToString(nullptr), "var")
-        << "a settable-property anonymous type keeps the explicit form";
-}
-
-// The index must be a pure counter (2 stores, 3 loads, no addresses).
-TEST(PatternStatementTransformTest, ForeachOnArrayRequiresTheIndexCounts)
-{
-    PatternStatementFixture fx;
-    auto loop = MakeForeachArrayLoop();
-    loop.index->StoreCount = 1;
-    auto block = std::make_unique<Syntax::BlockStatement>();
-    block->Statements().Add(loop.forStatement);
-
-    RunTransform(*block, fx);
-
-    ASSERT_EQ(block->Statements().Count(), 1);
-    EXPECT_EQ(block->Statements().At(0), loop.forStatement);
-}
-
-// The ForEachStatement setting gates the arm.
-TEST(PatternStatementTransformTest, ForeachSettingGatesTheArrayArm)
-{
-    PatternStatementFixture fx;
-    auto loop = MakeForeachArrayLoop();
-    auto block = std::make_unique<Syntax::BlockStatement>();
-    block->Statements().Add(loop.forStatement);
-
-    RunTransform(*block, fx, /*forStatementSetting=*/true,
-                 /*forEachStatementSetting=*/false);
-
-    ASSERT_EQ(block->Statements().Count(), 1);
-    EXPECT_EQ(block->Statements().At(0), loop.forStatement)
-        << "the ForEachStatement setting turns the arm off";
-}
-
-// A merged item variable cannot become the foreach local (the merged
-// declaration covers a wider scope).
-TEST(PatternStatementTransformTest, ForeachOnArrayKeepsMergedItemVariable)
-{
-    PatternStatementFixture fx;
-    auto loop = MakeForeachArrayLoop();
-    // Another `item`-named variable used before the loop: the collision
-    // resolution merges the two into one outer declaration (the same type:
-    // same-named colliding variables share their type by the name-assignment
-    // invariant the C# ResolveCollisions asserts).
-    IL::ILVariablePtr outerItem =
-        LocalOf("item", TS::ITypePtr(std::make_shared<TS::KnownType>(
-                              TS::KnownTypeCode::Int32)));
-    auto block = std::make_unique<Syntax::BlockStatement>();
-    block->Statements().Add(new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(
-            new Syntax::IdentifierExpression("x"),
-            Syntax::AssignmentOperatorType::Assign,
-            Var("item", outerItem))));
-    block->Statements().Add(loop.forStatement);
-
-    RunTransform(*block, fx);
-
-    ASSERT_EQ(block->Statements().Count(), 2);
-    EXPECT_EQ(block->Statements().At(1), loop.forStatement)
-        << "a merged item variable keeps the for loop";
-}
-
-// ---- The foreach-over-multi-dim-array reshape ----------------------------------------------
-
-// A `$result = $collection.$methodName($index);` bound-call statement
-// (the GetUpperBound/GetLowerBound shapes).
-Syntax::ExpressionStatement* MakeBoundCall(
-    const std::string& methodName, int index, const IL::ILVariablePtr& result,
-    const IL::ILVariablePtr& collection,
-    Syntax::IdentifierExpression** collectionOut = nullptr) {
-    auto* collectionIdentifier = Var(collection->Name, collection);
-    if (collectionOut != nullptr)
-        *collectionOut = collectionIdentifier;
-    auto* call = new Syntax::InvocationExpression(
-        new Syntax::MemberReferenceExpression(collectionIdentifier, methodName));
-    call->Arguments().Add(
-        new Syntax::PrimitiveExpression(Syntax::PrimitiveValue(index)));
-    return new Syntax::ExpressionStatement(new Syntax::AssignmentExpression(
-        Var(result->Name, result), Syntax::AssignmentOperatorType::Assign, call));
-}
-
-// A multi-dim for round: `for (; $index <= $upperBound; $index = $index + 1)`
-// (empty initializers -- the lower-bound assignment precedes the loop).
-Syntax::ForStatement* MakeMultiDimFor(const IL::ILVariablePtr& index,
-                                      const IL::ILVariablePtr& upperBound) {
-    auto* forStatement = new Syntax::ForStatement();
-    forStatement->Condition(new Syntax::BinaryOperatorExpression(
-        Var(index->Name, index), Syntax::BinaryOperatorType::LessThanOrEqual,
-        Var(upperBound->Name, upperBound)));
-    forStatement->Iterators().Add(new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(
-            Var(index->Name, index), Syntax::AssignmentOperatorType::Assign,
-            new Syntax::BinaryOperatorExpression(
-                Var(index->Name, index), Syntax::BinaryOperatorType::Add,
-                new Syntax::PrimitiveExpression(Syntax::PrimitiveValue(1))))));
-    return forStatement;
-}
-
-// The convertible 2-d foreach-over-multi-dimensional-array shape:
-//   ub0 = arr.GetUpperBound(0); ub1 = arr.GetUpperBound(1);
-//   lb0 = arr.GetLowerBound(0);
-//   for (; i0 <= ub0; i0 = i0 + 1) {
-//       lb1 = arr.GetLowerBound(1);
-//       for (; i1 <= ub1; i1 = i1 + 1) { item = arr[i0, i1]; work; }
-//   }
-struct ForeachMultiDimLoop {
-    IL::ILVariablePtr collection;
-    IL::ILVariablePtr item;
-    IL::ILVariablePtr lower1;
-    Syntax::ExpressionStatement* entry = nullptr;
-    Syntax::Statement* work = nullptr;
-    Syntax::IdentifierExpression* collectionInUpper1 = nullptr;
-    std::unique_ptr<Syntax::BlockStatement> block;
-};
-
-ForeachMultiDimLoop MakeForeachMultiDimLoop(TS::ITypePtr collectionType = nullptr) {
-    ForeachMultiDimLoop loop;
-    auto boundVar = [](const std::string& name) {
-        auto v = LocalOf(name, TS::UnknownType());
-        v->StoreCount = 1;
-        v->LoadCount = 1;
-        return v;
-    };
-    auto lowerVar = [](const std::string& name) {
-        auto v = LocalOf(name, TS::UnknownType());
-        v->StoreCount = 2;
-        v->LoadCount = 3;
-        return v;
-    };
-    loop.collection = LocalOf(
-        "arr", collectionType != nullptr
-                     ? std::move(collectionType)
-                     : TS::ITypePtr(std::make_shared<TS::ArrayType>(
-                           TS::ITypePtr(std::make_shared<TS::KnownType>(
-                               TS::KnownTypeCode::Int32)),
-                           2)));
-    IL::ILVariablePtr upper0 = boundVar("ub0");
-    IL::ILVariablePtr upper1 = boundVar("ub1");
-    IL::ILVariablePtr lower0 = lowerVar("lb0");
-    IL::ILVariablePtr lower1 = lowerVar("lb1");
-    IL::ILVariablePtr index0 = LocalOf("i0", TS::UnknownType());
-    IL::ILVariablePtr index1 = LocalOf("i1", TS::UnknownType());
-    loop.item = LocalOf("item", TS::ITypePtr(std::make_shared<TS::KnownType>(
-                                     TS::KnownTypeCode::Int32)));
-    loop.item->StoreCount = 1;
-
-    loop.entry = MakeBoundCall("GetUpperBound", 0, upper0, loop.collection);
-    auto* upper1Statement =
-        MakeBoundCall("GetUpperBound", 1, upper1, loop.collection,
-                      &loop.collectionInUpper1);
-    auto* lower0Statement =
-        MakeBoundCall("GetLowerBound", 0, lower0, loop.collection);
-
-    auto* outerFor = MakeMultiDimFor(index0, upper0);
-    auto* outerBody = new Syntax::BlockStatement();
-    outerBody->Statements().Add(
-        MakeBoundCall("GetLowerBound", 1, lower1, loop.collection));
-    auto* innerFor = MakeMultiDimFor(index1, upper1);
-    auto* innerBody = new Syntax::BlockStatement();
-    auto* elementAccess = new Syntax::IndexerExpression(
-        Var(loop.collection->Name, loop.collection));
-    elementAccess->Arguments().Add(Var(index0->Name, index0));
-    elementAccess->Arguments().Add(Var(index1->Name, index1));
-    innerBody->Statements().Add(new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(
-            Var(loop.item->Name, loop.item),
-            Syntax::AssignmentOperatorType::Assign, elementAccess)));
-    loop.work = new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(
-            new Syntax::IdentifierExpression("x"),
-            Syntax::AssignmentOperatorType::Assign,
-            new Syntax::IdentifierExpression("y")));
-    innerBody->Statements().Add(loop.work);
-    innerFor->EmbeddedStatement(innerBody);
-    outerBody->Statements().Add(innerFor);
-    outerFor->EmbeddedStatement(outerBody);
-
-    auto block = std::make_unique<Syntax::BlockStatement>();
-    block->Statements().Add(loop.entry);
-    block->Statements().Add(upper1Statement);
-    block->Statements().Add(lower0Statement);
-    block->Statements().Add(outerFor);
-    loop.lower1 = lower1;
-    loop.block = std::move(block);
-    return loop;
-}
-
-// The shape above becomes `foreach (int item in arr) { work; }`: the
-// upper-bound chain, the first lower-bound assignment, and the whole nested
-// for-loop structure are absorbed (the entry statement is replaced).
-TEST(PatternStatementTransformTest, ForeachOnMultiDimArrayIsIntroduced)
-{
-    PatternStatementFixture fx;
-    auto loop = MakeForeachMultiDimLoop();
-
-    RunTransform(*loop.block, fx);
-
-    ASSERT_EQ(loop.block->Statements().Count(), 1)
-        << "the upper-bound chain, the lower-bound assignment, and the nested"
-        " fors are absorbed";
-    auto* foreachStmt =
-        dynamic_cast<Syntax::ForeachStatement*>(loop.block->Statements().At(0));
-    ASSERT_NE(foreachStmt, nullptr);
-    ASSERT_NE(foreachStmt->VariableType(), nullptr);
-    auto* designation = dynamic_cast<Syntax::SingleVariableDesignation*>(
-        foreachStmt->VariableDesignation());
-    ASSERT_NE(designation, nullptr);
-    EXPECT_EQ(designation->Identifier(), "item");
-    const auto* designationAnnotation =
-        designation->Annotation<CS::ILVariableResolveResult>();
-    ASSERT_NE(designationAnnotation, nullptr);
-    EXPECT_EQ(designationAnnotation->Variable(), loop.item.get());
-    EXPECT_EQ(foreachStmt->InExpression(), loop.collectionInUpper1)
-        << "the in-expression is the collection identifier of the last"
-        " upper-bound match";
-    auto* body = dynamic_cast<Syntax::BlockStatement*>(
-        foreachStmt->EmbeddedStatement());
-    ASSERT_NE(body, nullptr);
-    ASSERT_EQ(body->Statements().Count(), 1);
-    EXPECT_EQ(body->Statements().At(0), loop.work);
-    EXPECT_EQ(loop.item->Kind, IL::VariableKind::ForeachLocal);
-}
-
-// The collection must be an array type.
-TEST(PatternStatementTransformTest, ForeachOnMultiDimRequiresArrayType)
-{
-    PatternStatementFixture fx;
-    auto loop = MakeForeachMultiDimLoop(
-        TS::ITypePtr(std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32)));
-
-    RunTransform(*loop.block, fx);
-
-    EXPECT_EQ(loop.block->Statements().Count(), 4)
-        << "a non-array collection keeps the loop structure";
-    EXPECT_EQ(loop.block->Statements().At(0), loop.entry);
-}
-
-// The lower-bound variables must have the pure-counter counts (2 stores,
-// 3 loads, no addresses).
-TEST(PatternStatementTransformTest, ForeachOnMultiDimRequiresLowerBoundCounts)
-{
-    PatternStatementFixture fx;
-    auto loop = MakeForeachMultiDimLoop();
-    loop.lower1->StoreCount = 1;
-
-    RunTransform(*loop.block, fx);
-
-    EXPECT_EQ(loop.block->Statements().Count(), 4)
-        << "an impure lower-bound variable keeps the loop structure";
-    EXPECT_EQ(loop.block->Statements().At(0), loop.entry);
-}
-
-// The upper-bound variables must be single-definition single-load.
-TEST(PatternStatementTransformTest, ForeachOnMultiDimRequiresUpperBoundCounts)
-{
-    PatternStatementFixture fx;
-    auto loop = MakeForeachMultiDimLoop();
-    // Give the entry's upper-bound variable a second load.
-    auto* entryAssignment = dynamic_cast<Syntax::AssignmentExpression*>(
-        loop.entry->Expression());
-    ASSERT_NE(entryAssignment, nullptr);
-    IL::ILVariable* upper0 =
-        CS::GetILVariable(*dynamic_cast<Syntax::IdentifierExpression*>(
-            entryAssignment->Left()));
-    ASSERT_NE(upper0, nullptr);
-    upper0->LoadCount = 2;
-
-    RunTransform(*loop.block, fx);
-
-    EXPECT_EQ(loop.block->Statements().Count(), 4)
-        << "an impure upper-bound variable keeps the loop structure";
-    EXPECT_EQ(loop.block->Statements().At(0), loop.entry);
-}
-
-// ---- The foreach-over-inline-array reshape -----------------------------------------------
-
-// The `[InlineArray(N)]` attribute stub (the InlineArrayTransform_Test
-// InlineArrayTestAttribute shape).
-class PatternInlineArrayAttribute : public TS::IAttribute {
-public:
-    explicit PatternInlineArrayAttribute(int length) : length_(length) {}
-    const TS::IType& AttributeType() const override { return attrType_; }
-    const TS::IMethod* Constructor() const override { return nullptr; }
-    bool HasDecodeErrors() const override { return false; }
-    std::vector<TS::CustomAttributeTypedArgument> FixedArguments() const override {
-        return {TS::CustomAttributeTypedArgument(
-            std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32),
-            std::any(length_))};
-    }
-    std::vector<TS::CustomAttributeNamedArgument> NamedArguments() const override {
-        return {};
-    }
-
-private:
-    int length_;
-    TS::KnownType attrType_{TS::KnownTypeCode::Object};
-};
-
-// An `[InlineArray(N)]` struct type definition (the InlineArrayTypeDefinition
-// precedent in InlineArrayTransform_Test.cpp): a LookupTypeDefinition whose
-// GetAttribute surfaces the InlineArray attribute.
-class PatternInlineArrayType : public TS::TestSupport::LookupTypeDefinition {
-public:
-    PatternInlineArrayType(int length, const TS::ICompilation& compilation)
-        : TS::TestSupport::LookupTypeDefinition(
-              "Buffer8", std::string(), TS::FullTypeName("Buffer8"),
-              TS::TypeKind::Struct, TS::Accessibility::Public, compilation,
-              nullptr),
-          attr_(length) {}
-
-    using LookupTypeDefinition::GetAttribute;
-    const TS::IAttribute* GetAttribute(TS::KnownAttribute attribute) const override {
-        if (attribute == TS::KnownAttribute::InlineArray)
-            return &attr_;
-        return nullptr;
-    }
-
-private:
-    mutable PatternInlineArrayAttribute attr_;
-};
-
-// The convertible foreach-over-inline-array shape:
-//   for (i = 0; i < 8; i = i + 1) {
-//       item = <PID>.InlineArrayElementRef(ref buffer, i);
-//       work;
-//   }
-// The loop bound must equal the buffer's `[InlineArray(N)]` length (the
-// soundness argument: InlineArrayElementRef is unchecked, the C# indexer is
-// bounds-checked).
-struct ForeachInlineArrayLoop {
-    IL::ILVariablePtr item;
-    Syntax::ForStatement* forStatement = nullptr;
-    Syntax::Statement* work = nullptr;
-    std::unique_ptr<Syntax::BlockStatement> block;
-};
-
-ForeachInlineArrayLoop MakeForeachInlineArrayLoop(
-    PatternStatementFixture& fx, const std::string& helperName =
-                                       "InlineArrayElementRef",
-    int loopBound = 8, int indexStoreCount = 2, int indexLoadCount = 3,
-    bool attachSymbol = true) {
-    ForeachInlineArrayLoop loop;
-    auto bufferType = std::make_shared<PatternInlineArrayType>(8, fx.compilation);
-    IL::ILVariablePtr buffer = LocalOf("buffer", bufferType);
-    IL::ILVariablePtr index = LocalOf("i", TS::UnknownType());
-    index->StoreCount = indexStoreCount;
-    index->LoadCount = indexLoadCount;
-    loop.item = LocalOf("item", TS::ITypePtr(std::make_shared<TS::KnownType>(
-                                   TS::KnownTypeCode::Int32)));
-    loop.item->StoreCount = 1;
-
-    auto* forStatement = new Syntax::ForStatement();
-    forStatement->Initializers().Add(new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(
-            Var(index->Name, index), Syntax::AssignmentOperatorType::Assign,
-            new Syntax::PrimitiveExpression(Syntax::PrimitiveValue(0)))));
-    forStatement->Condition(new Syntax::BinaryOperatorExpression(
-        Var(index->Name, index), Syntax::BinaryOperatorType::LessThan,
-        new Syntax::PrimitiveExpression(Syntax::PrimitiveValue(loopBound))));
-    forStatement->Iterators().Add(new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(
-            Var(index->Name, index), Syntax::AssignmentOperatorType::Assign,
-            new Syntax::BinaryOperatorExpression(
-                Var(index->Name, index), Syntax::BinaryOperatorType::Add,
-                new Syntax::PrimitiveExpression(Syntax::PrimitiveValue(1))))));
-
-    // `item = InlineArrayElementRef(ref buffer, i);` -- the compiler's
-    // unchecked element accessor, resolved through the symbol annotation.
-    auto* helperCall = new Syntax::InvocationExpression(
-        new Syntax::IdentifierExpression(helperName));
-    auto* bufferRef = new Syntax::DirectionExpression(
-        Syntax::FieldDirection::Ref, Var(buffer->Name, buffer));
-    helperCall->Arguments().Add(bufferRef);
-    helperCall->Arguments().Add(Var(index->Name, index));
-    if (attachSymbol) {
-        auto helperMethod = std::make_shared<TSImpl::FakeMethod>(
-            fx.compilation, TS::SymbolKind::Method);
-        helperMethod->SetName(helperName);
-        helperMethod->SetDeclaringType(std::make_shared<TS::SimpleType>(
-            TS::TopLevelTypeName(std::string(),
-                                 "<PrivateImplementationDetails>")));
-        helperMethod->SetReturnType(TS::ITypePtr(std::make_shared<TS::KnownType>(
-            TS::KnownTypeCode::Int32)));
-        auto target = std::make_shared<Sem::TypeResolveResult>(
-            helperMethod->DeclaringType());
-        helperCall->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
-            target,
-            // FakeMethod derives IMember twice (FakeMember and IMethod);
-            // pick the FakeMember subobject's IMember base.
-            static_cast<TSImpl::FakeMember*>(helperMethod.get())));
-        // Keep the stub method alive for the program's lifetime (the
-        // resolve-result annotation stores a raw pointer).
-        static std::vector<std::shared_ptr<TSImpl::FakeMethod>> keepAlive;
-        keepAlive.push_back(std::move(helperMethod));
-    }
-    auto* body = new Syntax::BlockStatement();
-    body->Statements().Add(new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(
-            Var(loop.item->Name, loop.item),
-            Syntax::AssignmentOperatorType::Assign, helperCall)));
-    loop.work = new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(
-            new Syntax::IdentifierExpression("x"),
-            Syntax::AssignmentOperatorType::Assign,
-            new Syntax::IdentifierExpression("y")));
-    body->Statements().Add(loop.work);
-    forStatement->EmbeddedStatement(body);
-    loop.forStatement = forStatement;
-
-    loop.block = std::make_unique<Syntax::BlockStatement>();
-    loop.block->Statements().Add(forStatement);
-    return loop;
-}
-
-// The shape above becomes `foreach (int item in buffer) { work; }` -- the
-// bounds-checked surface is sound because the loop bound equals the inline
-// array length.
-TEST(PatternStatementTransformTest, ForeachOnInlineArrayIsIntroduced)
-{
-    PatternStatementFixture fx;
-    auto loop = MakeForeachInlineArrayLoop(fx);
-
-    RunTransform(*loop.block, fx);
-
-    ASSERT_EQ(loop.block->Statements().Count(), 1);
-    auto* foreachStmt =
-        dynamic_cast<Syntax::ForeachStatement*>(loop.block->Statements().At(0));
-    ASSERT_NE(foreachStmt, nullptr);
-    auto* designation = dynamic_cast<Syntax::SingleVariableDesignation*>(
-        foreachStmt->VariableDesignation());
-    ASSERT_NE(designation, nullptr);
-    EXPECT_EQ(designation->Identifier(), "item");
-    const auto* designationAnnotation =
-        designation->Annotation<CS::ILVariableResolveResult>();
-    ASSERT_NE(designationAnnotation, nullptr);
-    EXPECT_EQ(designationAnnotation->Variable(), loop.item.get());
-    auto* inIdentifier =
-        dynamic_cast<Syntax::IdentifierExpression*>(foreachStmt->InExpression());
-    ASSERT_NE(inIdentifier, nullptr);
-    EXPECT_EQ(inIdentifier->Identifier(), "buffer");
-    auto* body = dynamic_cast<Syntax::BlockStatement*>(
-        foreachStmt->EmbeddedStatement());
-    ASSERT_NE(body, nullptr);
-    ASSERT_EQ(body->Statements().Count(), 1);
-    EXPECT_EQ(body->Statements().At(0), loop.work)
-        << "the element-access statement is dropped, the work survives";
-    EXPECT_EQ(loop.item->Kind, IL::VariableKind::ForeachLocal);
-}
-
-// Only the compiler's own InlineArrayElementRef(ReadOnly) helpers qualify.
-TEST(PatternStatementTransformTest, ForeachOnInlineArrayRequiresHelperName)
-{
-    PatternStatementFixture fx;
-    auto loop = MakeForeachInlineArrayLoop(fx, /*helperName=*/"SomeOtherHelper");
-
-    RunTransform(*loop.block, fx);
-
-    EXPECT_EQ(loop.block->Statements().Count(), 1);
-    EXPECT_EQ(loop.block->Statements().At(0), loop.forStatement);
-}
-
-// Without a resolved symbol the call keeps the (faithful) helper form.
-TEST(PatternStatementTransformTest, ForeachOnInlineArrayRequiresSymbol)
-{
-    PatternStatementFixture fx;
-    auto loop = MakeForeachInlineArrayLoop(fx, "InlineArrayElementRef",
-                                           /*loopBound=*/8, /*indexStoreCount=*/2,
-                                           /*indexLoadCount=*/3,
-                                           /*attachSymbol=*/false);
-
-    RunTransform(*loop.block, fx);
-
-    EXPECT_EQ(loop.block->Statements().Count(), 1);
-    EXPECT_EQ(loop.block->Statements().At(0), loop.forStatement);
-}
-
-// The loop bound must equal the inline array length exactly.
-TEST(PatternStatementTransformTest, ForeachOnInlineArrayRequiresLengthMatch)
-{
-    PatternStatementFixture fx;
-    // The buffer's [InlineArray(8)] length stays 8; the loop counts to 7.
-    auto loop = MakeForeachInlineArrayLoop(fx, "InlineArrayElementRef",
-                                           /*loopBound=*/7);
-
-    RunTransform(*loop.block, fx);
-
-    EXPECT_EQ(loop.block->Statements().Count(), 1);
-    EXPECT_EQ(loop.block->Statements().At(0), loop.forStatement);
-}
-
-// The index must be a pure counter (stored at init + increment, loaded at
-// the condition, the increment, and the element access).
-TEST(PatternStatementTransformTest, ForeachOnInlineArrayRequiresIndexCounts)
-{
-    PatternStatementFixture fx;
-    auto loop = MakeForeachInlineArrayLoop(fx, "InlineArrayElementRef", 8,
-                                           /*indexStoreCount=*/3);
-
-    RunTransform(*loop.block, fx);
-
-    EXPECT_EQ(loop.block->Statements().Count(), 1);
-    EXPECT_EQ(loop.block->Statements().At(0), loop.forStatement);
-}
-
-// ---- The destructor reshape -------------------------------------------------------------
-
-// The `try { body } finally { base.Finalize(); }` shape the compiler emits
-// for a Finalize override.
-Syntax::TryCatchStatement* MakeFinalizeBody(Syntax::BlockStatement** bodyOut = nullptr) {
-    auto* tryStatement = new Syntax::TryCatchStatement();
-    auto* body = new Syntax::BlockStatement();
-    body->Statements().Add(new Syntax::ReturnStatement());
-    tryStatement->TryBlock(body);
+    TransformFixture fixture;
+    auto* innerTryBlock = new Syntax::BlockStatement();
+    innerTryBlock->Statements().Add(new Syntax::ExpressionStatement(Ref("body")));
+    auto* innerTry = new Syntax::TryCatchStatement(innerTryBlock);
+    auto* catchClause = new Syntax::CatchClause();
+    innerTry->CatchClauses().Add(catchClause);
+    auto* outerTryBlock = new Syntax::BlockStatement();
+    outerTryBlock->Statements().Add(innerTry);
     auto* finallyBlock = new Syntax::BlockStatement();
-    finallyBlock->Statements().Add(new Syntax::ExpressionStatement(
-        new Syntax::InvocationExpression(new Syntax::MemberReferenceExpression(
-            new Syntax::BaseReferenceExpression(), "Finalize"))));
-    tryStatement->FinallyBlock(finallyBlock);
-    if (bodyOut != nullptr)
-        *bodyOut = body;
-    return tryStatement;
+    finallyBlock->Statements().Add(new Syntax::ExpressionStatement(Ref("f")));
+    auto* outerTry = new Syntax::TryCatchStatement(outerTryBlock);
+    outerTry->FinallyBlock(finallyBlock);
+
+    RunOnStatement(fixture, outerTry);
+
+    EXPECT_EQ(outerTry->TryBlock(), innerTryBlock);
+    ASSERT_EQ(outerTry->CatchClauses().Count(), 1);
+    EXPECT_EQ(outerTry->CatchClauses()[0], static_cast<Syntax::CatchClause*>(catchClause));
+    EXPECT_EQ(outerTry->FinallyBlock(), finallyBlock);
 }
 
-// The C# shape `protected override void Finalize() { try { body } finally
-// { base.Finalize(); } }` inside a type declaration becomes the destructor
-// `~MyClass() { body }`.
-TEST(PatternStatementTransformTest, FinalizeMethodBecomesDestructor)
+// A `try`/`catch` without a `finally` block is not the merge shape.
+TEST(PatternStatementTransformTest, KeepsTryCatchWithoutFinally)
 {
-    PatternStatementFixture fx;
-    auto typeDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
-        "MyClass", std::string(), TS::FullTypeName("MyClass"),
-        TS::TypeKind::Class, TS::Accessibility::Public, fx.compilation, nullptr);
+    TransformFixture fixture;
+    auto* innerTryBlock = new Syntax::BlockStatement();
+    auto* innerTry = new Syntax::TryCatchStatement(innerTryBlock);
+    innerTry->CatchClauses().Add(new Syntax::CatchClause());
+    auto* outerTryBlock = new Syntax::BlockStatement();
+    outerTryBlock->Statements().Add(innerTry);
+    auto* outerTry = new Syntax::TryCatchStatement(outerTryBlock);
 
-    auto* method = new Syntax::MethodDeclaration();
-    method->Name("Finalize");
-    auto* voidType = new Syntax::PrimitiveType();
-    voidType->Keyword("void");
-    method->ReturnType(voidType);
-    method->Modifiers(Syntax::Modifiers::Protected | Syntax::Modifiers::Override);
-    auto* methodBody = new Syntax::BlockStatement();
-    Syntax::BlockStatement* work = nullptr;
-    methodBody->Statements().Add(MakeFinalizeBody(&work));
-    method->Body(methodBody);
-    auto* attributeSection = new Syntax::AttributeSection();
-    method->Attributes().Add(attributeSection);
+    RunOnStatement(fixture, outerTry);
 
-    auto type = std::make_unique<Syntax::TypeDeclaration>();
-    type->Members().Add(method);
-    // The ContextTrackingVisitor reads the enclosing type through the type
-    // declaration's symbol annotation.
-    type->AddAnnotation(
-        std::make_shared<Sem::TypeResolveResult>(typeDef));
+    EXPECT_EQ(outerTry->TryBlock(), outerTryBlock);
+    EXPECT_EQ(outerTry->CatchClauses().Count(), 0);
+}
 
-    RunTransform(*type, fx, /*forStatementSetting=*/true,
-                 /*forEachStatementSetting=*/true, typeDef.get());
+// A `finally` block whose try body is not a single nested try-catch is not the merge shape.
+TEST(PatternStatementTransformTest, KeepsTryFinallyWithNonNestedBody)
+{
+    TransformFixture fixture;
+    auto* outerTryBlock = new Syntax::BlockStatement();
+    outerTryBlock->Statements().Add(new Syntax::ExpressionStatement(Ref("body")));
+    auto* finallyBlock = new Syntax::BlockStatement();
+    auto* outerTry = new Syntax::TryCatchStatement(outerTryBlock);
+    outerTry->FinallyBlock(finallyBlock);
 
-    ASSERT_EQ(type->Members().Count(), 1);
-    auto* destructor =
-        dynamic_cast<Syntax::DestructorDeclaration*>(type->Members().At(0));
-    ASSERT_NE(destructor, nullptr) << "the Finalize method becomes a destructor";
+    RunOnStatement(fixture, outerTry);
+
+    EXPECT_EQ(outerTry->TryBlock(), outerTryBlock);
+}
+
+// ---- destructor --------------------------------------------------------------------
+
+// A `void Finalize()` method with the compiler's destructor body becomes a destructor named
+// after the declaring type.
+TEST(PatternStatementTransformTest, ConvertsFinalizeMethodToDestructor)
+{
+    TransformFixture fixture;
+    auto typeDef = MakeDestructorTypeDef(fixture.compilation, "MyClass");
+    auto method = std::make_shared<TestSupport::LookupMethod>("Finalize", fixture.compilation);
+
+    auto* typeDecl = MakeDestructorTypeDecl("MyClass", typeDef);
+    auto* methodDecl = MakeDestructorMethod("Finalize", method.get());
+    methodDecl->ReturnType(new Syntax::PrimitiveType("void"));
+    auto* innerTry = MakeDestructorBodyTry();
+    auto* innerTryBody = innerTry->TryBlock();
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(innerTry);
+    methodDecl->Body(body);
+    typeDecl->Members().Add(methodDecl);
+
+    RunTransform(fixture, *typeDecl);
+
+    ASSERT_EQ(typeDecl->Members().Count(), 1);
+    auto* destructor = dynamic_cast<Syntax::DestructorDeclaration*>(typeDecl->Members()[0]);
+    ASSERT_NE(destructor, nullptr);
     EXPECT_EQ(destructor->Name(), "MyClass");
-    EXPECT_EQ(destructor->Body(), work)
-        << "the try body moves to the destructor body";
-    EXPECT_EQ(destructor->Modifiers(), Syntax::Modifiers::None)
-        << "Protected and Override are cleared";
-    ASSERT_EQ(destructor->Attributes().Count(), 1)
-        << "the method's attributes move to the destructor";
+    // The destructor takes the inner try body (the `finally { base.Finalize(); }` is consumed).
+    EXPECT_EQ(destructor->Body(), innerTryBody);
 }
 
-// A Finalize method that does not match the try-finally-base call shape
-// keeps its method form.
-TEST(PatternStatementTransformTest, FinalizeMethodRequiresTheExactShape)
+// A method named `Finalize` whose body does not match the destructor shape is kept.
+TEST(PatternStatementTransformTest, KeepsFinalizeMethodWithOtherBody)
 {
-    PatternStatementFixture fx;
-    auto typeDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
-        "MyClass", std::string(), TS::FullTypeName("MyClass"),
-        TS::TypeKind::Class, TS::Accessibility::Public, fx.compilation, nullptr);
+    TransformFixture fixture;
+    auto typeDef = MakeDestructorTypeDef(fixture.compilation, "MyClass");
+    auto method = std::make_shared<TestSupport::LookupMethod>("Finalize", fixture.compilation);
 
-    auto* method = new Syntax::MethodDeclaration();
-    method->Name("Finalize");
-    auto* voidType = new Syntax::PrimitiveType();
-    voidType->Keyword("void");
-    method->ReturnType(voidType);
-    method->Modifiers(Syntax::Modifiers::Protected | Syntax::Modifiers::Override);
-    auto* methodBody = new Syntax::BlockStatement();
-    auto* tryStatement = new Syntax::TryCatchStatement();
-    tryStatement->TryBlock(new Syntax::BlockStatement());
-    auto* finallyBlock = new Syntax::BlockStatement();
-    finallyBlock->Statements().Add(new Syntax::ExpressionStatement(
-        new Syntax::InvocationExpression(new Syntax::MemberReferenceExpression(
-            new Syntax::BaseReferenceExpression(), "Dispose"))));
-    tryStatement->FinallyBlock(finallyBlock);
-    methodBody->Statements().Add(tryStatement);
-    method->Body(methodBody);
+    auto* typeDecl = MakeDestructorTypeDecl("MyClass", typeDef);
+    auto* methodDecl = MakeDestructorMethod("Finalize", method.get());
+    methodDecl->ReturnType(new Syntax::PrimitiveType("void"));
+    methodDecl->Body(new Syntax::BlockStatement());
+    typeDecl->Members().Add(methodDecl);
 
-    auto type = std::make_unique<Syntax::TypeDeclaration>();
-    type->Members().Add(method);
-    type->AddAnnotation(
-        std::make_shared<Sem::TypeResolveResult>(typeDef));
+    RunTransform(fixture, *typeDecl);
 
-    RunTransform(*type, fx, true, true, typeDef.get());
-
-    ASSERT_EQ(type->Members().Count(), 1);
-    EXPECT_NE(dynamic_cast<Syntax::MethodDeclaration*>(type->Members().At(0)), nullptr)
-        << "a non-matching Finalize keeps the method form";
+    ASSERT_EQ(typeDecl->Members().Count(), 1);
+    EXPECT_NE(dynamic_cast<Syntax::MethodDeclaration*>(typeDecl->Members()[0]), nullptr);
 }
 
-// A destructor carrying the try-finally-base call body is unwrapped to just
-// the body.
-TEST(PatternStatementTransformTest, DestructorBodyIsSimplified)
+// A method with the destructor body shape but a different name is kept.
+TEST(PatternStatementTransformTest, KeepsNonFinalizeMethodWithDestructorShape)
 {
-    PatternStatementFixture fx;
-    auto typeDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
-        "MyClass", std::string(), TS::FullTypeName("MyClass"),
-        TS::TypeKind::Class, TS::Accessibility::Public, fx.compilation, nullptr);
+    TransformFixture fixture;
+    auto typeDef = MakeDestructorTypeDef(fixture.compilation, "MyClass");
+    auto method = std::make_shared<TestSupport::LookupMethod>("Cleanup", fixture.compilation);
 
+    auto* typeDecl = MakeDestructorTypeDecl("MyClass", typeDef);
+    auto* methodDecl = MakeDestructorMethod("Cleanup", method.get());
+    methodDecl->ReturnType(new Syntax::PrimitiveType("void"));
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(MakeDestructorBodyTry());
+    methodDecl->Body(body);
+    typeDecl->Members().Add(methodDecl);
+
+    RunTransform(fixture, *typeDecl);
+
+    ASSERT_EQ(typeDecl->Members().Count(), 1);
+    EXPECT_NE(dynamic_cast<Syntax::MethodDeclaration*>(typeDecl->Members()[0]), nullptr);
+}
+
+// A destructor whose body is `try { ... } finally { base.Finalize(); }` has the try body
+// hoisted out.
+TEST(PatternStatementTransformTest, SimplifiesDestructorBody)
+{
+    TransformFixture fixture;
+    auto* tryBody = new Syntax::BlockStatement();
+    tryBody->Statements().Add(new Syntax::ExpressionStatement(Ref("body")));
+    auto* innerTry = MakeDestructorBodyTry(/*tryBody=*/tryBody);
     auto* destructor = new Syntax::DestructorDeclaration();
     destructor->Name("MyClass");
-    auto* outerBody = new Syntax::BlockStatement();
-    Syntax::BlockStatement* work = nullptr;
-    outerBody->Statements().Add(MakeFinalizeBody(&work));
-    destructor->Body(outerBody);
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(innerTry);
+    destructor->Body(body);
 
-    auto type = std::make_unique<Syntax::TypeDeclaration>();
-    type->Members().Add(destructor);
-    type->AddAnnotation(
-        std::make_shared<Sem::TypeResolveResult>(typeDef));
+    RunTransform(fixture, *destructor);
 
-    RunTransform(*type, fx, true, true, typeDef.get());
-
-    EXPECT_EQ(destructor->Body(), work)
-        << "the try body unwraps into the destructor body";
+    EXPECT_EQ(destructor->Body(), tryBody);
 }
 
-// ---- The try-catch-finally merge --------------------------------------------------------
+// ---- pattern-based fixed ------------------------------------------------------------
 
-// `try { try { work } catch { c } } finally { f }` becomes
-// `try { work } catch { c } finally { f }` (the nested try-catch merges into
-// the outer try-finally).
-TEST(PatternStatementTransformTest, NestedTryCatchFinallyIsMerged)
-{
-    PatternStatementFixture fx;
-    auto* outer = new Syntax::TryCatchStatement();
-    auto* outerTryBlock = new Syntax::BlockStatement();
-    auto* inner = new Syntax::TryCatchStatement();
-    auto* work = new Syntax::BlockStatement();
-    work->Statements().Add(new Syntax::ReturnStatement());
-    inner->TryBlock(work);
-    auto* catchClause = new Syntax::CatchClause();
-    inner->CatchClauses().Add(catchClause);
-    outerTryBlock->Statements().Add(inner);
-    outer->TryBlock(outerTryBlock);
-    auto* finallyBlock = new Syntax::BlockStatement();
-    outer->FinallyBlock(finallyBlock);
+namespace {
 
-    auto root = std::make_unique<Syntax::BlockStatement>();
-    root->Statements().Add(outer);
+// A value-type `IType` stub whose `IsReferenceType()` is `false` (the pattern-based-`fixed`
+// gate's positive input; the base `IType` default is a null optional).
+class ValueStubType : public TS::IType {
+public:
+    TS::TypeKind Kind() const override { return TS::TypeKind::Struct; }
+    std::string Name() const override { return "S"; }
+    std::string ReflectionName() const override { return "S"; }
+    int TypeParameterCount() const override { return 0; }
+    bool StructuralEquals(const TS::IType& other) const override { return &other == this; }
+    std::optional<bool> IsReferenceType() const override { return std::optional<bool>(false); }
+};
 
-    RunTransform(*root, fx);
-
-    ASSERT_EQ(root->Statements().Count(), 1);
-    EXPECT_EQ(root->Statements().At(0), outer);
-    EXPECT_EQ(outer->TryBlock(), work)
-        << "the inner try's block becomes the outer try's block";
-    ASSERT_EQ(outer->CatchClauses().Count(), 1);
-    EXPECT_EQ(outer->CatchClauses().At(0), catchClause)
-        << "the inner catches move to the outer try";
-    EXPECT_EQ(outer->FinallyBlock(), finallyBlock);
+// `&<target>.GetPinnableReference()` -- the initializer shape the pattern-based-`fixed`
+// transform matches.
+Syntax::Expression* GetPinnableReferenceAddress(Syntax::Expression* target) {
+    auto* memberReference = new Syntax::MemberReferenceExpression(
+        target, std::string("GetPinnableReference"));
+    auto* invocation = new Syntax::InvocationExpression(memberReference);
+    return new Syntax::UnaryOperatorExpression(invocation, Syntax::UnaryOperatorType::AddressOf);
 }
 
-// A nested try without the outer finally does not merge.
-TEST(PatternStatementTransformTest, NestedTryCatchWithoutFinallyIsNotMerged)
+} // namespace
+
+// A `fixed (int p = &buffer.GetPinnableReference())` over a value-typed `buffer` becomes
+// `fixed (int p = buffer)`.
+TEST(PatternStatementTransformTest, RewritesPatternBasedFixedForValueType)
 {
-    PatternStatementFixture fx;
-    auto* outer = new Syntax::TryCatchStatement();
-    auto* outerTryBlock = new Syntax::BlockStatement();
-    auto* inner = new Syntax::TryCatchStatement();
-    inner->TryBlock(new Syntax::BlockStatement());
-    inner->CatchClauses().Add(new Syntax::CatchClause());
-    outerTryBlock->Statements().Add(inner);
-    outer->TryBlock(outerTryBlock);
+    TransformFixture fixture;
+    fixture.settings.SetPatternBasedFixedStatement(true);
+    auto* buffer = Ref("buffer");
+    buffer->AddAnnotation(std::make_shared<Sem::ResolveResult>(
+        std::static_pointer_cast<TS::IType>(std::make_shared<ValueStubType>())));
+    auto* initializer = new Syntax::VariableInitializer(
+        "p", GetPinnableReferenceAddress(buffer));
+    auto* fixedStmt = new Syntax::FixedStatement(new Syntax::PrimitiveType("int"));
+    fixedStmt->Variables().Add(initializer);
+    fixedStmt->EmbeddedStatement(new Syntax::BlockStatement());
 
-    auto root = std::make_unique<Syntax::BlockStatement>();
-    root->Statements().Add(outer);
+    RunOnStatement(fixture, fixedStmt);
 
-    RunTransform(*root, fx);
-
-    EXPECT_EQ(outer->TryBlock(), outerTryBlock)
-        << "without a finally the nested structure stays";
-    EXPECT_EQ(outer->CatchClauses().Count(), 0);
+    EXPECT_EQ(initializer->Initializer(), static_cast<Syntax::Expression*>(buffer));
 }
 
-// ---- The enhanced-using statement -------------------------------------------------------
-
-// A `using (var x = e) { }` statement that is the last statement of its block
-// becomes the C# 8.0 using-declaration form (`using var x = e;`).
-TEST(PatternStatementTransformTest, EnhancedUsingIsIntroduced)
+// A reference-typed `buffer` keeps the `&buffer.GetPinnableReference()` initializer (the
+// pinned-region detection handles reference types instead).
+TEST(PatternStatementTransformTest, KeepsPatternBasedFixedForReferenceType)
 {
-    PatternStatementFixture fx;
-    auto* usingStatement = new Syntax::UsingStatement();
-    auto* declaration = new Syntax::VariableDeclarationStatement();
-    usingStatement->ResourceAcquisition(declaration);
-    usingStatement->EmbeddedStatement(new Syntax::BlockStatement());
+    TransformFixture fixture;
+    fixture.settings.SetPatternBasedFixedStatement(true);
+    auto* buffer = Ref("buffer");
+    buffer->AddAnnotation(std::make_shared<Sem::ResolveResult>(
+        std::static_pointer_cast<TS::IType>(std::make_shared<DestructorStubType>("object"))));
+    auto* addressOf = GetPinnableReferenceAddress(buffer);
+    auto* initializer = new Syntax::VariableInitializer("p", addressOf);
+    auto* fixedStmt = new Syntax::FixedStatement(new Syntax::PrimitiveType("int"));
+    fixedStmt->Variables().Add(initializer);
+    fixedStmt->EmbeddedStatement(new Syntax::BlockStatement());
 
-    auto root = std::make_unique<Syntax::BlockStatement>();
-    root->Statements().Add(usingStatement);
+    RunOnStatement(fixture, fixedStmt);
 
-    RunTransform(*root, fx);
+    EXPECT_EQ(initializer->Initializer(), addressOf);
+}
+
+// A different initializer shape is left alone even with the setting on.
+TEST(PatternStatementTransformTest, KeepsNonPinnableReferenceInitializer)
+{
+    TransformFixture fixture;
+    fixture.settings.SetPatternBasedFixedStatement(true);
+    auto* initializer = new Syntax::VariableInitializer("p", Ref("buffer"));
+    auto* fixedStmt = new Syntax::FixedStatement(new Syntax::PrimitiveType("int"));
+    fixedStmt->Variables().Add(initializer);
+    fixedStmt->EmbeddedStatement(new Syntax::BlockStatement());
+
+    RunOnStatement(fixture, fixedStmt);
+
+    EXPECT_NE(dynamic_cast<Syntax::IdentifierExpression*>(initializer->Initializer()), nullptr);
+}
+
+// With the setting off the value-typed shape is kept.
+TEST(PatternStatementTransformTest, KeepsPatternBasedFixedWhenSettingOff)
+{
+    TransformFixture fixture;
+    fixture.settings.SetPatternBasedFixedStatement(false);
+    auto* buffer = Ref("buffer");
+    buffer->AddAnnotation(std::make_shared<Sem::ResolveResult>(
+        std::static_pointer_cast<TS::IType>(std::make_shared<ValueStubType>())));
+    auto* addressOf = GetPinnableReferenceAddress(buffer);
+    auto* initializer = new Syntax::VariableInitializer("p", addressOf);
+    auto* fixedStmt = new Syntax::FixedStatement(new Syntax::PrimitiveType("int"));
+    fixedStmt->Variables().Add(initializer);
+    fixedStmt->EmbeddedStatement(new Syntax::BlockStatement());
+
+    RunOnStatement(fixture, fixedStmt);
+
+    EXPECT_EQ(initializer->Initializer(), addressOf);
+}
+
+// ---- enhanced using ----------------------------------------------------------------
+
+// The last statement of a block whose resource acquisition is a variable declaration is
+// flagged as the enhanced using declaration.
+TEST(PatternStatementTransformTest, FlagsEnhancedUsingVariable)
+{
+    TransformFixture fixture;
+    fixture.settings.SetUseEnhancedUsing(true);
+    auto* declaration = new Syntax::VariableDeclarationStatement(
+        new Syntax::PrimitiveType("int"), "x");
+    auto* usingStatement = new Syntax::UsingStatement(
+        declaration, new Syntax::BlockStatement());
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(usingStatement);
+
+    RunTransform(fixture, *block);
 
     EXPECT_TRUE(usingStatement->IsEnhanced());
 }
 
-// A using statement followed by another statement keeps the statement form.
-TEST(PatternStatementTransformTest, EnhancedUsingRequiresLastStatement)
+// A using statement that is not the last statement of its block stays a using block.
+TEST(PatternStatementTransformTest, KeepsEnhancedUsingWhenFollowedByStatement)
 {
-    PatternStatementFixture fx;
-    auto* usingStatement = new Syntax::UsingStatement();
-    usingStatement->ResourceAcquisition(new Syntax::VariableDeclarationStatement());
-    usingStatement->EmbeddedStatement(new Syntax::BlockStatement());
+    TransformFixture fixture;
+    fixture.settings.SetUseEnhancedUsing(true);
+    auto* declaration = new Syntax::VariableDeclarationStatement(
+        new Syntax::PrimitiveType("int"), "x");
+    auto* usingStatement = new Syntax::UsingStatement(
+        declaration, new Syntax::BlockStatement());
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(usingStatement);
+    block->Statements().Add(new Syntax::ExpressionStatement(Ref("after")));
 
-    auto root = std::make_unique<Syntax::BlockStatement>();
-    root->Statements().Add(usingStatement);
-    root->Statements().Add(new Syntax::ReturnStatement());
-
-    RunTransform(*root, fx);
+    RunTransform(fixture, *block);
 
     EXPECT_FALSE(usingStatement->IsEnhanced());
 }
 
-// A using over an expression (not a variable declaration) keeps the form.
-TEST(PatternStatementTransformTest, EnhancedUsingRequiresVariableDeclaration)
+// A using statement whose resource acquisition is an expression (not a variable
+// declaration) stays a using block.
+TEST(PatternStatementTransformTest, KeepsEnhancedUsingWithExpressionResource)
 {
-    PatternStatementFixture fx;
-    auto* usingStatement = new Syntax::UsingStatement();
-    usingStatement->ResourceAcquisition(new Syntax::IdentifierExpression("x"));
-    usingStatement->EmbeddedStatement(new Syntax::BlockStatement());
+    TransformFixture fixture;
+    fixture.settings.SetUseEnhancedUsing(true);
+    auto* usingStatement = new Syntax::UsingStatement(
+        Ref("resource"), new Syntax::BlockStatement());
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(usingStatement);
 
-    auto root = std::make_unique<Syntax::BlockStatement>();
-    root->Statements().Add(usingStatement);
-
-    RunTransform(*root, fx);
+    RunTransform(fixture, *block);
 
     EXPECT_FALSE(usingStatement->IsEnhanced());
 }
 
-// ---- The pattern-based fixed statement --------------------------------------------------
-
-// `fixed (var p = &expr.GetPinnableReference()) { }` over a value-type target
-// becomes `fixed (var p = expr) { }` (the C# 7.3 pattern-based fixed).
-TEST(PatternStatementTransformTest, PatternBasedFixedIsIntroduced)
+// With the setting off the last-statement variable-declaration using is not flagged.
+TEST(PatternStatementTransformTest, KeepsEnhancedUsingWhenSettingOff)
 {
-    PatternStatementFixture fx;
-    auto* fixedStatement = new Syntax::FixedStatement();
-    auto* variable = new Syntax::VariableInitializer();
-    auto* target = new Syntax::IdentifierExpression("buffer");
-    // The target resolves to a value type (IsReferenceType false).
-    target->AddAnnotation(std::make_shared<Sem::TypeResolveResult>(
-        TS::ITypePtr(std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32))));
-    auto* call = new Syntax::InvocationExpression(
-        new Syntax::MemberReferenceExpression(target, "GetPinnableReference"));
-    variable->Initializer(new Syntax::UnaryOperatorExpression(
-        call, Syntax::UnaryOperatorType::AddressOf));
-    fixedStatement->Variables().Add(variable);
-    fixedStatement->EmbeddedStatement(new Syntax::BlockStatement());
+    TransformFixture fixture;
+    fixture.settings.SetUseEnhancedUsing(false);
+    auto* declaration = new Syntax::VariableDeclarationStatement(
+        new Syntax::PrimitiveType("int"), "x");
+    auto* usingStatement = new Syntax::UsingStatement(
+        declaration, new Syntax::BlockStatement());
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(usingStatement);
 
-    auto root = std::make_unique<Syntax::BlockStatement>();
-    root->Statements().Add(fixedStatement);
+    RunTransform(fixture, *block);
 
-    RunTransform(*root, fx);
-
-    EXPECT_EQ(variable->Initializer(), target)
-        << "the address-of-GetPinnableReference initializer unwraps to the target";
+    EXPECT_FALSE(usingStatement->IsEnhanced());
 }
 
-// A reference-type target keeps the GetPinnableReference call (the fixed
-// semantics only match for value types).
-TEST(PatternStatementTransformTest, PatternBasedFixedRequiresValueType)
+// A using statement not directly inside a block (here the root) is not flagged.
+TEST(PatternStatementTransformTest, KeepsEnhancedUsingOutsideBlock)
 {
-    PatternStatementFixture fx;
-    auto* fixedStatement = new Syntax::FixedStatement();
-    auto* variable = new Syntax::VariableInitializer();
-    auto* target = new Syntax::IdentifierExpression("buffer");
-    // A reference type (a class).
-    target->AddAnnotation(std::make_shared<Sem::TypeResolveResult>(
-        TS::ITypePtr(std::make_shared<TS::KnownType>(TS::KnownTypeCode::String))));
-    auto* call = new Syntax::InvocationExpression(
-        new Syntax::MemberReferenceExpression(target, "GetPinnableReference"));
-    variable->Initializer(new Syntax::UnaryOperatorExpression(
-        call, Syntax::UnaryOperatorType::AddressOf));
-    fixedStatement->Variables().Add(variable);
-    fixedStatement->EmbeddedStatement(new Syntax::BlockStatement());
+    TransformFixture fixture;
+    fixture.settings.SetUseEnhancedUsing(true);
+    auto* declaration = new Syntax::VariableDeclarationStatement(
+        new Syntax::PrimitiveType("int"), "x");
+    auto* usingStatement = new Syntax::UsingStatement(
+        declaration, new Syntax::BlockStatement());
 
-    auto root = std::make_unique<Syntax::BlockStatement>();
-    root->Statements().Add(fixedStatement);
+    RunTransform(fixture, *usingStatement);
 
-    RunTransform(*root, fx);
-
-    auto* initializer =
-        dynamic_cast<Syntax::UnaryOperatorExpression*>(variable->Initializer());
-    ASSERT_NE(initializer, nullptr)
-        << "a reference-type target keeps the address-of call";
+    EXPECT_FALSE(usingStatement->IsEnhanced());
 }
 
-// A fixed initializer that is not the GetPinnableReference shape keeps its form.
-TEST(PatternStatementTransformTest, PatternBasedFixedRequiresTheHelperShape)
-{
-    PatternStatementFixture fx;
-    auto* fixedStatement = new Syntax::FixedStatement();
-    auto* variable = new Syntax::VariableInitializer();
-    variable->Initializer(new Syntax::IdentifierExpression("ptr"));
-    fixedStatement->Variables().Add(variable);
-    fixedStatement->EmbeddedStatement(new Syntax::BlockStatement());
+// ---- for ---------------------------------------------------------------------------
 
-    auto root = std::make_unique<Syntax::BlockStatement>();
-    root->Statements().Add(fixedStatement);
+namespace {
 
-    RunTransform(*root, fx);
-
-    EXPECT_NE(variable->Initializer(), nullptr)
-        << "a non-matching initializer is untouched";
+IL::ILVariablePtr Var(const std::string& name) {
+    auto variable = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, TS::UnknownType());
+    variable->Name = name;
+    return variable;
 }
 
-// ---- The automatic-property reshape ------------------------------------------------------
+// An `IdentifierExpression` named after the variable and carrying its `ILVariableResolveResult`
+// (the annotation the `for` rewrite reads through `GetILVariable`).
+Syntax::IdentifierExpression* Use(const IL::ILVariablePtr& variable) {
+    auto* identifier = new Syntax::IdentifierExpression(variable->Name.c_str());
+    identifier->AddAnnotation(
+        std::make_shared<::ILSpy::Decompiler::CSharp::ILVariableResolveResult>(variable));
+    return identifier;
+}
 
-// A fake IField with settable classified attributes: the backing-field
-// checks read [CompilerGenerated] through IEntity::HasAttribute.
-class AutoPropertyTestField : public TSImpl::FakeField {
-public:
-    explicit AutoPropertyTestField(const TS::ICompilation& compilation)
-        : TSImpl::FakeField(compilation) {}
-    bool HasAttribute(TS::KnownAttribute attribute) const override {
-        return known_.find(attribute) != known_.end();
-    }
-    const TS::IAttribute* GetAttribute(TS::KnownAttribute attribute) const override {
-        return HasAttribute(attribute) ? &sentinel_ : nullptr;
-    }
-    void AddKnownAttribute(TS::KnownAttribute attribute) {
-        known_.insert(attribute);
-    }
-    void ClearKnownAttributes() { known_.clear(); }
+Syntax::PrimitiveExpression* Int(int value) {
+    return new Syntax::PrimitiveExpression(Syntax::PrimitiveValue(std::int32_t(value)));
+}
 
-private:
-    struct SentinelAttribute : TS::IAttribute {
-        const TS::IType& AttributeType() const override { return type_; }
-        const TS::IMethod* Constructor() const override { return nullptr; }
-        bool HasDecodeErrors() const override { return false; }
-        std::vector<TS::CustomAttributeTypedArgument> FixedArguments() const override {
-            return {};
-        }
-        std::vector<TS::CustomAttributeNamedArgument> NamedArguments() const override {
-            return {};
-        }
-        TS::KnownType type_{TS::KnownTypeCode::Object};
+// Runs the transform over a block holding `statements` and returns the block.
+Syntax::BlockStatement* RunOnBlock(
+    TransformFixture& fixture, std::initializer_list<Syntax::Statement*> statements) {
+    Transforms::TransformContext context = fixture.MakeContext();
+    auto* block = new Syntax::BlockStatement();
+    for (Syntax::Statement* statement : statements)
+        block->Statements().Add(statement);
+    Transforms::PatternStatementTransform transform;
+    transform.Run(*block, context);
+    return block;
+}
+
+} // namespace
+
+// `i = 0; while (i < n) { body; i = i + 1; }` becomes
+// `for (i = 0; i < n; i = i + 1) { body; }`.
+TEST(PatternStatementTransformTest, TransformsWhileLoopToFor)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForStatement(true);
+    auto i = Var("i");
+    auto n = Var("n");
+    auto* initStmt = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(i), Int(0)));
+    auto* condition = Bin(Use(i), Syntax::BinaryOperatorType::LessThan, Use(n));
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(new Syntax::ExpressionStatement(Use(n)));
+    auto* iteratorStmt = new Syntax::ExpressionStatement(new Syntax::AssignmentExpression(
+        Use(i), Syntax::AssignmentOperatorType::Assign,
+        Bin(Use(i), Syntax::BinaryOperatorType::Add, Int(1))));
+    body->Statements().Add(iteratorStmt);
+    auto* whileStmt = new Syntax::WhileStatement();
+    whileStmt->Condition(condition);
+    whileStmt->EmbeddedStatement(body);
+
+    auto* block = RunOnBlock(fixture, {initStmt, whileStmt});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    auto* forStatement = dynamic_cast<Syntax::ForStatement*>(block->Statements()[0]);
+    ASSERT_NE(forStatement, nullptr);
+    ASSERT_EQ(forStatement->Initializers().Count(), 1);
+    EXPECT_EQ(forStatement->Initializers()[0], static_cast<Syntax::Statement*>(initStmt));
+    EXPECT_EQ(forStatement->Condition(), condition);
+    ASSERT_EQ(forStatement->Iterators().Count(), 1);
+    EXPECT_EQ(forStatement->Iterators()[0], static_cast<Syntax::Statement*>(iteratorStmt));
+    auto* newBody = dynamic_cast<Syntax::BlockStatement*>(forStatement->EmbeddedStatement());
+    ASSERT_NE(newBody, nullptr);
+    EXPECT_EQ(newBody->Statements().Count(), 1);
+}
+
+// With `ForStatement` off the while loop is left in place.
+TEST(PatternStatementTransformTest, KeepsWhileLoopWhenSettingOff)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForStatement(false);
+    auto i = Var("i");
+    auto n = Var("n");
+    auto* initStmt = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(i), Int(0)));
+    auto* whileStmt = new Syntax::WhileStatement();
+    whileStmt->Condition(Bin(Use(i), Syntax::BinaryOperatorType::LessThan, Use(n)));
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(new Syntax::ExpressionStatement(new Syntax::AssignmentExpression(
+        Use(i), Syntax::AssignmentOperatorType::Assign,
+        Bin(Use(i), Syntax::BinaryOperatorType::Add, Int(1)))));
+    whileStmt->EmbeddedStatement(body);
+
+    auto* block = RunOnBlock(fixture, {initStmt, whileStmt});
+
+    EXPECT_EQ(block->Statements().Count(), 2);
+    EXPECT_EQ(block->Statements()[1], static_cast<Syntax::Statement*>(whileStmt));
+}
+
+// The declaration variable and the condition variable must be the same; otherwise the while
+// loop is kept.
+TEST(PatternStatementTransformTest, KeepsWhileLoopWhenVariableDiffers)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForStatement(true);
+    auto i = Var("i");
+    auto j = Var("j");
+    auto n = Var("n");
+    auto* initStmt = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(i), Int(0)));
+    auto* whileStmt = new Syntax::WhileStatement();
+    whileStmt->Condition(Bin(Use(j), Syntax::BinaryOperatorType::LessThan, Use(n)));
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(new Syntax::ExpressionStatement(new Syntax::AssignmentExpression(
+        Use(j), Syntax::AssignmentOperatorType::Assign,
+        Bin(Use(j), Syntax::BinaryOperatorType::Add, Int(1)))));
+    whileStmt->EmbeddedStatement(body);
+
+    auto* block = RunOnBlock(fixture, {initStmt, whileStmt});
+
+    EXPECT_EQ(block->Statements().Count(), 2);
+    EXPECT_EQ(block->Statements()[1], static_cast<Syntax::Statement*>(whileStmt));
+}
+
+// A `continue` in the loop body blocks the rewrite (in a while it jumps to the condition,
+// whereas in a for it jumps to the increment).
+TEST(PatternStatementTransformTest, KeepsWhileLoopWithContinue)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForStatement(true);
+    auto i = Var("i");
+    auto n = Var("n");
+    auto* initStmt = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(i), Int(0)));
+    auto* whileStmt = new Syntax::WhileStatement();
+    whileStmt->Condition(Bin(Use(i), Syntax::BinaryOperatorType::LessThan, Use(n)));
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(new Syntax::ContinueStatement());
+    body->Statements().Add(new Syntax::ExpressionStatement(new Syntax::AssignmentExpression(
+        Use(i), Syntax::AssignmentOperatorType::Assign,
+        Bin(Use(i), Syntax::BinaryOperatorType::Add, Int(1)))));
+    whileStmt->EmbeddedStatement(body);
+
+    auto* block = RunOnBlock(fixture, {initStmt, whileStmt});
+
+    EXPECT_EQ(block->Statements().Count(), 2);
+    EXPECT_EQ(block->Statements()[1], static_cast<Syntax::Statement*>(whileStmt));
+}
+
+// A variable referenced by the iterator that would be declared inside the loop body blocks the
+// rewrite (the iterator cannot be split from the declaration).
+TEST(PatternStatementTransformTest, KeepsWhileLoopWhenIteratorVariableDeclaredInside)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForStatement(true);
+    auto i = Var("i");
+    auto k = Var("k");
+    auto n = Var("n");
+    auto* initStmt = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(i), Int(0)));
+    auto* whileStmt = new Syntax::WhileStatement();
+    whileStmt->Condition(Bin(Use(i), Syntax::BinaryOperatorType::LessThan, Use(n)));
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(k), Int(5))));
+    body->Statements().Add(new Syntax::ExpressionStatement(new Syntax::AssignmentExpression(
+        Use(i), Syntax::AssignmentOperatorType::Assign,
+        Bin(Use(k), Syntax::BinaryOperatorType::Add, Int(1)))));
+    whileStmt->EmbeddedStatement(body);
+
+    auto* block = RunOnBlock(fixture, {initStmt, whileStmt});
+
+    EXPECT_EQ(block->Statements().Count(), 2);
+    EXPECT_EQ(block->Statements()[1], static_cast<Syntax::Statement*>(whileStmt));
+}
+
+// A by-ref local used after the loop keeps the while loop (the hoisted declaration cannot be
+// split into a for initializer).
+TEST(PatternStatementTransformTest, KeepsWhileLoopForByRefVariableUsedAfter)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForStatement(true);
+    auto i = Var("i");
+    i->Type = std::make_shared<TS::ByReferenceType>(TS::UnknownType());
+    auto n = Var("n");
+    auto* initStmt = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(i), Int(0)));
+    auto* whileStmt = new Syntax::WhileStatement();
+    whileStmt->Condition(Bin(Use(i), Syntax::BinaryOperatorType::LessThan, Use(n)));
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(new Syntax::ExpressionStatement(new Syntax::AssignmentExpression(
+        Use(i), Syntax::AssignmentOperatorType::Assign,
+        Bin(Use(i), Syntax::BinaryOperatorType::Add, Int(1)))));
+    whileStmt->EmbeddedStatement(body);
+    auto* afterStmt = new Syntax::ExpressionStatement(Use(i));
+
+    auto* block = RunOnBlock(fixture, {initStmt, whileStmt, afterStmt});
+
+    EXPECT_EQ(block->Statements().Count(), 3);
+    EXPECT_EQ(block->Statements()[1], static_cast<Syntax::Statement*>(whileStmt));
+}
+
+// A first statement that is not a `$var = $init` assignment is not a for declaration.
+TEST(PatternStatementTransformTest, KeepsFirstNonAssignmentStatement)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForStatement(true);
+    auto i = Var("i");
+    auto n = Var("n");
+    auto* firstStmt = new Syntax::ExpressionStatement(new Syntax::InvocationExpression(Ref("Foo")));
+    auto* whileStmt = new Syntax::WhileStatement();
+    whileStmt->Condition(Bin(Use(i), Syntax::BinaryOperatorType::LessThan, Use(n)));
+    whileStmt->EmbeddedStatement(new Syntax::BlockStatement());
+
+    auto* block = RunOnBlock(fixture, {firstStmt, whileStmt});
+
+    EXPECT_EQ(block->Statements().Count(), 2);
+    EXPECT_EQ(block->Statements()[1], static_cast<Syntax::Statement*>(whileStmt));
+}
+
+// `i = 0; for (; i < n; i = i + 1) {}` moves the declaration into the for initializer.
+TEST(PatternStatementTransformTest, MovesDeclarationIntoForInitializer)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForStatement(true);
+    auto i = Var("i");
+    auto n = Var("n");
+    auto* initStmt = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(i), Int(0)));
+    auto* forStatement = new Syntax::ForStatement();
+    forStatement->Condition(Bin(Use(i), Syntax::BinaryOperatorType::LessThan, Use(n)));
+    forStatement->Iterators().Add(new Syntax::ExpressionStatement(new Syntax::AssignmentExpression(
+        Use(i), Syntax::AssignmentOperatorType::Assign,
+        Bin(Use(i), Syntax::BinaryOperatorType::Add, Int(1)))));
+    forStatement->EmbeddedStatement(new Syntax::BlockStatement());
+
+    auto* block = RunOnBlock(fixture, {initStmt, forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+    ASSERT_EQ(forStatement->Initializers().Count(), 1);
+    EXPECT_EQ(forStatement->Initializers()[0], static_cast<Syntax::Statement*>(initStmt));
+}
+
+// A for loop whose condition and iterators do not use the variable keeps the declaration as a
+// separate statement.
+TEST(PatternStatementTransformTest, KeepsDeclarationWhenForDoesNotUseVariable)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForStatement(true);
+    auto i = Var("i");
+    auto j = Var("j");
+    auto n = Var("n");
+    auto* initStmt = new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(i), Int(0)));
+    auto* forStatement = new Syntax::ForStatement();
+    forStatement->Condition(Bin(Use(j), Syntax::BinaryOperatorType::LessThan, Use(n)));
+    forStatement->Iterators().Add(new Syntax::ExpressionStatement(new Syntax::AssignmentExpression(
+        Use(j), Syntax::AssignmentOperatorType::Assign,
+        Bin(Use(j), Syntax::BinaryOperatorType::Add, Int(1)))));
+    forStatement->EmbeddedStatement(new Syntax::BlockStatement());
+
+    auto* block = RunOnBlock(fixture, {initStmt, forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 2);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(initStmt));
+    EXPECT_EQ(forStatement->Initializers().Count(), 0);
+}
+
+// ---- foreach over array ------------------------------------------------------------
+
+namespace {
+
+// Builds the compiler's array index loop
+// `for (index = 0; index < array.Length; index = index + 1) { item = array[index]; <extra> }`.
+Syntax::ForStatement* MakeArrayForLoop(
+    const IL::ILVariablePtr& index, const IL::ILVariablePtr& array,
+    const IL::ILVariablePtr& item,
+    std::initializer_list<Syntax::Statement*> extraStatements = {}) {
+    auto* forStatement = new Syntax::ForStatement();
+    forStatement->Initializers().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(index), Int(0))));
+    forStatement->Condition(new Syntax::BinaryOperatorExpression(
+        Use(index), Syntax::BinaryOperatorType::LessThan,
+        new Syntax::MemberReferenceExpression(Use(array), std::string("Length"))));
+    forStatement->Iterators().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            Use(index), Syntax::AssignmentOperatorType::Assign,
+            new Syntax::BinaryOperatorExpression(
+                Use(index), Syntax::BinaryOperatorType::Add, Int(1)))));
+    auto* body = new Syntax::BlockStatement();
+    auto* indexer = new Syntax::IndexerExpression(Use(array));
+    indexer->Arguments().Add(Use(index));
+    body->Statements().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(item), indexer)));
+    for (Syntax::Statement* statement : extraStatements)
+        body->Statements().Add(statement);
+    forStatement->EmbeddedStatement(body);
+    return forStatement;
+}
+
+} // namespace
+
+// `for (i = 0; i < array.Length; i = i + 1) { item = array[i]; body; }` becomes
+// `foreach (var item in array) { body; }`.
+TEST(PatternStatementTransformTest, TransformsArrayForLoopToForeach)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+    auto* bodyStatement = new Syntax::ExpressionStatement(Ref("Foo"));
+    auto* forStatement = MakeArrayForLoop(index, array, item, {bodyStatement});
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    auto* foreachStmt = dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]);
+    ASSERT_NE(foreachStmt, nullptr);
+    auto* inExpression = dynamic_cast<Syntax::IdentifierExpression*>(foreachStmt->InExpression());
+    ASSERT_NE(inExpression, nullptr);
+    EXPECT_EQ(inExpression->Identifier(), "array");
+    auto* designation = dynamic_cast<Syntax::SingleVariableDesignation*>(
+        foreachStmt->VariableDesignation());
+    ASSERT_NE(designation, nullptr);
+    EXPECT_EQ(designation->Identifier(), "item");
+    EXPECT_EQ(static_cast<int>(item->Kind), static_cast<int>(IL::VariableKind::ForeachLocal));
+    auto* newBody = dynamic_cast<Syntax::BlockStatement*>(foreachStmt->EmbeddedStatement());
+    ASSERT_NE(newBody, nullptr);
+    ASSERT_EQ(newBody->Statements().Count(), 1);
+    EXPECT_EQ(newBody->Statements()[0], static_cast<Syntax::Statement*>(bodyStatement));
+}
+
+// A `string` looped by index also rewrites to `foreach` (the `Length` member plus the string
+// indexer read as a `char`).
+TEST(PatternStatementTransformTest, TransformsStringForLoopToForeach)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto text = Var("text");
+    text->Type = fixture.FindType(TS::KnownTypeCode::String);
+    auto item = Var("item");
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+    auto* forStatement = MakeArrayForLoop(index, text, item);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_NE(dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]), nullptr);
+}
+
+// With `ForEachStatement` off the index loop is left alone.
+TEST(PatternStatementTransformTest, KeepsForLoopWhenForEachSettingOff)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(false);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// The index variable must be a pure counter (stored twice, loaded three times, never
+// addressed); a different profile keeps the loop.
+TEST(PatternStatementTransformTest, KeepsForLoopWhenIndexCountsDiffer)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    index->StoreCount = 3;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// An item variable that is not single-definition (and whose address is not used for a single
+// call) cannot become a foreach local.
+TEST(PatternStatementTransformTest, KeepsForLoopWhenItemNotSingleDefinition)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 2;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// Builds an address-taken instance call on `item` whose `LdLoca` is the this pointer
+// (`ChildIndex == 0`), so `AddressUsedForSingleCall` can match. The call's parent chain is
+// rooted at `container`; returns the address `LdLoca` so a test can perturb it.
+IL::ILInstruction* MakeSingleAddressCall(const IL::ILVariablePtr& item,
+                                         IL::BlockContainer* container) {
+    auto* call = new IL::Call("Test::M");
+    call->IsInstanceCall = true;
+    auto ldLoca = std::make_unique<IL::LdLoca>(item);
+    IL::ILInstruction* address = ldLoca.get();
+    call->AddArg(std::move(ldLoca));
+    call->Parent = container;
+    item->AddressCount = 1;
+    item->AddressInstructions.push_back(address);
+    return address;
+}
+
+// An item variable that is not single-definition but whose address is taken for a single
+// instance method call inside the loop can still become the foreach local.
+TEST(PatternStatementTransformTest, TransformsArrayForLoopWhenItemAddressUsedForSingleCall)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    item->Type = fixture.FindType(TS::KnownTypeCode::Int32);
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+
+    IL::BlockContainer container;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+    forStatement->AddAnnotation(
+        std::make_shared<::ILSpy::Decompiler::CSharp::BlockContainerAnnotation>(&container));
+    MakeSingleAddressCall(item, &container);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_NE(dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]), nullptr);
+}
+
+// A reference-typed item is rejected even when its address is taken once (the C#
+// `v.Type.IsReferenceType == false` gate).
+TEST(PatternStatementTransformTest, KeepsForLoopWhenAddressTakenItemIsReferenceType)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    item->Type = fixture.FindType(TS::KnownTypeCode::String);
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+
+    IL::BlockContainer container;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+    forStatement->AddAnnotation(
+        std::make_shared<::ILSpy::Decompiler::CSharp::BlockContainerAnnotation>(&container));
+    MakeSingleAddressCall(item, &container);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// A static call taking the address is not the this-pointer shape.
+TEST(PatternStatementTransformTest, KeepsForLoopWhenAddressTakenCallIsStatic)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    item->Type = fixture.FindType(TS::KnownTypeCode::Int32);
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+
+    IL::BlockContainer container;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+    forStatement->AddAnnotation(
+        std::make_shared<::ILSpy::Decompiler::CSharp::BlockContainerAnnotation>(&container));
+    IL::ILInstruction* address = MakeSingleAddressCall(item, &container);
+    dynamic_cast<IL::Call*>(address->Parent)->IsInstanceCall = false;
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// The address must be the FIRST argument of the call (the this pointer, `ChildIndex == 0`).
+TEST(PatternStatementTransformTest, KeepsForLoopWhenAddressNotFirstArgument)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    item->Type = fixture.FindType(TS::KnownTypeCode::Int32);
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+
+    IL::BlockContainer container;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+    forStatement->AddAnnotation(
+        std::make_shared<::ILSpy::Decompiler::CSharp::BlockContainerAnnotation>(&container));
+    IL::ILInstruction* address = MakeSingleAddressCall(item, &container);
+    address->ChildIndex = 1;
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// The call must lie within the loop; a nested block container before the loop rejects the shape.
+TEST(PatternStatementTransformTest, KeepsForLoopWhenAddressCallIsInNestedContainer)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    item->Type = fixture.FindType(TS::KnownTypeCode::Int32);
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+
+    IL::BlockContainer container;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+    forStatement->AddAnnotation(
+        std::make_shared<::ILSpy::Decompiler::CSharp::BlockContainerAnnotation>(&container));
+    IL::BlockContainer nested;
+    nested.Parent = &container;
+    IL::ILInstruction* address = MakeSingleAddressCall(item, &nested);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// The address-taken shape requires the address to be the variable's ONLY non-store use
+// (`LoadCount == 0`).
+TEST(PatternStatementTransformTest, KeepsForLoopWhenAddressTakenItemIsAlsoLoaded)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    item->Type = fixture.FindType(TS::KnownTypeCode::Int32);
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+    item->LoadCount = 1;
+
+    IL::BlockContainer container;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+    forStatement->AddAnnotation(
+        std::make_shared<::ILSpy::Decompiler::CSharp::BlockContainerAnnotation>(&container));
+    MakeSingleAddressCall(item, &container);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// The looped collection must be an array or a string; any other type keeps the loop.
+TEST(PatternStatementTransformTest, KeepsForLoopWhenCollectionIsNotArrayOrString)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto scalar = Var("scalar");
+    scalar->Type = fixture.FindType(TS::KnownTypeCode::Int32);
+    auto item = Var("item");
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+    auto* forStatement = MakeArrayForLoop(index, scalar, item);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// Only locals/stack slots can become the foreach local; a parameter keeps the loop.
+TEST(PatternStatementTransformTest, KeepsForLoopWhenItemIsParameter)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    item->Kind = IL::VariableKind::Parameter;
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// A variable captured outside the loop keeps the loop (it cannot be declared in the loop).
+TEST(PatternStatementTransformTest, KeepsForLoopWhenItemCapturedOutsideLoop)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+    IL::BlockContainer captureScope;
+    item->CaptureScope = &captureScope;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// A condition that is not `<` (here `<=`) does not match the array pattern.
+TEST(PatternStatementTransformTest, KeepsForLoopWhenConditionIsLessThanOrEqual)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    auto index = Var("i");
+    auto array = Var("array");
+    array->Type = std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32));
+    auto item = Var("item");
+    index->StoreCount = 2;
+    index->LoadCount = 3;
+    item->StoreCount = 1;
+    auto* forStatement = MakeArrayForLoop(index, array, item);
+    static_cast<Syntax::BinaryOperatorExpression*>(forStatement->Condition())
+        ->Operator(Syntax::BinaryOperatorType::LessThanOrEqual);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// ---- foreach over a multidimensional array -----------------------------------------
+
+namespace {
+
+// `$target = $collection.GetUpperBound/$GetLowerBound($dim);`.
+Syntax::ExpressionStatement* BoundCall(const char* method, const IL::ILVariablePtr& target,
+                                        const IL::ILVariablePtr& collection, int dim) {
+    auto* invocation = new Syntax::InvocationExpression(
+        new Syntax::MemberReferenceExpression(Use(collection), std::string(method)));
+    invocation->Arguments().Add(Int(dim));
+    return new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(target), invocation));
+}
+
+// `for (; $index <= $upper; $index = $index + 1) { $lowerBoundAssign; <rest> }` (no
+// initializer -- the index is already set by the preceding lower-bound assignment).
+Syntax::ForStatement* MultiDimFor(const IL::ILVariablePtr& index,
+                                  const IL::ILVariablePtr& upper,
+                                  Syntax::Statement* lowerBoundAssign,
+                                  std::initializer_list<Syntax::Statement*> rest = {}) {
+    auto* forStatement = new Syntax::ForStatement();
+    forStatement->Condition(new Syntax::BinaryOperatorExpression(
+        Use(index), Syntax::BinaryOperatorType::LessThanOrEqual, Use(upper)));
+    forStatement->Iterators().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            Use(index), Syntax::AssignmentOperatorType::Assign,
+            new Syntax::BinaryOperatorExpression(
+                Use(index), Syntax::BinaryOperatorType::Add, Int(1)))));
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(lowerBoundAssign);
+    for (Syntax::Statement* statement : rest)
+        body->Statements().Add(statement);
+    forStatement->EmbeddedStatement(body);
+    return forStatement;
+}
+
+// `$item = $collection[$index0, $index1, ...];`.
+Syntax::ExpressionStatement* ElementAssignment(
+    const IL::ILVariablePtr& item, const IL::ILVariablePtr& collection,
+    std::initializer_list<IL::ILVariablePtr> indices) {
+    auto* indexer = new Syntax::IndexerExpression(Use(collection));
+    for (const IL::ILVariablePtr& index : indices)
+        indexer->Arguments().Add(Use(index));
+    return new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(item), indexer));
+}
+
+// The compiler's rank-2 multidimensional index nest:
+//   $u0 = array.GetUpperBound(0);
+//   $u1 = array.GetUpperBound(1);
+//   $i0 = array.GetLowerBound(0);
+//   for (; $i0 <= $u0; $i0 = $i0 + 1) {
+//       $i1 = array.GetLowerBound(1);
+//       for (; $i1 <= $u1; $i1 = $i1 + 1) {
+//           $item = array[$i0, $i1];
+//           <bodyStatements>
+//       }
+//   }
+std::vector<Syntax::Statement*> MakeMultiDimNest(
+    const IL::ILVariablePtr& collection, const IL::ILVariablePtr& u0,
+    const IL::ILVariablePtr& u1, const IL::ILVariablePtr& i0, const IL::ILVariablePtr& i1,
+    const IL::ILVariablePtr& item,
+    std::initializer_list<Syntax::Statement*> bodyStatements = {},
+    int firstUpperBoundIndex = 0) {
+    auto* innerFor = MultiDimFor(
+        i1, u1, ElementAssignment(item, collection, {i0, i1}), bodyStatements);
+    auto* outerFor = MultiDimFor(i0, u0, BoundCall("GetLowerBound", i1, collection, 1),
+                                 {innerFor});
+    return {
+        BoundCall("GetUpperBound", u0, collection, firstUpperBoundIndex),
+        BoundCall("GetUpperBound", u1, collection, 1),
+        BoundCall("GetLowerBound", i0, collection, 0),
+        outerFor,
     };
-    SentinelAttribute sentinel_;
-    std::set<TS::KnownAttribute> known_;
+}
+
+// The shared rank-2 setup (a rank-2 int array and one variable per bound/index/item role).
+struct MultiDimFixture {
+    IL::ILVariablePtr collection = Var("array");
+    IL::ILVariablePtr u0 = Var("u0");
+    IL::ILVariablePtr u1 = Var("u1");
+    IL::ILVariablePtr i0 = Var("i0");
+    IL::ILVariablePtr i1 = Var("i1");
+    IL::ILVariablePtr item = Var("item");
+
+    explicit MultiDimFixture(TransformFixture& fixture) {
+        collection->Type =
+            std::make_shared<TS::ArrayType>(fixture.FindType(TS::KnownTypeCode::Int32), 2);
+        u0->StoreCount = 1;
+        u0->LoadCount = 1;
+        u1->StoreCount = 1;
+        u1->LoadCount = 1;
+        i0->StoreCount = 2;
+        i0->LoadCount = 3;
+        i1->StoreCount = 2;
+        i1->LoadCount = 3;
+        item->StoreCount = 1;
+    }
+
+    std::vector<Syntax::Statement*> Make(
+        std::initializer_list<Syntax::Statement*> bodyStatements = {},
+        int firstUpperBoundIndex = 0) {
+        return MakeMultiDimNest(collection, u0, u1, i0, i1, item, bodyStatements,
+                                firstUpperBoundIndex);
+    }
 };
 
-// A fake IMethod with settable classified attributes: the accessor
-// checks read [CompilerGenerated] through IEntity::HasAttribute.
-class AutoPropertyTestMethod : public TSImpl::FakeMethod {
+} // namespace
+
+// The nested `GetUpperBound`/`GetLowerBound` index loops over a rank-2 array become
+// `foreach (var item in array) { body; }`.
+TEST(PatternStatementTransformTest, TransformsMultiDimArrayForLoopToForeach)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    MultiDimFixture dim(fixture);
+    auto* bodyStatement = new Syntax::ExpressionStatement(Ref("Foo"));
+    std::vector<Syntax::Statement*> statements = dim.Make({bodyStatement});
+
+    auto* block = RunOnBlock(fixture, {statements[0], statements[1], statements[2],
+                                       statements[3]});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    auto* foreachStmt = dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]);
+    ASSERT_NE(foreachStmt, nullptr);
+    auto* inExpression = dynamic_cast<Syntax::IdentifierExpression*>(foreachStmt->InExpression());
+    ASSERT_NE(inExpression, nullptr);
+    EXPECT_EQ(inExpression->Identifier(), "array");
+    auto* designation =
+        dynamic_cast<Syntax::SingleVariableDesignation*>(foreachStmt->VariableDesignation());
+    ASSERT_NE(designation, nullptr);
+    EXPECT_EQ(designation->Identifier(), "item");
+    EXPECT_EQ(static_cast<int>(dim.item->Kind),
+              static_cast<int>(IL::VariableKind::ForeachLocal));
+    auto* newBody = dynamic_cast<Syntax::BlockStatement*>(foreachStmt->EmbeddedStatement());
+    ASSERT_NE(newBody, nullptr);
+    ASSERT_EQ(newBody->Statements().Count(), 1);
+    EXPECT_EQ(newBody->Statements()[0], static_cast<Syntax::Statement*>(bodyStatement));
+}
+
+// With `ForEachStatement` off the multidimensional index nest is left alone.
+TEST(PatternStatementTransformTest, KeepsMultiDimArrayNestWhenForEachSettingOff)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(false);
+    MultiDimFixture dim(fixture);
+    std::vector<Syntax::Statement*> statements = dim.Make();
+
+    auto* block = RunOnBlock(fixture, {statements[0], statements[1], statements[2],
+                                       statements[3]});
+
+    // The `TransformFor` declaration move may still fold `$i0 = ...` into the `for`
+    // initializer, but the multidim nest itself is not rewritten.
+    EXPECT_NE(block->Statements()[0], nullptr);
+    EXPECT_EQ(dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]), nullptr);
+}
+
+// The collection must be an array type; a scalar keeps the index nest.
+TEST(PatternStatementTransformTest, KeepsMultiDimArrayNestWhenCollectionIsNotArray)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    MultiDimFixture dim(fixture);
+    dim.collection->Type = fixture.FindType(TS::KnownTypeCode::Int32);
+    std::vector<Syntax::Statement*> statements = dim.Make();
+
+    auto* block = RunOnBlock(fixture, {statements[0], statements[1], statements[2],
+                                       statements[3]});
+
+    EXPECT_EQ(dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]), nullptr);
+}
+
+// The upper-bound initializations must be numbered from 0; a `GetUpperBound(1)` first keeps the
+// nest.
+TEST(PatternStatementTransformTest, KeepsMultiDimArrayNestWhenBoundIndexIsWrong)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    MultiDimFixture dim(fixture);
+    std::vector<Syntax::Statement*> statements = dim.Make({}, 1);
+
+    auto* block = RunOnBlock(fixture, {statements[0], statements[1], statements[2],
+                                       statements[3]});
+
+    EXPECT_EQ(dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]), nullptr);
+}
+
+// An upper-bound variable that is loaded more than once (so not a pure bound) keeps the nest.
+TEST(PatternStatementTransformTest, KeepsMultiDimArrayNestWhenUpperBoundNotSingleLoad)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    MultiDimFixture dim(fixture);
+    dim.u0->LoadCount = 2;
+    std::vector<Syntax::Statement*> statements = dim.Make();
+
+    auto* block = RunOnBlock(fixture, {statements[0], statements[1], statements[2],
+                                       statements[3]});
+
+    EXPECT_EQ(dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]), nullptr);
+}
+
+// An index variable that is not a pure counter (stored twice, loaded three times, never
+// addressed) keeps the nest.
+TEST(PatternStatementTransformTest, KeepsMultiDimArrayNestWhenIndexCountsDiffer)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    MultiDimFixture dim(fixture);
+    dim.i0->StoreCount = 3;
+    std::vector<Syntax::Statement*> statements = dim.Make();
+
+    auto* block = RunOnBlock(fixture, {statements[0], statements[1], statements[2],
+                                       statements[3]});
+
+    EXPECT_EQ(dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]), nullptr);
+}
+
+// An item variable that is not single-definition cannot become the foreach local.
+TEST(PatternStatementTransformTest, KeepsMultiDimArrayNestWhenItemNotSingleDefinition)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    MultiDimFixture dim(fixture);
+    dim.item->StoreCount = 2;
+    std::vector<Syntax::Statement*> statements = dim.Make();
+
+    auto* block = RunOnBlock(fixture, {statements[0], statements[1], statements[2],
+                                       statements[3]});
+
+    EXPECT_EQ(dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]), nullptr);
+}
+
+// ---- foreach over an inline array ---------------------------------------------------
+
+namespace {
+
+// The `[InlineArray(N)]` attribute stub carrying the positional length argument.
+class TestInlineArrayAttribute : public TS::IAttribute {
 public:
-    AutoPropertyTestMethod(const TS::ICompilation& compilation,
-                           TS::SymbolKind symbolKind)
-        : TSImpl::FakeMethod(compilation, symbolKind) {}
+    TestInlineArrayAttribute(const TS::ITypePtr& intType, int length)
+        : args_({TS::CustomAttributeTypedArgument(intType, std::any(length))}) {}
+
+    const TS::IType& AttributeType() const override {
+        static auto attrType = std::make_shared<TS::SimpleType>(
+            TS::TopLevelTypeName("System.Runtime.CompilerServices", "InlineArrayAttribute"));
+        return *attrType;
+    }
+    const TS::IMethod* Constructor() const override { return nullptr; }
+    bool HasDecodeErrors() const override { return false; }
+    std::vector<TS::CustomAttributeTypedArgument> FixedArguments() const override
+    {
+        return args_;
+    }
+    std::vector<TS::CustomAttributeNamedArgument> NamedArguments() const override { return {}; }
+
+private:
+    std::vector<TS::CustomAttributeTypedArgument> args_;
+};
+
+// A struct definition carrying an `[InlineArray(N)]` attribute (the helper's buffer type).
+class TestInlineArrayDefinition : public TestSupport::LookupTypeDefinition {
+public:
+    using LookupTypeDefinition::LookupTypeDefinition;
+
+    void SetInlineArrayAttribute(const TS::IAttribute* attr) { attr_ = attr; }
     bool HasAttribute(TS::KnownAttribute attribute) const override {
-        return known_.find(attribute) != known_.end();
+        return attribute == TS::KnownAttribute::InlineArray && attr_ != nullptr;
     }
     const TS::IAttribute* GetAttribute(TS::KnownAttribute attribute) const override {
-        return HasAttribute(attribute) ? &sentinel_ : nullptr;
-    }
-    void AddKnownAttribute(TS::KnownAttribute attribute) {
-        known_.insert(attribute);
+        return attribute == TS::KnownAttribute::InlineArray ? attr_ : nullptr;
     }
 
 private:
-    struct SentinelAttribute : TS::IAttribute {
-        const TS::IType& AttributeType() const override { return type_; }
-        const TS::IMethod* Constructor() const override { return nullptr; }
-        bool HasDecodeErrors() const override { return false; }
-        std::vector<TS::CustomAttributeTypedArgument> FixedArguments() const override {
-            return {};
-        }
-        std::vector<TS::CustomAttributeNamedArgument> NamedArguments() const override {
-            return {};
-        }
-        TS::KnownType type_{TS::KnownTypeCode::Object};
-    };
-    SentinelAttribute sentinel_;
-    std::set<TS::KnownAttribute> known_;
+    const TS::IAttribute* attr_ = nullptr;
 };
 
-// The convertible auto-property shape inside a type declaration:
-//   int Count { get { return <Count>k__BackingField; }
-//              set { <Count>k__BackingField = value; } }
-//   private int <Count>k__BackingField;   // removed, its sections move
-struct AutoPropertyRig {
-    std::shared_ptr<TS::TestSupport::LookupTypeDefinition> typeDef;
-    std::shared_ptr<TSImpl::FakeProperty> property;
-    std::shared_ptr<AutoPropertyTestField> backingField;
-    Syntax::PropertyDeclaration* propertyDeclaration = nullptr;
-    Syntax::Accessor* getter = nullptr;
-    Syntax::Accessor* setter = nullptr;
-    Syntax::AttributeSection* movedSection = nullptr;
-    Syntax::Attribute* survivingAttribute = nullptr;
+// The `<PrivateImplementationDetails>` type (the helper method's declaring type).
+std::shared_ptr<TestSupport::LookupTypeDefinition> MakePrivateImplementationDetails(
+    TransformFixture& fixture) {
+    return std::make_shared<TestSupport::LookupTypeDefinition>(
+        "<PrivateImplementationDetails>", "",
+        TS::FullTypeName(TS::TopLevelTypeName("", "<PrivateImplementationDetails>", 0)),
+        TS::TypeKind::Class, TS::Accessibility::Public, fixture.compilation, nullptr,
+        TS::KnownTypeCode::None);
+}
+
+// The `[InlineArray(N)]` buffer type (leaks the attribute, test scope).
+TS::ITypePtr MakeInlineArrayBuffer(TransformFixture& fixture, int length) {
+    auto def = std::make_shared<TestInlineArrayDefinition>(
+        "Buffer", "Test", TS::FullTypeName(TS::TopLevelTypeName("Test", "Buffer", 0)),
+        TS::TypeKind::Struct, TS::Accessibility::Public, fixture.compilation, nullptr,
+        TS::KnownTypeCode::None);
+    def->SetInlineArrayAttribute(
+        new TestInlineArrayAttribute(fixture.FindType(TS::KnownTypeCode::Int32), length));
+    return def;
+}
+
+// Builds the compiler's inline-array loop
+// `for (index = 0; index < length; index = index + 1) { item = <helper>(ref buffer, index);
+// <extra> }`. `helper` may be null (then the element access carries no symbol).
+Syntax::ForStatement* MakeInlineArrayForLoop(
+    const IL::ILVariablePtr& index, const IL::ILVariablePtr& item,
+    const IL::ILVariablePtr& buffer, const TS::IMethod* helper,
+    const TS::ITypePtr& resultType, int length,
+    std::initializer_list<Syntax::Statement*> extraStatements = {}) {
+    auto* forStatement = new Syntax::ForStatement();
+    forStatement->Initializers().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(index), Int(0))));
+    forStatement->Condition(new Syntax::BinaryOperatorExpression(
+        Use(index), Syntax::BinaryOperatorType::LessThan, Int(length)));
+    forStatement->Iterators().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(
+            Use(index), Syntax::AssignmentOperatorType::Assign,
+            new Syntax::BinaryOperatorExpression(
+                Use(index), Syntax::BinaryOperatorType::Add, Int(1)))));
+    auto* invocation = new Syntax::InvocationExpression(
+        new Syntax::IdentifierExpression("InlineArrayElementRef"));
+    invocation->Arguments().Add(new Syntax::DirectionExpression(
+        Syntax::FieldDirection::Ref, Use(buffer)));
+    invocation->Arguments().Add(Use(index));
+    if (helper != nullptr) {
+        invocation->AddAnnotation(
+            std::make_shared<Sem::MemberResolveResult>(nullptr, helper, resultType));
+    }
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(item), invocation)));
+    for (Syntax::Statement* statement : extraStatements)
+        body->Statements().Add(statement);
+    forStatement->EmbeddedStatement(body);
+    return forStatement;
+}
+
+// The shared inline-array setup (a `[InlineArray(length)]` buffer, the
+// `<PrivateImplementationDetails>.InlineArrayElementRef` helper, and the loop variables).
+struct InlineArrayFixture {
+    std::shared_ptr<TestSupport::LookupTypeDefinition> implementationDetails;
+    TS::ITypePtr bufferType;
+    std::shared_ptr<TestSupport::LookupMethod> helper;
+    IL::ILVariablePtr index = Var("i");
+    IL::ILVariablePtr buffer = Var("buffer");
+    IL::ILVariablePtr item = Var("item");
+    int length = 4;
+
+    explicit InlineArrayFixture(TransformFixture& fixture) {
+        implementationDetails = MakePrivateImplementationDetails(fixture);
+        bufferType = MakeInlineArrayBuffer(fixture, length);
+        buffer->Type = bufferType;
+        helper = std::make_shared<TestSupport::LookupMethod>(
+            "InlineArrayElementRef", fixture.compilation);
+        helper->SetDeclaringType(implementationDetails);
+        index->StoreCount = 2;
+        index->LoadCount = 3;
+        item->StoreCount = 1;
+    }
+
+    Syntax::ForStatement* Make(
+        std::initializer_list<Syntax::Statement*> extraStatements = {}) {
+        return MakeInlineArrayForLoop(index, item, buffer, helper.get(), bufferType, length,
+                                      extraStatements);
+    }
+};
+
+} // namespace
+
+// The compiler's inline-array index loop becomes `foreach (var item in buffer) { body; }`.
+TEST(PatternStatementTransformTest, TransformsInlineArrayForLoopToForeach)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    fixture.settings.SetInlineArrays(true);
+    InlineArrayFixture inlineArray(fixture);
+    auto* bodyStatement = new Syntax::ExpressionStatement(Ref("Foo"));
+    auto* forStatement = inlineArray.Make({bodyStatement});
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    auto* foreachStmt = dynamic_cast<Syntax::ForeachStatement*>(block->Statements()[0]);
+    ASSERT_NE(foreachStmt, nullptr);
+    auto* inExpression = dynamic_cast<Syntax::IdentifierExpression*>(foreachStmt->InExpression());
+    ASSERT_NE(inExpression, nullptr);
+    EXPECT_EQ(inExpression->Identifier(), "buffer");
+    auto* designation =
+        dynamic_cast<Syntax::SingleVariableDesignation*>(foreachStmt->VariableDesignation());
+    ASSERT_NE(designation, nullptr);
+    EXPECT_EQ(designation->Identifier(), "item");
+    EXPECT_EQ(static_cast<int>(inlineArray.item->Kind),
+              static_cast<int>(IL::VariableKind::ForeachLocal));
+    auto* newBody = dynamic_cast<Syntax::BlockStatement*>(foreachStmt->EmbeddedStatement());
+    ASSERT_NE(newBody, nullptr);
+    ASSERT_EQ(newBody->Statements().Count(), 1);
+    EXPECT_EQ(newBody->Statements()[0], static_cast<Syntax::Statement*>(bodyStatement));
+}
+
+// With `InlineArrays` off the inline-array index loop is left alone.
+TEST(PatternStatementTransformTest, KeepsInlineArrayLoopWhenInlineArraysSettingOff)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    fixture.settings.SetInlineArrays(false);
+    InlineArrayFixture inlineArray(fixture);
+    auto* forStatement = inlineArray.Make();
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// With `ForEachStatement` off the inline-array index loop is left alone.
+TEST(PatternStatementTransformTest, KeepsInlineArrayLoopWhenForEachSettingOff)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(false);
+    fixture.settings.SetInlineArrays(true);
+    InlineArrayFixture inlineArray(fixture);
+    auto* forStatement = inlineArray.Make();
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// An element access that is not an invocation keeps the loop.
+TEST(PatternStatementTransformTest, KeepsInlineArrayLoopWhenElementAccessNotInvocation)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    fixture.settings.SetInlineArrays(true);
+    InlineArrayFixture inlineArray(fixture);
+    auto* forStatement = inlineArray.Make();
+    auto* body = static_cast<Syntax::BlockStatement*>(forStatement->EmbeddedStatement());
+    body->Statements().SetAt(0, new Syntax::ExpressionStatement(
+        new Syntax::AssignmentExpression(Use(inlineArray.item), Ref("element"))));
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// A helper whose declaring type is not `<PrivateImplementationDetails>` keeps the loop.
+TEST(PatternStatementTransformTest, KeepsInlineArrayLoopWhenHelperNotPrivateImplementationDetails)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    fixture.settings.SetInlineArrays(true);
+    InlineArrayFixture inlineArray(fixture);
+    auto otherType = std::make_shared<TestSupport::LookupTypeDefinition>(
+        "Other", "", TS::FullTypeName(TS::TopLevelTypeName("", "Other", 0)),
+        TS::TypeKind::Class, TS::Accessibility::Public, fixture.compilation, nullptr,
+        TS::KnownTypeCode::None);
+    inlineArray.helper->SetDeclaringType(otherType);
+    auto* forStatement = inlineArray.Make();
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// A helper with the wrong name keeps the loop.
+TEST(PatternStatementTransformTest, KeepsInlineArrayLoopWhenHelperNameDiffers)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    fixture.settings.SetInlineArrays(true);
+    InlineArrayFixture inlineArray(fixture);
+    inlineArray.helper = std::make_shared<TestSupport::LookupMethod>(
+        "InlineArrayOther", fixture.compilation);
+    inlineArray.helper->SetDeclaringType(inlineArray.implementationDetails);
+    auto* forStatement = inlineArray.Make();
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// A loop bound that does not equal the inline array length keeps the loop (the index would
+// not be provably in range).
+TEST(PatternStatementTransformTest, KeepsInlineArrayLoopWhenBoundDiffersFromLength)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    fixture.settings.SetInlineArrays(true);
+    InlineArrayFixture inlineArray(fixture);
+    auto* forStatement = MakeInlineArrayForLoop(
+        inlineArray.index, inlineArray.item, inlineArray.buffer, inlineArray.helper.get(),
+        inlineArray.bufferType, inlineArray.length + 1);
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// An index argument that is not the loop's index variable keeps the loop.
+TEST(PatternStatementTransformTest, KeepsInlineArrayLoopWhenIndexArgumentDiffers)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    fixture.settings.SetInlineArrays(true);
+    InlineArrayFixture inlineArray(fixture);
+    auto* forStatement = inlineArray.Make();
+    auto* body = static_cast<Syntax::BlockStatement*>(forStatement->EmbeddedStatement());
+    auto* assignment = static_cast<Syntax::ExpressionStatement*>(body->Statements()[0]);
+    auto* assignExpr = dynamic_cast<Syntax::AssignmentExpression*>(assignment->Expression());
+    ASSERT_NE(assignExpr, nullptr);
+    auto* invocation =
+        dynamic_cast<Syntax::InvocationExpression*>(assignExpr->Right());
+    ASSERT_NE(invocation, nullptr);
+    invocation->Arguments().SetAt(1, Use(Var("other")));
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// A buffer whose type is not an inline array keeps the loop.
+TEST(PatternStatementTransformTest, KeepsInlineArrayLoopWhenBufferTypeNotInlineArray)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    fixture.settings.SetInlineArrays(true);
+    InlineArrayFixture inlineArray(fixture);
+    inlineArray.buffer->Type = fixture.FindType(TS::KnownTypeCode::Int32);
+    auto* forStatement = inlineArray.Make();
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// An index variable that is not a pure counter keeps the loop.
+TEST(PatternStatementTransformTest, KeepsInlineArrayLoopWhenIndexCountsDiffer)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    fixture.settings.SetInlineArrays(true);
+    InlineArrayFixture inlineArray(fixture);
+    inlineArray.index->StoreCount = 3;
+    auto* forStatement = inlineArray.Make();
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// An item variable that is not single-definition cannot become the foreach local.
+TEST(PatternStatementTransformTest, KeepsInlineArrayLoopWhenItemNotSingleDefinition)
+{
+    TransformFixture fixture;
+    fixture.settings.SetForEachStatement(true);
+    fixture.settings.SetInlineArrays(true);
+    InlineArrayFixture inlineArray(fixture);
+    inlineArray.item->StoreCount = 2;
+    auto* forStatement = inlineArray.Make();
+
+    auto* block = RunOnBlock(fixture, {forStatement});
+
+    ASSERT_EQ(block->Statements().Count(), 1);
+    EXPECT_EQ(block->Statements()[0], static_cast<Syntax::Statement*>(forStatement));
+}
+
+// ---- automatic properties -----------------------------------------------------------
+
+namespace {
+
+// A `FakeField` reporting `[CompilerGenerated]`.
+class CompilerGeneratedField : public Impl::FakeField {
+public:
+    explicit CompilerGeneratedField(const TS::ICompilation& compilation)
+        : Impl::FakeField(compilation) {}
+    bool HasAttribute(TS::KnownAttribute attribute) const override {
+        return attribute == TS::KnownAttribute::CompilerGenerated
+            || Impl::FakeField::HasAttribute(attribute);
+    }
+};
+
+// A `FakeMethod` reporting `[CompilerGenerated]`.
+class CompilerGeneratedMethod : public Impl::FakeMethod {
+public:
+    explicit CompilerGeneratedMethod(const TS::ICompilation& compilation)
+        : Impl::FakeMethod(compilation, TS::SymbolKind::Method) {}
+    bool HasAttribute(TS::KnownAttribute attribute) const override {
+        return attribute == TS::KnownAttribute::CompilerGenerated
+            || Impl::FakeMethod::HasAttribute(attribute);
+    }
+};
+
+// A type definition whose `FullName` is `<ns>.<name>` and whose `FullTypeName` is the
+// matching top-level name (the attribute-type fixture the `IsKnownType` classification and
+// the full-name attribute removal compare against).
+std::shared_ptr<TestSupport::LookupTypeDefinition> MakeNamedTypeDef(
+    const TS::ICompilation& compilation, const std::string& ns, const std::string& name) {
+    const std::string fullName = ns.empty() ? name : ns + "." + name;
+    return std::make_shared<TestSupport::LookupTypeDefinition>(
+        fullName, ns, TS::FullTypeName(TS::TopLevelTypeName(ns, name)), TS::TypeKind::Class,
+        TS::Accessibility::Public, compilation, nullptr);
+}
+
+// `[<resolved type>]` -- an attribute section whose type node resolves to `typeDef`.
+Syntax::AttributeSection* MakeAttributeSection(
+    const std::shared_ptr<TestSupport::LookupTypeDefinition>& typeDef) {
+    auto* simpleType = new Syntax::SimpleType(typeDef->Name());
+    simpleType->AddAnnotation(std::make_shared<Sem::TypeResolveResult>(
+        std::static_pointer_cast<TS::IType>(typeDef)));
+    return new Syntax::AttributeSection(new Syntax::Attribute(simpleType));
+}
+
+// The `IField`-typed `IMember` handle for a fake field: the `FakeField` diamond shares its
+// `IMember` base with `FakeMember`, so the annotation is built through the `FakeMember`
+// subobject, while the identity comparison goes through the unambiguous `IField` subobject.
+const TS::IMember* AsMember(const Impl::FakeMember& member) {
+    return static_cast<const TS::IMember*>(static_cast<const Impl::FakeMember*>(&member));
+}
+const TS::IMember* AsMember(const Impl::FakeMethod& member) {
+    return static_cast<const TS::IMember*>(static_cast<const Impl::FakeMember*>(&member));
+}
+
+// The canonical `IMember` view of a fake property. The port's metadata members derive only from
+// their interface (so `static_cast<IMember*>(IProperty*)` is the identity the transforms and the
+// annotations use), while the `FakeProperty` diamond also has a `FakeMember`-path `IMember`
+// subobject. Tests that compare against a property returned by `GetProperties` or stored as an
+// `AccessorOwner` must use this view.
+const TS::IMember* AsPropertyMember(const Impl::FakeProperty& property) {
+    return static_cast<const TS::IMember*>(
+        static_cast<const TS::IProperty*>(&property));
+}
+
+// A fully built `class C { <field>; int P { get { return <field>; } set { <field> = value; } } }`
+// with resolved symbols, the compiler backing-field name, and the attribute shapes the
+// automatic-property rewrite consumes.
+class AutoPropertyFixture {
+public:
+    explicit AutoPropertyFixture(TransformFixture& f)
+        : fixture(f),
+          typeDef(MakeNamedTypeDef(f.compilation, "N", "C")),
+          compilerGeneratedAttr(MakeNamedTypeDef(
+              f.compilation, "System.Runtime.CompilerServices", "CompilerGeneratedAttribute")),
+          debuggerBrowsableAttr(
+              MakeNamedTypeDef(f.compilation, "System.Diagnostics", "DebuggerBrowsableAttribute")),
+          markerAttr(MakeNamedTypeDef(f.compilation, "N", "MarkerAttribute")),
+          field(std::make_shared<CompilerGeneratedField>(f.compilation)),
+          getter(std::make_shared<CompilerGeneratedMethod>(f.compilation)),
+          setter(std::make_shared<CompilerGeneratedMethod>(f.compilation)),
+          property(std::make_shared<Impl::FakeProperty>(f.compilation)) {
+        field->SetName("<P>k__BackingField");
+        field->SetDeclaringType(typeDef);
+        field->SetReturnType(f.FindType(TS::KnownTypeCode::Int32));
+        getter->SetName("get_P");
+        getter->SetDeclaringType(typeDef);
+        setter->SetName("set_P");
+        setter->SetDeclaringType(typeDef);
+        property->SetName("P");
+        property->SetDeclaringType(typeDef);
+        property->SetGetter(getter.get());
+        property->SetSetter(setter.get());
+        property->SetReturnType(f.FindType(TS::KnownTypeCode::Int32));
+    }
+
+    // The `IField*` identity the field declaration annotation must resolve to.
+    TS::IField* FieldPointer() { return static_cast<TS::IField*>(field.get()); }
+
+    // Builds `int <P>k__BackingField;` (with the compiler-generated, debugger-browsable and a
+    // marker attribute) plus `int P { get { return <P>k__BackingField; } set { ... } }` inside a
+    // `class C` and returns the type declaration. `withSetter` drops the setter; `useDerivedField`
+    // / `useDerivedAccessors` swap in the non-compiler-generated fakes.
+    Syntax::TypeDeclaration* Make(bool withSetter = true, bool useDerivedField = true,
+                                  bool useDerivedAccessors = true) {
+        if (!useDerivedField) {
+            field = std::make_shared<Impl::FakeField>(fixture.compilation);
+            field->SetName("<P>k__BackingField");
+            field->SetDeclaringType(typeDef);
+            field->SetReturnType(fixture.FindType(TS::KnownTypeCode::Int32));
+        }
+        if (!useDerivedAccessors) {
+            getter = std::make_shared<Impl::FakeMethod>(fixture.compilation, TS::SymbolKind::Method);
+            getter->SetName("get_P");
+            getter->SetDeclaringType(typeDef);
+            setter = std::make_shared<Impl::FakeMethod>(fixture.compilation, TS::SymbolKind::Method);
+            setter->SetName("set_P");
+            setter->SetDeclaringType(typeDef);
+        }
+        property->SetGetter(getter.get());
+        property->SetSetter(withSetter ? setter.get() : nullptr);
+
+        const TS::ITypePtr intType = fixture.FindType(TS::KnownTypeCode::Int32);
+
+        fieldDecl = new Syntax::FieldDeclaration();
+        fieldDecl->ReturnType(new Syntax::PrimitiveType("int"));
+        fieldDecl->Variables().Add(new Syntax::VariableInitializer("<P>k__BackingField"));
+        fieldDecl->AddAnnotation(
+            std::make_shared<Sem::MemberResolveResult>(nullptr, AsMember(*field), intType));
+        fieldDecl->Attributes().Add(MakeAttributeSection(compilerGeneratedAttr));
+        fieldDecl->Attributes().Add(MakeAttributeSection(debuggerBrowsableAttr));
+        fieldDecl->Attributes().Add(MakeAttributeSection(markerAttr));
+
+        prop = new Syntax::PropertyDeclaration();
+        prop->ReturnType(new Syntax::PrimitiveType("int"));
+        prop->Name("P");
+        prop->AddAnnotation(
+            std::make_shared<Sem::MemberResolveResult>(nullptr, AsMember(*property), intType));
+
+        auto* getterAccessor = new Syntax::Accessor(Syntax::AccessorKind::Getter);
+        getterAccessor->Attributes().Add(MakeAttributeSection(compilerGeneratedAttr));
+        auto* getterBody = new Syntax::BlockStatement();
+        getterRef = new Syntax::IdentifierExpression("<P>k__BackingField");
+        getterRef->AddAnnotation(
+            std::make_shared<Sem::MemberResolveResult>(nullptr, AsMember(*field), intType));
+        getterBody->Statements().Add(new Syntax::ReturnStatement(getterRef));
+        getterAccessor->Body(getterBody);
+        prop->Getter(getterAccessor);
+
+        if (withSetter) {
+            auto* setterAccessor = new Syntax::Accessor(Syntax::AccessorKind::Setter);
+            setterAccessor->Attributes().Add(MakeAttributeSection(compilerGeneratedAttr));
+            auto* setterBody = new Syntax::BlockStatement();
+            auto* assignment = new Syntax::AssignmentExpression(
+                new Syntax::IdentifierExpression("<P>k__BackingField"),
+                new Syntax::IdentifierExpression("value"));
+            setterBody->Statements().Add(new Syntax::ExpressionStatement(assignment));
+            setterAccessor->Body(setterBody);
+            prop->Setter(setterAccessor);
+        }
+
+        typeDecl = new Syntax::TypeDeclaration();
+        typeDecl->Name("C");
+        typeDecl->AddAnnotation(std::make_shared<Sem::TypeResolveResult>(
+            std::static_pointer_cast<TS::IType>(typeDef)));
+        typeDecl->Members().Add(fieldDecl);
+        typeDecl->Members().Add(prop);
+        return typeDecl;
+    }
+
+    TransformFixture& fixture;
+    std::shared_ptr<TestSupport::LookupTypeDefinition> typeDef;
+    std::shared_ptr<TestSupport::LookupTypeDefinition> compilerGeneratedAttr;
+    std::shared_ptr<TestSupport::LookupTypeDefinition> debuggerBrowsableAttr;
+    std::shared_ptr<TestSupport::LookupTypeDefinition> markerAttr;
+    std::shared_ptr<Impl::FakeField> field;
+    std::shared_ptr<Impl::FakeMethod> getter;
+    std::shared_ptr<Impl::FakeMethod> setter;
+    std::shared_ptr<Impl::FakeProperty> property;
+    Syntax::TypeDeclaration* typeDecl = nullptr;
     Syntax::FieldDeclaration* fieldDecl = nullptr;
-    std::unique_ptr<Syntax::TypeDeclaration> type;
+    Syntax::PropertyDeclaration* prop = nullptr;
+    Syntax::IdentifierExpression* getterRef = nullptr;
 };
 
-// The [Attr] attribute definition stub (the type the syntax attribute's
-// resolve result points at).
-TS::ITypePtr MakeAttributeType(const PatternStatementFixture& fx,
-                               const std::string& ns, const std::string& name) {
-    return std::make_shared<TS::TestSupport::LookupTypeDefinition>(
-        name, ns, TS::FullTypeName(ns.empty() ? name : ns + "." + name),
-        TS::TypeKind::Class, TS::Accessibility::Public, fx.compilation, nullptr);
+// The mscorlib fixture path for the automatic-event rewrite tests.
+const char* EventMscorlibPath() {
+#if defined(_WIN32)
+    return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    return "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
 }
 
-// A syntax [Attr] node whose type resolves to the given definition.
-Syntax::Attribute* MakeAttribute(TS::ITypePtr attributeType) {
-    auto* simpleType = new Syntax::SimpleType(attributeType->Name());
-    simpleType->AddAnnotation(std::make_shared<Sem::TypeResolveResult>(attributeType));
-    return new Syntax::Attribute(simpleType);
-}
-
-AutoPropertyRig MakeAutoProperty(PatternStatementFixture& fx) {
-    AutoPropertyRig rig;
-    rig.typeDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
-        "MyClass", std::string(), TS::FullTypeName("MyClass"), TS::TypeKind::Class,
-        TS::Accessibility::Public, fx.compilation, nullptr);
-
-    // The property and its accessors (fakes; the accessor checks are skipped
-    // because the declaring type carries a compiler-generated _Count field).
-    rig.property = std::make_shared<TSImpl::FakeProperty>(fx.compilation);
-    rig.property->SetName("Count");
-    auto getterMethod = std::make_shared<AutoPropertyTestMethod>(
-        fx.compilation, TS::SymbolKind::Method);
-    getterMethod->SetName("get_Count");
-    getterMethod->AddKnownAttribute(TS::KnownAttribute::CompilerGenerated);
-    auto setterMethod = std::make_shared<AutoPropertyTestMethod>(
-        fx.compilation, TS::SymbolKind::Method);
-    setterMethod->SetName("set_Count");
-    setterMethod->AddKnownAttribute(TS::KnownAttribute::CompilerGenerated);
-    rig.property->SetGetter(static_cast<const TS::IMethod*>(getterMethod.get()));
-    rig.property->SetSetter(static_cast<const TS::IMethod*>(setterMethod.get()));
-    rig.property->SetDeclaringType(rig.typeDef);
-
-    // The backing field: <Count>k__BackingField, compiler-generated.
-    rig.backingField = std::make_shared<AutoPropertyTestField>(fx.compilation);
-    rig.backingField->SetName("<Count>k__BackingField");
-    rig.backingField->AddKnownAttribute(TS::KnownAttribute::CompilerGenerated);
-    rig.backingField->SetDeclaringType(rig.typeDef);
-    rig.backingField->SetReturnType(TS::ITypePtr(std::make_shared<TS::KnownType>(
-        TS::KnownTypeCode::Int32)));
-
-    // The declaring type's fields: the VB-style _Count (a compiler-generated
-    // field makes the accessor compiler-generated checks unnecessary) and
-    // the backing field itself.
-    auto countField = std::make_shared<AutoPropertyTestField>(fx.compilation);
-    countField->SetName("_Count");
-    countField->AddKnownAttribute(TS::KnownAttribute::CompilerGenerated);
-    countField->SetDeclaringType(rig.typeDef);
-    rig.typeDef->SetFields({countField.get(), rig.backingField.get()});
-    rig.typeDef->SetProperties(
-        {static_cast<const TS::IProperty*>(rig.property.get())});
-
-    // The property declaration with the get/set bodies over the backing field.
-    rig.propertyDeclaration = new Syntax::PropertyDeclaration();
-    rig.propertyDeclaration->Name("Count");
-    rig.propertyDeclaration->ReturnType(new Syntax::SimpleType("Int32"));
-    rig.propertyDeclaration->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
-        std::make_shared<Sem::TypeResolveResult>(rig.typeDef),
-        static_cast<TSImpl::FakeMember*>(rig.property.get())));
-
-    rig.getter = new Syntax::Accessor();
-    auto* getterBody = new Syntax::BlockStatement();
-    auto* fieldReference = new Syntax::IdentifierExpression("<Count>k__BackingField");
-    fieldReference->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
-        std::make_shared<Sem::TypeResolveResult>(rig.typeDef),
-        static_cast<TSImpl::FakeMember*>(rig.backingField.get())));
-    getterBody->Statements().Add(new Syntax::ReturnStatement(fieldReference));
-    rig.getter->Body(getterBody);
-    // The accessor's [CompilerGenerated] section is stripped.
-    auto* getterSection = new Syntax::AttributeSection();
-    getterSection->Attributes().Add(MakeAttribute(MakeAttributeType(
-        fx, "System.Runtime.CompilerServices", "CompilerGeneratedAttribute")));
-    rig.getter->Attributes().Add(getterSection);
-    rig.propertyDeclaration->Getter(rig.getter);
-
-    rig.setter = new Syntax::Accessor();
-    auto* setterBody = new Syntax::BlockStatement();
-    setterBody->Statements().Add(new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(
-            new Syntax::IdentifierExpression("<Count>k__BackingField"),
-            Syntax::AssignmentOperatorType::Assign,
-            new Syntax::IdentifierExpression("value"))));
-    rig.setter->Body(setterBody);
-    rig.propertyDeclaration->Setter(rig.setter);
-
-    // The backing field declaration: a [CompilerGenerated] plus a surviving
-    // custom attribute (its section moves onto the property with the
-    // "field" target).
-    rig.fieldDecl = new Syntax::FieldDeclaration();
-    rig.fieldDecl->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
-        std::make_shared<Sem::TypeResolveResult>(rig.typeDef),
-        static_cast<TSImpl::FakeMember*>(rig.backingField.get())));
-    rig.movedSection = new Syntax::AttributeSection();
-    rig.movedSection->Attributes().Add(MakeAttribute(MakeAttributeType(
-        fx, "System.Runtime.CompilerServices", "CompilerGeneratedAttribute")));
-    rig.survivingAttribute =
-        MakeAttribute(MakeAttributeType(fx, "MyNamespace", "MyAttribute"));
-    rig.movedSection->Attributes().Add(rig.survivingAttribute);
-    rig.fieldDecl->Attributes().Add(rig.movedSection);
-    auto* variable = new Syntax::VariableInitializer();
-    variable->Name("<Count>k__BackingField");
-    rig.fieldDecl->Variables().Add(variable);
-
-    rig.type = std::make_unique<Syntax::TypeDeclaration>();
-    rig.type->Members().Add(rig.propertyDeclaration);
-    rig.type->Members().Add(rig.fieldDecl);
-    rig.type->AddAnnotation(std::make_shared<Sem::TypeResolveResult>(rig.typeDef));
-
-    // Keep the fake members alive for the program's lifetime (the resolve
-    // results hold raw pointers).
-    static std::vector<std::shared_ptr<void>> keepAlive;
-    keepAlive.push_back(getterMethod);
-    keepAlive.push_back(setterMethod);
-    keepAlive.push_back(countField);
-    return rig;
-}
-
-// The shape above becomes the auto-property `int Count { get; set; }`; the
-// backing field declaration disappears and its surviving attribute
-// sections move onto the property with the "field" target.
-TEST(PatternStatementTransformTest, AutomaticPropertyIsIntroduced)
-{
-    PatternStatementFixture fx;
-    auto rig = MakeAutoProperty(fx);
-
-    RunTransform(*rig.type, fx);
-
-    EXPECT_EQ(rig.getter->Body(), nullptr) << "the getter body is cleared";
-    EXPECT_EQ(rig.setter->Body(), nullptr) << "the setter body is cleared";
-    EXPECT_EQ(rig.getter->Attributes().Count(), 0)
-        << "the accessor's [CompilerGenerated] section is stripped";
-    ASSERT_EQ(rig.type->Members().Count(), 1)
-        << "the backing field declaration is removed";
-    ASSERT_EQ(rig.propertyDeclaration->Attributes().Count(), 1)
-        << "the surviving field section moves onto the property";
-    EXPECT_EQ(rig.propertyDeclaration->Attributes().At(0), rig.movedSection);
-    EXPECT_EQ(rig.propertyDeclaration->Attributes().At(0)->AttributeTarget(), "field");
-    EXPECT_EQ(rig.movedSection->Attributes().Count(), 1);
-    EXPECT_EQ(rig.movedSection->Attributes().At(0), rig.survivingAttribute);
-}
-
-// A property whose backing field is not compiler-generated keeps its
-// accessor bodies.
-TEST(PatternStatementTransformTest, AutomaticPropertyRequiresCompilerGeneratedField)
-{
-    PatternStatementFixture fx;
-    auto rig = MakeAutoProperty(fx);
-    rig.backingField->ClearKnownAttributes();
-
-    RunTransform(*rig.type, fx);
-
-    EXPECT_NE(rig.getter->Body(), nullptr)
-        << "a non-compiler-generated backing field keeps the accessor bodies";
-    EXPECT_EQ(rig.type->Members().Count(), 2)
-        << "the field declaration stays";
-}
-
-// A backing field whose name is not the compiler's pattern keeps the
-// accessor bodies.
-TEST(PatternStatementTransformTest, AutomaticPropertyRequiresBackingFieldName)
-{
-    PatternStatementFixture fx;
-    auto rig = MakeAutoProperty(fx);
-    rig.backingField->SetName("someOtherField");
-
-    RunTransform(*rig.type, fx);
-
-    EXPECT_NE(rig.getter->Body(), nullptr)
-        << "a non-backing-field name keeps the accessor bodies";
-    EXPECT_EQ(rig.type->Members().Count(), 2);
-}
-
-// ---- The backing-field identifier rewrite ----------------------------------------------
-
-// A use of the compiler-generated backing field outside the accessors
-// becomes a use of the property (the identifier is replaced and the
-// parent's resolve result is re-pointed).
-TEST(PatternStatementTransformTest, BackingFieldUsageIsReplacedWithProperty)
-{
-    PatternStatementFixture fx;
-    auto rig = MakeAutoProperty(fx);
-
-    auto* use = new Syntax::IdentifierExpression("<Count>k__BackingField");
-    use->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
-        std::make_shared<Sem::TypeResolveResult>(rig.typeDef),
-        static_cast<TSImpl::FakeMember*>(rig.backingField.get())));
-
-    auto root = std::make_unique<Syntax::BlockStatement>();
-    root->Statements().Add(new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(
-            new Syntax::IdentifierExpression("y"),
-            Syntax::AssignmentOperatorType::Assign, use)));
-
-    RunTransform(*root, fx);
-
-    EXPECT_EQ(use->IdentifierToken()->Name(), "Count")
-        << "the backing field identifier becomes the property name";
-    const auto* resolveResult = use->Annotation<Sem::MemberResolveResult>();
-    ASSERT_NE(resolveResult, nullptr);
-    EXPECT_EQ(resolveResult->Member(),
-              static_cast<const TS::IMember*>(
-                  static_cast<const TS::IProperty*>(rig.property.get())))
-        << "the parent's resolve result now points at the property";
-}
-
-// A getter-only property without the GetterOnlyAutomaticProperties
-// setting keeps the backing field use.
-TEST(PatternStatementTransformTest, BackingFieldUsageRequiresSetterOrSetting)
-{
-    PatternStatementFixture fx;
-    auto rig = MakeAutoProperty(fx);
-    rig.property->SetSetter(nullptr);
-
-    auto* use = new Syntax::IdentifierExpression("<Count>k__BackingField");
-    use->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
-        std::make_shared<Sem::TypeResolveResult>(rig.typeDef),
-        static_cast<TSImpl::FakeMember*>(rig.backingField.get())));
-
-    auto root = std::make_unique<Syntax::BlockStatement>();
-    root->Statements().Add(new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(
-            new Syntax::IdentifierExpression("y"),
-            Syntax::AssignmentOperatorType::Assign, use)));
-
-    RunTransform(*root, fx, /*forStatementSetting=*/true,
-                 /*forEachStatementSetting=*/true, /*currentTypeDefinition=*/nullptr,
-                 /*useEnhancedUsingSetting=*/true,
-                 /*getterOnlyAutomaticPropertiesSetting=*/false);
-
-    EXPECT_EQ(use->IdentifierToken()->Name(), "<Count>k__BackingField")
-        << "a getter-only property keeps the backing field use";
-}
-
-// A field whose name is not the backing-field pattern keeps its use.
-TEST(PatternStatementTransformTest, BackingFieldUsageRequiresFieldName)
-{
-    PatternStatementFixture fx;
-    auto rig = MakeAutoProperty(fx);
-    rig.backingField->SetName("someOtherField");
-
-    auto* use = new Syntax::IdentifierExpression("someOtherField");
-    use->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
-        std::make_shared<Sem::TypeResolveResult>(rig.typeDef),
-        static_cast<TSImpl::FakeMember*>(rig.backingField.get())));
-
-    auto root = std::make_unique<Syntax::BlockStatement>();
-    root->Statements().Add(new Syntax::ExpressionStatement(
-        new Syntax::AssignmentExpression(
-            new Syntax::IdentifierExpression("y"),
-            Syntax::AssignmentOperatorType::Assign, use)));
-
-    RunTransform(*root, fx);
-
-    EXPECT_EQ(use->IdentifierToken()->Name(), "someOtherField");
-}
-
-// ---- The automatic-events arm ------------------------------------------------
-
-// The net48 PresentationFramework fixture (the baml-provisioned reference
-// assemblies): the FrameworkContentElement Loaded event + LoadedEvent
-// field drive the event convention through the REAL metadata lookup (the
-// suffix form). The reference assemblies strip the private backing fields,
-// so the field side rides a stub carrying the real compiler shape
-// (private, the event's return type, the real field row token) -- the
-// lookup and the event entity are the real metadata.
-constexpr const char* kNet48PresentationFramework =
-    "/home/jim/ilspy-test-fixtures/net48/PresentationFramework.dll";
-
-// A private field stub over a real MetadataModule (the real compiler
-// backing shape; the MetadataToken drives the metadata lookup).
-class EventBackingFieldStub : public TSImpl::FakeField {
+// A compilation whose main module is settable and whose FindType routes through the ported
+// KnownTypeCache over the module (the MetadataTypeDefinition_Test CacheCompilation shape).
+class EventCompilation : public TS::ICompilation {
 public:
-    EventBackingFieldStub(const TS::ICompilation& compilation,
-                           const TS::IType* returnType,
-                           std::uint32_t metadataToken)
-        : TSImpl::FakeField(compilation), returnType_(returnType),
-          metadataToken_(metadataToken) {}
-    const TS::IType& ReturnType() const override { return *returnType_; }
-    std::uint32_t MetadataToken() const override { return metadataToken_; }
-    const TS::IModule* ParentModule() const override { return parentModule_; }
-    void SetParentModule(const TS::IModule* module) { parentModule_ = module; }
+    void SetMainModule(const TS::IModule* module) { mainModule_ = module; }
+
+    const TS::IModule& MainModule() const override { return *mainModule_; }
+    std::vector<const TS::IModule*> Modules() const override
+    {
+        return std::vector<const TS::IModule*>{ mainModule_ };
+    }
+    std::vector<const TS::IModule*> ReferencedModules() const override { return {}; }
+    const TS::INamespace& RootNamespace() const override
+    {
+        return mainModule_->RootNamespace();
+    }
+    const TS::INamespace* GetNamespaceForExternAlias(const std::string&) const override
+    {
+        return nullptr;
+    }
+    const TS::IType& FindType(TS::KnownTypeCode code) const override
+    {
+        return knownTypes_.FindType(code);
+    }
+    const TS::StringComparer& NameComparer() const override
+    {
+        return TS::StringComparer::Ordinal();
+    }
+    const ILSpy::Decompiler::Util::CacheManager& CacheManager() const override
+    {
+        return cacheManager_;
+    }
+    TS::TypeSystemOptions TypeSystemOptions() const override
+    {
+        return TS::TypeSystemOptions::Default;
+    }
 
 private:
-    const TS::IType* returnType_;
-    std::uint32_t metadataToken_;
-    const TS::IModule* parentModule_ = nullptr;
+    const TS::IModule* mainModule_ = nullptr;
+    ILSpy::Decompiler::Util::CacheManager cacheManager_;
+    TS::KnownTypeCache knownTypes_{ *this };
 };
 
-// A field-like event's backing field declaration is removed from the
-// enclosing type (the field is hidden behind the event).
-TEST(PatternStatementTransformTest, AutomaticEventRemovesBackingFieldDeclaration)
-{
-    std::error_code ec;
-    if (!std::filesystem::exists(kNet48PresentationFramework, ec))
-        GTEST_SKIP() << "the net48 fixture set is not provisioned";
-    PatternStatementFixture fx;
-    ::ILSpy::Decompiler::Metadata::MetadataFile file(kNet48PresentationFramework);
-    ASSERT_TRUE(file.IsValid());
-    TS::MetadataModule module{fx.compilation, &file,
-                              TS::TypeSystemOptions::Default};
+// The two nodes the automatic-event rewrite operates on: a `TypeDeclaration` holding a
+// `FieldDeclaration` and an `EventDeclaration`.
+struct EventDeclModel {
+    Syntax::TypeDeclaration* type = nullptr;
+    Syntax::FieldDeclaration* field = nullptr;
+    Syntax::EventDeclaration* event = nullptr;
+};
 
-    // FrameworkContentElement: the Loaded event + the LoadedEvent field --
-    // the suffix-convention pair.
-    std::uint32_t eventToken = 0;
-    std::uint32_t fieldToken = 0;
-    for (const auto& t : file.TypeDefs()) {
-        if (t.Name != "FrameworkContentElement") continue;
-        for (const auto& e : file.GetEvents(t.Token))
-            if (e.Name == "Loaded") eventToken = e.Token;
-        for (const auto& f : file.GetFields(t.Token))
-            if (f.Name == "LoadedEvent") fieldToken = f.Token;
-    }
-    ASSERT_NE(eventToken, 0u) << "the fixture carries the Loaded event";
-    ASSERT_NE(fieldToken, 0u) << "the fixture carries the LoadedEvent field";
-    const TS::IEvent* loaded = module.GetDefinitionEvent(eventToken);
-    ASSERT_NE(loaded, nullptr);
-
-    // The event declaration with its symbol annotation.
-    auto* eventDeclaration = new Syntax::EventDeclaration();
-    eventDeclaration->AddAnnotation(
-        std::make_shared<Sem::MemberResolveResult>(
-            std::shared_ptr<Sem::ResolveResult>(), loaded));
-
-    // The backing field declaration (one variable, the stub symbol over the
-    // real row).
-    auto* fieldDeclaration = new Syntax::FieldDeclaration();
-    auto* variable = new Syntax::VariableInitializer();
-    variable->Name("LoadedEvent");
-    fieldDeclaration->Variables().Add(variable);
-    auto field = std::make_shared<EventBackingFieldStub>(
-        fx.compilation, &loaded->ReturnType(), fieldToken);
-    field->SetName("LoadedEvent");
-    field->SetAccessibility(TS::Accessibility::Private);
-    field->SetParentModule(&module);
-    fieldDeclaration->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
-        std::shared_ptr<Sem::ResolveResult>(),
-        static_cast<TSImpl::FakeMember*>(field.get())));
-
-    auto type = std::make_unique<Syntax::TypeDeclaration>();
-    type->Members().Add(eventDeclaration);
-    type->Members().Add(fieldDeclaration);
-
-    RunTransform(*type, fx);
-
-    ASSERT_EQ(type->Members().Count(), 1)
-        << "the backing field declaration is removed";
-    EXPECT_EQ(type->Members().At(0), eventDeclaration);
-}
-
-// A non-private field (the reference assembly's real public static
-// LoadedEvent accessibility) keeps the declaration.
-TEST(PatternStatementTransformTest, AutomaticEventRequiresPrivateField)
-{
-    std::error_code ec;
-    if (!std::filesystem::exists(kNet48PresentationFramework, ec))
-        GTEST_SKIP() << "the net48 fixture set is not provisioned";
-    PatternStatementFixture fx;
-    ::ILSpy::Decompiler::Metadata::MetadataFile file(kNet48PresentationFramework);
-    ASSERT_TRUE(file.IsValid());
-    TS::MetadataModule module{fx.compilation, &file,
-                              TS::TypeSystemOptions::Default};
-
-    std::uint32_t eventToken = 0;
-    std::uint32_t fieldToken = 0;
-    for (const auto& t : file.TypeDefs()) {
-        if (t.Name != "FrameworkContentElement") continue;
-        for (const auto& e : file.GetEvents(t.Token))
-            if (e.Name == "Loaded") eventToken = e.Token;
-        for (const auto& f : file.GetFields(t.Token))
-            if (f.Name == "LoadedEvent") fieldToken = f.Token;
-    }
-    ASSERT_NE(eventToken, 0u);
-    ASSERT_NE(fieldToken, 0u);
-    const TS::IEvent* loaded = module.GetDefinitionEvent(eventToken);
-    ASSERT_NE(loaded, nullptr);
-
-    auto* eventDeclaration = new Syntax::EventDeclaration();
-    eventDeclaration->AddAnnotation(
-        std::make_shared<Sem::MemberResolveResult>(
-            std::shared_ptr<Sem::ResolveResult>(), loaded));
-
-    auto* fieldDeclaration = new Syntax::FieldDeclaration();
-    auto* variable = new Syntax::VariableInitializer();
-    variable->Name("LoadedEvent");
-    fieldDeclaration->Variables().Add(variable);
-    auto field = std::make_shared<EventBackingFieldStub>(
-        fx.compilation, &loaded->ReturnType(), fieldToken);
-    field->SetName("LoadedEvent");
-    // The reference assembly's real accessibility: a public static
-    // RoutedEvent field, not a backing field.
-    field->SetAccessibility(TS::Accessibility::Public);
-    field->SetParentModule(&module);
-    fieldDeclaration->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
-        std::shared_ptr<Sem::ResolveResult>(),
-        static_cast<TSImpl::FakeMember*>(field.get())));
-
-    auto type = std::make_unique<Syntax::TypeDeclaration>();
-    type->Members().Add(eventDeclaration);
-    type->Members().Add(fieldDeclaration);
-
-    RunTransform(*type, fx);
-
-    ASSERT_EQ(type->Members().Count(), 2)
-        << "a non-private field keeps its declaration";
-}
-
-// A Run entered while another Run is in flight throws (the C# reentrancy
-// guard). The step hook re-enters the transform mid-visit.
-TEST(PatternStatementTransformTest, RunIsGuardedAgainstReentrancy)
-{
-    PatternStatementFixture fx;
-    auto outer = std::make_unique<Syntax::IfElseStatement>(Id("c1"), Call("A"));
-    auto* elseBlock = new Syntax::BlockStatement();
-    elseBlock->Statements().Add(
-        new Syntax::IfElseStatement(Id("c2"), Call("B")));
-    outer->FalseStatement(elseBlock);
-    auto second = std::make_unique<Syntax::IfElseStatement>(Id("x"), Call("Y"));
-
+// The metadata-backed context for the automatic-event rewrite: `IsEventBackingFieldDeclaration`
+// reads a field's `ParentModule` / `MetadataFile` and metadata token, so the fake-member fixture
+// cannot drive it and this one builds a real mscorlib module over the fixture types.
+struct EventMetadataFixture {
+    TM::MetadataFile file;
+    EventCompilation compilation;
+    TS::MetadataModule module;
     DecompilerSettings settings;
-    DecompileRun runStorage(&settings, fx.usingScope);
-    CS::Transforms::TransformContext context;
-    context.DecompileRun = &runStorage;
-    CS::Transforms::PatternStatementTransform transform;
-    context.Step = [&transform, &second, &context](const std::string&, const void*) {
-        transform.Run(*second, context);
-    };
+    std::shared_ptr<::ILSpy::Decompiler::CSharp::TypeSystem::UsingScope> usingScope;
+    DecompileRun run;
+    std::shared_ptr<::ILSpy::Decompiler::CSharp::TypeSystem::CSharpTypeResolveContext> context;
+    Syntax::TypeSystemAstBuilder astBuilder;
 
-    EXPECT_THROW(transform.Run(*outer, context), std::logic_error);
+    explicit EventMetadataFixture(const char* path)
+        : file(path),
+          module(compilation, &file, TS::TypeSystemOptions::Default),
+          usingScope(MakeScope(module)),
+          run(&settings, usingScope),
+          context(std::make_shared<
+              ::ILSpy::Decompiler::CSharp::TypeSystem::CSharpTypeResolveContext>(
+              module, usingScope))
+    {
+        compilation.SetMainModule(&module);
+    }
+
+    std::shared_ptr<::ILSpy::Decompiler::CSharp::TypeSystem::UsingScope> MakeScope(
+        const TS::IModule& mainModule)
+    {
+        auto root = std::make_shared<
+            ::ILSpy::Decompiler::CSharp::TypeSystem::CSharpTypeResolveContext>(mainModule);
+        return std::make_shared<::ILSpy::Decompiler::CSharp::TypeSystem::UsingScope>(
+            root, mainModule.RootNamespace(), std::vector<const TS::INamespace*>{});
+    }
+
+    void Run(Syntax::AstNode& node)
+    {
+        Transforms::TransformContext transformContext(compilation, run, *context, astBuilder);
+        Transforms::PatternStatementTransform transform;
+        transform.Run(node, transformContext);
+    }
+};
+
+// The `ITypePtr` view of a member's return type (the `MemberResolveResult` requires a real
+// shared type; the metadata member's return type is owned by the type system).
+TS::ITypePtr EventTypeHandle(const TS::IType& type)
+{
+    return std::const_pointer_cast<TS::IType>(type.shared_from_this());
 }
 
-// The transform occupies the head of GetAstTransforms (the C# list position,
-// CSharpDecompiler.cs line 239).
-TEST(PatternStatementTransformTest, PipelineHeadIsPatternStatementTransform)
+const TS::IField* FindNamedField(const TS::ITypeDefinition& definition, const std::string& name)
 {
-    auto transforms = CS::CSharpDecompiler::GetAstTransforms();
-    ASSERT_FALSE(transforms.empty());
-    EXPECT_NE(dynamic_cast<CS::Transforms::PatternStatementTransform*>(
-                  transforms[0].get()),
-              nullptr)
-        << "PatternStatementTransform is the first AST transform";
+    for (const TS::IField* field : definition.Fields())
+        if (field->Name() == name)
+            return field;
+    return nullptr;
+}
+
+const TS::IEvent* FindNamedEvent(const TS::ITypeDefinition& definition, const std::string& name)
+{
+    for (const TS::IEvent* event : definition.Events())
+        if (event->Name() == name)
+            return event;
+    return nullptr;
+}
+
+// Builds `class AppDomain { int <field>; event int <event>; }` with the field/event symbols
+// annotated (the AST shape `VisitEventDeclaration` walks). `fieldVariableCount > 1` builds a
+// multi-variable field declaration.
+EventDeclModel MakeEventDeclModel(EventMetadataFixture& fixture, const TS::IField& field,
+                                  const TS::IEvent& event, int fieldVariableCount = 1)
+{
+    EventDeclModel model;
+    auto* fieldDecl = new Syntax::FieldDeclaration();
+    fieldDecl->ReturnType(new Syntax::PrimitiveType("int"));
+    fieldDecl->Variables().Add(new Syntax::VariableInitializer(field.Name()));
+    for (int i = 1; i < fieldVariableCount; i++)
+        fieldDecl->Variables().Add(
+            new Syntax::VariableInitializer("extra" + std::to_string(i)));
+    fieldDecl->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, static_cast<const TS::IMember*>(&field), EventTypeHandle(field.ReturnType())));
+
+    auto* eventDecl = new Syntax::EventDeclaration();
+    eventDecl->ReturnType(new Syntax::PrimitiveType("int"));
+    eventDecl->Variables().Add(new Syntax::VariableInitializer(event.Name()));
+    eventDecl->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, static_cast<const TS::IMember*>(&event), EventTypeHandle(event.ReturnType())));
+
+    auto* typeDecl = new Syntax::TypeDeclaration();
+    typeDecl->Name("AppDomain");
+    typeDecl->Members().Add(fieldDecl);
+    typeDecl->Members().Add(eventDecl);
+
+    model.type = typeDecl;
+    model.field = fieldDecl;
+    model.event = eventDecl;
+    return model;
+}
+
+} // namespace
+
+// A getter/setter pair over a compiler-generated backing field becomes an auto-property: the
+// accessor bodies are cleared, the backing field declaration is removed, and its remaining
+// attribute moves onto the property with the `field` target.
+TEST(PatternStatementTransformTest, ConvertsGetterSetterPairToAutoProperty)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    auto* typeDecl = model.Make();
+
+    RunTransform(fixture, *typeDecl);
+
+    EXPECT_TRUE(model.prop->IsAutomaticProperty());
+    EXPECT_EQ(model.prop->Getter()->Body(), nullptr);
+    EXPECT_EQ(model.prop->Setter()->Body(), nullptr);
+    EXPECT_EQ(model.prop->Getter()->Attributes().Count(), 0);
+    EXPECT_EQ(model.prop->Setter()->Attributes().Count(), 0);
+    EXPECT_EQ(typeDecl->Members().Count(), 1);
+    EXPECT_EQ(typeDecl->Members()[0], static_cast<Syntax::EntityDeclaration*>(model.prop));
+    ASSERT_EQ(model.prop->Attributes().Count(), 1);
+    EXPECT_EQ(model.prop->Attributes()[0]->AttributeTarget(), "field");
+    EXPECT_NE(model.prop->Attributes()[0]->Attributes()[0]
+                  ->Type(),
+              nullptr);
+}
+
+// A get-only property over a compiler-generated backing field becomes an auto-property (the
+// read-only pattern).
+TEST(PatternStatementTransformTest, ConvertsGetterOnlyPropertyToAutoProperty)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    auto* typeDecl = model.Make(/*withSetter=*/false);
+
+    RunTransform(fixture, *typeDecl);
+
+    EXPECT_TRUE(model.prop->IsAutomaticProperty());
+    EXPECT_EQ(model.prop->Getter()->Body(), nullptr);
+    EXPECT_EQ(model.prop->Setter(), nullptr);
+    EXPECT_EQ(typeDecl->Members().Count(), 1);
+}
+
+// With `AutomaticProperties` off the property is left alone.
+TEST(PatternStatementTransformTest, KeepsPropertyWhenAutomaticPropertiesDisabled)
+{
+    TransformFixture fixture;
+    fixture.settings.SetAutomaticProperties(false);
+    AutoPropertyFixture model(fixture);
+    auto* typeDecl = model.Make();
+
+    RunTransform(fixture, *typeDecl);
+
+    EXPECT_FALSE(model.prop->IsAutomaticProperty());
+    EXPECT_NE(model.prop->Getter()->Body(), nullptr);
+    EXPECT_EQ(typeDecl->Members().Count(), 2);
+}
+
+// A get-only property with `GetterOnlyAutomaticProperties` off is left alone.
+TEST(PatternStatementTransformTest, KeepsGetterOnlyPropertyWhenGetterOnlyDisabled)
+{
+    TransformFixture fixture;
+    fixture.settings.SetGetterOnlyAutomaticProperties(false);
+    AutoPropertyFixture model(fixture);
+    auto* typeDecl = model.Make(/*withSetter=*/false);
+
+    RunTransform(fixture, *typeDecl);
+
+    EXPECT_FALSE(model.prop->IsAutomaticProperty());
+    EXPECT_NE(model.prop->Getter()->Body(), nullptr);
+    EXPECT_EQ(typeDecl->Members().Count(), 2);
+}
+
+// Accessors that are not compiler-generated block the rewrite (no VB-style `_P` field here).
+TEST(PatternStatementTransformTest, KeepsPropertyWhenAccessorsNotCompilerGenerated)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    auto* typeDecl = model.Make(/*withSetter=*/true, /*useDerivedField=*/true,
+                                /*useDerivedAccessors=*/false);
+
+    RunTransform(fixture, *typeDecl);
+
+    EXPECT_FALSE(model.prop->IsAutomaticProperty());
+    EXPECT_NE(model.prop->Getter()->Body(), nullptr);
+    EXPECT_EQ(typeDecl->Members().Count(), 2);
+}
+
+// A backing field that is not compiler-generated is not hidden.
+TEST(PatternStatementTransformTest, KeepsPropertyWhenFieldNotCompilerGenerated)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    auto* typeDecl = model.Make(/*withSetter=*/true, /*useDerivedField=*/false);
+
+    RunTransform(fixture, *typeDecl);
+
+    EXPECT_FALSE(model.prop->IsAutomaticProperty());
+    EXPECT_NE(model.prop->Getter()->Body(), nullptr);
+    EXPECT_EQ(typeDecl->Members().Count(), 2);
+}
+
+// A property without a resolved symbol is left alone.
+TEST(PatternStatementTransformTest, KeepsPropertyWithoutSymbol)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    auto* typeDecl = model.Make();
+    model.prop->RemoveAnnotations<Sem::ResolveResult>();
+
+    RunTransform(fixture, *typeDecl);
+
+    EXPECT_FALSE(model.prop->IsAutomaticProperty());
+    EXPECT_NE(model.prop->Getter()->Body(), nullptr);
+    EXPECT_EQ(typeDecl->Members().Count(), 2);
+}
+
+// A `readonly set` accessor blocks the rewrite.
+TEST(PatternStatementTransformTest, KeepsPropertyWithReadonlySetter)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    auto* typeDecl = model.Make();
+    model.prop->Setter()->Modifiers(model.prop->Setter()->Modifiers()
+                                    | Syntax::Modifiers::Readonly);
+
+    RunTransform(fixture, *typeDecl);
+
+    EXPECT_FALSE(model.prop->IsAutomaticProperty());
+    EXPECT_NE(model.prop->Getter()->Body(), nullptr);
+    EXPECT_EQ(typeDecl->Members().Count(), 2);
+}
+
+// A backing field whose declaring type differs from the property's is not hidden.
+TEST(PatternStatementTransformTest, KeepsPropertyWhenFieldDeclaringTypeDiffers)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    auto* typeDecl = model.Make();
+    auto otherType = MakeNamedTypeDef(fixture.compilation, "N", "D");
+    model.field->SetDeclaringType(otherType);
+
+    RunTransform(fixture, *typeDecl);
+
+    EXPECT_FALSE(model.prop->IsAutomaticProperty());
+    EXPECT_NE(model.prop->Getter()->Body(), nullptr);
+    EXPECT_EQ(typeDecl->Members().Count(), 2);
+}
+
+// A backing-field name the regex does not recognize blocks the rewrite.
+TEST(PatternStatementTransformTest, KeepsPropertyWhenFieldNameNotBackingField)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    auto* typeDecl = model.Make();
+    model.field->SetName("otherField");
+
+    RunTransform(fixture, *typeDecl);
+
+    EXPECT_FALSE(model.prop->IsAutomaticProperty());
+    EXPECT_NE(model.prop->Getter()->Body(), nullptr);
+    EXPECT_EQ(typeDecl->Members().Count(), 2);
+}
+
+// ---- Backing-field reference replacement (VisitIdentifier) --------------------------
+
+// A reference to an auto-property's compiler backing field is rewritten to the property name and
+// the parent expression is re-annotated with a `MemberResolveResult` over the property.
+TEST(PatternStatementTransformTest, ReplacesBackingFieldReferenceWithProperty)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    model.typeDef->SetProperties({static_cast<const TS::IProperty*>(model.property.get())});
+    auto* ref = new Syntax::IdentifierExpression("<P>k__BackingField");
+    ref->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, AsMember(*model.field), fixture.FindType(TS::KnownTypeCode::Int32)));
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(new Syntax::ExpressionStatement(ref));
+
+    RunTransform(fixture, *block);
+
+    EXPECT_EQ(ref->Identifier(), "P");
+    const auto* mrr = ref->Annotation<Sem::MemberResolveResult>();
+    ASSERT_NE(mrr, nullptr);
+    EXPECT_EQ(mrr->Member(), AsPropertyMember(*model.property));
+}
+
+// The VB-style `_P` backing field is replaced too.
+TEST(PatternStatementTransformTest, ReplacesVbBackingFieldReferenceWithProperty)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    model.field->SetName("_P");
+    model.typeDef->SetProperties({static_cast<const TS::IProperty*>(model.property.get())});
+    auto* ref = new Syntax::IdentifierExpression("_P");
+    ref->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, AsMember(*model.field), fixture.FindType(TS::KnownTypeCode::Int32)));
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(new Syntax::ExpressionStatement(ref));
+
+    RunTransform(fixture, *block);
+
+    EXPECT_EQ(ref->Identifier(), "P");
+    EXPECT_EQ(ref->Annotation<Sem::MemberResolveResult>()->Member(),
+              AsPropertyMember(*model.property));
+}
+
+// With `AutomaticProperties` off the reference is left untouched.
+TEST(PatternStatementTransformTest, KeepsBackingFieldReferenceWhenAutomaticPropertiesDisabled)
+{
+    TransformFixture fixture;
+    fixture.settings.SetAutomaticProperties(false);
+    AutoPropertyFixture model(fixture);
+    model.typeDef->SetProperties({static_cast<const TS::IProperty*>(model.property.get())});
+    auto* ref = new Syntax::IdentifierExpression("<P>k__BackingField");
+    ref->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, AsMember(*model.field), fixture.FindType(TS::KnownTypeCode::Int32)));
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(new Syntax::ExpressionStatement(ref));
+
+    RunTransform(fixture, *block);
+
+    EXPECT_EQ(ref->Identifier(), "<P>k__BackingField");
+    EXPECT_EQ(ref->Annotation<Sem::MemberResolveResult>()->Member(), AsMember(*model.field));
+}
+
+// A name that is not a backing-field name is left untouched.
+TEST(PatternStatementTransformTest, KeepsNonBackingFieldReference)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    model.typeDef->SetProperties({static_cast<const TS::IProperty*>(model.property.get())});
+    auto* ref = new Syntax::IdentifierExpression("otherField");
+    ref->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, AsMember(*model.field), fixture.FindType(TS::KnownTypeCode::Int32)));
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(new Syntax::ExpressionStatement(ref));
+
+    RunTransform(fixture, *block);
+
+    EXPECT_EQ(ref->Identifier(), "otherField");
+    EXPECT_EQ(ref->Annotation<Sem::MemberResolveResult>()->Member(), AsMember(*model.field));
+}
+
+// A backing-field-named identifier whose parent carries no resolve result is left untouched.
+TEST(PatternStatementTransformTest, KeepsBackingFieldReferenceWithoutResolveResult)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    model.typeDef->SetProperties({static_cast<const TS::IProperty*>(model.property.get())});
+    auto* ref = new Syntax::IdentifierExpression("<P>k__BackingField");
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(new Syntax::ExpressionStatement(ref));
+
+    RunTransform(fixture, *block);
+
+    EXPECT_EQ(ref->Identifier(), "<P>k__BackingField");
+    EXPECT_EQ(ref->Annotation<Sem::MemberResolveResult>(), nullptr);
+}
+
+// A resolve result whose member is not a field is left untouched.
+TEST(PatternStatementTransformTest, KeepsBackingFieldReferenceWhenMemberNotField)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    model.typeDef->SetProperties({static_cast<const TS::IProperty*>(model.property.get())});
+    auto* ref = new Syntax::IdentifierExpression("<P>k__BackingField");
+    ref->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, AsMember(*model.getter), fixture.FindType(TS::KnownTypeCode::Int32)));
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(new Syntax::ExpressionStatement(ref));
+
+    RunTransform(fixture, *block);
+
+    EXPECT_EQ(ref->Identifier(), "<P>k__BackingField");
+    EXPECT_EQ(ref->Annotation<Sem::MemberResolveResult>()->Member(), AsMember(*model.getter));
+}
+
+// A non-compiler-generated backing field is left untouched.
+TEST(PatternStatementTransformTest, KeepsBackingFieldReferenceWhenFieldNotCompilerGenerated)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    auto plainField = std::make_shared<Impl::FakeField>(fixture.compilation);
+    plainField->SetName("<P>k__BackingField");
+    plainField->SetDeclaringType(model.typeDef);
+    plainField->SetReturnType(fixture.FindType(TS::KnownTypeCode::Int32));
+    model.typeDef->SetProperties({static_cast<const TS::IProperty*>(model.property.get())});
+    auto* ref = new Syntax::IdentifierExpression("<P>k__BackingField");
+    ref->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, AsMember(*plainField), fixture.FindType(TS::KnownTypeCode::Int32)));
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(new Syntax::ExpressionStatement(ref));
+
+    RunTransform(fixture, *block);
+
+    EXPECT_EQ(ref->Identifier(), "<P>k__BackingField");
+    EXPECT_EQ(ref->Annotation<Sem::MemberResolveResult>()->Member(), AsMember(*plainField));
+}
+
+// A non-compiler-generated accessor blocks the rewrite.
+TEST(PatternStatementTransformTest, KeepsBackingFieldReferenceWhenAccessorNotCompilerGenerated)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    auto plainGetter = std::make_shared<Impl::FakeMethod>(
+        fixture.compilation, TS::SymbolKind::Method);
+    plainGetter->SetName("get_P");
+    plainGetter->SetDeclaringType(model.typeDef);
+    model.property->SetGetter(plainGetter.get());
+    model.typeDef->SetProperties({static_cast<const TS::IProperty*>(model.property.get())});
+    auto* ref = new Syntax::IdentifierExpression("<P>k__BackingField");
+    ref->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, AsMember(*model.field), fixture.FindType(TS::KnownTypeCode::Int32)));
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(new Syntax::ExpressionStatement(ref));
+
+    RunTransform(fixture, *block);
+
+    EXPECT_EQ(ref->Identifier(), "<P>k__BackingField");
+    EXPECT_EQ(ref->Annotation<Sem::MemberResolveResult>()->Member(), AsMember(*model.field));
+}
+
+// A get-only property with `GetterOnlyAutomaticProperties` off blocks the rewrite.
+TEST(PatternStatementTransformTest, KeepsBackingFieldReferenceWhenGetterOnlyDisabled)
+{
+    TransformFixture fixture;
+    fixture.settings.SetGetterOnlyAutomaticProperties(false);
+    AutoPropertyFixture model(fixture);
+    model.property->SetSetter(nullptr);
+    model.typeDef->SetProperties({static_cast<const TS::IProperty*>(model.property.get())});
+    auto* ref = new Syntax::IdentifierExpression("<P>k__BackingField");
+    ref->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, AsMember(*model.field), fixture.FindType(TS::KnownTypeCode::Int32)));
+    auto* block = new Syntax::BlockStatement();
+    block->Statements().Add(new Syntax::ExpressionStatement(ref));
+
+    RunTransform(fixture, *block);
+
+    EXPECT_EQ(ref->Identifier(), "<P>k__BackingField");
+    EXPECT_EQ(ref->Annotation<Sem::MemberResolveResult>()->Member(), AsMember(*model.field));
+}
+
+// A reference inside the property's own accessor is left untouched (rewriting it would create
+// a recursive property reference).
+TEST(PatternStatementTransformTest, KeepsBackingFieldReferenceInsideOwnAccessor)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    model.typeDef->SetProperties({static_cast<const TS::IProperty*>(model.property.get())});
+    model.getter->SetAccessorOwner(AsPropertyMember(*model.property));
+    auto* ref = new Syntax::IdentifierExpression("<P>k__BackingField");
+    ref->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, AsMember(*model.field), fixture.FindType(TS::KnownTypeCode::Int32)));
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(new Syntax::ExpressionStatement(ref));
+    auto* method = new Syntax::MethodDeclaration();
+    method->Name("get_P");
+    method->ReturnType(new Syntax::PrimitiveType("int"));
+    method->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+        nullptr, AsMember(*model.getter), fixture.FindType(TS::KnownTypeCode::Int32)));
+    method->Body(body);
+
+    RunTransform(fixture, *method);
+
+    EXPECT_EQ(ref->Identifier(), "<P>k__BackingField");
+    EXPECT_EQ(ref->Annotation<Sem::MemberResolveResult>()->Member(), AsMember(*model.field));
+}
+
+// `IsBackingFieldOfAutomaticProperty` recognizes a compiler-generated backing field with a
+// matching property and rejects the non-field/non-backing-field/foreign-type shapes.
+TEST(PatternStatementTransformTest, IsBackingFieldOfAutomaticPropertyRecognizesShapes)
+{
+    TransformFixture fixture;
+    AutoPropertyFixture model(fixture);
+    model.typeDef->SetProperties({static_cast<const TS::IProperty*>(model.property.get())});
+
+    const TS::IProperty* property = nullptr;
+    EXPECT_TRUE(Transforms::PatternStatementTransform::IsBackingFieldOfAutomaticProperty(
+        *model.field, property));
+    EXPECT_EQ(property, static_cast<const TS::IProperty*>(model.property.get()));
+
+    const TS::IProperty* noProperty = nullptr;
+    auto plainField = std::make_shared<Impl::FakeField>(fixture.compilation);
+    plainField->SetName("<P>k__BackingField");
+    plainField->SetDeclaringType(model.typeDef);
+    EXPECT_FALSE(Transforms::PatternStatementTransform::IsBackingFieldOfAutomaticProperty(
+        *plainField, noProperty));
+
+    const TS::IProperty* wrongName = nullptr;
+    model.field->SetName("otherField");
+    EXPECT_FALSE(Transforms::PatternStatementTransform::IsBackingFieldOfAutomaticProperty(
+        *model.field, wrongName));
+}
+
+// ---- Automatic events --------------------------------------------------------------
+
+// A field-like event's compiler backing field (a private field whose metadata token the
+// `PropertyAndEventBackingFieldLookup` associates with the event) is removed from its type
+// when `AutomaticEvents` is on.
+TEST(PatternStatementTransformTest, RemovesEventBackingFieldDeclaration)
+{
+    const char* path = EventMscorlibPath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "mscorlib fixture not present";
+    EventMetadataFixture fixture(path);
+    ASSERT_TRUE(fixture.file.IsValid());
+    const TS::ITypeDefinition* appDomain = fixture.module.GetTypeDefinition(
+        TS::TopLevelTypeName("System", "AppDomain"));
+    ASSERT_NE(appDomain, nullptr);
+    const TS::IField* field = FindNamedField(*appDomain, "AssemblyLoad");
+    const TS::IEvent* event = FindNamedEvent(*appDomain, "AssemblyLoad");
+    ASSERT_NE(field, nullptr);
+    ASSERT_NE(event, nullptr);
+
+    EventDeclModel model = MakeEventDeclModel(fixture, *field, *event);
+    fixture.Run(*model.type);
+
+    EXPECT_EQ(model.type->Members().Count(), 1);
+    EXPECT_EQ(model.type->Members()[0], static_cast<Syntax::EntityDeclaration*>(model.event));
+}
+
+// `AutomaticEvents` off leaves the backing field declaration alone.
+TEST(PatternStatementTransformTest, KeepsEventBackingFieldWhenAutomaticEventsDisabled)
+{
+    const char* path = EventMscorlibPath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "mscorlib fixture not present";
+    EventMetadataFixture fixture(path);
+    fixture.settings.SetAutomaticEvents(false);
+    const TS::ITypeDefinition* appDomain = fixture.module.GetTypeDefinition(
+        TS::TopLevelTypeName("System", "AppDomain"));
+    ASSERT_NE(appDomain, nullptr);
+    const TS::IField* field = FindNamedField(*appDomain, "AssemblyLoad");
+    const TS::IEvent* event = FindNamedEvent(*appDomain, "AssemblyLoad");
+    ASSERT_NE(field, nullptr);
+    ASSERT_NE(event, nullptr);
+
+    EventDeclModel model = MakeEventDeclModel(fixture, *field, *event);
+    fixture.Run(*model.type);
+
+    EXPECT_EQ(model.type->Members().Count(), 2);
+    EXPECT_EQ(model.type->Members()[0], static_cast<Syntax::EntityDeclaration*>(model.field));
+}
+
+// A private field that the lookup does not associate with the event is not removed.
+TEST(PatternStatementTransformTest, KeepsUnassociatedEventSiblingField)
+{
+    const char* path = EventMscorlibPath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "mscorlib fixture not present";
+    EventMetadataFixture fixture(path);
+    const TS::ITypeDefinition* appDomain = fixture.module.GetTypeDefinition(
+        TS::TopLevelTypeName("System", "AppDomain"));
+    ASSERT_NE(appDomain, nullptr);
+    const TS::IField* field = FindNamedField(*appDomain, "_pDomain");
+    const TS::IEvent* event = FindNamedEvent(*appDomain, "AssemblyLoad");
+    ASSERT_NE(field, nullptr);
+    ASSERT_NE(event, nullptr);
+
+    EventDeclModel model = MakeEventDeclModel(fixture, *field, *event);
+    fixture.Run(*model.type);
+
+    EXPECT_EQ(model.type->Members().Count(), 2);
+    EXPECT_EQ(model.type->Members()[0], static_cast<Syntax::EntityDeclaration*>(model.field));
+}
+
+// A field declaration with more than one variable is never an event backing field.
+TEST(PatternStatementTransformTest, KeepsMultiVariableEventSiblingField)
+{
+    const char* path = EventMscorlibPath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "mscorlib fixture not present";
+    EventMetadataFixture fixture(path);
+    const TS::ITypeDefinition* appDomain = fixture.module.GetTypeDefinition(
+        TS::TopLevelTypeName("System", "AppDomain"));
+    ASSERT_NE(appDomain, nullptr);
+    const TS::IField* field = FindNamedField(*appDomain, "AssemblyLoad");
+    const TS::IEvent* event = FindNamedEvent(*appDomain, "AssemblyLoad");
+    ASSERT_NE(field, nullptr);
+    ASSERT_NE(event, nullptr);
+
+    EventDeclModel model = MakeEventDeclModel(fixture, *field, *event, 2);
+    fixture.Run(*model.type);
+
+    EXPECT_EQ(model.type->Members().Count(), 2);
+}
+
+// An event declaration without a resolved `IEvent` symbol leaves the sibling field alone.
+TEST(PatternStatementTransformTest, KeepsEventBackingFieldWhenEventSymbolMissing)
+{
+    const char* path = EventMscorlibPath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "mscorlib fixture not present";
+    EventMetadataFixture fixture(path);
+    const TS::ITypeDefinition* appDomain = fixture.module.GetTypeDefinition(
+        TS::TopLevelTypeName("System", "AppDomain"));
+    ASSERT_NE(appDomain, nullptr);
+    const TS::IField* field = FindNamedField(*appDomain, "AssemblyLoad");
+    const TS::IEvent* event = FindNamedEvent(*appDomain, "AssemblyLoad");
+    ASSERT_NE(field, nullptr);
+    ASSERT_NE(event, nullptr);
+
+    EventDeclModel model = MakeEventDeclModel(fixture, *field, *event);
+    model.event->RemoveAnnotations<Sem::MemberResolveResult>();
+    fixture.Run(*model.type);
+
+    EXPECT_EQ(model.type->Members().Count(), 2);
+    EXPECT_EQ(model.type->Members()[0], static_cast<Syntax::EntityDeclaration*>(model.field));
 }

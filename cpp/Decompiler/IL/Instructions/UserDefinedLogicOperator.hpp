@@ -42,17 +42,14 @@
 // path (the NullCoalescingInstruction D88 / IfInstruction CombineBranches
 // precedent).
 //
-// This is a tested-but-not-yet-wired foundation (the NullCoalescingInstruction
-// / MatchInstruction / UsingInstruction / NumericCompoundAssign /
-// UserDefinedCompoundAssign precedent): no pipeline transform constructs this
-// node yet. The next in-order consumer is UserDefinedLogicTransform (the
-// `LegacyPattern` / `RoslynOptimized` folds of the C# 7 user-defined
-// short-circuiting logic operator), which needs this node plus the
-// MatchCondition / MatchBitwiseCall helpers and the block-model adaptation for
-// the if-as-final shape; this header is the prerequisite that transform needs.
-// The OpCode::UserDefinedLogicOperator value was pre-declared in OpCode.hpp
-// (line 109), so porting the node needed only the subclass header (the
-// ThreeValuedBoolAnd/Or D95 / NumericCompoundAssign D125 precedent).
+// The ported UserDefinedLogicTransform (the `LegacyPattern` /
+// `RoslynOptimized` folds of the C# 7 user-defined short-circuiting logic
+// operator) constructs this node, and ExpressionBuilder::
+// VisitUserDefinedLogicOperator renders it as a `&&` / `||`
+// BinaryOperatorExpression. The OpCode::UserDefinedLogicOperator value was
+// pre-declared in OpCode.hpp (line 109), so porting the node needed only the
+// subclass header (the ThreeValuedBoolAnd/Or D95 / NumericCompoundAssign D125
+// precedent).
 
 #pragma once
 
@@ -76,6 +73,12 @@ namespace ILSpy::Decompiler::IL {
 // ResultType O, Left inlineable + Right).
 class UserDefinedLogicOperator : public BinaryInstruction {
 public:
+    // The C# `public readonly IMethod Method` -- the resolved operator method
+    // the Visit arm consumes (the parameter types drive the operand
+    // conversions, the name drives the `&&`/`||` operator lookup). Null for the
+    // seed stand-in construction form, whose string fields take over everywhere
+    // the real method is consulted.
+    std::shared_ptr<TypeSystem::IMethod> Method;
     // The resolved method name ("Namespace.Type::op_BitwiseAnd" /
     // "op_BitwiseOr"), the faithful stand-in for the C# `IMethod` (this port
     // models a method by its resolved name + declaring type, like Call and
@@ -87,12 +90,6 @@ public:
     // Carried so a future UserDefinedLogicTransform can consult it without a
     // MetadataFile handle (the pre-resolve-metadata-at-reader-time pattern).
     TypeSystem::ITypePtr MethodDeclaringType;
-    // The C# `public readonly IMethod Method` -- the resolved operator method
-    // (null on the seed string stand-in construction form). Carried so the
-    // VisitUserDefinedLogicOperator arm can read the parameter types and the
-    // op_BitwiseAnd/op_BitwiseOr name; the UserDefinedCompoundAssign (gnhf 110)
-    // precedent.
-    std::shared_ptr<TypeSystem::IMethod> Method;
 
     UserDefinedLogicOperator(std::string methodName,
                              TypeSystem::ITypePtr methodDeclaringType,
@@ -102,15 +99,6 @@ public:
                             std::move(left), std::move(right)),
           MethodName(std::move(methodName)),
           MethodDeclaringType(std::move(methodDeclaringType)) {}
-
-    // The C# ctor form (`UserDefinedLogicOperator(IMethod method,
-    // ILInstruction left, ILInstruction right)`): the resolved method populates
-    // the string stand-ins (WriteTo prints MethodName) and is kept for the
-    // VisitUserDefinedLogicOperator arm. Implemented out-of-line in the .cpp (the
-    // stand-in derivation mirrors the UserDefinedCompoundAssign gnhf-110 form).
-    UserDefinedLogicOperator(std::shared_ptr<TypeSystem::IMethod> method,
-                             std::unique_ptr<ILInstruction> left,
-                             std::unique_ptr<ILInstruction> right);
 
     // Faithful to the C# `public override StackType ResultType => StackType.O`.
     // A user-defined `&&` / `||` evaluates to the operand type (a reference

@@ -286,6 +286,7 @@ public:
 	void VisitNamedExpression(Syntax::NamedExpression*) override;
 	void VisitNamedArgumentExpression(Syntax::NamedArgumentExpression*) override;
 	void VisitErrorExpression(Syntax::ErrorExpression*) override;
+	void VisitPatternPlaceholder(Syntax::AstNode*, Syntax::PatternMatching::Pattern&) override;
 	void VisitOutVarDeclarationExpression(Syntax::OutVarDeclarationExpression*) override;
 	void VisitWithInitializerExpression(Syntax::WithInitializerExpression*) override;
 	void VisitUndocumentedExpression(Syntax::UndocumentedExpression*) override;
@@ -376,14 +377,6 @@ public:
 	void VisitQueryContinuationClause(Syntax::QueryContinuationClause*) override;
 	void VisitQueryJoinClause(Syntax::QueryJoinClause*) override;
 	void VisitSyntaxTree(Syntax::SyntaxTree*) override;
-	// The C# `virtual void VisitPatternPlaceholder(AstNode placeholder, Pattern pattern)`
-	// (CSharpOutputVisitor.cs line 2963, the "Pattern Nodes" region): renders a pattern
-	// node (the C# renders the pattern's structure for the PatternStatementTransform
-	// diagnostics). Deferred loudly with the pattern-output surface -- a pattern node
-	// never reaches the output path in the ported pipeline (the StatementBuilder's
-	// pattern objects are matched, never emitted).
-	void VisitPatternPlaceholder(Syntax::AstNode* placeholder,
-	                             Syntax::PatternMatching::Pattern* pattern) override;
 private:
 	// The throwing stub body shared by every not-yet-ported `Visit` method -- a clear, loud
 	// "not implemented" that makes the unported state explicit (distinct from a no-op, which

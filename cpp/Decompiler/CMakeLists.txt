@@ -6,6 +6,7 @@
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/SingleFileBundle.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/DecompilerSettings.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/NRExtensions.cpp
 )
 
 # DecompileRun is header-only (the C# class carries no behavior beyond the field

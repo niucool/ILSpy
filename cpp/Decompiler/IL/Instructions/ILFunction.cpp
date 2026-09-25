@@ -22,9 +22,6 @@
 // avoids pulling Call.hpp / TypeUtils.hpp into every translation unit.
 
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
-#include <cxxabi.h>
-#include <cstdlib>
-#include "Decompiler/IL/Transforms/IILTransform.hpp"
 
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
@@ -114,9 +111,15 @@ void ReassignUses(ILInstruction* inst, const ILVariablePtr& v1, const ILVariable
         case OpCode::LdLoc:
             reassign(static_cast<LdLoc*>(inst)->Variable, v1->LoadCount);
             break;
-        case OpCode::LdLoca:
-            reassign(static_cast<LdLoca*>(inst)->Variable, v1->AddressCount);
+        case OpCode::LdLoca: {
+            auto* lda = static_cast<LdLoca*>(inst);
+            if (lda->Variable.get() == v2) {
+                lda->Variable = v1;
+                ++v1->AddressCount;
+                v1->AddressInstructions.push_back(lda);
+            }
             break;
+        }
         case OpCode::StLoc:
             reassign(static_cast<StLoc*>(inst)->Variable, v1->StoreCount);
             break;
@@ -174,59 +177,12 @@ void ILFunction::RecombineVariables(ILVariablePtr variable1, ILVariablePtr varia
     variable2->LoadCount = 0;
     variable2->StoreCount = 0;
     variable2->AddressCount = 0;
+    variable2->AddressInstructions.clear();
     for (auto it = Variables.begin(); it != Variables.end(); ++it) {
         if (it->get() == variable2.get()) {
             Variables.erase(it);
             break;
         }
-    }
-}
-
-// The C# `public void RunTransforms(IEnumerable<IILTransform> transforms,
-// ILTransformContext context)` (ILFunction.cs line 402): the fixed per-body
-// pipeline driver. CheckInvariant before the loop (the C# shape), then per
-// transform: the step group start (the C# StepStartGroup(transform type
-// name) -- the port's single Step hook carries the type name), the Run,
-// and the invariant check after. The C# CancellationToken check and the
-// trace stopwatch bookkeeping are deferred with those surfaces.
-// The C# `transform.GetType().Name` equivalent: demangle the typeid name
-// (GCC's __cxa_demangle; the port's transform identities are the unmangled
-// C++ names the C# GetType().Name carries) and keep the last "::" segment
-// (the C# name is the bare class name, not the nested qualification).
-// Non-GNU toolchains fall back to the raw typeid name (a documented
-// divergence until the naming surface lands).
-static std::string TransformTypeName(const IILTransform& transform) {
-    std::string mangled = typeid(transform).name();
-#if defined(__GNUG__)
-    int status = 0;
-    std::unique_ptr<char, void (*)(void*)> demangled(
-        abi::__cxa_demangle(mangled.c_str(), nullptr, nullptr, &status),
-        std::free);
-    if (status == 0 && demangled) mangled = demangled.get();
-#endif
-    const std::size_t sep = mangled.rfind("::");
-    return sep == std::string::npos ? mangled : mangled.substr(sep + 2);
-}
-
-bool ILFunction::CapturesVariable(const ILVariable* v) const {
-    for (const auto& captured : CapturedVariables)
-        if (captured.get() == v) return true;
-    return false;
-}
-
-void ILFunction::RunTransforms(
-    const std::vector<std::unique_ptr<IILTransform>>& transforms,
-    ILTransformContext& context) {
-    CheckInvariant(ILPhase::Normal);
-    for (const std::unique_ptr<IILTransform>& transform : transforms) {
-        if (transform == nullptr) continue;
-        // The C# `context.StepStartGroup(transform.GetType().Name)` -- the
-        // port's StepOnce carries the type name (the Step/StepStartGroup/
-        // StepEndGroup fold onto one hook; the port's StepOnce guards the
-        // unset hook).
-        context.StepOnce(TransformTypeName(*transform).c_str());
-        transform->Run(*this, context);
-        CheckInvariant(ILPhase::Normal);
     }
 }
 

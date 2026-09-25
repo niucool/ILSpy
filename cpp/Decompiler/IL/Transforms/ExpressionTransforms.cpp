@@ -17,8 +17,6 @@
 // DEALINGS IN THE SOFTWARE.
 
 #include "Decompiler/IL/Transforms/ExpressionTransforms.hpp"
-
-#include "Decompiler/IL/Transforms/InlineArrayTransform.hpp"
 #include "Decompiler/IL/ConversionKind.hpp"
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
@@ -59,6 +57,8 @@
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/TypeKind.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
+
+#include <cassert>
 
 namespace ILSpy::Decompiler::IL {
 
@@ -605,7 +605,6 @@ void ExpressionTransforms::Run(Block& block, int pos, StatementTransformContext&
     // StatementTransformContext as a member). IsPatternMatch (in
     // FoldMatchTrueFalse) consults PatternCombinators/RelationalPatterns.
     settings_ = &context.Base.Settings;
-    context_ = &context;
 
     // Visit the statement at `pos` and its children (the C# AcceptVisitor on
     // block.Instructions[pos]). The sentinel pos = -1 (the driver's signal for an
@@ -629,6 +628,19 @@ void ExpressionTransforms::Run(Block& block, int pos, StatementTransformContext&
         auto* iff = dynamic_cast<IfInstruction*>(block.FinalInstruction.get());
         if (iff) VisitIfInstruction(iff);
     }
+}
+
+void ExpressionTransforms::RunOnSingleStatement(ILInstruction* statement, ILTransformContext& context) {
+    assert(statement != nullptr);
+    // The C# requires the statement to be a direct child of a Block; the port
+    // visitor walks the statement and its children, so the parent is only
+    // needed by the C# Run signature (kept as an assertion for fidelity).
+    auto* parent = dynamic_cast<Block*>(statement->Parent);
+    assert(parent != nullptr);
+    (void)parent;
+    ExpressionTransforms transform;
+    transform.settings_ = &context.Settings;
+    transform.Visit(statement);
 }
 
 void ExpressionTransforms::Visit(ILInstruction* inst) {
@@ -1080,19 +1092,11 @@ void ExpressionTransforms::VisitCall(Call* inst) {
         Visit(repPtr);
         return;
     }
-    // The C# VisitCall calls InlineArrayTransform.RunOnExpression after the
-    // fold arms and before base.VisitCall recurses into the arguments. The
-    // other two C# pieces (TransformArrayInitializers.
-    // TransformRuntimeHelpersCreateSpanInitialization,
-    // TransformAssignment.HandleCompoundAssign) stay deferred (the port
-    // carries them elsewhere / not yet).
-    if (context_->Base.Settings.InlineArrays &&
-        InlineArrayTransform::RunOnExpression(inst, *context_)) {
-        // The replacement is a fresh LdElemaInlineArray (no further arms
-        // apply); the C# does not re-visit it inside VisitCall.
-        return;
-    }
     // base.VisitCall: visit the arguments (the C# recurses into the children).
+    // The C# then calls TransformArrayInitializers.TransformRuntimeHelpersCreateSpan-
+    // Initialization, InlineArrayTransform.RunOnExpression, and
+    // TransformAssignment.HandleCompoundAssign -- all deferred (need
+    // TransformArrayInitializers / InlineArrayTransform / TransformAssignment).
     for (auto& arg : inst->Arguments) Visit(arg.get());
 }
 

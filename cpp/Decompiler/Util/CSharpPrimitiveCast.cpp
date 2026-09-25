@@ -86,6 +86,20 @@ ILSpy::Decompiler::TypeSystem::TypeCode TypeCodeOfBoxedValue(const std::any& val
         return TypeCode::Int64;
     if (type == typeid(std::uint64_t))
         return TypeCode::UInt64;
+    // The 64-bit integral spellings beyond std::int64_t/std::uint64_t: on
+    // LP64 GCC `long` is int64_t's underlying type while `long long` is a
+    // distinct type (on MSVC they coincide), and the port boxes C# `long`
+    // values through both spellings (`long long` in the statement/expression
+    // builders, std::int64_t elsewhere). Recognize every spelling so a box
+    // built either way reads as Int64/UInt64 instead of Object.
+    if (type == typeid(long long))
+        return TypeCode::Int64;
+    if (type == typeid(unsigned long long))
+        return TypeCode::UInt64;
+    if (type == typeid(long))
+        return TypeCode::Int64;
+    if (type == typeid(unsigned long))
+        return TypeCode::UInt64;
     if (type == typeid(float))
         return TypeCode::Single;
     if (type == typeid(double))
@@ -138,9 +152,9 @@ IntegralSource UnwrapIntegral(TypeCode sourceType, const std::any& input)
         case TypeCode::UInt32:
             return {static_cast<std::uint64_t>(std::any_cast<std::uint32_t>(input)), false};
         case TypeCode::Int64:
-            return {static_cast<std::uint64_t>(std::any_cast<std::int64_t>(input)), true};
+            return {static_cast<std::uint64_t>(UnboxInt64(input)), true};
         case TypeCode::UInt64:
-            return {std::any_cast<std::uint64_t>(input), false};
+            return {static_cast<std::uint64_t>(UnboxUInt64(input)), false};
         default:
             // Unreachable: the caller switches on an integral TypeCodeOfBoxedValue result.
             return {0, false};
@@ -419,9 +433,18 @@ std::any PrimitiveCast(TypeCode targetType, const std::any& input, bool isChecke
 {
     const TypeCode sourceType = TypeCodeOfBoxedValue(input);
 
-    // The C# `if (sourceType == targetType) return input;`
-    if (sourceType == targetType)
+    // The C# `if (sourceType == targetType) return input;` -- the identity
+    // return re-boxes through the canonical spelling: the 64-bit sources box
+    // through both `long long` and `std::int64_t` (= `long` on LP64 GCC, the
+    // same type as `long long` only on MSVC), and every caller downstream
+    // reads the box as the canonical type.
+    if (sourceType == targetType) {
+        if (targetType == TypeCode::Int64)
+            return std::any(UnboxInt64(input));
+        if (targetType == TypeCode::UInt64)
+            return std::any(UnboxUInt64(input));
         return input;
+    }
 
     switch (targetType)
     {
@@ -659,6 +682,28 @@ std::any PrimitiveCast(TypeCode targetType, const std::any& input, bool isChecke
 // The C# `public static object Cast(TypeCode targetType, object input, bool
 // checkForOverflow)` -- the null passthrough then the checked/unchecked pair (folded
 // into the isChecked flag the per-conversion-class helpers thread).
+// (CSharpPrimitiveCast.hpp) The 64-bit box spellings: on LP64 GCC `long long`
+// and `std::int64_t` (= `long`) are distinct types (they coincide on MSVC), and
+// the port boxes C# `long`/`ulong` values through both spellings. Extract
+// whichever the box carries.
+std::int64_t UnboxInt64(const std::any& input)
+{
+    if (input.type() == typeid(std::int64_t))
+        return std::any_cast<std::int64_t>(input);
+    if (input.type() == typeid(long long))
+        return static_cast<std::int64_t>(std::any_cast<long long>(input));
+    return static_cast<std::int64_t>(std::any_cast<long>(input));
+}
+
+std::uint64_t UnboxUInt64(const std::any& input)
+{
+    if (input.type() == typeid(std::uint64_t))
+        return std::any_cast<std::uint64_t>(input);
+    if (input.type() == typeid(unsigned long long))
+        return static_cast<std::uint64_t>(std::any_cast<unsigned long long>(input));
+    return static_cast<std::uint64_t>(std::any_cast<unsigned long>(input));
+}
+
 std::any Cast(TypeCode targetType, const std::any& input, bool checkForOverflow)
 {
     if (!input.has_value())

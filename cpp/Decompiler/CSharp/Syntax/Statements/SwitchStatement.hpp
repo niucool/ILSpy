@@ -116,7 +116,10 @@ namespace ILSpy::Decompiler::CSharp::Syntax {
 // no further derivation. The `InvocationExpression` D248 shape (a single required `Expression`
 // child at index 0 + a collection at index 1, incremental) with a `Statement` base and the
 // collection element `SwitchSection`.
-class SwitchStatement final : public Statement {
+// Not `final`: the `[DecompilerAstNode(hasPatternPlaceholder: true)]` attribute makes the C#
+// generator emit a nested `PatternPlaceholder` subclass, so the base must be inheritable (the
+// port's `PatternPlaceholderNode<SwitchStatement>`).
+class SwitchStatement : public Statement {
 public:
     ~SwitchStatement() override = default;
 

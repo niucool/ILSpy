@@ -87,10 +87,7 @@
 //     `Slots.hpp`, so no include cycle).
 //
 // The `IsAutomaticProperty` helper (a hand-written `bool` getter over `Getter.Body`/`Setter.Body`)
-// is DEFERRED -- it is consumed only by the unported transform stage
-// (`TransformFieldAndConstructorInitializers.cs`), the D234 value-vs-behavior discriminator
-// (a behavior helper consumed by an unported stage, unlike a const string which is a one-line
-// literal). It lands with the transform stage.
+// is landed above (the TransformFieldAndConstructorInitializers consumer now reaches it).
 //
 // The generated `DoMatch` (`WriteDoMatch` over `MembersToMatch`): the generator adds `Name` (a
 // `String` `MatchString` term -- `NameToken` is NOT `[ExcludeFromMatch]` on `PropertyDeclaration`,
@@ -335,6 +332,18 @@ public:
     Expression* ExpressionBody() const { return expressionBody_; }
     void ExpressionBody(Expression* value) {
         SetChildNode(expressionBody_, value);
+    }
+
+    // The C# `public bool IsAutomaticProperty` (the hand-written partial, lines 76-90): an
+    // auto-property is one whose `get`/`set` accessors carry no body (a `{ get; set; }`
+    // property). A `get`/`set` accessor with a body (or an expression body, which has no
+    // `Accessor` at all) is not automatic.
+    bool IsAutomaticProperty() const {
+        if (getter_ != nullptr && getter_->Body() != nullptr)
+            return false;
+        if (setter_ != nullptr && setter_->Body() != nullptr)
+            return false;
+        return true;
     }
 
     // ---- The per-node slot statics (pointing at the shared `Slots` kinds) ------------------

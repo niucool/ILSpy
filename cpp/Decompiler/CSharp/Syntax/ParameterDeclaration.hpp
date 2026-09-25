@@ -36,8 +36,9 @@
 // helpers). The `[DecompilerAstNode(hasPatternPlaceholder: true)]` (the explicit
 // `hasPatternPlaceholder: true` argument) means the node is NOT `sealed` (the generated
 // `PatternPlaceholder` derives from it -- the `ArrayInitializerExpression` D250 /
-// `VariableInitializer` D266 non-sealed precedent; the pattern placeholder is deferred, but the
-// class stays non-`final` to match the C# and to not block the placeholder landing). It derives
+// `VariableInitializer` D266 non-sealed precedent; the pattern placeholder is ported as the
+// generic `PatternPlaceholderNode<ParameterDeclaration>` (Syntax/PatternPlaceholder.hpp), so the
+// class stays non-`final` to match the C#). It derives
 // DIRECTLY from `AstNode` (not `EntityDeclaration`/`Expression`/`Statement`/`AstType`): a parameter
 // is a structural node owned by a declaration's `Parameters` collection, not a member declaration
 // (it carries no `SymbolKind`/`Modifiers`/`MatchAttributesAndModifiers` -- the `EntityDeclaration`

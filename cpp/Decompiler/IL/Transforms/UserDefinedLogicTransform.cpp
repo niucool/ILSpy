@@ -238,6 +238,9 @@ bool UserDefinedLogicTransform::LegacyPattern(Block& block, int pos,
     auto rhsOwned = call->TakeChild(1);
     auto userLogicOp = std::make_unique<UserDefinedLogicOperator>(
         call->MethodName, call->DeclaringType, std::move(lhsOwned), std::move(rhsOwned));
+    // Carry the resolved operator method through (the C# node's `Method`
+    // operand); null when the call's metadata was never resolved.
+    userLogicOp->Method = call->Method;
     // stloc.Value = userLogicOp (the C# `((StLoc)block.Instructions[pos]).Value =
     // userLogicOp`).
     stloc->SetChild(0, std::move(userLogicOp));

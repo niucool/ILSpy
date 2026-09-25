@@ -19,6 +19,7 @@
 #include "Decompiler/IL/BlockBuilder.hpp"
 #include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/IL/Instructions/Arglist.hpp"
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
@@ -43,11 +44,13 @@
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Instructions/RefAnyType.hpp"
+#include "Decompiler/IL/Instructions/TypedReferenceInstructions.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
+#include "Decompiler/IL/Instructions/Unbox.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/IL/StackTypeOf.hpp"
 #include "Decompiler/Metadata/ILOpCodes.hpp"
@@ -83,6 +86,7 @@ ITypePtr TypeOfValue(const ILInstruction* inst) {
         return std::make_shared<TypeSystem::ArrayType>(na->Type);
     if (auto* cc = dynamic_cast<const CastClass*>(inst)) return cc->Type;
     if (auto* ii = dynamic_cast<const IsInst*>(inst)) return ii->Type;
+    if (auto* u = dynamic_cast<const Unbox*>(inst)) return u->Type;
     if (auto* ua = dynamic_cast<const UnboxAny*>(inst)) return ua->Type;
     if (auto* ls = dynamic_cast<const LdStr*>(inst))
         return std::make_shared<KnownType>(KnownTypeCode::String);
@@ -162,6 +166,15 @@ struct ReaderState {
             return std::make_unique<LdLoc>(v);
         }
         return nullptr;  // stack underflow -> caller bails
+    }
+    // The C# `private bool CurrentStackIsEmpty()` (ILReader.cs line 599):
+    // both the pending expression trees and the committed evaluation stack
+    // are empty. The port's `currentStack` is reset per block and seeded from
+    // the block's recorded input stack (the C# `block.InputStack`), so the
+    // emptiness test reads the whole vector -- no stackBase offset (stackBase
+    // stays 0 in this reader; the field is kept for the Pop shape above).
+    bool CurrentStackIsEmpty() const {
+        return expressionStack.empty() && currentStack.empty();
     }
 };
 
@@ -540,7 +553,11 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             auto v = GetOrCreateLocal(s, idx);
             auto value = s.Pop();
             if (!value) return DecodeOutcome::Bail;
-            block->Add(std::make_unique<StLoc>(v, std::move(value)));
+            // The C# Stloc() sets the flag after the Pop (ILReader.cs line
+            // 1636): whether anything is left beneath the stored value.
+            auto stloc = std::make_unique<StLoc>(v, std::move(value));
+            stloc->ILStackWasEmpty = s.CurrentStackIsEmpty();
+            block->Add(std::move(stloc));
             break;
         }
         case ILOpCode::Ldloc_s: {
@@ -554,7 +571,9 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             auto v = GetOrCreateLocal(s, idx);
             auto value = s.Pop();
             if (!value) return DecodeOutcome::Bail;
-            block->Add(std::make_unique<StLoc>(v, std::move(value)));
+            auto stloc = std::make_unique<StLoc>(v, std::move(value));
+            stloc->ILStackWasEmpty = s.CurrentStackIsEmpty();
+            block->Add(std::move(stloc));
             break;
         }
         case ILOpCode::Ldloca_s: {
@@ -622,6 +641,10 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
                 if (!a) return DecodeOutcome::Bail;
                 args.push_back(std::move(a));
             }
+            // The C# `call.ILStackWasEmpty = CurrentStackIsEmpty()` -- evaluated
+            // after PrepareArguments popped the arguments, so the flag reports
+            // whether anything BENEATH the call's own operands survived.
+            call->ILStackWasEmpty = s.CurrentStackIsEmpty();
             for (auto it = args.rbegin(); it != args.rend(); ++it) call->AddArg(std::move(*it));
             if (op == ILOpCode::Newobj) {
                 // newobj leaves the constructed object on the stack regardless
@@ -668,6 +691,14 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             auto v = s.Pop();
             if (!v) return DecodeOutcome::Bail;
             if (!s.Push(std::make_unique<RefAnyType>(std::move(v)))) return DecodeOutcome::Bail;
+            break;
+        }
+
+        // ---- refanyval: TypedReference -> the addressed value ----
+        case ILOpCode::Refanyval: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto tr = s.Pop(); if (!tr) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<RefAnyValue>(file.ResolveTypeToken(tok, s.ownerMethodToken), std::move(tr)))) return DecodeOutcome::Bail;
             break;
         }
 
@@ -805,7 +836,14 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
             auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
             auto v = s.Pop(); if (!v) return DecodeOutcome::Bail;
-            if (!s.Push(std::make_unique<UnboxAny>(type, std::move(v)))) return DecodeOutcome::Bail;
+            // `unbox` yields a managed pointer (ref T) and only throws, while
+            // `unbox.any` has a side effect and yields T -- the C# reader maps
+            // them to distinct nodes (ILReader.cs lines 1270-1273).
+            if (op == ILOpCode::Unbox) {
+                if (!s.Push(std::make_unique<Unbox>(type, std::move(v)))) return DecodeOutcome::Bail;
+            } else {
+                if (!s.Push(std::make_unique<UnboxAny>(type, std::move(v)))) return DecodeOutcome::Bail;
+            }
             break;
         }
 
@@ -935,6 +973,8 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
             auto fieldType = file.GetFieldSignature(tok);
             std::string fieldName = file.ResolveTokenToString(tok, s.ownerMethodToken);
+            // FieldAttributes.InitOnly (0x20) is the C# `IField.IsReadOnly` bit.
+            const bool fieldIsReadOnly = (file.GetFieldAttributes(tok) & 0x20) != 0;
             if (op == ILOpCode::Ldfld || op == ILOpCode::Ldflda || op == ILOpCode::Stfld) {
                 // stfld pops value (top) then target; the loads pop only target.
                 std::unique_ptr<ILInstruction> storeValue;
@@ -948,6 +988,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
                 addr->DelayExceptions = (op != ILOpCode::Ldflda);
                 addr->FieldToken = tok;
                 addr->IsCompilerGeneratedField = file.IsFieldCompilerGeneratedOrInCompilerGeneratedClass(tok);
+                addr->FieldIsReadOnly = fieldIsReadOnly;
                 if (op == ILOpCode::Ldflda) {
                     if (!s.Push(std::move(addr))) return DecodeOutcome::Bail;
                 } else if (op == ILOpCode::Ldfld) {
@@ -959,6 +1000,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
                 auto addr = std::make_unique<LdsFlda>(fieldName);
                 addr->FieldToken = tok;
                 addr->IsCompilerGeneratedField = file.IsFieldCompilerGeneratedOrInCompilerGeneratedClass(tok);
+                addr->FieldIsReadOnly = fieldIsReadOnly;
                 if (op == ILOpCode::Ldsflda) {
                     if (!s.Push(std::move(addr))) return DecodeOutcome::Bail;
                 } else if (op == ILOpCode::Ldsfld) {
@@ -1113,6 +1155,9 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             // the type so downstream transforms (LdLocaDupInitObjTransform) and the
             // C# seed can render `default(T)` rather than a type-erased null/zero.
             auto dv = std::make_unique<DefaultValue>(type);
+            // The C# InitObj sets the flag after the target was popped
+            // (ILReader.cs line 1667).
+            dv->ILStackWasEmpty = s.CurrentStackIsEmpty();
             block->Add(std::make_unique<StObj>(std::move(ptr), std::move(dv), type));
             break;
         }
@@ -1217,9 +1262,11 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             break;
         }
 
-        // ---- arglist: push the argument list handle (vararg methods) ----
+        // ---- arglist: push the RuntimeArgumentHandle of a vararg method ----
+        // The C# ILReader pushes a dedicated Arglist node (ILReader.cs line 821),
+        // not a type-token load -- the handle is retrieved, not loaded by token.
         case ILOpCode::Arglist: {
-            if (!s.Push(std::make_unique<LdTypeToken>("arglist"))) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<Arglist>())) return DecodeOutcome::Bail;
             break;
         }
 
@@ -1295,7 +1342,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
         case ILOpCode::Mkrefany: {
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
             auto ptr = s.Pop(); if (!ptr) return DecodeOutcome::Bail;
-            if (!s.Push(std::make_unique<LdTypeToken>(file.ResolveTokenToString(tok, s.ownerMethodToken)))) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<MakeRefAny>(file.ResolveTypeToken(tok, s.ownerMethodToken), std::move(ptr)))) return DecodeOutcome::Bail;
             break;
         }
 

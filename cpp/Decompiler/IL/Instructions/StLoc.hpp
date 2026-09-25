@@ -35,6 +35,13 @@ class StLoc : public ILInstruction {
 public:
     ILVariablePtr Variable;
     std::unique_ptr<ILInstruction> Value;
+    // The C# `internal bool ILStackWasEmpty` (StLoc.cs line 37): whether the IL
+    // evaluation stack was empty after this store (evaluated by the reader
+    // after popping the stored value; only set for stores decoded from IL,
+    // not for stores the reader/transforms synthesize -- the FlushExpressionStack
+    // and dup stack-slot commits leave it false, exactly as the C# leaves it).
+    // Consulted by ILInlining's inlining-depth rule. Not part of the dump.
+    bool ILStackWasEmpty = false;
     StLoc(ILVariablePtr v, std::unique_ptr<ILInstruction> value)
         : ILInstruction(OpCode::StLoc), Variable(std::move(v)), Value(std::move(value)) {
         if (Value) { Value->Parent = this; Value->ChildIndex = 0; }

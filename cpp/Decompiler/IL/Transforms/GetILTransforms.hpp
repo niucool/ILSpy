@@ -27,7 +27,12 @@
 // ConnectionIdRewritePass -- the C# `function.RunTransforms(
 // CSharpDecompiler.GetILTransforms(), context)` site -- needs the same list).
 // The port has no CSharpDecompiler class yet, so the runner lives in the IL
-// namespace; the CSharpDecompiler-static home is the Phase-7 landing.
+// namespace; the CSharpDecompiler-static home is the Phase-7 landing. The same
+// header also carries the `CSharpDecompiler.DecompileBodyForAnalysis` prefix --
+// the pipeline truncated after the last BlockILTransform plus
+// CombineExitsTransform -- which the compiler-generated-code recognizers
+// (AutoEventDecompiler, RecordDecompiler) run over a body before matching it
+// structurally, and the fixed C# 1.0 settings that analysis runs with.
 //
 // The port-local approximations the CLI comments documented are carried as-is:
 // a transform the C# pipeline has no port for is simply absent from this list
@@ -35,12 +40,14 @@
 
 #pragma once
 
+#include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
 
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/IL/Transforms/CachedDelegateInitialization.hpp"
 #include "Decompiler/IL/Transforms/CachedReadOnlySpanInitialization.hpp"
+#include "Decompiler/IL/Transforms/CombineExitsTransform.hpp"
 #include "Decompiler/IL/Transforms/CopyPropagation.hpp"
 #include "Decompiler/IL/Transforms/DetectCatchWhenConditionBlocks.hpp"
 #include "Decompiler/IL/Transforms/EarlyExpressionTransforms.hpp"
@@ -48,17 +55,6 @@
 #include "Decompiler/IL/Transforms/FixRemainingIncrements.hpp"
 #include "Decompiler/IL/Transforms/HighLevelLoopTransform.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
-#include "Decompiler/IL/Transforms/LocalFunctionDecompiler.hpp"
-#include "Decompiler/IL/Transforms/DelegateConstruction.hpp"
-#include "Decompiler/IL/Transforms/SplitVariables.hpp"
-#include "Decompiler/IL/Transforms/IntroduceNativeIntTypeOnLocals.hpp"
-#include "Decompiler/IL/Transforms/TransformDisplayClassUsage.hpp"
-#include "Decompiler/IL/Transforms/NamedArgumentTransform.hpp"
-#include "Decompiler/IL/Transforms/DeconstructionTransform.hpp"
-#include "Decompiler/IL/Transforms/IndexRangeTransform.hpp"
-#include "Decompiler/IL/Transforms/TransformArrayInitializers.hpp"
-#include "Decompiler/IL/Transforms/TransformCollectionAndObjectInitializers.hpp"
-#include "Decompiler/IL/Transforms/TransformExpressionTrees.hpp"
 #include "Decompiler/IL/Transforms/InlineReturnTransform.hpp"
 #include "Decompiler/IL/Transforms/InterpolatedStringTransform.hpp"
 #include "Decompiler/IL/Transforms/LdLocaDupInitObjTransform.hpp"
@@ -83,140 +79,256 @@
 #include "Decompiler/IL/ControlFlow/LoopDetection.hpp"
 #include "Decompiler/IL/ControlFlow/RemoveRedundantReturn.hpp"
 #include "Decompiler/IL/ControlFlow/SwitchDetection.hpp"
-#include "Decompiler/IL/Transforms/SwitchOnStringTransform.hpp"
 #include "Decompiler/IL/ControlFlow/RemoveUnreachableBlocks.hpp"
 
 namespace ILSpy::Decompiler::IL {
 
-// The C# `CSharpDecompiler.GetILTransforms()` list, driven inline in the
-// GetILTransforms + RunTransforms order. Every comment documents the C#
-// transform it stands in for.
-// The C# `public static List<IILTransform> GetILTransforms()` (CSharpDecompiler.cs
-// line 89): the fixed per-body transform pipeline as a fresh-instance list --
-// the consumers iterate (RunTransforms is a plain loop over Run with the
-// invariant checks between entries, the ILFunction.RunTransforms driver).
-// The list order mirrors the C# GetILTransforms() list exactly, with the
-// port-local approximations the inline driver documented carried per-entry.
-// The BlockILTransform grouping (the C# block-scoped runs) is flattened:
-// every port transform is a function-level IILTransform entry (the C#
-// grouping is a scheduling detail the port's flat loop reproduces in
-// order).
-// The IILTransform adapter for the port's plain-Run transforms (the
-// BlockILTransform-grouped members whose port shape is a plain class with a
-// Run member or a static Run -- the C# wraps them in BlockILTransform
-// containers; the port's flat loop drives them through this adapter, which
-// forwards to the underlying Run exactly as the inline driver did).
-template <typename TTransform>
-class RunAdapter final : public IILTransform {
-public:
-    void Run(ILFunction& function, ILTransformContext& context) override {
-        TTransform::Run(function, context);
-    }
-};
-
-// The member-Run adapter: the port's plain classes whose Run is a non-static
-// member (the C# BlockILTransform-grouped members; the adapter holds the
-// instance and forwards).
-template <typename TTransform>
-class MemberRunAdapter final : public IILTransform {
-public:
-    void Run(ILFunction& function, ILTransformContext& context) override {
-        instance_.Run(function, context);
-    }
-private:
-    TTransform instance_;
-};
-
-inline std::vector<std::unique_ptr<IILTransform>> GetILTransforms() {
-    std::vector<std::unique_ptr<IILTransform>> transforms;
-    transforms.push_back(std::make_unique<ControlFlowSimplification>());
-    // The C# list head (CSharpDecompiler.cs line ~91-93):
-    // ControlFlowSimplification { aggressivelyDuplicateReturnBlocks } ->
-    // SplitVariables -> ILInlining; the port's ControlFlowSimplification
-    // has no duplication flag, so the SplitVariables entry follows it.
-    transforms.push_back(std::make_unique<SplitVariables>());
-    transforms.push_back(std::make_unique<StObjToStLoc>());
-    transforms.push_back(std::make_unique<ILInlining>());
-    transforms.push_back(std::make_unique<InlineReturnTransform>());
-    transforms.push_back(std::make_unique<RemoveInfeasiblePathTransform>());
-    transforms.push_back(std::make_unique<DetectPinnedRegions>());
-    transforms.push_back(std::make_unique<DetectCatchWhenConditionBlocks>());
-    transforms.push_back(std::make_unique<LdLocaDupInitObjTransform>());
-    transforms.push_back(std::make_unique<EarlyExpressionTransforms>());
-    transforms.push_back(std::make_unique<RemoveDeadVariableInit>());
-    transforms.push_back(std::make_unique<ControlFlowSimplification>());
-    transforms.push_back(std::make_unique<SwitchDetection>());
-    transforms.push_back(std::make_unique<SwitchOnStringTransform>());
-    transforms.push_back(std::make_unique<SwitchOnNullableTransform>());
-    transforms.push_back(std::make_unique<LoopDetection>());
-    transforms.push_back(std::make_unique<PatternMatchingTransform>());
-    transforms.push_back(std::make_unique<DetectExitPoints>());
-    transforms.push_back(std::make_unique<ConditionDetection>());
-    transforms.push_back(std::make_unique<LockTransform>());
-    transforms.push_back(std::make_unique<UsingTransform>());
-    transforms.push_back(
-        std::make_unique<MemberRunAdapter<CachedDelegateInitialization>>());
-    transforms.push_back(
-        std::make_unique<MemberRunAdapter<CachedReadOnlySpanInitialization>>());
-    {
-        auto statementTransform = std::make_unique<StatementTransform>();
-        // The interleaved per-statement children (the C# GetILTransforms()
-        // order: ILInlining first because it does not trigger re-runs, the
-        // rerun-mechanics transforms after).
-        statementTransform->AddChild(std::make_unique<ILInlining>());
-        statementTransform->AddChild(std::make_unique<ExpressionTransforms>());
-        statementTransform->AddChild(std::make_unique<TransformAssignment>());
-        statementTransform->AddChild(std::make_unique<NullCoalescingTransform>());
-        statementTransform->AddChild(
-            std::make_unique<NullableLiftingStatementTransform>());
-        statementTransform->AddChild(
-            std::make_unique<NullPropagationStatementTransform>());
-        statementTransform->AddChild(
-            std::make_unique<TransformArrayInitializers>());
-        statementTransform->AddChild(
-            std::make_unique<TransformCollectionAndObjectInitializers>());
-        statementTransform->AddChild(
-            std::make_unique<TransformExpressionTrees>());
-        statementTransform->AddChild(std::make_unique<DeconstructionTransform>());
-        statementTransform->AddChild(std::make_unique<IndexRangeTransform>());
-        statementTransform->AddChild(std::make_unique<NamedArgumentTransform>());
-        statementTransform->AddChild(std::make_unique<UserDefinedLogicTransform>());
-        statementTransform->AddChild(
-            std::make_unique<InterpolatedStringTransform>());
-        transforms.push_back(std::move(statementTransform));
-    }
-    transforms.push_back(std::make_unique<FixRemainingIncrements>());
-    transforms.push_back(std::make_unique<CopyPropagation>());
-    // The C# slot between CopyPropagation and LocalFunctionDecompiler
-    // (CSharpDecompiler.cs line 168): the transform Run embeds the decoded
-    // lambda bodies (the deep-decode rides the context's
-    // DelegateBodyResolver hook).
-    transforms.push_back(std::make_unique<DelegateConstruction>());
-    transforms.push_back(std::make_unique<LocalFunctionDecompiler>());
-    transforms.push_back(std::make_unique<TransformDisplayClassUsage>());
-    transforms.push_back(
-        std::make_unique<RunAdapter<HighLevelLoopTransform>>());
-    transforms.push_back(std::make_unique<ReduceNestingTransform>());
-    transforms.push_back(std::make_unique<RemoveUnreachableBlocks>());
-    transforms.push_back(std::make_unique<RemoveRedundantReturn>());
-    // The C# slot between RemoveRedundantReturn and AssignVariableNames
-    // (CSharpDecompiler.cs lines 185-186): IntroduceDynamicTypeOnLocals
-    // stays deferred with the DynamicInstruction argument-info surface;
-    // the native-integer introduction is ported.
-    // transforms.push_back(std::make_unique<IntroduceDynamicTypeOnLocals>());
-    transforms.push_back(std::make_unique<IntroduceNativeIntTypeOnLocals>());
-    // The C# tail ends with AssignVariableNames.
-    transforms.push_back(std::make_unique<AssignVariableNames>());
-    return transforms;
+// The fixed settings `DecompileBodyForAnalysis` runs with -- the C#
+// `new DecompilerSettings(LanguageVersion.CSharp1)` (CSharpDecompiler.cs line
+// 204). The C# builds a full DecompilerSettings so the analysis shape is
+// independent of the caller's user-visible settings; the port maps the fields
+// the ported transforms consult (the language-version-dependent feature gates:
+// C# 2 dropped nullables and anonymous methods, C# 6 null propagation and
+// string interpolation, C# 7 throw expressions and pattern matching, C# 8
+// recursive patterns, C# 9 native integers / relational patterns / pattern
+// combinators, C# 11 unsigned right shift and checked operators). Settings the
+// port does not model (yield/async, expression trees, ...) are omitted with
+// their transforms.
+inline ILTransformSettings AnalysisTransformSettings()
+{
+    ILTransformSettings s;
+    // The C# builds these settings internally (LanguageVersion.CSharp1), so the
+    // analysis shape does not depend on the caller's user-visible settings.
+    s.LiftNullables = false;
+    s.AnonymousMethods = false;
+    s.NullPropagation = false;
+    s.StringInterpolation = false;
+    s.ThrowExpressions = false;
+    s.PatternMatching = false;
+    s.RecursivePatternMatching = false;
+    s.PatternCombinators = false;
+    s.RelationalPatterns = false;
+    s.NativeIntegers = false;
+    s.UnsignedRightShift = false;
+    s.CheckedOperators = false;
+    return s;
 }
 
+// The prefix of the C# `CSharpDecompiler.GetILTransforms()` list up to and
+// including the last BlockILTransform (the ConditionDetection..StatementTransform
+// post-order set), driven inline in the GetILTransforms + RunTransforms order.
+// This is the part `DecompileBodyForAnalysis` keeps; `RunGetILTransforms`
+// continues with the late transforms. Every comment documents the C# transform
+// it stands in for.
+inline void RunILTransformsThroughBlockTransforms(ILFunction& function, ILTransformContext& context)
+{
+    // ControlFlowSimplification (1st pass): block cleanup the rest of the
+    // pipeline expects.
+    ControlFlowSimplification().Run(function, context);
+    // StObjToStLoc (the StObjToStLoc piece of EarlyExpressionTransforms the
+    // C# folds into its own transform): stobj(ldloca V, value) -> stloc V.
+    StObjToStLoc().Run(function, context);
+    // ILInlining: the pipeline's first inlining pass.
+    ILInlining().Run(function, context);
+    // InlineReturnTransform: must run before DetectPinnedRegions (per the
+    // C# GetILTransforms() order).
+    InlineReturnTransform().Run(function, context);
+    // Remove infeasible paths: a block that stores a known constant
+    // to a stack slot and branches to a multi-pred test block skips
+    // the test (redirected to the feasible exit; dead store dropped).
+    RemoveInfeasiblePathTransform().Run(function, context);
+    // Detect pinned regions (`fixed` blocks): must run after inlining
+    // and before loop detection (per the C# GetILTransforms() order).
+    DetectPinnedRegions().Run(function, context);
+    // Detect catch-when filter entry points: a `catch (T e) when (...)`
+    // filter starts with a redundant isinst type test (the catch is
+    // already typed T); drop it so the entry branches straight to the
+    // when-condition block. Must run after inlining and before loop
+    // detection (per the C# GetILTransforms() order).
+    DetectCatchWhenConditionBlocks().Run(function, context);
+    // ldloca; dup; initobj (Roslyn >= 2 codegen for `var v = default;`
+    // + a use of &v): rewrite `stloc s(ldloca v); stobj(ldloc s, default T)`
+    // to `stloc v(default T); stloc s(ldloca v)` so `s` can be inlined into
+    // its subsequent uses. Runs after DetectCatchWhenConditionBlocks (the
+    // deferred DetectExitPoints would sit here in the C# order) and before
+    // the second CFS, per GetILTransforms().
+    LdLocaDupInitObjTransform().Run(function, context);
+    // Early expression-level rewrites the rest of the pipeline
+    // depends on: stobj(ldloca V, ..) -> stloc V, .., ldobj(ldloca V)
+    // -> ldloc V (so ILInlining can fold them), and comparison-kind
+    // normalization against ldnull. Runs after LdLocaDupInitObjTransform,
+    // before the second CFS (per GetILTransforms()).
+    EarlyExpressionTransforms().Run(function, context);
+    // Remove dead stores to never-read variables: a variable flagged
+    // RemoveIfRedundant (by RemoveInfeasiblePath) or under the
+    // RemoveDeadStores setting, with no loads or addresses, has its
+    // stores dropped. Runs after EarlyExpressionTransforms and before
+    // the second CFS, per GetILTransforms().
+    RemoveDeadVariableInit().Run(function, context);
+    // Re-run CFS so the duplicated 1-pred return blocks merge and
+    // the single-definition variable inlines to `leave (expr)`.
+    ControlFlowSimplification().Run(function, context);
+    // SwitchDetection: reconstruct a C# switch compiled to a sequence
+    // of if-statements (non-contiguous case labels) as a single
+    // SwitchInstruction, and run SimplifySwitchInstruction as the 2nd
+    // pass on the SwitchInstructions the reader emits. Runs after the
+    // second CFS and before LoopDetection (per GetILTransforms()), so
+    // loops are still flat back-edges the continue/break analysis walks.
+    SwitchDetection().Run(function, context);
+    // SwitchOnNullable: fold the C# compiler's switch-on-
+    // Nullable<T> shapes (legacy csc and Roslyn) into a lifted
+    // SwitchInstruction with an explicit `case null:` arm. Runs
+    // after SwitchDetection and before LoopDetection (per
+    // GetILTransforms()), so ifs are still block finals with
+    // positional fall-through. Gated on LiftNullables (default true).
+    SwitchOnNullableTransform().Run(function, context);
+    LoopDetection().Run(function, context);
+    // PatternMatching: detect the C# 7.0 `is` patterns Roslyn emits
+    // (a type test plus a variable capture) and rewrite the isinst +
+    // null-test block tail into a single MatchInstruction condition
+    // (`if (expr is T x) ...`). Runs after LoopDetection and before
+    // ConditionDetection (per GetILTransforms()), so ifs are still
+    // block finals with positional fall-through.
+    PatternMatchingTransform().Run(function, context);
+    // DetectExitPoints: replace inner Branch-to-loop-exit with
+    // Leave(loop) so the following ConditionDetection can restructure
+    // `if (cond) leave` patterns (invert to `if (!cond) { body }`).
+    DetectExitPoints().Run(function, context);
+    ConditionDetection().Run(function, context);
+    // LockTransform: detect the Monitor.Enter/Exit try/finally pattern
+    // and fold it into a `lock (expr) { body }`. Runs after
+    // ConditionDetection in the BlockILTransform post-order set (per
+    // GetILTransforms()). Gated on the LockStatement setting (default true).
+    LockTransform().Run(function, context);
+    // UsingTransform: detect the IDisposable try/finally pattern and
+    // fold it into a `using (resource) { body }`. Runs after
+    // ConditionDetection and LockTransform in the BlockILTransform
+    // post-order set (per GetILTransforms()). Gated on the
+    // UsingStatement setting (default true).
+    UsingTransform().Run(function, context);
+    // CachedDelegateInitialization: collapse the lazy delegate
+    // cache (`if (v == null) v = new Delegate(...)`) into the
+    // unconditional init. Runs after ConditionDetection /
+    // LockTransform / UsingTransform in the BlockILTransform
+    // post-order set, before the StatementTransform (per GetILTransforms()).
+    // Gated on the AnonymousMethods setting (default true).
+    CachedDelegateInitialization().Run(function, context);
+    // CachedReadOnlySpanInitialization: collapse the lazy
+    // ReadOnlySpan<T>-from-array-literal cache into the unconditional
+    // init. Runs right after CachedDelegateInitialization in the
+    // BlockILTransform post-order set (per GetILTransforms()).
+    // Gated on the ArrayInitializers setting (default true).
+    CachedReadOnlySpanInitialization().Run(function, context);
+    // StatementTransform: the BlockILTransform post-order set's final
+    // member, a per-statement driver that runs the interleaved
+    // statement transforms statement-by-statement with rerun
+    // mechanics (per GetILTransforms()).
+    {
+        StatementTransform statementTransform;
+        // ILInlining: the per-statement child, first in the C#
+        // GetILTransforms() order (it doesn't trigger re-runs).
+        statementTransform.AddChild(std::make_unique<ILInlining>());
+        // ExpressionTransforms: the second per-statement child (the C#
+        // GetILTransforms() order) -- simple expression folds
+        // (comp-not/comparison-against-zero normalization).
+        statementTransform.AddChild(std::make_unique<ExpressionTransforms>());
+        // TransformAssignment: the inline- and compound-assignment
+        // folds (the next per-statement child in the C# GetILTransforms()
+        // order).
+        statementTransform.AddChild(std::make_unique<TransformAssignment>());
+        // NullCoalescingTransform: the reference-type `??` fold
+        // (the next per-statement child in the C# GetILTransforms()
+        // order).
+        statementTransform.AddChild(std::make_unique<NullCoalescingTransform>());
+        // NullableLiftingStatementTransform: the block-tail nullable
+        // expression lift (the next per-statement child in the C#
+        // GetILTransforms() order).
+        statementTransform.AddChild(std::make_unique<NullableLiftingStatementTransform>());
+        // NullPropagationStatementTransform: the block-tail `?.` /
+        // `x ?? y` statement lift (the next per-statement child in the
+        // C# GetILTransforms() order).
+        statementTransform.AddChild(std::make_unique<NullPropagationStatementTransform>());
+        // UserDefinedLogicTransform: the lifted user-defined &&/||/
+        // ?? operators on nullable operands (a later per-statement
+        // child in the C# GetILTransforms() order).
+        statementTransform.AddChild(std::make_unique<UserDefinedLogicTransform>());
+        // InterpolatedStringTransform: the C# 10/.NET 6 `$"..."` fold
+        // (the last per-statement child in the C# GetILTransforms()
+        // order). Gated on the StringInterpolation setting (default true).
+        statementTransform.AddChild(std::make_unique<InterpolatedStringTransform>());
+        statementTransform.Run(function, context);
+    }
+}
+
+// The full C# `CSharpDecompiler.GetILTransforms()` list: the block-transform
+// prefix plus the late transforms after the last BlockILTransform.
 inline void RunGetILTransforms(ILFunction& function, ILTransformContext& context)
 {
-    // The C# `function.RunTransforms(GetILTransforms(), context)` -- the
-    // list + the RunTransforms driver (the CheckInvariant between the
-    // entries and the per-transform step groups are the driver's job now,
-    // replacing the inline call sequence).
-    function.RunTransforms(GetILTransforms(), context);
+    RunILTransformsThroughBlockTransforms(function, context);
+    // HighLevelLoopTransform: turn the `while (true)` + break
+    // structure LoopDetection+ConditionDetection produced into a
+    // `while (cond)` container. Runs after the StatementTransform
+    // (per GetILTransforms()).
+    HighLevelLoopTransform::Run(function, context);
+    // FixRemainingIncrements: the user-defined `op_Increment`/
+    // `op_Decrement` calls TransformAssignment did not fold. Runs
+    // after the StatementTransform + HighLevelLoopTransform and before
+    // CopyPropagation (per GetILTransforms: ProxyCallReplacer,
+    // FixRemainingIncrements, CopyPropagation; ProxyCallReplacer is
+    // deferred).
+    FixRemainingIncrements().Run(function, context);
+    // CopyPropagation: drop dead stores to stack slots and propagate
+    // single-def stack slots. Runs late, after the StatementTransform +
+    // HighLevelLoopTransform (per GetILTransforms).
+    CopyPropagation().Run(function, context);
+    AssignVariableNames().Run(function, context);
+    // ReduceNestingTransform: EliminateRedundantTryFinally +
+    // ImproveILOrdering. Runs after HighLevelLoopTransform (per
+    // GetILTransforms: the C# order is HighLevelLoopTransform,
+    // ReduceNestingTransform, RemoveRedundantReturn).
+    ReduceNestingTransform().Run(function, context);
+    // RemoveUnreachableBlocks: drop blocks with no reachable path from
+    // the container entry (the C# BlockContainer.SortBlocks(
+    // deleteUnreachableBlocks: true) subset). Runs BEFORE
+    // RemoveRedundantReturn so a trailing empty dead block does not
+    // shadow the real last reachable block's `return;`.
+    RemoveUnreachableBlocks().Run(function, context);
+    RemoveRedundantReturn().Run(function, context);
+}
+
+// CSharpDecompiler.DecompileBodyForAnalysis's transform list
+// (CSharpDecompiler.cs lines 205-212): the GetILTransforms() list truncated
+// after the last BlockILTransform, with CombineExitsTransform appended so a
+// release-mode `return a && b` body stays a single statement. The C# drops
+// every transform after the last BlockILTransform (the late naming/cleanup
+// passes) before appending it; this runner is the port's equivalent of that
+// transform list. Settings are the caller's -- `DecompileBodyForAnalysis`
+// supplies the fixed C# 1.0 set (AnalysisTransformSettings).
+inline void RunILTransformsForAnalysis(ILFunction& function, ILTransformContext& context)
+{
+    RunILTransformsThroughBlockTransforms(function, context);
+    // Without this, a release-mode `return other != null && ...;` is a chain
+    // of conditional exits instead of one statement (the C# comment).
+    CombineExitsTransform().Run(function, context);
+}
+
+// CSharpDecompiler.DecompileBodyForAnalysis (CSharpDecompiler.cs line 187):
+// read a method body and run the analysis transform prefix, so that
+// compiler-generated-code recognizers (AutoEventDecompiler, RecordDecompiler)
+// structurally match the body regardless of the caller's user-visible settings.
+// The C# returns the entry block (or null when the body is absent); the port
+// returns the decoded function so the caller reads `function->Body`, and null
+// in the same cases (nil token, no body, undecodable IL).
+inline std::unique_ptr<ILFunction> DecompileBodyForAnalysis(const Metadata::MetadataFile& file,
+                                                            std::uint32_t methodToken,
+                                                            std::uint32_t rva)
+{
+    auto function = ReadIL(file, methodToken, rva);
+    if (!function) return nullptr;
+    ILTransformContext context;
+    context.Settings = AnalysisTransformSettings();
+    RunILTransformsForAnalysis(*function, context);
+    return function;
 }
 
 } // namespace ILSpy::Decompiler::IL

@@ -46,6 +46,11 @@
 namespace ILSpy::Decompiler::Util {
 
 // The Unicode letter or decimal-digit units (L* and Nd) over the BMP.
+// The C# `char.IsLetter(char)` -- the L* category over the BMP (the
+// IsLetterOrDigit table minus the Nd digit units, probed unit-by-unit the
+// same way). First consumer: AssignVariableNames.IsValidName.
+bool IsLetter(char16_t c);
+
 bool IsLetterOrDigit(char16_t c);
 
 // The Unicode whitespace units (the string.Trim() set) over the BMP.

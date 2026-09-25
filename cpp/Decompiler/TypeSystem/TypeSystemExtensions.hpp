@@ -103,6 +103,15 @@ inline std::vector<const IType*> GetNonInterfaceBaseTypes(const IType& type)
     return GetNonInterfaceBaseTypes(&type);
 }
 
+// The C# `INamespace? GetNamespaceByFullName(this ICompilation compilation, string?
+// name)` (TypeSystemExtensions.cs line 877): walks the root namespace down the
+// dot-separated parts of `name`; an empty/null name yields the root namespace and a
+// missing child yields null. The C# `string.Split('.')` with no options gives one
+// empty part for an empty string, which would look up an empty-named child; the port
+// short-circuits on the empty name first (the `string.IsNullOrEmpty` guard), matching
+// the C# which returns the root before visiting any part.
+const INamespace* GetNamespaceByFullName(const ICompilation& compilation, const std::string& name);
+
 // The C# `IEnumerable<ITypeDefinition> GetAllBaseTypeDefinitions(this IType type)`:
 //
 // "Gets all base type definitions. The output is ordered so that base types
@@ -295,6 +304,15 @@ bool IsAnyPointer(TypeKind typeKind);
 // `as ParameterizedType` test).
 const IType* SkipModifiers(const IType& type);
 
+// The C# `public static IType UnwrapByRef(this IType type)`
+// (TypeSystemExtensions.cs line 434): strip one `ByReferenceType` wrapper,
+// answering the element type; any other type (including other wrappers) is
+// returned unchanged. First consumer: IsUnambiguousCall's out-var
+// type-mismatch check (the out parameter's unwrapped type).
+const IType& UnwrapByRef(const IType& type);
+
+const IType* SkipModifiers(const IType& type);
+
 // The C# `public static IType WithoutNullability(this IType type)` (TypeSystemExtensions.cs
 // line 799) -- `type.ChangeNullability(Nullability.Oblivious)`: the same type with the
 // nullability annotation erased (the pre-C#-8 default annotation). The C# extension's
@@ -415,29 +433,6 @@ ITypePtr GetElementTypeFromIEnumerable(const IType& collectionType,
 // guards because it reads raw metadata rows).
 bool IsCompilerGeneratedOrIsInCompilerGeneratedClass(const IEntity* entity);
 
-// The C# `public static bool HasGeneratedName(this IType type)` (NRExtensions.cs
-// line 51, over SRMExtensions' internal IsGeneratedName): whether the type's
-// name carries the mangled prefix the compilers use for declarations with no
-// user-written form (a leading '<' or an embedded '$' -- neither is legal in a
-// C# or VB identifier).
-bool HasGeneratedName(const IType& type);
-
-// The C# `static bool HasOnlyReadOnlyProperties(ITypeDefinition type)`
-// (NRExtensions.cs line 67): every property of the type is read-only (the
-// C# anonymous-type shape -- all members take part in Equals/GetHashCode and
-// are immutable).
-bool HasOnlyReadOnlyProperties(const ITypeDefinition& type);
-
-// The C# `public static bool IsAnonymousType(this IType type)` (NRExtensions.cs
-// line 79): a C# anonymous type -- the compiler-generated, empty-namespace
-// generated-name shape whose properties are all read-only. A settable
-// property (the VB shape) keeps its own declaration.
-bool IsAnonymousType(const IType& type);
-
-// The C# `public static bool ContainsAnonymousType(this IType type)`
-// (NRExtensions.cs line 99): whether any type nested in the composition is an
-// anonymous type (the `var` decision for declarations over such a type).
-bool ContainsAnonymousType(const IType& type);
 
 // The C# `internal static bool IsPotentialClosure(ITypeDefinition
 // decompiledTypeDefinition, ITypeDefinition potentialDisplayClass, bool

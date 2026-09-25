@@ -26,11 +26,11 @@
 //
 // Deferrals (documented at each member): the CancellationToken (the port has no
 // cooperative-cancel machinery -- the C# ctor only stores it, and every consumer
-// calls ThrowIfCancellationRequested() which is a no-op here); the
-// DocumentationProvider (IDocumentationProvider, the XML-doc provider -- no ported
-// consumer yet); RecordDecompilers / AutomaticEvents / TypeHierarchyIsKnown (the
-// CSharpDecompiler type-declaration slices that fill them are not ported yet --
-// the dictionaries land with those slices).
+// calls ThrowIfCancellationRequested() which is a no-op here); RecordDecompilers /
+// TypeHierarchyIsKnown (the CSharpDecompiler type-declaration slices that fill
+// them are not ported yet -- the dictionaries land with those slices). The
+// DocumentationProvider is a caller-supplied interface pointer (the concrete
+// XmlDocumentationProvider stays with a later Decompiler slice).
 
 #pragma once
 
@@ -41,7 +41,17 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
+
+namespace ILSpy::Decompiler::Documentation {
+class IDocumentationProvider;
+}
+
+namespace ILSpy::Decompiler::TypeSystem {
+class IEvent;
+class IField;
+}
 
 namespace ILSpy::Decompiler {
 
@@ -54,9 +64,9 @@ enum class EnumValueDisplayMode {
     FirstOnly
 };
 
-// The C# `internal class DecompileRun`. The C# `IDocumentationProvider` /
-// `RecordDecompilers` / `AutomaticEvents` / `TypeHierarchyIsKnown` members are
-// the documented deferrals above.
+// The C# `internal class DecompileRun`. The C# `RecordDecompilers` /
+// `AutomaticEvents` / `TypeHierarchyIsKnown` members are the documented deferrals
+// above.
 class DecompileRun {
 public:
     // The C# `public HashSet<string> DefinedSymbols { get; }` -- the #define symbols
@@ -88,6 +98,28 @@ public:
         return usingScope_;
     }
 
+    // The C# `public IDocumentationProvider? DocumentationProvider { get; set; }` --
+    // the optional XML documentation source. A non-owning pointer (the C# nullable
+    // reference; the caller owns the provider). Null when no documentation is
+    // supplied, which is the `AddXmlDocumentationTransform` early-out.
+    const Documentation::IDocumentationProvider* DocumentationProvider() const {
+        return documentationProvider_;
+    }
+    void SetDocumentationProvider(const Documentation::IDocumentationProvider* provider) {
+        documentationProvider_ = provider;
+    }
+
+    // The C# `public Dictionary<IEvent, IField?> AutomaticEvents { get; }` -- the
+    // memoized AutoEventDecompiler verdicts (a null value is the "not an automatic
+    // event" verdict). The C# ctor initializes it empty; consumers route through
+    // AutoEventDecompiler.IsAutomaticEvent, which memoizes so all consumers decide
+    // from the same analysis. The keys/values are non-owning (the type system owns
+    // the members); the map keys on the IEvent identity (the C# reference equality).
+    std::unordered_map<const TypeSystem::IEvent*, const TypeSystem::IField*>&
+    AutomaticEvents() {
+        return automaticEvents_;
+    }
+
     // The C# ctor `DecompileRun(DecompilerSettings settings, UsingScope usingScope)`
     // with both ArgumentNullException guards. The settings port alias: the caller
     // owns the bag (the C# GC reference); the using scope is the port's
@@ -108,6 +140,9 @@ private:
     std::optional<std::unordered_set<std::string>> namespaces_;
     const DecompilerSettings* settings_;
     std::shared_ptr<CSharp::TypeSystem::UsingScope> usingScope_;
+    const Documentation::IDocumentationProvider* documentationProvider_ = nullptr;
+    std::unordered_map<const TypeSystem::IEvent*, const TypeSystem::IField*>
+        automaticEvents_;
 };
 
 } // namespace ILSpy::Decompiler

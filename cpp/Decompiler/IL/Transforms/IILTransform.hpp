@@ -24,15 +24,16 @@
 
 #pragma once
 
-#include <functional>
 #include <cstdint>
+#include <functional>
 #include <memory>
 
-namespace ILSpy::Decompiler::TypeSystem { class ICompilation; }
-namespace ILSpy::Decompiler::Metadata { class MetadataFile; }
+namespace ILSpy::Decompiler::CSharp::Resolver {
+class CSharpResolver;
+}
 
-namespace ILSpy::Decompiler::TypeSystem {
-class ITypeDefinition;
+namespace ILSpy::Decompiler {
+class DecompilerSettings;
 }
 
 namespace ILSpy::Decompiler::IL {
@@ -103,16 +104,6 @@ struct ILTransformSettings {
     // unconditional (like the NullableLifting helpers), but the transform that
     // consumes it is gated here.
     bool AnonymousMethods = true;
-    // Whether to wire local-function uses into the enclosing function (the C#
-    // settings.LocalFunctions, default true; gates LocalFunctionDecompiler --
-    // not yet in the pipeline, the transform shell lands first).
-    bool LocalFunctions = true;
-    // Whether scalar replacement of aggregates may drop the display-class
-    // gates (the C# settings.AggressiveScalarReplacementOfAggregates,
-    // default false) -- with it on, any struct/class-kind local is a SROA
-    // candidate; with it off, only compiler-generated display classes in the
-    // decompiled type's own nesting tree qualify.
-    bool AggressiveScalarReplacementOfAggregates = false;
     // Whether to recover array/collection/object initializers (and the
     // compiler-generated ReadOnlySpan<char> cache Roslyn emits for a
     // multi-byte array literal on frameworks without RuntimeHelpers.
@@ -123,59 +114,6 @@ struct ILTransformSettings {
     // transforms recover the literal and the <PrivateImplementationDetails>
     // cache field disappears from the output.
     bool ArrayInitializers = true;
-    // Whether to fold the collection/object initializer statements back into
-    // a Block initializer (the C# 3.0 `new List<int> { 1, 2 }` /
-    // `new Data { A = 1 }` recovery). DecompilerSettings.
-    // ObjectOrCollectionInitializers -- default true. Gates
-    // TransformCollectionAndObjectInitializers (the per-statement transform
-    // after TransformArrayInitializers) and its IsPartOfInitializer scan.
-    bool ObjectOrCollectionInitializers = true;
-    // Whether to fold the deconstruction assignments (the C# 7
-    // `var (a, b) = expr;` / `var (a, b) = o;` recovery into a single
-    // DeconstructInstruction). DecompilerSettings.Deconstruction -- default
-    // true. Gates DeconstructionTransform (the per-statement transform
-    // between TransformCollectionAndObjectInitializers and
-    // IndexRangeTransform; the tuple-designation arms are deferred with the
-    // TupleType surface).
-    // Whether to detect C# `inline array` types (`[InlineArray(N)]` structs)
-    // accessed through the compiler-generated helpers. DecompilerSettings.
-    // InlineArrays -- default true. Gates InlineArrayTransform (the
-    // RunOnExpression folds inside ExpressionTransforms).
-    bool InlineArrays = true;
-    // Whether to fold the compiler's switch-on-string shapes into a
-    // SwitchInstruction over a StringToInt hash dispatch (the C#
-    // settings.SwitchStatementOnString, default true).
-    bool SwitchStatementOnString = true;
-    // Whether a switch over a ReadOnlySpan<char>/Span<char> local is
-    // recognized alongside the string shapes (the C#
-    // settings.SwitchOnReadOnlySpanChar).
-    bool SwitchOnReadOnlySpanChar = true;
-    // Whether to fold LINQ Expression.Lambda call trees back into
-    // ILFunctions (the C# settings.ExpressionTrees, default false).
-    bool ExpressionTrees = false;
-    bool Deconstruction = true;
-    // Whether to detect the dictionary-initializer form inside the
-    // object-initializer scan (`dict["k"] = v` and the index-variable stloc
-    // entries). DecompilerSettings.DictionaryInitializers -- default true.
-    bool DictionaryInitializers = true;
-    // Whether `with`-expression constructs (record clone calls and
-    // WithInitializer blocks) are decompiled. DecompilerSettings.
-    // WithExpressions -- default true. Gates the record-clone
-    // (IsRecordCloneMethodCall) arm and the with-initializer block kind.
-    bool WithExpressions = true;
-    // Whether to decompile `new T()` over a generic type parameter via the
-    // Activator.CreateInstance pattern (the C# 2.0
-    // UseObjectCreationOfGenericTypeParameter setting). Default false (the
-    // C# < CSharp2 default; the port's ILTransformSettings default follows
-    // DecompilerSettings::SetLanguageVersion's CSharp2 gate). Gates the
-    // Activator.CreateInstance arm of TransformCollectionAndObjectInitializers.
-    bool UseObjectCreationOfGenericTypeParameter = false;
-    // Whether to introduce named arguments (the C# 4.0 named-argument
-    // recovery). DecompilerSettings.NamedArguments -- default true. Gates
-    // NamedArgumentTransform.Run (the per-statement transform the
-    // StatementTransform consults; the InliningOptions.IntroduceNamedArguments
-    // option it ORs into the inlining options).
-    bool NamedArguments = true;
     // Whether to detect the C# 6.0 null-conditional operator (`?.`).
     // DecompilerSettings.NullPropagation -- default true. Gates
     // NullPropagationTransform (the `v != null ? v.AccessChain : null` ->
@@ -229,11 +167,6 @@ struct ILTransformSettings {
     // allowed only when the unsigned-right-shift operator is available (the
     // `signMismatchAllowed` gate).
     bool UnsignedRightShift = true;
-    // Whether to decompile the C# 8 System.Index / System.Range patterns (the
-    // `array[^1]` / `span[a..b]` recovery). DecompilerSettings.Ranges --
-    // default true. Gates IndexRangeTransform (both the Run statement driver
-    // and the HandleLdElema expression hook the ExpressionTransforms call).
-    bool Ranges = true;
     // Whether to use C# 11.0 user-defined checked operators
     // (`op_CheckedIncrement` / `op_CheckedDecrement`). DecompilerSettings.
     // CheckedOperators -- a C# 11.0 setting, default true (false only for the
@@ -252,52 +185,67 @@ struct ILTransformSettings {
     // call sequence stays as the raw calls instead of folding to a $"..."
     // InterpolatedString block.
     bool StringInterpolation = true;
+    // DecompilerSettings.NamedArguments (the C# `UseNamedArguments`, default
+    // true). Gates NamedArgumentTransform: with it off a call whose argument
+    // ordering blocks inlining keeps the original order instead of being
+    // rewritten to a named-argument call. Consulted by the transform's Run.
+    bool NamedArguments = true;
+    // DecompilerSettings.ObjectOrCollectionInitializers -- a C# 3.0 setting,
+    // default true. Gates TransformCollectionAndObjectInitializers: with it
+    // off the `stloc v(newobj T(...)); call set_P(ldloc v, ...)` statement
+    // sequences stay as separate statements instead of folding into an
+    // object/collection-initializer block.
+    bool ObjectOrCollectionInitializers = true;
+    // DecompilerSettings.UseObjectCreationOfGenericTypeParameter -- a C# 2.0
+    // setting, default true. Consulted by the same transform's
+    // Activator.CreateInstance<T> arm: with it off the `stloc v(call
+    // Activator.CreateInstance<T>())` head stays a call instead of becoming
+    // `new T()` (the `default(T)` object-creation render).
+    bool UseObjectCreationOfGenericTypeParameter = true;
+    // DecompilerSettings.WithExpressions -- a C# 9.0 setting, default true.
+    // Consulted by the same transform's record-clone arm: with it off a
+    // `<Clone>$` call head stays a call instead of becoming a
+    // BlockKind.WithInitializer block.
+    bool WithExpressions = true;
+    // DecompilerSettings.DictionaryInitializers -- a C# 6.0 setting, default
+    // true. Consulted by TransformCollectionAndObjectInitializers.
+    // IsPartOfInitializer: with it off the single-definition local stores the
+    // scan collects as possible index variables (the C# 6
+    // `{ [key] = value }` dictionary-initializer indices) are rejected, and
+    // GetAccessPath's accessor-path arm drops parameterized accesses (the
+    // `settings?.DictionaryInitializers == false` gate).
+    bool DictionaryInitializers = true;
 };
 
 class ILTransformContext {
 public:
     ILTransformSettings Settings;
+    // The C# ILTransformContext's full DecompilerSettings (`context.Settings`,
+    // defaulting to `new DecompilerSettings()` when the caller passes null) and
+    // its lazily-created CSharpResolver (`context.CSharpResolver`) -- the two
+    // C#-layer fields the C# context carries natively, which cross-layer
+    // transforms (TransformCollectionAndObjectInitializers's IsPartOfInitializer
+    // passes both into AccessPathElement.GetAccessPath) consult. The port keeps
+    // them as nullable non-owning handles following the D78 convention: the
+    // IL-layer pipeline callers (the seed CLI paths) leave them null, which
+    // reproduces the C# default-constructed-settings gates (both consulted
+    // settings default on) and skips the resolver-driven applicability checks
+    // (GetAccessPath's `resolver != null` branches); the C#-layer pipeline and
+    // the tests set them for the faithful resolver-checked behavior. The
+    // resolver member name avoids the self-named-member trap (a member named
+    // CSharpResolver would shadow the CSharpResolver TYPE in the class scope).
+    const ::ILSpy::Decompiler::DecompilerSettings* CSharpSettings = nullptr;
+    ::ILSpy::Decompiler::CSharp::Resolver::CSharpResolver* Resolver = nullptr;
     // Debug transition log (C# ILTransformContext.Step). Set by tools/tests to
     // observe per-step rewrites; null in production.
     std::function<void(const char* what)> Step;
-    // The C# `public IDecompilerTypeSystem TypeSystem` (ILTransformContext.cs)
-    // -- the decompilation's type system the transforms consult (the port
-    // stores the raw ICompilation; the C# surface is the
-    // SimpleCompilation-derived interface). Null in the minimal construction;
-    // the transforms that need it (NamedArgumentIntroduce's FindType) assert.
-    ::ILSpy::Decompiler::TypeSystem::ICompilation* TypeSystem = nullptr;
-    // The C# `ReadLocalFunctionDefinition` deep-decode entry
-    // (LocalFunctionDecompiler.cs): resolves a local function's decoded body
-    // from the metadata (the C# path reads the method body through
-    // context.CreateILReader(); the production wiring lands with the
-    // reader's token surface). The hook takes the full method name (the
-    // "Namespace.Type::<caller>g__fn|n" identity the IL reader records) and
-    // returns the decoded ILFunction, or null when the method has no
-    // decodable body. Unset by default; the LocalFunctionDecompiler walk
-    // consults it on a use-site's first sighting.
-    std::function<std::unique_ptr<ILFunction>(const std::string&)>
-        LocalFunctionBodyResolver;
-    // The C# `resolveContext.CurrentTypeDefinition` (the
-    // SimpleTypeResolveContext(function.Method) of LocalFunctionDecompiler.Run):
-    // the declaring type of the function being decompiled -- the current-type
-    // anchor the closure-parameter / potential-closure checks consult. Null in
-    // the minimal construction (the checks then reject: a null current type is
-    // not part of any type tree).
-    const ::ILSpy::Decompiler::TypeSystem::ITypeDefinition* CurrentTypeDefinition
-        = nullptr;
-    // The metadata module the transforms deep-decode through (the C# context
-    // carries the PEFile; the port's transforms consult the MetadataFile for
-    // the metadata-level probes -- LocalFunctionDecompiler.IsLocalFunctionMethod
-    // -- and the deep-decode inputs). Null in the minimal construction; the
-    // probes that need it reject when null.
-    ::ILSpy::Decompiler::Metadata::MetadataFile* Metadata = nullptr;
-    // The DelegateConstruction deep-decode entry (the C#
-    // context.CreateILReader() + GetMethodBody + ReadIL(..., ILFunctionKind.
-    // Delegate, genericContext) path): resolves a delegate target's body from
-    // the metadata. The hook takes the MethodDef token and the RVA and
-    // returns the decoded ILFunction (the caller sets Kind/DelegateType), or
-    // null when the body does not decode. Unset by default; production wiring
-    // is ReadIL(module, token, rva) at the facade call site.
+
+    // The delegate-body deep-decode hook (the facade's addition): resolves a
+    // delegate-construction method's body out-of-band through the metadata. The
+    // hook takes the MethodDef token and the RVA and returns the decoded
+    // ILFunction (the caller sets Kind/DelegateType), or null when the body does
+    // not decode. Unset by default; production wiring is ReadIL(module, token,
+    // rva) at the facade call site.
     std::function<std::unique_ptr<ILFunction>(std::uint32_t methodToken,
                                               std::uint32_t methodRva)>
         DelegateBodyResolver;

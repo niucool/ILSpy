@@ -37,9 +37,11 @@
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
+#include "Decompiler/IL/Instructions/DefaultValue.hpp"
 #include "Decompiler/IL/Instructions/CompoundAssignmentInstruction.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/IL/Instructions/InvalidInstructions.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
@@ -156,6 +158,30 @@ TEST(ILInstructionClone, LdcI4ClonesScalar) {
     auto clone = AssertCloneInvariants(ldc);
     ASSERT_TRUE(clone);
     EXPECT_EQ(static_cast<LdcI4*>(clone.get())->Value, 42);
+}
+
+// The invalid-IL leaves carry scalar fields (Message/Severity/ExpectedResultType)
+// that the clone must copy.
+TEST(ILInstructionClone, InvalidLeavesCloneScalars) {
+    InvalidBranch ib(std::string("no block"));
+    ib.ExpectedResultType = StackType::I4;
+    auto ibClone = AssertCloneInvariants(ib);
+    ASSERT_TRUE(ibClone);
+    auto* ibc = static_cast<InvalidBranch*>(ibClone.get());
+    ASSERT_TRUE(ibc->Message.has_value());
+    EXPECT_EQ(*ibc->Message, "no block");
+    EXPECT_EQ(ibc->ExpectedResultType, StackType::I4);
+
+    InvalidExpression ie(std::string("goto emulation"));
+    ie.Severity = "Note";
+    ie.ExpectedResultType = StackType::O;
+    auto ieClone = AssertCloneInvariants(ie);
+    ASSERT_TRUE(ieClone);
+    auto* iec = static_cast<InvalidExpression*>(ieClone.get());
+    EXPECT_EQ(iec->Severity, "Note");
+    ASSERT_TRUE(iec->Message.has_value());
+    EXPECT_EQ(*iec->Message, "goto emulation");
+    EXPECT_EQ(iec->ExpectedResultType, StackType::O);
 }
 
 // A one-value-slot node: the Value child is deep-cloned and reparented; mutating
@@ -428,4 +454,49 @@ TEST(ILInstructionClone, MscorlibSweepClonesEveryInstruction) {
     }
     EXPECT_GT(processed, 5000);
     EXPECT_GT(totalCloned, 100000) << "the sweep cloned a meaningful number of instructions";
+}
+
+// The ILStackWasEmpty scalar (the C# CallInstruction / DefaultValue / StLoc
+// public fields) rides along with the clone: the C# Clone copies every field,
+// and the CSharp back end re-clones reader-built subtrees (e.g. the local
+// function / proxy-call replacements) expecting the flag to survive.
+
+TEST(ILInstructionClone, ILStackWasEmptyScalarRidesTheClone)
+{
+    auto variable = std::make_shared<ILVariable>();
+    variable->Kind = VariableKind::Local;
+    variable->Type = nullptr;
+    variable->Index = 0;
+
+    // A call with the flag set (a reader-built statement-level call).
+    Call call("Ns.T::M");
+    call.ILStackWasEmpty = true;
+    call.AddArg(std::make_unique<LdLoc>(variable));
+    auto callClone = call.Clone();
+    auto* clonedCall = dynamic_cast<Call*>(callClone.get());
+    ASSERT_NE(clonedCall, nullptr);
+    EXPECT_TRUE(clonedCall->ILStackWasEmpty);
+    EXPECT_FALSE(clonedCall->IsNewObj);
+
+    // A store with the flag set.
+    StLoc store(variable, std::make_unique<LdLoc>(variable));
+    store.ILStackWasEmpty = true;
+    auto storeClone = store.Clone();
+    auto* clonedStore = dynamic_cast<StLoc*>(storeClone.get());
+    ASSERT_NE(clonedStore, nullptr);
+    EXPECT_TRUE(clonedStore->ILStackWasEmpty);
+
+    // A default-value with the flag set (the initobj construction).
+    DefaultValue defaultValue(
+        std::make_shared<ILSpy::Decompiler::TypeSystem::KnownType>(ILSpy::Decompiler::TypeSystem::KnownTypeCode::Int32));
+    defaultValue.ILStackWasEmpty = true;
+    auto dvClone = defaultValue.Clone();
+    auto* clonedDv = dynamic_cast<DefaultValue*>(dvClone.get());
+    ASSERT_NE(clonedDv, nullptr);
+    EXPECT_TRUE(clonedDv->ILStackWasEmpty);
+
+    // The default (a hand-built node) stays false after a clone.
+    Call plain("Ns.T::N");
+    auto plainClone = plain.Clone();
+    EXPECT_FALSE(dynamic_cast<Call*>(plainClone.get())->ILStackWasEmpty);
 }

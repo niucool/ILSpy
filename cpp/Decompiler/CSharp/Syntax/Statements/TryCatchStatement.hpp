@@ -115,7 +115,10 @@ namespace ILSpy::Decompiler::CSharp::Syntax {
 // The C# `public sealed partial class TryCatchStatement : Statement`. `final` (the C# `sealed`):
 // no further derivation. The `ObjectCreateExpression` D251 shape (a single REQUIRED child + a
 // NON-INCREMENTAL collection + a NULLABLE trailing single) applied to the `Statement` hierarchy.
-class TryCatchStatement final : public Statement {
+// Not `final`: the `[DecompilerAstNode(hasPatternPlaceholder: true)]` attribute makes the C#
+// generator emit a nested `PatternPlaceholder` subclass, so the base must be inheritable (the
+// port's `PatternPlaceholderNode<TryCatchStatement>`).
+class TryCatchStatement : public Statement {
 public:
     ~TryCatchStatement() override = default;
 

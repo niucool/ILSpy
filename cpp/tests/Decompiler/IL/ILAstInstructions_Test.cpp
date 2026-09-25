@@ -32,14 +32,18 @@
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
+#include "Decompiler/IL/Instructions/InvalidInstructions.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLen.hpp"
+#include "Decompiler/IL/Instructions/Arglist.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/IL/Instructions/Unbox.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
+#include "Decompiler/IL/Instructions/TypedReferenceInstructions.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
@@ -75,6 +79,43 @@ TEST(ILAstInstructions, SimpleInstructions) {
     EXPECT_EQ(n.Op, OpCode::LdNull);
     EXPECT_EQ(n.ResultType(), StackType::O);
     EXPECT_EQ(n.ToString(), "ldnull");
+
+    // Arglist: the vararg RuntimeArgumentHandle retrieval (SimpleInstruction,
+    // result O, no children, no direct flags).
+    Arglist a;
+    EXPECT_EQ(a.Op, OpCode::Arglist);
+    EXPECT_EQ(a.ResultType(), StackType::O);
+    EXPECT_EQ(a.ChildCount(), 0);
+    EXPECT_EQ(a.DirectFlags(), InstructionFlags::None);
+    EXPECT_EQ(a.ToString(), "arglist");
+
+    // InvalidBranch: the invalid-IL terminator (SimpleInstruction, MayThrow |
+    // SideEffect | EndPointUnreachable, result Void by default, no children).
+    // The dump appends the parenthesized message only when one is present.
+    InvalidBranch ib;
+    EXPECT_EQ(ib.Op, OpCode::InvalidBranch);
+    EXPECT_EQ(ib.ResultType(), StackType::Void);
+    EXPECT_EQ(ib.ChildCount(), 0);
+    EXPECT_TRUE(HasFlag(ib.DirectFlags(), InstructionFlags::MayThrow));
+    EXPECT_TRUE(HasFlag(ib.DirectFlags(), InstructionFlags::SideEffect));
+    EXPECT_TRUE(HasFlag(ib.DirectFlags(), InstructionFlags::EndPointUnreachable));
+    EXPECT_EQ(ib.ToString(), "InvalidBranch");
+    InvalidBranch ibMsg(std::string("boom"));
+    EXPECT_EQ(ibMsg.ToString(), "InvalidBranch(\"boom\")");
+
+    // InvalidExpression: the invalid-IL value (MayThrow | SideEffect, result
+    // Unknown by default, no children).
+    InvalidExpression ie;
+    EXPECT_EQ(ie.Op, OpCode::InvalidExpression);
+    EXPECT_EQ(ie.ResultType(), StackType::Unknown);
+    EXPECT_EQ(ie.ChildCount(), 0);
+    EXPECT_FALSE(HasFlag(ie.DirectFlags(), InstructionFlags::EndPointUnreachable));
+    EXPECT_TRUE(HasFlag(ie.DirectFlags(), InstructionFlags::MayThrow));
+    EXPECT_TRUE(HasFlag(ie.DirectFlags(), InstructionFlags::SideEffect));
+    EXPECT_EQ(ie.Severity, "Error");
+    EXPECT_EQ(ie.ToString(), "InvalidExpression");
+    InvalidExpression ieMsg(std::string("bad value"));
+    EXPECT_EQ(ieMsg.ToString(), "InvalidExpression(\"bad value\")");
 }
 
 TEST(ILAstInstructions, UnaryInstructionsFlagsAndResult) {
@@ -98,6 +139,15 @@ TEST(ILAstInstructions, UnaryInstructionsFlagsAndResult) {
     EXPECT_TRUE(HasFlag(u.DirectFlags(), InstructionFlags::SideEffect));
     EXPECT_TRUE(HasFlag(u.DirectFlags(), InstructionFlags::MayThrow));
     EXPECT_EQ(u.ResultType(), StackType::I4);
+
+    // `unbox` is the managed-pointer twin of `unbox.any`: a Ref result, and only
+    // MayThrow (no SideEffect). The dump keeps the two spellings apart.
+    Unbox ub(Int32(), std::make_unique<LdcI4>(0));
+    EXPECT_FALSE(HasFlag(ub.DirectFlags(), InstructionFlags::SideEffect));
+    EXPECT_TRUE(HasFlag(ub.DirectFlags(), InstructionFlags::MayThrow));
+    EXPECT_EQ(ub.ResultType(), StackType::Ref);
+    EXPECT_NE(ub.ToString().find("unbox(System.Int32, ldc.i4(0))"), std::string::npos)
+        << ub.ToString();
 
     Throw th(std::make_unique<LdNull>());
     EXPECT_TRUE(HasFlag(th.DirectFlags(), InstructionFlags::MayThrow));
@@ -123,6 +173,36 @@ TEST(ILAstInstructions, UnaryInstructionsFlagsAndResult) {
 
     Conv conv(std::make_unique<LdcI4>(1), PrimitiveType::I8, false, Sign::None);
     EXPECT_EQ(conv.ResultType(), StackType::I8);
+}
+
+TEST(ILAstInstructions, TypedReferenceNodesFlagsAndResult) {
+    // MakeRefAny: O result, no direct flags, type + argument dump.
+    MakeRefAny mr(Int32(), std::make_unique<LdcI4>(0));
+    EXPECT_EQ(mr.Op, OpCode::MakeRefAny);
+    EXPECT_EQ(mr.ResultType(), StackType::O);
+    EXPECT_EQ(mr.ChildCount(), 1);
+    EXPECT_EQ(mr.DirectFlags(), InstructionFlags::None);
+    EXPECT_NE(mr.ToString().find("makerefany System.Int32(ldc.i4(0))"), std::string::npos)
+        << mr.ToString();
+
+    // RefAnyValue: Ref result, MayThrow.
+    RefAnyValue rv(Int32(), std::make_unique<LdcI4>(0));
+    EXPECT_EQ(rv.Op, OpCode::RefAnyValue);
+    EXPECT_EQ(rv.ResultType(), StackType::Ref);
+    EXPECT_TRUE(HasFlag(rv.DirectFlags(), InstructionFlags::MayThrow));
+    EXPECT_NE(rv.ToString().find("refanyval System.Int32(ldc.i4(0))"), std::string::npos)
+        << rv.ToString();
+
+    // The clone carries the type operand and clones the argument.
+    auto cloned = std::unique_ptr<MakeRefAny>(static_cast<MakeRefAny*>(mr.Clone().release()));
+    ASSERT_TRUE(cloned != nullptr);
+    EXPECT_EQ(cloned->Type, mr.Type);
+    ASSERT_TRUE(cloned->Argument != nullptr);
+    EXPECT_NE(cloned->Argument.get(), mr.Argument.get());
+    auto clonedRv = std::unique_ptr<RefAnyValue>(static_cast<RefAnyValue*>(rv.Clone().release()));
+    ASSERT_TRUE(clonedRv != nullptr);
+    EXPECT_EQ(clonedRv->Type, rv.Type);
+    ASSERT_TRUE(clonedRv->Argument != nullptr);
 }
 
 TEST(ILAstInstructions, BinaryInstructions) {

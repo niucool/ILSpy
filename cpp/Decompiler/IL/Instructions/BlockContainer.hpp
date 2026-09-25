@@ -48,33 +48,6 @@ public:
     std::vector<std::unique_ptr<Block>> Blocks;
     ContainerKind Kind = ContainerKind::Normal;
 
-    // The C# `public static BlockContainer? FindClosestContainer(ILInstruction?
-    // inst)` (BlockContainer.cs): the closest container ancestor of inst, or
-    // null when inst is detached.
-    static BlockContainer* FindClosestContainer(ILInstruction* inst) {
-        while (inst != nullptr) {
-            if (auto* bc = dynamic_cast<BlockContainer*>(inst)) return bc;
-            inst = inst->Parent;
-        }
-        return nullptr;
-    }
-
-    // The C# `public StackType ExpectedResultType { get; set; }` -- the
-    // evaluation-stack type the container's `leave` values must produce. The
-    // port stores it plain (the C# ctor keeps the set-by-consumer shape); the
-    // reader leaves it Unknown for containers it builds.
-    StackType ExpectedResultType = StackType::Unknown;
-
-    // The C# `public Block EntryPoint { get; }` -- the container's entry block
-    // (the C# `entryPoint!` HACK: every container must have one per the
-    // invariant, so the accessor returns non-null). The port derives it as the
-    // first block (the container-construction convention -- the C# sets
-    // `EntryPoint = Blocks.FirstOrDefault()` at creation); null only for a
-    // blockless degenerate container the port's tests build directly.
-    Block* EntryPoint() const {
-        return Blocks.empty() ? nullptr : Blocks.front().get();
-    }
-
     BlockContainer() : ILInstruction(OpCode::BlockContainer) {}
     InstructionFlags DirectFlags() const override { return InstructionFlags::None; }
     StackType ResultType() const override { return StackType::Void; }
@@ -84,20 +57,63 @@ public:
         return (i >= 0 && i < static_cast<int>(Blocks.size())) ? Blocks[i].get() : nullptr;
     }
 
-    // The C# `internal override bool CanInlineIntoSlot` (BlockContainer.cs
-    // line 259): inlining into the entry-point is allowed as long as we're not
-    // moving code into a loop (a second incoming edge to the entry point would
-    // re-evaluate it).
-    bool CanInlineIntoSlot(int childIndex, ILInstruction* expressionBeingMoved) override {
-        (void)expressionBeingMoved;
-        return childIndex == 0 && EntryPoint() != nullptr
-            && EntryPoint()->IncomingEdgeCount == 1;
-    }
-
     void AddBlock(std::unique_ptr<Block> b) {
         if (b) { b->Parent = this; b->ChildIndex = static_cast<int>(Blocks.size()); }
         Blocks.push_back(std::move(b));
     }
+
+    // The C# `public Block EntryPoint` (BlockContainer.cs line 66): the container's
+    // entry point -- the first block in the Blocks collection. The C# reads a private
+    // field assigned by the BlockBuilder's Normalize; the port's containers are
+    // statically normalized (the invariant `Blocks.Count > 0 && EntryPoint ==
+    // Blocks[0]` holds by construction), so the accessor computes it. Null for a
+    // degenerate block-less container (the C# HACK would deref `entryPoint!`).
+    Block* EntryPoint() const {
+        return Blocks.empty() ? nullptr : Blocks.front().get();
+    }
+
+    // The C# `public static BlockContainer? FindClosestContainer(ILInstruction? inst)`
+    // (BlockContainer.cs line 334): walks the parent chain for the closest enclosing
+    // container of any kind (null when none). The DeclareVariables scope analysis
+    // walks a capture scope's parents through this.
+    static BlockContainer* FindClosestContainer(ILInstruction* inst) {
+        while (inst != nullptr) {
+            if (auto* bc = dynamic_cast<BlockContainer*>(inst))
+                return bc;
+            inst = inst->Parent;
+        }
+        return nullptr;
+    }
+
+    // The C# `public static BlockContainer? FindClosestSwitchContainer(
+    // ILInstruction? inst)` (BlockContainer.cs line 345): walks the parent chain
+    // for the closest enclosing Switch-kind container (null when none). The
+    // port's containers are complete here, so the dynamic_cast on each parent
+    // is well-formed.
+    static BlockContainer* FindClosestSwitchContainer(ILInstruction* inst) {
+        while (inst != nullptr) {
+            if (auto* bc = dynamic_cast<BlockContainer*>(inst);
+                bc != nullptr && bc->Kind == ContainerKind::Switch)
+                return bc;
+            inst = inst->Parent;
+        }
+        return nullptr;
+    }
+
+    // The C# `public bool MatchConditionBlock(Block block, out ILInstruction?
+    // condition, out Block? bodyStartBlock)` (BlockContainer.cs line 356): a
+    // single-instruction block whose one instruction is an IfInstruction whose
+    // false arm leaves THIS container and whose true arm branches to the loop
+    // body start (the loop-condition block shape the Loop/While/For loop
+    // matches consume). Defined out-of-line in Block.cpp (the shared pattern
+    // matchers it calls pull the include chain).
+    bool MatchConditionBlock(Block* block, ILInstruction*& condition, Block*& bodyStartBlock);
+
+    // The C# `public bool MatchIncrementBlock(Block block)` (BlockContainer.cs
+    // line 367): the block whose last instruction branches to the container's
+    // entry point (the for-loop increment-block shape). Out-of-line in
+    // Block.cpp.
+    bool MatchIncrementBlock(Block* block);
 
     void WriteTo(std::string& out) const override {
         out += "BlockContainer {\n";

@@ -39,6 +39,7 @@
 
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/AddressOf.hpp"
+#include "Decompiler/IL/Instructions/Arglist.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/BitNot.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
@@ -53,6 +54,7 @@
 #include "Decompiler/IL/Instructions/DefaultValue.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/IL/Instructions/InvalidInstructions.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
 #include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
@@ -62,7 +64,10 @@
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/Instructions/LdcDecimal.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdObjIfRef.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/GetPinnableReference.hpp"
+#include "Decompiler/IL/Instructions/YieldReturn.hpp"
 #include "Decompiler/IL/Instructions/LockInstruction.hpp"
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
@@ -71,15 +76,18 @@
 #include "Decompiler/IL/Instructions/NullableInstructions.hpp"
 #include "Decompiler/IL/Instructions/PinnedRegion.hpp"
 #include "Decompiler/IL/Instructions/RefAnyType.hpp"
+#include "Decompiler/IL/Instructions/TypedReferenceInstructions.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/SimpleInstruction.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/StringToInt.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/IL/Instructions/UnaryInstruction.hpp"
+#include "Decompiler/IL/Instructions/Unbox.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/IL/Instructions/UserDefinedLogicOperator.hpp"
 #include "Decompiler/IL/Instructions/UsingInstruction.hpp"
@@ -109,9 +117,34 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
     std::unique_ptr<ILInstruction> c;
     switch (Op) {
         // ---- leaf nodes (no children) ----
-        case OpCode::Nop: c = std::make_unique<Nop>(); break;
+        case OpCode::Nop: {
+            const auto& s = static_cast<const Nop&>(*this);
+            auto clone = std::make_unique<Nop>();
+            clone->Kind = s.Kind;
+            clone->Comment = s.Comment;
+            c = std::move(clone);
+            break;
+        }
         case OpCode::LdNull: c = std::make_unique<LdNull>(); break;
+        case OpCode::Arglist: c = std::make_unique<Arglist>(); break;
         case OpCode::Rethrow: c = std::make_unique<Rethrow>(); break;
+        case OpCode::InvalidBranch: {
+            const auto& s = static_cast<const InvalidBranch&>(*this);
+            auto clone = std::make_unique<InvalidBranch>();
+            clone->Message = s.Message;
+            clone->ExpectedResultType = s.ExpectedResultType;
+            c = std::move(clone);
+            break;
+        }
+        case OpCode::InvalidExpression: {
+            const auto& s = static_cast<const InvalidExpression&>(*this);
+            auto clone = std::make_unique<InvalidExpression>();
+            clone->Severity = s.Severity;
+            clone->Message = s.Message;
+            clone->ExpectedResultType = s.ExpectedResultType;
+            c = std::move(clone);
+            break;
+        }
         case OpCode::LdcI4: {
             const auto& s = static_cast<const LdcI4&>(*this);
             c = std::make_unique<LdcI4>(s.Value);
@@ -144,7 +177,9 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         }
         case OpCode::DefaultValue: {
             const auto& s = static_cast<const DefaultValue&>(*this);
-            c = std::make_unique<DefaultValue>(s.Type);
+            auto clone = std::make_unique<DefaultValue>(s.Type);
+            clone->ILStackWasEmpty = s.ILStackWasEmpty;
+            c = std::move(clone);
             break;
         }
         case OpCode::LdsFlda: {
@@ -152,17 +187,25 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             auto clone = std::make_unique<LdsFlda>(s.FieldName);
             clone->FieldToken = s.FieldToken;
             clone->IsCompilerGeneratedField = s.IsCompilerGeneratedField;
+            clone->FieldIsReadOnly = s.FieldIsReadOnly;
+            clone->Field = s.Field;
             c = std::move(clone);
             break;
         }
         case OpCode::LdFtn: {
             const auto& s = static_cast<const LdFtn&>(*this);
-            c = std::make_unique<LdFtn>(s.MethodName);
+            if (s.Method)
+                c = std::make_unique<LdFtn>(s.Method);
+            else
+                c = std::make_unique<LdFtn>(s.MethodName);
             break;
         }
         case OpCode::LdVirtFtn: {
             const auto& s = static_cast<const LdVirtFtn&>(*this);
-            c = std::make_unique<LdVirtFtn>(s.MethodName);
+            if (s.Method)
+                c = std::make_unique<LdVirtFtn>(s.Method);
+            else
+                c = std::make_unique<LdVirtFtn>(s.MethodName);
             break;
         }
         case OpCode::SizeOf: {
@@ -197,12 +240,19 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         // ---- one-value-slot nodes ----
         case OpCode::StLoc: {
             const auto& s = static_cast<const StLoc&>(*this);
-            c = std::make_unique<StLoc>(s.Variable, s.Value ? s.Value->Clone() : nullptr);
+            auto clone = std::make_unique<StLoc>(s.Variable, s.Value ? s.Value->Clone() : nullptr);
+            clone->ILStackWasEmpty = s.ILStackWasEmpty;
+            c = std::move(clone);
             break;
         }
         case OpCode::Leave: {
             const auto& s = static_cast<const Leave&>(*this);
             c = std::make_unique<Leave>(s.TargetContainer, s.Value ? s.Value->Clone() : nullptr);
+            break;
+        }
+        case OpCode::YieldReturn: {
+            const auto& s = static_cast<const YieldReturn&>(*this);
+            c = std::make_unique<YieldReturn>(s.Value ? s.Value->Clone() : nullptr);
             break;
         }
 
@@ -218,11 +268,6 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             c = std::make_unique<Box>(s.Type, s.Argument ? s.Argument->Clone() : nullptr);
             break;
         }
-        case OpCode::AddressOf: {
-            const auto& s = static_cast<const AddressOf&>(*this);
-            c = std::make_unique<AddressOf>(s.Value ? s.Value->Clone() : nullptr, s.Type);
-            break;
-        }
         case OpCode::CastClass: {
             const auto& s = static_cast<const CastClass&>(*this);
             c = std::make_unique<CastClass>(s.Type, s.Argument ? s.Argument->Clone() : nullptr);
@@ -231,6 +276,11 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         case OpCode::IsInst: {
             const auto& s = static_cast<const IsInst&>(*this);
             c = std::make_unique<IsInst>(s.Type, s.Argument ? s.Argument->Clone() : nullptr);
+            break;
+        }
+        case OpCode::Unbox: {
+            const auto& s = static_cast<const Unbox&>(*this);
+            c = std::make_unique<Unbox>(s.Type, s.Argument ? s.Argument->Clone() : nullptr);
             break;
         }
         case OpCode::UnboxAny: {
@@ -261,6 +311,16 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             c = std::make_unique<RefAnyType>(s.Argument ? s.Argument->Clone() : nullptr);
             break;
         }
+        case OpCode::MakeRefAny: {
+            const auto& s = static_cast<const MakeRefAny&>(*this);
+            c = std::make_unique<MakeRefAny>(s.Type, s.Argument ? s.Argument->Clone() : nullptr);
+            break;
+        }
+        case OpCode::RefAnyValue: {
+            const auto& s = static_cast<const RefAnyValue&>(*this);
+            c = std::make_unique<RefAnyValue>(s.Type, s.Argument ? s.Argument->Clone() : nullptr);
+            break;
+        }
         case OpCode::NullableRewrap: {
             const auto& s = static_cast<const NullableRewrap&>(*this);
             c = std::make_unique<NullableRewrap>(s.Argument ? s.Argument->Clone() : nullptr);
@@ -274,8 +334,12 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         }
         case OpCode::LdVirtDelegate: {
             const auto& s = static_cast<const LdVirtDelegate&>(*this);
-            c = std::make_unique<LdVirtDelegate>(s.Argument ? s.Argument->Clone() : nullptr,
-                s.Type, s.MethodName);
+            if (s.Method)
+                c = std::make_unique<LdVirtDelegate>(s.Argument ? s.Argument->Clone() : nullptr,
+                    s.Type, s.Method);
+            else
+                c = std::make_unique<LdVirtDelegate>(s.Argument ? s.Argument->Clone() : nullptr,
+                    s.Type, s.MethodName);
             break;
         }
 
@@ -312,8 +376,10 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         }
         case OpCode::UserDefinedLogicOperator: {
             const auto& s = static_cast<const UserDefinedLogicOperator&>(*this);
-            c = std::make_unique<UserDefinedLogicOperator>(s.MethodName, s.MethodDeclaringType,
+            auto clone = std::make_unique<UserDefinedLogicOperator>(s.MethodName, s.MethodDeclaringType,
                 s.Left ? s.Left->Clone() : nullptr, s.Right ? s.Right->Clone() : nullptr);
+            clone->Method = s.Method;
+            c = std::move(clone);
             break;
         }
 
@@ -341,13 +407,18 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             auto clone = std::make_unique<LdFlda>(s.Target ? s.Target->Clone() : nullptr, s.FieldName);
             clone->FieldToken = s.FieldToken;
             clone->IsCompilerGeneratedField = s.IsCompilerGeneratedField;
+            clone->FieldIsReadOnly = s.FieldIsReadOnly;
+            clone->Field = s.Field;
             clone->DelayExceptions = s.DelayExceptions;
             c = std::move(clone);
             break;
         }
         case OpCode::LdObj: {
             const auto& s = static_cast<const LdObj&>(*this);
-            c = std::make_unique<LdObj>(s.Target ? s.Target->Clone() : nullptr, s.Type);
+            auto clone = std::make_unique<LdObj>(s.Target ? s.Target->Clone() : nullptr, s.Type);
+            clone->IsVolatile = s.IsVolatile;
+            clone->UnalignedPrefix = s.UnalignedPrefix;
+            c = std::move(clone);
             break;
         }
         case OpCode::LocAlloc: {
@@ -366,32 +437,42 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             c = std::make_unique<Ckfinite>(s.Argument ? s.Argument->Clone() : nullptr);
             break;
         }
-        case OpCode::Cpblk: {
-            const auto& s = static_cast<const Cpblk&>(*this);
-            auto clone = std::make_unique<Cpblk>(
-                s.DestAddress ? s.DestAddress->Clone() : nullptr,
-                s.SourceAddress ? s.SourceAddress->Clone() : nullptr,
-                s.Size ? s.Size->Clone() : nullptr);
-            clone->IsVolatile = s.IsVolatile;
-            clone->UnalignedPrefix = s.UnalignedPrefix;
-            c = std::move(clone);
-            break;
-        }
         case OpCode::Initblk: {
             const auto& s = static_cast<const Initblk&>(*this);
             auto clone = std::make_unique<Initblk>(
                 s.Address ? s.Address->Clone() : nullptr,
                 s.Value ? s.Value->Clone() : nullptr,
                 s.Size ? s.Size->Clone() : nullptr);
-            clone->IsVolatile = s.IsVolatile;
             clone->UnalignedPrefix = s.UnalignedPrefix;
+            clone->IsVolatile = s.IsVolatile;
+            c = std::move(clone);
+            break;
+        }
+        case OpCode::Cpblk: {
+            const auto& s = static_cast<const Cpblk&>(*this);
+            auto clone = std::make_unique<Cpblk>(
+                s.DestAddress ? s.DestAddress->Clone() : nullptr,
+                s.SourceAddress ? s.SourceAddress->Clone() : nullptr,
+                s.Size ? s.Size->Clone() : nullptr);
+            clone->UnalignedPrefix = s.UnalignedPrefix;
+            clone->IsVolatile = s.IsVolatile;
             c = std::move(clone);
             break;
         }
         case OpCode::StObj: {
             const auto& s = static_cast<const StObj&>(*this);
-            c = std::make_unique<StObj>(s.Target ? s.Target->Clone() : nullptr,
+            auto clone = std::make_unique<StObj>(s.Target ? s.Target->Clone() : nullptr,
                 s.Value ? s.Value->Clone() : nullptr, s.Type);
+            clone->IsVolatile = s.IsVolatile;
+            clone->UnalignedPrefix = s.UnalignedPrefix;
+            c = std::move(clone);
+            break;
+        }
+        case OpCode::StringToInt: {
+            const auto& s = static_cast<const StringToInt&>(*this);
+            auto clone = std::make_unique<StringToInt>(
+                s.Argument ? s.Argument->Clone() : nullptr, s.Map, s.ExpectedType);
+            c = std::move(clone);
             break;
         }
 
@@ -403,8 +484,10 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         }
         case OpCode::LdElema: {
             const auto& s = static_cast<const LdElema&>(*this);
-            c = std::make_unique<LdElema>(s.Type, s.Array ? s.Array->Clone() : nullptr,
+            auto clone = std::make_unique<LdElema>(s.Type, s.Array ? s.Array->Clone() : nullptr,
                 CloneChildren(s.Indices));
+            clone->WithSystemIndex = s.WithSystemIndex;
+            c = std::move(clone);
             break;
         }
 
@@ -437,8 +520,24 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             clone->IsOperator = s.IsOperator;
             clone->TypeArgumentsCount = s.TypeArgumentsCount;
             clone->IsLifted = s.IsLifted;
+            clone->Method = s.Method;
+            clone->IsTail = s.IsTail;
+            clone->ConstrainedTo = s.ConstrainedTo;
+            clone->ILStackWasEmpty = s.ILStackWasEmpty;
             for (auto& a : s.Arguments) clone->AddArg(a ? a->Clone() : nullptr);
             c = std::move(clone);
+            break;
+        }
+        case OpCode::AddressOf: {
+            const auto& s = static_cast<const AddressOf&>(*this);
+            c = std::make_unique<AddressOf>(s.Argument ? s.Argument->Clone() : nullptr,
+                s.Type);
+            break;
+        }
+        case OpCode::LdObjIfRef: {
+            const auto& s = static_cast<const LdObjIfRef&>(*this);
+            c = std::make_unique<LdObjIfRef>(s.Target() ? s.Target()->Clone() : nullptr,
+                s.Type);
             break;
         }
         case OpCode::MatchInstruction: {
@@ -455,6 +554,14 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             const auto& s = static_cast<const PinnedRegion&>(*this);
             c = std::make_unique<PinnedRegion>(s.Variable,
                 s.Init ? s.Init->Clone() : nullptr, s.Body ? s.Body->Clone() : nullptr);
+            break;
+        }
+        case OpCode::GetPinnableReference: {
+            const auto& s = static_cast<const GetPinnableReference&>(*this);
+            auto clone = std::make_unique<GetPinnableReference>(
+                s.Argument ? s.Argument->Clone() : nullptr, s.Method);
+            clone->MethodName = s.MethodName;
+            c = std::move(clone);
             break;
         }
         case OpCode::LockInstruction: {
@@ -477,6 +584,7 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             const auto& s = static_cast<const SwitchSection&>(*this);
             auto clone = std::make_unique<SwitchSection>(s.Labels);
             clone->HasNullLabel = s.HasNullLabel;
+            clone->IsCompilerGeneratedDefaultSection = s.IsCompilerGeneratedDefaultSection;
             clone->SetBody(s.Body ? s.Body->Clone() : nullptr);
             c = std::move(clone);
             break;
@@ -486,6 +594,7 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             auto clone = std::make_unique<SwitchInstruction>(s.Value ? s.Value->Clone() : nullptr);
             clone->IsLifted = s.IsLifted;
             clone->Type = s.Type;
+            clone->SetResultType(s.ResultType());
             for (auto& sec : s.Sections) {
                 clone->AddSection(std::unique_ptr<SwitchSection>(
                     static_cast<SwitchSection*>(sec ? sec->Clone().release() : nullptr)));
@@ -549,6 +658,10 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             auto clone = std::make_unique<ILFunction>();
             clone->IsConstructor = s.IsConstructor;
             clone->IsStatic = s.IsStatic;
+            clone->Kind = s.Kind;
+            clone->IsIterator = s.IsIterator;
+            clone->AsyncReturnType = s.AsyncReturnType;
+            clone->ReturnType = s.ReturnType;
             clone->Variables = s.Variables;  // shared ILVariablePtr copies
             clone->Body.reset(static_cast<BlockContainer*>(
                 s.Body ? s.Body->Clone().release() : nullptr));

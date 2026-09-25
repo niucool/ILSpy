@@ -50,6 +50,8 @@
 #include <string>
 #include <vector>
 
+#include "Decompiler/NRExtensions.hpp"
+
 namespace TS = ILSpy::Decompiler::TypeSystem;
 namespace Impl = ILSpy::Decompiler::TypeSystem::Implementation;
 using TS::TestSupport::LookupCompilation;
@@ -1341,11 +1343,11 @@ TEST(TypeSystemExtensionsTest, IsAnonymousTypeAcceptsCSharpShape) {
     property->SetGetter(getter.get());
     anon->SetProperties(
         {static_cast<const TS::IProperty*>(property.get())});
-    EXPECT_TRUE(TS::IsAnonymousType(*anon));
+    EXPECT_TRUE(::ILSpy::Decompiler::IsAnonymousType(anon.get()));
     // The visitor finds it nested in a composed type (the shared-owned
     // form -- the visitor walk returns the visited node).
     auto arrayOverAnon = std::make_shared<TS::ArrayType>(anon);
-    EXPECT_TRUE(TS::ContainsAnonymousType(*arrayOverAnon));
+    EXPECT_TRUE(::ILSpy::Decompiler::ContainsAnonymousType(*arrayOverAnon));
 }
 
 // A VB anonymous type with a settable, non-'Key' property keeps its own
@@ -1365,7 +1367,7 @@ TEST(TypeSystemExtensionsTest, IsAnonymousTypeRejectsSettableProperty) {
     property->SetSetter(accessor.get());
     anon->SetProperties(
         {static_cast<const TS::IProperty*>(property.get())});
-    EXPECT_FALSE(TS::IsAnonymousType(*anon));
+    EXPECT_FALSE(::ILSpy::Decompiler::IsAnonymousType(anon.get()));
 }
 
 // A user-named type is never anonymous, and neither is the plain array
@@ -1377,8 +1379,8 @@ TEST(TypeSystemExtensionsTest, IsAnonymousTypeRejectsPlainName) {
         TS::Accessibility::Public, compilation, nullptr,
         TS::KnownTypeCode::None);
     plain->SetCompilerGenerated(true);
-    EXPECT_FALSE(TS::IsAnonymousType(*plain));
+    EXPECT_FALSE(::ILSpy::Decompiler::IsAnonymousType(plain.get()));
     auto arrayOverPlain = std::make_shared<TS::ArrayType>(
         TS::ITypePtr(std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32)));
-    EXPECT_FALSE(TS::ContainsAnonymousType(*arrayOverPlain));
+    EXPECT_FALSE(::ILSpy::Decompiler::ContainsAnonymousType(*arrayOverPlain));
 }

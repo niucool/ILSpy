@@ -31,8 +31,12 @@
 #include "Decompiler/CSharp/Syntax/AstType.hpp"
 
 #include "Decompiler/CSharp/Syntax/ComposedType.hpp"
+#include "Decompiler/CSharp/Syntax/Constraint.hpp"
 #include "Decompiler/CSharp/Syntax/MemberType.hpp"
 #include "Decompiler/CSharp/Syntax/SimpleType.hpp"
+#include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/UsingAliasDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/UsingDeclaration.hpp"
 
 #include <string>
 #include <utility>
@@ -110,6 +114,43 @@ AstType* AstType::Create(const std::string& dottedName) {
         type = new MemberType(type, parts[i]);
     }
     return type;
+}
+
+// The C# `public bool IsVar()` (AstType.cs line 40): a `SimpleType` named `var` with no
+// type arguments. The C# `st.Identifier == "var"` string comparison is the `std::optional`
+// equality (a nullopt identifier is never "var"); a `SimpleType` with an empty identifier
+// token and zero type arguments is therefore NOT `var`.
+bool AstType::IsVar() const {
+    const auto* simpleType = dynamic_cast<const SimpleType*>(this);
+    return simpleType != nullptr
+        && simpleType->Identifier() == std::optional<std::string>("var")
+        && simpleType->TypeArguments().Count() == 0;
+}
+
+// The C# `public NameLookupMode GetNameLookupMode()` (AstType.cs line 51): walk to the
+// OUTERMOST `AstType` in the parent chain, then classify by where that node sits. A
+// `using`/`using`-alias import is `TypeInUsingDeclaration`; a `BaseType` slot whose parent
+// is a `TypeDeclaration` (or a `Constraint` directly under a `TypeDeclaration`) is
+// `BaseTypeReference`; everything else is `Type`. The `Slots.BaseType` comparison is on the
+// slot KIND (the shared `Slots::BaseType` constant the per-node `BaseTypesSlot` points at),
+// matching the C# `outermostType.Slot?.Kind == Slots.BaseType`.
+Resolver::NameLookupMode AstType::GetNameLookupMode() {
+    AstType* outermostType = this;
+    while (dynamic_cast<AstType*>(outermostType->Parent()) != nullptr)
+        outermostType = static_cast<AstType*>(outermostType->Parent());
+    AstNode* parent = outermostType->Parent();
+    if (dynamic_cast<UsingDeclaration*>(parent) != nullptr
+        || dynamic_cast<UsingAliasDeclaration*>(parent) != nullptr) {
+        return Resolver::NameLookupMode::TypeInUsingDeclaration;
+    }
+    if (outermostType->Slot() != nullptr && outermostType->Slot()->Kind() == &Slots::BaseType) {
+        if (dynamic_cast<TypeDeclaration*>(parent) != nullptr
+            || (dynamic_cast<Constraint*>(parent) != nullptr
+                && dynamic_cast<TypeDeclaration*>(parent->Parent()) != nullptr)) {
+            return Resolver::NameLookupMode::BaseTypeReference;
+        }
+    }
+    return Resolver::NameLookupMode::Type;
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

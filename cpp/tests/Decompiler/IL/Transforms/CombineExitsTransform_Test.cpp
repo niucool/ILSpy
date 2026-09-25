@@ -1,127 +1,247 @@
-// Tests for CombineExitsTransform (the C# CombineExitsTransform.cs, the
-// nested-pipeline tail DelegateConstruction runs after the lambda body's
-// transforms): the `if (cond) { leave(value); } leave(elseValue);` shape
-// folds to `leave(if (cond) value else elseValue)` when both exits leave
-// the function with non-nop values.
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+// to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
 
-#include "Decompiler/IL/Transforms/CombineExitsTransform.hpp"
+// Tests for CombineExitsTransform -- the compact early fold
+// `if (cond) leave(a); leave(b)` -> `leave (cond ? a : b)` that the C#
+// DecompileBodyForAnalysis prefix uses so a release-mode `return a && b` body is
+// one statement. The hand-built tests cover the simple combine, the nested-else
+// recursion, the RunOnSingleStatement post-fold (the condition comp(x != 0) is
+// folded to x), and the negative guards (multi-block body, non-empty else arm,
+// non-leave true arm, Nop leave value, non-function leave target).
 
-#include "Decompiler/IL/Instructions/ILFunction.hpp"
-#include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
+#include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
-#include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
-#include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/ILInstruction.hpp"
+#include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/IL/Transforms/CombineExitsTransform.hpp"
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
+#include "Decompiler/IL/VariableKind.hpp"
 
 #include <gtest/gtest.h>
 
 #include <memory>
-#include <utility>
+
+using ILSpy::Decompiler::IL::Block;
+using ILSpy::Decompiler::IL::BlockContainer;
+using ILSpy::Decompiler::IL::CombineExitsTransform;
+using ILSpy::Decompiler::IL::Comp;
+using ILSpy::Decompiler::IL::ComparisonKind;
+using ILSpy::Decompiler::IL::ILFunction;
+using ILSpy::Decompiler::IL::ILInstruction;
+using ILSpy::Decompiler::IL::ILTransformContext;
+using ILSpy::Decompiler::IL::ILVariable;
+using ILSpy::Decompiler::IL::ILVariablePtr;
+using ILSpy::Decompiler::IL::IfInstruction;
+using ILSpy::Decompiler::IL::LdcI4;
+using ILSpy::Decompiler::IL::LdLoc;
+using ILSpy::Decompiler::IL::Leave;
+using ILSpy::Decompiler::IL::VariableKind;
 
 namespace {
 
-namespace IL = ::ILSpy::Decompiler::IL;
+std::unique_ptr<LdcI4> I4(int v) { return std::make_unique<LdcI4>(v); }
 
-// A minimal known type for the test locals (the object stand-in: the
-// variables' Type only feeds WriteTo/Invariant here).
-struct CombineExitsFixture {
-    IL::ILFunction fn;
-    IL::BlockContainer* body = nullptr;
-    IL::ILVariablePtr condVar;
-    IL::Block* entry = nullptr;
-
-    CombineExitsFixture()
-    {
-        auto container = std::make_unique<IL::BlockContainer>();
-        body = container.get();
-        auto entryBlock = std::make_unique<IL::Block>();
-        entry = entryBlock.get();
-        container->AddBlock(std::move(entryBlock));
-        fn.Body = std::move(container);
-        fn.Body->Parent = &fn;
-        fn.Body->ChildIndex = 0;
-        condVar = std::make_shared<IL::ILVariable>(
-            IL::VariableKind::Local, nullptr, 0);
-    }
-
-    void Finish() { fn.CheckInvariant(IL::ILPhase::InILReader); }
-};
-
-// if (cond) { leave(ldloc v1); }  leave(ldc.i4 2)
-// folds to: leave(if (cond) ldloc v1 else ldc.i4 2)
-TEST(CombineExitsTransform, FoldsIfThenLeaveAndTrailingLeave)
-{
-    CombineExitsFixture fx;
-    auto v1 = std::make_shared<IL::ILVariable>(IL::VariableKind::Local,
-                                               nullptr, 1);
-
-    // The true branch: a block whose single instruction is the leave.
-    auto trueBlock = std::make_unique<IL::Block>();
-    trueBlock->Add(std::make_unique<IL::Leave>(fx.body,
-                                               std::make_unique<IL::LdLoc>(v1)));
-    auto condition = std::make_unique<IL::LdLoc>(fx.condVar);
-    auto ifInst = std::make_unique<IL::IfInstruction>(
-        std::move(condition), std::move(trueBlock), nullptr);
-    IL::IfInstruction* ifPtr = ifInst.get();
-    auto elseLeave = std::make_unique<IL::Leave>(
-        fx.body, std::make_unique<IL::LdcI4>(2));
-    IL::Leave* elseLeavePtr = elseLeave.get();
-
-    fx.entry->Add(std::move(ifInst));
-    fx.entry->SetFinal(std::move(elseLeave));
-    fx.Finish();
-
-    IL::ILTransformContext ctx;
-    IL::CombineExitsTransform().Run(fx.fn, ctx);
-
-    // The if is replaced by a leave carrying the combined conditional value;
-    // the old final leave's slot is gone (the combined leave now closes the
-    // block, and the port leaves the final slot empty -- the leave itself is
-    // the terminator).
-    ASSERT_EQ(fx.entry->Instructions.size(), 1u);
-    ASSERT_EQ(fx.entry->Instructions[0]->Op, IL::OpCode::Leave);
-    auto* combined = static_cast<IL::Leave*>(fx.entry->Instructions[0].get());
-    ASSERT_EQ(combined->TargetContainer, fx.body);
-    ASSERT_NE(combined->Value, nullptr);
-    EXPECT_EQ(combined->Value->Op, IL::OpCode::IfInstruction);
-    auto* combinedIf = static_cast<IL::IfInstruction*>(combined->Value.get());
-    EXPECT_EQ(combinedIf->TrueInst->Op, IL::OpCode::LdLoc);
-    EXPECT_EQ(combinedIf->FalseInst->Op, IL::OpCode::LdcI4);
-    (void)ifPtr;
-    (void)elseLeavePtr;
-    fx.fn.CheckInvariant(IL::ILPhase::Normal);
+ILVariablePtr MakeLocal(std::string name) {
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = std::move(name);
+    return v;
 }
 
-// The transform requires both leaves to carry values (the C#
-// `leave.Value.MatchNop() || leaveElse.Value.MatchNop()` rejection).
-TEST(CombineExitsTransform, RejectsNopLeaveValues)
-{
-    CombineExitsFixture fx;
+// A one-block function; `block` receives the entry block.
+std::unique_ptr<ILFunction> MakeFn(Block*& block) {
+    auto container = std::make_unique<BlockContainer>();
+    auto b = std::make_unique<Block>();
+    block = b.get();
+    container->AddBlock(std::move(b));
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::move(container);
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    return fn;
+}
 
-    auto trueBlock = std::make_unique<IL::Block>();
-    trueBlock->Add(std::make_unique<IL::Leave>(fx.body, nullptr));
-    auto ifInst = std::make_unique<IL::IfInstruction>(
-        std::make_unique<IL::LdLoc>(fx.condVar), std::move(trueBlock),
-        nullptr);
-    auto elseLeave =
-        std::make_unique<IL::Leave>(fx.body, nullptr);
-    fx.entry->Add(std::move(ifInst));
-    fx.entry->SetFinal(std::move(elseLeave));
-    fx.Finish();
+void RunTransform(ILFunction& fn) {
+    ILTransformContext ctx;
+    CombineExitsTransform().Run(fn, ctx);
+}
 
-    IL::ILTransformContext ctx;
-    IL::CombineExitsTransform().Run(fx.fn, ctx);
-
-    // Nothing folded: the if and the trailing leave stay.
-    EXPECT_EQ(fx.entry->Instructions.size(), 1u);
-    EXPECT_EQ(fx.entry->FinalInstruction->Op, IL::OpCode::Leave);
-    EXPECT_EQ(static_cast<IL::Leave*>(fx.entry->FinalInstruction.get())->Value,
-              nullptr);
-    (void)0;
+// The fold result: a Leave whose Value is an IfInstruction, or null.
+IfInstruction* CombinedIf(Block* block) {
+    auto* leave = dynamic_cast<Leave*>(block->FinalInstruction.get());
+    if (!leave) return nullptr;
+    return dynamic_cast<IfInstruction*>(leave->Value.get());
 }
 
 } // namespace
+
+// ---- Positive: the simple tail folds ----
+
+TEST(CombineExitsTransform, SimpleIfLeaveThenLeaveFolds) {
+    Block* block = nullptr;
+    auto fn = MakeFn(block);
+    auto* body = static_cast<BlockContainer*>(fn->Body.get());
+    auto cond = I4(1);
+    auto trueLeave = std::make_unique<Leave>(body, I4(10));
+    block->Add(std::make_unique<IfInstruction>(std::move(cond), std::move(trueLeave)));
+    block->SetFinal(std::make_unique<Leave>(body, I4(20)));
+
+    RunTransform(*fn);
+
+    // The if is gone; the final is a single leave carrying the conditional.
+    EXPECT_TRUE(block->Instructions.empty());
+    auto* combined = CombinedIf(block);
+    ASSERT_NE(combined, nullptr);
+    EXPECT_EQ(combined->Condition->Op, ILSpy::Decompiler::IL::OpCode::LdcI4);
+    ASSERT_NE(dynamic_cast<LdcI4*>(combined->TrueInst.get()), nullptr);
+    ASSERT_NE(dynamic_cast<LdcI4*>(combined->FalseInst.get()), nullptr);
+    EXPECT_EQ(static_cast<LdcI4*>(combined->TrueInst.get())->Value, 10);
+    EXPECT_EQ(static_cast<LdcI4*>(combined->FalseInst.get())->Value, 20);
+}
+
+TEST(CombineExitsTransform, NestedBlockArmRecurses) {
+    Block* block = nullptr;
+    auto fn = MakeFn(block);
+    auto* body = static_cast<BlockContainer*>(fn->Body.get());
+    // Outer: if (cond) { if (cond2) leave(a); leave(b) } leave(c)
+    auto nested = std::make_unique<Block>();
+    nested->Add(std::make_unique<IfInstruction>(I4(1),
+        std::make_unique<Leave>(body, I4(1))));
+    nested->SetFinal(std::make_unique<Leave>(body, I4(2)));
+    block->Add(std::make_unique<IfInstruction>(I4(1), std::move(nested)));
+    block->SetFinal(std::make_unique<Leave>(body, I4(3)));
+
+    RunTransform(*fn);
+
+    EXPECT_TRUE(block->Instructions.empty());
+    auto* outer = CombinedIf(block);
+    ASSERT_NE(outer, nullptr);
+    // The true arm is the nested conditional; the false arm is the outer else.
+    auto* inner = dynamic_cast<IfInstruction*>(outer->TrueInst.get());
+    ASSERT_NE(inner, nullptr);
+    ASSERT_NE(dynamic_cast<LdcI4*>(inner->TrueInst.get()), nullptr);
+    ASSERT_NE(dynamic_cast<LdcI4*>(inner->FalseInst.get()), nullptr);
+    EXPECT_EQ(static_cast<LdcI4*>(inner->TrueInst.get())->Value, 1);
+    EXPECT_EQ(static_cast<LdcI4*>(inner->FalseInst.get())->Value, 2);
+    ASSERT_NE(dynamic_cast<LdcI4*>(outer->FalseInst.get()), nullptr);
+    EXPECT_EQ(static_cast<LdcI4*>(outer->FalseInst.get())->Value, 3);
+}
+
+TEST(CombineExitsTransform, RunsExpressionTransformsOnCombinedExit) {
+    Block* block = nullptr;
+    auto fn = MakeFn(block);
+    auto* body = static_cast<BlockContainer*>(fn->Body.get());
+    auto x = MakeLocal("x");
+    // if (comp(x != 0)) leave(a); leave(b)
+    block->Add(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(x), I4(0),
+                               ComparisonKind::Inequality),
+        std::make_unique<Leave>(body, I4(10))));
+    block->SetFinal(std::make_unique<Leave>(body, I4(20)));
+
+    RunTransform(*fn);
+
+    auto* combined = CombinedIf(block);
+    ASSERT_NE(combined, nullptr);
+    // ExpressionTransforms folded `comp(x != 0)` to `x` (the condition slot).
+    auto* ldloc = dynamic_cast<LdLoc*>(combined->Condition.get());
+    ASSERT_NE(ldloc, nullptr);
+    EXPECT_EQ(ldloc->Variable.get(), x.get());
+}
+
+// ---- Negative guards ----
+
+TEST(CombineExitsTransform, MultiBlockBodyIsIgnored) {
+    Block* block = nullptr;
+    auto fn = MakeFn(block);
+    auto* body = static_cast<BlockContainer*>(fn->Body.get());
+    body->AddBlock(std::make_unique<Block>());
+    block->Add(std::make_unique<IfInstruction>(I4(1),
+        std::make_unique<Leave>(body, I4(10))));
+    block->SetFinal(std::make_unique<Leave>(body, I4(20)));
+
+    RunTransform(*fn);
+
+    EXPECT_EQ(block->Instructions.size(), 1u);
+    EXPECT_EQ(block->FinalInstruction->Op, ILSpy::Decompiler::IL::OpCode::Leave);
+    EXPECT_EQ(dynamic_cast<Leave*>(block->FinalInstruction.get())->Value->Op,
+              ILSpy::Decompiler::IL::OpCode::LdcI4);
+}
+
+TEST(CombineExitsTransform, NonEmptyElseArmIsIgnored) {
+    Block* block = nullptr;
+    auto fn = MakeFn(block);
+    auto* body = static_cast<BlockContainer*>(fn->Body.get());
+    block->Add(std::make_unique<IfInstruction>(I4(1),
+        std::make_unique<Leave>(body, I4(10)), I4(99)));
+    block->SetFinal(std::make_unique<Leave>(body, I4(20)));
+
+    RunTransform(*fn);
+
+    EXPECT_EQ(block->Instructions.size(), 1u);
+    EXPECT_EQ(CombinedIf(block), nullptr);
+}
+
+TEST(CombineExitsTransform, NonLeaveTrueArmIsIgnored) {
+    Block* block = nullptr;
+    auto fn = MakeFn(block);
+    auto* body = static_cast<BlockContainer*>(fn->Body.get());
+    block->Add(std::make_unique<IfInstruction>(I4(1), I4(10)));
+    block->SetFinal(std::make_unique<Leave>(body, I4(20)));
+
+    RunTransform(*fn);
+
+    EXPECT_EQ(block->Instructions.size(), 1u);
+    EXPECT_EQ(CombinedIf(block), nullptr);
+}
+
+TEST(CombineExitsTransform, NopLeaveValueIsIgnored) {
+    Block* block = nullptr;
+    auto fn = MakeFn(block);
+    auto* body = static_cast<BlockContainer*>(fn->Body.get());
+    // The true leave has no value (the port's Nop shape).
+    block->Add(std::make_unique<IfInstruction>(I4(1),
+        std::make_unique<Leave>(body, nullptr)));
+    block->SetFinal(std::make_unique<Leave>(body, I4(20)));
+
+    RunTransform(*fn);
+
+    EXPECT_EQ(block->Instructions.size(), 1u);
+    EXPECT_EQ(CombinedIf(block), nullptr);
+}
+
+TEST(CombineExitsTransform, NonFunctionLeaveTargetIsIgnored) {
+    Block* block = nullptr;
+    auto fn = MakeFn(block);
+    auto* body = static_cast<BlockContainer*>(fn->Body.get());
+    // A detached container (parent is not an ILFunction) is not a function exit.
+    auto detached = std::make_unique<BlockContainer>();
+    block->Add(std::make_unique<IfInstruction>(I4(1),
+        std::make_unique<Leave>(detached.get(), I4(10))));
+    block->SetFinal(std::make_unique<Leave>(body, I4(20)));
+
+    RunTransform(*fn);
+
+    EXPECT_EQ(block->Instructions.size(), 1u);
+    EXPECT_EQ(CombinedIf(block), nullptr);
+}

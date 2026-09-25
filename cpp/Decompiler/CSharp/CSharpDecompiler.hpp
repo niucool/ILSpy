@@ -32,8 +32,11 @@
 
 #pragma once
 
+#include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
+#include "Decompiler/TypeSystem/CustomAttributeTypedArgument.hpp"
+#include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/MetadataModule.hpp"
 #include "Decompiler/Metadata/PartialTypeInfo.hpp"
 
@@ -72,7 +75,6 @@ public:
     // The C# `public static List<IILTransform> GetILTransforms()` -- the
     // fixed per-body pipeline (the IL-namespace factory; the C#-shaped
     // alias the facade's consumers drive).
-    static std::vector<std::unique_ptr<IL::IILTransform>> GetILTransforms();
 
     // The C# `function.RunTransforms(CSharpDecompiler.GetILTransforms(),
     // context)` shape -- the per-body pipeline driver over the factory.
@@ -101,8 +103,8 @@ public:
     // readability flag on) and the GenericGrammarAmbiguityVisitor tail.
     static void RunAstTransforms(
         Syntax::AstNode& rootNode, ::ILSpy::Decompiler::DecompileRun& decompileRun,
-        const ::ILSpy::Decompiler::TypeSystem::ITypeResolveContext*
-            decompilationContext = nullptr);
+        const ::ILSpy::Decompiler::TypeSystem::ITypeResolveContext&
+            decompilationContext);
 
     // The C# `static TypeSystemAstBuilder CreateAstBuilder(DecompilerSettings
     // settings)` (line 722): the type renderer the transform context carries
@@ -252,5 +254,37 @@ private:
     struct InstanceState;
     ::std::unique_ptr<InstanceState> state_;
 };
+
+
+// The C# `internal static bool IsFixedField(IField field, out IType type, out int
+// elementCount)` (CSharpDecompiler.cs line 2522): whether the field carries a
+// `FixedBufferAttribute` whose first fixed argument is the element type and whose
+// second is the element count. Both out-params are cleared on a false return (the
+// C# `out` contract). `type` is the decoded element type; `elementCount` the
+// buffer length.
+inline bool IsFixedField(const ::ILSpy::Decompiler::TypeSystem::IField& field,
+                         ::ILSpy::Decompiler::TypeSystem::ITypePtr& type, int& elementCount)
+{
+    type = nullptr;
+    elementCount = 0;
+    const ::ILSpy::Decompiler::TypeSystem::IAttribute* attr =
+        field.GetAttribute(::ILSpy::Decompiler::TypeSystem::KnownAttribute::FixedBuffer);
+    if (attr == nullptr)
+        return false;
+    const std::vector<::ILSpy::Decompiler::TypeSystem::CustomAttributeTypedArgument>
+        arguments = attr->FixedArguments();
+    if (arguments.size() != 2)
+        return false;
+    const std::any first = arguments[0].Value();
+    const std::any second = arguments[1].Value();
+    const auto* elementType =
+        std::any_cast<::ILSpy::Decompiler::TypeSystem::ITypePtr>(&first);
+    const auto* length = std::any_cast<std::int32_t>(&second);
+    if (elementType == nullptr || length == nullptr)
+        return false;
+    type = *elementType;
+    elementCount = static_cast<int>(*length);
+    return true;
+}
 
 } // namespace ILSpy::Decompiler::CSharp

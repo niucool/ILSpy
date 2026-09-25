@@ -339,7 +339,9 @@ std::vector<const ITypeParameter*> MetadataTypeDefinition::TypeParameters()
 // The C# `GetNestedTypes(filter, options)` -- the
 // `(IgnoreInheritedMembers | ReturnMemberDefinitions)` arm is the
 // NestedTypes-only short-circuit (the C# GetFiltered(this.NestedTypes,
-// filter): the null filter passes everything).
+// filter): the null filter passes everything); otherwise the
+// GetMembersHelper routing arm (the base-type walk, the C#
+// `GetMembersHelper.GetNestedTypes(this, filter, options)`).
 std::vector<ITypePtr> MetadataTypeDefinition::GetNestedTypes(
     std::function<bool(const ITypeDefinition*)> filter,
     GetMemberOptions options) const
@@ -356,9 +358,11 @@ std::vector<ITypePtr> MetadataTypeDefinition::GetNestedTypes(
         }
         return result;
     }
-    throw std::logic_error(
-        "MetadataTypeDefinition::GetNestedTypes: GetMembersHelper is not yet "
-        "routed (gated on the member entity family)");
+    // The C# `return GetMembersHelper.GetNestedTypes(this, filter,
+    // options);` -- the owning ITypePtr vector the helper builds (the
+    // ParameterizedType.GetNestedTypes routing arm returns it verbatim, so
+    // unlike the member families there is no keep-alive cache here).
+    return GetMembersHelper::GetNestedTypes(this, filter, options);
 }
 
 std::vector<ITypePtr> MetadataTypeDefinition::GetNestedTypes(
@@ -366,13 +370,9 @@ std::vector<ITypePtr> MetadataTypeDefinition::GetNestedTypes(
     std::function<bool(const ITypeDefinition*)> filter,
     GetMemberOptions options) const
 {
-    (void)typeArguments;
-    (void)filter;
-    (void)options;
-    throw std::logic_error(
-        "MetadataTypeDefinition::GetNestedTypes(typeArguments): "
-        "GetMembersHelper is not yet routed (gated on the member entity "
-        "family)");
+    // The C# `return GetMembersHelper.GetNestedTypes(this, typeArguments,
+    // filter, options);` -- the non-null nested-type-arguments count filter.
+    return GetMembersHelper::GetNestedTypes(this, &typeArguments, filter, options);
 }
 
 // The Void early-exit arms (the C# `if (Kind == TypeKind.Void) return

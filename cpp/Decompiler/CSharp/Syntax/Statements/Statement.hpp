@@ -111,14 +111,14 @@ public:
     // The C# `public override void AcceptVisitor(IAstVisitor visitor)`.
     void AcceptVisitor(IAstVisitor& visitor) override {
         // The C# `visitor.VisitPatternPlaceholder(this, child)`.
-        visitor.VisitPatternPlaceholder(this, child_);
+        visitor.VisitPatternPlaceholder(this, *child_);
     }
 
     // The C# `AcceptVisitor<T>(IAstVisitor<T> visitor)` over S = bool (the port's
     // IAstVisitorBool instantiation; the C# generated placeholder overrides the
     // generic dispatch alongside the void one).
     bool AcceptVisitorBool(IAstVisitorBool& visitor) override {
-        return visitor.VisitPatternPlaceholder(this, child_);
+        return visitor.VisitPatternPlaceholder(this, *child_);
     }
 
     bool DoMatch(AstNode* other, PatternMatching::Match match) override {

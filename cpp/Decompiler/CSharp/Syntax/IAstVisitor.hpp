@@ -47,19 +47,16 @@
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
-// The `Pattern` forward declaration the `VisitPatternPlaceholder(AstNode*, Pattern*)`
-// member needs (the concrete pattern classes live in the PatternMatching namespace; the
-// pointer parameter needs only the declaration, the PatternNodes.hpp include lands with
-// the visitors that use the concrete nodes).
-namespace PatternMatching {
-class Pattern;
-}
+// Forward declaration: `VisitPatternPlaceholder` takes the placeholder `AstNode` by pointer
+// and the wrapped `Pattern` by reference, so this header needs only the forward declarations
+// (`AstNode` is not otherwise named here -- it forward-declares this interface in turn).
+class AstNode;
+namespace PatternMatching { class Pattern; }
 
 // Forward declarations of the concrete AST nodes whose `Visit` methods are declared below.
 // A pointer parameter needs only a forward declaration, so this header does not include the
 // concrete node headers (the node's own header includes this one so its `AcceptVisitor`
 // override can call `visitor.Visit<NodeName>(this)`); more are added as the hierarchy lands.
-class AstNode;
 class Identifier;
 class NullReferenceExpression;
 class ThisReferenceExpression;
@@ -971,14 +968,14 @@ public:
     // so the generator's visit-method-name default yields `VisitSyntaxTree`).
     virtual void VisitSyntaxTree(SyntaxTree*) = 0;
 
-    // ---- The pattern-placeholder dispatch ------------------------------------------------
-
-    // The C# generated `void VisitPatternPlaceholder(AstNode placeholder, Pattern pattern)`
-    // (DecompilerSyntaxTreeGenerator.cs: every generated IAstVisitor variant carries the
-    // member; the per-node `PatternPlaceholder` classes' `AcceptVisitor` dispatch here).
-    // The C# DepthFirstAstVisitor defaults it to `VisitChildren(placeholder)`.
-    virtual void VisitPatternPlaceholder(AstNode* placeholder,
-                                         PatternMatching::Pattern* pattern) = 0;
+    // The C# generator's `VisitPatternPlaceholder(AstNode placeholder, Pattern pattern)`
+    // (one shared arm, declared on every generated visitor rather than per concrete node):
+    // the dispatch target of a `PatternPlaceholder`'s `AcceptVisitor`. `placeholder` is the
+    // wrapping node (always an `AstNode`), `pattern` the pattern it wraps. `DepthFirstAstVisitor`
+    // supplies the default `VisitChildren(placeholder)` (the placeholder has no AST children),
+    // and `CSharpOutputVisitor` renders the node span (the pattern-rendering `VisitNodeInPattern`
+    // helper is deferred).
+    virtual void VisitPatternPlaceholder(AstNode* placeholder, PatternMatching::Pattern& pattern) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

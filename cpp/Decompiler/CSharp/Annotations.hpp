@@ -101,6 +101,12 @@ public:
     // mutable handle; the port returns the shared_ptr's raw pointer).
     IL::ILVariable* Variable() const { return variable_.get(); }
 
+    // The owning handle behind `Variable` -- the `shared_ptr` a caller needs to build a
+    // new `ILVariableResolveResult` over the same variable (the C# `new
+    // ILVariableResolveResult(v)` carries the same GC reference; the port shares the
+    // handle).
+    const IL::ILVariablePtr& VariableHandle() const { return variable_; }
+
 protected:
     std::string ClassName() const override { return "ILVariableResolveResult"; }
 
@@ -230,6 +236,10 @@ public:
         static const UseImplicitlyTypedOutAnnotation instance;
         return instance;
     }
+    // The port's owning shared handle of the same singleton (the annotation
+    // channel owns via shared_ptr; the CheckedAnnotationHandle convention) --
+    // `Instance()` stays the reference-identity read the C# shape carries.
+    static std::shared_ptr<UseImplicitlyTypedOutAnnotation> SharedInstance();
 };
 
 // The non-owning shared handle to the `UseImplicitlyTypedOutAnnotation` singleton
@@ -336,6 +346,42 @@ Syntax::VariableInitializer* WithILVariable(Syntax::VariableInitializer& initial
 // this ForeachStatement loop, ILVariable v)`.
 Syntax::ForeachStatement* WithILVariable(Syntax::ForeachStatement& loop,
                                          const IL::ILVariablePtr& variable);
+
+// The C# `ide.AddAnnotation(localFunction)` -- the local-function ILFunction object
+// itself as the identifier-expression's AST annotation (consumed by DeclareVariables'
+// scope walk and the DebugInfoGenerator). The port's annotation channel owns via
+// shared_ptr<AnnotationBase>, so the non-owning function pointer is wrapped in this
+// holder (the ILInstructionAnnotation precedent).
+class ILFunctionAnnotation final : public Syntax::AnnotationBase {
+public:
+    IL::ILFunction* Function;
+
+    explicit ILFunctionAnnotation(IL::ILFunction* function) : Function(function) {}
+};
+
+// The C# `node.AddAnnotation(localFunction)` over the holder channel -- attach the
+// function as the node's ILFunction annotation.
+void WithILFunction(Syntax::AstNode& node, IL::ILFunction* function);
+
+// The C# `node.Annotation<ILFunction>()` -- the function carried by the node's
+// ILFunction annotation, or null.
+IL::ILFunction* GetILFunction(const Syntax::AstNode& node);
+
+// The C# `node.Annotation<BlockContainer>()` -- the block container the AST
+// translation attributed to a node (the scope the DeclareVariables analysis tracks
+// for loop bodies and function bodies). The C# stores the ILInstruction itself; the
+// port wraps the non-owning pointer in a holder (the ILFunctionAnnotation
+// precedent).
+class BlockContainerAnnotation final : public Syntax::AnnotationBase {
+public:
+    IL::BlockContainer* Container;
+
+    explicit BlockContainerAnnotation(IL::BlockContainer* container) : Container(container) {}
+};
+
+// The C# `node.Annotation<BlockContainer>()` over the holder channel -- the container
+// carried by the node's BlockContainer annotation, or null.
+IL::BlockContainer* GetBlockContainer(const Syntax::AstNode& node);
 
 // The C# `public static T CopyAnnotationsFrom<T>(this T node, AstNode other)
 // where T : AstNode` -- copies all annotations from `other` to `node` (the same

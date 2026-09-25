@@ -16,18 +16,22 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-// Minimal nodes for ldftn, sizeof, ldtoken, and mkrefany/refanyval/refanytype.
-// These carry a display string (resolved by the IL reader) and have no children
-// (the token/type is a reference, not a tree child). They are SimpleInstruction
-// subclasses; the full ILAst has richer nodes (LdFtn carries an IMethod, SizeOf
-// carries an IType) but the display-string form is enough for the reader to
-// build a valid tree and for the ILAst dump. The C# generated nodes in
-// Instructions.cs carry the same opcodes.
+// Minimal nodes for ldftn, ldvirtftn, sizeof, ldtoken, and
+// mkrefany/refanyval/refanytype. These carry a display string (resolved by the
+// IL reader) and have no children (the token/type is a reference, not a tree
+// child). They are SimpleInstruction subclasses. The C# generated nodes in
+// Instructions.cs carry the richer operands: LdFtn/LdVirtFtn an IMethod, SizeOf
+// an IType, LdTypeToken an IType. The type-bearing nodes carry the resolved
+// IType beside the display string (the SizeOf/LdTypeToken precedent); the
+// LdFtn/LdVirtFtn nodes now do the same for their IMethod (the
+// UserDefinedCompoundAssign precedent): a second ctor populating the seed
+// string stand-in, with the seed reader still building the string-only form
+// (the seed's Call node and UserDefinedCompoundAssign both keep their string
+// fallbacks for the dump path).
 
 #pragma once
 
 #include "Decompiler/IL/Instructions/SimpleInstruction.hpp"
-#include "Decompiler/TypeSystem/IMethod.hpp"
 #include "Decompiler/IL/Instructions/UnaryInstruction.hpp"
 #include "Decompiler/IL/InstructionFlags.hpp"
 #include "Decompiler/IL/StackType.hpp"
@@ -37,46 +41,51 @@
 #include <string>
 #include <utility>
 
+// Forward declaration (the field is a shared_ptr to the incomplete type; the
+// resolved ctors live in the .cpp beside the complete-type include).
+namespace ILSpy::Decompiler::TypeSystem {
+class IMethod;
+}
+
 namespace ILSpy::Decompiler::IL {
 
 // ldftn <method>: push a function pointer. Result I (native int / fn pointer).
+// The C# `LdFtn(IMethod method)` carries the resolved method (the C# `readonly
+// IMethod Method` -- the CallBuilder delegate-construction arm and
+// MatchDelegateConstruction's `((IInstructionWithMethodOperand)...)` read);
+// the seed reader builds the string-only form and keeps the display string
+// (the C# WriteToCore prints the method through the ambience, which the
+// display string approximates).
 class LdFtn : public SimpleInstruction {
 public:
+    // The C# `readonly IMethod Method` -- null for the seed stand-in form.
+    std::shared_ptr<TypeSystem::IMethod> Method;
     std::string MethodName;
-    // The C# `IMethod Method { get; }` -- the resolved method the CallBuilder
-    // delegate-construction arm reads. Null on reader-built nodes (the IL
-    // reader discards the token target; the stand-in convention); the
-    // CallBuilder path asserts it (the C# node is only ever created with a
-    // method).
-    std::shared_ptr<const TypeSystem::IMethod> Method;
     explicit LdFtn(std::string method = std::string())
         : SimpleInstruction(OpCode::LdFtn), MethodName(std::move(method)) {}
-    // The IMethod-bearing ctor (the C# `new LdFtn(method)` -- the resolved
-    // method the CallBuilder consumes; the MethodName derives from it).
-    LdFtn(std::shared_ptr<const TypeSystem::IMethod> method)
-        : SimpleInstruction(OpCode::LdFtn),
-          MethodName(std::string(method->Name())), Method(std::move(method)) {}
+    // The C# `LdFtn(IMethod method)` ctor -- the resolved method populates the
+    // display string (out-of-line: the ReflectionName derivation needs the
+    // IType surface).
+    explicit LdFtn(std::shared_ptr<TypeSystem::IMethod> method);
     StackType ResultType() const override { return StackType::I; }
     void WriteTo(std::string& out) const override {
         out += "ldftn("; out += MethodName; out += ')';
     }
 };
 
-// ldvirtftn <method>: push a virtual function pointer. Result I.
+// ldvirtftn <method>: push a virtual function pointer. Result I. The C#
+// `LdVirtFtn(IMethod method)` carries the resolved method (the LdFtn
+// precedent above); the seed reader builds the string-only form.
 class LdVirtFtn : public SimpleInstruction {
 public:
+    // The C# `readonly IMethod Method` -- null for the seed stand-in form.
+    std::shared_ptr<TypeSystem::IMethod> Method;
     std::string MethodName;
-    // The C# `IMethod Method { get; }` -- the resolved virtual method the
-    // CallBuilder delegate-construction arm reads. Null on reader-built nodes
-    // (the IL reader discards the token target; the stand-in convention).
-    std::shared_ptr<const TypeSystem::IMethod> Method;
     explicit LdVirtFtn(std::string method = std::string())
         : SimpleInstruction(OpCode::LdVirtFtn), MethodName(std::move(method)) {}
-    // The IMethod-bearing ctor (the C# `new LdVirtFtn(method)` -- the resolved
-    // virtual method the CallBuilder consumes; the MethodName derives from it).
-    LdVirtFtn(std::shared_ptr<const TypeSystem::IMethod> method)
-        : SimpleInstruction(OpCode::LdVirtFtn),
-          MethodName(std::string(method->Name())), Method(std::move(method)) {}
+    // The C# `LdVirtFtn(IMethod method)` ctor -- the resolved method populates
+    // the display string (out-of-line with LdFtn's).
+    explicit LdVirtFtn(std::shared_ptr<TypeSystem::IMethod> method);
     StackType ResultType() const override { return StackType::I; }
     void WriteTo(std::string& out) const override {
         out += "ldvirtftn("; out += MethodName; out += ')';
@@ -110,33 +119,24 @@ public:
 // -- ExpressionTransforms.TransformDelegateCtorLdVirtFtnToLdVirtDelegate folds the
 // newobj so the delegate target and the virtual method are unified. A UnaryInstruction
 // (the Argument slot is the target, inlineable) carrying the delegate type (ITypePtr)
-// and the resolved method name string. Result O; MayThrow (a virtual call resolves the
-// method). Port of the C# LdVirtDelegate (generated Instructions.cs) -- the C# carries
-// an IMethod; this port carries the resolved method name string, matching the
-// LdFtn/LdVirtFtn precedent (no IMethod type-system object).
+// and the resolved method. Result O; MayThrow (a virtual call resolves the
+// method). Port of the C# LdVirtDelegate (generated Instructions.cs) -- the C#
+// carries an IMethod, which the port now does beside the display string (the
+// LdFtn/LdVirtFtn precedent above); the seed reader builds the string-only form.
 class LdVirtDelegate : public UnaryInstruction {
 public:
     TypeSystem::ITypePtr Type;
+    // The C# `readonly IMethod Method` -- null for the seed stand-in form.
+    std::shared_ptr<TypeSystem::IMethod> Method;
     std::string MethodName;
-    // The C# `IMethod Method { get; }` -- the resolved virtual method the
-    // CallBuilder delegate-reference family reads (BuildLdVirtDelegate). The
-    // IL reader discards the ldvirtftn target method (the stand-in
-    // convention), so this field is null on reader-built nodes; the
-    // CallBuilder path asserts it (the C# node is only ever created with a
-    // method).
-    std::shared_ptr<const TypeSystem::IMethod> Method;
     LdVirtDelegate(std::unique_ptr<ILInstruction> argument, TypeSystem::ITypePtr type,
                   std::string method)
         : UnaryInstruction(OpCode::LdVirtDelegate, std::move(argument)),
           Type(std::move(type)), MethodName(std::move(method)) {}
-    // The IMethod-bearing ctor (the C# `new LdVirtDelegate(argument, method)` --
-    // the delegate type/method pair the CallBuilder consumes).
+    // The resolved-method ctor -- populates the display string out-of-line with
+    // LdFtn's.
     LdVirtDelegate(std::unique_ptr<ILInstruction> argument, TypeSystem::ITypePtr type,
-                  std::string methodName,
-                  std::shared_ptr<const TypeSystem::IMethod> resolvedMethod)
-        : UnaryInstruction(OpCode::LdVirtDelegate, std::move(argument)),
-          Type(std::move(type)), MethodName(std::move(methodName)),
-          Method(std::move(resolvedMethod)) {}
+                  std::shared_ptr<TypeSystem::IMethod> method);
     InstructionFlags DirectFlags() const override {
         return InstructionFlags::None | InstructionFlags::MayThrow;
     }
@@ -173,30 +173,6 @@ public:
     StackType ResultType() const override { return StackType::O; }
     void WriteTo(std::string& out) const override {
         out += "ldtoken("; out += TokenName; out += ')';
-    }
-};
-
-// ldmembertoken <member>: push a runtime member handle (the C#
-// `LdMemberToken : SimpleInstruction` carrying the resolved IMember -- the
-// MethodBase.GetMethodFromHandle argument the expression-tree call sites
-// build). Result O. The member is the resolved-method handle (non-owning:
-// the metadata owns it); TokenName is the display form.
-class LdMemberToken : public SimpleInstruction {
-public:
-    // The C# `LdMemberToken(IMember member)`: the member handle carries
-    // any member kind (the method-handle shape the call sites build, the
-    // field-handle shape FieldInfo.GetFieldFromHandle consumes).
-    std::shared_ptr<const TypeSystem::IMember> Member;
-    std::string TokenName;
-    explicit LdMemberToken(std::string name = std::string())
-        : SimpleInstruction(OpCode::LdMemberToken), TokenName(std::move(name)) {}
-    LdMemberToken(std::shared_ptr<const TypeSystem::IMember> member,
-                  std::string name)
-        : SimpleInstruction(OpCode::LdMemberToken), Member(std::move(member)),
-          TokenName(std::move(name)) {}
-    StackType ResultType() const override { return StackType::O; }
-    void WriteTo(std::string& out) const override {
-        out += "ldtoken "; out += TokenName;
     }
 };
 

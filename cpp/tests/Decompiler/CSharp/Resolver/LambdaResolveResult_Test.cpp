@@ -28,11 +28,9 @@
 // `Body`), and provides the concrete `GetChildResults()` override yielding `{ Body }`.
 // `LambdaConversion` is the internal singleton `Conversion` subclass with
 // `IsAnonymousFunctionConversion` + `IsImplicit` both true. The C# `DecompiledLambdaResolveResult`
-// concrete subclass (the third class in the .cs file) is DEFERRED: its `IsAsync` /
-// `Parameters` / `ReturnType` delegate to `ILFunction.IsAsync` / `ILFunction.Parameters`
-// / `ILFunction.ReturnType` (the port's `ILFunction` has none of those surfaces) and its
-// `IsValid` calls `CSharpConversions.IdentityConversion` / `ImplicitConversion` (the
-// ~2500-line `CSharpConversions` class is unported).
+// concrete subclass (the third class in the .cs file) projects `IsAsync` / `Parameters` /
+// `ReturnType` over the held `ILFunction` and answers `IsValid` through `CSharpConversions`
+// (both prerequisites, `ILFunction.Parameters` and the conversion controller, are landed).
 //
 // The tests exercise `LambdaResolveResult` through a local concrete test subclass (the
 // class is abstract). They pin the `SpecialType.NoType` base-type crux
@@ -40,19 +38,16 @@
 // `GetChildResults()` single-element snapshot (direct + through a `ResolveResult*` base),
 // the inherited `ToString` bracket form (with the test subclass's `ClassName()` override),
 // the `ShallowClone` runtime-type preservation + shared `Body`, and the class-shape
-// static-asserts. `IsValid` is NOT invoked at runtime: its `CSharpConversions&` parameter
-// is an incomplete type here (the class is unported), so no test can construct one; the
-// `LambdaConversion` singleton the C# `IsValid` returns on success is tested directly.
-// For `LambdaConversion` the tests pin the two overridden flags, the inherited defaults
-// (`IsValid` true, `IsExplicit` / `IsIdentityConversion` false), the `Instance` singleton
-// reference-identity, the inherited reference-equality `Equals`, the polymorphic dispatch
-// through a `Conversion*` base, and the class-shape static-asserts.
+// static-asserts. `DecompiledLambdaResolveResult` is exercised directly (the ctor /
+// projections / `GetInferredReturnType` / `ToString` / `ShallowClone` and the full `IsValid`
+// arm matrix). For `LambdaConversion` the tests pin the two overridden flags, the inherited
+// defaults (`IsValid` true, `IsExplicit` / `IsIdentityConversion` false), the `Instance`
+// singleton reference-identity, the inherited reference-equality `Equals`, the polymorphic
+// dispatch through a `Conversion*` base, and the class-shape static-asserts.
 
+#include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"
 #include "Decompiler/CSharp/Resolver/LambdaResolveResult.hpp"
-#include "Decompiler/TypeSystem/LookupStubs.hpp"
-#include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
-#include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
-#include "Decompiler/TypeSystem/SimpleCompilation.hpp"
+#include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/Semantics/Conversion.hpp"
 #include "Decompiler/Semantics/ConversionFactories.hpp"
 #include "Decompiler/Semantics/ResolveResult.hpp"
@@ -60,6 +55,7 @@
 #include "Decompiler/TypeSystem/IParameter.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/TypeSystem/LookupStubs.hpp"
 #include "Decompiler/TypeSystem/ReferenceKind.hpp"
 #include "Decompiler/TypeSystem/SymbolKind.hpp"
 #include "Decompiler/TypeSystem/TypeKind.hpp"
@@ -73,10 +69,9 @@
 #include <vector>
 
 namespace Res = ILSpy::Decompiler::CSharp::Resolver;
-namespace Impl = ILSpy::Decompiler::TypeSystem::Implementation;
-namespace IL = ::ILSpy::Decompiler::IL;
 namespace Sem = ILSpy::Decompiler::Semantics;
 namespace TS = ILSpy::Decompiler::TypeSystem;
+namespace IL = ILSpy::Decompiler::IL;
 
 namespace {
 
@@ -87,6 +82,9 @@ public:
     explicit TestLambdaParameter(std::string name)
         : name_(std::move(name)),
           type_(std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32)) {}
+
+    TestLambdaParameter(std::string name, TS::ITypePtr type)
+        : name_(std::move(name)), type_(std::move(type)) {}
 
     // --- ISymbol ---
     TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Variable; }
@@ -108,43 +106,11 @@ private:
     TS::ITypePtr type_;
 };
 
-// The CSharpConversions instance the IsValid calls pass (the C# `conversions`
-// parameter): the port's controller is a value object over the compilation.
-// The `operator CSharpConversions&()` lets the test call sites read like the
-// C# `IsValid(args, returnType, conversions)` pass-through.
-struct TestConversions {
-    TestConversions()
-        : conversions(Compilation())
-    {
-    }
-    static TS::ICompilation& Compilation()
-    {
-        static TS::SimpleCompilation compilation(
-            Impl::MinimalCorlib::Instance(), {});
-        return compilation;
-    }
-    Res::CSharpConversions conversions;
-    operator Res::CSharpConversions&() { return conversions; }
-};
-
-std::shared_ptr<TS::TestSupport::LookupTypeDefinition> Prim(TS::KnownTypeCode ktc)
-{
-    const int n = static_cast<int>(ktc);
-    return std::make_shared<TS::TestSupport::LookupTypeDefinition>(
-        "T" + std::to_string(n), "",
-        TS::FullTypeName(TS::TopLevelTypeName("", "T" + std::to_string(n), 0)),
-        TS::TypeKind::Struct, TS::Accessibility::Public, TestConversions::Compilation(),
-        nullptr, ktc);
-}
-
-
 // The concrete test subclass driving the abstract `LambdaResolveResult`: the C# class is
-// abstract (its C# consumer `DecompiledLambdaResolveResult` is deferred), so the tests
-// define a concrete stand-in that stores canned answers for every pure-virtual member.
-// `IsValid` stores nothing and returns `LambdaConversion::Instance()` (the canned success
-// conversion -- the C# `IsValid` success result); it cannot be CALLED here (the
-// `CSharpConversions&` parameter is an incomplete type), but the override proves the
-// class is concrete.
+// abstract (the real back-end subclass is `DecompiledLambdaResolveResult`, tested below), so
+// the tests define a concrete stand-in that stores canned answers for every pure-virtual
+// member. `IsValid` stores nothing and returns the `LambdaConversion` singleton (the canned
+// success conversion -- the C# `IsValid` success result).
 class TestLambdaResolveResult : public Res::LambdaResolveResult {
 public:
     bool hasParameterList = true;
@@ -176,8 +142,7 @@ public:
                                              const TS::ITypePtr&,
                                              Res::CSharpConversions&) const override
     {
-        return std::shared_ptr<Sem::Conversion>(
-            const_cast<Res::LambdaConversion*>(&Res::LambdaConversion::Instance()));
+        return Res::LambdaConversion::InstancePtr();
     }
     Sem::ResolveResult& Body() const override { return *body; }
 
@@ -405,6 +370,230 @@ TEST(LambdaConversionTest, DispatchesThroughConversionBasePointer)
 }
 
 // ===========================================================================
+// DecompiledLambdaResolveResult -- the concrete back-end subclass.
+// ===========================================================================
+
+namespace {
+
+using ILSpy::Decompiler::TypeSystem::TestSupport::LookupCompilation;
+
+// An `ILFunction` with a two-parameter list, an Int32 return type, and the compilation the
+// `CSharpConversions` controller runs over. The parameters are owned by the fixture (the
+// `ILFunction.Parameters` field is non-owning, faithful to the C# type-system ownership).
+struct DecompiledLambdaFixture {
+    LookupCompilation compilation;
+    IL::ILFunction function;
+    std::shared_ptr<TestLambdaParameter> firstParam;
+    std::shared_ptr<TestLambdaParameter> secondParam;
+
+    DecompiledLambdaFixture()
+    {
+        firstParam = std::make_shared<TestLambdaParameter>(
+            "sender", std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object));
+        secondParam = std::make_shared<TestLambdaParameter>(
+            "e", std::make_shared<TS::KnownType>(TS::KnownTypeCode::String));
+        function.Parameters.push_back(firstParam.get());
+        function.Parameters.push_back(secondParam.get());
+        function.ReturnType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    }
+};
+
+} // namespace
+
+TEST(DecompiledLambdaResolveResultTest, CtorCapturesFlagsAndProjectsFunction)
+{
+    DecompiledLambdaFixture f;
+    auto delegateType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object);
+    auto inferred = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    Res::DecompiledLambdaResolveResult rr(&f.function, delegateType, inferred,
+                                          /*hasParameterList*/ true,
+                                          /*isAnonymousMethod*/ false,
+                                          /*isImplicitlyTyped*/ true);
+    EXPECT_TRUE(rr.HasParameterList());
+    EXPECT_FALSE(rr.IsAnonymousMethod());
+    EXPECT_TRUE(rr.IsImplicitlyTyped());
+    EXPECT_FALSE(rr.IsAsync());
+    ASSERT_EQ(rr.Parameters().size(), 2u);
+    EXPECT_EQ(rr.Parameters()[0], f.firstParam.get());
+    EXPECT_EQ(rr.Parameters()[1], f.secondParam.get());
+    EXPECT_EQ(&rr.ReturnType(), f.function.ReturnType.get());
+    EXPECT_EQ(rr.DelegateType.get(), delegateType.get());
+    EXPECT_EQ(rr.InferredReturnType.get(), inferred.get());
+    // The lambda has NO type (the anonymous-function conversion carries the delegate type).
+    EXPECT_EQ(rr.Type().Kind(), TS::TypeKind::None);
+    EXPECT_FALSE(rr.IsError());
+    // The Body is a fresh ResolveResult(SpecialType.UnknownType).
+    EXPECT_EQ(rr.Body().Type().Kind(), TS::TypeKind::Unknown);
+}
+
+TEST(DecompiledLambdaResolveResultTest, IsAsyncProjectsFunctionAsyncReturnType)
+{
+    DecompiledLambdaFixture f;
+    f.function.AsyncReturnType =
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Boolean);
+    auto delegateType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object);
+    auto inferred = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    Res::DecompiledLambdaResolveResult rr(&f.function, delegateType, inferred, false, true, false);
+    EXPECT_TRUE(rr.IsAsync());
+}
+
+TEST(DecompiledLambdaResolveResultTest, GetInferredReturnTypeReturnsStoredField)
+{
+    DecompiledLambdaFixture f;
+    auto delegateType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object);
+    auto inferred = std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
+    Res::DecompiledLambdaResolveResult rr(&f.function, delegateType, inferred, false, false, false);
+    // The parameter types are ignored (the C# "we don't know how to compute ... " comment).
+    EXPECT_EQ(rr.GetInferredReturnType({}).get(), inferred.get());
+    EXPECT_EQ(rr.GetInferredReturnType(
+                  {std::make_shared<TS::KnownType>(TS::KnownTypeCode::Boolean)})
+                  .get(),
+              inferred.get());
+    // `InferredReturnType` is a public mutable field (`ModifyReturnTypeOfLambda` assigns it).
+    auto replacement = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Boolean);
+    rr.InferredReturnType = replacement;
+    EXPECT_EQ(rr.GetInferredReturnType({}).get(), replacement.get());
+}
+
+TEST(DecompiledLambdaResolveResultTest, ToStringUsesConcreteClassName)
+{
+    DecompiledLambdaFixture f;
+    auto delegateType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object);
+    auto inferred = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    Res::DecompiledLambdaResolveResult rr(&f.function, delegateType, inferred, false, false, false);
+    // The inherited ResolveResult bracket form uses the concrete ClassName; a lambda has NoType
+    // (its ReflectionName is "?").
+    EXPECT_EQ(rr.ToString(), "[DecompiledLambdaResolveResult ?]");
+}
+
+TEST(DecompiledLambdaResolveResultTest, ShallowClonePreservesTypeAndSharesBody)
+{
+    DecompiledLambdaFixture f;
+    auto delegateType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object);
+    auto inferred = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    Res::DecompiledLambdaResolveResult rr(&f.function, delegateType, inferred, true, false, false);
+    auto clone = rr.ShallowClone();
+    ASSERT_NE(clone, nullptr);
+    EXPECT_EQ(clone->ToString(), "[DecompiledLambdaResolveResult ?]");
+    auto* cloneLambda = dynamic_cast<Res::LambdaResolveResult*>(clone.get());
+    ASSERT_NE(cloneLambda, nullptr);
+    // The Body shared_ptr / the ITypePtr fields are shared; the held function pointer is copied.
+    EXPECT_EQ(&cloneLambda->Body(), &rr.Body());
+}
+
+TEST(DecompiledLambdaResolveResultTest, IsValidIdentityParameterAndReturnTypes)
+{
+    DecompiledLambdaFixture f;
+    Res::CSharpConversions conversions(f.compilation);
+    auto delegateType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object);
+    auto inferred = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    Res::DecompiledLambdaResolveResult rr(&f.function, delegateType, inferred,
+                                          true, false, false);
+    std::vector<TS::ITypePtr> parameterTypes{
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object),
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::String)};
+    auto returnType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto result = rr.IsValid(parameterTypes, returnType, conversions);
+    ASSERT_NE(result, nullptr);
+    EXPECT_TRUE(result->IsValid());
+    EXPECT_TRUE(result->IsAnonymousFunctionConversion());
+}
+
+TEST(DecompiledLambdaResolveResultTest, IsValidParameterCountMismatchIsNone)
+{
+    DecompiledLambdaFixture f;
+    Res::CSharpConversions conversions(f.compilation);
+    auto delegateType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object);
+    auto inferred = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    Res::DecompiledLambdaResolveResult rr(&f.function, delegateType, inferred,
+                                          true, false, false);
+    std::vector<TS::ITypePtr> parameterTypes{
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object)};
+    auto returnType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto result = rr.IsValid(parameterTypes, returnType, conversions);
+    ASSERT_NE(result, nullptr);
+    EXPECT_FALSE(result->IsValid());
+    EXPECT_FALSE(result->IsAnonymousFunctionConversion());
+}
+
+TEST(DecompiledLambdaResolveResultTest, IsValidImplicitlyTypedParameterMismatchIsValid)
+{
+    DecompiledLambdaFixture f;
+    Res::CSharpConversions conversions(f.compilation);
+    auto delegateType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object);
+    // Neither the declared return type (String) nor the inferred return type (String) converts
+    // to the target (Int32); only the parameter-list early return can make this valid.
+    f.function.ReturnType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
+    auto inferred = std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
+    Res::DecompiledLambdaResolveResult rr(&f.function, delegateType, inferred,
+                                          true, false, /*isImplicitlyTyped*/ true);
+    std::vector<TS::ITypePtr> parameterTypes{
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32),
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Boolean)};
+    auto returnType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto result = rr.IsValid(parameterTypes, returnType, conversions);
+    ASSERT_NE(result, nullptr);
+    EXPECT_TRUE(result->IsValid());
+    EXPECT_TRUE(result->IsAnonymousFunctionConversion());
+}
+
+TEST(DecompiledLambdaResolveResultTest, IsValidExplicitlyTypedParameterMismatchIsNone)
+{
+    DecompiledLambdaFixture f;
+    Res::CSharpConversions conversions(f.compilation);
+    auto delegateType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object);
+    // Neither the declared return type (String) nor the inferred return type (String) converts
+    // to the target (Int32); the explicitly typed parameter mismatch yields None.
+    f.function.ReturnType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
+    auto inferred = std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
+    Res::DecompiledLambdaResolveResult rr(&f.function, delegateType, inferred,
+                                          true, false, /*isImplicitlyTyped*/ false);
+    std::vector<TS::ITypePtr> parameterTypes{
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32),
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Boolean)};
+    auto returnType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto result = rr.IsValid(parameterTypes, returnType, conversions);
+    ASSERT_NE(result, nullptr);
+    EXPECT_FALSE(result->IsValid());
+    EXPECT_FALSE(result->IsAnonymousFunctionConversion());
+}
+
+TEST(DecompiledLambdaResolveResultTest, IsValidFallsBackToInferredReturnType)
+{
+    DecompiledLambdaFixture f;
+    Res::CSharpConversions conversions(f.compilation);
+    auto delegateType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object);
+    // The declared return type (Int32) does not identity-convert to the target (Object), but
+    // the inferred return type (Object) does.
+    auto inferred = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object);
+    Res::DecompiledLambdaResolveResult rr(&f.function, delegateType, inferred,
+                                          false, false, false);
+    auto returnType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object);
+    auto result = rr.IsValid({}, returnType, conversions);
+    ASSERT_NE(result, nullptr);
+    EXPECT_TRUE(result->IsValid());
+    EXPECT_TRUE(result->IsAnonymousFunctionConversion());
+}
+
+TEST(DecompiledLambdaResolveResultTest, IsValidNoConversionIsNone)
+{
+    DecompiledLambdaFixture f;
+    Res::CSharpConversions conversions(f.compilation);
+    auto delegateType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object);
+    // Neither the declared return type (String) nor the inferred return type (Object) converts
+    // implicitly to the target (Int32): boxing is not implicit, unboxing is explicit.
+    f.function.ReturnType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
+    auto inferred = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object);
+    Res::DecompiledLambdaResolveResult rr(&f.function, delegateType, inferred,
+                                          false, false, false);
+    auto returnType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto result = rr.IsValid({}, returnType, conversions);
+    ASSERT_NE(result, nullptr);
+    EXPECT_FALSE(result->IsValid());
+    EXPECT_FALSE(result->IsAnonymousFunctionConversion());
+}
+
+// ===========================================================================
 // Class shape -- base / abstract / not-final / polymorphic.
 // ===========================================================================
 
@@ -424,193 +613,10 @@ static_assert(!std::is_final<Res::LambdaConversion>::value,
 static_assert(std::is_polymorphic<Res::LambdaConversion>::value,
               "LambdaConversion is polymorphic");
 
-static_assert(std::is_base_of<Res::LambdaResolveResult,
-                              Res::DecompiledLambdaResolveResult>::value,
+static_assert(std::is_base_of<Res::LambdaResolveResult, Res::DecompiledLambdaResolveResult>::value,
               "DecompiledLambdaResolveResult derives from LambdaResolveResult");
 static_assert(std::is_final<Res::DecompiledLambdaResolveResult>::value,
               "DecompiledLambdaResolveResult is final (the C# class is sealed)");
 static_assert(std::is_polymorphic<Res::DecompiledLambdaResolveResult>::value,
               "DecompiledLambdaResolveResult is polymorphic");
-
-// ---- DecompiledLambdaResolveResult (the concrete subclass) ------------------
-
-namespace {
-
-using Res::DecompiledLambdaResolveResult;
-
-// A primitive numeric definition (the CSharpConversionsNumeric_Test::Prim
-// precedent): the numeric-conversion path consults
-// `ReflectionHelper.GetTypeCode`, which dynamic-casts to `ITypeDefinition` --
-// the bare `TS::KnownType` stub reports `TypeCode::Empty` and the Int32->Int64
-// implicit-numeric lookup would fail.
-
-// An ILFunction fixture: a non-async void-delegate shape and an async variant.
-struct DecompiledLambdaFixture {
-    IL::ILFunction function;
-    TS::ITypePtr stringType = Prim(TS::KnownTypeCode::String);
-    TS::ITypePtr int32Type = Prim(TS::KnownTypeCode::Int32);
-    TS::ITypePtr int64Type = Prim(TS::KnownTypeCode::Int64);
-    TS::ITypePtr delegateType = Prim(TS::KnownTypeCode::Object);
-
-    DecompiledLambdaFixture()
-    {
-        function.ReturnType = int32Type;
-        // Two parameters (Int32 name) exercise the count/identity gates.
-        function.Parameters.push_back(
-            std::make_shared<const Impl::DefaultParameter>(int32Type, "x"));
-    }
-};
-
-TEST(DecompiledLambdaResolveResultTest, StoresAllCtorFields)
-{
-    DecompiledLambdaFixture fixture;
-    Res::DecompiledLambdaResolveResult result(
-        fixture.function, fixture.delegateType, fixture.int32Type,
-        /*hasParameterList=*/true, /*isAnonymousMethod=*/false,
-        /*isImplicitlyTyped=*/true);
-    EXPECT_TRUE(result.HasParameterList());
-    EXPECT_FALSE(result.IsAnonymousMethod());
-    EXPECT_TRUE(result.IsImplicitlyTyped());
-    EXPECT_EQ(&result.DelegateType(), fixture.delegateType.get());
-    EXPECT_EQ(&result.InferredReturnType(), fixture.int32Type.get());
-}
-
-TEST(DecompiledLambdaResolveResultTest, IsAsyncFollowsFunction)
-{
-    DecompiledLambdaFixture fixture;
-    Res::DecompiledLambdaResolveResult syncResult(
-        fixture.function, fixture.delegateType, fixture.int32Type, true, false, true);
-    EXPECT_FALSE(syncResult.IsAsync());
-    fixture.function.AsyncReturnType =
-        std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
-    Res::DecompiledLambdaResolveResult asyncResult(
-        fixture.function, fixture.delegateType, fixture.int32Type, true, false, true);
-    EXPECT_TRUE(asyncResult.IsAsync());
-}
-
-TEST(DecompiledLambdaResolveResultTest, ParametersComeFromFunction)
-{
-    DecompiledLambdaFixture fixture;
-    Res::DecompiledLambdaResolveResult result(
-        fixture.function, fixture.delegateType, fixture.int32Type, true, false, true);
-    std::vector<const TS::IParameter*> parameters = result.Parameters();
-    ASSERT_EQ(parameters.size(), 1u);
-    EXPECT_EQ(parameters[0]->Name(), "x");
-    EXPECT_EQ(&parameters[0]->Type(), fixture.int32Type.get());
-}
-
-TEST(DecompiledLambdaResolveResultTest, ReturnTypeFollowsFunction)
-{
-    DecompiledLambdaFixture fixture;
-    Res::DecompiledLambdaResolveResult result(
-        fixture.function, fixture.delegateType, fixture.int32Type, true, false, true);
-    EXPECT_EQ(&result.ReturnType(), fixture.int32Type.get());
-}
-
-TEST(DecompiledLambdaResolveResultTest, GetInferredReturnTypeIgnoresParameterTypes)
-{
-    DecompiledLambdaFixture fixture;
-    Res::DecompiledLambdaResolveResult result(
-        fixture.function, fixture.delegateType, fixture.int32Type, true, false, true);
-    auto stringType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
-    auto inferred = result.GetInferredReturnType({stringType});
-    EXPECT_EQ(inferred.get(), fixture.int32Type.get());
-}
-
-TEST(DecompiledLambdaResolveResultTest, BodyIsUnknownTypeStub)
-{
-    DecompiledLambdaFixture fixture;
-    Res::DecompiledLambdaResolveResult result(
-        fixture.function, fixture.delegateType, fixture.int32Type, true, false, true);
-    EXPECT_EQ(result.Body().Type().Kind(), TS::TypeKind::Unknown);
-    // The single-child GetChildResults: new[] { this.Body }.
-    std::vector<const Sem::ResolveResult*> children = result.GetChildResults();
-    ASSERT_EQ(children.size(), 1u);
-    EXPECT_EQ(children[0], &result.Body());
-}
-
-TEST(DecompiledLambdaResolveResultTest, IsValidMatchingIdentityParametersIsLambdaConversion)
-{
-    DecompiledLambdaFixture fixture;
-    Res::DecompiledLambdaResolveResult result(
-        fixture.function, fixture.delegateType, fixture.int32Type, true, false, true);
-    // The parameter type (Int32) identity-matches; the return (Int32) identity-
-    // matches the function's ReturnType (Int32).
-    auto conversion = result.IsValid({fixture.int32Type}, fixture.int32Type,
-                                     TestConversions());
-    EXPECT_TRUE(conversion->IsAnonymousFunctionConversion());
-    EXPECT_TRUE(conversion->IsImplicit());
-}
-
-TEST(DecompiledLambdaResolveResultTest, IsValidWrongParameterCountIsNone)
-{
-    DecompiledLambdaFixture fixture;
-    Res::DecompiledLambdaResolveResult result(
-        fixture.function, fixture.delegateType, fixture.int32Type, true, false, true);
-    // HasParameterList is true and the function declares one parameter; a
-    // zero-parameter call is not applicable.
-    auto conversion = result.IsValid({}, fixture.int32Type, TestConversions());
-    EXPECT_FALSE(conversion->IsAnonymousFunctionConversion());
-}
-
-TEST(DecompiledLambdaResolveResultTest, IsValidImplicitlyTypedMismatchIsLambdaConversion)
-{
-    DecompiledLambdaFixture fixture;
-    Res::DecompiledLambdaResolveResult result(
-        fixture.function, fixture.delegateType, fixture.int32Type, true,
-        /*isAnonymousMethod=*/false, /*isImplicitlyTyped=*/true);
-    // A different parameter type (String) is not an identity match, but the
-    // implicitly-typed lambda may still be valid (the C# arm).
-    auto stringType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
-    auto conversion = result.IsValid({stringType}, fixture.int32Type,
-                                     TestConversions());
-    EXPECT_TRUE(conversion->IsAnonymousFunctionConversion());
-}
-
-TEST(DecompiledLambdaResolveResultTest, IsValidExplicitlyTypedMismatchIsNone)
-{
-    DecompiledLambdaFixture fixture;
-    Res::DecompiledLambdaResolveResult result(
-        fixture.function, fixture.delegateType, fixture.int32Type, true,
-        /*isAnonymousMethod=*/true, /*isImplicitlyTyped=*/false);
-    auto stringType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
-    auto conversion = result.IsValid({stringType}, fixture.int32Type,
-                                     TestConversions());
-    EXPECT_FALSE(conversion->IsAnonymousFunctionConversion());
-}
-
-TEST(DecompiledLambdaResolveResultTest, IsValidImplicitReturnConversionIsLambdaConversion)
-{
-    DecompiledLambdaFixture fixture;
-    Res::DecompiledLambdaResolveResult result(
-        fixture.function, fixture.delegateType, fixture.int32Type, true, false, true);
-    // The inferred return type (Int32) implicitly converts to the target
-    // return type (Int64) even though it is not an identity match.
-    auto conversion = result.IsValid({fixture.int32Type}, fixture.int64Type,
-                                     TestConversions());
-    EXPECT_TRUE(conversion->IsAnonymousFunctionConversion());
-}
-
-TEST(DecompiledLambdaResolveResultTest, ShallowClonePreservesRuntimeType)
-{
-    DecompiledLambdaFixture fixture;
-    Res::DecompiledLambdaResolveResult result(
-        fixture.function, fixture.delegateType, fixture.int32Type, true, false, true);
-    auto clone = std::unique_ptr<Sem::ResolveResult>(result.ShallowClone());
-    auto* cloned = dynamic_cast<Res::DecompiledLambdaResolveResult*>(clone.get());
-    ASSERT_TRUE(cloned != nullptr);
-    EXPECT_EQ(&cloned->DelegateType(), fixture.delegateType.get());
-}
-
-TEST(DecompiledLambdaResolveResultTest, DispatchesThroughLambdaResolveResultBasePointer)
-{
-    DecompiledLambdaFixture fixture;
-    Res::DecompiledLambdaResolveResult concrete(
-        fixture.function, fixture.delegateType, fixture.int32Type, true, false, true);
-    Res::LambdaResolveResult& base = concrete;
-    EXPECT_TRUE(base.HasParameterList());
-    EXPECT_FALSE(base.IsAsync());
-}
-
-} // namespace
 

@@ -1,108 +1,155 @@
 // Copyright (c) 2026 ILSpy Contributors
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy of this
-// software and associated documentation files (the "Software"), to deal in
-// the Software without restriction, including without limitation the rights to
-// use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
-// of the Software, and to permit persons to whom the Software is furnished to do
-// so, subject to the following conditions:
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+// to whom the Software is furnished to do so, subject to the following conditions:
 //
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
 //
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
 
 // Port of ICSharpCode.Decompiler/CSharp/Transforms/TransformContext.cs -- the
-// parameters for IAstTransform. The C# class carries the type system, the
-// cancellation token, the TypeSystemAstBuilder, the settings bag, the
-// DecompileRun, the Stepper, and the decompilation context (whose
-// CurrentMember / CurrentTypeDefinition / CurrentModule accessors the
-// transforms read). The port's minimal-faithful shape:
-//  - `TypeSystem` is the compilation (the port stores the raw ICompilation;
-//    the C# `IDecompilerTypeSystem` wraps it -- the ILTransformContext
-//    convention).
-//  - `Settings` aliases the DecompileRun's bag (the C# `decompileRun.Settings`).
-//  - `Stepper` is the debug step hook std::function (the ILTransformContext
-//    `Step` convention; the C# Stepper class is the debug-transition log).
-//  - the decompilation context's member/type/module slots port to nullable
-//    raw pointers (the SimpleTypeResolveContext (a) convention).
-// The `CancellationToken` / `RequiredNamespacesSuperset` members are deferred:
-// the port has no cancellation surface, and the namespace superset is the
-// DecompileRun's own Namespaces() the consumers read directly.
+// per-transform state bag the `IAstTransform` passes read: the type-system /
+// compilation, the `DecompileRun` (settings + gathered namespaces), the
+// decompilation position (current module/type/member), and the shared
+// `TypeSystemAstBuilder`.
 //
-// The C# `[Conditional("STEP")]` Step/StepStartGroup/StepEndGroup/EndStep
-// members compile away in release builds; the port carries the Step
-// std::function (no-op when unset) covering the observable behavior.
+// The C# `public readonly IDecompilerTypeSystem TypeSystem` ports as the port's
+// narrower `ICompilation` surface: every ported consumer only
+// reads `FindType` / `MainModule` / `RootNamespace` off it, and the port has no
+// `IDecompilerTypeSystem` interface (the ExpressionBuilder already takes the two
+// narrower interfaces directly).
+//
+// Deferrals (each named at the member that needs it): the `CancellationToken` is a
+// no-op in the port (the DecompileRun convention); the `Stepper` and the
+// `[Conditional("STEP")]` debug-step methods are no-ops (the port has no debug-step
+// machinery -- the C# methods compile out of a normal build, so a normal C# run is
+// a no-op too); and the `DecompileRun` reader some later transforms use
+// (`RecordDecompilers`) stays with its DecompileRun slice (the `DocumentationProvider`
+// reader landed with the `AddXmlDocumentationTransform` port).
 
 #pragma once
 
+#include "Decompiler/CSharp/Syntax/AstNode.hpp"
+#include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/DecompileRun.hpp"
+#include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/TypeSystem/ICompilation.hpp"
-#include "Decompiler/TypeSystem/IModule.hpp"
-#include "Decompiler/TypeSystem/IMember.hpp"
-#include "Decompiler/TypeSystem/ITypeDefinition.hpp"
+#include "Decompiler/TypeSystem/ITypeResolveContext.hpp"
 
-#include <functional>
 #include <string>
+#include <unordered_set>
 
-namespace ILSpy::Decompiler::CSharp {
-class AstNode;
-} // namespace ILSpy::Decompiler::CSharp
-
-namespace ILSpy::Decompiler::CSharp::Syntax {
-class TypeSystemAstBuilder;
-} // namespace ILSpy::Decompiler::CSharp::Syntax
+// The type-system entity types the position accessors return, forward-declared
+// (the accessors return non-owning pointers the caller does not dereference past
+// the context's lifetime).
+namespace ILSpy::Decompiler::TypeSystem {
+class IMember;
+class IModule;
+class ITypeDefinition;
+}
 
 namespace ILSpy::Decompiler::CSharp::Transforms {
 
+// The C# `public class TransformContext`. Stores non-owning references to the
+// caller-owned type system / run / position / ast-builder (the C# GC-reference
+// convention) and exposes the C# public read surface.
 class TransformContext {
 public:
-    // The C# `public readonly IDecompilerTypeSystem TypeSystem` -- the
-    // decompilation's type system (the port stores the raw ICompilation; the
-    // ILTransformContext convention). Not owned.
-    const ::ILSpy::Decompiler::TypeSystem::ICompilation* TypeSystem = nullptr;
-    // The C# `internal readonly DecompileRun DecompileRun` + the aliased
-    // `public DecompilerSettings Settings`.
-    const ::ILSpy::Decompiler::DecompileRun* DecompileRun = nullptr;
-    // The decompilation context's slots (the C# `ITypeResolveContext
-    // decompilationContext` is private; its CurrentMember /
-    // CurrentTypeDefinition / CurrentModule accessors are what the transforms
-    // read). Null when a whole type or module is being decompiled.
-    const ::ILSpy::Decompiler::TypeSystem::IMember* CurrentMember = nullptr;
-    const ::ILSpy::Decompiler::TypeSystem::ITypeDefinition* CurrentTypeDefinition =
-        nullptr;
-    const ::ILSpy::Decompiler::TypeSystem::IModule* CurrentModule = nullptr;
+    // The C# `internal TransformContext(IDecompilerTypeSystem typeSystem,
+    // DecompileRun decompileRun, ITypeResolveContext decompilationContext,
+    // TypeSystemAstBuilder typeSystemAstBuilder)`. All four are caller-owned
+    // (the C# holds GC references); the port stores pointers/references.
+    TransformContext(const ::ILSpy::Decompiler::TypeSystem::ICompilation& typeSystem,
+                     const ::ILSpy::Decompiler::DecompileRun& decompileRun,
+                     const ::ILSpy::Decompiler::TypeSystem::ITypeResolveContext&
+                         decompilationContext,
+                     Syntax::TypeSystemAstBuilder& typeSystemAstBuilder)
+        : typeSystem_(&typeSystem),
+          decompileRun_(&decompileRun),
+          decompilationContext_(&decompilationContext),
+          typeSystemAstBuilder_(&typeSystemAstBuilder)
+    {
+    }
 
-    // The C# `public readonly TypeSystemAstBuilder TypeSystemAstBuilder` --
-    // the type renderer the insertion arms consult (ConvertType). A
-    // driver-owned instance (RunAstTransforms builds it through
-    // CSharpDecompiler::CreateAstBuilder, the C# ctor parameter); null when
-    // the driver did not provide one (the insertion arms that need it are
-    // skipped in that configuration).
-    ::ILSpy::Decompiler::CSharp::Syntax::TypeSystemAstBuilder* TypeSystemAstBuilder =
-        nullptr;
+    // The C# `public readonly IDecompilerTypeSystem TypeSystem` -- the port's
+    // narrower `ICompilation&` (see the header note). The accessor shares the
+    // `TypeSystem` name with the type-system namespace; C++ resolves the member
+    // function name in the class scope, so callers write `context.TypeSystem()`
+    // and the definition is qualified here.
+    const ::ILSpy::Decompiler::TypeSystem::ICompilation& TypeSystem() const {
+        return *typeSystem_;
+    }
 
-    // The C# `public DecompilerSettings Settings` (aliased to the run's bag;
-    // the run is the owner, the port's ctor requires it non-null like the C#
-    // internal ctor's non-null contract).
+    // The C# `public readonly TypeSystemAstBuilder TypeSystemAstBuilder`.
+    Syntax::TypeSystemAstBuilder& TypeSystemAstBuilder() const {
+        return *typeSystemAstBuilder_;
+    }
+
+    // The C# `public readonly DecompileRun DecompileRun` (and `public DecompilerSettings
+    // Settings => DecompileRun.Settings`). The accessor shares the `DecompileRun`
+    // name with the type, so the return types are fully qualified.
+    const ::ILSpy::Decompiler::DecompileRun& DecompileRun() const { return *decompileRun_; }
     const ::ILSpy::Decompiler::DecompilerSettings& Settings() const {
-        return DecompileRun->Settings();
+        return decompileRun_->Settings();
     }
 
-    // The debug step hook (the C# `Stepper` + the `[Conditional("STEP")]`
-    // Step/StepStartGroup/StepEndGroup folded onto one hook; no-op when unset).
-    // `what` names the step, `near` the mutated node (nullable).
-    std::function<void(const std::string& what, const void* near)> Step;
-
-    void StepOnce(const std::string& what, const void* near = nullptr) const {
-        if (Step) Step(what, near);
+    // The C# `public IMember? CurrentMember => decompilationContext.CurrentMember`.
+    const ::ILSpy::Decompiler::TypeSystem::IMember* CurrentMember() const {
+        return decompilationContext_->CurrentMember();
     }
+
+    // The C# `public ITypeDefinition? CurrentTypeDefinition`.
+    const ::ILSpy::Decompiler::TypeSystem::ITypeDefinition* CurrentTypeDefinition() const {
+        return decompilationContext_->CurrentTypeDefinition();
+    }
+
+    // The C# `public IModule? CurrentModule`.
+    const ::ILSpy::Decompiler::TypeSystem::IModule* CurrentModule() const {
+        return decompilationContext_->CurrentModule();
+    }
+
+    // The C# `public IImmutableSet<string> RequiredNamespacesSuperset =>
+    // DecompileRun.Namespaces.ToImmutableHashSet()`. The port returns a plain
+    // set copy (the C# immutable set has no ported counterpart); an unset
+    // `Namespaces` (the pre-collector state) yields the empty set.
+    std::unordered_set<std::string> RequiredNamespacesSuperset() const {
+        if (const std::optional<std::unordered_set<std::string>>& namespaces =
+                decompileRun_->Namespaces();
+            namespaces.has_value())
+        {
+            return *namespaces;
+        }
+        return {};
+    }
+
+    // The C# `[Conditional("STEP")] void Step(string description, AstNode? near = null)`
+    // and the group/end companions. `[Conditional]` compiles the calls out of a
+    // normal C# build, so the port's no-op bodies are behaviourally identical.
+    void Step(const std::string& /*description*/, const Syntax::AstNode* /*near*/ = nullptr) const
+    {
+    }
+    void Step(const std::string& /*description*/) const {}
+    void StepStartGroup(const std::string& /*description*/,
+                        const Syntax::AstNode* /*near*/ = nullptr) const
+    {
+    }
+    void StepEndGroup(bool /*keepIfEmpty*/ = false) const {}
+    void EndStep(const Syntax::AstNode* /*modifiedNode*/) const {}
+
+private:
+    const ::ILSpy::Decompiler::TypeSystem::ICompilation* typeSystem_;
+    const ::ILSpy::Decompiler::DecompileRun* decompileRun_;
+    const ::ILSpy::Decompiler::TypeSystem::ITypeResolveContext* decompilationContext_;
+    Syntax::TypeSystemAstBuilder* typeSystemAstBuilder_;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Transforms

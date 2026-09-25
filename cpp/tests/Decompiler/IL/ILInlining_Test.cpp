@@ -636,6 +636,8 @@ TEST(ILInlining, RecombineVariablesReassignsLoadStoreAndAddress) {
     ASSERT_EQ(v2->StoreCount, 1);
     ASSERT_EQ(v2->LoadCount, 1);
     ASSERT_EQ(v2->AddressCount, 1);
+    ASSERT_EQ(v2->AddressInstructions.size(), 1u) << "the LdLoca is recorded";
+    EXPECT_EQ(v2->AddressInstructions[0], ldaPtr);
 
     fn->RecombineVariables(v1, v2);
     fn->CheckInvariant(ILPhase::Normal);
@@ -646,9 +648,12 @@ TEST(ILInlining, RecombineVariablesReassignsLoadStoreAndAddress) {
     EXPECT_EQ(v1->StoreCount, 1) << "v1 gained v2's store";
     EXPECT_EQ(v1->LoadCount, 1) << "v1 gained v2's load";
     EXPECT_EQ(v1->AddressCount, 1) << "v1 gained v2's address";
+    ASSERT_EQ(v1->AddressInstructions.size(), 1u) << "v1 absorbed the address instruction";
+    EXPECT_EQ(v1->AddressInstructions[0], ldaPtr);
     EXPECT_EQ(v2->StoreCount, 0) << "v2's counts are drained";
     EXPECT_EQ(v2->LoadCount, 0);
     EXPECT_EQ(v2->AddressCount, 0);
+    EXPECT_TRUE(v2->AddressInstructions.empty()) << "v2's address list is drained";
     bool v1Listed = false, v2Listed = false;
     for (auto& var : fn->Variables) {
         if (var.get() == v1.get()) v1Listed = true;
@@ -656,6 +661,13 @@ TEST(ILInlining, RecombineVariablesReassignsLoadStoreAndAddress) {
     }
     EXPECT_TRUE(v1Listed) << "v1 stays on the function";
     EXPECT_FALSE(v2Listed) << "v2 dropped from the function";
+
+    // A fresh recompute rebuilds the list (the clear-then-populate pass) without
+    // duplicating the reassigned entry.
+    ComputeVariableUsage(*fn);
+    EXPECT_EQ(v1->AddressCount, 1);
+    ASSERT_EQ(v1->AddressInstructions.size(), 1u);
+    EXPECT_EQ(v1->AddressInstructions[0], ldaPtr);
 }
 
 TEST(ILInlining, RecombineVariablesSumsCountsWhenTargetHasExistingUses) {
@@ -726,4 +738,146 @@ TEST(ILInlining, RecombineVariablesPreservesOtherVariablesCounts) {
     EXPECT_EQ(v3->LoadCount, 1);
     EXPECT_EQ(v1->StoreCount, 1) << "v1 absorbed v2's store";
     EXPECT_EQ(fn->Variables.size(), 2u) << "v2 removed; v1 and v3 remain";
+}
+
+
+TEST(ILInlining, InlineIfPossibleFoldsSingleUseSlot) {
+    // The aggressive wrapper over InlineOneIfPossible: a single-use stack slot
+    // folds into the next instruction's load.
+    auto slot = MakeVar(VariableKind::StackSlot, "S_0", -1);
+    auto dst = MakeVar(VariableKind::Local, "dst", 0);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(slot, std::make_unique<LdcI4>(42)));
+    block->Add(std::make_unique<StLoc>(dst, std::make_unique<LdLoc>(slot)));
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Variables.push_back(slot);
+    fn->Variables.push_back(dst);
+    fn->CheckInvariant(ILPhase::Normal);
+    ComputeVariableUsage(*fn);
+
+    EXPECT_TRUE(InlineIfPossible(fn->Body->Blocks[0].get(), 0, Ctx()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    const auto& instructions = fn->Body->Blocks[0]->Instructions;
+    ASSERT_EQ(instructions.size(), 1u) << "the slot store is consumed";
+    auto* st = dynamic_cast<StLoc*>(instructions[0].get());
+    ASSERT_NE(st, nullptr);
+    ASSERT_NE(st->Value, nullptr);
+    EXPECT_EQ(st->Value->Op, OpCode::LdcI4) << "the load became the constant";
+}
+
+TEST(ILInlining, InlineIntoChainsEarlierStoresIntoTarget) {
+    // stloc a(ldc 1); stloc b(ldloc a); stloc c(ldloc b): InlineInto(block, 2)
+    // folds b's store into c (count 1), then a's store into the now-adjacent c
+    // (count 2), leaving the single `stloc c(ldc 1)`.
+    auto a = MakeVar(VariableKind::Local, "a", 0);
+    auto b = MakeVar(VariableKind::Local, "b", 1);
+    auto c = MakeVar(VariableKind::Local, "c", 2);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(a, std::make_unique<LdcI4>(1)));
+    block->Add(std::make_unique<StLoc>(b, std::make_unique<LdLoc>(a)));
+    block->Add(std::make_unique<StLoc>(c, std::make_unique<LdLoc>(b)));
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Variables.push_back(a);
+    fn->Variables.push_back(b);
+    fn->Variables.push_back(c);
+    fn->CheckInvariant(ILPhase::Normal);
+    ComputeVariableUsage(*fn);
+
+    EXPECT_EQ(InlineInto(fn->Body->Blocks[0].get(), 2, InliningOptions::None, Ctx()), 2)
+        << "both earlier stores were inlined";
+    fn->CheckInvariant(ILPhase::Normal);
+
+    const auto& instructions = fn->Body->Blocks[0]->Instructions;
+    ASSERT_EQ(instructions.size(), 1u);
+    auto* st = dynamic_cast<StLoc*>(instructions[0].get());
+    ASSERT_NE(st, nullptr);
+    ASSERT_EQ(st->Variable.get(), c.get());
+    ASSERT_NE(st->Value, nullptr);
+    EXPECT_EQ(st->Value->Op, OpCode::LdcI4) << "both loads were replaced";
+}
+
+TEST(ILInlining, InlineIntoStopsAtFirstNonInlinable) {
+    // A store of a twice-loaded variable is neither inlinable nor dead, so the
+    // backward walk stops at it: only the stores after it were inlined.
+    auto a = MakeVar(VariableKind::Local, "a", 0);
+    auto b = MakeVar(VariableKind::Local, "b", 1);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(a, std::make_unique<LdcI4>(1)));
+    block->Add(std::make_unique<StLoc>(b, std::make_unique<LdcI4>(2)));
+    auto call = std::make_unique<Call>("F");
+    call->AddArg(std::make_unique<LdLoc>(b));
+    call->AddArg(std::make_unique<LdLoc>(a));
+    call->AddArg(std::make_unique<LdLoc>(a));
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(
+        std::make_unique<Leave>(fn->Body.get(), std::move(call)));
+    fn->Variables.push_back(a);
+    fn->Variables.push_back(b);
+    fn->CheckInvariant(ILPhase::Normal);
+    ComputeVariableUsage(*fn);  // a Store 1 / Load 2; b Store 1 / Load 1
+
+    EXPECT_EQ(InlineInto(fn->Body->Blocks[0].get(), 2, InliningOptions::None, Ctx()), 1)
+        << "b's store inlined; the walk stopped at a's twice-loaded store";
+    fn->CheckInvariant(ILPhase::Normal);
+
+    const auto& instructions = fn->Body->Blocks[0]->Instructions;
+    ASSERT_EQ(instructions.size(), 1u) << "a's store stays";
+    auto* stA = dynamic_cast<StLoc*>(instructions[0].get());
+    ASSERT_NE(stA, nullptr);
+    EXPECT_EQ(stA->Variable.get(), a.get());
+    auto* leave = dynamic_cast<Leave*>(fn->Body->Blocks[0]->FinalInstruction.get());
+    ASSERT_NE(leave, nullptr);
+    auto* finalCall = dynamic_cast<Call*>(leave->Value.get());
+    ASSERT_NE(finalCall, nullptr);
+    ASSERT_EQ(finalCall->Arguments.size(), 3u);
+    ASSERT_NE(finalCall->Arguments[0], nullptr);
+    EXPECT_EQ(finalCall->Arguments[0]->Op, OpCode::LdcI4) << "b's load was replaced";
+    EXPECT_EQ(finalCall->Arguments[1]->Op, OpCode::LdLoc) << "a's loads stay";
+    EXPECT_EQ(finalCall->Arguments[2]->Op, OpCode::LdLoc) << "a's loads stay";
+}
+
+TEST(ILInlining, InlineIntoAtFinalIndexFoldsIntoTheFinal) {
+    // The C# counts the final inside Instructions, so InlineInto at the final's
+    // index is legitimate: the store before it folds into the leave's value.
+    auto a = MakeVar(VariableKind::Local, "a", 0);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(a, std::make_unique<LdcI4>(9)));
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(
+        std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdLoc>(a)));
+    fn->Variables.push_back(a);
+    fn->CheckInvariant(ILPhase::Normal);
+    ComputeVariableUsage(*fn);
+
+    EXPECT_EQ(InlineInto(fn->Body->Blocks[0].get(), 1, InliningOptions::None, Ctx()), 1)
+        << "the store folded into the final";
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_TRUE(fn->Body->Blocks[0]->Instructions.empty()) << "the store is consumed";
+    auto* leave = dynamic_cast<Leave*>(fn->Body->Blocks[0]->FinalInstruction.get());
+    ASSERT_NE(leave, nullptr);
+    ASSERT_NE(leave->Value, nullptr);
+    EXPECT_EQ(leave->Value->Op, OpCode::LdcI4) << "the leave's load became the constant";
+}
+
+TEST(ILInlining, InlineIntoBeyondBoundsReturnsZero) {
+    // pos past the final's logical index returns 0 and touches nothing.
+    auto a = MakeVar(VariableKind::Local, "a", 0);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(a, std::make_unique<LdcI4>(3)));
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Variables.push_back(a);
+    ComputeVariableUsage(*fn);
+
+    EXPECT_EQ(InlineInto(fn->Body->Blocks[0].get(), 3, InliningOptions::None, Ctx()), 0);
+    EXPECT_EQ(fn->Body->Blocks[0]->Instructions.size(), 1u) << "nothing changed";
 }

@@ -104,6 +104,15 @@ public:
     // last non-terminal position.
     void Run(Block& block, int pos, StatementTransformContext& context) override;
 
+    // The C# `public static void RunOnSingleStatement(ILInstruction statement,
+    // ILTransformContext context)`: run the expression rewrites on one statement
+    // that is a direct child of a Block (the multi-pass callers --
+    // CombineExitsTransform, HighLevelLoopTransform, TransformArrayInitializers --
+    // use it to fold a freshly-built instruction). The C# reads the parent block
+    // and the statement's ChildIndex and drives Run; the port runs the same
+    // visitor directly (Run only consults the settings, which this sets).
+    static void RunOnSingleStatement(ILInstruction* statement, ILTransformContext& context);
+
 private:
     // Recursive visitor (the C# ILVisitor's AcceptVisitor / Default). Dispatches
     // on OpCode; non-Comp/non-If nodes recurse into their children (the C# Default).

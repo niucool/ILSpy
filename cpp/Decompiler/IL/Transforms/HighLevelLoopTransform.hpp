@@ -55,7 +55,7 @@ class Block;
 class ILInstruction;
 class ILVariable;
 class ILFunction;
-struct ILTransformContext;
+class ILTransformContext;
 
 // The static helper subset of HighLevelLoopTransform. The full transform (the
 // while/for restructuring) is deferred; only the shape matchers LoopContext and

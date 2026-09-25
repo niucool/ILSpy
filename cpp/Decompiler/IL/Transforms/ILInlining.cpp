@@ -17,9 +17,9 @@
 // DEALINGS IN THE SOFTWARE.
 
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
-
-#include "Decompiler/IL/Instructions/DeconstructInstruction.hpp"
 #include "Decompiler/IL/Transforms/NamedArgumentTransform.hpp"
+#include "Decompiler/TypeSystem/IParameter.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
@@ -29,10 +29,10 @@
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
-#include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
-#include "Decompiler/TypeSystem/IParameter.hpp"
-#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/AddressOf.hpp"
 
 #include <algorithm>
 #include <functional>
@@ -50,152 +50,71 @@ bool VariableCanBeUsedForInlining(const ILVariable* v) {
     return true;
 }
 
+// The ILFunction root that owns `inst`, found by walking the Parent chain to the
+// root (ILFunction::IsRoot). Every connected instruction is rooted at a function;
+// returns null for a detached/unconnected subtree (a hand-built test tree whose
+// root is not an ILFunction). Mirrors the FunctionOf helper the port's other
+// transforms (NullCoalescingTransform) carry locally.
+ILFunction* FunctionOfBlock(ILInstruction* inst) {
+    for (ILInstruction* p = inst; p != nullptr; p = p->Parent) {
+        if (p->IsRoot()) return static_cast<ILFunction*>(p);
+    }
+    return nullptr;
+}
+
 } // namespace
 
 // Find the single load of `v` (an LdLoc or an LdLoca) inside `expr` that can be
-// replaced by `expressionBeingMoved`. Mirrors ILInlining.FindLoadInNext (subset:
-// no SlotInfo restrictions, no named-argument handling). Faithful to the C#,
-// which returns Found for both an LdLoc(v) and an LdLoca(v) match; the caller
-// gates whether an ldloca can actually be inlined (this port defers the
+// replaced by `expressionBeingMoved`. Mirrors ILInlining.FindLoadInNext. Faithful
+// to the C#, which returns Found for both an LdLoc(v) and an LdLoca(v) match; the
+// caller gates whether an ldloca can actually be inlined (this port defers the
 // ldloca-into-addressof path, so InlineOneIfPossible skips an LdLoca found).
+//
+// The C# `expr.CanInlineIntoSlot(child.ChildIndex, expressionBeingMoved)` gate
+// before each child recursion is not modeled (the port's inlining has no SlotInfo
+// restrictions); the C# named-argument branch is: when a child recursion returns
+// Stop while IntroduceNamedArguments is set and `expr` is a CallInstruction, the
+// call may be converted to a named-argument call.
 FindResult FindLoadInNext(ILInstruction* expr, ILVariable* v,
                           ILInstruction* expressionBeingMoved,
                           InliningOptions options) {
-    if (!expr) return {FindResultType::Stop};
+    if (!expr) return FindResult::StopResult();
     if (expr->Op == OpCode::LdLoc) {
         auto* ld = static_cast<LdLoc*>(expr);
-        if (ld->Variable.get() == v) return {FindResultType::Found, ld};
-        if (MayReorder(expressionBeingMoved, expr))
-            return {FindResultType::Continue};
-        return {FindResultType::Stop};
+        if (ld->Variable.get() == v) return FindResult::FoundResult(ld);
+        if (MayReorder(expressionBeingMoved->Flags(), expr->Flags()))
+            return FindResult::ContinueResult();
+        return FindResult::StopResult();
     }
     if (expr->Op == OpCode::LdLoca) {
         auto* lda = static_cast<LdLoca*>(expr);
-        if (lda->Variable.get() == v) return {FindResultType::Found, lda};
-        if (MayReorder(expressionBeingMoved, expr))
-            return {FindResultType::Continue};
-        return {FindResultType::Stop};
+        if (lda->Variable.get() == v) return FindResult::FoundResult(lda);
+        if (MayReorder(expressionBeingMoved->Flags(), expr->Flags()))
+            return FindResult::ContinueResult();
+        return FindResult::StopResult();
     }
-    if (auto* block = dynamic_cast<Block*>(expr);
-        block != nullptr && block->Kind == BlockKind::CallWithNamedArgs) {
+    if (expr->Op == OpCode::Block
+        && static_cast<Block*>(expr)->Kind == BlockKind::CallWithNamedArgs) {
         // The C# `expr is Block { Kind: BlockKind.CallWithNamedArgs }` arm:
-        // a named-argument block can host the load in any of its slots (the
-        // C# `NamedArgumentTransform.CanExtendNamedArgument` static).
-        return NamedArgumentCanExtend(block, v, expressionBeingMoved);
-    }
-    if ((static_cast<int>(options) & static_cast<int>(InliningOptions::FindDeconstruction)) != 0 &&
-        dynamic_cast<DeconstructInstruction*>(expr) != nullptr) {
-        // The C# `options.HasFlag(InliningOptions.FindDeconstruction) && expr
-        // is DeconstructInstruction di` arm: the walk has REACHED a deconstruct
-        // instruction; the result carries it and the caller (the
-        // InlineDeconstructionInitializer) checks the load's location against
-        // the deconstruct's assignments.
-        return FindResult(FindResultType::Deconstruction, expr);
+        // extending an existing named-argument block has its own search.
+        return NamedArgumentTransform::CanExtendNamedArgument(
+            static_cast<Block*>(expr), v, expressionBeingMoved);
     }
     for (int i = 0; i < expr->ChildCount(); ++i) {
-        FindResult r = FindLoadInNext(expr->GetChild(i), v, expressionBeingMoved,
-                                      options);
+        FindResult r = FindLoadInNext(expr->GetChild(i), v, expressionBeingMoved, options);
         if (r.type != FindResultType::Continue) {
             if (r.type == FindResultType::Stop
-                && options & InliningOptions::IntroduceNamedArguments) {
-                if (auto* call = dynamic_cast<Call*>(expr)) {
-                    return NamedArgumentCanIntroduce(
-                        call, expr->GetChild(i), v, expressionBeingMoved);
-                }
+                && HasInliningOption(options, InliningOptions::IntroduceNamedArguments)
+                && expr->Op == OpCode::Call) {
+                return NamedArgumentTransform::CanIntroduceNamedArgument(
+                    static_cast<Call*>(expr), expr->GetChild(i), v, expressionBeingMoved);
             }
             return r;
         }
     }
-    if (MayReorder(expressionBeingMoved, expr))
-        return {FindResultType::Continue};
-    return {FindResultType::Stop};
-}
-
-// The C# `static bool IsSafeForInlineOver(ILInstruction expr, ILInstruction
-// expressionBeingMoved)` (ILInlining.cs line 907): safe to move
-// `expressionBeingMoved` past `expr` -- SemanticHelper.MayReorder (the port's
-// flag-level MayReorder).
-static bool IsSafeForInlineOver(const ILInstruction* expr,
-                                const ILInstruction* expressionBeingMoved) {
-    return MayReorder(expressionBeingMoved->Flags(), expr->Flags());
-}
-
-// The C# `public static bool CanMoveInto(...)` (ILInlining.cs line 933). The
-// ancestor chain's slots must accept the inlining and the move must not reorder
-// past any of the ancestors' earlier children. The port's per-node
-// `CanInlineIntoSlot` (the Block/BlockContainer/IsInst overrides ported
-// faithfully; the port's default is permissive -- see the ILInstruction note
-// on the SlotInfo metadata deferral).
-bool CanMoveInto(ILInstruction* expressionBeingMoved, ILInstruction* stmt,
-                 ILInstruction* targetLoad) {
-    assert(targetLoad->IsDescendantOf(stmt));
-    for (ILInstruction* inst = targetLoad; inst != stmt; inst = inst->Parent) {
-        if (!inst->Parent->CanInlineIntoSlot(inst->ChildIndex, expressionBeingMoved))
-            return false;
-        // Check whether re-ordering with predecessors is valid:
-        const int childIndex = inst->ChildIndex;
-        for (int i = 0; i < childIndex; ++i) {
-            ILInstruction* predecessor = inst->Parent->GetChild(i);
-            if (!IsSafeForInlineOver(predecessor, expressionBeingMoved))
-                return false;
-        }
-    }
-    return true;
-}
-
-// The C# `public static bool CanUninline(ILInstruction arg, ILInstruction stmt)`
-// (ILInlining.cs line 980): moving into and moving out-of are equivalent.
-bool CanUninline(ILInstruction* arg, ILInstruction* stmt) {
-    return CanMoveInto(arg, stmt, arg);
-}
-
-// The C# `internal static bool IsUsedAsThisPointerInCall(LdLoca ldloca)`
-// (ILInlining.cs lines 455-503): the ldloca flows into a call's `this` slot on a
-// value type; the property-getter compound-assignment and the setter cases
-// follow the C#. The Await/NullableUnwrap/MatchInstruction parent arms are
-// deferred with those nodes (a nullptr parent chain ends the walk).
-bool IsUsedAsThisPointerInCall(LdLoca* ldloca) {
-    if (ldloca == nullptr || ldloca->Variable == nullptr)
-        return false;
-    if (ldloca->Variable->Type != nullptr
-        && ldloca->Variable->Type->IsReferenceType() == true)
-        return false;
-    ILInstruction* inst = ldloca;
-    // The C# `inst.Parent is LdObjIfRef` arm is deferred with the LdObjIfRef node
-    // (the port's ldobj model folds it at read time); the LdFlda chain walk
-    // follows the C#.
-    while (inst->Parent != nullptr && inst->Parent->Op == OpCode::LdFlda) {
-        inst = inst->Parent;
-    }
-    if (inst->ChildIndex != 0)
-        return false;
-    if (inst->Parent == nullptr)
-        return false;
-    switch (inst->Parent->Op) {
-        case OpCode::Call:
-        case OpCode::CallVirt: {
-            auto* callInst = static_cast<Call*>(inst->Parent);
-            if (callInst->Method == nullptr)
-                return false;
-            const TypeSystem::IMethod* method = callInst->Method.get();
-            if (method->IsAccessor()) {
-                if (method->AccessorKind()
-                    == TypeSystem::MethodSemanticsAttributes::Getter) {
-                    // C# doesn't allow property compound assignments on temporary
-                    // structs: the parent-of-parent shape is a
-                    // CompoundAssignmentInstruction with the property target.
-                    // (The port's compound-assignment node is deferred; the
-                    // getter-over-temporary case returns true here.)
-                    return true;
-                }
-                // C# doesn't allow calling setters on temporary structs.
-                return false;
-            }
-            return !method->IsStatic();
-        }
-        default:
-            return false;
-    }
+    if (MayReorder(expressionBeingMoved->Flags(), expr->Flags()))
+        return FindResult::ContinueResult();
+    return FindResult::StopResult();
 }
 
 // The top-level statement containing `inst`: the last ancestor (including inst
@@ -236,30 +155,113 @@ bool MethodRequiresCopyForReadonlyLValue(const TypeSystem::IMethod* method,
 }
 
 // The C# `internal static bool IsReadOnlySpanCharCtor(IMethod method)`
-// (IL/Transforms/ILInlining.cs lines 541-550). See the header comment for the
-// TypeArguments/ByReferenceType read notes.
-bool IsReadOnlySpanCharCtor(const TypeSystem::IMethod& method) {
-    if (!method.IsConstructor()) return false;
-    const std::vector<const TypeSystem::IParameter*> parameters = method.Parameters();
-    if (parameters.size() != 1 || parameters[0] == nullptr) return false;
-    TypeSystem::ITypePtr declaringType = method.DeclaringType();
+// (IL/Transforms/ILInlining.cs line 541): a one-parameter constructor over the
+// closed `ReadOnlySpan<char>` instantiation whose parameter is
+// `ref readonly char` (a ByReferenceType whose element is Char). The C#
+// `DeclaringType.TypeArguments[0]` ports through the ParameterizedType
+// dispatch (a non-ParameterizedType declaring type answers false -- the
+// CallBuilder divergence note; an `IsKnownType(ReadOnlySpanOfT)` declaring type
+// is always a closed ParameterizedType in practice).
+bool IsReadOnlySpanCharCtor(const TypeSystem::IMethod* method) {
+    if (method == nullptr || !method->IsConstructor())
+        return false;
+    auto parameters = method->Parameters();
+    if (parameters.size() != 1)
+        return false;
+    TypeSystem::ITypePtr declaringType = method->DeclaringType();
     if (!declaringType
         || !TypeSystem::IsKnownType(*declaringType,
-                                    TypeSystem::KnownTypeCode::ReadOnlySpanOfT)) {
+                                        TypeSystem::KnownTypeCode::ReadOnlySpanOfT)) {
         return false;
     }
     auto* parameterized =
         dynamic_cast<const TypeSystem::ParameterizedType*>(declaringType.get());
-    if (parameterized == nullptr || parameterized->TypeArguments().size() != 1
-        || !TypeSystem::IsKnownType(*parameterized->TypeArguments()[0],
-                                    TypeSystem::KnownTypeCode::Char)) {
+    if (!parameterized || parameterized->TypeArguments().empty())
+        return false;
+    if (!TypeSystem::IsKnownType(*parameterized->TypeArguments()[0],
+                                     TypeSystem::KnownTypeCode::Char)) {
         return false;
     }
-    auto* parameterType =
-        dynamic_cast<const TypeSystem::ByReferenceType*>(&parameters[0]->Type());
-    return parameterType != nullptr && parameterType->Element() != nullptr
-        && TypeSystem::IsKnownType(*parameterType->Element(),
-                                   TypeSystem::KnownTypeCode::Char);
+    auto* parameterType = parameters[0] != nullptr
+                              ? &parameters[0]->Type()
+                              : nullptr;
+    auto* byRef = dynamic_cast<const TypeSystem::ByReferenceType*>(parameterType);
+    if (!byRef)
+        return false;
+    return TypeSystem::IsKnownType(*byRef->Element(),
+                                       TypeSystem::KnownTypeCode::Char);
+}
+
+ExpressionClassification ClassifyExpression(ILInstruction* inst) {
+    switch (inst->Op) {
+        case OpCode::LdLoc:
+        case OpCode::StLoc: {
+            const ILVariablePtr& v = (inst->Op == OpCode::LdLoc)
+                                         ? static_cast<LdLoc*>(inst)->Variable
+                                         : static_cast<StLoc*>(inst)->Variable;
+            if (!v)
+                return ExpressionClassification::MutableLValue;
+            if (v->IsRefReadOnly
+                || v->Kind == VariableKind::ForeachLocal
+                || v->Kind == VariableKind::UsingLocal) {
+                return ExpressionClassification::ReadonlyLValue;
+            }
+            return ExpressionClassification::MutableLValue;
+        }
+        case OpCode::LdObj:
+            // ldobj typically refers to a storage location,
+            // but readonly fields are an exception.
+            return IsReadonlyReference(static_cast<LdObj*>(inst)->Target.get())
+                       ? ExpressionClassification::ReadonlyLValue
+                       : ExpressionClassification::MutableLValue;
+        case OpCode::StObj:
+            // stobj is the same as ldobj.
+            return IsReadonlyReference(static_cast<StObj*>(inst)->Target.get())
+                       ? ExpressionClassification::ReadonlyLValue
+                       : ExpressionClassification::MutableLValue;
+        case OpCode::Call:
+        case OpCode::CallVirt: {
+            const auto* call = static_cast<Call*>(inst);
+            // multi-dimensional array getters are lvalues,
+            // everything else is an rvalue.
+            if (call->DeclaringType
+                && call->DeclaringType->Kind() == TypeSystem::TypeKind::Array) {
+                return ExpressionClassification::MutableLValue;
+            }
+            return ExpressionClassification::RValue;
+        }
+        default:
+            return ExpressionClassification::RValue; // most instructions result in an rvalue
+    }
+}
+
+bool IsReadonlyReference(ILInstruction* addr) {
+    if (addr == nullptr)
+        return false;
+    switch (addr->Op) {
+        case OpCode::LdFlda:
+            return static_cast<LdFlda*>(addr)->FieldIsReadOnly;
+        case OpCode::LdsFlda:
+            return static_cast<LdsFlda*>(addr)->FieldIsReadOnly;
+        case OpCode::LdLoc:
+            return static_cast<LdLoc*>(addr)->Variable
+                   && static_cast<LdLoc*>(addr)->Variable->IsRefReadOnly;
+        case OpCode::Call:
+        case OpCode::CallVirt: {
+            const auto* call = static_cast<Call*>(addr);
+            return call->Method != nullptr && call->Method->ReturnTypeIsRefReadOnly();
+        }
+        case OpCode::AddressOf:
+            // C# doesn't allow mutation of value-type temporaries
+            return true;
+        default:
+            // The C# default arm matches `addr.MatchLdFld(out _, out var field)`
+            // and returns `field.ReturnTypeIsRefReadOnly`; the port's LdFlda/LdsFlda
+            // carry no ref-readonly return type, so the arm stays false (the
+            // conservative direction -- an unmatched address is treated as
+            // mutable rather than readonly).
+            return false;
+    }
 }
 
 // True when `inst` sits in the constructor initializer (before the chained
@@ -292,8 +294,12 @@ bool IsInConstructorInitializer(const ILFunction* function, const ILInstruction*
 // call. The helper it uses (VariableCanBeUsedForInlining) is in the anonymous
 // namespace above and visible here; FindLoadInNext is also at namespace scope
 // (declared in the header) so other transforms can call it directly.
-bool InlineOneIfPossible(Block* block, int pos, ILTransformContext& ctx,
-                         InliningOptions options) {
+bool InlineOneIfPossible(Block* block, int pos, ILTransformContext& ctx) {
+    return InlineOneIfPossible(block, pos, InliningOptions::None, ctx);
+}
+
+bool InlineOneIfPossible(Block* block, int pos, InliningOptions options,
+                         ILTransformContext& ctx) {
     if (pos < 0 || static_cast<std::size_t>(pos) >= block->Instructions.size()) return false;
     auto* stloc = dynamic_cast<StLoc*>(block->Instructions[static_cast<std::size_t>(pos)].get());
     if (!stloc) return false;
@@ -311,30 +317,32 @@ bool InlineOneIfPossible(Block* block, int pos, ILTransformContext& ctx,
             next = block->FinalInstruction.get();
         auto value = stloc->TakeChild(0);
         FindResult r = FindLoadInNext(next, v, value.get(), options);
-        // Only inline an LdLoc found (a NamedArgument result introduces the
-        // named argument first, then inlines as usual). An LdLoca found is the
-        // deferred ldloca-into-addressof path (needs an AddressOf node +
+        // Only inline an LdLoc found. An LdLoca found is the deferred
+        // ldloca-into-addressof path (needs an AddressOf node +
         // IsGeneratedTemporaryForAddressOf, not yet ported): skip it and fall
         // through to the dead-store check, preserving the prior LdLoca->Stop
         // behavior. Faithful to the C# DoInline, which gates an LdLoca found on
         // IsGeneratedTemporaryForAddressOf (always false in this port).
-        if ((r.type == FindResultType::Found
-             || r.type == FindResultType::NamedArgument)
-            && r.loadInst && r.loadInst->Op == OpCode::LdLoc) {
+        bool inlinable = (r.type == FindResultType::Found
+                          || r.type == FindResultType::NamedArgument)
+                         && r.loadInst && r.loadInst->Op == OpCode::LdLoc;
+        if (inlinable) {
             if (r.type == FindResultType::NamedArgument) {
-                // The C# `NamedArgumentTransform.IntroduceNamedArgument(
-                // r.CallArgument, context)`: promote the call argument to a
-                // named argument; the original load is re-parented into the
-                // promoted store and the inline continues as usual.
-                NamedArgumentIntroduce(r.callArgument, ctx);
-                // The introduce may have replaced the call in its parent slot
-                // (the CallWithNamedArgs block) and re-parented the load;
-                // `r.loadInst` (the LdLoc(v2) inside the promoted argument)
-                // is still the inline target.
+                // The C# DoInline calls NamedArgumentTransform.IntroduceNamedArgument
+                // before the ordinary inlining, so the expression being moved is
+                // evaluated early inside the promoted argument.
+                NamedArgumentTransform::IntroduceNamedArgument(r.callArgument, ctx);
             }
             ctx.StepOnce("Inline variable");
             r.loadInst->ReplaceWith(std::move(value));
             block->RemoveInstructionAt(static_cast<std::size_t>(pos));
+            if (r.type == FindResultType::NamedArgument) {
+                // The named-argument variable the transform registered needs fresh
+                // usage counts (the C# keeps them incrementally; this port
+                // recomputes after the tree is consistent again).
+                if (ILFunction* function = FunctionOfBlock(block))
+                    ComputeVariableUsage(*function);
+            }
             return true;
         }
         stloc->SetChild(0, std::move(value));  // restore, try dead-store below
@@ -358,6 +366,28 @@ bool InlineOneIfPossible(Block* block, int pos, ILTransformContext& ctx,
     }
 
     return false;
+}
+
+bool InlineIfPossible(Block* block, int pos, ILTransformContext& ctx) {
+    return InlineOneIfPossible(block, pos, InliningOptions::Aggressive, ctx);
+}
+
+int InlineInto(Block* block, int pos, InliningOptions options,
+               ILTransformContext& ctx) {
+    // The C# guard is `pos >= block.Instructions.Count` over a list that
+    // includes the final; the port's final sits at the logical index
+    // Instructions.size(), so pos == size is the final's target position (a
+    // legitimate one -- the loop below inlines the preceding stores into it).
+    if (pos > static_cast<int>(block->Instructions.size()))
+        return 0;
+    int count = 0;
+    while (--pos >= 0) {
+        if (InlineOneIfPossible(block, pos, options, ctx))
+            count++;
+        else
+            break;
+    }
+    return count;
 }
 
 namespace {

@@ -30,17 +30,27 @@
 //   - Detach<T>(T*) (SyntaxExtensions.cs line 75) -- consumed by the ambience's
 //     parameter-list rendering (`CSharpAmbience.ConvertSymbol` strips a parameter's
 //     default expression when `ShowParameterDefaultValues` is off).
+//   - GetNextStatement(Statement*) (SyntaxExtensions.cs line 56) -- consumed by the
+//     AddCheckedBlocks transform's block-range walk (the first statement whose
+//     `NextSibling` is a `Statement`, used to iterate a `BlockStatement`'s statements
+//     while insertion is planned).
+//   - UnwrapInDirectionExpression(Expression*) (SyntaxExtensions.cs line 81) -- consumed
+//     by ReplaceMethodCallsWithOperators.ProcessInvocationExpression, which strips an
+//     `in`-direction wrapper from an operator-method argument before building the
+//     operator expression.
 //
 // The remaining methods are DEFERRED until their consumers port: `IsBitwise`
 // (BinaryOperatorType -- the unported CSharpResolver/OutputVisitor binary-operator
-// tiebreaks), and `IsArgList` / `AddNamedArgument` /
-// `UnwrapInDirectionExpression` (the unported
-// CSharpResolver/TypeSystemAstBuilder stages).
+// tiebreaks), `IsArgList` / `AddNamedArgument` (the unported CSharpResolver/
+// TypeSystemAstBuilder stages).
 
 #pragma once
 
-#include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"  // DirectionExpression / FieldDirection
+#include "Decompiler/CSharp/Syntax/AstNode.hpp"
 #include "Decompiler/CSharp/Syntax/OperatorDeclaration.hpp"  // OperatorType (the enum)
+#include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"  // + the FieldDirection enum
+#include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/Statement.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -72,28 +82,32 @@ T* Detach(T* node) {
     return node;
 }
 
-// The C# `public static Expression UnwrapInDirectionExpression(
-// this Expression expr)` (SyntaxExtensions.cs lines 81-88): strip a
-// by-REFERENCE-OUT `in`-direction wrapper off an argument (the compiler's
-// by-ref operator-argument form; `out`/`ref` wrappers stay). First
-// consumed by ReplaceMethodCallsWithOperators' operator rewrites (the
-// user-defined-operator arguments).
+// The C# `public static Statement? GetNextStatement(this Statement statement)`
+// (SyntaxExtensions.cs line 56) -- the next sibling that is a `Statement`, skipping any
+// intervening non-`Statement` siblings (`while (next != null && !(next is Statement))`),
+// or null at the end. A `BlockStatement`'s statements are all `Statement`s, so the loop
+// is a single step there; the walk matters for a statement embedded in a node whose slot
+// can hold a non-statement sibling. The nullable return ports as a nullable pointer.
+inline Statement* GetNextStatement(Statement* statement) {
+    AstNode* next = statement->NextSibling();
+    while (next != nullptr && dynamic_cast<Statement*>(next) == nullptr)
+        next = next->NextSibling();
+    return static_cast<Statement*>(next);
+}
+
+// The C# `public static Expression UnwrapInDirectionExpression(this Expression expr)`
+// (SyntaxExtensions.cs line 81) -- when the expression is an `in`-direction wrapper
+// (`in` argument passed to a call), return the wrapped expression detached from the
+// wrapper; any other expression (including a `ref`/`out` direction wrapper) is returned
+// unchanged. The C# `expr is DirectionExpression dir && dir.FieldDirection ==
+// FieldDirection.In` ports to a dynamic cast plus the enum check. First consumed by
+// ReplaceMethodCallsWithOperators.ProcessInvocationExpression, which unwraps
+// operator-method arguments before building the operator expression.
 inline Expression* UnwrapInDirectionExpression(Expression* expr) {
     auto* dir = dynamic_cast<DirectionExpression*>(expr);
     if (dir == nullptr || dir->FieldDirection() != FieldDirection::In)
         return expr;
     return Detach(dir->Expression());
-}
-
-// The C# `public static Statement? GetNextStatement(Statement statement)`
-// (SyntaxExtensions.cs line 56): the next STATEMENT sibling, skipping
-// non-statement siblings. Consumed by the multi-dimensional foreach arm's
-// upper-bound chain walk.
-inline Statement* GetNextStatement(Statement* statement) {
-    AstNode* next = statement->NextSibling();
-    while (next != nullptr && dynamic_cast<Statement*>(next) == nullptr)
-        next = next->NextSibling();
-    return dynamic_cast<Statement*>(next);
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

@@ -9,14 +9,14 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/ILTypeExtensions.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/PointerArithmeticOffset.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/InstructionOutputExtensions.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Instructions/Block.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Instructions/ILInstructionClone.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Instructions/Call.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/StackTypeOf.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ILReader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/BlockBuilder.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Instructions/ILFunction.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Instructions/CompoundAssignmentInstruction.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Instructions/UserDefinedLogicOperator.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Instructions/TokenInstructions.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ControlFlow/VariableUsage.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ControlFlow/ControlFlowSimplification.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ControlFlow/ControlFlowGraph.cpp
@@ -29,18 +29,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/ControlFlow/SwitchAnalysis.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ControlFlow/SwitchDetection.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/ILInlining.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/NamedArgumentTransform.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/TransformArrayInitializers.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/TransformCollectionAndObjectInitializers.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/TransformExpressionTrees.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/SwitchOnStringTransform.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/LocalFunctionDecompiler.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/TransformDisplayClassUsage.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/IndexRangeTransform.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/InlineArrayTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/TupleTransform.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Instructions/DeconstructInstruction.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/DeconstructionTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/InlineReturnTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/AssignVariableNames.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/CopyPropagation.cpp
@@ -65,11 +54,12 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/NullCoalescingTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/TransformAssignment.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/UserDefinedLogicTransform.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/NamedArgumentTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/InterpolatedStringTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/FixRemainingIncrements.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/ReduceNestingTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/CombineExitsTransform.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/DelegateConstruction_impl.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/IntroduceNativeIntTypeOnLocals.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/SplitVariables.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/AccessPathElement.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/TransformCollectionAndObjectInitializers.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/TransformDisplayClassUsage.cpp
 )

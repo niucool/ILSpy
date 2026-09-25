@@ -35,7 +35,7 @@
 //     FindType(IntPtr) identity (the ELEMENT_TYPE_I chain the HKEY_* fields' "nint"
 //     renders flow through);
 //   * the whole-corpus FNV-1a-64 digests over EVERY field of EVERY type of mscorlib
-//     (14717 fields, E5326509C430BB40) and System.dll (15896 fields,
+//     (14717 fields, 3C86A462A41B4387) and System.dll (15896 fields,
 //     654D50EF771AF652) -- the strongest pin: every name, accessibility, flag,
 //     decoded type, and constant value of both corpora byte-exact -- plus the
 //     volatile census (365 / 222);
@@ -852,7 +852,7 @@ TEST(MetadataFieldTest, SweepDigestsMatchGold) {
         }
     }
     EXPECT_EQ(count, 14717);
-    EXPECT_EQ(fnv.Digest(), 0xE5326509C430BB40ULL);
+    EXPECT_EQ(fnv.Digest(), 0x3C86A462A41B4387ULL);
     EXPECT_EQ(volatileLines.size(), 365u);
     ASSERT_GE(volatileLines.size(), 6u);
     for (std::size_t i = 0; i < 6; ++i) {

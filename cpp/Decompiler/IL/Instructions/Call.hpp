@@ -18,9 +18,7 @@
 
 // Call: a method invocation. Children are the arguments (in order); the method
 // is identified by a display name the IL reader fills in from the resolved
-// MethodDef/MemberRef token, or by a fully resolved IMethod when constructed
-// through the IMethod-taking ctor (the VisitCall/CallBuilder path).
-// DirectFlags = SideEffect | MayThrow.
+// MethodDef/MemberRef token. DirectFlags = SideEffect | MayThrow.
 
 #pragma once
 
@@ -34,17 +32,31 @@
 
 namespace ILSpy::Decompiler::IL {
 
+// The C# `internal static StackType CallInstruction.ExpectedTypeForThisPointer(
+// IType declaringType, IType? constrainedTo)` (CallInstruction.cs lines 107-124):
+// the expected stack type for passing the this pointer in a method call.
+// Returns StackType.Ref when constrainedTo is not null, StackType.O for
+// reference types (the this pointer passed as an object reference), and
+// StackType.Ref for type parameters and value types (the this pointer passed
+// as a managed reference). Returns StackType.Unknown when the input type is
+// unknown (the `IsReferenceType` tri-state carries neither true nor false --
+// e.g. a type whose reference-ness is indeterminate).
+inline StackType ExpectedTypeForThisPointer(const TypeSystem::IType* declaringType,
+                                            const TypeSystem::IType* constrainedTo)
+{
+    if (constrainedTo != nullptr)
+        return StackType::Ref;
+    assert(declaringType != nullptr);
+    if (declaringType->Kind() == TypeSystem::TypeKind::TypeParameter)
+        return StackType::Ref;
+    const std::optional<bool> isReferenceType = declaringType->IsReferenceType();
+    if (isReferenceType.has_value())
+        return *isReferenceType ? StackType::O : StackType::Ref;
+    return StackType::Unknown;
+}
+
 class Call : public ILInstruction {
 public:
-    // The C# `public readonly IMethod Method` (CallInstruction.cs) -- the
-    // resolved method this call invokes. Null on the seed string-stand-in
-    // construction form (the `Call(std::string method)` ctor the IL reader and
-    // the transforms use), non-null on the resolved-method construction form
-    // (the `Call(std::shared_ptr<IMethod>, bool)` ctor), which derives every
-    // stand-in field below from it. A future visitor resolves the reader's
-    // token to an IMethod through a type-system handle and uses that ctor; the
-    // reader itself stays type-system-free (D78) and keeps the string form.
-    std::shared_ptr<TypeSystem::IMethod> Method;
     std::string MethodName;  // "Namespace.Type::Method" (resolved by the IL reader)
     std::vector<std::unique_ptr<ILInstruction>> Arguments;
     StackType ReturnType = StackType::Unknown;
@@ -84,13 +96,6 @@ public:
     // True for call/callvirt on an instance method (Arguments[0] is the
     // receiver); false for static calls and newobj. Set by the IL reader.
     bool IsInstanceCall = false;
-    // The C# `public bool ILStackWasEmpty` (CallInstruction.cs) -- whether the
-    // evaluation stack was empty at the point of this call (not counting the
-    // arguments/return value of the call itself). Set by the IL reader BEFORE
-    // the argument pops. Consumed by
-    // TransformCollectionAndObjectInitializers (the statement-level local
-    // bail) and the seed's statement-level checks.
-    bool ILStackWasEmpty = false;
     // True for a `newobj` call (the C# models this as a separate NewObj node;
     // this port reuses Call with this flag, matching the IsInstanceCall
     // precedent). The IL reader sets it from the decoded opcode. Consumed by
@@ -132,48 +137,34 @@ public:
     // so a default-false call never trips that bail). It is a settable field so
     // a future resolver-backed path can mark a lifted operator call.
     bool IsLifted = false;
-    // The C# `public bool IsTail` (CallInstruction.cs) -- the IL `tail.`
-    // prefix the Build render surfaces as a `/*tail.*/` inline comment. The
-    // reader never sets it yet (F# emits tail calls pervasively; the reader
-    // decodes the prefix as part of the extended opcode -- the additive
-    // field keeps the stand-in model honest without reader changes).
+
+    // The C# `public readonly IMethod Method` -- the resolved method identity the
+    // CSharp back end consumes (the CallBuilder's MemberResolveResult render, the
+    // span-based string-concat detection, the accessor/operator checks). Null on
+    // the seed path (the IL reader fills the MethodName/flag stand-ins above; the
+    // call arms that need the IMethod are not yet wired into the reader), so every
+    // consumer must null-check before dereferencing -- the same optional-method
+    // shape the UserDefinedCompoundAssign upgrade carried before its second ctor
+    // landed. Set directly by tests (the FakeMethod/LookupMethod fixtures) and
+    // later by the reader once the type-system plumbing reaches it.
+    std::shared_ptr<TypeSystem::IMethod> Method;
+    // The C# `public bool IsTail` -- whether the call carries the IL 'tail.'
+    // prefix (the C# surfaces it as an inline `/*tail.*/` comment marker).
     bool IsTail = false;
-    // The C# `public IType? ConstrainedTo` (CallInstruction.cs) -- the
-    // `constrained.` prefix's type operand, set at visit time when the
-    // resolved method is generic over a type parameter. Null on the stand-in
-    // construction form.
+    // The C# `public IType? ConstrainedTo` -- the type operand of the
+    // 'constrained.' prefix; null when no prefix exists.
     TypeSystem::ITypePtr ConstrainedTo;
+    // The C# `public bool ILStackWasEmpty` (CallInstruction.cs line 61):
+    // whether the IL evaluation stack was empty at the point of this call,
+    // not counting the call's own arguments/return value (evaluated by the
+    // reader AFTER popping the arguments -- the C# PrepareArguments-then-
+    // CurrentStackIsEmpty order). The statement-level initializer detection
+    // (TransformCollectionAndObjectInitializers) uses it to prefer keeping
+    // plain local variables on the statement level. False for calls created
+    // outside the reader (the C# default).
+    bool ILStackWasEmpty = false;
 
     explicit Call(std::string method = std::string()) : ILInstruction(OpCode::Call), MethodName(std::move(method)) {}
-
-    // The C# ctor form (`CallInstruction(OpCode opCode, IMethod method)` -- here
-    // pinned to the call opcode, with `isNewObj` selecting the C# `NewObj
-    // Subclass): the resolved method populates every stand-in field (MethodName,
-    // ReturnIType/ReturnType, ParameterIType, DeclaringType, IsInstanceCall,
-    // IsNewObj, IsOperator, TypeArgumentsCount) the C# derives from the method,
-    // and is kept for the VisitCall/VisitCallVirt/VisitNewObj arms and the
-    // CallBuilder. Implemented out-of-line in the .cpp (the stand-in derivation
-    // needs the ReflectionName/Name display and StackTypeOf; the
-    // UserDefinedCompoundAssign gnhf-110 / UserDefinedLogicOperator gnhf-118
-    // precedent).
-    Call(std::shared_ptr<TypeSystem::IMethod> method, bool isNewObj = false);
-
-    // The C# `internal static StackType CallInstruction.ExpectedTypeForThisPointer(
-    // IType declaringType, IType? constrainedTo)` (CallInstruction.cs lines
-    // 107-122): Ref when the call is constrained, the declaring type is a type
-    // parameter, or a value type; O for a reference type; Unknown when the
-    // reference-ness is indeterminate.
-    static StackType ExpectedTypeForThisPointer(const TypeSystem::IType& declaringType,
-                                                const TypeSystem::IType* constrainedTo = nullptr) {
-        if (constrainedTo != nullptr)
-            return StackType::Ref;
-        if (declaringType.Kind() == TypeSystem::TypeKind::TypeParameter)
-            return StackType::Ref;
-        std::optional<bool> isReferenceType = declaringType.IsReferenceType();
-        if (isReferenceType.has_value())
-            return *isReferenceType ? StackType::O : StackType::Ref;
-        return StackType::Unknown;
-    }
 
     InstructionFlags DirectFlags() const override {
         return InstructionFlags::SideEffect | InstructionFlags::MayThrow;

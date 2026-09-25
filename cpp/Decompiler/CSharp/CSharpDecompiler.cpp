@@ -62,14 +62,12 @@
 
 namespace ILSpy::Decompiler::CSharp {
 
-std::vector<std::unique_ptr<IL::IILTransform>>
-CSharpDecompiler::GetILTransforms() {
-    return IL::GetILTransforms();
-}
-
+// The IL pipeline driver: the IL layer's RunGetILTransforms (the fixed
+// GetILTransforms + RunTransforms sequence, kept inline there so every
+// consumer drives the same order).
 void CSharpDecompiler::RunILTransforms(IL::ILFunction& function,
                                        IL::ILTransformContext& context) {
-    function.RunTransforms(GetILTransforms(), context);
+    IL::RunGetILTransforms(function, context);
 }
 
 // The context wiring the C# ILTransformContext carries natively: the
@@ -77,7 +75,6 @@ void CSharpDecompiler::RunILTransforms(IL::ILFunction& function,
 // entry (the port's DelegateBodyResolver hook over ReadIL).
 static void WireTransformContext(IL::ILTransformContext& context,
                                  const Metadata::MetadataFile& file) {
-    context.Metadata = const_cast<Metadata::MetadataFile*>(&file);
     context.DelegateBodyResolver =
         [&file](std::uint32_t methodToken,
                 std::uint32_t methodRva) -> std::unique_ptr<IL::ILFunction> {
@@ -90,7 +87,7 @@ void CSharpDecompiler::RunILTransforms(IL::ILFunction& function,
                                        const Metadata::MetadataFile& file) {
     IL::ILTransformContext context;
     WireTransformContext(context, file);
-    function.RunTransforms(GetILTransforms(), context);
+    IL::RunGetILTransforms(function, context);
 }
 
 std::string CSharpDecompiler::DecompileFunctionToString(
@@ -562,7 +559,7 @@ Syntax::SyntaxTree* CSharpDecompiler::DecompileModuleAndAssemblyAttributes(
     // is the main module; the port's SimpleTypeResolveContext over the
     // module carries the same pair).
     TS::SimpleTypeResolveContext decompilationContext(module);
-    RunAstTransforms(*syntaxTree, decompileRun, &decompilationContext);
+    RunAstTransforms(*syntaxTree, decompileRun, decompilationContext);
     return syntaxTree;
 }
 
@@ -679,33 +676,31 @@ CSharpDecompiler::GetAstTransforms() {
     return transforms;
 }
 
-void CSharpDecompiler::RunAstTransforms(    Syntax::AstNode& rootNode, DecompileRun& decompileRun,
-    const ::ILSpy::Decompiler::TypeSystem::ITypeResolveContext* decompilationContext) {
+void CSharpDecompiler::RunAstTransforms(
+    Syntax::AstNode& rootNode, DecompileRun& decompileRun,
+    const ::ILSpy::Decompiler::TypeSystem::ITypeResolveContext& decompilationContext) {
     // The C# RunTransforms shape: the context build, the up-front invariant
     // check, the transform loop with the per-entry step groups and invariant
     // checks, then the InsertParenthesesVisitor (the readability flag on)
     // and the GenericGrammarAmbiguityVisitor tail. The C# StepLimitReached /
     // CancellationToken bookkeeping is deferred with those surfaces.
-    Transforms::TransformContext context;
-    context.DecompileRun = &decompileRun;
     // The C# `var typeSystemAstBuilder = CreateAstBuilder(decompileRun.Settings)`
     // + the TransformContext ctor parameter: the type renderer the
     // insertion arms consume (ConvertType).
     Syntax::TypeSystemAstBuilder typeSystemAstBuilder =
         CreateAstBuilder(decompileRun.Settings());
-    context.TypeSystemAstBuilder = &typeSystemAstBuilder;
     // The C# TransformContext ctor's third parameter (the IDecompilerTypeSystem
     // the ctor passes): the compilation the context's TypeSystem slot carries.
     // The C# passes the decompiler's type system -- an IDecompilerTypeSystem IS
     // an ITypeResolveContext -- so the port reads it off the decompilation
     // context parameter; a caller that passes none (the pipeline driver's
-    // bare form) leaves the slot null and the arm that needs it degrades.
-    context.TypeSystem = decompilationContext != nullptr
-                             ? &decompilationContext->Compilation()
-                             : nullptr;
+    // bare form) passes a bare SimpleTypeResolveContext over the module
+    // instead (the null slot would leave nothing to resolve against).
+    Transforms::TransformContext context(
+        decompilationContext.Compilation(), decompileRun,
+        decompilationContext, typeSystemAstBuilder);
     rootNode.CheckInvariant();
     for (const auto& transform : GetAstTransforms()) {
-        context.StepOnce("AstTransform");
         transform->Run(rootNode, context);
         rootNode.CheckInvariant();
     }

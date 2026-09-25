@@ -23,17 +23,15 @@
 // `visitor.Visit<NodeName>(this)` and add the matching `Visit` pure-virtuals to `IAstVisitor`
 // (the next in-order Phase-5 piece per the D225 plan).
 //
-// `Expression` is the common base of every C# expression node. It is an abstract `partial
-// class : AstNode` carrying the `[DecompilerAstNode(hasPatternPlaceholder: true)]` attribute;
-// the hand-written part adds a typed `Clone` and a typed `ReplaceWith` (the C# `new` keyword
-// hides the `AstNode` overloads and downcasts the result so callers get an `Expression` back
-// instead of an `AstNode`). The generator emits a pattern placeholder (the
-// `implicit operator Expression(Pattern)` + a sealed `PatternPlaceholder` nested class
-// wrapping a `Pattern`) because `hasPatternPlaceholder` is true -- ported here as the nested
-// `PatternPlaceholder` class (the C# generator's DecompilerSyntaxTreeGenerator.cs
-// WritePatternPlaceholder) plus the `ToExpression` free function standing in for the C#
-// implicit conversion (C++ has no user-defined implicit conversions between class types
-// through a base; the free function is the port's call-site form).
+// `Expression` is the common base of every C# expression node. It is an abstract, otherwise
+// empty `partial class : AstNode` carrying the `[DecompilerAstNode(hasPatternPlaceholder:
+// true)]` attribute; the hand-written part adds only a typed `Clone` and a typed `ReplaceWith`
+// (the C# `new` keyword hides the `AstNode` overloads and downcasts the result so callers get
+// an `Expression` back instead of an `AstNode`). The generator additionally emits a pattern
+// placeholder (the `implicit operator Expression(Pattern)` + a sealed `PatternPlaceholder`
+// nested class wrapping a `Pattern`) because `hasPatternPlaceholder` is true; it is ported as
+// the generic `PatternPlaceholderNode<Expression>` (Syntax/PatternPlaceholder.hpp), with the
+// `implicit operator` call sites ported to `PatternExtensions::ToExpression`.
 //
 // The typed `Clone` ports as a covariant pure-virtual override: `AstNode::Clone()` returns
 // `AstNode*` (its base body throws, since C++ has no `MemberwiseClone`); `Expression`
@@ -52,9 +50,6 @@
 #define ILSPY_DECOMPILER_CSHARP_SYNTAX_EXPRESSIONS_EXPRESSION_HPP
 
 #include "Decompiler/CSharp/Syntax/AstNode.hpp"
-#include "Decompiler/CSharp/Syntax/IAstVisitor.hpp"
-#include "Decompiler/CSharp/Syntax/IAstVisitorBool.hpp"
-#include "Decompiler/CSharp/Syntax/PatternMatching/Pattern.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -80,71 +75,7 @@ public:
     // Covariant: `Expression*` derives from `AstNode*`, so this is a valid override of
     // `AstNode::Clone()`.
     Expression* Clone() const override = 0;
-
-    // wraps a Pattern so it can occupy an Expression slot (the C#
-    // `implicit operator Expression(Pattern)` constructs it). Defined out-of-line
-    // below the class (C++ requires the enclosing class to be complete before a
-    // nested class deriving from it, the C# nested-class shape kept).
-    class PatternPlaceholder;
-
-    // The C# `public static implicit operator Expression(Pattern? pattern)` -- a
-    // null pattern converts to a null expression. The port's call-site form (the
-    // C# PatternExtensions `ToExpression(this Pattern)` end state after the
-    // implicit conversion): a null pattern throws (the port's non-null conventions)
-    // and a non-null pattern wraps in the placeholder.
-    static Expression* ToExpression(PatternMatching::Pattern& pattern);
 };
-
-// The out-of-line nested-class definition (the enclosing Expression must be
-// complete for the nested class deriving from it -- the C++ rule that keeps the
-// C# generator's nested-class shape but moves the definition past the class).
-class Expression::PatternPlaceholder final : public Expression {
-public:
-    explicit PatternPlaceholder(PatternMatching::Pattern& child) : child_(&child) {}
-
-    // The C# `AstNode.Clone()` is a concrete MemberwiseClone-based method the
-    // placeholder inherits; the port's Clone is a covariant pure virtual on
-    // Expression, so the placeholder supplies the shallow-copy equivalent: a fresh
-    // placeholder over the same child reference (the C# MemberwiseClone copies the
-    // `child` FIELD by reference too).
-    Expression* Clone() const override { return new PatternPlaceholder(*child_); }
-
-    // The C# `public override void AcceptVisitor(IAstVisitor visitor)`.
-    void AcceptVisitor(IAstVisitor& visitor) override {
-        // The C# `visitor.VisitPatternPlaceholder(this, child)`.
-        visitor.VisitPatternPlaceholder(this, child_);
-    }
-
-    // The C# `AcceptVisitor<T>(IAstVisitor<T> visitor)` over S = bool (the port's
-    // IAstVisitorBool instantiation; the C# generated placeholder overrides the
-    // generic dispatch alongside the void one).
-    bool AcceptVisitorBool(IAstVisitorBool& visitor) override {
-        return visitor.VisitPatternPlaceholder(this, child_);
-    }
-
-    bool DoMatch(AstNode* other, PatternMatching::Match match) override {
-        return child_->DoMatch(other, match);
-    }
-
-    bool DoMatchCollection(const std::vector<PatternMatching::INode*>& other, int pos,
-                           PatternMatching::Match match,
-                           PatternMatching::BacktrackingInfo& backtrackingInfo) override {
-        return child_->DoMatchCollection(other, pos, match, backtrackingInfo);
-    }
-
-    // The C# `readonly PatternMatching.Pattern child` (a GC reference; the port
-    // observes the caller-owned pattern).
-    PatternMatching::Pattern& Child() const { return *child_; }
-
-private:
-    PatternMatching::Pattern* child_;
-};
-
-// The C# `public static implicit operator Expression(Pattern? pattern)` / the
-// PatternExtensions `ToExpression(this Pattern)`: the call-site form.
-inline Expression* Expression::ToExpression(PatternMatching::Pattern& pattern) {
-    return new PatternPlaceholder(pattern);
-}
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 

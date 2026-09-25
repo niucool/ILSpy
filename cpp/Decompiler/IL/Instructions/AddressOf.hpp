@@ -1,72 +1,65 @@
 // Copyright (c) 2026 ILSpy Contributors
 //
-// Permission is hereby granted, free of charge, to any person obtaining a copy of this
-// software and associated documentation files (the "Software"), to deal in the Software
-// without restriction, including without limitation the rights to use, copy, modify, merge,
-// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
-// to whom the Software is furnished to do so, subject to the following conditions:
+// Permission is hereby granted, free of charge, to any person obtaining a copy of
+// this software and associated documentation files (the "Software"), to deal in
+// the Software without restriction, including without limitation the rights to
+// use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+// of the Software, and to permit persons to whom the Software is furnished to do
+// so, subject to the following conditions:
 //
-// The above copyright notice and this permission notice shall be included in all copies or
-// substantial portions of the Software.
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
 //
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
-// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
-// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
-// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
-// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-// DEALINGS IN THE SOFTWARE.
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
 
-// Port of the C# `AddressOf` node (ICSharpCode.Decompiler/IL/Instructions.cs,
-// the `public sealed partial class AddressOf : ILInstruction`): takes the
-// managed reference (`ref`/`out`/`in` argument or the operand of a
-// `readonly.`-typed load) of the wrapped expression. One Value child (the C#
-// ValueSlot, canInlineInto) plus the IType type operand (a plain field, not a
-// child -- the C# GetChildCount is 1 and the type is carried as `IType type`).
-// ResultType is StackType::Ref. The C# AcceptVisitor/ILVisitor surface has no
-// port counterpart (the port dispatches through dynamic_cast), and the
-// C# PerformMatch/WriteILRange pieces have no port counterpart (the port has
-// no pattern-match or IL-range infrastructure on ILInstruction).
-//
-// Consumed by the CallBuilder span-based string-concat shape
-// (`NewObj { Arguments: [AddressOf addressOf] }` with a ReadOnlySpan<char>
-// ctor) and the `ExpressionBuilder::VisitUserDefinedCompoundAssign` span arm,
-// both of which previously probed `Op == OpCode::AddressOf` generically.
+// AddressOf: `addressof <type>(<value>)` -- the managed-reference wrapper the
+// IL reader emits for the `ldloca`/`ldsflda` address-of forms and the transforms
+// rewrap when an inlined expression needs an lvalue address. Port of the C#
+// generated `AddressOf` node (IL/Instructions.cs): a single `Value` child
+// (canInlineInto), a `Type` operand, `ResultType` Ref, `DirectFlags` None with
+// `ComputeFlags` delegating to the child.
 
 #pragma once
 
-#include "Decompiler/IL/ILInstruction.hpp"
+#include "Decompiler/IL/Instructions/UnaryInstruction.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
-#include <cassert>
 #include <memory>
+#include <string>
 
 namespace ILSpy::Decompiler::IL {
 
-class AddressOf final : public ILInstruction {
+class AddressOf final : public UnaryInstruction {
 public:
-    std::unique_ptr<ILInstruction> Value;
+    // The C# `IType type` operand (the type the reference points at).
     TypeSystem::ITypePtr Type;
+
     AddressOf(std::unique_ptr<ILInstruction> value, TypeSystem::ITypePtr type)
-        : ILInstruction(OpCode::AddressOf), Value(std::move(value)), Type(std::move(type)) {
-        if (Value) { Value->Parent = this; Value->ChildIndex = 0; }
-    }
-    InstructionFlags DirectFlags() const override { return InstructionFlags::None; }
+        : UnaryInstruction(OpCode::AddressOf, std::move(value)), Type(std::move(type)) {}
+
+    // The C# `public override StackType ResultType { get { return StackType.Ref; } }`.
     StackType ResultType() const override { return StackType::Ref; }
-    int ChildCount() const override { return Value ? 1 : 0; }
-    ILInstruction* GetChild(int i) const override { return i == 0 ? Value.get() : nullptr; }
-    void WriteTo(std::string& out) const override {
-        out += "addressof(";
-        out += Type ? Type->ReflectionName() : std::string("?");
-        out += ", ";
-        if (Value) Value->WriteTo(out); else out += "(null)";
-        out += ')';
+
+    // The C# `DirectFlags { get { return InstructionFlags.None; } }` with
+    // `ComputeFlags()` delegating to the child's flags: the port folds the two
+    // into one override (every existing port node carries only the direct
+    // flags; no consumer walks ComputeFlags separately).
+    InstructionFlags DirectFlags() const override {
+        return Argument ? Argument->Flags() : InstructionFlags::None;
     }
-protected:
-    std::unique_ptr<ILInstruction> SetChildRaw(int i, std::unique_ptr<ILInstruction> n) override {
-        assert(i == 0);
-        auto old = std::move(Value);
-        Value = std::move(n);
-        return old;
+
+    void WriteTo(std::string& out) const override {
+        out += "addressof ";
+        out += Type ? Type->ReflectionName() : std::string("?");
+        out += '(';
+        if (Argument) Argument->WriteTo(out); else out += "(null)";
+        out += ')';
     }
 };
 

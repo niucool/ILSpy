@@ -41,18 +41,12 @@ void CountUsage(ILInstruction* inst) {
     switch (inst->Op) {
         case OpCode::LdLoc: {
             auto* ld = static_cast<LdLoc*>(inst);
-            if (ld->Variable) {
-                ++ld->Variable->LoadCount;
-                ld->Variable->LoadInstructions.push_back(ld);
-            }
+            if (ld->Variable) ++ld->Variable->LoadCount;
             break;
         }
         case OpCode::StLoc: {
             auto* st = static_cast<StLoc*>(inst);
-            if (st->Variable) {
-                ++st->Variable->StoreCount;
-                st->Variable->StoreInstructions.push_back(st);
-            }
+            if (st->Variable) ++st->Variable->StoreCount;
             break;
         }
         // MatchInstruction is an IStoreInstruction (it captures the matched
@@ -60,20 +54,14 @@ void CountUsage(ILInstruction* inst) {
         // Connected() hook that calls variable.AddStoreInstruction(this).
         case OpCode::MatchInstruction: {
             auto* m = static_cast<MatchInstruction*>(inst);
-            if (m->Variable) {
-                ++m->Variable->StoreCount;
-                m->Variable->StoreInstructions.push_back(m);
-            }
+            if (m->Variable) ++m->Variable->StoreCount;
             break;
         }
         // UsingInstruction is an IStoreInstruction (it stores the resource into
         // Variable), so it counts as a store -- mirroring the C# Connected() hook.
         case OpCode::UsingInstruction: {
             auto* u = static_cast<UsingInstruction*>(inst);
-            if (u->Variable) {
-                ++u->Variable->StoreCount;
-                u->Variable->StoreInstructions.push_back(u);
-            }
+            if (u->Variable) ++u->Variable->StoreCount;
             break;
         }
         case OpCode::LdLoca: {
@@ -87,10 +75,7 @@ void CountUsage(ILInstruction* inst) {
         case OpCode::TryCatchHandler: {
             // The runtime stores the exception into the handler variable.
             auto* h = static_cast<TryCatchHandler*>(inst);
-            if (h->Variable) {
-                ++h->Variable->StoreCount;
-                h->Variable->StoreInstructions.push_back(h);
-            }
+            if (h->Variable) ++h->Variable->StoreCount;
             break;
         }
         default:
@@ -137,13 +122,8 @@ void ComputeVariableUsage(ILFunction& function) {
         if (!v) continue;
         v->LoadCount = 0;
         v->AddressCount = 0;
-        v->StoreCount = (v->Kind == VariableKind::Parameter) ? 1 : 0;
-        // The use-site lists restart empty each walk (the recompute
-        // convention: the C# maintains them via Connected/Disconnected, the
-        // port snapshots them per walk).
-        v->LoadInstructions.clear();
-        v->StoreInstructions.clear();
         v->AddressInstructions.clear();
+        v->StoreCount = (v->Kind == VariableKind::Parameter) ? 1 : 0;
         all.insert(v.get());
     }
     CountUsage(function.Body.get());

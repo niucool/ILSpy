@@ -36,22 +36,6 @@ namespace ILSpy::Decompiler::IL {
 
 class Block : public ILInstruction {
 public:
-    // The C# `public static ILInstruction? GetContainingStatement(ILInstruction
-    // inst)` (Block.cs): the node whose parent is a ControlFlow-kind block --
-    // the C# `curr.Parent is Block { Kind: BlockKind.ControlFlow }` walk.
-    // Null when inst is detached.
-    static ILInstruction* GetContainingStatement(ILInstruction* inst) {
-        ILInstruction* curr = inst;
-        while (curr != nullptr) {
-            if (curr->Parent != nullptr) {
-                if (auto* block = dynamic_cast<Block*>(curr->Parent)) {
-                    if (block->Kind == BlockKind::ControlFlow) return curr;
-                }
-            }
-            curr = curr->Parent;
-        }
-        return nullptr;
-    }
     std::vector<std::unique_ptr<ILInstruction>> Instructions;
     std::unique_ptr<ILInstruction> FinalInstruction;
     // What this block models beyond plain control flow (ControlFlow by default;
@@ -69,38 +53,22 @@ public:
     // (Block.IncomingEdgeCount in the C#).
     int IncomingEdgeCount = 0;
 
-    // The C# `public string Label` (Block.cs) -- the label name the
-    // LabelDecompiler assigns (the `IL_XXXX`/`label_N` forms). Empty until a
-    // label decompiler runs; the StatementBuilder's gotos/labels render it
-    // (EnsureUniqueLabel).
-    std::string Label;
-
     Block() : ILInstruction(OpCode::Block) {}
-
-    // The C# `internal override bool CanInlineIntoSlot(int childIndex,
-    // ILInstruction expressionBeingMoved)` (Block.cs): inlining into the block is
-    // allowed only as the block's first instruction, and only for the block kinds
-    // that permit it (a ControlFlow block inside a container, or an initializer
-    // block); every other kind (and any later position) rejects inlining.
-    bool CanInlineIntoSlot(int childIndex, ILInstruction* expressionBeingMoved) override {
-        (void)expressionBeingMoved;
-        switch (Kind) {
-            case BlockKind::ControlFlow:
-            case BlockKind::ArrayInitializer:
-            case BlockKind::CollectionInitializer:
-            case BlockKind::ObjectInitializer:
-            case BlockKind::CallInlineAssign:
-                // Allow inlining into the first instruction of the block. The C#
-                // gate reads `Parent is BlockContainer` for the ControlFlow case;
-                // the port's blocks always sit in containers (the reader contract),
-                // so the kind alone decides.
-                return childIndex == 0;
-            default:
-                return false;
-        }
-    }
     InstructionFlags DirectFlags() const override { return InstructionFlags::None; }
     StackType ResultType() const override { return StackType::Void; }
+
+    // The C# `public string Label` (Block.cs line 257): the block's name --
+    // DisassemblerHelpers.OffsetToString(StartILOffset). Defined out-of-line in
+    // Block.cpp (the Disassembler include is not wanted in this header).
+    std::string Label() const;
+
+    // The C# `public bool MatchInlineAssignBlock(out CallInstruction? call, out
+    // ILInstruction? value)` (Block.cs lines 436-452): a BlockKind.CallInlineAssign
+    // block holding a single setter call whose last argument is an
+    // `stloc tmp(value)` with a single load, followed by `ldloc tmp`. Answers the
+    // setter call and the extracted assigned value. Defined out-of-line in
+    // Block.cpp (its body calls the PatternMatching.hpp matchers).
+    bool MatchInlineAssignBlock(ILInstruction*& call, ILInstruction*& value) const;
 
     int ChildCount() const override {
         return static_cast<int>(Instructions.size()) + (FinalInstruction ? 1 : 0);

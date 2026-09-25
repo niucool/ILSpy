@@ -210,11 +210,10 @@ public:
     virtual bool VisitQueryJoinClause(QueryJoinClause* node) { return VisitChildren(node); }
     virtual bool VisitSyntaxTree(SyntaxTree* node) { return VisitChildren(node); }
 
-    // The C# `public virtual T VisitPatternPlaceholder(AstNode placeholder, Pattern
-    // pattern)` over the bool instantiation (DepthFirstAstVisitor.cs line 1367).
-    virtual bool VisitPatternPlaceholder(AstNode* placeholder,
-                                         PatternMatching::Pattern* pattern) {
-        (void)pattern;
+    // The C# `public virtual T VisitPatternPlaceholder(AstNode placeholder, Pattern pattern)`
+    // -- the `<bool>` default walk (the placeholder has no AST children), returning
+    // `VisitChildren`'s `false` (the `default(bool)`).
+    virtual bool VisitPatternPlaceholder(AstNode* placeholder, PatternMatching::Pattern& /*pattern*/) {
         return VisitChildren(placeholder);
     }
 };

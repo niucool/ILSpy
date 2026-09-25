@@ -28,18 +28,15 @@
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
 
-#include <vector>
-
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace ILSpy::Decompiler::IL {
 
 class BlockContainer;
 class ILInstruction;
-class LdLoc;
-class LdLoca;
 
 class ILVariable {
 public:
@@ -56,22 +53,24 @@ public:
     int StoreCount = 0;
     int AddressCount = 0;
 
-    // The variable's use-site instruction lists (the C# LoadInstructions/
-    // StoreInstructions/AddressInstructions, the IReadOnlyList<...> fields the
-    // transforms enumerate). The C# maintains them through the tree's
-    // Connected/Disconnected protocol; the port fills them in the
-    // ComputeVariableUsage walk (the recompute convention the counts already
-    // follow) -- they are snapshots valid until the next mutation, and a
-    // consumer that mutates the tree must recompute before reading again.
-    // Non-owning raw pointers into the live tree.
-    std::vector<LdLoc*> LoadInstructions;
-    std::vector<ILInstruction*> StoreInstructions;
-    std::vector<LdLoca*> AddressInstructions;
+    // The C# `public IReadOnlyList<LdLoca> AddressInstructions` (ILVariable.cs):
+    // every `LdLoca` that takes this variable's address, in tree order. Populated
+    // by ComputeVariableUsage (the reader-event equivalent) and kept current by
+    // ILFunction::RecombineVariables. Non-owning (the C# stores references; the
+    // owning tree is the ILFunction). `AddressCount` equals this list's size on
+    // every fresh recompute.
+    std::vector<ILInstruction*> AddressInstructions;
 
     // Set by transforms (e.g. RemoveInfeasiblePathTransform) to mark a variable
     // whose dead stores RemoveDeadVariableInit should drop even when the
     // RemoveDeadStores setting is off (ILVariable.RemoveIfRedundant in the C#).
     bool RemoveIfRedundant = false;
+
+    // The C# `public bool IsRefReadOnly { get; internal set; }` -- whether the
+    // variable holds a `ref readonly` reference (set by the ref-read-only
+    // modifier analysis). Read by ILInlining.ClassifyExpression / the Expression
+    // builder to classify a load as a readonly lvalue; defaults false.
+    bool IsRefReadOnly = false;
 
     // True if the variable's name is compiler-generated (e.g. the exception
     // stack slot's "E_<offset>" name), false for a name taken from a source
@@ -79,24 +78,28 @@ public:
     // the catch variable. Mirrors ILVariable.HasGeneratedName.
     bool HasGeneratedName = false;
 
-    // The C# `public bool UsesInitialValue` (ILVariable.cs): whether the
-    // variable's initial value is read before being overwritten (set by the
-    // SROA/initializer paths; RemoveDeadVariableInit resets it).
+    // The C# `public BlockContainer? CaptureScope { get; internal set; }` -- the
+    // block container in which this variable is captured (the loop container for a
+    // variable declared inside a loop, the parent function's container otherwise).
+    // Null for variables that are not captured. Non-owning (the C# GC reference);
+    // the owning tree is the ILFunction. Read by the ported DeclareVariables scope
+    // analysis to place a captured variable's declaration outside its capture scope.
+    BlockContainer* CaptureScope = nullptr;
+
+    // The C# `public bool UsesInitialValue { get; set; }` -- whether the variable's
+    // initial value is used (the `.locals init` semantics). The C# setter refuses to
+    // clear the flag on a parameter; the port's plain field leaves that discipline to
+    // the IL pipeline. Read by the DeclareVariables analysis to choose between the
+    // `default(T)` and `Unsafe.SkipInit(out T)` declaration forms. The port's
+    // `StoreCount` does NOT fold this flag in (the C# `StoreCount` adds 1 when it is
+    // set): the variable-usage reconstruction computes the count directly.
     bool UsesInitialValue = false;
 
-    // The C# `public bool InitialValueIsInitialized` (ILVariable.cs): whether
-    // the variable's initial value is already initialized (set by the
-    // display-class declaration path and the initializer analysis; read by
-    // DeclareVariables to pick NeedsDefaultValue over NeedsSkipInit).
+    // The C# `public bool InitialValueIsInitialized { get; set; }` -- whether the
+    // variable's initial value is zero-initialized (`.locals init`). The C# setter
+    // refuses to clear the flag on a parameter; the port's plain field leaves that
+    // discipline to the IL pipeline.
     bool InitialValueIsInitialized = false;
-
-    // The C# `public BlockContainer? CaptureScope { get; internal set; }`
-    // (ILVariable.cs): the container the variable is captured in -- the
-    // closest container of its first address-taking use or initializer store,
-    // combined over all capture uses (LocalFunctionDecompiler). Null for
-    // variables that are not captured. Non-owning (the container is owned by
-    // the enclosing ILFunction tree).
-    BlockContainer* CaptureScope = nullptr;
 
     // True if the variable is written exactly once and its address is never
     // taken (ILVariable.IsSingleDefinition).

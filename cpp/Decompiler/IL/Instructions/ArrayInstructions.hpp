@@ -74,11 +74,9 @@ public:
     TypeSystem::ITypePtr Type;
     std::unique_ptr<ILInstruction> Array;
     std::vector<std::unique_ptr<ILInstruction>> Indices;
-    // The C# `public bool WithSystemIndex` (LdElema.cs): the index was
-    // converted from a System.Index computation (`call GetOffset(...)` /
-    // `binary.sub.i4(ldlen, ...)`) -- the C# renderer prints
-    // `array[^i]` / `array[Index]` for the marked ldelema. Set by
-    // IndexRangeTransform.HandleLdElema.
+    // The C# `public bool WithSystemIndex` operand the IndexRangeTransform sets and
+    // the ExpressionBuilder's VisitLdElema reads to pick the System.Index hint;
+    // rendered as the `withsystemindex.` prefix before the opcode.
     bool WithSystemIndex = false;
     LdElema(TypeSystem::ITypePtr type, std::unique_ptr<ILInstruction> array,
             std::vector<std::unique_ptr<ILInstruction>> indices)
@@ -101,6 +99,7 @@ public:
         return (idx >= 0 && idx < static_cast<int>(Indices.size())) ? Indices[idx].get() : nullptr;
     }
     void WriteTo(std::string& out) const override {
+        if (WithSystemIndex) out += "withsystemindex.";
         out += "ldelema(";
         out += Type ? Type->ReflectionName() : std::string("?");
         out += ", ";
@@ -118,6 +117,5 @@ protected:
         return old;
     }
 };
-
 
 } // namespace ILSpy::Decompiler::IL

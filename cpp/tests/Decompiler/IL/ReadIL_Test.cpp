@@ -23,7 +23,7 @@
 // that the straight-line reader rejects.
 
 #include "Decompiler/IL/ILReader.hpp"
-#include <cstdlib>
+#include "Decompiler/IL/Instructions/Arglist.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
@@ -34,6 +34,8 @@
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/IL/Instructions/Unbox.hpp"
+#include "Decompiler/IL/Instructions/TypedReferenceInstructions.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 
 #include <gtest/gtest.h>
@@ -50,8 +52,6 @@ static const char* FixturePath() {
 #if defined(_WIN32)
     return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
 #else
-    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB"); env != nullptr)
-        return env;
     return "/usr/lib/mono/4.5/mscorlib.dll";
 #endif
 }
@@ -253,6 +253,87 @@ TEST(ReadIL, RefAnyTypeDecodes) {
         break;
     }
     EXPECT_TRUE(found) << "no refanytype method found in fixture";
+}
+
+TEST(ReadIL, UnboxDecodesToDedicatedNode) {
+    // The CIL `unbox T` opcode (0x79) is distinct from `unbox.any T` (0xA5):
+    // it yields a managed pointer (ref T). The reader must produce the dedicated
+    // Unbox node, not collapse it onto UnboxAny. System.IntPtr's equality helpers
+    // use `unbox System.IntPtr` followed by `ldfld m_value`, so at least one
+    // decoded body must carry an Unbox node.
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+    bool found = false;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0 || found) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        std::function<void(ILInstruction*)> walk = [&](ILInstruction* i) {
+            if (!i) return;
+            if (auto* unbox = dynamic_cast<Unbox*>(i)) {
+                ASSERT_NE(unbox->Type, nullptr);
+                found = true;
+            }
+            for (int k = 0; k < i->ChildCount(); ++k) walk(i->GetChild(k));
+        };
+        walk(fn.get());
+    }
+    EXPECT_TRUE(found) << "no `unbox` opcode decoded in fixture";
+}
+
+TEST(ReadIL, ArglistDecodesToDedicatedNode) {
+    // The CIL `arglist` opcode (0xFE00) retrieves the vararg
+    // RuntimeArgumentHandle. The reader must produce the dedicated Arglist node,
+    // not the type-token load it previously collapsed onto. mscorlib's vararg
+    // String::Concat(object, object, object, object) overload begins with
+    // `ldloca.s 2` / `arglist` / `call ArgIterator::.ctor`, so its decoded body
+    // must carry an Arglist node.
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringToken = FindType(f, "System", "String");
+    ASSERT_NE(stringToken, 0u);
+    bool found = false;
+    for (const auto& m : f.GetMethods(stringToken)) {
+        if (m.RVA == 0 || found) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        std::function<void(ILInstruction*)> walk = [&](ILInstruction* i) {
+            if (!i) return;
+            if (dynamic_cast<Arglist*>(i) != nullptr) found = true;
+            for (int k = 0; k < i->ChildCount(); ++k) walk(i->GetChild(k));
+        };
+        walk(fn.get());
+    }
+    EXPECT_TRUE(found) << "no `arglist` opcode decoded in String::Concat";
+}
+
+TEST(ReadIL, MkrefanyDecodesToDedicatedNode) {
+    // The CIL `mkrefany <T>` opcode (0xC6) makes a typed reference. The reader
+    // must produce the dedicated MakeRefAny node, not the type-token load it
+    // previously collapsed onto. System.Threading.Interlocked's private
+    // _Exchange<T> overload uses `mkrefany !!T` on both ref arguments, so at
+    // least one decoded body must carry a MakeRefAny node.
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+    bool found = false;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0 || found) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        std::function<void(ILInstruction*)> walk = [&](ILInstruction* i) {
+            if (!i) return;
+            if (dynamic_cast<MakeRefAny*>(i) != nullptr) found = true;
+            for (int k = 0; k < i->ChildCount(); ++k) walk(i->GetChild(k));
+        };
+        walk(fn.get());
+    }
+    EXPECT_TRUE(found) << "no `mkrefany` opcode decoded in fixture";
 }
 
 TEST(ReadIL, StfldUsesTargetThenValueStackOrder) {

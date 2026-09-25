@@ -602,12 +602,10 @@ public:
         VisitChildren(node);
     }
 
-    // The C# `public virtual void VisitPatternPlaceholder(AstNode placeholder, Pattern
-    // pattern)` (DepthFirstAstVisitor.cs line 692): the default recurses into the
-    // placeholder's children (the wrapped pattern node is one).
-    virtual void VisitPatternPlaceholder(AstNode* placeholder,
-                                         PatternMatching::Pattern* pattern) {
-        (void)pattern;
+    // The C# `public virtual void VisitPatternPlaceholder(AstNode placeholder, Pattern pattern)`
+    // -- the default walk (the placeholder has no AST children of its own; the wrapped pattern
+    // is not an `AstNode`).
+    virtual void VisitPatternPlaceholder(AstNode* placeholder, PatternMatching::Pattern& /*pattern*/) {
         VisitChildren(placeholder);
     }
 };

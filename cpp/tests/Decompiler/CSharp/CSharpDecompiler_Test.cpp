@@ -110,17 +110,6 @@ namespace CSharp = ::ILSpy::Decompiler::CSharp;
 namespace Syntax = ::ILSpy::Decompiler::CSharp::Syntax;
 using ILVariablePtr = std::shared_ptr<IL::ILVariable>;
 
-TEST(CSharpDecompilerTest, GetILTransformsAliasesTheILNamespaceFactory)
-{
-    auto transforms = CSharp::CSharpDecompiler::GetILTransforms();
-    ASSERT_FALSE(transforms.empty());
-    // The same list shape the IL-namespace factory produces (the head is
-    // ControlFlowSimplification, per the C# GetILTransforms list).
-    EXPECT_NE(dynamic_cast<IL::ControlFlowSimplification*>(
-                  transforms[0].get()),
-              nullptr);
-}
-
 // The per-body decompile half: a synthetic function whose body is
 // `stloc v(ldc.i4 42)` runs through the pipeline and renders with the
 // constant folded.

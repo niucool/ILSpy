@@ -37,6 +37,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ErrorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IsExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
@@ -48,6 +49,11 @@
 #include "Decompiler/CSharp/Syntax/Expressions/TypeOfExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UndocumentedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/RecursivePatternExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DeclarationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
+#include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/ComposedType.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/TranslatedExpression.hpp"
@@ -63,16 +69,34 @@
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
+#include "Decompiler/IL/Instructions/LdLen.hpp"
+#include "Decompiler/IL/Instructions/NullableInstructions.hpp"
+#include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
+#include "Decompiler/IL/Instructions/AddressOf.hpp"
+#include "Decompiler/IL/Instructions/Arglist.hpp"
+#include "Decompiler/IL/Instructions/RefAnyType.hpp"
+#include "Decompiler/IL/Instructions/TypedReferenceInstructions.hpp"
+#include "Decompiler/IL/Instructions/IfInstruction.hpp"
+#include "Decompiler/IL/Instructions/InvalidInstructions.hpp"
+#include "Decompiler/IL/Transforms/ILInlining.hpp"
+#include "Decompiler/IL/Transforms/TupleTransform.hpp"
+#include "Decompiler/CSharp/CSharpDecompiler.hpp"
 #include "Decompiler/IL/Instructions/BitNot.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
+#include "Decompiler/IL/Instructions/UserDefinedLogicOperator.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
+#include "Decompiler/IL/Instructions/Unbox.hpp"
+#include "Decompiler/IL/Instructions/UnboxAny.hpp"
+#include "Decompiler/IL/Instructions/Box.hpp"
+#include "Decompiler/IL/Instructions/CastClass.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
+#include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
@@ -83,23 +107,38 @@
 #include "Decompiler/Semantics/ThrowResolveResult.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
+#include "Decompiler/Semantics/MemberResolveResult.hpp"
 #include "Decompiler/Semantics/ConstantResolveResult.hpp"
 #include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
 #include "Decompiler/Semantics/OperatorResolveResult.hpp"
+#include "Decompiler/Semantics/InvocationResolveResult.hpp"
 #include "Decompiler/Semantics/SizeOfResolveResult.hpp"
 #include "Decompiler/Semantics/TypeIsResolveResult.hpp"
 #include "Decompiler/Semantics/TypeOfResolveResult.hpp"
+#include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
+#include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
+#include "Decompiler/TypeSystem/IProperty.hpp"
+#include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/TypeSystem/NullableType.hpp"
 #include "Decompiler/TypeSystem/LookupStubs.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
+#include "Decompiler/TypeSystem/TupleType.hpp"
+#include "Decompiler/TypeSystem/IAttribute.hpp"
+#include "Decompiler/TypeSystem/CustomAttributeTypedArgument.hpp"
+#include "Decompiler/TypeSystem/IEvent.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCache.hpp"
+#include "Decompiler/TypeSystem/MetadataModule.hpp"
+#include "Decompiler/Metadata/MetadataFile.hpp"
 
 #include <gtest/gtest.h>
 
 #include <any>
+#include <filesystem>
+#include <map>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -178,8 +217,34 @@ struct BuilderFixture {
                                  &run);
     }
 
+    // A builder whose decompilation context carries the given current type
+    // definition (the field-address arms build a MemberLookup / resolve simple
+    // names against it). The typed context is owned by the fixture and outlives
+    // the returned builder (the ExpressionBuilder stores it by pointer).
+    ExpressionBuilder MakeBuilderForType(const TS::ITypeDefinition* currentTypeDefinition)
+    {
+        typedContext_ = std::make_shared<CSharp::TypeSystem::CSharpTypeResolveContext>(
+            compilation.MainModule(), usingScope, currentTypeDefinition, nullptr);
+        return ExpressionBuilder(nullptr, compilation, *typedContext_, &function_, &settings,
+                                 &run);
+    }
+
+    // The MakeBuilderForType variant that also sets the context's current member (the
+    // `decompilationContext.CurrentMember` gate the automatic-property requires-qualifier
+    // special case reads). The member must be the canonical IMember subobject the
+    // comparison uses (the property's IProperty-to-IMember upcast).
+    ExpressionBuilder MakeBuilderForTypeAndMember(const TS::ITypeDefinition* currentTypeDefinition,
+                                                  const TS::IMember* currentMember)
+    {
+        typedContext_ = std::make_shared<CSharp::TypeSystem::CSharpTypeResolveContext>(
+            compilation.MainModule(), usingScope, currentTypeDefinition, currentMember);
+        return ExpressionBuilder(nullptr, compilation, *typedContext_, &function_, &settings,
+                                 &run);
+    }
+
 private:
     IL::ILFunction function_;
+    std::shared_ptr<CSharp::TypeSystem::CSharpTypeResolveContext> typedContext_;
     // The decompilation context over the compilation (a CSharpTypeResolveContext --
     // the C# `decompilationContext` is a CSharpTypeResolveContext in practice).
     std::shared_ptr<CSharp::TypeSystem::CSharpTypeResolveContext> context_;
@@ -730,6 +795,73 @@ TEST(ExpressionBuilderDefaultTest, DefaultRendersOpCodeNotSupported)
     EXPECT_TRUE(error.ResolveResult()->IsError());
 }
 
+// The C# `VisitInvalidBranch` arm (ExpressionBuilder.cs lines 5121-5133): the
+// error text is "Error[ near IL_xxxx][: message]". The offset/message tests pin
+// both formatting rules and prove the dispatch routes to the arm (a Default
+// fallback would say "OpCode not supported").
+TEST(ExpressionBuilderInvalidTest, InvalidBranchRendersErrorWithOffsetAndMessage)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::InvalidBranch inst;
+    inst.SetILRange(0x123, 0x124);
+    inst.Message = "no block for target";
+    auto expr = builder.Translate(&inst);
+    auto* error = dynamic_cast<Syntax::ErrorExpression*>(expr.Expression());
+    ASSERT_TRUE(error != nullptr);
+    ASSERT_EQ(error->TrailingTrivia().size(), std::size_t{1});
+    auto* comment = dynamic_cast<Syntax::Comment*>(error->TrailingTrivia()[0]);
+    ASSERT_TRUE(comment != nullptr);
+    EXPECT_EQ(comment->Content(), "Error near IL_0123: no block for target");
+    EXPECT_TRUE(expr.ResolveResult()->IsError());
+}
+
+TEST(ExpressionBuilderInvalidTest, InvalidBranchWithoutOffsetOrMessageIsBareError)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::InvalidBranch inst;
+    auto expr = builder.Translate(&inst);
+    auto* error = dynamic_cast<Syntax::ErrorExpression*>(expr.Expression());
+    ASSERT_TRUE(error != nullptr);
+    ASSERT_EQ(error->TrailingTrivia().size(), std::size_t{1});
+    auto* comment = dynamic_cast<Syntax::Comment*>(error->TrailingTrivia()[0]);
+    ASSERT_TRUE(comment != nullptr);
+    EXPECT_EQ(comment->Content(), "Error");
+}
+
+// The C# `VisitInvalidExpression` arm (lines 5135-5146): the prefix is the
+// node's Severity (default "Error") instead of the literal "Error".
+TEST(ExpressionBuilderInvalidTest, InvalidExpressionUsesSeverityPrefix)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::InvalidExpression inst(std::string("goto from catch to try"));
+    inst.Severity = "Note";
+    inst.SetILRange(42, 43);
+    auto expr = builder.Translate(&inst);
+    auto* error = dynamic_cast<Syntax::ErrorExpression*>(expr.Expression());
+    ASSERT_TRUE(error != nullptr);
+    ASSERT_EQ(error->TrailingTrivia().size(), std::size_t{1});
+    auto* comment = dynamic_cast<Syntax::Comment*>(error->TrailingTrivia()[0]);
+    ASSERT_TRUE(comment != nullptr);
+    EXPECT_EQ(comment->Content(), "Note near IL_002a: goto from catch to try");
+}
+
+TEST(ExpressionBuilderInvalidTest, InvalidExpressionDefaultSeverityIsError)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::InvalidExpression inst(std::string("bad value"));
+    auto expr = builder.Translate(&inst);
+    auto* error = dynamic_cast<Syntax::ErrorExpression*>(expr.Expression());
+    ASSERT_TRUE(error != nullptr);
+    ASSERT_EQ(error->TrailingTrivia().size(), std::size_t{1});
+    auto* comment = dynamic_cast<Syntax::Comment*>(error->TrailingTrivia()[0]);
+    ASSERT_TRUE(comment != nullptr);
+    EXPECT_EQ(comment->Content(), "Error: bad value");
+}
+
 // ---------------------------------------------------------------------------
 // UnwrapBoxingConversion / ChangeDirectionExpressionTo
 
@@ -741,6 +873,2091 @@ TEST(ExpressionBuilderStaticsTest, UnwrapBoxingConversionNoOpWithoutCast)
     auto expr = builder.Translate(&ldnull);
     auto unwrapped = ExpressionBuilder::UnwrapBoxingConversion(expr);
     EXPECT_EQ(unwrapped.Expression(), expr.Expression());
+}
+
+
+// ---------------------------------------------------------------------------
+// The boxing/cast conversion arms (VisitUnboxAny / VisitBox / VisitCastClass):
+// the conversion leaves that need no CallBuilder, no statement machinery, and
+// no control-flow helpers. Expectations derived from the C# bodies
+// (ExpressionBuilder.cs lines 3285-3358) over the MinimalCorlib fixture.
+
+// The fixture's object-typed local (the unboxing/cast source).
+std::shared_ptr<IL::ILVariable> ObjectLocal(const BuilderFixture& fixture)
+{
+    auto variable = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local,
+        std::const_pointer_cast<TS::IType>(
+            fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this()),
+        0);
+    variable->Name = "o";
+    return variable;
+}
+
+TEST(ExpressionBuilderCastTest, UnboxAnyInt32RendersUnboxingCast)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto objectVar = ObjectLocal(fixture);
+    // unbox.any int32(object) is not the isinst shortcut (int32 is a value type),
+    // so it falls through the object conversion to the plain unboxing cast.
+    IL::UnboxAny unboxAny(intType, std::make_unique<IL::LdLoc>(objectVar));
+    auto expr = builder.Translate(&unboxAny);
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(expr.Expression());
+    ASSERT_TRUE(cast != nullptr);
+    const auto* crr = dynamic_cast<const Sem::ConversionResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(crr != nullptr);
+    EXPECT_TRUE(crr->ConversionProperty()->IsUnboxingConversion());
+}
+
+TEST(ExpressionBuilderCastTest, UnboxAnyWithIsInstRendersAsExpression)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto stringType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    auto objectVar = ObjectLocal(fixture);
+    // unbox.any string(isinst string(object)) is the nullable/reference shortcut:
+    // "object as string" rather than a cast.
+    IL::UnboxAny unboxAny(
+        stringType, std::make_unique<IL::IsInst>(stringType, std::make_unique<IL::LdLoc>(objectVar)));
+    auto expr = builder.Translate(&unboxAny);
+    auto* asExpr = dynamic_cast<Syntax::AsExpression*>(expr.Expression());
+    ASSERT_TRUE(asExpr != nullptr);
+    const auto* crr = dynamic_cast<const Sem::ConversionResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(crr != nullptr);
+    EXPECT_TRUE(crr->ConversionProperty()->IsTryCast());
+}
+
+TEST(ExpressionBuilderCastTest, UnboxInt32RendersRefCastDirection)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto objectVar = ObjectLocal(fixture);
+    // `unbox int32(object)` yields a managed pointer: `ref (int32)object` with
+    // the UnboxingConversion on the cast and a ByReferenceResolveResult on the
+    // ref direction (unlike unbox.any, which yields the value directly).
+    IL::Unbox unbox(intType, std::make_unique<IL::LdLoc>(objectVar));
+    auto expr = builder.Translate(&unbox);
+    auto* dir = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(dir != nullptr);
+    EXPECT_EQ(dir->FieldDirection(), Syntax::FieldDirection::Ref);
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(dir->Expression());
+    ASSERT_TRUE(cast != nullptr);
+    const auto* crr = dynamic_cast<const Sem::ConversionResolveResult*>(
+        CSharp::GetResolveResult(*cast));
+    ASSERT_TRUE(crr != nullptr);
+    EXPECT_TRUE(crr->ConversionProperty()->IsUnboxingConversion());
+    const auto* brr = dynamic_cast<const Sem::ByReferenceResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(brr != nullptr);
+}
+
+TEST(ExpressionBuilderCastTest, BoxInt32RendersBoxingCast)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    IL::Box box(intType, std::make_unique<IL::LdcI4>(42));
+    auto expr = builder.Translate(&box);
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(expr.Expression());
+    ASSERT_TRUE(cast != nullptr);
+    const auto* crr = dynamic_cast<const Sem::ConversionResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(crr != nullptr);
+    EXPECT_TRUE(crr->ConversionProperty()->IsBoxingConversion());
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()), TS::KnownTypeCode::Object));
+}
+
+TEST(ExpressionBuilderCastTest, CastClassStringRendersExplicitCast)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto stringType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    auto objectVar = ObjectLocal(fixture);
+    IL::CastClass castClass(stringType, std::make_unique<IL::LdLoc>(objectVar));
+    auto expr = builder.Translate(&castClass);
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(expr.Expression());
+    ASSERT_TRUE(cast != nullptr);
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()), TS::KnownTypeCode::String));
+}
+
+// ---------------------------------------------------------------------------
+// The memory-access load/store arms (VisitLdObj / VisitStObj): the typed
+// managed/raw load and store, the `unaligned.` Unsafe intrinsic rewrites, and
+// the node prefix fields (ISupportsVolatilePrefix / ISupportsUnalignedPrefix).
+// Expectations derived from the C# bodies (ExpressionBuilder.cs lines 2857-3125)
+// over the MinimalCorlib fixture.
+
+// A local whose type is a raw pointer to `elementType` (the LdObj/StObj address).
+std::shared_ptr<IL::ILVariable> PointerLocal(const BuilderFixture& fixture,
+                                             const TS::ITypePtr& elementType)
+{
+    (void)fixture;
+    auto variable = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local, std::make_shared<TS::PointerType>(elementType), 0);
+    variable->Name = "p";
+    return variable;
+}
+
+TEST(ExpressionBuilderMemoryTest, LdObjOverPointerRendersDereference)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto pointerVar = PointerLocal(fixture, intType);
+    // ldobj int32(*p): the pointer is incompatible as a value, so the LdObj helper
+    // renders the `*p` dereference.
+    IL::LdObj ldObj(std::make_unique<IL::LdLoc>(pointerVar), intType);
+    auto expr = builder.Translate(&ldObj);
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    EXPECT_EQ(unary->Operator(), Syntax::UnaryOperatorType::Dereference);
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()), TS::KnownTypeCode::Int32));
+}
+
+TEST(ExpressionBuilderMemoryTest, LdObjOverRefStripsTheRef)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto intVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    intVar->Name = "x";
+    // ldobj int32(ref x): the byref target is compatible, so the managed reference
+    // is dereferenced by stripping the `ref` and keeping the identifier.
+    IL::LdObj ldObj(std::make_unique<IL::LdLoca>(intVar), intType);
+    auto expr = builder.Translate(&ldObj);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(expr.Expression()) != nullptr);
+}
+
+TEST(ExpressionBuilderMemoryTest, LdObjUnalignedRendersReadUnaligned)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto pointerVar = PointerLocal(fixture, intType);
+    IL::LdObj ldObj(std::make_unique<IL::LdLoc>(pointerVar), intType);
+    ldObj.UnalignedPrefix = 1;
+    auto expr = builder.Translate(&ldObj);
+    auto* invocation = dynamic_cast<Syntax::InvocationExpression*>(expr.Expression());
+    ASSERT_TRUE(invocation != nullptr);
+    auto* target = dynamic_cast<Syntax::MemberReferenceExpression*>(invocation->Target());
+    ASSERT_TRUE(target != nullptr);
+    EXPECT_EQ(target->MemberName(), "ReadUnaligned");
+    EXPECT_EQ(target->TypeArguments().Count(), 1);
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()), TS::KnownTypeCode::Int32));
+}
+
+TEST(ExpressionBuilderMemoryTest, LdObjTypeHintPrefersCompatibleHint)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto uintType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::UInt32).shared_from_this());
+    TS::ITypePtr objectType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object);
+    auto pointerVar = PointerLocal(fixture, objectType);
+    // ldobj int32(*p) with an uint32 hint: the type hint is compatible (equal size
+    // integer) so the load type is replaced by the hint.
+    IL::LdObj ldObj(std::make_unique<IL::LdLoc>(pointerVar), intType);
+    auto expr = builder.Translate(&ldObj, uintType.get());
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()), TS::KnownTypeCode::UInt32));
+}
+
+TEST(ExpressionBuilderMemoryTest, StObjOverPointerRendersAssignment)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto pointerVar = PointerLocal(fixture, intType);
+    // stobj int32(*p, 5): a raw-pointer store to an unmanaged type is a plain
+    // dereference assignment.
+    IL::StObj stObj(std::make_unique<IL::LdLoc>(pointerVar),
+                    std::make_unique<IL::LdcI4>(5), intType);
+    auto expr = builder.Translate(&stObj);
+    auto* assign = dynamic_cast<Syntax::AssignmentExpression*>(expr.Expression());
+    ASSERT_TRUE(assign != nullptr);
+    auto* left = dynamic_cast<Syntax::UnaryOperatorExpression*>(assign->Left());
+    ASSERT_TRUE(left != nullptr);
+    EXPECT_EQ(left->Operator(), Syntax::UnaryOperatorType::Dereference);
+}
+
+TEST(ExpressionBuilderMemoryTest, StObjOverRefRendersPlainAssignment)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto intVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    intVar->Name = "x";
+    // stobj int32(ref x, 5): the byref target dereferences to the identifier.
+    IL::StObj stObj(std::make_unique<IL::LdLoca>(intVar),
+                    std::make_unique<IL::LdcI4>(5), intType);
+    auto expr = builder.Translate(&stObj);
+    auto* assign = dynamic_cast<Syntax::AssignmentExpression*>(expr.Expression());
+    ASSERT_TRUE(assign != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(assign->Left()) != nullptr);
+}
+
+TEST(ExpressionBuilderMemoryTest, StObjUnalignedRendersWriteUnaligned)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto pointerVar = PointerLocal(fixture, intType);
+    IL::StObj stObj(std::make_unique<IL::LdLoc>(pointerVar),
+                    std::make_unique<IL::LdcI4>(5), intType);
+    stObj.UnalignedPrefix = 4;
+    auto expr = builder.Translate(&stObj);
+    auto* invocation = dynamic_cast<Syntax::InvocationExpression*>(expr.Expression());
+    ASSERT_TRUE(invocation != nullptr);
+    auto* target = dynamic_cast<Syntax::MemberReferenceExpression*>(invocation->Target());
+    ASSERT_TRUE(target != nullptr);
+    EXPECT_EQ(target->MemberName(), "WriteUnaligned");
+    EXPECT_EQ(invocation->Arguments().Count(), 2);
+}
+
+TEST(ExpressionBuilderMemoryTest, StObjManagedTypeRendersWrite)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto stringType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    auto pointerVar = PointerLocal(fixture, stringType);
+    // stobj string(*p, "x"): a managed-typed store to a raw pointer routes through
+    // Unsafe.Write<T>.
+    IL::StObj stObj(std::make_unique<IL::LdLoc>(pointerVar),
+                    std::make_unique<IL::LdStr>("x"), stringType);
+    auto expr = builder.Translate(&stObj);
+    auto* invocation = dynamic_cast<Syntax::InvocationExpression*>(expr.Expression());
+    ASSERT_TRUE(invocation != nullptr);
+    auto* target = dynamic_cast<Syntax::MemberReferenceExpression*>(invocation->Target());
+    ASSERT_TRUE(target != nullptr);
+    EXPECT_EQ(target->MemberName(), "Write");
+}
+
+TEST(ExpressionBuilderMemoryTest, LdObjAndStObjDumpRendersPrefixes)
+{
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    IL::LdObj ldObj(std::make_unique<IL::LdNull>(), intType);
+    ldObj.IsVolatile = true;
+    ldObj.UnalignedPrefix = 2;
+    std::string dump;
+    ldObj.WriteTo(dump);
+    EXPECT_EQ(dump, "volatile.unaligned(2).ldobj(System.Int32, ldnull)");
+
+    IL::StObj stObj(std::make_unique<IL::LdNull>(), std::make_unique<IL::LdcI4>(1), intType);
+    stObj.UnalignedPrefix = 1;
+    std::string stDump;
+    stObj.WriteTo(stDump);
+    EXPECT_EQ(stDump, "unaligned(1).stobj(System.Int32, ldnull, ldc.i4(1))");
+}
+
+TEST(ExpressionBuilderMemoryTest, LdObjAndStObjCloneCarriesPrefixes)
+{
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    IL::LdObj ldObj(std::make_unique<IL::LdNull>(), intType);
+    ldObj.IsVolatile = true;
+    ldObj.UnalignedPrefix = 3;
+    auto ldClone = ldObj.Clone();
+    auto* ldCloneTyped = dynamic_cast<IL::LdObj*>(ldClone.get());
+    ASSERT_TRUE(ldCloneTyped != nullptr);
+    EXPECT_TRUE(ldCloneTyped->IsVolatile);
+    EXPECT_EQ(ldCloneTyped->UnalignedPrefix, 3);
+
+    IL::StObj stObj(std::make_unique<IL::LdNull>(), std::make_unique<IL::LdcI4>(1), intType);
+    stObj.IsVolatile = true;
+    stObj.UnalignedPrefix = 4;
+    auto stClone = stObj.Clone();
+    auto* stCloneTyped = dynamic_cast<IL::StObj*>(stClone.get());
+    ASSERT_TRUE(stCloneTyped != nullptr);
+    EXPECT_TRUE(stCloneTyped->IsVolatile);
+    EXPECT_EQ(stCloneTyped->UnalignedPrefix, 4);
+}
+
+
+// ---------------------------------------------------------------------------
+// The array-length arm (VisitLdLen): the `ldlen.i4` / `ldlen.i8` renders over an
+// array-typed local. The StackType selects the `Length` (Int32) / `LongLength`
+// (Int64) member name, and the array operand is translated against the
+// System.Array type hint. Expectations derived from the C# VisitLdLen
+// (ExpressionBuilder.cs lines 3088-3116) body over the MinimalCorlib fixture
+// (whose System.Array exposes no properties, so the resolve result degrades to the
+// plain Int32/Int64 result).
+
+TEST(ExpressionBuilderLdLenTest, LdLenI4RendersLength)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto arrayType = std::make_shared<TS::ArrayType>(intType);
+    auto arrayVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, arrayType, 0);
+    arrayVar->Name = "a";
+    IL::LdLen ldLen(IL::StackType::I4, std::make_unique<IL::LdLoc>(arrayVar));
+    auto expr = builder.Translate(&ldLen);
+    auto* memberRef = dynamic_cast<Syntax::MemberReferenceExpression*>(expr.Expression());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "Length");
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(memberRef->Target()) != nullptr);
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()), TS::KnownTypeCode::Int32));
+}
+
+TEST(ExpressionBuilderLdLenTest, LdLenI8RendersLongLength)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto arrayType = std::make_shared<TS::ArrayType>(intType);
+    auto arrayVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, arrayType, 0);
+    arrayVar->Name = "a";
+    IL::LdLen ldLen(IL::StackType::I8, std::make_unique<IL::LdLoc>(arrayVar));
+    auto expr = builder.Translate(&ldLen);
+    auto* memberRef = dynamic_cast<Syntax::MemberReferenceExpression*>(expr.Expression());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "LongLength");
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()), TS::KnownTypeCode::Int64));
+}
+
+TEST(ExpressionBuilderLdLenTest, LdLenRawIRendersLongLength)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto arrayType = std::make_shared<TS::ArrayType>(intType);
+    auto arrayVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, arrayType, 0);
+    arrayVar->Name = "a";
+    // The raw `ldlen` pushes a native int (StackType::I): every non-I4 stack type
+    // selects LongLength.
+    IL::LdLen ldLen(IL::StackType::I, std::make_unique<IL::LdLoc>(arrayVar));
+    auto expr = builder.Translate(&ldLen);
+    auto* memberRef = dynamic_cast<Syntax::MemberReferenceExpression*>(expr.Expression());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "LongLength");
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()), TS::KnownTypeCode::Int64));
+}
+
+// The array-element-address arm (VisitLdElema): the `ldelema <T>(array, index)`
+// render -- the array indexer wrapped in a `ref` DirectionExpression carrying a
+// ByReferenceResolveResult over the element type (the C# VisitLdElema,
+// ExpressionBuilder.cs lines 3203-3229). The `withsystemindex` prefix drives the
+// System.Index conversion for the index, and a mismatched element type converts the
+// array expression to a fresh array of the access type.
+
+TEST(ExpressionBuilderLdElemaTest, LdElemaOverArrayRendersRefIndexer)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto arrayType = std::make_shared<TS::ArrayType>(intType);
+    auto arrayVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, arrayType, 0);
+    arrayVar->Name = "a";
+    auto idxVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 1);
+    idxVar->Name = "i";
+    std::vector<std::unique_ptr<IL::ILInstruction>> indices;
+    indices.push_back(std::make_unique<IL::LdLoc>(idxVar));
+    IL::LdElema ldElema(intType, std::make_unique<IL::LdLoc>(arrayVar), std::move(indices));
+    auto expr = builder.Translate(&ldElema);
+    auto* dir = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(dir != nullptr);
+    EXPECT_EQ(dir->FieldDirection(), Syntax::FieldDirection::Ref);
+    auto* indexer = dynamic_cast<Syntax::IndexerExpression*>(dir->Expression());
+    ASSERT_TRUE(indexer != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(indexer->Target()) != nullptr);
+    ASSERT_EQ(indexer->Arguments().Count(), 1);
+    auto* brrr = dynamic_cast<const Sem::ByReferenceResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(brrr != nullptr);
+    EXPECT_EQ(expr.Type().Kind(), TS::TypeKind::ByReference);
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(brrr->ElementType()), TS::KnownTypeCode::Int32));
+    // The outer DirectionExpression carries no IL annotation (the C#
+    // WithoutILInstruction), but the inner indexer keeps it.
+    EXPECT_TRUE(expr.ILInstructions().empty());
+    std::vector<IL::ILInstruction*> indexerIL = CSharp::GetILInstructions(*indexer);
+    ASSERT_EQ(indexerIL.size(), std::size_t(1));
+    EXPECT_EQ(indexerIL[0], &ldElema);
+}
+
+TEST(ExpressionBuilderLdElemaTest, MismatchedElementTypeConvertsArray)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto longType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int64).shared_from_this());
+    // A scalar int local indexed as if it were an int[]: the translated type is not
+    // an array, so the arm builds a fresh array of the access type and converts.
+    auto valueVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    valueVar->Name = "v";
+    auto idxVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 1);
+    idxVar->Name = "i";
+    std::vector<std::unique_ptr<IL::ILInstruction>> indices;
+    indices.push_back(std::make_unique<IL::LdLoc>(idxVar));
+    IL::LdElema ldElema(longType, std::make_unique<IL::LdLoc>(valueVar), std::move(indices));
+    auto expr = builder.Translate(&ldElema);
+    auto* dir = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(dir != nullptr);
+    auto* indexer = dynamic_cast<Syntax::IndexerExpression*>(dir->Expression());
+    ASSERT_TRUE(indexer != nullptr);
+    // The array operand was converted to the fresh array type (an explicit cast).
+    EXPECT_TRUE(dynamic_cast<Syntax::CastExpression*>(indexer->Target()) != nullptr);
+    auto* brrr = dynamic_cast<const Sem::ByReferenceResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(brrr != nullptr);
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(brrr->ElementType()), TS::KnownTypeCode::Int64));
+}
+
+TEST(ExpressionBuilderLdElemaTest, WithSystemIndexConvertsIndexToSystemIndex)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto arrayType = std::make_shared<TS::ArrayType>(intType);
+    auto arrayVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, arrayType, 0);
+    arrayVar->Name = "a";
+    auto idxVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 1);
+    idxVar->Name = "i";
+    std::vector<std::unique_ptr<IL::ILInstruction>> indices;
+    indices.push_back(std::make_unique<IL::LdLoc>(idxVar));
+    IL::LdElema ldElema(intType, std::make_unique<IL::LdLoc>(arrayVar), std::move(indices));
+    ldElema.WithSystemIndex = true;
+    auto expr = builder.Translate(&ldElema);
+    auto* dir = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(dir != nullptr);
+    auto* indexer = dynamic_cast<Syntax::IndexerExpression*>(dir->Expression());
+    ASSERT_TRUE(indexer != nullptr);
+    ASSERT_EQ(indexer->Arguments().Count(), 1);
+    const Sem::ResolveResult* argRR = indexer->Arguments().At(0)->Annotation<Sem::ResolveResult>();
+    ASSERT_TRUE(argRR != nullptr);
+    const TS::IType& systemIndex = fixture.compilation.FindType(TS::KnownTypeCode::Index);
+    EXPECT_TRUE(TS::NormalizeTypeVisitor::IgnoreNullabilityAndTuples().EquivalentTypes(
+        const_cast<TS::IType&>(argRR->Type()), const_cast<TS::IType&>(systemIndex)));
+}
+
+TEST(ExpressionBuilderLdElemaTest, NodeCloneCarriesWithSystemIndex)
+{
+    TS::SimpleCompilation compilation(Impl::MinimalCorlib::Instance(), {});
+    auto intType = std::const_pointer_cast<TS::IType>(
+        compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    std::vector<std::unique_ptr<IL::ILInstruction>> indices;
+    indices.push_back(std::make_unique<IL::LdcI4>(0));
+    IL::LdElema ldElema(intType, std::make_unique<IL::LdcI4>(0), std::move(indices));
+    ldElema.WithSystemIndex = true;
+    std::string dump;
+    ldElema.WriteTo(dump);
+    EXPECT_EQ(dump.rfind("withsystemindex.ldelema(", 0), 0u);
+    auto clone = ldElema.Clone();
+    auto* cloneTyped = static_cast<IL::LdElema*>(clone.get());
+    EXPECT_TRUE(cloneTyped->WithSystemIndex);
+}
+
+// The field-address arms (ConvertField + VisitLdsFlda, the C# lines 302-398 and
+// 3196-3201): the field reference through the requires-qualifier / ambiguous-access
+// machinery and the `ref` DirectionExpression wrap of the static field address. The
+// fixture's IField stub fills the C# IField surface the arms read; the port's IL
+// reader leaves the nodes' resolved `Field` unset, so it is wired by hand here.
+
+// A resolved custom attribute stub for the fixed-buffer fixtures: the
+// `[FixedBuffer(typeof(T), N)]` decode IsFixedField reads.
+class AttributeStub : public TS::IAttribute {
+public:
+    AttributeStub(TS::ITypePtr type, std::vector<TS::CustomAttributeTypedArgument> args)
+        : type_(std::move(type)), args_(std::move(args)) {}
+    const TS::IType& AttributeType() const override { return *type_; }
+    const TS::IMethod* Constructor() const override { return nullptr; }
+    bool HasDecodeErrors() const override { return false; }
+    std::vector<TS::CustomAttributeTypedArgument> FixedArguments() const override {
+        return args_;
+    }
+    std::vector<TS::CustomAttributeNamedArgument> NamedArguments() const override {
+        return {};
+    }
+
+private:
+    TS::ITypePtr type_;
+    std::vector<TS::CustomAttributeTypedArgument> args_;
+};
+
+class FieldStub : public TS::IField {
+public:
+    FieldStub(std::string name, TS::ITypePtr fieldType, const TS::ICompilation& compilation)
+        : name_(std::move(name)), fieldType_(std::move(fieldType)), compilation_(&compilation) {}
+
+    ::ILSpy::Decompiler::TypeSystem::SymbolKind SymbolKind() const override {
+        return ::ILSpy::Decompiler::TypeSystem::SymbolKind::Field;
+    }
+    std::string Name() const override { return name_; }
+    std::string FullName() const override { return name_; }
+    std::string ReflectionName() const override { return name_; }
+    std::string Namespace() const override { return {}; }
+    const TS::ICompilation& Compilation() const override { return *compilation_; }
+    std::uint32_t MetadataToken() const override { return 0; }
+    const TS::ITypeDefinition* DeclaringTypeDefinition() const override {
+        return declaringTypeDefinition_;
+    }
+    TS::ITypePtr DeclaringType() const override { return declaringType_; }
+    const TS::IModule* ParentModule() const override { return nullptr; }
+    std::vector<const TS::IAttribute*> GetAttributes() const override { return attributes_; }
+    bool HasAttribute(TS::KnownAttribute kind) const override {
+        return GetAttribute(kind) != nullptr;
+    }
+    const TS::IAttribute* GetAttribute(TS::KnownAttribute kind) const override {
+        auto it = knownAttributes_.find(kind);
+        return it == knownAttributes_.end() ? nullptr : it->second;
+    }
+    TS::Accessibility Accessibility() const override { return TS::Accessibility::Public; }
+    bool IsStatic() const override { return isStatic_; }
+    bool IsAbstract() const override { return false; }
+    bool IsSealed() const override { return false; }
+    const TS::IMember* MemberDefinition() const override { return this; }
+    const TS::IType& ReturnType() const override { return *fieldType_; }
+    std::vector<const TS::IMember*> ExplicitlyImplementedInterfaceMembers() const override {
+        return {};
+    }
+    bool IsExplicitInterfaceImplementation() const override { return false; }
+    bool IsVirtual() const override { return false; }
+    bool IsOverride() const override { return false; }
+    bool IsOverridable() const override { return false; }
+    const TS::TypeParameterSubstitution* Substitution() const override { return nullptr; }
+    const TS::IMember* Specialize(const TS::TypeParameterSubstitution*) const override {
+        return this;
+    }
+    bool Equals(const TS::IMember* obj, const TS::TypeVisitor*) const override {
+        return obj == this;
+    }
+    const TS::IType& Type() const override { return *fieldType_; }
+    bool IsConst() const override { return false; }
+    std::any GetConstantValue(bool = false) const override { return {}; }
+    bool IsReadOnly() const override { return false; }
+    bool ReturnTypeIsRefReadOnly() const override { return false; }
+    bool IsVolatile() const override { return false; }
+
+    void SetStatic(bool value) { isStatic_ = value; }
+    void SetDeclaringType(TS::ITypePtr value) { declaringType_ = std::move(value); }
+    void SetDeclaringTypeDefinition(const TS::ITypeDefinition* value) {
+        declaringTypeDefinition_ = value;
+    }
+    void SetKnownAttribute(TS::KnownAttribute kind, const TS::IAttribute* attribute) {
+        knownAttributes_[kind] = attribute;
+        attributes_.push_back(attribute);
+    }
+
+private:
+    std::string name_;
+    TS::ITypePtr fieldType_;
+    const TS::ICompilation* compilation_;
+    TS::ITypePtr declaringType_;
+    const TS::ITypeDefinition* declaringTypeDefinition_ = nullptr;
+    bool isStatic_ = false;
+    std::vector<const TS::IAttribute*> attributes_;
+    std::map<TS::KnownAttribute, const TS::IAttribute*> knownAttributes_;
+};
+
+TEST(ExpressionBuilderFieldTest, ConvertFieldStaticFieldRendersMemberReference)
+{
+    BuilderFixture fixture;
+    auto objectType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    const TS::ITypeDefinition* objectDef =
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).GetDefinition();
+    auto builder = fixture.MakeBuilderForType(objectDef);
+
+    auto field = std::make_shared<FieldStub>("Value", objectType, fixture.compilation);
+    field->SetStatic(true);
+    field->SetDeclaringType(objectType);
+    field->SetDeclaringTypeDefinition(objectDef);
+
+    auto result = builder.ConvertField(*field);
+    auto* memberRef = dynamic_cast<Syntax::MemberReferenceExpression*>(result.Expression());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "Value");
+    EXPECT_TRUE(dynamic_cast<Syntax::TypeReferenceExpression*>(memberRef->Target()) != nullptr);
+    const auto* mrr = dynamic_cast<const Sem::MemberResolveResult*>(result.ResolveResult());
+    ASSERT_TRUE(mrr != nullptr);
+    EXPECT_EQ(mrr->Member(), field.get());
+}
+
+TEST(ExpressionBuilderFieldTest, ConvertFieldByReferenceTypeWrapsInRefDirection)
+{
+    BuilderFixture fixture;
+    auto objectType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    const TS::ITypeDefinition* objectDef =
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).GetDefinition();
+    auto builder = fixture.MakeBuilderForType(objectDef);
+
+    auto byRefInt = std::make_shared<TS::ByReferenceType>(intType);
+    auto field = std::make_shared<FieldStub>("RefField", byRefInt, fixture.compilation);
+    field->SetStatic(true);
+    field->SetDeclaringType(objectType);
+    field->SetDeclaringTypeDefinition(objectDef);
+
+    auto result = builder.ConvertField(*field);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(result.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    EXPECT_EQ(direction->FieldDirection(), Syntax::FieldDirection::Ref);
+    auto* byRef = dynamic_cast<const Sem::ByReferenceResolveResult*>(result.ResolveResult());
+    ASSERT_TRUE(byRef != nullptr);
+    EXPECT_EQ(byRef->ReferenceKind(), TS::ReferenceKind::Ref);
+}
+
+// The automatic-property requires-qualifier special case (C# ExpressionBuilder.cs
+// lines 325-339): when the field is the backing field of an automatic property that
+// PatternStatementTransform will hide, the qualifier decision is made against the
+// property instead of the field. The observable is the qualified member reference: a local
+// named after the property forces a qualified reference, while the backing field's name
+// alone stays unqualified.
+
+namespace {
+
+// A class fixture whose type declares one compiler-generated backing field and the
+// property it belongs to (the ExpressionBuilder view of the AutoPropertyFixture).
+struct AutoPropertyFieldFixture {
+    BuilderFixture& fixture;
+    std::shared_ptr<TestSupport::LookupTypeDefinition> typeDef;
+    TS::ITypePtr objectType;
+    std::shared_ptr<FieldStub> field;
+    std::shared_ptr<Impl::FakeProperty> property;
+    std::shared_ptr<Impl::FakeMethod> setter;
+    std::shared_ptr<AttributeStub> compilerGenerated;
+
+    explicit AutoPropertyFieldFixture(BuilderFixture& f)
+        : fixture(f),
+          objectType(std::const_pointer_cast<TS::IType>(
+              f.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this())),
+          typeDef(std::make_shared<TestSupport::LookupTypeDefinition>(
+              "N.C", "N", TS::FullTypeName(TS::TopLevelTypeName("N", "C")),
+              TS::TypeKind::Class, TS::Accessibility::Public, f.compilation, nullptr)),
+          field(std::make_shared<FieldStub>("<P>k__BackingField", objectType,
+                                            f.compilation)),
+          property(std::make_shared<Impl::FakeProperty>(f.compilation)),
+          setter(std::make_shared<Impl::FakeMethod>(f.compilation, TS::SymbolKind::Method)),
+          compilerGenerated(std::make_shared<AttributeStub>(objectType, std::vector<TS::CustomAttributeTypedArgument>{})) {
+        TS::ITypePtr typePtr = std::static_pointer_cast<TS::IType>(typeDef);
+        field->SetDeclaringType(typePtr);
+        field->SetDeclaringTypeDefinition(typeDef.get());
+        field->SetKnownAttribute(TS::KnownAttribute::CompilerGenerated,
+                                 compilerGenerated.get());
+        setter->SetName("set_P");
+        setter->SetDeclaringType(typePtr);
+        property->SetName("P");
+        property->SetDeclaringType(typePtr);
+        property->SetReturnType(objectType);
+        property->SetSetter(setter.get());
+    }
+
+    // The canonical IMember view of the property (the identity the context comparison uses).
+    const TS::IMember* PropertyMember() const {
+        return static_cast<const TS::IMember*>(
+            static_cast<const TS::IProperty*>(property.get()));
+    }
+
+    // Publishes the property and field in the type's own member lists so the
+    // IsBackingFieldOfAutomaticProperty lookup and the simple-name resolution succeed.
+    void PublishMembers() {
+        typeDef->SetProperties({static_cast<const TS::IProperty*>(property.get())});
+        typeDef->SetFields({static_cast<const TS::IField*>(field.get())});
+    }
+};
+
+// An LdLoc over the synthetic `this` parameter.
+struct ThisLoad {
+    IL::ILVariablePtr variable;
+    IL::LdLoc ldloc;
+    explicit ThisLoad(TS::ITypePtr type)
+        : variable(std::make_shared<IL::ILVariable>(IL::VariableKind::Parameter,
+                                                    std::move(type), -1)),
+          ldloc(variable) {
+        variable->Name = "this";
+    }
+};
+
+} // namespace
+
+TEST(ExpressionBuilderFieldTest, ConvertFieldAutoPropertyBackingFieldUsesPropertyForQualifier)
+{
+    BuilderFixture fixture;
+    AutoPropertyFieldFixture autoFixture(fixture);
+    autoFixture.PublishMembers();
+
+    // A local named `P` hides the property name (but not the backing-field name), so
+    // the property-based qualifier decision differs from the field-based one.
+    auto pHidden = std::make_shared<IL::ILVariable>(IL::VariableKind::Local,
+                                                    autoFixture.objectType, 0);
+    pHidden->Name = "P";
+    fixture.Function().Variables.push_back(pHidden);
+
+    ThisLoad thisLoad(autoFixture.objectType);
+    auto builder = fixture.MakeBuilderForType(autoFixture.typeDef.get());
+    auto result = builder.ConvertField(*autoFixture.field, &thisLoad.ldloc);
+
+    // The property's name is hidden, so the reference is qualified even though the
+    // field's own name is not hidden.
+    auto* memberRef = dynamic_cast<Syntax::MemberReferenceExpression*>(result.Expression());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "<P>k__BackingField");
+}
+
+TEST(ExpressionBuilderFieldTest, ConvertFieldAutoPropertyQualifierSpecialCaseSkippedWhenAutomaticPropertiesOff)
+{
+    BuilderFixture fixture;
+    fixture.settings.SetAutomaticProperties(false);
+    AutoPropertyFieldFixture autoFixture(fixture);
+    autoFixture.PublishMembers();
+
+    auto pHidden = std::make_shared<IL::ILVariable>(IL::VariableKind::Local,
+                                                    autoFixture.objectType, 0);
+    pHidden->Name = "P";
+    fixture.Function().Variables.push_back(pHidden);
+
+    ThisLoad thisLoad(autoFixture.objectType);
+    auto builder = fixture.MakeBuilderForType(autoFixture.typeDef.get());
+    auto result = builder.ConvertField(*autoFixture.field, &thisLoad.ldloc);
+
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(result.Expression()) != nullptr);
+}
+
+TEST(ExpressionBuilderFieldTest, ConvertFieldAutoPropertyQualifierSpecialCaseSkippedInOwnAccessor)
+{
+    BuilderFixture fixture;
+    AutoPropertyFieldFixture autoFixture(fixture);
+    autoFixture.PublishMembers();
+
+    auto pHidden = std::make_shared<IL::ILVariable>(IL::VariableKind::Local,
+                                                    autoFixture.objectType, 0);
+    pHidden->Name = "P";
+    fixture.Function().Variables.push_back(pHidden);
+
+    ThisLoad thisLoad(autoFixture.objectType);
+    // The current member is the property itself, so the field is rendered as the field.
+    auto builder = fixture.MakeBuilderForTypeAndMember(autoFixture.typeDef.get(),
+                                                       autoFixture.PropertyMember());
+    auto result = builder.ConvertField(*autoFixture.field, &thisLoad.ldloc);
+
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(result.Expression()) != nullptr);
+}
+
+TEST(ExpressionBuilderFieldTest, ConvertFieldAutoPropertyQualifierSpecialCaseRequiresSettableOrGetterOnly)
+{
+    BuilderFixture fixture;
+    fixture.settings.SetGetterOnlyAutomaticProperties(false);
+    AutoPropertyFieldFixture autoFixture(fixture);
+    autoFixture.property->SetSetter(nullptr);
+    autoFixture.PublishMembers();
+
+    auto pHidden = std::make_shared<IL::ILVariable>(IL::VariableKind::Local,
+                                                    autoFixture.objectType, 0);
+    pHidden->Name = "P";
+    fixture.Function().Variables.push_back(pHidden);
+
+    ThisLoad thisLoad(autoFixture.objectType);
+    auto builder = fixture.MakeBuilderForType(autoFixture.typeDef.get());
+    auto result = builder.ConvertField(*autoFixture.field, &thisLoad.ldloc);
+
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(result.Expression()) != nullptr);
+}
+
+TEST(ExpressionBuilderFieldTest, ConvertFieldAutoPropertyQualifierSpecialCaseSkippedForNonBackingField)
+{
+    BuilderFixture fixture;
+    AutoPropertyFieldFixture autoFixture(fixture);
+    autoFixture.PublishMembers();
+    // The field name does not match the backing-field shape, so the special case never fires.
+    auto ordinaryField = std::make_shared<FieldStub>("Other", autoFixture.objectType,
+                                                     fixture.compilation);
+    ordinaryField->SetDeclaringType(
+        std::static_pointer_cast<TS::IType>(autoFixture.typeDef));
+    ordinaryField->SetDeclaringTypeDefinition(autoFixture.typeDef.get());
+    autoFixture.typeDef->SetFields({static_cast<const TS::IField*>(ordinaryField.get())});
+
+    auto pHidden = std::make_shared<IL::ILVariable>(IL::VariableKind::Local,
+                                                    autoFixture.objectType, 0);
+    pHidden->Name = "P";
+    fixture.Function().Variables.push_back(pHidden);
+
+    ThisLoad thisLoad(autoFixture.objectType);
+    auto builder = fixture.MakeBuilderForType(autoFixture.typeDef.get());
+    auto result = builder.ConvertField(*ordinaryField, &thisLoad.ldloc);
+
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(result.Expression()) != nullptr);
+}
+
+// ---- The automatic-event backing-field special case (C# ExpressionBuilder.cs
+// lines 302-312 and 400-425): a reference to a field-like event's backing field is
+// printed as the event, gated on the PropertyAndEventBackingFieldLookup
+// association, the AutoEventDecompiler verdict, and the accessor self-reference
+// check. ------------------------------------------------------------------
+
+namespace {
+
+// The mscorlib fixture path (the AutoEventDecompiler_Test convention).
+const char* AutoEventMscorlibPath()
+{
+#ifdef _WIN32
+    return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    return "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+}
+
+// A compilation over a real metadata module -- the metadata-backed ExpressionBuilder
+// fixture (the AutoEventDecompiler_Test MetadataFixture shape). The automatic-event
+// gate reads the field's ParentModule / MetadataFile, so the synthetic MinimalCorlib
+// fixture cannot exercise it.
+struct AutoEventBuilderFixture {
+    class Compilation : public TS::ICompilation {
+    public:
+        void SetMainModule(const TS::IModule* module) { mainModule_ = module; }
+        const TS::IModule& MainModule() const override { return *mainModule_; }
+        std::vector<const TS::IModule*> Modules() const override { return { mainModule_ }; }
+        std::vector<const TS::IModule*> ReferencedModules() const override { return {}; }
+        const TS::INamespace& RootNamespace() const override {
+            return mainModule_->RootNamespace();
+        }
+        const TS::INamespace* GetNamespaceForExternAlias(const std::string&) const override {
+            return nullptr;
+        }
+        const TS::IType& FindType(TS::KnownTypeCode code) const override {
+            return knownTypes_.FindType(code);
+        }
+        const TS::StringComparer& NameComparer() const override {
+            return TS::StringComparer::Ordinal();
+        }
+        const ::ILSpy::Decompiler::Util::CacheManager& CacheManager() const override {
+            return cacheManager_;
+        }
+        TS::TypeSystemOptions TypeSystemOptions() const override {
+            return TS::TypeSystemOptions::Default;
+        }
+    private:
+        const TS::IModule* mainModule_ = nullptr;
+        ::ILSpy::Decompiler::Util::CacheManager cacheManager_;
+        TS::KnownTypeCache knownTypes_{ *this };
+    };
+
+    Metadata::MetadataFile file;
+    Compilation compilation;
+    TS::MetadataModule module;
+    DecompilerSettings settings;
+    std::shared_ptr<CSharp::TypeSystem::CSharpTypeResolveContext> root;
+    std::shared_ptr<CSharp::TypeSystem::UsingScope> usingScope;
+    DecompileRun run;
+    IL::ILFunction function;
+
+    explicit AutoEventBuilderFixture(const char* path)
+        : file(path),
+          module(compilation, &file, TS::TypeSystemOptions::Default),
+          root(std::make_shared<CSharp::TypeSystem::CSharpTypeResolveContext>(module)),
+          usingScope(std::make_shared<CSharp::TypeSystem::UsingScope>(
+              root, module.RootNamespace(), std::vector<const TS::INamespace*>{})),
+          run(&settings, usingScope) {
+        compilation.SetMainModule(&module);
+    }
+
+    const TS::IEvent* FindEvent(const std::string& typeName, const std::string& eventName)
+    {
+        const TS::ITypeDefinition* type =
+            module.GetTypeDefinition(TS::TopLevelTypeName("System", typeName));
+        if (type == nullptr)
+            return nullptr;
+        for (const TS::IEvent* e : type->Events())
+            if (e->Name() == eventName)
+                return e;
+        return nullptr;
+    }
+
+    const TS::IField* FindField(const TS::ITypeDefinition& type, const std::string& name)
+    {
+        for (const TS::IField* f : type.Fields())
+            if (f->Name() == name)
+                return f;
+        return nullptr;
+    }
+
+    // An ExpressionBuilder whose decompilation context's current type is the given
+    // type definition (the metadata typed context outlives the builder).
+    CSharp::ExpressionBuilder MakeBuilderForType(
+        const TS::ITypeDefinition* typeDef, const TS::IMember* currentMember = nullptr)
+    {
+        typedContext = std::make_shared<CSharp::TypeSystem::CSharpTypeResolveContext>(
+            compilation.MainModule(), usingScope, typeDef, currentMember);
+        return CSharp::ExpressionBuilder(nullptr, compilation, *typedContext, &function,
+                                         &settings, &run);
+    }
+
+    std::shared_ptr<CSharp::TypeSystem::CSharpTypeResolveContext> typedContext;
+};
+
+} // namespace
+
+// A field-like event's backing field is recognized, with the event returned.
+TEST(ExpressionBuilderFieldTest, AutoEventBackingFieldIsRecognized)
+{
+    const char* path = AutoEventMscorlibPath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "mscorlib fixture not present";
+    AutoEventBuilderFixture f(path);
+    ASSERT_TRUE(f.file.IsValid());
+    const TS::IEvent* event = f.FindEvent("AppDomain", "AssemblyLoad");
+    ASSERT_NE(event, nullptr);
+    const TS::IField* field = f.FindField(*event->DeclaringTypeDefinition(), "AssemblyLoad");
+    ASSERT_NE(field, nullptr);
+
+    // The run's memoization is seeded with the verdict the AutoEventDecompiler would
+    // produce (the un-memoized accessor-body check is exercised by the
+    // AutoEventDecompiler suite; the port's control-flow pipeline does not produce the
+    // C# accessor shape yet).
+    f.run.AutomaticEvents()[event] = field;
+    auto builder = f.MakeBuilderForType(event->DeclaringTypeDefinition());
+    const TS::IEvent* ev = nullptr;
+    EXPECT_TRUE(builder.IsBackingFieldOfAutomaticEvent(*field, ev));
+    EXPECT_EQ(ev, event);
+}
+
+// With a non-automatic memoized verdict the field is not recognized as an event.
+TEST(ExpressionBuilderFieldTest, AutoEventBackingFieldNotRecognizedWhenNotAutomatic)
+{
+    const char* path = AutoEventMscorlibPath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "mscorlib fixture not present";
+    AutoEventBuilderFixture f(path);
+    ASSERT_TRUE(f.file.IsValid());
+    const TS::IEvent* event = f.FindEvent("AppDomain", "AssemblyLoad");
+    ASSERT_NE(event, nullptr);
+    const TS::IField* field = f.FindField(*event->DeclaringTypeDefinition(), "AssemblyLoad");
+    ASSERT_NE(field, nullptr);
+
+    f.run.AutomaticEvents()[event] = nullptr;
+    auto builder = f.MakeBuilderForType(event->DeclaringTypeDefinition());
+    const TS::IEvent* ev = nullptr;
+    EXPECT_FALSE(builder.IsBackingFieldOfAutomaticEvent(*field, ev));
+    EXPECT_EQ(ev, nullptr);
+}
+
+// Inside the event's own accessor the backing field is printed as the field, so the
+// helper declines.
+TEST(ExpressionBuilderFieldTest, AutoEventBackingFieldNotRecognizedInOwnAccessor)
+{
+    const char* path = AutoEventMscorlibPath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "mscorlib fixture not present";
+    AutoEventBuilderFixture f(path);
+    ASSERT_TRUE(f.file.IsValid());
+    const TS::IEvent* event = f.FindEvent("AppDomain", "AssemblyLoad");
+    ASSERT_NE(event, nullptr);
+    const TS::IField* field = f.FindField(*event->DeclaringTypeDefinition(), "AssemblyLoad");
+    ASSERT_NE(field, nullptr);
+    const TS::IMethod* addAccessor = event->AddAccessor();
+    ASSERT_NE(addAccessor, nullptr);
+
+    f.run.AutomaticEvents()[event] = field;
+    auto builder = f.MakeBuilderForType(event->DeclaringTypeDefinition(),
+                                        static_cast<const TS::IMember*>(addAccessor));
+    const TS::IEvent* ev = nullptr;
+    EXPECT_FALSE(builder.IsBackingFieldOfAutomaticEvent(*field, ev));
+    EXPECT_EQ(ev, nullptr);
+}
+
+// A field the lookup does not associate with an event is never recognized.
+TEST(ExpressionBuilderFieldTest, AutoEventNonBackingFieldIsNotRecognized)
+{
+    const char* path = AutoEventMscorlibPath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "mscorlib fixture not present";
+    AutoEventBuilderFixture f(path);
+    ASSERT_TRUE(f.file.IsValid());
+    const TS::ITypeDefinition* type =
+        f.module.GetTypeDefinition(TS::TopLevelTypeName("System", "AppDomain"));
+    ASSERT_NE(type, nullptr);
+    const TS::IField* ordinary = nullptr;
+    for (const TS::IField* candidate : type->Fields()) {
+        std::uint32_t eventToken = 0;
+        if (!f.file.GetPropertyAndEventBackingFieldLookup().IsEventBackingField(
+                candidate->MetadataToken(), eventToken)) {
+            ordinary = candidate;
+            break;
+        }
+    }
+    ASSERT_NE(ordinary, nullptr);
+    auto builder = f.MakeBuilderForType(type);
+    const TS::IEvent* ev = nullptr;
+    EXPECT_FALSE(builder.IsBackingFieldOfAutomaticEvent(*ordinary, ev));
+    EXPECT_EQ(ev, nullptr);
+}
+
+// ConvertField renders a field-like event's backing field as the event reference.
+TEST(ExpressionBuilderFieldTest, ConvertFieldAutoEventBackingFieldRendersEvent)
+{
+    const char* path = AutoEventMscorlibPath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "mscorlib fixture not present";
+    AutoEventBuilderFixture f(path);
+    ASSERT_TRUE(f.file.IsValid());
+    const TS::IEvent* event = f.FindEvent("AppDomain", "AssemblyLoad");
+    ASSERT_NE(event, nullptr);
+    const TS::IField* field = f.FindField(*event->DeclaringTypeDefinition(), "AssemblyLoad");
+    ASSERT_NE(field, nullptr);
+
+    f.run.AutomaticEvents()[event] = field;
+    auto builder = f.MakeBuilderForType(event->DeclaringTypeDefinition());
+
+    ThisLoad thisLoad(std::const_pointer_cast<TS::IType>(
+        event->DeclaringType()->shared_from_this()));
+    auto result = builder.ConvertField(*field, &thisLoad.ldloc);
+
+    // The reference is the event (its name equals the field's here), but the resolve
+    // result carries the EVENT, not the field.
+    auto* mrr = dynamic_cast<const Sem::MemberResolveResult*>(result.ResolveResult());
+    ASSERT_NE(mrr, nullptr);
+    EXPECT_EQ(dynamic_cast<const TS::IEvent*>(mrr->Member()), event);
+}
+
+// With AutomaticEvents off the automatic-event special case is skipped and the
+// backing-field reference resolves through the ordinary field path.
+TEST(ExpressionBuilderFieldTest, ConvertFieldAutoEventBackingFieldSkippedWhenAutomaticEventsOff)
+{
+    const char* path = AutoEventMscorlibPath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "mscorlib fixture not present";
+    AutoEventBuilderFixture f(path);
+    ASSERT_TRUE(f.file.IsValid());
+    f.settings.SetAutomaticEvents(false);
+    const TS::IEvent* event = f.FindEvent("AppDomain", "AssemblyLoad");
+    ASSERT_NE(event, nullptr);
+    const TS::IField* field = f.FindField(*event->DeclaringTypeDefinition(), "AssemblyLoad");
+    ASSERT_NE(field, nullptr);
+
+    f.run.AutomaticEvents()[event] = field;
+    auto builder = f.MakeBuilderForType(event->DeclaringTypeDefinition());
+
+    ThisLoad thisLoad(std::const_pointer_cast<TS::IType>(
+        event->DeclaringType()->shared_from_this()));
+    auto result = builder.ConvertField(*field, &thisLoad.ldloc);
+
+    // The resolve result is not the event: the field path ran (whether it
+    // resolved the field itself or fell through to the direct field result).
+    auto* mrr = dynamic_cast<const Sem::MemberResolveResult*>(result.ResolveResult());
+    ASSERT_NE(mrr, nullptr);
+    EXPECT_EQ(dynamic_cast<const TS::IEvent*>(mrr->Member()), nullptr);
+}
+
+TEST(ExpressionBuilderFieldTest, LdsFldaRendersRefDirectionOverFieldReference)
+{
+    BuilderFixture fixture;
+    auto objectType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    const TS::ITypeDefinition* objectDef =
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).GetDefinition();
+    auto builder = fixture.MakeBuilderForType(objectDef);
+
+    auto field = std::make_shared<FieldStub>("Value", objectType, fixture.compilation);
+    field->SetStatic(true);
+    field->SetDeclaringType(objectType);
+    field->SetDeclaringTypeDefinition(objectDef);
+
+    IL::LdsFlda ldsFlda("System.Object::Value");
+    ldsFlda.Field = field;
+    auto expr = builder.Translate(&ldsFlda);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    EXPECT_EQ(direction->FieldDirection(), Syntax::FieldDirection::Ref);
+    auto* memberRef = dynamic_cast<Syntax::MemberReferenceExpression*>(direction->Expression());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "Value");
+    auto* byRef = dynamic_cast<const Sem::ByReferenceResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(byRef != nullptr);
+    EXPECT_EQ(byRef->ReferenceKind(), TS::ReferenceKind::Ref);
+    // The outer DirectionExpression carries no IL-instruction annotation (the C#
+    // `.WithoutILInstruction()`); the inner field access keeps the single one.
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*memberRef);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], &ldsFlda);
+}
+
+TEST(ExpressionBuilderFieldTest, LdsFldaUnresolvedFieldRendersDefaultError)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::LdsFlda ldsFlda("System.Object::Missing");
+    auto expr = builder.Translate(&ldsFlda);
+    EXPECT_TRUE(dynamic_cast<Syntax::ErrorExpression*>(expr.Expression()) != nullptr);
+}
+
+TEST(ExpressionBuilderFieldTest, LdsFldaCloneCarriesResolvedField)
+{
+    TS::SimpleCompilation compilation(Impl::MinimalCorlib::Instance(), {});
+    auto objectType = std::const_pointer_cast<TS::IType>(
+        compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    IL::LdsFlda ldsFlda("System.Object::Value");
+    ldsFlda.Field = std::make_shared<FieldStub>("Value", objectType, compilation);
+    auto clone = ldsFlda.Clone();
+    auto* cloneTyped = static_cast<IL::LdsFlda*>(clone.get());
+    ASSERT_TRUE(cloneTyped->Field != nullptr);
+    EXPECT_EQ(cloneTyped->Field.get(), ldsFlda.Field.get());
+}
+
+TEST(ExpressionBuilderFieldTest, IsFixedFieldDecodesFixedBufferAttribute)
+{
+    BuilderFixture fixture;
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto bufferType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+
+    std::vector<TS::CustomAttributeTypedArgument> args;
+    args.emplace_back(intType, std::any(intType));
+    args.emplace_back(intType, std::any(std::int32_t(16)));
+    AttributeStub attribute(bufferType, std::move(args));
+
+    FieldStub field("FixedBuffer", intType, fixture.compilation);
+    field.SetKnownAttribute(TS::KnownAttribute::FixedBuffer, &attribute);
+
+    TS::ITypePtr type;
+    int count = -1;
+    EXPECT_TRUE(CSharp::IsFixedField(field, type, count));
+    EXPECT_EQ(type.get(), intType.get());
+    EXPECT_EQ(count, 16);
+
+    FieldStub plain("Plain", intType, fixture.compilation);
+    TS::ITypePtr noType;
+    int noCount = 99;
+    EXPECT_FALSE(CSharp::IsFixedField(plain, noType, noCount));
+    EXPECT_TRUE(noType == nullptr);
+    EXPECT_EQ(noCount, 0);
+}
+
+TEST(ExpressionBuilderFieldTest, TupleTransformMatchesItemAndRestChain)
+{
+    TS::SimpleCompilation compilation(Impl::MinimalCorlib::Instance(), {});
+    auto objectType = std::const_pointer_cast<TS::IType>(
+        compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto intType = std::const_pointer_cast<TS::IType>(
+        compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+
+    auto tupleType = std::make_shared<TS::TupleType>(
+        objectType, std::vector<TS::ITypePtr>{objectType, intType},
+        std::vector<std::string>{"", "Second"});
+
+    auto field = std::make_shared<FieldStub>("Item1", objectType, compilation);
+    field->SetDeclaringType(tupleType);
+    auto target = std::make_unique<IL::LdLoc>(
+        std::make_shared<IL::ILVariable>(IL::VariableKind::Local, TS::ITypePtr(tupleType)));
+    IL::LdFlda inst(std::move(target), "Item1");
+    inst.Field = field;
+
+    TS::ITypePtr matchedType;
+    IL::ILInstruction* matchedTarget = nullptr;
+    int position = 0;
+    EXPECT_TRUE(IL::TupleTransform::MatchTupleFieldAccess(inst, matchedType, matchedTarget,
+                                                          position));
+    EXPECT_EQ(position, 1);
+    EXPECT_EQ(matchedType.get(), tupleType.get());
+    EXPECT_EQ(matchedTarget, inst.Target.get());
+
+    auto nonItem = std::make_shared<FieldStub>("Value", objectType, compilation);
+    nonItem->SetDeclaringType(tupleType);
+    IL::LdFlda nonItemInst(
+        std::make_unique<IL::LdLoc>(
+            std::make_shared<IL::ILVariable>(IL::VariableKind::Local, TS::ITypePtr(tupleType))),
+        "Value");
+    nonItemInst.Field = nonItem;
+    TS::ITypePtr unusedType;
+    IL::ILInstruction* unusedTarget = nullptr;
+    int unusedPosition = 7;
+    EXPECT_FALSE(IL::TupleTransform::MatchTupleFieldAccess(nonItemInst, unusedType,
+                                                           unusedTarget, unusedPosition));
+    EXPECT_EQ(unusedPosition, 0);
+}
+
+TEST(ExpressionBuilderFieldTest, LdFldaTupleElementRendersNamedMemberReference)
+{
+    BuilderFixture fixture;
+    auto objectType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    const TS::ITypeDefinition* objectDef =
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).GetDefinition();
+    auto builder = fixture.MakeBuilderForType(objectDef);
+
+    auto tupleType = std::make_shared<TS::TupleType>(
+        objectType, std::vector<TS::ITypePtr>{objectType, intType},
+        std::vector<std::string>{"", "Second"});
+    auto field = std::make_shared<FieldStub>("Item2", intType, fixture.compilation);
+    field->SetDeclaringType(tupleType);
+    field->SetDeclaringTypeDefinition(objectDef);
+
+    auto variable = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, TS::ITypePtr(tupleType));
+    IL::LdFlda inst(std::make_unique<IL::LdLoca>(variable), "Item2");
+    inst.Field = field;
+
+    auto expr = builder.Translate(&inst);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    auto* memberRef =
+        dynamic_cast<Syntax::MemberReferenceExpression*>(direction->Expression());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "Second");
+    const auto* mrr =
+        dynamic_cast<const Sem::MemberResolveResult*>(CSharp::GetResolveResult(*memberRef));
+    ASSERT_TRUE(mrr != nullptr);
+    EXPECT_EQ(mrr->Member(), field.get());
+    const auto* byRef = dynamic_cast<const Sem::ByReferenceResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(byRef != nullptr);
+    EXPECT_EQ(byRef->ReferenceKind(), TS::ReferenceKind::Ref);
+}
+
+TEST(ExpressionBuilderFieldTest, LdFldaUnresolvedFieldRendersDefaultError)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::LdFlda ldFlda(std::make_unique<IL::LdLoc>(
+                          std::make_shared<IL::ILVariable>(IL::VariableKind::Local, nullptr)),
+                      "System.Object::Missing");
+    auto expr = builder.Translate(&ldFlda);
+    EXPECT_TRUE(dynamic_cast<Syntax::ErrorExpression*>(expr.Expression()) != nullptr);
+}
+
+TEST(ExpressionBuilderFieldTest, LdFldaFixedBufferRendersFieldIndexer)
+{
+    BuilderFixture fixture;
+    auto objectType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    const TS::ITypeDefinition* objectDef =
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).GetDefinition();
+    auto builder = fixture.MakeBuilderForType(objectDef);
+
+    std::vector<TS::CustomAttributeTypedArgument> args;
+    args.emplace_back(intType, std::any(intType));
+    args.emplace_back(intType, std::any(std::int32_t(4)));
+    AttributeStub attribute(objectType, std::move(args));
+
+    auto nestedField = std::make_shared<FieldStub>(
+        "Buffer", std::make_shared<TS::PointerType>(intType), fixture.compilation);
+    nestedField->SetStatic(true);
+    nestedField->SetDeclaringType(objectType);
+    nestedField->SetDeclaringTypeDefinition(objectDef);
+    nestedField->SetKnownAttribute(TS::KnownAttribute::FixedBuffer, &attribute);
+
+    auto elementField = std::make_shared<FieldStub>("FixedElementField", intType,
+                                                    fixture.compilation);
+    elementField->SetStatic(true);
+    elementField->SetDeclaringType(objectType);
+    elementField->SetDeclaringTypeDefinition(objectDef);
+
+    auto nested = std::make_unique<IL::LdFlda>(
+        std::make_unique<IL::LdLoc>(
+            std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objectType)),
+        "Buffer");
+    nested->Field = nestedField;
+    IL::LdFlda inst(std::move(nested), "FixedElementField");
+    inst.Field = elementField;
+
+    auto expr = builder.Translate(&inst);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    auto* indexer = dynamic_cast<Syntax::IndexerExpression*>(direction->Expression());
+    ASSERT_TRUE(indexer != nullptr);
+    ASSERT_EQ(indexer->Arguments().Count(), 1);
+    auto* zero = dynamic_cast<Syntax::PrimitiveExpression*>(
+        indexer->Arguments().At(0));
+    ASSERT_TRUE(zero != nullptr);
+}
+
+// The fixed-buffer pointer-arithmetic arm of HandleManagedPointerArithmetic (the C#
+// `settings.FixedBuffers && Add && LdFlda-of-LdFlda && IsFixedField` shape,
+// ExpressionBuilder.cs lines 1414-1426): `&buffer.field + offset` over a fixed
+// buffer renders as `ref buffer[index]`, where the field access re-types to a
+// pointer of the declared element type and the detected byte offset folds to the
+// element index (the LdcI4(4) byte offset over an int32 element becomes index 1).
+TEST(ExpressionBuilderFieldTest, FixedBufferPointerArithmeticRendersRefIndexer)
+{
+    BuilderFixture fixture;
+    auto objectType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    const TS::ITypeDefinition* objectDef =
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).GetDefinition();
+    auto builder = fixture.MakeBuilderForType(objectDef);
+
+    std::vector<TS::CustomAttributeTypedArgument> args;
+    args.emplace_back(intType, std::any(intType));
+    args.emplace_back(intType, std::any(std::int32_t(4)));
+    AttributeStub attribute(objectType, std::move(args));
+
+    auto bufferField = std::make_shared<FieldStub>(
+        "Buffer", std::make_shared<TS::PointerType>(intType), fixture.compilation);
+    bufferField->SetStatic(true);
+    bufferField->SetDeclaringType(objectType);
+    bufferField->SetDeclaringTypeDefinition(objectDef);
+    bufferField->SetKnownAttribute(TS::KnownAttribute::FixedBuffer, &attribute);
+
+    auto valueField = std::make_shared<FieldStub>("Value", intType, fixture.compilation);
+    valueField->SetDeclaringType(objectType);
+    valueField->SetDeclaringTypeDefinition(objectDef);
+
+    auto buffer = std::make_unique<IL::LdFlda>(
+        std::make_unique<IL::LdLoc>(
+            std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objectType)),
+        "Buffer");
+    buffer->Field = bufferField;
+    IL::LdFlda field(std::move(buffer), "Value");
+    field.Field = valueField;
+
+    IL::BinaryNumericInstruction inst(
+        std::make_unique<IL::LdFlda>(std::move(field)),
+        std::make_unique<IL::LdcI4>(4), IL::BinaryNumericOperator::Add, false,
+        TS::Sign::None);
+
+    auto expr = builder.Translate(&inst);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    EXPECT_EQ(direction->FieldDirection(), Syntax::FieldDirection::Ref);
+    auto* indexer = dynamic_cast<Syntax::IndexerExpression*>(direction->Expression());
+    ASSERT_TRUE(indexer != nullptr);
+    ASSERT_EQ(indexer->Arguments().Count(), 1);
+    auto* index = dynamic_cast<Syntax::PrimitiveExpression*>(indexer->Arguments().At(0));
+    ASSERT_TRUE(index != nullptr);
+    const std::int32_t* value = std::get_if<std::int32_t>(&index->Value());
+    ASSERT_TRUE(value != nullptr);
+    EXPECT_EQ(*value, 1);
+}
+
+// With FixedBuffers disabled the arm is skipped and the general element-offset
+// intrinsic render is used (the top level is the unsafe intrinsic call, not a
+// ref-direction indexer).
+TEST(ExpressionBuilderFieldTest, FixedBufferPointerArithmeticDisabledBySetting)
+{
+    BuilderFixture fixture;
+    fixture.settings.SetFixedBuffers(false);
+    auto objectType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    const TS::ITypeDefinition* objectDef =
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).GetDefinition();
+    auto builder = fixture.MakeBuilderForType(objectDef);
+
+    std::vector<TS::CustomAttributeTypedArgument> args;
+    args.emplace_back(intType, std::any(intType));
+    args.emplace_back(intType, std::any(std::int32_t(4)));
+    AttributeStub attribute(objectType, std::move(args));
+
+    auto bufferField = std::make_shared<FieldStub>(
+        "Buffer", std::make_shared<TS::PointerType>(intType), fixture.compilation);
+    bufferField->SetStatic(true);
+    bufferField->SetDeclaringType(objectType);
+    bufferField->SetDeclaringTypeDefinition(objectDef);
+    bufferField->SetKnownAttribute(TS::KnownAttribute::FixedBuffer, &attribute);
+
+    auto valueField = std::make_shared<FieldStub>("Value", intType, fixture.compilation);
+    valueField->SetDeclaringType(objectType);
+    valueField->SetDeclaringTypeDefinition(objectDef);
+
+    auto buffer = std::make_unique<IL::LdFlda>(
+        std::make_unique<IL::LdLoc>(
+            std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objectType)),
+        "Buffer");
+    buffer->Field = bufferField;
+    IL::LdFlda field(std::move(buffer), "Value");
+    field.Field = valueField;
+
+    IL::BinaryNumericInstruction inst(
+        std::make_unique<IL::LdFlda>(std::move(field)),
+        std::make_unique<IL::LdcI4>(4), IL::BinaryNumericOperator::Add, false,
+        TS::Sign::None);
+
+    auto expr = builder.Translate(&inst);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    EXPECT_EQ(dynamic_cast<Syntax::IndexerExpression*>(direction->Expression()), nullptr);
+    EXPECT_NE(dynamic_cast<Syntax::InvocationExpression*>(direction->Expression()),
+              nullptr);
+}
+
+// A nested field without the FixedBuffer attribute is not a fixed field, so the
+// arm is skipped even with FixedBuffers enabled.
+TEST(ExpressionBuilderFieldTest, FixedBufferPointerArithmeticRequiresFixedField)
+{
+    BuilderFixture fixture;
+    auto objectType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    const TS::ITypeDefinition* objectDef =
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).GetDefinition();
+    auto builder = fixture.MakeBuilderForType(objectDef);
+
+    auto bufferField = std::make_shared<FieldStub>(
+        "Buffer", std::make_shared<TS::PointerType>(intType), fixture.compilation);
+    bufferField->SetStatic(true);
+    bufferField->SetDeclaringType(objectType);
+    bufferField->SetDeclaringTypeDefinition(objectDef);
+
+    auto valueField = std::make_shared<FieldStub>("Value", intType, fixture.compilation);
+    valueField->SetDeclaringType(objectType);
+    valueField->SetDeclaringTypeDefinition(objectDef);
+
+    auto buffer = std::make_unique<IL::LdFlda>(
+        std::make_unique<IL::LdLoc>(
+            std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objectType)),
+        "Buffer");
+    buffer->Field = bufferField;
+    IL::LdFlda field(std::move(buffer), "Value");
+    field.Field = valueField;
+
+    IL::BinaryNumericInstruction inst(
+        std::make_unique<IL::LdFlda>(std::move(field)),
+        std::make_unique<IL::LdcI4>(4), IL::BinaryNumericOperator::Add, false,
+        TS::Sign::None);
+
+    auto expr = builder.Translate(&inst);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    EXPECT_EQ(dynamic_cast<Syntax::IndexerExpression*>(direction->Expression()), nullptr);
+    EXPECT_NE(dynamic_cast<Syntax::InvocationExpression*>(direction->Expression()),
+              nullptr);
+}
+
+
+// The null-conditional arms (VisitNullableRewrap / VisitNullableUnwrap, the C#
+// lines 4298-4321): the `?.` join point lifts a non-nullable value-type operand
+// into `Nullable<T>` and renders a NullConditionalRewrap; the `?.` dereference
+// strips a ref DirectionExpression for a RefInput argument and renders a
+// NullConditional over the underlying type. Expectations derived from the C#
+// bodies over the MinimalCorlib fixture.
+
+TEST(ExpressionBuilderNullableTest, RewrapLiftsNonNullableValueTypeToNullable)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto var = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    var->Name = "x";
+    IL::NullableRewrap rewrap(std::make_unique<IL::LdLoc>(var));
+    auto expr = builder.Translate(&rewrap);
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    EXPECT_EQ(unary->Operator(), Syntax::UnaryOperatorType::NullConditionalRewrap);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(unary->Expression()) != nullptr);
+    // The int operand is a non-nullable value type, so the result is Nullable<int>.
+    EXPECT_TRUE(TS::IsNullable(expr.Type()));
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*unary);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], &rewrap);
+}
+
+TEST(ExpressionBuilderNullableTest, RewrapKeepsReferenceTypeUnlifted)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    const TS::IType& stringType = fixture.compilation.FindType(TS::KnownTypeCode::String);
+    auto stringPtr = std::const_pointer_cast<TS::IType>(stringType.shared_from_this());
+    auto var = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, stringPtr, 0);
+    var->Name = "s";
+    IL::NullableRewrap rewrap(std::make_unique<IL::LdLoc>(var));
+    auto expr = builder.Translate(&rewrap);
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    EXPECT_EQ(unary->Operator(), Syntax::UnaryOperatorType::NullConditionalRewrap);
+    // A reference type is not lifted: the result stays the reference type itself.
+    EXPECT_FALSE(TS::IsNullable(expr.Type()));
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()), TS::KnownTypeCode::String));
+}
+
+TEST(ExpressionBuilderNullableTest, UnwrapRendersNullConditionalOverUnderlyingType)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    TS::ITypePtr nullableInt = TS::Create(fixture.compilation, *intType);
+    auto var = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, nullableInt, 0);
+    var->Name = "n";
+    IL::NullableUnwrap unwrap(IL::StackType::I4, std::make_unique<IL::LdLoc>(var));
+    auto expr = builder.Translate(&unwrap);
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    EXPECT_EQ(unary->Operator(), Syntax::UnaryOperatorType::NullConditional);
+    // GetUnderlyingType(Nullable<int>) is int (not the nullable itself).
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()), TS::KnownTypeCode::Int32));
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*unary);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], &unwrap);
+}
+
+TEST(ExpressionBuilderNullableTest, UnwrapRefInputStripsDirectionExpression)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto var = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    var->Name = "x";
+    // LdLoca translates to a ref DirectionExpression; the RefInput arm strips it.
+    IL::NullableUnwrap unwrap(IL::StackType::I4, std::make_unique<IL::LdLoca>(var),
+                              /*refInput=*/true);
+    auto expr = builder.Translate(&unwrap);
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    EXPECT_EQ(unary->Operator(), Syntax::UnaryOperatorType::NullConditional);
+    EXPECT_TRUE(dynamic_cast<Syntax::DirectionExpression*>(unary->Expression()) == nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(unary->Expression()) != nullptr);
+}
+
+TEST(ExpressionBuilderNullableTest, NodeDumpsAndClones)
+{
+    IL::NullableRewrap rewrap(std::make_unique<IL::LdcI4>(1));
+    std::string dump;
+    rewrap.WriteTo(dump);
+    EXPECT_EQ(dump.rfind("nullable.rewrap(", 0), 0u);
+    auto rewrapClone = rewrap.Clone();
+    EXPECT_EQ(rewrapClone->Op, IL::OpCode::NullableRewrap);
+
+    IL::NullableUnwrap unwrap(IL::StackType::I4, std::make_unique<IL::LdcI4>(1),
+                              /*refInput=*/true);
+    std::string dump2;
+    unwrap.WriteTo(dump2);
+    EXPECT_EQ(dump2.rfind("nullable.unwrap.refinput.I4(", 0), 0u);
+    auto unwrapClone = unwrap.Clone();
+    auto* cloneTyped = static_cast<IL::NullableUnwrap*>(unwrapClone.get());
+    EXPECT_TRUE(cloneTyped->RefInput);
+    EXPECT_EQ(cloneTyped->ResultTypeField, IL::StackType::I4);
+}
+
+
+// The null-coalescing arm (VisitNullCoalescingInstruction, the C# lines
+// 3912-3953): translate both operands, constant-adjust the fallback to the
+// value's type, resolve the `??` operator; on an error recover the target type
+// (a throw fallback over NoType uses the value's underlying type, two differing
+// non-null types fall back to inst.UnderlyingResultType, else the non-null
+// operand's type) and convert the operands. Expectations derived from the C#
+// body over the MinimalCorlib fixture.
+
+TEST(ExpressionBuilderNullCoalescingTest, RefKindRendersNullCoalescingOverStrings)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto stringType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    auto a = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, stringType, 0);
+    a->Name = "a";
+    auto b = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, stringType, 1);
+    b->Name = "b";
+    IL::NullCoalescingInstruction coalescing(IL::NullCoalescingKind::Ref,
+                                             std::make_unique<IL::LdLoc>(a),
+                                             std::make_unique<IL::LdLoc>(b));
+    auto expr = builder.Translate(&coalescing);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::NullCoalescing);
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()),
+                                TS::KnownTypeCode::String));
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*binary);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], &coalescing);
+}
+
+TEST(ExpressionBuilderNullCoalescingTest, NullableKindKeepsNullableResult)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    TS::ITypePtr nullableInt = TS::Create(fixture.compilation, *intType);
+    auto a = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, nullableInt, 0);
+    a->Name = "a";
+    auto b = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, nullableInt, 1);
+    b->Name = "b";
+    IL::NullCoalescingInstruction coalescing(IL::NullCoalescingKind::Nullable,
+                                             std::make_unique<IL::LdLoc>(a),
+                                             std::make_unique<IL::LdLoc>(b));
+    coalescing.UnderlyingResultType = IL::StackType::I4;
+    auto expr = builder.Translate(&coalescing);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::NullCoalescing);
+    EXPECT_TRUE(TS::IsNullable(expr.Type()));
+    EXPECT_TRUE(TS::IsKnownType(
+        const_cast<TS::IType&>(TS::GetUnderlyingType(expr.Type())), TS::KnownTypeCode::Int32));
+}
+
+TEST(ExpressionBuilderNullCoalescingTest, ValueFallbackKindRecoversIntFromUnderlyingResultType)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    TS::ITypePtr nullableInt = TS::Create(fixture.compilation, *intType);
+    auto a = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, nullableInt, 0);
+    a->Name = "a";
+    auto b = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 1);
+    b->Name = "b";
+    IL::NullCoalescingInstruction coalescing(
+        IL::NullCoalescingKind::NullableWithValueFallback, std::make_unique<IL::LdLoc>(a),
+        std::make_unique<IL::LdLoc>(b));
+    coalescing.UnderlyingResultType = IL::StackType::I4;
+    auto expr = builder.Translate(&coalescing);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::NullCoalescing);
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()),
+                                TS::KnownTypeCode::Int32));
+}
+
+TEST(ExpressionBuilderNullCoalescingTest, ThrowFallbackOverNoTypeUsesValueUnderlyingType)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    TS::ITypePtr nullableInt = TS::Create(fixture.compilation, *intType);
+    auto a = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, nullableInt, 0);
+    a->Name = "a";
+    IL::NullCoalescingInstruction coalescing(
+        IL::NullCoalescingKind::Nullable, std::make_unique<IL::LdLoc>(a),
+        std::make_unique<IL::Throw>(std::make_unique<IL::LdNull>()));
+    coalescing.UnderlyingResultType = IL::StackType::I4;
+    auto expr = builder.Translate(&coalescing);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::NullCoalescing);
+    // The throw fallback has NoType, so the recovered target type is the value's
+    // underlying type (int), not the nullable itself.
+    EXPECT_TRUE(TS::IsKnownType(const_cast<TS::IType&>(expr.Type()),
+                                TS::KnownTypeCode::Int32));
+}
+
+// The AddressOf arm (VisitAddressOf, the C# lines 4231-4266): classify the
+// wrapped value, translate + convert it to the address type, insert a redundant
+// cast for a mutable lvalue whose parent chain is not an ldobj (so a mutating C#
+// call cannot modify the original), and render a ref DirectionExpression
+// carrying a ByReferenceResolveResult. Expectations derived from the C# body over
+// the MinimalCorlib fixture.
+
+TEST(ExpressionBuilderAddressOfTest, MutableLocalInsertsCastAndRendersRefDirection)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto v = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    v->Name = "v";
+    IL::AddressOf addressOf(std::make_unique<IL::LdLoc>(v), intType);
+    auto expr = builder.Translate(&addressOf);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    EXPECT_EQ(direction->FieldDirection(), Syntax::FieldDirection::Ref);
+    // The mutable lvalue gets the redundant cast (the C# copy-forcing shape).
+    ASSERT_TRUE(dynamic_cast<Syntax::CastExpression*>(direction->Expression()) != nullptr);
+    // The outer direction carries the AddressOf IL annotation.
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*direction);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], &addressOf);
+    ASSERT_TRUE(dynamic_cast<const Sem::ByReferenceResolveResult*>(expr.ResolveResult())
+                != nullptr);
+}
+
+TEST(ExpressionBuilderAddressOfTest, ReadonlyLocalSkipsCast)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto v = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    v->Name = "v";
+    v->IsRefReadOnly = true;
+    IL::AddressOf addressOf(std::make_unique<IL::LdLoc>(v), intType);
+    auto expr = builder.Translate(&addressOf);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    // A readonly lvalue is not a MutableLValue, so no copy-forcing cast is inserted.
+    EXPECT_EQ(dynamic_cast<Syntax::CastExpression*>(direction->Expression()), nullptr);
+}
+
+TEST(ExpressionBuilderAddressOfTest, ConstantRValueSkipsCast)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    IL::AddressOf addressOf(std::make_unique<IL::LdcI4>(5), intType);
+    auto expr = builder.Translate(&addressOf);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    // An rvalue is never cast.
+    EXPECT_EQ(dynamic_cast<Syntax::CastExpression*>(direction->Expression()), nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::PrimitiveExpression*>(direction->Expression()) != nullptr);
+}
+
+TEST(ExpressionBuilderAddressOfTest, LdObjParentSkipsCast)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto v = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    v->Name = "v";
+    auto addressOf = std::make_unique<IL::AddressOf>(std::make_unique<IL::LdLoc>(v), intType);
+    auto* addressOfPtr = addressOf.get();
+    // The parent ldobj makes the address a pure load (CanIgnoreCopy), so no cast.
+    IL::LdObj ldObj(std::move(addressOf), intType);
+    auto expr = builder.Translate(addressOfPtr);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    EXPECT_EQ(dynamic_cast<Syntax::CastExpression*>(direction->Expression()), nullptr);
+}
+
+// The RefAnyType arm (VisitRefAnyType, the C# lines 3386-3394): the
+// `__reftype(typedReference).TypeHandle` render -- the RefType
+// UndocumentedExpression over the translated argument, the `TypeHandle` member
+// reference, and the System.RuntimeTypeHandle resolve result.
+
+TEST(ExpressionBuilderRefAnyTypeTest, RendersRefTypeTypeHandleWithRuntimeTypeHandleResolveResult)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto v = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    v->Name = "v";
+    IL::RefAnyType refAnyType(std::make_unique<IL::LdLoc>(v));
+    auto expr = builder.Translate(&refAnyType);
+    auto* memberRef = dynamic_cast<Syntax::MemberReferenceExpression*>(expr.Expression());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "TypeHandle");
+    auto* doc = dynamic_cast<Syntax::UndocumentedExpression*>(memberRef->Target());
+    ASSERT_TRUE(doc != nullptr);
+    EXPECT_EQ(doc->UndocumentedExpressionType(), Syntax::UndocumentedExpressionType::RefType);
+    ASSERT_EQ(doc->Arguments().Count(), 1);
+    // The translated argument (the local load) is the UndocumentedExpression argument.
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(doc->Arguments().At(0)) != nullptr);
+    // The IL annotation sits on the member reference (the C# WithILInstruction).
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*memberRef);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], &refAnyType);
+    // The resolve result is the RuntimeTypeHandle type resolve result.
+    ASSERT_TRUE(dynamic_cast<const Sem::TypeResolveResult*>(expr.ResolveResult()) != nullptr);
+}
+
+// The MakeRefAny arm (VisitMakeRefAny, the C# lines 3371-3384): the
+// `__makeref(arg)` render -- the Makeref UndocumentedExpression over the
+// translated argument (a DirectionExpression is stripped to its inner
+// expression), carrying a System.TypedReference resolve result.
+
+TEST(ExpressionBuilderMakeRefAnyTest, RendersMakeRefOverArgumentWithTypedReferenceResolveResult)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto v = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    v->Name = "v";
+    IL::MakeRefAny makeRefAny(intType, std::make_unique<IL::LdLoc>(v));
+    auto expr = builder.Translate(&makeRefAny);
+    auto* doc = dynamic_cast<Syntax::UndocumentedExpression*>(expr.Expression());
+    ASSERT_TRUE(doc != nullptr);
+    EXPECT_EQ(doc->UndocumentedExpressionType(), Syntax::UndocumentedExpressionType::MakeRef);
+    ASSERT_EQ(doc->Arguments().Count(), 1);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(doc->Arguments().At(0)) != nullptr);
+    // The IL annotation sits on the UndocumentedExpression.
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*doc);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], &makeRefAny);
+    ASSERT_TRUE(dynamic_cast<const Sem::TypeResolveResult*>(expr.ResolveResult()) != nullptr);
+}
+
+TEST(ExpressionBuilderMakeRefAnyTest, StripsDirectionExpressionFromArgument)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto v = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    v->Name = "v";
+    // `ldloca` translates to a ref DirectionExpression; `__makeref` takes the
+    // address's inner expression (the C# `arg is DirectionExpression` strip).
+    IL::MakeRefAny makeRefAny(intType, std::make_unique<IL::LdLoca>(v));
+    auto expr = builder.Translate(&makeRefAny);
+    auto* doc = dynamic_cast<Syntax::UndocumentedExpression*>(expr.Expression());
+    ASSERT_TRUE(doc != nullptr);
+    ASSERT_EQ(doc->Arguments().Count(), 1);
+    EXPECT_EQ(dynamic_cast<Syntax::DirectionExpression*>(doc->Arguments().At(0)), nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(doc->Arguments().At(0)) != nullptr);
+}
+
+// The RefAnyValue arm (VisitRefAnyValue, the C# lines 3396-3404): the
+// `ref __refvalue(arg, T)` render -- a RefValue UndocumentedExpression over the
+// translated argument and a TypeReferenceExpression for the node's type, wrapped
+// in a ref DirectionExpression with a ByReferenceResolveResult.
+
+TEST(ExpressionBuilderRefAnyValueTest, RendersRefRefValueWithByReferenceResolveResult)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto v = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    v->Name = "v";
+    IL::RefAnyValue refAnyValue(intType, std::make_unique<IL::LdLoc>(v));
+    auto expr = builder.Translate(&refAnyValue);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    EXPECT_EQ(direction->FieldDirection(), Syntax::FieldDirection::Ref);
+    auto* doc = dynamic_cast<Syntax::UndocumentedExpression*>(direction->Expression());
+    ASSERT_TRUE(doc != nullptr);
+    EXPECT_EQ(doc->UndocumentedExpressionType(), Syntax::UndocumentedExpressionType::RefValue);
+    ASSERT_EQ(doc->Arguments().Count(), 2);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(doc->Arguments().At(0)) != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::TypeReferenceExpression*>(doc->Arguments().At(1)) != nullptr);
+    // The IL annotation sits on the UndocumentedExpression (the C#
+    // WithILInstruction on the inner expression, the direction is Without).
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*doc);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], &refAnyValue);
+    ASSERT_TRUE(dynamic_cast<const Sem::ByReferenceResolveResult*>(expr.ResolveResult()) != nullptr);
+}
+
+TEST(ExpressionBuilderRefAnyValueTest, NullTypeRendersErrorExpression)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto v = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    v->Name = "v";
+    IL::RefAnyValue refAnyValue(nullptr, std::make_unique<IL::LdLoc>(v));
+    auto expr = builder.Translate(&refAnyValue);
+    EXPECT_TRUE(dynamic_cast<Syntax::ErrorExpression*>(expr.Expression()) != nullptr);
+}
+
+// The Arglist arm (VisitArglist, the C# lines 3274-3280): the `__arglist`
+// render -- the ArgListAccess UndocumentedExpression with no arguments and a
+// System.RuntimeArgumentHandle resolve result, annotated with the IL node.
+
+TEST(ExpressionBuilderArglistTest, RendersArgListAccessWithRuntimeArgumentHandleResolveResult)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::Arglist arglist;
+    auto expr = builder.Translate(&arglist);
+    auto* doc = dynamic_cast<Syntax::UndocumentedExpression*>(expr.Expression());
+    ASSERT_TRUE(doc != nullptr);
+    EXPECT_EQ(doc->UndocumentedExpressionType(), Syntax::UndocumentedExpressionType::ArgListAccess);
+    EXPECT_EQ(doc->Arguments().Count(), 0);
+    // The IL annotation sits on the UndocumentedExpression (the C# WithILInstruction).
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*doc);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], &arglist);
+    // The C# `new TypeResolveResult(...)` over System.RuntimeArgumentHandle.
+    ASSERT_TRUE(dynamic_cast<const Sem::TypeResolveResult*>(expr.ResolveResult()) != nullptr);
+}
+
+// The UserDefinedLogicOperator arm (VisitUserDefinedLogicOperator, the C# lines
+// 1233-1257): the user-defined short-circuiting `&&`/`||` render -- both operands
+// translated/converted to the operator method's parameter types, the operator
+// derived from the method name, and an InvocationResolveResult over the method.
+
+// Build an op_-named FakeMethod over a shared operand type. String is used because
+// its GetStackType is O, matching the node's ResultType (a value-type operand would
+// need the full struct type-system machinery).
+std::shared_ptr<Impl::FakeMethod> MakeLogicOperatorMethod(
+    const TS::ICompilation& compilation, const char* name, TS::ITypePtr operandType)
+{
+    auto method = std::make_shared<Impl::FakeMethod>(compilation, TS::SymbolKind::Operator);
+    method->SetName(name);
+    method->SetIsStatic(true);
+    method->SetDeclaringType(operandType);
+    std::vector<std::shared_ptr<const TS::IParameter>> parameters;
+    parameters.push_back(
+        std::make_shared<Impl::DefaultParameter>(operandType, std::string("left")));
+    parameters.push_back(
+        std::make_shared<Impl::DefaultParameter>(operandType, std::string("right")));
+    method->SetParameters(parameters);
+    method->SetReturnType(operandType);
+    return method;
+}
+
+TEST(ExpressionBuilderUserDefinedLogicOperatorTest, BitwiseAndRendersConditionalAnd)
+{
+    BuilderFixture fixture;
+    auto operandType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    auto method = MakeLogicOperatorMethod(fixture.compilation, "op_BitwiseAnd", operandType);
+    auto left = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, operandType);
+    left->Name = "left";
+    auto right = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, operandType);
+    right->Name = "right";
+    IL::UserDefinedLogicOperator node("ns::T::op_BitwiseAnd", operandType,
+                                      std::make_unique<IL::LdLoc>(left),
+                                      std::make_unique<IL::LdLoc>(right));
+    node.Method = method;
+
+    auto expr = fixture.Translate(&node);
+    auto* binop = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binop != nullptr);
+    EXPECT_EQ(binop->Operator(), Syntax::BinaryOperatorType::ConditionalAnd);
+    // The C# `.WithRR(new InvocationResolveResult(null, inst.Method, ...))`.
+    ASSERT_TRUE(
+        dynamic_cast<const Sem::InvocationResolveResult*>(expr.ResolveResult()) != nullptr);
+    // The C# `.WithILInstruction(inst)`.
+    ASSERT_EQ(CSharp::GetILInstructions(*binop).size(), 1u);
+    EXPECT_EQ(CSharp::GetILInstructions(*binop)[0], &node);
+}
+
+TEST(ExpressionBuilderUserDefinedLogicOperatorTest, BitwiseOrRendersConditionalOr)
+{
+    BuilderFixture fixture;
+    auto operandType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    auto method = MakeLogicOperatorMethod(fixture.compilation, "op_BitwiseOr", operandType);
+    auto left = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, operandType);
+    left->Name = "left";
+    auto right = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, operandType);
+    right->Name = "right";
+    IL::UserDefinedLogicOperator node("ns::T::op_BitwiseOr", operandType,
+                                      std::make_unique<IL::LdLoc>(left),
+                                      std::make_unique<IL::LdLoc>(right));
+    node.Method = method;
+
+    auto expr = fixture.Translate(&node);
+    auto* binop = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binop != nullptr);
+    EXPECT_EQ(binop->Operator(), Syntax::BinaryOperatorType::ConditionalOr);
+}
+
+TEST(ExpressionBuilderUserDefinedLogicOperatorTest, InvalidMethodNameThrows)
+{
+    BuilderFixture fixture;
+    auto operandType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    auto method = MakeLogicOperatorMethod(fixture.compilation, "op_Addition", operandType);
+    auto left = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, operandType);
+    left->Name = "left";
+    auto right = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, operandType);
+    right->Name = "right";
+    IL::UserDefinedLogicOperator node("ns::T::op_Addition", operandType,
+                                      std::make_unique<IL::LdLoc>(left),
+                                      std::make_unique<IL::LdLoc>(right));
+    node.Method = method;
+
+    EXPECT_THROW(fixture.Translate(&node), std::invalid_argument);
+}
+
+TEST(ExpressionBuilderUserDefinedLogicOperatorTest, SeedStandInWithoutMethodThrows)
+{
+    BuilderFixture fixture;
+    auto operandType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    auto left = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, operandType);
+    left->Name = "left";
+    auto right = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, operandType);
+    right->Name = "right";
+    IL::UserDefinedLogicOperator node("ns::T::op_BitwiseAnd", operandType,
+                                      std::make_unique<IL::LdLoc>(left),
+                                      std::make_unique<IL::LdLoc>(right));
+
+    EXPECT_THROW(fixture.Translate(&node), std::logic_error);
+}
+
+// The ILInlining.ClassifyExpression / IsReadonlyReference helpers (the C#
+// ILInlining.cs lines 557-645) the AddressOf arm composes.
+
+TEST(ILInliningClassifyExpressionTest, LocalKindsClassify)
+{
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto local = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    IL::LdLoc localLoad(local);
+    EXPECT_EQ(IL::ClassifyExpression(&localLoad), IL::ExpressionClassification::MutableLValue);
+
+    auto foreachVar = std::make_shared<IL::ILVariable>(IL::VariableKind::ForeachLocal, intType, 1);
+    IL::LdLoc foreachLoad(foreachVar);
+    EXPECT_EQ(IL::ClassifyExpression(&foreachLoad),
+              IL::ExpressionClassification::ReadonlyLValue);
+
+    auto usingVar = std::make_shared<IL::ILVariable>(IL::VariableKind::UsingLocal, intType, 2);
+    IL::LdLoc usingLoad(usingVar);
+    EXPECT_EQ(IL::ClassifyExpression(&usingLoad), IL::ExpressionClassification::ReadonlyLValue);
+
+    local->IsRefReadOnly = true;
+    EXPECT_EQ(IL::ClassifyExpression(&localLoad), IL::ExpressionClassification::ReadonlyLValue);
+}
+
+TEST(ILInliningClassifyExpressionTest, LdObjStObjOverReadonlyFieldClassifyReadonly)
+{
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto target = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    auto readonlyField = std::make_unique<IL::LdFlda>(std::make_unique<IL::LdLoc>(target),
+                                                      "ns::T::F");
+    readonlyField->FieldIsReadOnly = true;
+    IL::LdObj load(std::move(readonlyField), intType);
+    EXPECT_EQ(IL::ClassifyExpression(&load), IL::ExpressionClassification::ReadonlyLValue);
+
+    auto mutableField = std::make_unique<IL::LdFlda>(std::make_unique<IL::LdLoc>(target),
+                                                     "ns::T::G");
+    IL::LdObj mutableLoad(std::move(mutableField), intType);
+    EXPECT_EQ(IL::ClassifyExpression(&mutableLoad),
+              IL::ExpressionClassification::MutableLValue);
+
+    auto storeField = std::make_unique<IL::LdFlda>(std::make_unique<IL::LdLoc>(target),
+                                                   "ns::T::F");
+    storeField->FieldIsReadOnly = true;
+    IL::StObj store(std::move(storeField), std::make_unique<IL::LdcI4>(1), intType);
+    EXPECT_EQ(IL::ClassifyExpression(&store), IL::ExpressionClassification::ReadonlyLValue);
+}
+
+TEST(ILInliningClassifyExpressionTest, CallOverArrayClassifiesMutable)
+{
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    IL::Call arrayCall("ns::T::Get");
+    arrayCall.DeclaringType = std::make_shared<TS::ArrayType>(intType);
+    EXPECT_EQ(IL::ClassifyExpression(&arrayCall),
+              IL::ExpressionClassification::MutableLValue);
+
+    IL::Call plainCall("ns::T::M");
+    plainCall.DeclaringType = intType;
+    EXPECT_EQ(IL::ClassifyExpression(&plainCall), IL::ExpressionClassification::RValue);
+}
+
+TEST(ILInliningClassifyExpressionTest, DefaultAndConstantClassifyRValue)
+{
+    IL::LdcI4 constant(1);
+    EXPECT_EQ(IL::ClassifyExpression(&constant), IL::ExpressionClassification::RValue);
+}
+
+TEST(ILInliningClassifyExpressionTest, IsReadonlyReferenceArms)
+{
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto local = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    IL::LdLoc localLoad(local);
+    EXPECT_FALSE(IL::IsReadonlyReference(&localLoad));
+    local->IsRefReadOnly = true;
+    EXPECT_TRUE(IL::IsReadonlyReference(&localLoad));
+
+    IL::AddressOf addressOf(std::make_unique<IL::LdLoc>(local), intType);
+    EXPECT_TRUE(IL::IsReadonlyReference(&addressOf));
+
+    IL::LdsFlda staticReadonly("ns::T::F");
+    staticReadonly.FieldIsReadOnly = true;
+    EXPECT_TRUE(IL::IsReadonlyReference(&staticReadonly));
+    IL::LdsFlda staticMutable("ns::T::G");
+    EXPECT_FALSE(IL::IsReadonlyReference(&staticMutable));
+
+    IL::Call call("ns::T::M");
+    EXPECT_FALSE(IL::IsReadonlyReference(&call));
 }
 
 
@@ -3656,6 +5873,356 @@ TEST(ExpressionBuilderBinaryNumericTest, IsCSharpSmallIntegerTypeReadsTheDefinit
         std::const_pointer_cast<TS::IType>(
             fixture.compilation.FindType(TS::KnownTypeCode::Int16).shared_from_this()));
     EXPECT_FALSE(TS::IsCSharpSmallIntegerType(enumDef.get()));
+}
+
+// The VisitIfInstruction arm (ExpressionBuilder.cs lines 3956-4049) and the
+// IfInstruction.IsInConditionSlot predicate it composes.
+
+TEST(IfInstructionConditionSlotTest, ChildRolesClassify)
+{
+    // A comparison against the constant 0: the non-constant operand sits in a
+    // condition slot; the 0 constant itself does not (the C# checks the OTHER
+    // operand).
+    IL::Comp zeroComp(std::make_unique<IL::LdcI4>(1), std::make_unique<IL::LdcI4>(0),
+                      IL::ComparisonKind::Inequality, TS::Sign::None);
+    EXPECT_TRUE(IL::IfInstruction::IsInConditionSlot(zeroComp.Left.get()));
+    EXPECT_FALSE(IL::IfInstruction::IsInConditionSlot(zeroComp.Right.get()));
+    // A comparison against a non-zero constant: neither operand qualifies.
+    IL::Comp nonzeroComp(std::make_unique<IL::LdcI4>(1), std::make_unique<IL::LdcI4>(2),
+                         IL::ComparisonKind::Inequality, TS::Sign::None);
+    EXPECT_FALSE(IL::IfInstruction::IsInConditionSlot(nonzeroComp.Left.get()));
+    EXPECT_FALSE(IL::IfInstruction::IsInConditionSlot(nonzeroComp.Right.get()));
+    // Of a root if, only the condition child is in a condition slot; the arms
+    // recurse to the (root) if and come back false.
+    IL::IfInstruction ifInst(std::make_unique<IL::LdcI4>(1), std::make_unique<IL::LdcI4>(2),
+                             std::make_unique<IL::LdcI4>(3));
+    EXPECT_TRUE(IL::IfInstruction::IsInConditionSlot(ifInst.Condition.get()));
+    EXPECT_FALSE(IL::IfInstruction::IsInConditionSlot(ifInst.TrueInst.get()));
+    EXPECT_FALSE(IL::IfInstruction::IsInConditionSlot(ifInst.FalseInst.get()));
+    // A disconnected node has no slot.
+    IL::LdcI4 standalone(9);
+    EXPECT_FALSE(IL::IfInstruction::IsInConditionSlot(&standalone));
+}
+
+TEST(IfInstructionConditionSlotTest, NestedArmReachesConditionSlot)
+{
+    // outer's condition is an inner if; outer is itself the condition of the
+    // root if, so the inner's arms transitively sit in a condition slot.
+    auto inner = std::make_unique<IL::IfInstruction>(
+        std::make_unique<IL::LdcI4>(1), std::make_unique<IL::LdcI4>(2),
+        std::make_unique<IL::LdcI4>(0));
+    auto* innerPtr = inner.get();
+    auto outer = std::make_unique<IL::IfInstruction>(
+        std::move(inner), std::make_unique<IL::LdcI4>(3), std::make_unique<IL::LdcI4>(4));
+    auto* outerPtr = outer.get();
+    IL::IfInstruction root(std::move(outer), std::make_unique<IL::LdcI4>(5),
+                           std::make_unique<IL::LdcI4>(6));
+    EXPECT_TRUE(IL::IfInstruction::IsInConditionSlot(root.Condition.get()));
+    EXPECT_TRUE(IL::IfInstruction::IsInConditionSlot(innerPtr));
+    EXPECT_TRUE(IL::IfInstruction::IsInConditionSlot(innerPtr->Condition.get()));
+    EXPECT_TRUE(IL::IfInstruction::IsInConditionSlot(innerPtr->TrueInst.get()));
+    (void)outerPtr;
+}
+
+TEST(ExpressionBuilderIfInstructionTest, PlainIfRendersConditionalExpression)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::IfInstruction ifInst(std::make_unique<IL::LdcI4>(1), std::make_unique<IL::LdcI4>(2),
+                             std::make_unique<IL::LdcI4>(3));
+    auto expr = builder.Translate(&ifInst);
+    auto* cond = dynamic_cast<Syntax::ConditionalExpression*>(expr.Expression());
+    ASSERT_TRUE(cond != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::PrimitiveExpression*>(cond->Condition()) != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::PrimitiveExpression*>(cond->TrueExpression()) != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::PrimitiveExpression*>(cond->FalseExpression()) != nullptr);
+    // The IL annotation sits on the conditional expression.
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*cond);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], &ifInst);
+}
+
+TEST(ExpressionBuilderIfInstructionTest, BooleanLogicAndRendersConditionalAnd)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto b = MakeLocal(fixture, TS::KnownTypeCode::Boolean, "b");
+    auto c = MakeLocal(fixture, TS::KnownTypeCode::Boolean, "c");
+    IL::IfInstruction ifInst(std::make_unique<IL::LdLoc>(b), std::make_unique<IL::LdLoc>(c),
+                             std::make_unique<IL::LdcI4>(0));
+    auto expr = builder.Translate(&ifInst);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::ConditionalAnd);
+    EXPECT_TRUE(TS::IsKnownType(expr.Type(), TS::KnownTypeCode::Boolean));
+}
+
+TEST(ExpressionBuilderIfInstructionTest, BooleanLogicOrRendersConditionalOr)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto b = MakeLocal(fixture, TS::KnownTypeCode::Boolean, "b");
+    auto c = MakeLocal(fixture, TS::KnownTypeCode::Boolean, "c");
+    IL::IfInstruction ifInst(std::make_unique<IL::LdLoc>(b), std::make_unique<IL::LdcI4>(1),
+                             std::make_unique<IL::LdLoc>(c));
+    auto expr = builder.Translate(&ifInst);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::ConditionalOr);
+    EXPECT_TRUE(TS::IsKnownType(expr.Type(), TS::KnownTypeCode::Boolean));
+}
+
+TEST(ExpressionBuilderIfInstructionTest, NonBooleanLogicAndFallsBackToConditional)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    // The logic-and shape with a non-boolean rhs, at the root (not in a
+    // condition slot), cannot be rendered as `&&`; it degrades to `?:`.
+    IL::IfInstruction ifInst(std::make_unique<IL::LdcI4>(1), std::make_unique<IL::LdcI4>(5),
+                             std::make_unique<IL::LdcI4>(0));
+    auto expr = builder.Translate(&ifInst);
+    EXPECT_TRUE(dynamic_cast<Syntax::ConditionalExpression*>(expr.Expression()) != nullptr);
+}
+
+TEST(ExpressionBuilderIfInstructionTest, MissingFalseArmRendersNopError)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    // The reader's fall-through if has a null FalseInst; the missing arm
+    // translates as the Nop error expression (the C# Nop default).
+    IL::IfInstruction ifInst(std::make_unique<IL::LdcI4>(1), std::make_unique<IL::LdcI4>(2));
+    auto expr = builder.Translate(&ifInst);
+    auto* cond = dynamic_cast<Syntax::ConditionalExpression*>(expr.Expression());
+    ASSERT_TRUE(cond != nullptr);
+    EXPECT_TRUE(cond->FalseExpression() != nullptr);
+}
+
+// The MatchInstruction arm (VisitMatchInstruction + TranslatePattern, the C# lines
+// 4989-5118): the C# 7 `is`-pattern render -- the tested operand wrapped in a
+// `is` BinaryOperatorExpression whose right operand is the pattern tree
+// (declaration, recursive, or bare type), or a constant/relational pattern.
+
+TEST(ExpressionBuilderMatchInstructionTest, TypePatternRendersDeclaration)
+{
+    BuilderFixture fixture;
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto objType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto patternVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType);
+    patternVar->Name = "x";
+    patternVar->LoadCount = 1;  // the designator is used
+    auto sourceVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objType);
+    sourceVar->Name = "o";
+    IL::MatchInstruction match(patternVar, std::make_unique<IL::LdLoc>(sourceVar));
+    match.CheckType = true;
+
+    auto expr = fixture.Translate(&match);
+    auto* binop = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binop != nullptr);
+    EXPECT_EQ(binop->Operator(), Syntax::BinaryOperatorType::IsPattern);
+    // The C# `.WithRR(new ResolveResult(compilation.FindType(Boolean)))`.
+    ASSERT_TRUE(expr.ResolveResult() != nullptr);
+    auto* decl = dynamic_cast<Syntax::DeclarationExpression*>(binop->Right());
+    ASSERT_TRUE(decl != nullptr);
+    auto* type = dynamic_cast<Syntax::PrimitiveType*>(decl->Type());
+    ASSERT_TRUE(type != nullptr);
+    EXPECT_EQ(type->Keyword(), "int");
+    auto* desig = dynamic_cast<Syntax::SingleVariableDesignation*>(decl->Designation());
+    ASSERT_TRUE(desig != nullptr);
+    EXPECT_EQ(desig->Identifier(), "x");
+    EXPECT_TRUE(desig->Annotation<CSharp::ILVariableResolveResult>() != nullptr);
+    // The C# `.WithILInstruction(matchInstruction)` sits on the declaration.
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*decl);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], &match);
+}
+
+TEST(ExpressionBuilderMatchInstructionTest, PureTypePatternRendersTypeReference)
+{
+    BuilderFixture fixture;
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto objType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto patternVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType);
+    patternVar->Name = "x";
+    auto sourceVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objType);
+    sourceVar->Name = "o";
+    // No designator use: the pure `expr is int` shape.
+    IL::MatchInstruction match(patternVar, std::make_unique<IL::LdLoc>(sourceVar));
+    match.CheckType = true;
+
+    auto expr = fixture.Translate(&match);
+    auto* binop = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binop != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::TypeReferenceExpression*>(binop->Right()) != nullptr);
+}
+
+TEST(ExpressionBuilderMatchInstructionTest, VarPatternRendersVarDeclaration)
+{
+    BuilderFixture fixture;
+    auto objType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto patternVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objType);
+    patternVar->Name = "x";
+    patternVar->LoadCount = 1;
+    auto sourceVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objType);
+    sourceVar->Name = "o";
+    // The IsVar shape: no type test, no non-null test, no sub-patterns.
+    IL::MatchInstruction match(patternVar, std::make_unique<IL::LdLoc>(sourceVar));
+
+    auto expr = fixture.Translate(&match);
+    auto* binop = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binop != nullptr);
+    auto* decl = dynamic_cast<Syntax::DeclarationExpression*>(binop->Right());
+    ASSERT_TRUE(decl != nullptr);
+    auto* type = dynamic_cast<Syntax::SimpleType*>(decl->Type());
+    ASSERT_TRUE(type != nullptr);
+    ASSERT_TRUE(type->Identifier().has_value());
+    EXPECT_EQ(type->Identifier().value(), "var");
+}
+
+TEST(ExpressionBuilderMatchInstructionTest, NullCheckPatternRendersRecursivePattern)
+{
+    BuilderFixture fixture;
+    auto objType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto patternVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objType);
+    patternVar->Name = "x";
+    patternVar->LoadCount = 1;
+    auto sourceVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objType);
+    sourceVar->Name = "o";
+    // The `expr is {} x` shape (a non-null test without a type test).
+    IL::MatchInstruction match(patternVar, std::make_unique<IL::LdLoc>(sourceVar));
+    match.CheckNotNull = true;
+
+    auto expr = fixture.Translate(&match);
+    auto* binop = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binop != nullptr);
+    auto* recursive = dynamic_cast<Syntax::RecursivePatternExpression*>(binop->Right());
+    ASSERT_TRUE(recursive != nullptr);
+    EXPECT_TRUE(recursive->Type() == nullptr);
+    EXPECT_EQ(recursive->SubPatterns().Count(), 0);
+    ASSERT_TRUE(recursive->Designation() != nullptr);
+    auto* desig = dynamic_cast<Syntax::SingleVariableDesignation*>(recursive->Designation());
+    ASSERT_TRUE(desig != nullptr);
+    EXPECT_EQ(desig->Identifier(), "x");
+}
+
+TEST(ExpressionBuilderMatchInstructionTest, RecursiveSubPatternRendersNamedArgument)
+{
+    BuilderFixture fixture;
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto objType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this());
+    auto prop = std::make_shared<Impl::FakeProperty>(fixture.compilation);
+    prop->SetName("X");
+    prop->SetReturnType(intType);
+    auto accessor = std::make_shared<Impl::FakeMethod>(fixture.compilation, TS::SymbolKind::Method);
+    accessor->SetName("get_X");
+    accessor->SetReturnType(intType);
+    accessor->SetAccessorOwner(static_cast<const TS::IProperty*>(prop.get()));
+
+    auto call = std::make_unique<IL::Call>("ns::T::get_X");
+    call->Method = accessor;
+    auto comp = std::make_unique<IL::Comp>(std::move(call),
+                                           std::make_unique<IL::LdcI4>(1),
+                                           IL::ComparisonKind::Equality);
+    auto patternVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objType);
+    patternVar->Name = "p";
+    auto sourceVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, objType);
+    sourceVar->Name = "o";
+    IL::MatchInstruction match(patternVar, std::make_unique<IL::LdLoc>(sourceVar));
+    match.CheckNotNull = true;
+    match.AddSubPattern(std::move(comp));
+
+    auto expr = fixture.Translate(&match);
+    auto* binop = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binop != nullptr);
+    auto* recursive = dynamic_cast<Syntax::RecursivePatternExpression*>(binop->Right());
+    ASSERT_TRUE(recursive != nullptr);
+    ASSERT_EQ(recursive->SubPatterns().Count(), 1);
+    auto* namedArg =
+        dynamic_cast<Syntax::NamedArgumentExpression*>(recursive->SubPatterns().At(0));
+    ASSERT_TRUE(namedArg != nullptr);
+    EXPECT_EQ(namedArg->Name(), "X");
+    EXPECT_TRUE(dynamic_cast<Syntax::PrimitiveExpression*>(namedArg->Expression()) != nullptr);
+    auto* mrr =
+        dynamic_cast<const Sem::MemberResolveResult*>(CSharp::GetResolveResult(*namedArg));
+    ASSERT_TRUE(mrr != nullptr);
+    EXPECT_EQ(mrr->Member(),
+              static_cast<const TS::IMember*>(static_cast<const TS::IProperty*>(prop.get())));
+}
+
+TEST(ExpressionBuilderMatchInstructionTest, RelationalPatternRendersUnaryPattern)
+{
+    BuilderFixture fixture;
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto builder = fixture.MakeBuilder();
+    auto comp = std::make_unique<IL::Comp>(std::make_unique<IL::LdcI4>(1),
+                                           std::make_unique<IL::LdcI4>(2),
+                                           IL::ComparisonKind::LessThan);
+    auto pattern = builder.TranslatePattern(comp.get(), intType.get());
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(pattern.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    EXPECT_EQ(unary->Operator(), Syntax::UnaryOperatorType::PatternRelationalLessThan);
+    std::vector<IL::ILInstruction*> il = CSharp::GetILInstructions(*unary);
+    ASSERT_EQ(il.size(), 1u);
+    EXPECT_EQ(il[0], comp.get());
+}
+
+TEST(ExpressionBuilderMatchInstructionTest, UnsupportedPatternThrows)
+{
+    BuilderFixture fixture;
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto builder = fixture.MakeBuilder();
+    IL::Nop nop;
+    EXPECT_THROW(builder.TranslatePattern(&nop, intType.get()), std::logic_error);
+}
+
+TEST(ExpressionBuilderMatchInstructionTest, BoxingCastIsUnwrappedForValueTypePattern)
+{
+    BuilderFixture fixture;
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto patternVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType);
+    patternVar->Name = "x";
+    IL::MatchInstruction match(
+        patternVar, std::make_unique<IL::Box>(intType, std::make_unique<IL::LdcI4>(5)));
+    match.CheckType = true;
+
+    auto expr = fixture.Translate(&match);
+    auto* binop = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binop != nullptr);
+    // The boxing cast is unwrapped for a value-type pattern (the C# condition).
+    EXPECT_TRUE(dynamic_cast<Syntax::CastExpression*>(binop->Left()) == nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::PrimitiveExpression*>(binop->Left()) != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::TypeReferenceExpression*>(binop->Right()) != nullptr);
+}
+
+TEST(ExpressionBuilderMatchInstructionTest, MatchInstructionDumpsAndClones)
+{
+    BuilderFixture fixture;
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto patternVar = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType);
+    patternVar->Name = "x";
+    patternVar->LoadCount = 1;
+    IL::MatchInstruction match(patternVar,
+                               std::make_unique<IL::LdcI4>(7));
+    match.CheckType = true;
+    std::string dump;
+    match.WriteTo(dump);
+    EXPECT_NE(dump.find("match.type"), std::string::npos);
+    auto clone = match.Clone();
+    auto* cloned = dynamic_cast<IL::MatchInstruction*>(clone.get());
+    ASSERT_TRUE(cloned != nullptr);
+    EXPECT_TRUE(cloned->CheckType);
+    EXPECT_EQ(cloned->Variable->Name, "x");
 }
 
 } // namespace ILSpy::Tests

@@ -21,12 +21,18 @@
 
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 
+#include "Decompiler/Metadata/CustomAttributeDecoder.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/SRMExtensions.hpp"
+#include "Decompiler/TypeSystem/ICompilation.hpp"
+#include "Decompiler/TypeSystem/GenericContext.hpp"
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"
 #include "Decompiler/TypeSystem/MetadataModule.hpp"
+#include "Decompiler/TypeSystem/Implementation/AttributeListBuilder.hpp"
+#include "Decompiler/TypeSystem/Implementation/MetadataMethod.hpp"
 #include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
 
+#include <any>
 #include <cstdio>
 #include <string>
 #include <utility>
@@ -158,13 +164,23 @@ std::string MetadataTypeParameter::ToString() const
     return std::string(buffer) + " " + ReflectionName();
 }
 
-// DEFERRED (convention (d)): the AttributeListBuilder + custom-attribute
-// value decoder.
+// The C# `public override IEnumerable<IAttribute> GetAttributes()`: the row's
+// custom-attribute rows through `AttributeListBuilder` (the
+// `SymbolKind.TypeParameter` target). Cached where the C# rebuilds per call.
 std::vector<const IAttribute*> MetadataTypeParameter::GetAttributes() const
 {
-    throw std::logic_error(
-        "MetadataTypeParameter::GetAttributes: AttributeListBuilder is not "
-        "yet ported");
+    if (!attributeListLoaded_)
+    {
+        Implementation::AttributeListBuilder b(module_);
+        b.Add(handle_, ::ILSpy::Decompiler::TypeSystem::SymbolKind::TypeParameter);
+        attributeList_ = b.Build();
+        attributeListLoaded_ = true;
+    }
+    std::vector<const IAttribute*> result;
+    result.reserve(attributeList_.size());
+    for (const auto& attr : attributeList_)
+        result.push_back(attr.get());
+    return result;
 }
 
 // The C# `public override bool HasUnmanagedConstraint` (convention (c)): the
@@ -190,26 +206,131 @@ bool MetadataTypeParameter::HasUnmanagedConstraint() const
     return unmanagedConstraint_ == 1;
 }
 
-// DEFERRED (convention (d)): the [Nullable] byte decode behind
-// ShouldDecodeNullableAttributes (the module's minAccessibilityForNRT
-// computation and the CustomAttributeDecoder).
+// The C# `public override Nullability NullabilityConstraint` and its
+// `private Nullability LoadNullabilityConstraint()`: the option/accessibility
+// gate, then the row's own `[Nullable]` byte, then the MetadataMethod /
+// ITypeDefinition `NullableContext` fallback (Oblivious otherwise).
 ::ILSpy::Decompiler::TypeSystem::Nullability
 MetadataTypeParameter::NullabilityConstraint() const
 {
-    throw std::logic_error(
-        "MetadataTypeParameter::NullabilityConstraint: the NullableAttribute "
-        "value decode is not yet ported (gated on "
-        "ShouldDecodeNullableAttributes / the custom-attribute value "
-        "decoder)");
+    if (!nullabilityConstraintLoaded_)
+    {
+        nullabilityConstraint_ = LoadNullabilityConstraint();
+        nullabilityConstraintLoaded_ = true;
+    }
+    return nullabilityConstraint_;
 }
 
-// DEFERRED (convention (d)): the module.ResolveType constraint decode (the
-// TypeProvider slice).
+// The C# `private Nullability LoadNullabilityConstraint()` (an inner helper;
+// promoted to a private member so the accessor and the helper read the same
+// row state). This is the `module.ShouldDecodeNullableAttributes(Owner)` gate
+// plus the `[Nullable]` byte decode.
+::ILSpy::Decompiler::TypeSystem::Nullability
+MetadataTypeParameter::LoadNullabilityConstraint() const
+{
+    namespace TS = ::ILSpy::Decompiler::TypeSystem;
+    if (!module_.ShouldDecodeNullableAttributes(Owner()))
+        return TS::Nullability::Oblivious;
+
+    const Metadata::MetadataFile* metadata = module_.MetadataFile();
+    for (std::uint32_t attributeToken :
+         metadata->GetCustomAttributeTokens(handle_))
+    {
+        if (!Metadata::IsKnownAttribute(*metadata, attributeToken,
+                                        TS::KnownAttribute::Nullable))
+            continue;
+        std::optional<Metadata::CustomAttributeRowInfo> row =
+            metadata->GetCustomAttribute(attributeToken);
+        if (!row)
+            continue;
+        Metadata::CustomAttributeDecoder decoder(
+            *metadata,
+            const_cast<TS::TypeProvider&>(module_.TypeProvider()));
+        Metadata::CustomAttributeValue value = decoder.DecodeValue(
+            row->ConstructorToken,
+            row->ValueBlob ? row->ValueBlob->data() : nullptr,
+            row->ValueBlob ? row->ValueBlob->size() : 0);
+        if (value.FixedArguments.size() == 1)
+        {
+            std::any boxed = value.FixedArguments[0].Value();
+            if (auto* b = std::any_cast<std::uint8_t>(&boxed))
+            {
+                if (*b <= 2)
+                    return static_cast<TS::Nullability>(*b);
+            }
+        }
+    }
+    if (const auto* method = dynamic_cast<const MetadataMethod*>(Owner()))
+        return method->NullableContext();
+    if (const auto* td = dynamic_cast<const ITypeDefinition*>(Owner()))
+        return td->NullableContext();
+    return TS::Nullability::Oblivious;
+}
+
+// The C# `public override IReadOnlyList<TypeConstraint> TypeConstraints`
+// and `private IReadOnlyList<TypeConstraint> DecodeConstraints()`.
 std::vector<TypeConstraint> MetadataTypeParameter::TypeConstraints() const
 {
-    throw std::logic_error(
-        "MetadataTypeParameter::TypeConstraints: ResolveType is not yet "
-        "ported (gated on the TypeProvider slice)");
+    namespace TS = ::ILSpy::Decompiler::TypeSystem;
+    if (!typeConstraintsLoaded_)
+    {
+        const Metadata::MetadataFile* metadata = module_.MetadataFile();
+
+        TS::Nullability nullableContext;
+        if (const auto* td = dynamic_cast<const ITypeDefinition*>(Owner()))
+            nullableContext = td->NullableContext();
+        else if (const auto* method =
+                     dynamic_cast<const MetadataMethod*>(Owner()))
+            nullableContext = method->NullableContext();
+        else
+            nullableContext = TS::Nullability::Oblivious;
+
+        std::vector<TypeConstraint> result;
+        bool hasNonInterfaceConstraint = false;
+        for (const Metadata::GenericParamConstraintInfo& constraint :
+             metadata->GetGenericParameterConstraints(handle_))
+        {
+            std::vector<std::uint32_t> attrs =
+                metadata->GetCustomAttributeTokens(constraint.Token);
+            ITypePtr ty = module_.ResolveType(
+                constraint.TypeToken, TS::GenericContext(*Owner()), attrs,
+                nullableContext);
+            if (ty && ty->Kind() != TS::TypeKind::Interface)
+                hasNonInterfaceConstraint = true;
+            if (attrs.empty())
+            {
+                result.emplace_back(std::move(ty));
+            }
+            else
+            {
+                Implementation::AttributeListBuilder b(module_);
+                b.Add(constraint.Token, TS::SymbolKind::Constraint);
+                std::vector<std::shared_ptr<IAttribute>> built = b.Build();
+                std::vector<const IAttribute*> raw;
+                raw.reserve(built.size());
+                for (const auto& attr : built)
+                    raw.push_back(attr.get());
+                constraintAttributes_.insert(constraintAttributes_.end(),
+                                             built.begin(), built.end());
+                result.emplace_back(std::move(ty), std::move(raw));
+            }
+        }
+        if (HasValueTypeConstraint())
+        {
+            result.emplace_back(const_cast<TS::IType&>(
+                Compilation().FindType(TS::KnownTypeCode::ValueType))
+                                    .shared_from_this());
+        }
+        else if (!hasNonInterfaceConstraint)
+        {
+            result.emplace_back(const_cast<TS::IType&>(
+                Compilation().FindType(TS::KnownTypeCode::Object))
+                                    .shared_from_this());
+        }
+        typeConstraints_ = std::move(result);
+        typeConstraintsLoaded_ = true;
+    }
+    return typeConstraints_;
 }
 
 // The C# `public override bool Equals(object obj)`.

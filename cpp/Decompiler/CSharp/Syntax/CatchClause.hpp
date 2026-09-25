@@ -431,11 +431,11 @@ public:
     CatchClause* Clone() const override { return new PatternPlaceholder(*child_); }
 
     void AcceptVisitor(IAstVisitor& visitor) override {
-        visitor.VisitPatternPlaceholder(this, child_);
+        visitor.VisitPatternPlaceholder(this, *child_);
     }
 
     bool AcceptVisitorBool(IAstVisitorBool& visitor) override {
-        return visitor.VisitPatternPlaceholder(this, child_);
+        return visitor.VisitPatternPlaceholder(this, *child_);
     }
 
     bool DoMatch(AstNode* other, PatternMatching::Match match) override {

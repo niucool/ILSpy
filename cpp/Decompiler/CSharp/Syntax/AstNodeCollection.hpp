@@ -301,6 +301,14 @@ public:
         return nullptr;
     }
 
+    // The C# `T? LastOrDefault()` -- the last element, or null when the
+    // collection is empty. First consumer: the StatementBuilder ConvertLoop
+    // region (the trailing-continue removals). The predicate overload does not
+    // exist in the C# and has no consumer yet.
+    T* LastOrNull() const {
+        return list_.empty() ? nullptr : list_.back();
+    }
+
     // The C# `void MoveTo(ICollection<T> targetCollection)` -- move every element
     // (in order) out of this collection and into the target, removing each from
     // this one first (the snapshot mirrors the C# `list?.ToArray()`: the `Remove()`

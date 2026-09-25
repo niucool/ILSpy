@@ -31,8 +31,9 @@
 // strings). The `[DecompilerAstNode(hasPatternPlaceholder: true)]` (the explicit `hasPatternPlaceholder:
 // true` argument) means the node is NOT `sealed` (the generated `PatternPlaceholder` derives from
 // it -- the `ArrayInitializerExpression` D250 non-sealed precedent; the pattern placeholder is
-// deferred, but the class stays non-`final` to match the C# and to not block the placeholder
-// landing). It derives DIRECTLY from `AstNode` (not `Expression`/`Statement`/`AstType`), the first
+// ported as the generic `PatternPlaceholderNode<VariableInitializer>` (Syntax/PatternPlaceholder.hpp),
+// so the class stays non-`final` to match the C#). It derives DIRECTLY from `AstNode` (not
+// `Expression`/`Statement`/`AstType`), the first
 // ported `TypeMembers` node and the first non-sealed node deriving directly from the `AstNode`
 // root.
 //

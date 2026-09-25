@@ -33,6 +33,7 @@
 #include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
 #include "Decompiler/TypeSystem/IModule.hpp"
+#include "Decompiler/TypeSystem/INamespace.hpp"
 #include "Decompiler/TypeSystem/IParameter.hpp"
 #include "Decompiler/TypeSystem/IParameterizedMember.hpp"
 #include "Decompiler/TypeSystem/IProperty.hpp"
@@ -73,6 +74,28 @@ std::vector<const IType*> GetNonInterfaceBaseTypes(const IType* type)
     collector.SkipImplementedInterfaces = true;
     collector.CollectBaseTypes(*type);
     return collector.Types();
+}
+
+const INamespace* GetNamespaceByFullName(const ICompilation& compilation, const std::string& name)
+{
+    if (name.empty())
+        return &compilation.RootNamespace();
+    const INamespace* ns = &compilation.RootNamespace();
+    std::string part;
+    for (std::size_t i = 0; i <= name.size(); i++) {
+        if (i == name.size() || name[i] == '.') {
+            // A null result stops the walk: a later part could never match a child of a
+            // missing namespace (the C# `if (child == null) return null;` early exit).
+            const INamespace* child = ns->GetChildNamespace(part);
+            if (child == nullptr)
+                return nullptr;
+            ns = child;
+            part.clear();
+        } else {
+            part.push_back(name[i]);
+        }
+    }
+    return ns;
 }
 
 std::vector<const ITypeDefinition*> GetAllBaseTypeDefinitions(const IType* type)
@@ -190,6 +213,15 @@ bool IsAnyPointer(TypeKind typeKind)
         default:
             return false;
     }
+}
+
+const IType& UnwrapByRef(const IType& type)
+{
+    // C# `if (type is ByReferenceType byRef) type = byRef.ElementType; return type;` --
+    // one wrapper strip (no recursion); any other type is returned unchanged.
+    if (const ByReferenceType* byRef = dynamic_cast<const ByReferenceType*>(&type))
+        return *byRef->Element();
+    return type;
 }
 
 const IType* SkipModifiers(const IType& type)
@@ -564,73 +596,6 @@ bool IsCompilerGeneratedOrIsInCompilerGeneratedClass(const IEntity* entity)
     return IsCompilerGeneratedOrIsInCompilerGeneratedClass(entity->DeclaringTypeDefinition());
 }
 
-// The C# `HasGeneratedName(this IType)` (NRExtensions.cs line 51, over
-// SRMExtensions' internal `IsGeneratedName(string)` line 513).
-bool HasGeneratedName(const IType& type)
-{
-    const std::string& name = type.Name();
-    return (!name.empty() && name[0] == '<') || name.find('$') != std::string::npos;
-}
-
-// The C# `HasOnlyReadOnlyProperties` (NRExtensions.cs line 67).
-bool HasOnlyReadOnlyProperties(const ITypeDefinition& type)
-{
-    for (const IProperty* property : type.GetProperties()) {
-        if (property->CanSet())
-            return false;
-    }
-    return true;
-}
-
-// The C# `IsAnonymousType(this IType)` (NRExtensions.cs line 79).
-bool IsAnonymousType(const IType& type)
-{
-    if (type.Namespace().empty() && HasGeneratedName(type)
-        && (type.Name().find("AnonType") != std::string::npos
-            || type.Name().find("AnonymousType") != std::string::npos)) {
-        const ITypeDefinition* td = type.GetDefinition();
-        return td != nullptr
-            && td->HasAttribute(KnownAttribute::CompilerGenerated)
-            && HasOnlyReadOnlyProperties(*td);
-    }
-    return false;
-}
-
-namespace {
-
-// The C# `ContainsAnonTypeVisitor` (NRExtensions.cs line 105): the TypeVisitor
-// recording whether any visited type is an anonymous type. The default
-// VisitOtherType/VisitTypeDefinition arms cover the kinds with no specific
-// visit (the anonymous-type shapes are definitions or the `other` kinds).
-class ContainsAnonTypeVisitor : public TypeVisitor {
-public:
-    bool ContainsAnonType = false;
-
-    ITypePtr VisitTypeDefinition(ITypeDefinition& type) override {
-        if (IsAnonymousType(type))
-            ContainsAnonType = true;
-        return TypeVisitor::VisitTypeDefinition(type);
-    }
-
-    ITypePtr VisitOtherType(IType& type) override {
-        if (IsAnonymousType(type))
-            ContainsAnonType = true;
-        return TypeVisitor::VisitOtherType(type);
-    }
-};
-
-} // namespace
-
-// The C# `ContainsAnonymousType(this IType)` (NRExtensions.cs line 99).
-bool ContainsAnonymousType(const IType& type)
-{
-    ContainsAnonTypeVisitor visitor;
-    // The C# type.AcceptVisitor(visitor) -- the mutable walk (the established
-    // const_cast convention for the type-system's mutable objects behind
-    // const references).
-    const_cast<IType&>(type).AcceptVisitor(visitor);
-    return visitor.ContainsAnonType;
-}
 
 // The C# `IsPotentialClosure` (TransformDisplayClassUsage.cs): the display-class
 // shape + compiler-generated + same-nesting-tree checks.
@@ -882,16 +847,6 @@ const ISymbol* GetSymbol(const ILSpy::Decompiler::Semantics::ResolveResult& reso
         return dynamicInvocation->Symbol();
     }
     return nullptr;
-}
-
-// The C# `public static IType UnwrapByRef(this IType type)`
-// (TypeSystemExtensions.cs line 434): strips one `ByReferenceType` wrapper and
-// returns the element type; any other type passes through unchanged.
-const IType& UnwrapByRef(const IType& type)
-{
-    if (const auto* byRef = dynamic_cast<const ByReferenceType*>(&type))
-        return *byRef->Element();
-    return type;
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem

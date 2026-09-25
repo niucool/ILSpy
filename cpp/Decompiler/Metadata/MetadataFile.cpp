@@ -162,15 +162,12 @@ struct MetadataFile::Impl {
         return *methodSemanticsLookup;
     }
 
-    // The backing-field lookup (the C# MetadataFile's lazy
+    // The backing-field -> property/event association lookup (the C# MetadataFile's lazy
     // PropertyAndEventBackingFieldLookup property -- the header's
-    // GetPropertyAndEventBackingFieldLookup contract; same
-    // lazy-build-in-impl shape).
-    std::unique_ptr<PropertyAndEventBackingFieldLookup>
-        propertyAndEventBackingFieldLookup;
+    // GetPropertyAndEventBackingFieldLookup contract; same lazy-build-in-impl shape).
+    std::unique_ptr<PropertyAndEventBackingFieldLookup> propertyAndEventBackingFieldLookup;
 
-    PropertyAndEventBackingFieldLookup& BackingFieldLookup(
-        const MetadataFile* owner) {
+    PropertyAndEventBackingFieldLookup& BackingFieldLookup(const MetadataFile* owner) {
         if (!propertyAndEventBackingFieldLookup)
             propertyAndEventBackingFieldLookup =
                 std::make_unique<PropertyAndEventBackingFieldLookup>(*owner);
@@ -194,20 +191,15 @@ struct MetadataFile::Impl {
         }
     }
 
-    // The in-memory form (the file loaders' stream surface -- see the
-    // public ctor's note): the same parse over caller-supplied bytes. The
-    // MZ gate mirrors is_database()'s PE check so a non-PE buffer reports
-    // invalid without constructing the database (which would throw for
-    // garbage and land in the catch anyway -- the gate keeps the failure
-    // deterministic for buffers the caller already screened).
-    explicit Impl(std::string p, std::vector<std::uint8_t> bytes) : path(std::move(p)) {
+    // The in-memory form (the port's addition the ILSpyX loaders use): the
+    // image bytes are supplied instead of read from the path.
+    Impl(std::string p, std::vector<std::uint8_t> imageBytes)
+        : path(std::move(p)) {
         try {
-            if (bytes.size() < 2 || bytes[0] != 'M' || bytes[1] != 'Z') return;
-            auto shared = std::make_shared<const std::vector<std::uint8_t>>(
-                std::move(bytes));
-            std::vector<std::uint8_t> copy(*shared);
-            db = std::make_unique<winmd::reader::database>(std::move(copy));
-            image = std::move(shared);
+            image = std::make_shared<const std::vector<std::uint8_t>>(
+                std::move(imageBytes));
+            if (winmd::reader::database::is_database(path))
+                db = std::make_unique<winmd::reader::database>(path);
             if (image) bodyReader = std::make_unique<MethodBodyReader>(image);
             valid = true;
         } catch (const std::exception&) {
@@ -1574,13 +1566,10 @@ std::uint32_t MetadataFile::GetEventTypeToken(
     std::uint32_t row = eventToken & 0x00FFFFFFu;
     if (table != 0x14 || row == 0 || row > impl_->db->Event.size()) return 0;
     try {
-        // The C# `eventDefinition.Type`: the Event.Type coded index decoded
-        // to its EntityHandle. The tag-0 (TypeDefinition) arm keeps the row
-        // 0 -- the C# `TypeDefinitionHandle(0)` is a NIL handle whose
-        // WriteTo renders `<nil>` -- so a nil Type column is a rendered
-        // `<nil>` event, not a throw (the sweep's capa07 events).
         std::uint32_t v = impl_->db->Event.get_value<std::uint32_t>(row - 1, 2);
+        if (v == 0) return 0;
         std::uint32_t rid = v >> 2;
+        if (rid == 0) return 0;
         switch (v & 0x3u) {
             case 0:  // TypeDef
                 return (0x02u << 24) | rid;
@@ -1690,10 +1679,6 @@ const MethodSemanticsLookup& MetadataFile::GetMethodSemanticsLookup() const {
     return impl_->SemanticsLookup(this);
 }
 
-// The C# `internal PropertyAndEventBackingFieldLookup
-// PropertyAndEventBackingFieldLookup { get; }` (MetadataFile.cs): the lazy
-// accessor the automatic-events family consults (the same single-threaded
-// lazy-build convention as the MethodSemanticsLookup accessor above).
 const PropertyAndEventBackingFieldLookup&
 MetadataFile::GetPropertyAndEventBackingFieldLookup() const {
     return impl_->BackingFieldLookup(this);

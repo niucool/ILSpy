@@ -1,369 +1,447 @@
 // Copyright (c) 2026 ILSpy Contributors
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy of
-// this software and associated documentation files (the "Software"), to deal in the
-// Software without restriction, including without limitation the rights to use, copy,
-// modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
-// and to permit persons to whom the Software is furnished to do so, subject to the
-// following conditions:
+// this software and associated documentation files (the "Software"), to deal in
+// the Software without restriction, including without limitation the rights to use,
+// copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the
+// Software, and to permit persons to whom the Software is furnished to do so,
+// subject to the following conditions:
 //
-// The above copyright notice and this permission notice shall be included in all copies
-// or substantial portions of the Software.
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
 //
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
-// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-// PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
-// HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
-// CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
-// OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+// FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+// COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN
+// AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+// WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-// Port of ICSharpCode.Decompiler/CSharp/StatementBuilder.cs -- `sealed class
-// StatementBuilder : ILVisitor<TranslatedStatement>`: the statement-level walk of
-// the ILAst to the C# AST, the twin of the ExpressionBuilder (which it constructs
-// and owns, passing `this`). This file is the FIRST SLICE: the class skeleton
-// (ctor + state), `Convert`/`ConvertAsBlock`/`Default`, and the leaf statement
-// visitors (`VisitIsInst`, `VisitStLoc`, `VisitStObj`, `VisitNop`, `VisitThrow`,
-// `VisitRethrow`). Later slices land the branch state machine
-// (`VisitBranch`/`VisitLeave`/the break/continue/label bookkeeping), the
-// structured-control-flow visitors (`VisitIfInstruction`, `VisitSwitchInstruction`
-// + `TranslateSwitchValue`, `VisitTryCatch`/`TryFinally`/`TryFault`,
-// `VisitLockInstruction`, `VisitUsingInstruction`, `VisitBlock`/
-// `VisitBlockContainer`, `VisitPinnedRegion`, `VisitInitblk`), and the
-// `EnforceExplicitIn` flag consumer (`EmitAsRefReadOnly`).
+// Port of the StatementBuilder SKELETON (ICSharpCode.Decompiler/CSharp/
+// StatementBuilder.cs -- the ILVisitor<TranslatedStatement> that translates ILAst
+// blocks to C# statements): the ctor with its ExpressionBuilder construction (the
+// C# builds the expression builder passing `this` -- the mutual reference), the
+// translation entry family (Convert / ConvertAsBlock), the real C# `Default`
+// fallback (an ExpressionStatement over the expression translation -- unlike the
+// ExpressionBuilder's error-expression fallback, this one is the C#'s own
+// behavior), and the per-instruction Visit arms the slices have landed (the leaf
+// statement stores/nops and the isinst expression statement).
 //
-// KEY PORT CONVENTIONS:
-//  (a) The C# `internal readonly ExpressionBuilder exprBuilder` ports to a
-//      non-owning `unique_ptr` member the ctor allocates, passing `this` (the
-//      C# GC reference convention; the ExpressionBuilder ctor takes the
-//      non-owning pointer). The pointer is NON-CONST because the CallBuilder's
-//      `EnforceExplicitIn` arm writes `EmitAsRefReadOnly` through it (the C#
-//      writes through the GC reference).
-//  (b) The C# ILVisitor double dispatch (`inst.AcceptVisitor(this)`) ports to a
-//      dynamic_cast chain in `Convert` (the port's IL instruction nodes have no
-//      visitor infrastructure; the ExpressionBuilder dispatch precedent).
-//  (c) The C# `internal` members are widened to public for direct TDD (the
-//      internal-widening convention); the per-instruction visitors stay in the
-//      .cpp (the C# `protected internal override` surface).
-//  (d) `currentReturnContainer` is a non-owning `BlockContainer*` over the
-//      function body (the C# downcast of `currentFunction.Body`).
-//  (e) The CancellationToken is a no-op in the port (the DecompileRun
-//      convention).
-//  (f) `currentResultType` is an owning `ITypePtr` (the C# `IType` GC
-//      reference; `IsAsync ? AsyncReturnType : ReturnType`).
+// The C# `ILVisitor<TranslatedStatement>` base is a double-dispatch: every
+// ILInstruction overrides AcceptVisitor<T> to call the visitor's Visit<Instr>
+// (this). The port's IL tree has no AcceptVisitor surface (the ExpressionBuilder
+// convention): `Visit` is an OpCode switch dispatching to the per-instruction
+// Visit methods, and `Default` is the C#'s own not-overridden fallback -- the
+// ExpressionStatement over `exprBuilder.Translate(inst)`.
+//
+// The C# fields the ctor copies: `currentReturnContainer` (the body cast to
+// BlockContainer -- the port's ILFunction::Body is statically a BlockContainer, so
+// the C# InvalidCastException shape is unreachable), `currentIsIterator` (the C#
+// `IsIterator` field -- the port's seed ILFunction copies it), and
+// `currentResultType` (the C# `IsAsync ? AsyncReturnType! : ReturnType` -- the
+// port's seed ILFunction carries both fields, null until the type-system plumbing
+// populates them).
+//
+// Deferrals (each named at the member that needs it): the CancellationToken (the
+// cooperative-cancel ThrowIfCancellationRequested in Convert is a no-op in the
+// port, the DecompileRun convention), the foreach machinery the using arm rides
+// (the TransformToForeach / TransformToForeachWithoutDispose arms -- the pattern
+// matcher's concrete nodes and the ILInlining/variable-use helpers they need),
+// and, inside the block-container
+// region, the DeclareLocalFunctions local-function declarations (the
+// TypeSystemAstBuilder.ConvertEntity long pole; the port's seed pipeline
+// produces no local functions, so the no-op is unobservable today) and the
+// TransformToForeachWithoutDispose arm of the block instruction loop (a null
+// return -- statements convert through the normal path). An instruction whose
+// C# Visit method has not been ported yet degrades to the Default expression
+// statement instead of crashing.
+//
+// The using-statement arm (VisitUsingInstruction, lines 533-598) has landed: the
+// resource translation, the IsValidInCSharp predicate (the null literal, a ref
+// struct, or a resource whose underlying type implements the known dispose
+// interface), and the UsingStatement render (the VariableDeclarationStatement
+// resource acquisition when the using variable is loaded/address-taken, else the
+// bare resource expression). The foreach arm and the not-valid-in-C# try/finally
+// fallback (the AssignVariableNames.GenerateVariableName dependency) remain the
+// named deferrals.
+//
+// The try-construction region (the C#
+// MakeTryCatch helper + VisitTryCatch/VisitTryFinally/VisitTryFault, lines
+// 445-505) and the VisitLockInstruction sibling (lines 506-510) have landed
+// beside the leaf arms, the switch region (CreateTypedCaseLabel +
+// TranslateSwitch + VisitSwitchInstruction, lines 156-346) has landed with the
+// StringToInt node and the ExpressionBuilder TranslateSwitchValue entry it
+// rides, the block-container region (VisitBlock + VisitBlockContainer +
+// ConvertLoop + ConvertBlockContainer, lines 1280-1608) completes the
+// statement-level dispatch over the ILAst control flow, and the pinned-region
+// arm (VisitPinnedRegion + the IsAddressOfMoveableVar/IsFixedSizeBuffer
+// helpers, lines 1201-1278) has landed with the IL::GetPinnableReference node
+// the deferred array/string pinned-region post-passes will populate.
+//
+// The goto/leave state (StatementBuilder.cs lines 338-373 + 1576-1597) landed
+// with the leaf arms: the block->label maps (labels/duplicateLabels +
+// EnsureUniqueLabel), the breakTarget/endContainerLabels pair a Leave consults,
+// and the continueTarget/continueCount pair a Branch consults. They default to
+// the C#-idle shape (no mappings, null targets) until the VisitBlockContainer /
+// TranslateSwitch slices write them.
 
 #pragma once
 
-#include "Decompiler/Semantics/ConstantResolveResult.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/LockStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/Statement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/SwitchStatement.hpp"
-#include "Decompiler/CSharp/Syntax/SwitchSection.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/TranslatedStatement.hpp"
-#include "Decompiler/CSharp/TranslatedExpression.hpp"
+#include "Decompiler/DecompileRun.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
-#include "Decompiler/Semantics/ResolveResult.hpp"
 #include "Decompiler/IL/ILInstruction.hpp"
-#include "Decompiler/IL/ILVariable.hpp"
-#include "Decompiler/CSharp/Syntax/PatternMatching/Pattern.hpp"
-#include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/Semantics/ConstantResolveResult.hpp"
+#include "Decompiler/TypeSystem/ICompilation.hpp"
+#include "Decompiler/TypeSystem/ITypeResolveContext.hpp"
 
-#include <map>
 #include <memory>
 #include <optional>
 #include <string>
-#include <vector>
+#include <unordered_map>
 
-namespace ILSpy::Decompiler {
-
-class DecompileRun;
-class ExpressionBuilder;
-
-namespace IL {
-class Block;
-class BlockContainer;
-class Block;
-class Branch;
-class ILFunction;
-class IfInstruction;
+// The forward declarations at GLOBAL scope (the nested-namespace trap: a declaration
+// written inside namespace CSharp would create CSharp::IL and shadow the real
+// ILSpy::Decompiler::IL).
+namespace ILSpy::Decompiler::IL {
 class IsInst;
-class Leave;
-class LockInstruction;
-class TryCatch;
-class TryCatchHandler;
-class TryFinally;
-class TryFault;
-class Nop;
-class Rethrow;
-class PinnedRegion;
-class LdLoc;
-class LdLoca;
 class StLoc;
 class StObj;
-class Call;
-namespace PatternMatching {
-class Pattern;  // the Match/Backreference family (PatternNodes.hpp) -- the
-                // StatementBuilder's pattern-match signatures take Match by value
-                // (a shared handle) and the class types by pointer.
-}
-class SwitchInstruction;
-class SwitchSection;
-class UsingInstruction;
-class Initblk;
-class Cpblk;
-class Ckfinite;
+class Nop;
+class IfInstruction;
+class Branch;
+class Leave;
 class Throw;
-} // namespace IL
-
-} // namespace ILSpy::Decompiler
-
-namespace ILSpy::Decompiler::TypeSystem {
-class ICompilation;
-class ITypeResolveContext;
-} // namespace ILSpy::Decompiler::TypeSystem
+class Rethrow;
+class YieldReturn;
+class Ckfinite;
+class Cpblk;
+class Initblk;
+class SwitchInstruction;
+}  // namespace ILSpy::Decompiler::IL
 
 namespace ILSpy::Decompiler::CSharp {
 
-class ExpressionBuilder;
-
-// The TS alias (the CallBuilder TS:: convention).
+// The REAL type-system namespace alias: the CSharp/TypeSystem sub-namespace
+// (CSharpTypeResolveContext/UsingScope) shadows the plain `TypeSystem::` lookup
+// inside this namespace, so every type-system reference goes through the
+// fully-qualified alias (the ExpressionBuilder TS:: convention).
 namespace TS = ::ILSpy::Decompiler::TypeSystem;
 
-// The Syntax/Sem namespace aliases (the file-local conventions; the AST and
-// Semantics types appear in the switch-family signatures).
-namespace Syntax = ::ILSpy::Decompiler::CSharp::Syntax;
-namespace Sem = ::ILSpy::Decompiler::Semantics;
-namespace PatternMatching = ::ILSpy::Decompiler::CSharp::Syntax::PatternMatching;
-
-// The ILVariable shared handle (the DetectGetCurrentTransformation out-parameter
-// convention; the C# ILVariable is a GC reference).
-using ILVariablePtr = ::ILSpy::Decompiler::IL::ILVariablePtr;
-
-// Port of the C# `sealed class StatementBuilder : ILVisitor<TranslatedStatement>`
-// (see the header comment). The C# ctor
-// `StatementBuilder(IDecompilerTypeSystem typeSystem, ITypeResolveContext
-// decompilationContext, ILFunction currentFunction, DecompilerSettings settings,
-// DecompileRun decompileRun, CancellationToken cancellationToken)` ports to the
-// 5-parameter form (the cancellation token dropped, convention (e)).
+// The ExpressionBuilder skeleton. The C# `sealed class StatementBuilder :
+// ILVisitor<TranslatedStatement>`; the port models the visitor as the OpCode-switch
+// `Visit` (the ExpressionBuilder convention) with one `VisitXxx` member per ported
+// instruction kind.
 class StatementBuilder {
 public:
-    // The C# `internal readonly ExpressionBuilder exprBuilder` (convention (a)).
+    // The C# `public StatementBuilder(IDecompilerTypeSystem typeSystem,
+    // ITypeResolveContext decompilationContext, ILFunction currentFunction,
+    // DecompilerSettings settings, DecompileRun decompileRun, CancellationToken
+    // cancellationToken)`: builds the ExpressionBuilder over `this`, casts the
+    // function body to the currentReturnContainer, and copies the
+    // iterator/async-result state. The C# `Debug.Assert(typeSystem != null &&
+    // decompilationContext != null)` maps to the port's invalid_argument guard for
+    // the pointer parameters (the D424 convention -- the reference parameters carry
+    // their non-nullness in their type); the IDecompilerTypeSystem surface ports as
+    // the ICompilation narrowing (the ExpressionBuilder convention); the
+    // CancellationToken is the documented deferral.
+    // The out-of-line destructor: the unique_ptr<ExpressionBuilder> member over a
+    // forward-declared-in-some-TUs complete type would instantiate the default_delete
+    // in every consuming TU (the XamlContext convention).
+    ~StatementBuilder();
+    // The defaulted move (the destructor suppresses the implicit one; the fixture
+    // factory returns by value).
+    StatementBuilder(StatementBuilder&&) = default;
+
+    explicit StatementBuilder(const TS::ICompilation& typeSystem,
+                              const TS::ITypeResolveContext& decompilationContext,
+                              IL::ILFunction* currentFunction,
+                              const DecompilerSettings* settings,
+                              const DecompileRun* decompileRun);
+
+    // -- The translation entry family -------------------------------------------------
+
+    // The C# `public Statement Convert(ILInstruction inst)`: the visitor dispatch
+    // (the C# `inst.AcceptVisitor(this)` double dispatch through the port's OpCode
+    // switch; the C# ThrowIfCancellationRequested is the documented no-op
+    // deferral). The returned TranslatedStatement converts to its Statement
+    // through the C# implicit operator.
+    Syntax::Statement* Convert(IL::ILInstruction* inst);
+
+    // The C# `public BlockStatement ConvertAsBlock(ILInstruction inst)`: re-attaches
+    // the IL-instruction annotation and wraps the converted statement in a
+    // BlockStatement unless it already is one (the C# `stmt as BlockStatement ??
+    // new BlockStatement { stmt }`).
+    Syntax::BlockStatement* ConvertAsBlock(IL::ILInstruction* inst);
+
+    // The C# `internal readonly ExpressionBuilder exprBuilder` -- the expression
+    // builder this statement builder owns (the C# GC roots it through the field;
+    // the mutual reference back is the non-owning statementBuilder pointer).
     std::unique_ptr<ExpressionBuilder> exprBuilder;
-    // The C# `internal bool EmitAsRefReadOnly` -- the flag the CallBuilder's
-    // `EnforceExplicitIn` arm sets for every `in T` argument it wraps; the
-    // `VisitUsingInstruction` arm consults it.
+
+    // -- The C# `internal` state fields ----------------------------------------------
+
+    // The C# `readonly ILFunction currentFunction`.
+    IL::ILFunction* currentFunction = nullptr;
+    // The C# `internal BlockContainer currentReturnContainer` -- the body cast to
+    // BlockContainer (the port's Body is statically a BlockContainer, so the C#
+    // InvalidCastException shape is unreachable).
+    IL::BlockContainer* currentReturnContainer = nullptr;
+    // The C# `internal IType currentResultType` -- the async return type when the
+    // function is async, the function's own return type otherwise (the C#
+    // `currentFunction.IsAsync ? AsyncReturnType! : ReturnType`).
+    const TS::IType* currentResultType = nullptr;
+    // The C# `internal bool currentIsIterator` -- the YieldReturnDecompiler's flag.
+    bool currentIsIterator = false;
+    // The C# `internal bool EmitAsRefReadOnly` -- the CallBuilder's
+    // EnforceExplicitIn writes it; the StatementBuilder's own consumption
+    // (the as-readonly emission) is the StatementBuilder slice that owns it.
     bool EmitAsRefReadOnly = false;
 
-    // The C# ctor fields (conventions (d)/(f)); the currentFunction,
-    // settings, and decompileRun handles ride the ExpressionBuilder's own
-    // slots (the C# stores them on both builders; the port forwards).
-    IL::BlockContainer* currentReturnContainer = nullptr;
-    TS::ITypePtr currentResultType;
-    bool currentIsIterator = false;
-    // The C# `ILFunction currentFunction` field (read by VisitBlockContainer's
-    // `currentFunction.Body == container` check and the DeclareLocalFunctions
-    // walk).
-    IL::ILFunction* currentFunction = nullptr;
+    // -- The goto/leave state (StatementBuilder.cs lines 338-373 + 1576-1597) ------
+    // The C# fields are private; the port's no-visibility-level convention keeps
+    // them public for the tests (the VisitBlockContainer / TranslateSwitch slices
+    // write them; the Visit arms consume them). All default to the C#-idle shape.
 
-    StatementBuilder(const ::ILSpy::Decompiler::TypeSystem::ICompilation& typeSystem,
-                     const ::ILSpy::Decompiler::TypeSystem::ITypeResolveContext& decompilationContext,
-                     IL::ILFunction* currentFunction,
-                     const DecompilerSettings* settings,
-                     const DecompileRun* decompileRun);
+    // The C# `Dictionary<Block, ConstantResolveResult?>? caseLabelMapping` (line
+    // 338): the switch's block->case-label mapping. Null when not translating a
+    // switch; a mapped NULL value is the 'goto default' case (the C# nullable
+    // value), a mapped non-null value the 'goto case <value>' target.
+    using CaseLabelMapping = std::unordered_map<IL::Block*, std::shared_ptr<Sem::ConstantResolveResult>>;
+    std::optional<CaseLabelMapping> caseLabelMapping;
 
-    // The C# `public Statement Convert(ILInstruction inst)`: the ILVisitor
-    // dispatch (convention (b)).
-    TranslatedStatement Convert(IL::ILInstruction* inst);
-
-    // The C# `public BlockStatement ConvertAsBlock(ILInstruction inst)`:
-    // `Convert(inst).WithILInstruction(inst)`, then the `as BlockStatement ??
-    // new BlockStatement { stmt }` wrap.
-    TranslatedStatement ConvertAsBlock(IL::ILInstruction* inst);
-
-    // The branch state machine (the C# fields at StatementBuilder.cs lines
-    // 336-344): the continue/break/case-label/end-container bookkeeping the
-    // loop- and switch-translation slices drive. `continueTarget` is a
-    // non-owning Block*; `caseLabelMapping` maps a block to the constant case
-    // value (`std::nullopt` marks the default case); `labels` /
-    // `duplicateLabels` / `endContainerLabels` are the EnsureUniqueLabel /
-    // end-label de-dup tables.
+    // The C# `Block? continueTarget` (line 341) + `int continueCount` (line 343):
+    // the block a 'continue;' statement would continue to and how many
+    // ContinueStatements were created for it (VisitBlockContainer seeds it).
     IL::Block* continueTarget = nullptr;
     int continueCount = 0;
-    // The C# `Dictionary<Block, ConstantResolveResult?>?` -- the port models
-    // the nullability with an optional map; the value is the `ResolveResult`
-    // shared handle, nullopt for the default case.
-    std::optional<std::map<IL::Block*, std::optional<std::shared_ptr<Sem::ResolveResult>>>>
-        caseLabelMapping;
-    IL::BlockContainer* breakTarget = nullptr;
-    std::map<IL::BlockContainer*, std::string> endContainerLabels;
-    std::map<IL::Block*, std::string> labels;
-    std::map<std::string, int> duplicateLabels;
 
-    // The C# `string EnsureUniqueLabel(Block block)` (StatementBuilder.cs):
-    // the per-block label with the duplicate `_N` suffixes.
+    // The C# `BlockContainer? breakTarget` (line 371): the container a 'break;'
+    // statement would break out of. Null when not inside a breakable construct.
+    IL::BlockContainer* breakTarget = nullptr;
+
+    // The C# `readonly Dictionary<BlockContainer, string> endContainerLabels` (line
+    // 372): the 'goto end_<label>' name per escaped container (VisitLeave invents
+    // the names; VisitBlockContainer emits the LabelStatements).
+    std::unordered_map<IL::BlockContainer*, std::string> endContainerLabels;
+
+    // The C# `readonly Dictionary<Block, string> labels` (line 1578) + `readonly
+    // Dictionary<string, int> duplicateLabels` (line 1579): the block->label map
+    // EnsureUniqueLabel fills and the label->occurrence-count map it shares with
+    // the end-container naming (the same duplicateLabels dictionary in the C#).
+    std::unordered_map<IL::Block*, std::string> labels;
+    std::unordered_map<std::string, int> duplicateLabels;
+
+    // The C# `string EnsureUniqueLabel(Block block)` (lines 1581-1597): the block's
+    // IL_xxxx label, deduplicated through the labels map with the `_N` suffix the
+    // shared duplicateLabels count produces. The C# is private; the port's
+    // no-visibility-level convention keeps it public for the tests.
     std::string EnsureUniqueLabel(IL::Block* block);
 
-private:
-    // The C# `protected internal override` leaf visitors this slice ports; the
-    // private members are the C# `protected internal` surface (the port keeps
-    // them out-of-line, declared here for the dynamic_cast dispatch).
-    TranslatedStatement VisitIsInst(IL::IsInst* inst);
-    TranslatedStatement VisitStLoc(IL::StLoc* inst);
-    TranslatedStatement VisitStObj(IL::StObj* inst);
-    TranslatedStatement VisitNop(IL::Nop* inst);
-    TranslatedStatement VisitThrow(IL::Throw* inst);
-    TranslatedStatement VisitRethrow(IL::Rethrow* inst);
-    TranslatedStatement VisitBranch(IL::Branch* inst);
-    TranslatedStatement VisitLeave(IL::Leave* inst);
-    TranslatedStatement VisitIfInstruction(IL::IfInstruction* inst);
-    TranslatedStatement VisitTryCatch(IL::TryCatch* inst);
-    TranslatedStatement VisitTryFinally(IL::TryFinally* inst);
-    TranslatedStatement VisitTryFault(IL::TryFault* inst);
-    TranslatedStatement VisitLockInstruction(IL::LockInstruction* inst);
-    TranslatedStatement VisitBlock(IL::Block* inst);
-    TranslatedStatement VisitPinnedRegion(IL::PinnedRegion* inst);
-    // The C# `TryCatchStatement MakeTryCatch(ILInstruction tryBlock)`: the
-    // try-block conversion with the extend-existing-try-catch reuse.
-    TranslatedStatement MakeTryCatch(IL::ILInstruction* tryBlock);
+    // -- The switch-construction region (StatementBuilder.cs lines 156-346) -------------
 
-    // The switch family (the C# `VisitSwitchInstruction`/`TranslateSwitch`/
-    // `CreateTypedCaseLabel`/`ConvertSwitchSectionBody`, CallBuilder.cs's
-    // sibling slices at StatementBuilder.cs lines 156-346). The C#
-    // `IEnumerable<ConstantResolveResult> CreateTypedCaseLabel(long, IType,
-    // List<(string?, int)>?)` ports to a materializing vector (the eager-
-    // iteration convention); the StringToInt map arm asserts (the node is not
-    // ported).
-    TranslatedStatement VisitSwitchInstruction(IL::SwitchInstruction* inst);
-    Syntax::SwitchStatement* TranslateSwitch(IL::BlockContainer* switchContainer,
-                                             IL::SwitchInstruction* inst);
+    // The C# `internal IEnumerable<ConstantResolveResult> CreateTypedCaseLabel(
+    // long i, IType type, List<(string? Key, int Value)>? map = null)` (lines
+    // 156-202): the typed case-label constant for a switch over the type -- the
+    // boolean re-box, the string-map one-label-per-key, the enum underlying-type
+    // cast, the primitive TypeCode cast, and the raw-long fallback. The C#
+    // nullable-key tuple list ports to the optional-string pair vector. The C# is
+    // internal; the port's no-visibility-level convention keeps it public.
     std::vector<std::shared_ptr<Sem::ConstantResolveResult>> CreateTypedCaseLabel(
-        std::int64_t i, const TS::IType& type,
-        const std::optional<std::vector<std::pair<std::optional<std::string>, int>>>& map)
-        const;
-    void ConvertSwitchSectionBody(Syntax::SwitchSection* astSection,
-                                  IL::ILInstruction* bodyInst);
-    IL::SwitchSection* GetDefaultSection(IL::SwitchInstruction* inst) const;
+        long long i, TS::IType& type,
+        const std::vector<std::pair<std::optional<std::string>, int>>* map = nullptr);
 
-    // The block-container/loop family (the C# `VisitBlockContainer`/
-    // `ConvertLoop`/`ConvertBlockContainer`/`DeclareLocalFunctions`,
-    // StatementBuilder.cs lines 1300-1582). The C# IEnumerable block sequences
-    // (Skip/Except/SkipLast) port to materialized vectors; the
-    // TransformToForeachWithoutDispose arm is deferred with the foreach
-    // surface; DeclareLocalFunctions throws when it would emit (the
-    // local-function declaration machinery is not ported).
-    TranslatedStatement VisitUsingInstruction(IL::UsingInstruction* inst);
-
-    // ---- The foreach construction (StatementBuilder.cs lines 512-1230) -------------
-
-    // The C# `enum RequiredGetCurrentTransformation` (StatementBuilder.cs line 984):
-    // which foreach-variable shape the loop body requires (the C# nested-enum
-    // declaration ports to the namespace scope; the Deconstruction arm is deferred
-    // with the DeconstructInstruction surface).
-    enum class RequiredGetCurrentTransformation {
-        NoForeach,
-        UseExistingVariable,
-        IntroduceNewVariable,
-        IntroduceNewVariableAndLocalCopy,
-        Deconstruction,
-    };
-
-    // The C# `bool MatchGetEnumeratorPattern(Expression resource, out Match m,
-    // out bool isAsync)` (StatementBuilder.cs line 611): the GetEnumerator /
-    // GetAsyncEnumerator pattern over the translated resource, with the
-    // extension-method arm gated on the settings and validated through the
-    // resolver's CanTransformToExtensionMethodCall.
-    bool MatchGetEnumeratorPattern(Syntax::Expression* resource,
-                                   PatternMatching::Match& m, bool& isAsync);
-
-    // The C# `Statement TransformToForeach(UsingInstruction inst, Expression
-    // resource)` (StatementBuilder.cs line 664): the settings gate, the pattern
-    // match, the body-container unwrap, and the dispatch into the full transform.
-    Syntax::Statement* TransformToForeach(IL::UsingInstruction* inst,
-                                          Syntax::Expression* resource);
-
-    // The C# `Statement TransformToForeach(BlockContainer container, BlockContainer
-    // loopContainer, Leave? optionalLeaveAfterLoop, ILVariable enumeratorVar, bool
-    // isAsync, Match m, ILInstruction resourceExpression)` (StatementBuilder.cs
-    // line 729): the shared tail of the two entry points (the container/isAsync
-    // gates, the nested-container unwrap, and the full transform).
-    Syntax::Statement* TransformToForeachTail(
-        IL::BlockContainer* container, IL::BlockContainer* loopContainer,
-        IL::Leave* optionalLeaveAfterLoop, IL::ILVariable* enumeratorVar, bool isAsync,
-        PatternMatching::Match m, IL::ILInstruction* resourceExpression);
-
-    // The C# `Statement TransformToForeachWithoutDispose(Block block, ref int i)`
-    // (StatementBuilder.cs line 669): the bare 'stloc e(GetEnumerator);
-    // while (e.MoveNext())' shape; on success `i` is advanced past the loop.
-    Syntax::Statement* TransformToForeachWithoutDispose(IL::Block* block, int& i);
-
-    // The C# `Statement TransformToForeachWithoutDispose(StLoc storeInst,
-    // BlockContainer loopContainer)` (StatementBuilder.cs line 684): the
-    // never-disposable-enumerator gates and the shared tail dispatch.
-    Syntax::Statement* TransformToForeachWithoutDispose(
-        IL::StLoc* storeInst, IL::BlockContainer* loopContainer);
-
-    // The C# `Statement TransformToForeach(BlockContainer container, BlockContainer
-    // loopContainer, Leave? optionalLeaveAfterLoop, ILVariable enumeratorVar, bool
-    // isAsync, Match m, ILInstruction resourceExpression)` (StatementBuilder.cs
-    // line 729): the MoveNext condition match, the get_Current transformation
-    // detection, the designation, and the ForeachStatement construction with the
-    // optional leave / trailing statements block.
-    Syntax::Statement* TransformToForeachCore(
-        IL::BlockContainer* container, IL::BlockContainer* loopContainer,
-        IL::Leave* optionalLeaveAfterLoop, IL::ILVariable* enumeratorVar, bool isAsync,
-        PatternMatching::Match m, IL::ILInstruction* resourceExpression);
-
-    // The C# `BlockContainer UnwrapNestedContainerIfPossible(BlockContainer
-    // container, out Leave? optionalLeaveInst)` (StatementBuilder.cs line 960):
-    // unwrap a single-block container holding a nested container + a Leave.
-    IL::BlockContainer* UnwrapNestedContainerIfPossible(IL::BlockContainer* container,
-                                                        IL::Leave*& optionalLeaveInst);
-
-    // The C# `RequiredGetCurrentTransformation DetectGetCurrentTransformation(...)`
-    // (StatementBuilder.cs line 1002): the enumerator load/Current analysis. The C#
-    // consults the tracked `LoadInstructions`/`AddressInstructions` lists; this port
-    // computes them with an on-demand tree walk (see the implementation note).
-    RequiredGetCurrentTransformation DetectGetCurrentTransformation(
-        IL::BlockContainer* usingContainer, IL::Block* loopBody,
-        IL::BlockContainer* loopContainer, IL::ILVariable* enumerator,
-        IL::ILInstruction* moveNextUsage, IL::Call*& singleGetter,
-        IL::ILVariablePtr& foreachVariable);
-
-    // The C# `bool VariableIsOnlyUsedInBlock(StLoc storeInst, BlockContainer
-    // usingContainer, BlockContainer loopContainer)` (StatementBuilder.cs line 1142).
-    bool VariableIsOnlyUsedInBlock(IL::StLoc* storeInst,
-                                   IL::BlockContainer* usingContainer,
-                                   IL::BlockContainer* loopContainer);
-
-    // The C# `bool CurrentIsStructSetterTarget(ILInstruction inst, CallInstruction
-    // singleGetter)` (StatementBuilder.cs line 1161) and its helpers
-    // `IsTargetOfSetterCall` (line 1170) and `ParentIsCurrentGetter` (line 1206).
-    bool CurrentIsStructSetterTarget(IL::ILInstruction* inst, IL::Call* singleGetter);
-    bool IsTargetOfSetterCall(IL::ILInstruction* inst, const TS::IType& targetType);
-    bool ParentIsCurrentGetter(IL::ILInstruction* inst);
-
-    // The C# `bool IsDynamicCastToIEnumerable(Expression expr, out Expression
-    // dynamicExpr)` (StatementBuilder.cs line 937).
-    bool IsDynamicCastToIEnumerable(Syntax::Expression* expr, Syntax::Expression*& dynamicExpr);
-    // The memory-instruction family (the C# `VisitInitblk`/`VisitCpblk`/
-    // `VisitCkfinite`, StatementBuilder.cs lines 1609-1678): the Unsafe
-    // intrinsic calls with the leading `IL ... instruction` comments and the
-    // `float.IsFinite` throw-guard render.
-    TranslatedStatement VisitInitblk(IL::Initblk* inst);
-    TranslatedStatement VisitCpblk(IL::Cpblk* inst);
-    TranslatedStatement VisitCkfinite(IL::Ckfinite* inst);
-    TranslatedStatement VisitBlockContainer(IL::BlockContainer* container);
-    Syntax::Statement* ConvertLoop(IL::BlockContainer* container);
-    Syntax::BlockStatement* ConvertBlockContainer(IL::BlockContainer* container,
-                                                  bool isLoop);
-    void ConvertBlockContainer(Syntax::BlockStatement* blockStatement,
-                               IL::BlockContainer* container,
-                               const std::vector<IL::Block*>& blocks, bool isLoop);
-    void DeclareLocalFunctions(IL::BlockContainer* container,
-                               Syntax::BlockStatement* blockStatement);
+    // The C# `SwitchStatement TranslateSwitch(BlockContainer? switchContainer,
+    // SwitchInstruction inst)` (lines 208-320): the switch-statement render over
+    // TranslateSwitchValue -- the per-section case labels (the default section's
+    // bare label, the null label, the typed constants), the branch-body inlining
+    // gate, the case-label mapping the VisitBranch goto-case arm consumes, the
+    // default-only Leave-section removal, the remaining-blocks trailing labels,
+    // and the end-container break. The C# is private; the port's
+    // no-visibility-level-for-tests convention keeps it public (the
+    // EnsureUniqueLabel precedent -- the VisitBlockContainer arm is still
+    // deferred, so the container-driven shape is reachable only directly).
+    Syntax::SwitchStatement* TranslateSwitch(IL::BlockContainer* switchContainer,
+                                             IL::SwitchInstruction& inst);
 
 private:
-    // The C# `protected override TranslatedStatement Default(ILInstruction
-    // inst)`: `new ExpressionStatement(exprBuilder.Translate(inst))` wrapped
-    // with the IL instruction.
+    // The C# `readonly IDecompilerTypeSystem typeSystem` / `DecompilerSettings
+    // settings` / `internal readonly DecompileRun decompileRun` fields.
+    const TS::ICompilation* typeSystem = nullptr;
+    const DecompilerSettings* settings = nullptr;
+    const DecompileRun* decompileRun = nullptr;
+
+    // -- The visitor dispatch (the C# ILVisitor<TranslatedStatement> base) -----------
+
+    // The port's stand-in for the C# AcceptVisitor double dispatch: the OpCode
+    // switch over the landed Visit arms, falling back to Default (the C#'s own
+    // fallback -- an ExpressionStatement over the expression translation).
+    TranslatedStatement Visit(IL::ILInstruction* inst);
+
+    // The C# `protected override TranslatedStatement Default(ILInstruction inst)`.
     TranslatedStatement Default(IL::ILInstruction* inst);
+
+    // The C# `protected internal override TranslatedStatement VisitIsInst(IsInst
+    // inst)`: the unused-result `is` test over the boxing-unwrapped argument.
+    TranslatedStatement VisitIsInst(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement VisitStLoc(StLoc
+    // inst)` / VisitStObj sibling: the statement-level store renders the assignment
+    // and strips the top-level ref on ref re-assignment.
+    TranslatedStatement VisitStLoc(IL::ILInstruction* inst);
+    TranslatedStatement VisitStObj(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement VisitNop(Nop inst)`:
+    // the empty statement with the nop's comment as trailing trivia.
+    TranslatedStatement VisitNop(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement
+    // VisitIfInstruction(IfInstruction inst)`: the if/else statement over the
+    // translated condition (a false arm that is a Nop is the C#'s no-else shape).
+    TranslatedStatement VisitIfInstruction(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement VisitBranch(Branch
+    // inst)` (lines 347-362): the continue / goto-case / goto-label fix, with the
+    // continue arm first (the C# order) so a continue-target branch never renders
+    // as a goto.
+    TranslatedStatement VisitBranch(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement VisitLeave(Leave
+    // inst)` (lines 377-423): the break / yield-break / return / goto-end fix, with
+    // the possible-loss-of-type-information cast the lambda/expr-tree arm inserts.
+    TranslatedStatement VisitLeave(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement VisitThrow(Throw
+    // inst)` (lines 424-427): the throw statement over the translated argument.
+    TranslatedStatement VisitThrow(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement VisitRethrow(Rethrow
+    // inst)` (lines 429-432): a bare throw statement (no expression).
+    TranslatedStatement VisitRethrow(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement VisitYieldReturn(
+    // YieldReturn inst)` (lines 434-444): the yield return statement over the
+    // element-typed value (the async return type, else the IEnumerable unwrap).
+    TranslatedStatement VisitYieldReturn(IL::ILInstruction* inst);
+    // The C# `TryCatchStatement MakeTryCatch(ILInstruction tryBlock)` (lines
+    // 445-454): reuses a converted nested try-catch statement without a finally
+    // block (the extend-existing path) or wraps the converted statement in a
+    // fresh TryCatchStatement.
+    Syntax::TryCatchStatement* MakeTryCatch(IL::ILInstruction* tryBlock);
+    // The C# `protected internal override TranslatedStatement VisitTryCatch(
+    // TryCatch inst)` (lines 456-485): the try/catch statement over the
+    // converted try block and one CatchClause per handler (the caught variable's
+    // name/type from its store counts, the `when` filter over every non-ldc.i4.1
+    // filter).
+    TranslatedStatement VisitTryCatch(IL::ILInstruction* inst);
+    // The C# VisitTryFinally sibling (lines 486-492): the finally block over
+    // MakeTryCatch's reused-or-wrapped try statement.
+    TranslatedStatement VisitTryFinally(IL::ILInstruction* inst);
+    // The C# VisitTryFault sibling (lines 493-505): the fault block becomes a
+    // catch clause body carrying the 'try-fault' empty statement and a bare
+    // throw.
+    TranslatedStatement VisitTryFault(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement
+    // VisitLockInstruction(LockInstruction inst)` (lines 506-510): the lock
+    // statement over the translated monitor expression and the converted body.
+    TranslatedStatement VisitLockInstruction(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement
+    // VisitUsingInstruction(UsingInstruction inst)` (lines 533-598): the
+    // using-statement render -- the resource expression translation, the validity
+    // check (the null literal, a ref struct, or a resource whose underlying type
+    // implements the known dispose interface), and the `UsingStatement` over the
+    // resource acquisition (a `VariableDeclarationStatement` when the using
+    // variable is loaded/address-taken, else the bare resource expression) and the
+    // converted body. The C# `TransformToForeach` first arm and the not-valid-in-C#
+    // try/finally fallback are documented deferrals (the foreach machinery and
+    // `AssignVariableNames.GenerateVariableName`).
+    TranslatedStatement VisitUsingInstruction(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement VisitInitblk(Initblk
+    // inst)` (lines 1609-1623): the Unsafe.InitBlock/InitBlockUnaligned intrinsic
+    // call over the (address, value, size) translations with the IL comment trivia.
+    TranslatedStatement VisitInitblk(IL::ILInstruction* inst);
+    // The C# VisitCpblk sibling (lines 1627-1641): Unsafe.CopyBlock/CopyBlockUnaligned.
+    TranslatedStatement VisitCpblk(IL::ILInstruction* inst);
+    // The C# VisitCkfinite (lines 1645-1669): the `if (!float.IsFinite(<arg>)) throw
+    // new ArithmeticException();` guard.
+    TranslatedStatement VisitCkfinite(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement
+    // VisitSwitchInstruction(SwitchInstruction inst)` (line 203): the switch
+    // statement over TranslateSwitch (the null-container shape -- the container
+    // driven shape comes through the VisitBlockContainer arm, still deferred).
+    TranslatedStatement VisitSwitchInstruction(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement VisitBlock(Block
+    // block)` (line 1280): the ControlFlow block as a BlockStatement over its
+    // instructions plus the non-Nop final instruction (the foreach conversion
+    // arm inside the loop is deferred with the TransformToForeach machinery).
+    TranslatedStatement VisitBlock(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement
+    // VisitBlockContainer(BlockContainer container)` (line 1300): the loop /
+    // switch-entry / plain-block dispatch over the container kind and the
+    // entry point's incoming-edge count.
+    TranslatedStatement VisitBlockContainer(IL::ILInstruction* inst);
+    // The C# `protected internal override TranslatedStatement
+    // VisitPinnedRegion(PinnedRegion inst)` (lines 1201-1278): the `fixed`
+    // statement over the pinned variable and its init expression -- the
+    // GetPinnableReference unwrap, the pointer-to-ref retype, the
+    // DirectionExpression address-of surgery, and the Unsafe.AsRef fallback for
+    // an already-unmanaged pointer.
+    TranslatedStatement VisitPinnedRegion(IL::ILInstruction* inst);
+
+public:
+    // The C# `private static bool IsAddressOfMoveableVar(Expression initExpr)`
+    // (lines 1262-1271): whether an `&expr` init takes the address of a moveable
+    // variable (the PointerArithmeticOffset.IsFixedVariable gate). The C# is
+    // private; the port's no-visibility-level-for-tests convention keeps it public.
+    static bool IsAddressOfMoveableVar(Syntax::Expression* initExpr);
+
+    // The C# `private static bool IsFixedSizeBuffer(Expression initExpr)` (lines
+    // 1273-1277): whether the init resolves to a fixed-size buffer field (the
+    // CSharpDecompiler.IsFixedField predicate). The C# is private; the port's
+    // no-visibility-level-for-tests convention keeps it public.
+    static bool IsFixedSizeBuffer(Syntax::Expression* initExpr);
+
+private:
+
+    // The C# `private void ConvertSwitchSectionBody(Syntax.SwitchSection
+    // astSection, ILInstruction bodyInst)` (lines 321-346): the converted body
+    // plus the EndPointUnreachable-gated break insertion (into the body block
+    // when the body converted to one, else as a trailing section statement).
+    void ConvertSwitchSectionBody(Syntax::SwitchSection* astSection, IL::ILInstruction* bodyInst);
+
+    // -- The block-container region (StatementBuilder.cs lines 1280-1608) -----------------------
+
+    // The C# `Statement ConvertLoop(BlockContainer container)` (lines 1321-1430):
+    // the four loop kinds -- Loop (the while-true shape with the entry-point
+    // label removal), While (the condition-block shape with the reachability
+    // break and the not-continue entry label), DoWhile (the last-block condition
+    // shape), and For (the increment-block iterators). Declared private like the
+    // C#; the tests drive through Convert's dispatch.
+    Syntax::Statement* ConvertLoop(IL::BlockContainer* container);
+
+    // The C# `BlockStatement ConvertBlockContainer(BlockContainer container,
+    // bool isLoop)` (lines 1432-1465): the wrapper over the worker -- the
+    // local-function declarations (the DeclareLocalFunctions deferral below) and
+    // the ref-readonly helper emission for the function body container.
+    Syntax::BlockStatement* ConvertBlockContainer(IL::BlockContainer* container, bool isLoop);
+
+    // The C# `BlockStatement ConvertBlockContainer(BlockStatement blockStatement,
+    // BlockContainer container, IEnumerable<Block> blocks, bool isLoop)` (lines
+    // 1529-1608): the worker -- the per-block labels (any block with an incoming
+    // multi-edge or a non-entry position), the instruction conversion with the
+    // final-leave skip (the ImplicitReturnAnnotation) and the nested-block
+    // flattening, the non-Nop final instruction, and the end-container label
+    // (with the loop's continue/break pair).
+    Syntax::BlockStatement* ConvertBlockContainer(Syntax::BlockStatement* blockStatement,
+                                                   IL::BlockContainer* container,
+                                                   const std::vector<IL::Block*>& blocks,
+                                                   bool isLoop);
+
+    // The C# `static bool IsFinalLeave(Leave leave)` (lines 1599-1608): the
+    // value-less leave that is the very last instruction of the container's
+    // last block targeting that container -- the function's implicit return.
+    static bool IsFinalLeave(IL::Leave* leave);
 };
 
-} // namespace ILSpy::Decompiler::CSharp
+}  // namespace ILSpy::Decompiler::CSharp

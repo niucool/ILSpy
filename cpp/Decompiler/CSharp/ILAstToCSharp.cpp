@@ -55,6 +55,7 @@
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/PinnedRegion.hpp"
 #include "Decompiler/IL/Instructions/RefAnyType.hpp"
+#include "Decompiler/IL/Instructions/TypedReferenceInstructions.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
@@ -64,6 +65,7 @@
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
 #include "Decompiler/IL/Instructions/UserDefinedLogicOperator.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
+#include "Decompiler/IL/Instructions/Unbox.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
@@ -2332,6 +2334,11 @@ private:
                 return "(" + TypeDisplayName(cast.Type) + ")(" +
                        (cast.Argument ? Expr(*cast.Argument) : "(default)") + ")";
             }
+            case OpCode::Unbox: {
+                const auto& unbox = static_cast<const Unbox&>(inst);
+                return "(" + TypeDisplayName(unbox.Type) + ")(" +
+                       (unbox.Argument ? Expr(*unbox.Argument) : "(default)") + ")";
+            }
             case OpCode::UnboxAny: {
                 const auto& unbox = static_cast<const UnboxAny&>(inst);
                 return "(" + TypeDisplayName(unbox.Type) + ")(" +
@@ -2358,6 +2365,18 @@ private:
                 const auto& ref = static_cast<const RefAnyType&>(inst);
                 return "__reftype(" + (ref.Argument ? Expr(*ref.Argument) : "(default)") +
                        ").TypeHandle";
+            }
+            case OpCode::MakeRefAny: {
+                // `mkrefany <T>` -- the C# `__makeref(arg)` undocumented keyword.
+                const auto& mr = static_cast<const MakeRefAny&>(inst);
+                return "__makeref(" + (mr.Argument ? Expr(*mr.Argument) : "(default)") + ")";
+            }
+            case OpCode::RefAnyValue: {
+                // `refanyval <T>` -- the C# `__refvalue(arg, T)` undocumented
+                // keyword (a managed pointer to the value in the typed reference).
+                const auto& rv = static_cast<const RefAnyValue&>(inst);
+                return "__refvalue(" + (rv.Argument ? Expr(*rv.Argument) : "(default)") +
+                       ", " + TypeDisplayName(rv.Type) + ")";
             }
             case OpCode::LdLen: {
                 const auto& ld = static_cast<const LdLen&>(inst);
@@ -2412,6 +2431,10 @@ private:
                 return "sizeof(" + static_cast<const SizeOf&>(inst).TypeName + ")";
             case OpCode::LdTypeToken:
                 return "typeof(" + FlattenMetadataName(static_cast<const LdTypeToken&>(inst).TokenName) + ")";
+            case OpCode::Arglist:
+                // The real back end's VisitArglist renders the ArgListAccess
+                // UndocumentedExpression as the `__arglist` keyword.
+                return "__arglist";
             case OpCode::DefaultValue: {
                 const auto& dv = static_cast<const DefaultValue&>(inst);
                 return "default(" + CSharpTypeName(dv.Type) + ")";

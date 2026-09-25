@@ -7,7 +7,6 @@ add_executable(ilspy_tests
     Util/Util_Test.cpp
     Util/LongSet_Test.cpp
     Util/BitSet_Test.cpp
-    Util/UnionFind_Test.cpp
     Util/StringComparers_Test.cpp
     Util/ResourcesFile_Test.cpp
     Util/ResourcesFileValue_Test.cpp
@@ -31,7 +30,6 @@ add_executable(ilspy_tests
     Decompiler/Metadata/MethodBody_Test.cpp
     Decompiler/Metadata/MethodSemanticsLookup_Test.cpp
     Decompiler/Metadata/PropertyAndEventBackingFieldLookup_Test.cpp
-    Decompiler/Metadata/CodeMappingInfo_Test.cpp
     Decompiler/Metadata/ILDisassembler_Test.cpp
     Decompiler/Metadata/EntitySurface_Test.cpp
     Decompiler/Metadata/CustomAttributes_Test.cpp
@@ -43,7 +41,6 @@ add_executable(ilspy_tests
     Decompiler/Metadata/AssemblyIdentity_Test.cpp
     Decompiler/Metadata/MetadataFileLookups_Test.cpp
     Decompiler/Metadata/NamespaceDefinition_Test.cpp
-    Decompiler/Metadata/CustomAttributeDecoderPair_Test.cpp
     Decompiler/Metadata/CustomAttributeDecoder_Test.cpp
     Decompiler/Metadata/DotNetCorePathFinderExtensions_Test.cpp
     Decompiler/Metadata/DotNetCorePathFinder_Test.cpp
@@ -66,26 +63,10 @@ add_executable(ilspy_tests
     Decompiler/Disassembler/ILStructure_Test.cpp
     Decompiler/Disassembler/MethodBodyDisassembler_Test.cpp
     Decompiler/Disassembler/ReflectionDisassembler_Test.cpp
-    Decompiler/Disassembler/SecurityDeclarationDecoder_Test.cpp
     Decompiler/Disassembler/SortByNameProcessor_Test.cpp
-    Decompiler/Disassembler/WriteValue_Test.cpp
-    Decompiler/Disassembler/WriteDecodedCustomAttributeBlob_Test.cpp
-    Decompiler/Disassembler/TryDecodeSecurityDeclaration_Test.cpp
     Decompiler/DebugInfo/IDebugInfoProvider_Test.cpp
     ILSpyX/PdbProvider/PortableDebugInfoProvider_Test.cpp
     ILSpyX/PdbProvider/DebugInfoUtils_Test.cpp
-    ILSpyX/Util/GuessFileType_Test.cpp
-    ILSpyX/Extensions/CollectionExtensions_Test.cpp
-    ILSpyX/LoadedPackage_Test.cpp
-    ILSpyX/LoadedAssembly_Test.cpp
-    ILSpyX/LoadedAssemblyResolver_Test.cpp
-    ILSpyX/AssemblyListManager_Test.cpp
-    ILSpyX/LoadedAssemblyExtensions_Test.cpp
-    ILSpyX/AssemblyList_Test.cpp
-    ILSpyX/FileLoaders/FileLoaders_Test.cpp
-    ILSpyX/Abstractions/ILanguage_Test.cpp
-    ILSpyX/Settings/Settings_Test.cpp
-    ILSpyX/Settings/DecompilerSettingsOptions_Test.cpp
     ILSpyCmd/IlspyCmdProgram_Test.cpp
     ILSpyCmd/ResourceExtensions_Test.cpp
     ILSpyCmd/MetadataTableDumper_Test.cpp
@@ -118,18 +99,17 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/SignatureDecoder_Test.cpp
     Decompiler/TypeSystem/TypeKindDerivation_Test.cpp
     Decompiler/TypeSystem/TypeUtils_Test.cpp
+    Decompiler/TypeSystem/NRExtensions_Test.cpp
     Decompiler/TypeSystem/ISymbol_Test.cpp
     Decompiler/TypeSystem/IVariable_Test.cpp
     Decompiler/TypeSystem/INamedElement_Test.cpp
     Decompiler/TypeSystem/Accessibility_Test.cpp
     Decompiler/TypeSystem/TypeSystemOptions_Test.cpp
     Decompiler/TypeSystem/ITypeDefinitionOrUnknown_Test.cpp
-    Decompiler/TypeSystem/ITypeNamespace_Test.cpp
     Decompiler/TypeSystem/KnownAttribute_Test.cpp
     Decompiler/TypeSystem/ICompilationProvider_Test.cpp
     Decompiler/TypeSystem/BaseTypeCollector_Test.cpp
     Decompiler/TypeSystem/TypeSystemExtensions_Test.cpp
-    Decompiler/TypeSystem/DecompilerTypeSystem_Test.cpp
     Decompiler/TypeSystem/MemberEnumeration_Test.cpp
     Decompiler/TypeSystem/DummyTypeParameter_Test.cpp
     Decompiler/TypeSystem/NormalizeTypeVisitor_Test.cpp
@@ -243,6 +223,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Resolver/CSharpOperatorsBitwise_Test.cpp
     Decompiler/CSharp/Resolver/CSharpOperatorsUserDefined_Test.cpp
     Decompiler/CSharp/Resolver/CSharpOperatorsInvoke_Test.cpp
+    Decompiler/CSharp/Resolver/CSharpResolverArrayCreation_Test.cpp
     Decompiler/CSharp/Resolver/CSharpResolverBinaryOperator_Test.cpp
     Decompiler/CSharp/Resolver/CSharpResolverCanTransform_Test.cpp
     Decompiler/CSharp/Resolver/CSharpResolverConditionPrimitiveDefaultAssignment_Test.cpp
@@ -316,6 +297,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/MetadataModuleResolution_Test.cpp
     Decompiler/TypeSystem/MetadataTypeDefinition_Test.cpp
     Decompiler/TypeSystem/MetadataField_Test.cpp
+    Decompiler/TypeSystem/MetadataTypeParameter_Test.cpp
     Decompiler/TypeSystem/AttributeListBuilder_Test.cpp
     Decompiler/TypeSystem/MetadataMethod_Test.cpp
     Decompiler/TypeSystem/MetadataPropertyEvent_Test.cpp
@@ -367,6 +349,7 @@ add_executable(ilspy_tests
     Decompiler/IL/ILInstructionClone_Test.cpp
     Decompiler/IL/ILAmbience_Test.cpp
     Decompiler/CSharp/ILAstToCSharp_Test.cpp
+    Decompiler/CSharp/AutoEventDecompiler_Test.cpp
     Decompiler/CSharp/ProjectDecompiler/WholeProjectDecompiler_Test.cpp
     Decompiler/CSharp/Syntax/TextLocation_Test.cpp
     Decompiler/CSharp/Syntax/CSharpSlotInfo_Test.cpp
@@ -430,17 +413,6 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Syntax/Statements/YieldReturnEmptyLabelStatement_Test.cpp
     Decompiler/CSharp/Syntax/Statements/CheckedUncheckedUnsafeStatement_Test.cpp
     Decompiler/CSharp/Syntax/Statements/LockStatement_Test.cpp
-    Decompiler/CSharp/Transforms/FlattenSwitchBlocks_Test.cpp
-    Decompiler/CSharp/Transforms/FixNameCollisions_Test.cpp
-    Decompiler/CSharp/Transforms/EscapeInvalidIdentifiers_Test.cpp
-    Decompiler/CSharp/Transforms/PrettifyAssignments_Test.cpp
-    Decompiler/CSharp/Transforms/NormalizeBlockStatements_Test.cpp
-    Decompiler/CSharp/Transforms/PatternStatementTransform_Test.cpp
-    Decompiler/CSharp/Transforms/DeclareVariables_Test.cpp
-    Decompiler/CSharp/Transforms/ReplaceMethodCallsWithOperators_Test.cpp
-    Decompiler/CSharp/Transforms/IntroduceUnsafeModifier_Test.cpp
-    Decompiler/CSharp/RequiredNamespaceCollector_Test.cpp
-    Decompiler/CSharp/RequiredNamespaceCollectorMetadata_Test.cpp
     Decompiler/CSharp/Syntax/Statements/UsingStatement_Test.cpp
     Decompiler/CSharp/Syntax/Statements/ForStatement_Test.cpp
     Decompiler/CSharp/Syntax/Statements/ForeachStatement_Test.cpp
@@ -506,35 +478,40 @@ add_executable(ilspy_tests
     Decompiler/CSharp/ExpressionBuilderSkeleton_Test.cpp
     Decompiler/CSharp/ExpressionBuilderUserDefinedCompoundAssign_Test.cpp
     Decompiler/CSharp/ExpressionBuilderNumericCompoundAssign_Test.cpp
-    Decompiler/CSharp/ExpressionBuilderLdObjStObj_Test.cpp
-    Decompiler/CSharp/ExpressionBuilderLdLen_Test.cpp
-    Decompiler/CSharp/ExpressionBuilderLdElema_Test.cpp
-    Decompiler/CSharp/ExpressionBuilderUnboxBoxCast_Test.cpp
-    Decompiler/CSharp/ExpressionBuilderNullableRewrapUnwrap_Test.cpp
-    Decompiler/CSharp/ExpressionBuilderNullCoalescing_Test.cpp
-    Decompiler/CSharp/ExpressionBuilderUserDefinedLogic_Test.cpp
-    Decompiler/CSharp/ExpressionBuilderRefAnyType_Test.cpp
-    Decompiler/CSharp/ExpressionBuilderInterpolatedString_Test.cpp
-    Decompiler/CSharp/ExpressionBuilderTranslateTarget_Test.cpp
-    Decompiler/CSharp/CallBuilderArgumentList_Test.cpp
-    Decompiler/CSharp/CallBuilderBuildArgumentList_Test.cpp
-    Decompiler/CSharp/CallBuilderStatics_Test.cpp
-    Decompiler/CSharp/CallBuilderIsAppropriateCallTarget_Test.cpp
-    Decompiler/CSharp/CallBuilderStringConcat_Test.cpp
-    Decompiler/CSharp/CallBuilderStringInterpolation_Test.cpp
-    Decompiler/CSharp/CallBuilderBuildCall_Test.cpp
+    Decompiler/CSharp/ExpressionBuilderTranslateTargetTest.cpp
     Decompiler/CSharp/StatementBuilder_Test.cpp
-    Decompiler/CSharp/CallBuilderBuild_Test.cpp
-    Decompiler/CSharp/CallBuilderDelegateReference_Test.cpp
-    Decompiler/CSharp/CallBuilderRangeConstruction_Test.cpp
-    Decompiler/CSharp/CallBuilderTransformations_Test.cpp
-    Decompiler/CSharp/CallBuilderHandleImplicitConversion_Test.cpp
+    Decompiler/CSharp/CallBuilder_Test.cpp
+    Decompiler/CSharp/Transforms/EscapeInvalidIdentifiers_Test.cpp
+    Decompiler/CSharp/Transforms/RemoveCLSCompliantAttribute_Test.cpp
+    Decompiler/CSharp/Transforms/RemoveCompilerGeneratedAssemblyAttributes_Test.cpp
+    Decompiler/CSharp/Transforms/FlattenSwitchBlocks_Test.cpp
+    Decompiler/CSharp/Transforms/NormalizeBlockStatements_Test.cpp
+    Decompiler/CSharp/Transforms/RenameVisualBasicAnonymousTypes_Test.cpp
+    Decompiler/CSharp/Transforms/FixNameCollisions_Test.cpp
+    Decompiler/CSharp/Transforms/AddXmlDocumentationTransform_Test.cpp
+    Decompiler/CSharp/Transforms/AddCheckedBlocks_Test.cpp
+    Decompiler/CSharp/Transforms/IntroduceUnsafeModifier_Test.cpp
+    Decompiler/CSharp/Transforms/ContextTrackingVisitor_Test.cpp
+    Decompiler/CSharp/Transforms/PatternStatementTransform_Test.cpp
+    Decompiler/CSharp/Transforms/PrettifyAssignments_Test.cpp
+    Decompiler/CSharp/Transforms/ReplaceMethodCallsWithOperators_Test.cpp
+    Decompiler/TypeSystem/DecompilerTypeSystem_Test.cpp
+    Decompiler/CSharp/CSharpDecompilerAstPipeline_Test.cpp
+    Decompiler/CSharp/CSharpDecompiler_Test.cpp
+    Decompiler/CSharp/Transforms/CustomPatterns_Test.cpp
+    Decompiler/CSharp/Transforms/CombineQueryExpressions_Test.cpp
+    Decompiler/CSharp/Transforms/IntroduceQueryExpressions_Test.cpp
+    Decompiler/CSharp/Transforms/IntroduceExtensionMethods_Test.cpp
+    Decompiler/CSharp/Transforms/IntroduceUsingDeclarations_Test.cpp
+    Decompiler/CSharp/Transforms/TransformFieldAndConstructorInitializers_Test.cpp
+    Decompiler/CSharp/Transforms/DeclareVariables_Test.cpp
     Decompiler/CSharp/Syntax/InterpolatedString_Test.cpp
     Decompiler/CSharp/Syntax/QueryExpression_Test.cpp
     Decompiler/CSharp/Syntax/QueryClauses_Test.cpp
     Decompiler/CSharp/Syntax/QueryJoinClause_Test.cpp
     Decompiler/CSharp/Syntax/PatternMatching/PatternMatching_Test.cpp
     Decompiler/CSharp/Syntax/PatternMatching/PatternNodes_Test.cpp
+    Decompiler/CSharp/Syntax/PatternMatching/PatternPlaceholder_Test.cpp
     Decompiler/CSharp/OutputVisitor/TokenWriter_Test.cpp
     Decompiler/CSharp/OutputVisitor/CSharpFormattingOptions_Test.cpp
     Decompiler/CSharp/OutputVisitor/CSharpKeywordCheck_Test.cpp
@@ -551,7 +528,6 @@ add_executable(ilspy_tests
     Decompiler/IL/ControlFlowSimplification_Test.cpp
     Decompiler/IL/ControlFlowGraph_Test.cpp
     Decompiler/FlowAnalysis/Dominance_Test.cpp
-    Decompiler/FlowAnalysis/ReachingDefinitions_Test.cpp
     Decompiler/IL/ILInlining_Test.cpp
     Decompiler/IL/LoopDetection_Test.cpp
     Decompiler/IL/ConditionDetection_Test.cpp
@@ -578,14 +554,11 @@ add_executable(ilspy_tests
     Decompiler/IL/Transforms/UsingTransform_Test.cpp
     Decompiler/IL/Transforms/DelegateConstruction_Test.cpp
     Decompiler/IL/Transforms/CachedDelegateInitialization_Test.cpp
-    Decompiler/IL/Transforms/CombineExitsTransform_Test.cpp
-    Decompiler/IL/Transforms/VariableUsageLists_Test.cpp
     Decompiler/IL/Transforms/CachedReadOnlySpanInitialization_Test.cpp
     Decompiler/IL/Instructions/NullableInstructions_Test.cpp
     Decompiler/IL/Transforms/StatementTransform_Test.cpp
     Decompiler/IL/Transforms/ExpressionTransforms_Test.cpp
     Decompiler/IL/Instructions/MatchInstruction_Test.cpp
-    Decompiler/IL/Instructions/AddressOf_Test.cpp
     Decompiler/IL/Instructions/UsingInstruction_Test.cpp
     Decompiler/IL/Instructions/Conv_Test.cpp
     Decompiler/IL/Instructions/Comp_Test.cpp
@@ -595,37 +568,21 @@ add_executable(ilspy_tests
     Decompiler/IL/Instructions/BinaryNumericInstruction_Test.cpp
     Decompiler/IL/Instructions/ThreeValuedBoolInstructions_Test.cpp
     Decompiler/IL/Instructions/UserDefinedLogicOperator_Test.cpp
-    Decompiler/IL/Instructions/CallResolvedMethod_Test.cpp
+    Decompiler/IL/Instructions/PatternMatching_Test.cpp
     Decompiler/IL/Transforms/NullCoalescingTransform_Test.cpp
-    Decompiler/IL/Transforms/NamedArgumentTransform_Test.cpp
-    Decompiler/IL/Transforms/TransformArrayInitializers_Test.cpp
-    Decompiler/IL/Transforms/TransformCollectionAndObjectInitializers_Test.cpp
-    Decompiler/IL/Transforms/TransformCollectionAndObjectInitializers_StalePos_Test.cpp
-    Decompiler/IL/Transforms/DeconstructionTransform_Test.cpp
-    Decompiler/IL/Transforms/InlineArrayTransform_Test.cpp
-    Decompiler/IL/Transforms/TupleTransform_Test.cpp
-    Decompiler/IL/Transforms/IndexRangeTransform_Test.cpp
-    Decompiler/IL/Transforms/TransformExpressionTrees_Test.cpp
-    Decompiler/IL/Transforms/SwitchOnStringTransform_Test.cpp
-    Decompiler/IL/Transforms/SwitchOnStringHashtable_Test.cpp
-    Decompiler/IL/Transforms/SwitchOnStringLengthChar_Test.cpp
-    Decompiler/IL/Transforms/TransformDisplayClassUsage_Test.cpp
-    Decompiler/IL/Transforms/TransformDisplayClassUsageAnalyze_Test.cpp
-    Decompiler/IL/Transforms/TransformDisplayClassUsageSroa_Test.cpp
-    Decompiler/IL/Transforms/LocalFunctionDecompilerUseSites_Test.cpp
-    Decompiler/IL/Instructions/RunTransforms_Test.cpp
-    Decompiler/IL/Transforms/GetILTransforms_Test.cpp
-    Decompiler/CSharp/CSharpDecompiler_Test.cpp
-    Decompiler/IL/Transforms/LocalFunctionDecompiler_Test.cpp
-    Decompiler/CSharp/Transforms/RemoveCompilerGeneratedAssemblyAttributes_Test.cpp
-    Decompiler/CSharp/CSharpDecompilerAstPipeline_Test.cpp
     Decompiler/IL/Transforms/NullPropagationTransform_Test.cpp
     Decompiler/IL/Transforms/TransformAssignment_Test.cpp
     Decompiler/IL/Transforms/UserDefinedLogicTransform_Test.cpp
+    Decompiler/IL/Transforms/NamedArgumentTransform_Test.cpp
     Decompiler/IL/Transforms/InterpolatedStringTransform_Test.cpp
     Decompiler/IL/Transforms/FixRemainingIncrements_Test.cpp
     Decompiler/IL/Transforms/CopyPropagation_Test.cpp
     Decompiler/IL/Transforms/ReduceNestingTransform_Test.cpp
+    Decompiler/IL/Transforms/CombineExitsTransform_Test.cpp
+    Decompiler/IL/Transforms/DecompileBodyForAnalysis_Test.cpp
+    Decompiler/IL/Transforms/AccessPathElement_Test.cpp
+    Decompiler/IL/Transforms/TransformCollectionAndObjectInitializers_Test.cpp
+    Decompiler/IL/Transforms/TransformDisplayClassUsage_Test.cpp
 )
 target_include_directories(ilspy_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ilspy_tests PRIVATE
@@ -634,4 +591,4 @@ target_link_libraries(ilspy_tests PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(ilspy_tests DISCOVERY_TIMEOUT 120)
+gtest_discover_tests(ilspy_tests)

@@ -1,139 +1,140 @@
 // Copyright (c) 2026 ILSpy Contributors
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy of this
-// software and associated documentation files (the "Software"), to deal in the
-// Software without restriction, including without limitation the rights to use, copy,
-// modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
-// and to permit persons to whom the Software is furnished to do so, subject to the
-// following conditions:
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+// to whom the Software is furnished to do so, subject to the following conditions:
 //
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
 //
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
-// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-// PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
-// HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-// OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
-// SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-// The DeclareVariables analysis half (see DeclareVariables.hpp for the
-// deferred mutation half): the insertion-point computation
-// (FindInsertionPoints + the scope tracking) and the collision resolution.
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
 
 #include "Decompiler/CSharp/Transforms/DeclareVariables.hpp"
 
 #include "Decompiler/CSharp/Annotations.hpp"
-#include "Decompiler/CSharp/ExpressionBuilder.hpp"
-#include "Decompiler/CSharp/Syntax/Comment.hpp"
+#include "Decompiler/NRExtensions.hpp"
+#include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
-#include "Decompiler/CSharp/Syntax/Expressions/DefaultValueExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ErrorExpression.hpp"
-#include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/LambdaExpression.hpp"
-#include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
-#include "Decompiler/CSharp/Syntax/Expressions/OutVarDeclarationExpression.hpp"
-#include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
-#include "Decompiler/CSharp/Syntax/Slots.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Slots.hpp"
+#include "Decompiler/CSharp/ExpressionBuilder.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DefaultValueExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/OutVarDeclarationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
-#include "Decompiler/CSharp/Syntax/Statements/Statement.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
-#include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
-#include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
-#include "Decompiler/CSharp/Syntax/VariableInitializer.hpp"
+#include "Decompiler/CSharp/Syntax/SimpleType.hpp"
+#include "Decompiler/Semantics/OutVarResolveResult.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
+#include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
-#include "Decompiler/Semantics/OutVarResolveResult.hpp"
-#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
-#include <cassert>
-#include <functional>
 #include <stdexcept>
 
 namespace ILSpy::Decompiler::CSharp::Transforms {
 
-namespace CS = ::ILSpy::Decompiler::CSharp;
-namespace Syntax = ::ILSpy::Decompiler::CSharp::Syntax;
-namespace IL = ::ILSpy::Decompiler::IL;
-
 namespace {
 
-// (The C# `node.Annotation<BlockContainer>()` / `Annotation<ILFunction>()`
-// queries moved to the shared Annotations surface:
-// CS::GetBlockContainerAnnotation / CS::GetILFunctionAnnotation.)
+// The C# `v.DefaultInitialization |= prev.DefaultInitialization` values are an
+// enum-flag combination (None=0, NeedsDefaultValue=1, NeedsSkipInit=2).
+
+// The C# `Debug.Assert(prev.Type.Equals(v.Type))` in ResolveCollisions: a same-name
+// collision is only legal between equal-typed variables. The port asserts (debug
+// builds) instead of the C# `Debug.Assert`.
+
+// The shared `ILVariable` handle for a VariableToDeclare: read off the first
+// use's existing ILVariableResolveResult annotation (the identifier
+// FindInsertionPoints analyzed -- `GetILVariable` succeeded on it, so the
+// annotation with the owning shared handle is present).
+IL::ILVariablePtr VariableHandleOf(
+    const DeclareVariables::VariableToDeclare& v) {
+    if (v.FirstUse == nullptr)
+        return nullptr;
+    if (const auto* rr =
+            v.FirstUse->Annotation<ILVariableResolveResult>())
+        return rr->VariableHandle();
+    return nullptr;
+}
 
 } // namespace
 
-// ---- InsertionPoint ----------------------------------------------------------------------
+// ---- InsertionPoint -------------------------------------------------------
 
 DeclareVariables::InsertionPoint DeclareVariables::InsertionPoint::Up() const {
-    // Insertion points live inside a method body, so walking up always finds
-    // a parent (the C# null-forgiving `!` invariant).
-    assert(nextNode != nullptr && nextNode->Parent() != nullptr);
-    return InsertionPoint(level - 1, nextNode->Parent());
+    return InsertionPoint{level - 1, nextNode->Parent()};
 }
 
-DeclareVariables::InsertionPoint DeclareVariables::InsertionPoint::UpTo(
-    int targetLevel) const {
+DeclareVariables::InsertionPoint DeclareVariables::InsertionPoint::UpTo(int targetLevel) const {
     InsertionPoint result = *this;
     while (result.level > targetLevel) {
-        assert(result.nextNode != nullptr && result.nextNode->Parent() != nullptr);
         result.nextNode = result.nextNode->Parent();
         result.level -= 1;
     }
     return result;
 }
 
-// ---- VariableToDeclare -------------------------------------------------------------------
+// ---- VariableToDeclare ----------------------------------------------------
 
 DeclareVariables::VariableToDeclare::VariableToDeclare(
-    const IL::ILVariablePtr& variable, InsertionPoint insertionPoint,
+    IL::ILVariable* variable, DeclareVariables::InsertionPoint insertionPoint,
     Syntax::IdentifierExpression* firstUse, int sourceOrder)
-    : DefaultInitialization(VariableInitKind::None),
-      insertionPoint(insertionPoint),
-      firstUse(firstUse),
-      sourceOrder(sourceOrder),
+    : SourceOrder(sourceOrder),
+      InsertionPoint(insertionPoint),
+      FirstUse(firstUse),
       ilVariable_(variable) {
-    // The C# ctor's initialization-kind decision: a variable whose initial
-    // value is read needs a default initialization (the initialized form when
-    // the value was set up front, SkipInit otherwise).
     if (variable->UsesInitialValue) {
-        if (variable->InitialValueIsInitialized) {
-            DefaultInitialization = VariableInitKind::NeedsDefaultValue;
-        } else {
-            DefaultInitialization = VariableInitKind::NeedsSkipInit;
-        }
+        DefaultInitialization = variable->InitialValueIsInitialized
+            ? VariableInitKind::NeedsDefaultValue
+            : VariableInitKind::NeedsSkipInit;
     } else {
         DefaultInitialization = VariableInitKind::None;
     }
 }
 
-// ---- The analysis surface ----------------------------------------------------------------
+std::string DeclareVariables::VariableToDeclare::Name() const {
+    return ilVariable_->Name;
+}
 
+// ---- Run / analysis entry points ------------------------------------------
+
+// The C# `public override void Run(AstNode rootNode, TransformContext context)`:
+// the ctor-guarded context field, the statement-expression validation, the
+// analysis half (via ClearAnalysisResults + FindInsertionPoints +
+// ResolveCollisions), the insertion sweep, the annotation re-targeting.
 void DeclareVariables::Run(Syntax::AstNode& rootNode, TransformContext& context) {
+    if (context_ != nullptr)
+        throw std::logic_error("Reentrancy in DeclareVariables?");
+    context_ = &context;
     try {
-        if (context_ != nullptr)
-            throw std::logic_error("Reentrancy in DeclareVariables?");
-        context_ = &context;
         ClearAnalysisResults();
         EnsureExpressionStatementsAreValid(&rootNode);
-        FindInsertionPoints(&rootNode, 0);
+        FindInsertionPoints(rootNode, 0);
         ResolveCollisions();
-        // InsertDeconstructionVariableDeclarations is DEFERRED loudly (the
-        // C# call site, line ~484): it needs
-        // StatementBuilder.TranslateDeconstructionDesignation, which is not
-        // ported. Deconstruction assignments keep their tuple-expression
-        // left side until that lands.
+        // InsertDeconstructionVariableDeclarations is DEFERRED loudly (the C#
+        // call site): it needs StatementBuilder.TranslateDeconstructionDesignation,
+        // which is not ported. Deconstruction assignments keep their
+        // tuple-expression left side until that lands.
         InsertVariableDeclarations();
         UpdateAnnotations(&rootNode);
     } catch (...) {
@@ -144,6 +145,55 @@ void DeclareVariables::Run(Syntax::AstNode& rootNode, TransformContext& context)
     context_ = nullptr;
     ClearAnalysisResults();
 }
+
+void DeclareVariables::Analyze(Syntax::AstNode& rootNode) {
+    variableDict.clear();
+    variableOrder.clear();
+    scopeTracking.clear();
+    FindInsertionPoints(rootNode, 0);
+    ResolveCollisions();
+}
+
+Syntax::AstNode* DeclareVariables::GetDeclarationPoint(IL::ILVariable& variable) {
+    auto it = variableDict.find(&variable);
+    if (it == variableDict.end())
+        throw std::out_of_range("DeclareVariables::GetDeclarationPoint: unknown variable");
+    VariableToDeclare* v = it->second.get();
+    while (v->ReplacementDueToCollision != nullptr) {
+        v = v->ReplacementDueToCollision;
+    }
+    return v->InsertionPoint.nextNode;
+}
+
+bool DeclareVariables::WasMerged(IL::ILVariable& variable) {
+    auto it = variableDict.find(&variable);
+    if (it == variableDict.end())
+        throw std::out_of_range("DeclareVariables::WasMerged: unknown variable");
+    VariableToDeclare* v = it->second.get();
+    return v->InvolvedInCollision || v->RemovedDueToCollision();
+}
+
+void DeclareVariables::ClearAnalysisResults() {
+    variableDict.clear();
+    variableOrder.clear();
+    scopeTracking.clear();
+}
+
+DeclareVariables::VariableToDeclare* DeclareVariables::ResolveVariableToDeclare(
+    IL::ILVariable* variable) {
+    if (variable == nullptr)
+        return nullptr;
+    auto it = variableDict.find(variable);
+    if (it == variableDict.end())
+        return nullptr;
+    VariableToDeclare* v = it->second.get();
+    while (v->ReplacementDueToCollision != nullptr) {
+        v = v->ReplacementDueToCollision;
+    }
+    return v;
+}
+
+// ---- VariableNeedsDeclaration ---------------------------------------------
 
 bool DeclareVariables::VariableNeedsDeclaration(IL::VariableKind kind) {
     switch (kind) {
@@ -160,169 +210,139 @@ bool DeclareVariables::VariableNeedsDeclaration(IL::VariableKind kind) {
     }
 }
 
-void DeclareVariables::Analyze(Syntax::AstNode& rootNode) {
-    ClearAnalysisResults();
-    FindInsertionPoints(&rootNode, 0);
-    ResolveCollisions();
-}
+// ---- IsValidInStatementExpression -----------------------------------------
 
-void DeclareVariables::ClearAnalysisResults() {
-    variables_.clear();
-    variableDict_.clear();
-    scopeTracking_.clear();
-}
-
-Syntax::AstNode* DeclareVariables::GetDeclarationPoint(IL::ILVariable* variable) {
-    VariableToDeclare* v = variableDict_.at(variable);
-    while (v->replacementDueToCollision != nullptr) {
-        v = v->replacementDueToCollision;
+bool DeclareVariables::IsValidInStatementExpression(Syntax::Expression& expr) {
+    if (dynamic_cast<Syntax::InvocationExpression*>(&expr) != nullptr
+        || dynamic_cast<Syntax::ObjectCreateExpression*>(&expr) != nullptr
+        || dynamic_cast<Syntax::AssignmentExpression*>(&expr) != nullptr
+        || dynamic_cast<Syntax::ErrorExpression*>(&expr) != nullptr) {
+        return true;
     }
-    return v->insertionPoint.nextNode;
+    if (auto* uoe = dynamic_cast<Syntax::UnaryOperatorExpression*>(&expr)) {
+        switch (uoe->Operator()) {
+            case Syntax::UnaryOperatorType::PostIncrement:
+            case Syntax::UnaryOperatorType::PostDecrement:
+            case Syntax::UnaryOperatorType::Increment:
+            case Syntax::UnaryOperatorType::Decrement:
+            case Syntax::UnaryOperatorType::Await:
+                return true;
+            case Syntax::UnaryOperatorType::NullConditionalRewrap:
+                return IsValidInStatementExpression(*uoe->Expression());
+            default:
+                return false;
+        }
+    }
+    return false;
 }
 
-bool DeclareVariables::WasMerged(IL::ILVariable* variable) {
-    VariableToDeclare* v = variableDict_.at(variable);
-    return v->involvedInCollision || v->RemovedDueToCollision();
+// ---- FindInsertionPoints --------------------------------------------------
+
+bool DeclareVariables::IsRelevantScope(IL::BlockContainer& scope) {
+    IL::Block* entryPoint = scope.EntryPoint();
+    if (entryPoint != nullptr && entryPoint->IncomingEdgeCount > 1)
+        return true;
+    return dynamic_cast<IL::ILFunction*>(scope.Parent) != nullptr;
 }
 
-// ---- FindInsertionPoints -----------------------------------------------------------------
-
-void DeclareVariables::FindInsertionPoints(Syntax::AstNode* node, int nodeLevel) {
-    // Track loops and function bodies as scopes, for comparison with
-    // CaptureScope. A scope entry is added for a node carrying a relevant
-    // BlockContainer annotation, or for an expression-bodied lambda (whose
-    // BlockStatement-less body links to the container through the ILFunction
-    // annotation).
-    IL::BlockContainer* scope = CS::GetBlockContainerAnnotation(*node);
+void DeclareVariables::FindInsertionPoints(Syntax::AstNode& node, int nodeLevel) {
+    IL::BlockContainer* scope = CSharp::GetBlockContainer(node);
     bool scopeAdded = false;
-    if (scope != nullptr && IsRelevantScope(scope)) {
-        scopeTracking_.push_back(
-            ScopeTrackingEntry{InsertionPoint(nodeLevel, node), scope});
+    if (scope != nullptr && IsRelevantScope(*scope)) {
+        scopeTracking.push_back({InsertionPoint{nodeLevel, &node}, scope});
         scopeAdded = true;
-    } else {
-        auto* lambda = dynamic_cast<Syntax::LambdaExpression*>(node);
-        Syntax::Expression* lambdaBody =
-            lambda != nullptr
-                ? dynamic_cast<Syntax::Expression*>(lambda->Body())
-                : nullptr;
-        if (lambdaBody != nullptr) {
-            // Expression-bodied lambdas don't have a BlockStatement linking
-            // to the BlockContainer.
-            IL::ILFunction* function = CS::GetILFunctionAnnotation(*node);
-            scope = function != nullptr
-                        ? dynamic_cast<IL::BlockContainer*>(function->Body.get())
-                        : nullptr;
-            if (scope != nullptr) {
-                scopeTracking_.push_back(
-                    ScopeTrackingEntry{InsertionPoint(nodeLevel + 1, lambdaBody),
-                                       scope});
-                scopeAdded = true;
-            }
-        } else {
-            scope = nullptr; // don't remove a scope if we didn't add one
+    } else if (auto* lambda = dynamic_cast<Syntax::LambdaExpression*>(&node);
+               lambda != nullptr && dynamic_cast<Syntax::Expression*>(lambda->Body()) != nullptr) {
+        // Expression-bodied lambdas don't have a BlockStatement linking to the
+        // BlockContainer, so the body expression itself carries the insertion point.
+        IL::ILFunction* function = CSharp::GetILFunction(node);
+        scope = (function != nullptr && function->Body) ? function->Body.get() : nullptr;
+        if (scope != nullptr) {
+            scopeTracking.push_back({InsertionPoint{nodeLevel + 1, lambda->Body()}, scope});
+            scopeAdded = true;
         }
     }
-    try {
-        for (Syntax::AstNode* child = node->FirstChild(); child != nullptr;
-             child = child->NextSibling()) {
-            FindInsertionPoints(child, nodeLevel + 1);
-        }
-        if (auto* identExpr = dynamic_cast<Syntax::IdentifierExpression*>(node);
-            identExpr != nullptr) {
-            IL::ILVariable* variable = CS::GetILVariable(*identExpr);
-            if (variable != nullptr &&
-                VariableNeedsDeclaration(variable->Kind)) {
-                FindInsertionPointForVariable(variable, identExpr, nodeLevel);
-            } else if (IL::ILFunction* localFunction =
-                           CS::GetILFunctionAnnotation(*node);
-                       localFunction != nullptr &&
-                       localFunction->Kind == IL::ILFunctionKind::LocalFunction) {
-                for (const IL::ILVariablePtr& v : localFunction->CapturedVariables) {
-                    if (VariableNeedsDeclaration(v->Kind))
-                        FindInsertionPointForVariable(v.get(), identExpr, nodeLevel);
-                }
-            }
-        }
-    } catch (...) {
-        if (scopeAdded)
-            scopeTracking_.pop_back();
-        throw;
-    }
-    if (scopeAdded)
-        scopeTracking_.pop_back();
-}
 
-void DeclareVariables::FindInsertionPointForVariable(
-    IL::ILVariable* variable, Syntax::IdentifierExpression* identExpr,
-    int nodeLevel) {
-    InsertionPoint newPoint;
-    int startIndex = static_cast<int>(scopeTracking_.size()) - 1;
-    IL::BlockContainer* captureScope = variable->CaptureScope;
-    while (captureScope != nullptr && !IsRelevantScope(captureScope)) {
-        captureScope = IL::BlockContainer::FindClosestContainer(captureScope->Parent);
-    }
-    if (captureScope != nullptr && startIndex > 0 &&
-        captureScope != scopeTracking_[static_cast<std::size_t>(startIndex)].scope) {
-        while (startIndex > 0 &&
-               scopeTracking_[static_cast<std::size_t>(startIndex)].scope !=
-                   captureScope) {
-            startIndex--;
+    auto findInsertionPointForVariable = [&](IL::ILVariable& variable) {
+        InsertionPoint newPoint{};
+        auto startIndex = static_cast<int>(scopeTracking.size()) - 1;
+        IL::BlockContainer* captureScope = variable.CaptureScope;
+        while (captureScope != nullptr && !IsRelevantScope(*captureScope)) {
+            captureScope = IL::BlockContainer::FindClosestContainer(captureScope->Parent);
         }
-        newPoint =
-            scopeTracking_[static_cast<std::size_t>(startIndex) + 1].insertionPoint;
-    } else {
-        newPoint = InsertionPoint(nodeLevel, identExpr);
-        if (variable->UsesInitialValue) {
-            // Uninitialized variables are logically initialized at the
-            // beginning of the function. Because it's possible that the
-            // variable has a loop-carried dependency, declare it outside of
-            // any loops.
-            while (startIndex >= 0) {
-                const ScopeTrackingEntry& entry =
-                    scopeTracking_[static_cast<std::size_t>(startIndex)];
-                if (entry.scope->EntryPoint() != nullptr &&
-                    entry.scope->EntryPoint()->IncomingEdgeCount > 1) {
-                    // declare variable outside of loop
-                    newPoint = entry.insertionPoint;
-                } else if (dynamic_cast<IL::ILFunction*>(entry.scope->Parent) !=
-                           nullptr) {
-                    // stop at beginning of function
-                    break;
-                }
+        if (captureScope != nullptr && startIndex > 0
+            && captureScope != scopeTracking[static_cast<std::size_t>(startIndex)].second) {
+            while (startIndex > 0
+                   && scopeTracking[static_cast<std::size_t>(startIndex)].second != captureScope) {
                 startIndex--;
             }
+            newPoint = scopeTracking[static_cast<std::size_t>(startIndex + 1)].first;
+        } else {
+            newPoint = InsertionPoint{nodeLevel, &node};
+            if (variable.UsesInitialValue) {
+                // Uninitialized variables are logically initialized at the beginning of
+                // the function; because it's possible that the variable has a
+                // loop-carried dependency, declare it outside of any loops.
+                while (startIndex >= 0) {
+                    IL::BlockContainer* tracked = scopeTracking[static_cast<std::size_t>(startIndex)].second;
+                    IL::Block* entryPoint = tracked->EntryPoint();
+                    if (entryPoint != nullptr && entryPoint->IncomingEdgeCount > 1) {
+                        // declare variable outside of loop
+                        newPoint = scopeTracking[static_cast<std::size_t>(startIndex)].first;
+                    } else if (dynamic_cast<IL::ILFunction*>(tracked->Parent) != nullptr) {
+                        // stop at beginning of function
+                        break;
+                    }
+                    startIndex--;
+                }
+            }
+        }
+        auto it = variableDict.find(&variable);
+        if (it != variableDict.end()) {
+            it->second->InsertionPoint = FindCommonParent(it->second->InsertionPoint, newPoint);
+        } else {
+            auto v = std::make_unique<VariableToDeclare>(
+                &variable, newPoint, static_cast<Syntax::IdentifierExpression*>(&node),
+                static_cast<int>(variableDict.size()));
+            variableOrder.push_back(v.get());
+            variableDict.emplace(&variable, std::move(v));
+        }
+    };
+
+    struct ScopeGuard {
+        std::vector<std::pair<InsertionPoint, IL::BlockContainer*>>& tracking;
+        bool active;
+        ~ScopeGuard() {
+            if (active)
+                tracking.pop_back();
+        }
+    } guard{scopeTracking, scopeAdded};
+
+    for (Syntax::AstNode* child = node.FirstChild(); child != nullptr; child = child->NextSibling()) {
+        FindInsertionPoints(*child, nodeLevel + 1);
+    }
+    if (auto* identExpr = dynamic_cast<Syntax::IdentifierExpression*>(&node)) {
+        IL::ILVariable* variable = CSharp::GetILVariable(*identExpr);
+        if (variable != nullptr && VariableNeedsDeclaration(variable->Kind)) {
+            findInsertionPointForVariable(*variable);
+        } else if (IL::ILFunction* localFunction = CSharp::GetILFunction(node);
+                   localFunction != nullptr
+                   && localFunction->Kind == IL::ILFunctionKind::LocalFunction) {
+            for (IL::ILVariable* captured : localFunction->CapturedVariables) {
+                if (captured != nullptr && VariableNeedsDeclaration(captured->Kind))
+                    findInsertionPointForVariable(*captured);
+            }
         }
     }
-    auto it = variableDict_.find(variable);
-    if (it != variableDict_.end()) {
-        it->second->insertionPoint =
-            FindCommonParent(it->second->insertionPoint, newPoint);
-    } else {
-        // A non-owning alias over the caller-owned variable (the IL function
-        // tree owns it; the annotation constructions downstream copy the
-        // alias without taking ownership -- the no-op-deleter convention).
-        IL::ILVariablePtr variableHandle(variable, [](IL::ILVariable*) {});
-        auto v = std::make_unique<VariableToDeclare>(
-            variableHandle, newPoint, identExpr,
-            static_cast<int>(variables_.size()));
-        VariableToDeclare* raw = v.get();
-        variables_.push_back(std::move(v));
-        variableDict_.emplace(variable, raw);
-    }
 }
 
-bool DeclareVariables::IsRelevantScope(IL::BlockContainer* scope) {
-    return (scope->EntryPoint() != nullptr &&
-            scope->EntryPoint()->IncomingEdgeCount > 1) ||
-           dynamic_cast<IL::ILFunction*>(scope->Parent) != nullptr;
-}
+// ---- FindCommonParent -----------------------------------------------------
 
-DeclareVariables::InsertionPoint DeclareVariables::FindCommonParent(
-    InsertionPoint oldPoint, InsertionPoint newPoint) const {
+DeclareVariables::InsertionPoint DeclareVariables::FindCommonParent(InsertionPoint oldPoint,
+                                                                   InsertionPoint newPoint) {
     // First ensure we're looking at nodes on the same level:
     oldPoint = oldPoint.UpTo(newPoint.level);
     newPoint = newPoint.UpTo(oldPoint.level);
-    assert(newPoint.level == oldPoint.level);
     // Then go up the tree until both points share the same parent:
     while (oldPoint.nextNode->Parent() != newPoint.nextNode->Parent()) {
         oldPoint = oldPoint.Up();
@@ -332,134 +352,171 @@ DeclareVariables::InsertionPoint DeclareVariables::FindCommonParent(
     return oldPoint;
 }
 
-// ---- ResolveCollisions -------------------------------------------------------------------
+// ---- ResolveCollisions ----------------------------------------------------
 
 void DeclareVariables::ResolveCollisions() {
-    // The C# `MultiDictionary<string, VariableToDeclare>` (a name-keyed
-    // multimap preserving insertion order).
     std::unordered_map<std::string, std::vector<VariableToDeclare*>> multiDict;
-    for (std::unique_ptr<VariableToDeclare>& v : variables_) {
-        // We can only insert variable declarations in blocks, but
-        // FindInsertionPoints() didn't guarantee that it finds only blocks.
-        // Fix that up now.
-        while (!(dynamic_cast<Syntax::BlockStatement*>(
-                     v->insertionPoint.nextNode->Parent()) != nullptr ||
-                 dynamic_cast<Syntax::LambdaExpression*>(
-                     v->insertionPoint.nextNode->Parent()) != nullptr)) {
-            auto* forStatement = dynamic_cast<Syntax::ForStatement*>(
-                v->insertionPoint.nextNode->Parent());
-            Syntax::Statement* firstInitializer =
-                forStatement != nullptr && forStatement->Initializers().Count() > 0
-                    ? forStatement->Initializers().At(0)
-                    : nullptr;
-            if (forStatement != nullptr &&
-                v->insertionPoint.nextNode == firstInitializer &&
-                IsMatchingAssignment(*v)) {
-                // Special case: the initializer of a ForStatement can also
-                // declare a variable (with scope local to the for loop).
-                break;
+    for (VariableToDeclare* vptr : variableOrder) {
+        VariableToDeclare& v = *vptr;
+        // We can only insert variable declarations in blocks, but FindInsertionPoints()
+        // didn't guarantee that it finds only blocks. Fix that up now.
+        while (dynamic_cast<Syntax::BlockStatement*>(v.InsertionPoint.nextNode->Parent()) == nullptr
+               && dynamic_cast<Syntax::LambdaExpression*>(v.InsertionPoint.nextNode->Parent()) == nullptr) {
+            if (auto* f = dynamic_cast<Syntax::ForStatement*>(v.InsertionPoint.nextNode->Parent());
+                f != nullptr && f->Initializers().Count() > 0
+                && f->Initializers()[0] == v.InsertionPoint.nextNode) {
+                // Special case: the initializer of a ForStatement can also declare a
+                // variable (with scope local to the for loop).
+                Syntax::AssignmentExpression* assignment = nullptr;
+                if (IsMatchingAssignment(v, assignment))
+                    break;
             }
-            v->insertionPoint = v->insertionPoint.Up();
+            v.InsertionPoint = v.InsertionPoint.Up();
         }
-        // Note: 'out var', pattern matching etc. is not considered a valid
-        // insertion point here, because the scope of the resulting variable
-        // is not restricted to the parent node of the insertion point, but
-        // extends to the whole BlockStatement. We moved up the insertion
-        // point to the whole BlockStatement so that we can resolve
-        // collisions, later we might decide to declare the variable more
-        // locally (as 'out var') instead if still possible.
 
         // Go through all potentially colliding variables:
-        for (VariableToDeclare* prev : multiDict[v->Name()]) {
+        for (VariableToDeclare* prev : multiDict[v.Name()]) {
             if (prev->RemovedDueToCollision())
                 continue;
             // Go up until both nodes are on the same level:
-            InsertionPoint point1 =
-                prev->insertionPoint.UpTo(v->insertionPoint.level);
-            InsertionPoint point2 =
-                v->insertionPoint.UpTo(prev->insertionPoint.level);
-            assert(point1.level == point2.level);
+            InsertionPoint point1 = prev->InsertionPoint.UpTo(v.InsertionPoint.level);
+            InsertionPoint point2 = v.InsertionPoint.UpTo(prev->InsertionPoint.level);
             if (point1.nextNode->Parent() == point2.nextNode->Parent()) {
-                assert(prev->Type()->Equals(*v->Type()));
                 // We found a collision!
-                v->involvedInCollision = true;
-                prev->replacementDueToCollision = v.get();
-                // Continue checking other entries in multiDict against the
-                // new position of `v`.
-                if (prev->sourceOrder < v->sourceOrder) {
-                    // Switch v's insertion point to prev's insertion point:
-                    v->insertionPoint = point1;
-                    // Since prev was first, it has the correct
-                    // SourceOrder/FirstUse values for the new combined
-                    // variable:
-                    v->sourceOrder = prev->sourceOrder;
-                    v->firstUse = prev->firstUse;
+                v.InvolvedInCollision = true;
+                prev->ReplacementDueToCollision = &v;
+                if (prev->SourceOrder < v.SourceOrder) {
+                    // Switch v's insertion point to prev's insertion point; since prev
+                    // was first, it has the correct SourceOrder/FirstUse values for the
+                    // new combined variable.
+                    v.InsertionPoint = point1;
+                    v.SourceOrder = prev->SourceOrder;
+                    v.FirstUse = prev->FirstUse;
                 } else {
-                    // v is first in source order, so it keeps its old
-                    // insertion point (and other properties), except that
-                    // the insertion point is moved up to prev's level.
-                    v->insertionPoint = point2;
+                    // v is first in source order, so it keeps its old insertion point
+                    // (and other properties), except that the insertion point is moved
+                    // up to prev's level.
+                    v.InsertionPoint = point2;
                 }
-                v->DefaultInitialization = static_cast<VariableInitKind>(
-                    static_cast<int>(v->DefaultInitialization) |
-                    static_cast<int>(prev->DefaultInitialization));
-                // We don't need to re-check the dict entries that we already
-                // checked earlier, because the new v.InsertionPoint only
-                // collides with another point x if either the old
-                // v.InsertionPoint or the old prev.InsertionPoint already
-                // collided with x.
+                v.DefaultInitialization = v.DefaultInitialization | prev->DefaultInitialization;
             }
         }
 
-        multiDict[v->Name()].push_back(v.get());
+        multiDict[v.Name()].push_back(&v);
     }
 }
 
-bool DeclareVariables::IsMatchingAssignment(
-    VariableToDeclare& v, Syntax::AssignmentExpression** assignmentOut) const {
-    Syntax::AssignmentExpression* assignment = dynamic_cast<Syntax::AssignmentExpression*>(
-        v.insertionPoint.nextNode);
+// ---- IsMatchingAssignment -------------------------------------------------
+
+bool DeclareVariables::IsMatchingAssignment(VariableToDeclare& v,
+                                           Syntax::AssignmentExpression*& assignment) {
+    assignment = dynamic_cast<Syntax::AssignmentExpression*>(v.InsertionPoint.nextNode);
     if (assignment == nullptr) {
-        auto* statement = dynamic_cast<Syntax::ExpressionStatement*>(
-            v.insertionPoint.nextNode);
-        assignment =
-            statement != nullptr
-                ? dynamic_cast<Syntax::AssignmentExpression*>(statement->Expression())
-                : nullptr;
-        if (assignment == nullptr) {
-            if (assignmentOut != nullptr)
-                *assignmentOut = nullptr;
+        auto* stmt = dynamic_cast<Syntax::ExpressionStatement*>(v.InsertionPoint.nextNode);
+        assignment = stmt != nullptr
+            ? dynamic_cast<Syntax::AssignmentExpression*>(stmt->Expression())
+            : nullptr;
+        if (assignment == nullptr)
             return false;
+    }
+    if (assignment->Operator() != Syntax::AssignmentOperatorType::Assign)
+        return false;
+    auto* identExpr = dynamic_cast<Syntax::IdentifierExpression*>(assignment->Left());
+    if (identExpr == nullptr)
+        return false;
+    return identExpr->Identifier() == v.Name() && identExpr->TypeArguments().Count() == 0;
+}
+
+// ---- Mutation-phase helpers (the deferred Run pieces) ---------------------
+
+bool DeclareVariables::CombineDeclarationAndInitializer(VariableToDeclare& v,
+                                                        TransformContext& context) {
+    // `if (v.Type.IsByRefLike) return true;` -- a by-ref-like variable (a `ref
+    // struct` local) must be initialized at its declaration.
+    if (v.ILVariable()->Type != nullptr && v.ILVariable()->Type->IsByRefLike())
+        return true;
+    // `if (v.InsertionPoint.nextNode.Slot?.Kind == Slots.ForInitializer) return true;`
+    // -- a for-statement initializer is always combined with the declaration.
+    Syntax::AstNode* nextNode = v.InsertionPoint.nextNode;
+    if (nextNode != nullptr && nextNode->Slot() != nullptr
+        && nextNode->Slot()->Kind() == &Syntax::Slots::ForInitializer) {
+        return true;
+    }
+    return !context.Settings().SeparateLocalVariableDeclarations();
+}
+
+bool DeclareVariables::CanBeDeclaredAsOutVariable(VariableToDeclare& v,
+                                                  Syntax::DirectionExpression*& dirExpr,
+                                                  TransformContext& context) {
+    dirExpr = v.FirstUse != nullptr
+        ? dynamic_cast<Syntax::DirectionExpression*>(v.FirstUse->Parent())
+        : nullptr;
+    if (dirExpr == nullptr || dirExpr->FieldDirection() != Syntax::FieldDirection::Out)
+        return false;
+    if (!context.Settings().OutVariables())
+        return false;
+    if (v.DefaultInitialization != VariableInitKind::None)
+        return false;
+    // The C# switch: IfElseStatement / ExpressionStatement return whether the node is
+    // the insertion point; other statements deny promotion (a `while` condition cannot
+    // declare a variable in its parent scope); a lambda body may match the insertion
+    // point. Any other ancestor keeps walking up.
+    for (Syntax::AstNode* node = v.FirstUse; node != nullptr; node = node->Parent()) {
+        if (node->Slot() != nullptr && node->Slot()->Kind() == &Syntax::Slots::EmbeddedStatement)
+            return false;
+        if (dynamic_cast<Syntax::IfElseStatement*>(node) != nullptr
+            || dynamic_cast<Syntax::ExpressionStatement*>(node) != nullptr) {
+            return node == v.InsertionPoint.nextNode;
+        }
+        if (dynamic_cast<Syntax::Statement*>(node) != nullptr)
+            return false;
+        if (auto* lambda = dynamic_cast<Syntax::LambdaExpression*>(node))
+            return lambda->Body() == v.InsertionPoint.nextNode;
+    }
+    return false;
+}
+
+bool DeclareVariables::IsReferencedWithinDeclaringCall(Syntax::DirectionExpression& dirExpr,
+                                                       VariableToDeclare& v) {
+    Syntax::AstNode* call = dirExpr.Parent();
+    if (call == nullptr)
+        return false;
+    for (Syntax::AstNode* argument = call->FirstChild(); argument != nullptr;
+         argument = argument->NextSibling()) {
+        if (argument == &dirExpr)
+            continue;
+        for (Syntax::AstNode* node : argument->DescendantsAndSelf()) {
+            auto* identifier = dynamic_cast<Syntax::IdentifierExpression*>(node);
+            if (identifier != nullptr
+                && ResolveVariableToDeclare(CSharp::GetILVariable(*identifier)) == &v) {
+                return true;
+            }
         }
     }
-    if (assignmentOut != nullptr)
-        *assignmentOut = assignment;
-    auto* identExpr = dynamic_cast<Syntax::IdentifierExpression*>(assignment->Left());
-    return assignment->Operator() == Syntax::AssignmentOperatorType::Assign &&
-           identExpr != nullptr && identExpr->Identifier() == v.Name() &&
-           identExpr->TypeArguments().Count() == 0;
+    return false;
 }
 
-// ---- The mutation half -------------------------------------------------------------------
 
+// The C# `void EnsureExpressionStatementsAreValid(AstNode rootNode)` (lines
+// ~225-252): the DirectionExpression-statement unwrap and the
+// invalid-statement-expression discard assignment.
 void DeclareVariables::EnsureExpressionStatementsAreValid(Syntax::AstNode* rootNode) {
     for (Syntax::AstNode* node : rootNode->DescendantsAndSelf()) {
         auto* stmt = dynamic_cast<Syntax::ExpressionStatement*>(node);
         if (stmt == nullptr)
             continue;
         auto* dir = dynamic_cast<Syntax::DirectionExpression*>(stmt->Expression());
-        if (dir != nullptr && IsValidInStatementExpression(dir->Expression())) {
-            context_->StepOnce("Unwrap direction expression statement", stmt);
-            stmt->Expression(Syntax::Detach(dir->Expression()));
-        } else if (!IsValidInStatementExpression(stmt->Expression())) {
-            // fetch ILFunction: the root ILFunction annotation among the
-            // statement's ancestors (the C# `Ancestors.SelectMany(a =>
-            // a.Annotations.OfType<ILFunction>()).First(f => f.Parent ==
-            // null)`; the First on an empty sequence throws).
+        if (dir != nullptr && IsValidInStatementExpression(*dir->Expression())) {
+            context_->Step("Unwrap direction expression statement", stmt);
+            stmt->Expression(Detach(dir->Expression()));
+        } else if (!IsValidInStatementExpression(*stmt->Expression())) {
+            // Fetch the root ILFunction annotation among the statement's
+            // ancestors (the C# `Ancestors.SelectMany(a => a.Annotations
+            // .OfType<ILFunction>()).First(f => f.Parent == null)`).
             IL::ILFunction* function = nullptr;
             for (Syntax::AstNode* ancestor = stmt; ancestor != nullptr;
                  ancestor = ancestor->Parent()) {
-                if (IL::ILFunction* candidate = CS::GetILFunctionAnnotation(*ancestor);
+                if (IL::ILFunction* candidate = GetILFunctionAnnotation(*ancestor);
                     candidate != nullptr && candidate->Parent == nullptr) {
                     function = candidate;
                     break;
@@ -469,20 +526,20 @@ void DeclareVariables::EnsureExpressionStatementsAreValid(Syntax::AstNode* rootN
                 throw std::runtime_error(
                     "DeclareVariables: no root ILFunction annotation found for the "
                     "invalid expression statement");
-            // if possible use C# 7.0 discard-assignment
-            if (context_->DecompileRun->Settings().Discards() &&
-                !ExpressionBuilder::HidesVariableWithName(*function, "_")) {
-                context_->StepOnce("Assign invalid expression statement to discard", stmt);
+            // If possible use a C# 7.0 discard-assignment.
+            if (context_->Settings().Discards()
+                && !ExpressionBuilder::HidesVariableWithName(*function, "_")) {
+                context_->Step("Assign invalid expression statement to discard", stmt);
                 stmt->Expression(new Syntax::AssignmentExpression(
                     new Syntax::IdentifierExpression("_"),
                     // no ResolveResult
-                    Syntax::Detach(stmt->Expression())));
+                    Detach(stmt->Expression())));
             } else {
-                // DEFERRED loudly (the C# temporary arm, line ~249): it needs
+                // DEFERRED loudly (the C# temporary arm): it needs
                 // AssignVariableNames.GenerateVariableName over the function
                 // and the UsingScope, which is not ported. The invalid
                 // statement keeps its shape until that lands.
-                context_->StepOnce(
+                context_->Step(
                     "Assign invalid expression statement to temporary -- DEFERRED",
                     stmt);
             }
@@ -490,65 +547,31 @@ void DeclareVariables::EnsureExpressionStatementsAreValid(Syntax::AstNode* rootN
     }
 }
 
-bool DeclareVariables::IsValidInStatementExpression(Syntax::Expression* expr) {
-    if (dynamic_cast<Syntax::InvocationExpression*>(expr) != nullptr ||
-        dynamic_cast<Syntax::ObjectCreateExpression*>(expr) != nullptr ||
-        dynamic_cast<Syntax::AssignmentExpression*>(expr) != nullptr ||
-        dynamic_cast<Syntax::ErrorExpression*>(expr) != nullptr)
-        return true;
-    if (auto* uoe = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr)) {
-        switch (uoe->Operator()) {
-            case Syntax::UnaryOperatorType::PostIncrement:
-            case Syntax::UnaryOperatorType::PostDecrement:
-            case Syntax::UnaryOperatorType::Increment:
-            case Syntax::UnaryOperatorType::Decrement:
-            case Syntax::UnaryOperatorType::Await:
-                return true;
-            case Syntax::UnaryOperatorType::NullConditionalRewrap:
-                return IsValidInStatementExpression(uoe->Expression());
-            default:
-                return false;
-        }
-    }
-    return false;
-}
-
-bool DeclareVariables::CombineDeclarationAndInitializer(VariableToDeclare& v) {
-    if (v.Type()->IsByRefLike())
-        return true; // by-ref-like variables always must be initialized at their declaration.
-
-    const Syntax::CSharpSlotInfo* slot = v.insertionPoint.nextNode->Slot();
-    if (slot != nullptr && slot->Kind() == &Syntax::Slots::ForInitializer)
-        return true; // for-statement initializers always should combine declaration and initialization.
-
-    return !context_->DecompileRun->Settings().SeparateLocalVariableDeclarations();
-}
-
+// The C# `void InsertVariableDeclarations()` (lines 502-716): the insertion
+// sweep. The node replacements are performed at the end so that no node is
+// replaced while it is still referenced by a VariableToDeclare.
 void DeclareVariables::InsertVariableDeclarations() {
-    // The C# replacements list: (oldNode, createNewNode, stepDescription)
-    // -- performed at the end, so that no node is replaced while it is still
-    // referenced by a VariableToDeclare.
     struct Replacement {
         Syntax::AstNode* oldNode;
         std::function<Syntax::AstNode*()> createNewNode;
         const char* stepDescription;
     };
     std::vector<Replacement> replacements;
-    for (std::unique_ptr<VariableToDeclare>& vPtr : variables_) {
+    for (VariableToDeclare* vPtr : variableOrder) {
         VariableToDeclare& v = *vPtr;
-        if (v.RemovedDueToCollision() || v.declaredInDeconstruction)
+        if (v.RemovedDueToCollision() || v.DeclaredInDeconstruction)
             continue;
 
         Syntax::AssignmentExpression* assignment = nullptr;
         Syntax::DirectionExpression* dirExpr = nullptr;
-        if (CombineDeclarationAndInitializer(v) && IsMatchingAssignment(v, &assignment)) {
+        if (CombineDeclarationAndInitializer(v, *context_)
+            && IsMatchingAssignment(v, assignment)) {
             // 'int v; v = expr;' can be combined to 'int v = expr;'
             Syntax::AstType* type =
-                context_->DecompileRun->Settings().AnonymousTypes() &&
-                        TS::ContainsAnonymousType(*v.ILVariable()->Type)
-                    ? static_cast<Syntax::AstType*>(
-                          new Syntax::SimpleType("var"))
-                    : context_->TypeSystemAstBuilder->ConvertType(
+                context_->Settings().AnonymousTypes()
+                        && ::ILSpy::Decompiler::ContainsAnonymousType(*v.ILVariable()->Type)
+                    ? static_cast<Syntax::AstType*>(new Syntax::SimpleType("var"))
+                    : context_->TypeSystemAstBuilder().ConvertType(
                           *v.ILVariable()->Type);
             // (The C# IsRefReadOnly readonly-specifier fixup is DEFERRED: the
             // ILVariable flag is not ported.)
@@ -557,81 +580,80 @@ void DeclareVariables::InsertVariableDeclarations() {
                     new Syntax::Comment("pinned", Syntax::CommentType::MultiLine));
             }
             replacements.push_back(Replacement{
-                v.insertionPoint.nextNode,
+                v.InsertionPoint.nextNode,
                 [&v, assignment, type]() -> Syntax::AstNode* {
                     auto* vds = new Syntax::VariableDeclarationStatement(
-                        type, v.Name(), Syntax::Detach(assignment->Right()));
+                        type, v.Name(), Detach(assignment->Right()));
                     Syntax::VariableInitializer* init = vds->Variables().At(0);
-                    init->AddAnnotation(
-                        CS::GetSharedResolveResult(*assignment->Left()));
+                    init->AddAnnotation(GetSharedResolveResult(*assignment->Left()));
                     // Move the non-resolve-result annotations of the
                     // assignment's left side and of the whole assignment
                     // onto the initializer.
                     for (const auto& annotation :
                          assignment->Left()->SharedAnnotations()) {
-                        if (dynamic_cast<const Sem::ResolveResult*>(
-                                annotation.get()) == nullptr)
+                        if (dynamic_cast<const Semantics::ResolveResult*>(annotation.get())
+                            == nullptr)
                             init->AddAnnotation(annotation);
                     }
                     for (const auto& annotation : assignment->SharedAnnotations()) {
-                        if (dynamic_cast<const Sem::ResolveResult*>(
-                                annotation.get()) == nullptr)
+                        if (dynamic_cast<const Semantics::ResolveResult*>(annotation.get())
+                            == nullptr)
                             init->AddAnnotation(annotation);
                     }
                     return vds;
                 },
                 "Combine variable declaration with initializer"});
-        } else if (CanBeDeclaredAsOutVariable(v, &dirExpr)) {
+        } else if (CanBeDeclaredAsOutVariable(v, dirExpr, *context_)) {
             // 'T v; SomeCall(out v);' can be combined to 'SomeCall(out T v);'
             Syntax::AstType* type = nullptr;
             bool isOutVar = false;
-            if (context_->DecompileRun->Settings().AnonymousTypes() &&
-                TS::ContainsAnonymousType(*v.ILVariable()->Type)) {
+            if (context_->Settings().AnonymousTypes()
+                && ::ILSpy::Decompiler::ContainsAnonymousType(*v.ILVariable()->Type)) {
                 type = new Syntax::SimpleType("var");
                 isOutVar = true;
             } else {
                 // (The C# UseImplicitlyTypedOutAnnotation `var` decision is
                 // DEFERRED: the annotation surface is not ported, so only
                 // the anonymous-type arm reaches the implicit form.)
-                type = context_->TypeSystemAstBuilder->ConvertType(*v.ILVariable()->Type);
+                type = context_->TypeSystemAstBuilder().ConvertType(
+                    *v.ILVariable()->Type);
             }
             std::string name;
-            // Variable is not used and discards are allowed, we can simplify
-            // this to 'out T _'.
-            if (context_->DecompileRun->Settings().Discards() &&
-                v.ILVariable()->LoadCount == 0 && v.ILVariable()->StoreCount == 0 &&
-                v.ILVariable()->AddressCount == 1) {
+            // Variable is not used and discards are allowed, so simplify to
+            // 'out T _'.
+            if (context_->Settings().Discards()
+                && v.ILVariable()->LoadCount == 0 && v.ILVariable()->StoreCount == 0
+                && v.ILVariable()->AddressCount == 1) {
                 name = "_";
             } else {
                 name = v.Name();
             }
             auto* ovd = new Syntax::OutVarDeclarationExpression(type, name);
             ovd->Variable()->AddAnnotation(
-                std::make_shared<CS::ILVariableResolveResult>(v.ILVariableHandle()));
-            CS::CopyAnnotationsFrom(ovd, *dirExpr);
+                std::make_shared<ILVariableResolveResult>(VariableHandleOf(v)));
+            CopyAnnotationsFrom(ovd, *dirExpr);
             if (isOutVar) {
-                ovd->RemoveAnnotations<Sem::ResolveResult>();
-                ovd->AddAnnotation(std::make_shared<Sem::OutVarResolveResult>(
-                    v.ILVariable()->Type));
+                ovd->RemoveAnnotations<Semantics::ResolveResult>();
+                ovd->AddAnnotation(
+                    std::make_shared<Semantics::OutVarResolveResult>(v.ILVariable()->Type));
             }
-            Replacement replacement{
-                dirExpr, [ovd]() -> Syntax::AstNode* { return ovd; },
-                "Declare out variable"};
-            replacements.push_back(std::move(replacement));
+            replacements.push_back(
+                Replacement{dirExpr,
+                            [ovd]() -> Syntax::AstNode* { return ovd; },
+                            "Declare out variable"});
         } else {
             // Insert a separate declaration statement.
-            Syntax::AstType* type = context_->TypeSystemAstBuilder->ConvertType(*v.ILVariable()->Type);
+            Syntax::AstType* type = context_->TypeSystemAstBuilder().ConvertType(
+                *v.ILVariable()->Type);
             Syntax::Expression* initializer = nullptr;
             if (v.DefaultInitialization == VariableInitKind::NeedsDefaultValue) {
                 initializer = new Syntax::DefaultValueExpression(type->Clone());
             }
             auto* vds =
                 new Syntax::VariableDeclarationStatement(type, v.Name(), initializer);
-            vds->Variables().At(0)->AddAnnotation(
-                std::make_shared<CS::ILVariableResolveResult>(v.ILVariableHandle()));
-            context_->StepOnce("Insert variable declaration", v.insertionPoint.nextNode);
+            context_->Step("Insert variable declaration", v.InsertionPoint.nextNode);
             if (auto* lambda = dynamic_cast<Syntax::LambdaExpression*>(
-                    v.insertionPoint.nextNode->Parent());
+                    v.InsertionPoint.nextNode->Parent());
                 lambda != nullptr) {
                 // An expression-bodied lambda body gets wrapped in a block
                 // with a return statement, so the declaration has a block to
@@ -640,56 +662,50 @@ void DeclareVariables::InsertVariableDeclarations() {
                 assert(lambdaBody != nullptr);
                 auto* blockStatement = new Syntax::BlockStatement();
                 blockStatement->Statements().Add(
-                    new Syntax::ReturnStatement(Syntax::Detach(lambdaBody)));
+                    new Syntax::ReturnStatement(Detach(lambdaBody)));
                 lambda->Body(blockStatement);
             }
             if (dynamic_cast<Syntax::ReturnStatement*>(
-                    v.insertionPoint.nextNode->Parent()) != nullptr) {
-                v.insertionPoint = v.insertionPoint.Up();
+                    v.InsertionPoint.nextNode->Parent())
+                != nullptr) {
+                v.InsertionPoint = v.InsertionPoint.Up();
             }
-            assert(v.insertionPoint.nextNode->Slot() != nullptr &&
-                   v.insertionPoint.nextNode->Slot()->Kind() ==
-                       &Syntax::Slots::Statement);
-            // The insertion point is a statement within a block, so it always
-            // has a parent.
-            Syntax::AstNode* insertionNode = v.insertionPoint.nextNode;
+            assert(v.InsertionPoint.nextNode->Slot() != nullptr
+                   && v.InsertionPoint.nextNode->Slot()->Kind()
+                       == &Syntax::Slots::Statement);
+            // The insertion point is a statement within a block, so it
+            // always has a parent.
+            Syntax::AstNode* insertionNode = v.InsertionPoint.nextNode;
             Syntax::AstNode* insertionParent = insertionNode->Parent();
             if (insertionParent == nullptr)
-                throw std::runtime_error("Variable insertion point has no parent.");
+                throw std::runtime_error(
+                    "Variable insertion point has no parent.");
             // The C# NeedsSkipInit forms (lines 717-770): the
-            // System.Runtime.CompilerServices.Unsafe.SkipInit call marks
-            // the uninitialized local -- with the out-variables setting the
+            // System.Runtime.CompilerServices.Unsafe.SkipInit call marks the
+            // uninitialized local -- with the out-variables setting the
             // declaration folds into the call's argument (no separate
             // declaration renders); otherwise the plain declaration is
-            // followed by the call. A null context TypeSystem (a caller that
-            // passed no decompilation context) degrades to the plain
-            // declaration -- the port's documented fallback for the bare
-            // pipeline-driver form.
-            if (v.DefaultInitialization == VariableInitKind::NeedsSkipInit
-                && context_->TypeSystem != nullptr) {
+            // followed by the call.
+            if (v.DefaultInitialization == VariableInitKind::NeedsSkipInit) {
                 // The C# `context.TypeSystemAstBuilder.ConvertType(
                 // context.TypeSystem.FindType(KnownTypeCode.Unsafe))`.
                 Syntax::AstType* unsafeType =
-                    context_->TypeSystemAstBuilder->ConvertType(
-                        const_cast<TS::IType&>(
-                            context_->TypeSystem->FindType(
-                                TS::KnownTypeCode::Unsafe)));
+                    context_->TypeSystemAstBuilder().ConvertType(
+                        const_cast<::ILSpy::Decompiler::TypeSystem::IType&>(
+                            context_->TypeSystem().FindType(
+                                ::ILSpy::Decompiler::TypeSystem::KnownTypeCode::Unsafe)));
                 Syntax::ExpressionStatement* skipInitStatement;
                 Syntax::AstNode* insertedNode;
-                if (context_->DecompileRun->Settings().OutVariables()) {
-                    // The C# `new OutVarDeclarationExpression(type.Clone(),
-                    // v.Name)` + the ILVariableResolveResult annotation.
-                    auto* outVarDecl =
-                        new Syntax::OutVarDeclarationExpression(
-                            type->Clone(), v.Name());
+                if (context_->Settings().OutVariables()) {
+                    auto* outVarDecl = new Syntax::OutVarDeclarationExpression(
+                        type->Clone(), v.Name());
                     outVarDecl->Variable()->AddAnnotation(
-                        std::make_shared<CS::ILVariableResolveResult>(
-                            v.ILVariableHandle()));
+                        std::make_shared<ILVariableResolveResult>(
+                            VariableHandleOf(v)));
                     skipInitStatement = new Syntax::ExpressionStatement(
                         new Syntax::InvocationExpression(
                             new Syntax::MemberReferenceExpression(
-                                new Syntax::TypeReferenceExpression(
-                                    unsafeType),
+                                new Syntax::TypeReferenceExpression(unsafeType),
                                 "SkipInit")));
                     static_cast<Syntax::InvocationExpression*>(
                         skipInitStatement->Expression())
@@ -706,134 +722,76 @@ void DeclareVariables::InsertVariableDeclarations() {
                     // The C# `new DirectionExpression(FieldDirection.Out,
                     // new IdentifierExpression(v.Name).WithRR(
                     // new ILVariableResolveResult(ilVariable)))`.
-                    auto* identifier =
-                        new Syntax::IdentifierExpression(v.Name());
-                    identifier->AddAnnotation(
-                        std::make_shared<CS::ILVariableResolveResult>(
-                            v.ILVariableHandle()));
                     skipInitStatement = new Syntax::ExpressionStatement(
                         new Syntax::InvocationExpression(
                             new Syntax::MemberReferenceExpression(
-                                new Syntax::TypeReferenceExpression(
-                                    unsafeType),
+                                new Syntax::TypeReferenceExpression(unsafeType),
                                 "SkipInit")));
                     static_cast<Syntax::InvocationExpression*>(
                         skipInitStatement->Expression())
                         ->Arguments()
                         .Add(new Syntax::DirectionExpression(
-                            Syntax::FieldDirection::Out, identifier));
+                            Syntax::FieldDirection::Out,
+                            [handle = VariableHandleOf(v),
+                             name = v.Name()]() {
+                                auto* identifier =
+                                    new Syntax::IdentifierExpression(name);
+                                identifier->AddAnnotation(
+                                    std::make_shared<ILVariableResolveResult>(
+                                        handle));
+                                return identifier;
+                            }()));
                     insertionParent->InsertChildBefore(
                         insertionNode, skipInitStatement,
                         &Syntax::Slots::Statement);
                 }
-                context_->StepOnce("Insert variable declaration",
-                                   insertedNode);
+                context_->Step("Insert variable declaration", insertedNode);
             } else {
-                insertionParent->InsertChildBefore(insertionNode, vds,
-                                                    &Syntax::Slots::Statement);
+                insertionParent->InsertChildBefore(
+                    insertionNode, vds, &Syntax::Slots::Statement);
             }
         }
     }
-    // perform replacements at end, so that we don't replace a node while it
-    // is still referenced by a VariableToDeclare
+    // Perform the replacements at the end so that we don't replace a node
+    // while it is still referenced by a VariableToDeclare.
     for (Replacement& replacement : replacements) {
-        context_->StepOnce(replacement.stepDescription, replacement.oldNode);
+        context_->Step(replacement.stepDescription, replacement.oldNode);
         Syntax::AstNode* newNode = replacement.createNewNode();
         replacement.oldNode->ReplaceWith(newNode);
     }
 }
 
-bool DeclareVariables::CanBeDeclaredAsOutVariable(
-    VariableToDeclare& v, Syntax::DirectionExpression** dirExprOut) {
-    *dirExprOut = dynamic_cast<Syntax::DirectionExpression*>(v.firstUse->Parent());
-    Syntax::DirectionExpression* dirExpr = *dirExprOut;
-    if (dirExpr == nullptr || dirExpr->FieldDirection() != Syntax::FieldDirection::Out)
-        return false;
-    if (!context_->DecompileRun->Settings().OutVariables())
-        return false;
-    if (v.DefaultInitialization != VariableInitKind::None)
-        return false;
-    for (Syntax::AstNode* node = v.firstUse; node != nullptr; node = node->Parent()) {
-        const Syntax::CSharpSlotInfo* slot = node->Slot();
-        if (slot != nullptr && slot->Kind() == &Syntax::Slots::EmbeddedStatement) {
-            return false;
-        }
-        if (dynamic_cast<Syntax::IfElseStatement*>(node) != nullptr) {
-            // variable declared in if condition appears in parent scope
-            return node == v.insertionPoint.nextNode;
-        }
-        if (dynamic_cast<Syntax::ExpressionStatement*>(node) != nullptr)
-            return node == v.insertionPoint.nextNode;
-        if (dynamic_cast<Syntax::Statement*>(node) != nullptr) {
-            // other statements (e.g. while) don't allow variables to be
-            // promoted to parent scope
-            return false;
-        }
-        if (auto* lambda = dynamic_cast<Syntax::LambdaExpression*>(node))
-            return lambda->Body() == v.insertionPoint.nextNode;
-    }
-    return false;
-}
-
-bool DeclareVariables::IsReferencedWithinDeclaringCall(
-    Syntax::DirectionExpression* dirExpr, VariableToDeclare& v) {
-    Syntax::AstNode* call = dirExpr->Parent();
-    if (call == nullptr)
-        return false;
-    for (Syntax::AstNode* argument = call->FirstChild(); argument != nullptr;
-         argument = argument->NextSibling()) {
-        if (argument == dirExpr)
-            continue;
-        for (Syntax::AstNode* node : argument->DescendantsAndSelf()) {
-            if (auto* identifier = dynamic_cast<Syntax::IdentifierExpression*>(node);
-                identifier != nullptr &&
-                ResolveVariableToDeclare(CS::GetILVariable(*identifier)) == &v)
-                return true;
-        }
-    }
-    return false;
-}
-
-DeclareVariables::VariableToDeclare* DeclareVariables::ResolveVariableToDeclare(
-    IL::ILVariable* variable) {
-    if (variable == nullptr)
-        return nullptr;
-    auto it = variableDict_.find(variable);
-    if (it == variableDict_.end())
-        return nullptr;
-    VariableToDeclare* v = it->second;
-    while (v->replacementDueToCollision != nullptr) {
-        v = v->replacementDueToCollision;
-    }
-    return v;
-}
-
+// The C# `void UpdateAnnotations(AstNode rootNode)` (lines 775-796): a
+// variable removed by a name collision keeps reading through its
+// replacement -- the identifiers' resolve results are re-targeted onto the
+// surviving variable.
 void DeclareVariables::UpdateAnnotations(Syntax::AstNode* rootNode) {
     for (Syntax::AstNode* node : rootNode->Descendants()) {
         IL::ILVariable* ilVar = nullptr;
         if (auto* id = dynamic_cast<Syntax::IdentifierExpression*>(node)) {
-            ilVar = CS::GetILVariable(*id);
+            ilVar = GetILVariable(*id);
         } else if (auto* vi = dynamic_cast<Syntax::VariableInitializer*>(node)) {
-            ilVar = CS::GetILVariable(*vi);
+            ilVar = GetILVariable(*vi);
         } else {
             continue;
         }
         if (ilVar == nullptr || !VariableNeedsDeclaration(ilVar->Kind))
             continue;
-        auto it = variableDict_.find(ilVar);
-        if (it == variableDict_.end())
+        auto it = variableDict.find(ilVar);
+        if (it == variableDict.end())
             throw std::out_of_range(
                 "DeclareVariables::UpdateAnnotations: variable not analyzed");
-        VariableToDeclare* v = it->second;
+        VariableToDeclare* v = it->second.get();
         if (!v->RemovedDueToCollision())
             continue;
-        while (v->replacementDueToCollision != nullptr) {
-            v = v->replacementDueToCollision;
+        while (v->ReplacementDueToCollision != nullptr) {
+            v = v->ReplacementDueToCollision;
         }
-        node->RemoveAnnotations<Sem::ResolveResult>();
-        node->AddAnnotation(std::make_shared<CS::ILVariableResolveResult>(
-            v->ILVariableHandle(), v->ILVariable()->Type));
+        node->RemoveAnnotations<Semantics::ResolveResult>();
+        node->AddAnnotation(std::make_shared<ILVariableResolveResult>(
+            VariableHandleOf(*v), v->ILVariable()->Type));
     }
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Transforms
+
