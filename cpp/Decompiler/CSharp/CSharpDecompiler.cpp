@@ -159,7 +159,8 @@ bool CSharpDecompiler::DecompileMethodToString(
     const Metadata::MetadataFile& file,
     TS::DecompilerTypeSystem* typeSystem, std::uint32_t methodToken,
     std::uint32_t methodRva, const std::string& methodName,
-    std::string& out, bool isConstructor) {
+    std::string& out, bool isConstructor, bool* asyncDecompiled,
+    bool* iteratorDecompiled) {
     auto fn = IL::ReadIL(file, methodToken, methodRva);
     if (!fn) return false;
     // The C# ILReader decodes the body through the method definition (the
@@ -195,6 +196,10 @@ bool CSharpDecompiler::DecompileMethodToString(
     WireTransformContext(transformContext, file, typeSystem);
     RunILTransforms(*fn, transformContext);
     fn->CheckInvariant(IL::ILPhase::Normal);
+    if (asyncDecompiled != nullptr)
+        *asyncDecompiled = fn->IsAsync();
+    if (iteratorDecompiled != nullptr)
+        *iteratorDecompiled = fn->IsIterator;
     out = IL::ILAstToCSharp(*fn, returnType, methodName, paramDecl,
                             isConstructor);
     return true;
@@ -211,6 +216,16 @@ bool CSharpDecompiler::DecompileMethodToString(
 // DecompilerTypeSystem.hpp notes), and a TypeRef scoped to an AssemblyRef
 // resolves into the referenced module's real entity.
 
+
+static OutputVisitor::CSharpFormattingOptions SettingsFormattingOptions() {
+    OutputVisitor::CSharpFormattingOptions options =
+        OutputVisitor::FormattingOptionsFactory::CreateAllman();
+    options.IndentSwitchBody = false;
+    options.ArrayInitializerWrapping = OutputVisitor::Wrapping::WrapIfTooLong;
+    options.AutoPropertyFormatting =
+        OutputVisitor::PropertyFormatting::SingleLine;
+    return options;
+}
 
 namespace {
 
@@ -291,6 +306,55 @@ std::string ConstantFieldLiteral(const TS::IField& field) {
         return "null";
     }
     return std::string();
+}
+
+// The C# ConvertAttributes (the TypeSystemAstBuilder's member form): one
+// AttributeSection per attribute, rendered as the declaration's leading
+// `[...]` lines through the output visitor with the settings' formatting
+// options. The empty string when the entity carries no attributes.
+std::string MemberAttributesText(const TS::IEntity* entity,
+                                 bool asyncDecompiled = false,
+                                 bool iteratorDecompiled = false) {
+    if (entity == nullptr)
+        return std::string();
+    std::vector<const TS::IAttribute*> attributes = entity->GetAttributes();
+    if (attributes.empty())
+        return std::string();
+    OutputVisitor::CSharpFormattingOptions options =
+        SettingsFormattingOptions();
+    // The CreateAstBuilder configuration (the short attribute names the
+    // C# facade renders; the resolver-less builder skips the
+    // disambiguation lookups, matching the attribute path's builder).
+    SyntaxNS::TypeSystemAstBuilder builder;
+    builder.ShowAttributes() = true;
+    builder.AlwaysUseShortTypeNames() = true;
+    std::string out;
+    for (const TS::IAttribute* a : attributes) {
+        if (a == nullptr)
+            continue;
+        // The C# CleanUpMethodDeclaration's removals: the state machine
+        // attributes drop when the async/iterator de-sugar succeeded
+        // (the attribute names the compiler-generated type the de-sugar
+        // replaced; a method that did not de-sugar keeps it).
+        std::string attributeName = a->AttributeType().ReflectionName();
+        if (asyncDecompiled &&
+            attributeName ==
+                "System.Runtime.CompilerServices.AsyncStateMachineAttribute")
+            continue;
+        if (iteratorDecompiled &&
+            (attributeName ==
+                 "System.Runtime.CompilerServices.IteratorStateMachineAttribute" ||
+             attributeName ==
+                 "System.Runtime.CompilerServices.AsyncIteratorStateMachineAttribute"))
+            continue;
+        Syntax::AttributeSection section(builder.ConvertAttribute(*a));
+        std::string text = section.ToString(&options);
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r'))
+            text.pop_back();
+        if (!text.empty())
+            out += text + "\n";
+    }
+    return out;
 }
 
 } // namespace
@@ -385,6 +449,7 @@ bool DecompileTypeToStringBody(
         }
         if (partialType != nullptr)
             typeModifiers = typeModifiers | SyntaxNS::Modifiers::Partial;
+        out += MemberAttributesText(typeDef);
         for (SyntaxNS::Modifiers modifier :
              SyntaxNS::CSharpModifiers::AllModifiers) {
             if (modifier == SyntaxNS::Modifiers::Any)
@@ -465,8 +530,10 @@ bool DecompileTypeToStringBody(
                         IL::CSharpTypeName(sig->ParameterTypes[0]);
             }
         }
-        out += MemberModifiersText(
-            module.GetDefinitionProperty(p.Token));
+        const TS::IProperty* propertyEntity =
+            module.GetDefinitionProperty(p.Token);
+        out += MemberAttributesText(propertyEntity);
+        out += MemberModifiersText(propertyEntity);
         out += propertyTypeName;
         out += ' ';
         out += p.Name;
@@ -507,6 +574,7 @@ bool DecompileTypeToStringBody(
                 accessorTokens.insert(token);
             std::string eventTypeName = "object";
             const TS::IEvent* event = module.GetDefinitionEvent(e.Token);
+            out += MemberAttributesText(event);
             out += MemberModifiersText(event);
             if (event != nullptr) {
                 // A non-owning alias (the module's entity cache owns the
@@ -538,6 +606,7 @@ bool DecompileTypeToStringBody(
             fieldType ? IL::CSharpTypeName(fieldType)
                       : std::string("var");
         const TS::IField* fieldEntity = module.GetDefinitionField(f.Token);
+        out += MemberAttributesText(fieldEntity);
         out += MemberModifiersText(fieldEntity);
         out += fieldTypeName;
         out += ' ';
@@ -604,6 +673,7 @@ bool DecompileTypeToStringBody(
                 paramDecl = CSharpDecompiler::MethodDeclString(*sig,
                                                                 paramNames);
             }
+            out += MemberAttributesText(methodEntity);
             out += modifiers;
             out += isConstructor ? std::string() : returnType + " ";
             out += methodName;
@@ -612,9 +682,13 @@ bool DecompileTypeToStringBody(
             continue;
         }
         std::string text;
+        bool asyncDecompiled = false;
+        bool iteratorDecompiled = false;
         if (CSharpDecompiler::DecompileMethodToString(
                 file, typeSystem, m.Token, m.RVA, methodName, text,
-                isConstructor)) {
+                isConstructor, &asyncDecompiled, &iteratorDecompiled)) {
+            out += MemberAttributesText(methodEntity, asyncDecompiled,
+                                        iteratorDecompiled);
             out += modifiers;
             out += text;
             out += "\n";
@@ -882,15 +956,7 @@ void CSharpDecompiler::DoDecompileModuleAndAssemblyAttributes(
 // auto properties. The C# caches the options per settings instance; the
 // port builds them per render (a handful of option copies, no observable
 // difference -- the options are value semantics either way).
-static OutputVisitor::CSharpFormattingOptions SettingsFormattingOptions() {
-    OutputVisitor::CSharpFormattingOptions options =
-        OutputVisitor::FormattingOptionsFactory::CreateAllman();
-    options.IndentSwitchBody = false;
-    options.ArrayInitializerWrapping = OutputVisitor::Wrapping::WrapIfTooLong;
-    options.AutoPropertyFormatting =
-        OutputVisitor::PropertyFormatting::SingleLine;
-    return options;
-}
+
 
 // The C# `public string DecompileModuleAndAssemblyAttributesToString()`
 // (CSharpDecompiler.cs line 838): `SyntaxTreeToString(

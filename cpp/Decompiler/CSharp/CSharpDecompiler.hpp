@@ -167,7 +167,12 @@ public:
         ::ILSpy::Decompiler::TypeSystem::DecompilerTypeSystem* typeSystem,
         std::uint32_t methodToken, std::uint32_t methodRva,
         const std::string& methodName, std::string& out,
-        bool isConstructor = false);
+        bool isConstructor = false,
+        // The de-sugar outcomes the caller's attribute filter reads (the
+        // C# CleanUpMethodDeclaration's state machine attribute removals
+        // when the async/iterator transform succeeded).
+        bool* asyncDecompiled = nullptr,
+        bool* iteratorDecompiled = nullptr);
 
     // The type-level entry: the type's decodable method bodies rendered in
     // sequence. True when at least one body rendered (the C#

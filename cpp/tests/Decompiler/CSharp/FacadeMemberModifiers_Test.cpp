@@ -308,6 +308,54 @@ TEST(FacadeMemberModifiersTest, ReadonlyStructRenders)
         << text;
 }
 
+// The member attributes render as the declaration's leading sections
+// (the C# ConvertAttributes: one section per attribute, the fixed and
+// named arguments as their constant literals).
+TEST(FacadeMemberModifiersTest, MemberAttributesRender)
+{
+    std::string text;
+    if (!RenderType(kModifierFixture, "ModifierShapes", text))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    EXPECT_NE(text.find("[Obsolete(\"Use NewMethod instead.\")]"),
+              std::string::npos)
+        << text;
+    // The attribute precedes its member declaration.
+    std::size_t attrPos =
+        text.find("[Obsolete(\"Use NewMethod instead.\")]");
+    std::size_t methodPos = text.find("public static int StaticMethod()");
+    ASSERT_NE(attrPos, std::string::npos);
+    ASSERT_NE(methodPos, std::string::npos);
+    EXPECT_LT(attrPos, methodPos) << text;
+}
+
+// The connid corpus's type and members carry the XamlGen GeneratedCode
+// attribute (the oracle renders it on the type header and each member).
+TEST(FacadeMemberModifiersTest, ConnidMemberAttributesRender)
+{
+    std::string path = ::ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    Metadata::MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+    std::string text;
+    for (const auto& t : file.TypeDefs()) {
+        if (std::string(t.Name) != "Page1")
+            continue;
+        ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
+            file, t.Token, text));
+        break;
+    }
+    ASSERT_FALSE(text.empty());
+    EXPECT_NE(text.find("[GeneratedCode(\"XamlGen\", \"4.8.0.0\")]"),
+              std::string::npos)
+        << text;
+    // The attribute precedes the member declaration it decorates.
+    std::size_t attrPos =
+        text.find("[GeneratedCode(\"XamlGen\", \"4.8.0.0\")]");
+    std::size_t methodPos = text.find("public void InitializeComponent()");
+    ASSERT_NE(methodPos, std::string::npos);
+    EXPECT_LT(attrPos, methodPos) << text;
+}
+
 // The constructor's implicit no-argument base call does not render (the
 // C# constructor-initializer convention: a base ctor call renders only
 // with arguments; the no-arg form is the implicit default).
