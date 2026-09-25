@@ -874,6 +874,35 @@ TEST(FacadeMemberModifiersTest, ParameterDefaultValuesRender)
         << text;
 }
 
+// The generic type-parameter list on the declaration header (the C#
+// TypeDeclaration's TypeParameters): the type's OWN parameters only --
+// the declaring chain's outer parameters are not restated (a nested
+// `Outer<T>.Inner<U>` declares <U>; the compiler-generated state
+// machines re-declare the enclosing generic's parameters, so they
+// render without any).
+TEST(FacadeMemberModifiersTest, NestedTypeParameterListSkipsOuterParameters)
+{
+    constexpr const char* kNestedFixture =
+        "/home/jim/ilspy-test-fixtures/nested_fixture/NestedBase.dll";
+    std::string text;
+    if (!RenderType(kNestedFixture, "Gen", text))
+        GTEST_SKIP() << "the nested-base fixture is not provisioned";
+    // The nested-in-generic shapes: the re-declaring nested type renders
+    // only its OWN parameters (the chain-merged surface carries the
+    // declaring type's first).
+    std::string shadow, ownParam;
+    ASSERT_TRUE(RenderType(kNestedFixture, "Shadow", shadow));
+    EXPECT_NE(shadow.find("private sealed class Shadow<TOther1, TOther2>"),
+              std::string::npos)
+        << shadow;
+    ASSERT_TRUE(RenderType(kNestedFixture, "OwnParam", ownParam));
+    EXPECT_NE(ownParam.find("public sealed class OwnParam<TItem>"),
+              std::string::npos)
+        << ownParam;
+    // The top-level generic renders its own list.
+    EXPECT_NE(text.find("class Gen<T>"), std::string::npos) << text;
+}
+
 // The whole-module render's using header carries the module-wide
 // required set (the C# IntroduceUsingDeclarations over the whole-module
 // tree), not just the assembly-attribute namespaces: the connid module's

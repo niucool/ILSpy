@@ -1169,19 +1169,34 @@ bool DecompileTypeToStringBody(
         out += ' ';
         out += bareName;
         // The type-parameter list (the C# TypeDeclaration's
-        // TypeParameters): the declared names in declaration order.
+        // TypeParameters): the type's OWN parameters only -- the C#
+        // skips the declaring type's count. The port's TypeParameters
+        // surface is the chain-merged list (the declaring type's
+        // parameters first, then the own), so the own slice starts at
+        // the declaring type's count; the compiler-generated state
+        // machines (which reference the enclosing generic's parameters
+        // without re-declaring any of their own) render no list at all.
         if (typeDef != nullptr && typeDef->TypeParameterCount() > 0) {
-            out += '<';
+            std::size_t outerTypeParameterCount =
+                typeDef->DeclaringTypeDefinition() != nullptr
+                    ? static_cast<std::size_t>(typeDef
+                                                   ->DeclaringTypeDefinition()
+                                                   ->TypeParameterCount())
+                    : 0;
             const std::vector<const TS::ITypeParameter*>& typeParameters =
                 typeDef->TypeParameters();
-            for (std::size_t i = 0; i < typeParameters.size(); ++i) {
-                if (i != 0)
-                    out += ", ";
-                out += typeParameters[i] != nullptr
-                           ? typeParameters[i]->Name()
-                           : std::string("?");
+            if (typeParameters.size() > outerTypeParameterCount) {
+                out += '<';
+                for (std::size_t i = outerTypeParameterCount;
+                     i < typeParameters.size(); ++i) {
+                    if (i != outerTypeParameterCount)
+                        out += ", ";
+                    out += typeParameters[i] != nullptr
+                               ? typeParameters[i]->Name()
+                               : std::string("?");
+                }
+                out += '>';
             }
-            out += '>';
         }
         if (typeDef != nullptr) {
             std::vector<std::string> baseTypeNames;
