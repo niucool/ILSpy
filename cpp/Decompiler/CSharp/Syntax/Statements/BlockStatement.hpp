@@ -221,6 +221,16 @@ public:
     // collection-only `ArrayInitializerExpression` D250 no-location-copy precedent). The
     // covariant return is `BlockStatement*` (through `Statement*`, the `Statement::Clone`
     // pure-virtual).
+
+    // wraps a Pattern so it can occupy a BlockStatement-typed slot (the C# generator's
+    // `implicit operator BlockStatement(Pattern)`). Defined out-of-line below the class
+    // (the nested class derives from the enclosing one, which must be complete).
+    class PatternPlaceholder;
+
+    // The C# `public static implicit operator BlockStatement(Pattern? pattern)` -- the
+    // PatternExtensions `ToBlockStatement(this Pattern)` call-site form.
+    static BlockStatement* ToBlockStatement(PatternMatching::Pattern& pattern);
+
     BlockStatement* Clone() const override {
         auto* node = new BlockStatement();
         node->CloneAnnotationsFrom(*this);
@@ -296,6 +306,51 @@ inline const CSharpSlotInfoT<BlockStatement> TryBlock{"TryBlock", false, nullptr
 namespace Slots {
 inline const CSharpSlotInfoT<BlockStatement> FinallyBlock{"FinallyBlock", false, nullptr, false};
 } // namespace Slots
+
+// The C# generator's `BlockStatement.PatternPlaceholder` (the `hasPatternPlaceholder: true`
+// nested class, the `Statement::PatternPlaceholder` precedent): wraps a Pattern so it can
+// occupy a BlockStatement-typed slot (the C# `implicit operator BlockStatement(Pattern)`), as
+// the try-finally patterns do for their `TryBlock = new AnyNode(...)` terms. Defined
+// out-of-line after the class (the nested class derives from the enclosing one, which must be
+// complete).
+class BlockStatement::PatternPlaceholder final : public BlockStatement {
+public:
+    explicit PatternPlaceholder(PatternMatching::Pattern& child) : child_(&child) {}
+
+    // The shallow-copy equivalent of the C# inherited MemberwiseClone: a fresh
+    // placeholder over the same child reference.
+    BlockStatement* Clone() const override { return new PatternPlaceholder(*child_); }
+
+    void AcceptVisitor(IAstVisitor& visitor) override {
+        visitor.VisitPatternPlaceholder(this, child_);
+    }
+
+    bool AcceptVisitorBool(IAstVisitorBool& visitor) override {
+        return visitor.VisitPatternPlaceholder(this, child_);
+    }
+
+    bool DoMatch(AstNode* other, PatternMatching::Match match) override {
+        return child_->DoMatch(other, match);
+    }
+
+    bool DoMatchCollection(const std::vector<PatternMatching::INode*>& other, int pos,
+                           PatternMatching::Match match,
+                           PatternMatching::BacktrackingInfo& backtrackingInfo) override {
+        return child_->DoMatchCollection(other, pos, match, backtrackingInfo);
+    }
+
+    PatternMatching::Pattern& Child() const { return *child_; }
+
+private:
+    PatternMatching::Pattern* child_;
+};
+
+// The C# `public static implicit operator BlockStatement(Pattern? pattern)` /
+// the PatternExtensions `ToBlockStatement(this Pattern)`: the call-site form.
+inline BlockStatement* BlockStatement::ToBlockStatement(
+    PatternMatching::Pattern& pattern) {
+    return new PatternPlaceholder(pattern);
+}
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 

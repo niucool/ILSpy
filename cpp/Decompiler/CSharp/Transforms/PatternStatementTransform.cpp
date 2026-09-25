@@ -52,10 +52,12 @@
 
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/Syntax/Accessor.hpp"
+#include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
 #include "Decompiler/CSharp/Syntax/ConstructorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/DepthFirstAstVisitor.hpp"
 #include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/BaseReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
@@ -69,6 +71,7 @@
 #include "Decompiler/CSharp/Syntax/OperatorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/PatternMatching/Match.hpp"
 #include "Decompiler/CSharp/Syntax/PatternMatching/PatternNodes.hpp"
+#include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
@@ -77,7 +80,9 @@
 #include "Decompiler/CSharp/Syntax/Statements/ForeachStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/Statement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
 #include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
@@ -454,6 +459,48 @@ ForeachOnInlineArrayPatternHolder& GetForeachOnInlineArrayPattern() {
     return holder;
 }
 
+// The C# destructor patterns (lines ~933-948):
+//   destructorBodyPattern: `{ try { $body } finally { base.Finalize(); } }`
+//   destructorPattern: `$modifiers void Finalize() { destructorBodyPattern }`
+struct DestructorPatternsHolder {
+    PatternMatching::AnyNode body{"body"};
+    Syntax::BaseReferenceExpression baseReference;
+    Syntax::MemberReferenceExpression finalizeMember{&baseReference, "Finalize"};
+    Syntax::InvocationExpression finalizeCall{&finalizeMember};
+    // The C# `new BlockStatement { new InvocationExpression(...) }` -- the
+    // expression-statement convenience wrap.
+    Syntax::ExpressionStatement finalizeStatement{&finalizeCall};
+    Syntax::BlockStatement finallyBlock;
+    Syntax::TryCatchStatement tryCatch;
+    Syntax::BlockStatement destructorBodyPattern;
+    Syntax::PrimitiveType voidType;
+    PatternMatching::AnyNode anyAttribute;
+    PatternMatching::Repeat anyAttributes{anyAttribute};
+    Syntax::MethodDeclaration destructorPattern;
+
+    DestructorPatternsHolder() {
+        voidType.Keyword("void");
+        destructorPattern.Modifiers(Syntax::Modifiers::Any);
+        finallyBlock.Statements().Add(&finalizeStatement);
+        tryCatch.TryBlock(Syntax::BlockStatement::ToBlockStatement(body));
+        tryCatch.FinallyBlock(&finallyBlock);
+        destructorBodyPattern.Statements().Add(&tryCatch);
+        destructorPattern.Attributes().Add(
+            Syntax::AttributeSection::ToAttributeSection(anyAttributes));
+        destructorPattern.ReturnType(&voidType);
+        destructorPattern.Name("Finalize");
+        destructorPattern.Body(&destructorBodyPattern);
+    }
+};
+
+DestructorPatternsHolder& GetDestructorPatterns() {
+    static DestructorPatternsHolder holder;
+    return holder;
+}
+
+// (The C# `DestructorDeclaration dd = new()` construction helper -- the port
+// inlines it in TransformDestructor.)
+
 // The C# `bool DescendIntoStatement(AstNode node)` -- the continue-scan gate:
 // do not descend into expressions (their identifier references are not
 // statements) or into NESTED loops (a continue there targets the nested loop,
@@ -587,6 +634,12 @@ public:
     }
 
     void VisitMethodDeclaration(Syntax::MethodDeclaration* methodDeclaration) override {
+        // The destructor reshape routes before the tracking/base visit (the
+        // C# derived override chains onto the ContextTrackingVisitor base).
+        if (Syntax::AstNode* result = TransformDestructor(methodDeclaration)) {
+            lastResult = result;
+            return;
+        }
         const TS::IMethod* oldMethod = currentMethod;
         currentMethod =
             dynamic_cast<const TS::IMethod*>(CS::GetSymbol(*methodDeclaration));
@@ -605,6 +658,12 @@ public:
 
     void VisitDestructorDeclaration(
         Syntax::DestructorDeclaration* destructorDeclaration) override {
+        // The lowered-body unwrap routes before the tracking/base visit.
+        if (Syntax::AstNode* result =
+                TransformDestructorBody(destructorDeclaration)) {
+            lastResult = result;
+            return;
+        }
         const TS::IMethod* oldMethod = currentMethod;
         currentMethod =
             dynamic_cast<const TS::IMethod*>(CS::GetSymbol(*destructorDeclaration));
@@ -1244,6 +1303,55 @@ public:
         // The C# `context.EndStep(foreachStmt)` (the step-group close) folds
         // onto the single step hook.
         return foreachStmt;
+    }
+
+    // The C# `DestructorDeclaration? TransformDestructor(MethodDeclaration
+    // methodDef)` (line ~949): the compiler-generated `protected override
+    // void Finalize() { try { body } finally { base.Finalize(); } }` becomes
+    // the destructor `~T() { body }`.
+    Syntax::DestructorDeclaration* TransformDestructor(
+        Syntax::MethodDeclaration* methodDef) {
+        PatternMatching::Match m =
+            Syntax::MatchNode(GetDestructorPatterns().destructorPattern, methodDef);
+        if (!m.Success())
+            return nullptr;
+        context->StepOnce("Convert Finalize method to destructor", methodDef);
+        auto* dd = new Syntax::DestructorDeclaration();
+        methodDef->Attributes().MoveTo(dd->Attributes());
+        CS::CopyAnnotationsFrom(dd, *methodDef);
+        dd->Modifiers(methodDef->Modifiers() &
+                      ~(Syntax::Modifiers::Protected | Syntax::Modifiers::Override));
+        std::vector<Syntax::BlockStatement*> bodyCaptures =
+            m.Get<Syntax::BlockStatement>("body");
+        // The C# `.Single()` (exactly one capture by construction).
+        assert(bodyCaptures.size() == 1);
+        dd->Body(Syntax::Detach(bodyCaptures.front()));
+        // A destructor only appears inside a type declaration, so the
+        // context tracker has an enclosing type at this point (the C#
+        // null-forgiving `!`).
+        assert(currentTypeDefinition != nullptr);
+        dd->Name(currentTypeDefinition->Name());
+        methodDef->ReplaceWith(dd);
+        // The C# `context.EndStep(dd)` (the step-group close) folds onto the
+        // single step hook.
+        return dd;
+    }
+
+    // The C# `DestructorDeclaration? TransformDestructorBody(DestructorDeclaration
+    // dtorDef)` (line ~970): a destructor whose body is still the lowered
+    // try-finally shape is unwrapped to just the body.
+    Syntax::DestructorDeclaration* TransformDestructorBody(
+        Syntax::DestructorDeclaration* dtorDef) {
+        PatternMatching::Match m = Syntax::MatchNode(
+            GetDestructorPatterns().destructorBodyPattern, dtorDef->Body());
+        if (!m.Success())
+            return nullptr;
+        context->StepOnce("Simplify destructor body", dtorDef);
+        std::vector<Syntax::BlockStatement*> bodyCaptures =
+            m.Get<Syntax::BlockStatement>("body");
+        assert(bodyCaptures.size() == 1);
+        dtorDef->Body(Syntax::Detach(bodyCaptures.front()));
+        return dtorDef;
     }
 
     // The C# `public override AstNode VisitIfElseStatement(IfElseStatement ...)`.

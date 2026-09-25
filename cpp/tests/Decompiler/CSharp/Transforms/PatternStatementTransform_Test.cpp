@@ -30,7 +30,10 @@
 
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/CSharpDecompiler.hpp"
+#include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
+#include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/BaseReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
@@ -39,6 +42,8 @@
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/MethodDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
@@ -46,8 +51,11 @@
 #include "Decompiler/CSharp/Syntax/Statements/ForeachStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
+#include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
@@ -128,13 +136,15 @@ std::string NameOf(const Syntax::Expression* expression) {
 // Runs the transform over a root node with the fixture's context.
 void RunTransform(Syntax::AstNode& root, const PatternStatementFixture& fx,
                   bool forStatementSetting = true,
-                  bool forEachStatementSetting = true) {
+                  bool forEachStatementSetting = true,
+                  const TS::ITypeDefinition* currentTypeDefinition = nullptr) {
     DecompilerSettings settings;
     settings.SetForStatement(forStatementSetting);
     settings.SetForEachStatement(forEachStatementSetting);
     DecompileRun runStorage(&settings, fx.usingScope);
     CS::Transforms::TransformContext context;
     context.DecompileRun = &runStorage;
+    context.CurrentTypeDefinition = currentTypeDefinition;
     context.TypeSystemAstBuilder = &const_cast<PatternStatementFixture&>(fx).astBuilder;
     CS::Transforms::PatternStatementTransform transform;
     transform.Run(root, context);
@@ -1362,6 +1372,136 @@ TEST(PatternStatementTransformTest, ForeachOnInlineArrayRequiresIndexCounts)
 
     EXPECT_EQ(loop.block->Statements().Count(), 1);
     EXPECT_EQ(loop.block->Statements().At(0), loop.forStatement);
+}
+
+// ---- The destructor reshape -------------------------------------------------------------
+
+// The `try { body } finally { base.Finalize(); }` shape the compiler emits
+// for a Finalize override.
+Syntax::TryCatchStatement* MakeFinalizeBody(Syntax::BlockStatement** bodyOut = nullptr) {
+    auto* tryStatement = new Syntax::TryCatchStatement();
+    auto* body = new Syntax::BlockStatement();
+    body->Statements().Add(new Syntax::ReturnStatement());
+    tryStatement->TryBlock(body);
+    auto* finallyBlock = new Syntax::BlockStatement();
+    finallyBlock->Statements().Add(new Syntax::ExpressionStatement(
+        new Syntax::InvocationExpression(new Syntax::MemberReferenceExpression(
+            new Syntax::BaseReferenceExpression(), "Finalize"))));
+    tryStatement->FinallyBlock(finallyBlock);
+    if (bodyOut != nullptr)
+        *bodyOut = body;
+    return tryStatement;
+}
+
+// The C# shape `protected override void Finalize() { try { body } finally
+// { base.Finalize(); } }` inside a type declaration becomes the destructor
+// `~MyClass() { body }`.
+TEST(PatternStatementTransformTest, FinalizeMethodBecomesDestructor)
+{
+    PatternStatementFixture fx;
+    auto typeDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        "MyClass", std::string(), TS::FullTypeName("MyClass"),
+        TS::TypeKind::Class, TS::Accessibility::Public, fx.compilation, nullptr);
+
+    auto* method = new Syntax::MethodDeclaration();
+    method->Name("Finalize");
+    auto* voidType = new Syntax::PrimitiveType();
+    voidType->Keyword("void");
+    method->ReturnType(voidType);
+    method->Modifiers(Syntax::Modifiers::Protected | Syntax::Modifiers::Override);
+    auto* methodBody = new Syntax::BlockStatement();
+    Syntax::BlockStatement* work = nullptr;
+    methodBody->Statements().Add(MakeFinalizeBody(&work));
+    method->Body(methodBody);
+    auto* attributeSection = new Syntax::AttributeSection();
+    method->Attributes().Add(attributeSection);
+
+    auto type = std::make_unique<Syntax::TypeDeclaration>();
+    type->Members().Add(method);
+    // The ContextTrackingVisitor reads the enclosing type through the type
+    // declaration's symbol annotation.
+    type->AddAnnotation(
+        std::make_shared<Sem::TypeResolveResult>(typeDef));
+
+    RunTransform(*type, fx, /*forStatementSetting=*/true,
+                 /*forEachStatementSetting=*/true, typeDef.get());
+
+    ASSERT_EQ(type->Members().Count(), 1);
+    auto* destructor =
+        dynamic_cast<Syntax::DestructorDeclaration*>(type->Members().At(0));
+    ASSERT_NE(destructor, nullptr) << "the Finalize method becomes a destructor";
+    EXPECT_EQ(destructor->Name(), "MyClass");
+    EXPECT_EQ(destructor->Body(), work)
+        << "the try body moves to the destructor body";
+    EXPECT_EQ(destructor->Modifiers(), Syntax::Modifiers::None)
+        << "Protected and Override are cleared";
+    ASSERT_EQ(destructor->Attributes().Count(), 1)
+        << "the method's attributes move to the destructor";
+}
+
+// A Finalize method that does not match the try-finally-base call shape
+// keeps its method form.
+TEST(PatternStatementTransformTest, FinalizeMethodRequiresTheExactShape)
+{
+    PatternStatementFixture fx;
+    auto typeDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        "MyClass", std::string(), TS::FullTypeName("MyClass"),
+        TS::TypeKind::Class, TS::Accessibility::Public, fx.compilation, nullptr);
+
+    auto* method = new Syntax::MethodDeclaration();
+    method->Name("Finalize");
+    auto* voidType = new Syntax::PrimitiveType();
+    voidType->Keyword("void");
+    method->ReturnType(voidType);
+    method->Modifiers(Syntax::Modifiers::Protected | Syntax::Modifiers::Override);
+    auto* methodBody = new Syntax::BlockStatement();
+    auto* tryStatement = new Syntax::TryCatchStatement();
+    tryStatement->TryBlock(new Syntax::BlockStatement());
+    auto* finallyBlock = new Syntax::BlockStatement();
+    finallyBlock->Statements().Add(new Syntax::ExpressionStatement(
+        new Syntax::InvocationExpression(new Syntax::MemberReferenceExpression(
+            new Syntax::BaseReferenceExpression(), "Dispose"))));
+    tryStatement->FinallyBlock(finallyBlock);
+    methodBody->Statements().Add(tryStatement);
+    method->Body(methodBody);
+
+    auto type = std::make_unique<Syntax::TypeDeclaration>();
+    type->Members().Add(method);
+    type->AddAnnotation(
+        std::make_shared<Sem::TypeResolveResult>(typeDef));
+
+    RunTransform(*type, fx, true, true, typeDef.get());
+
+    ASSERT_EQ(type->Members().Count(), 1);
+    EXPECT_NE(dynamic_cast<Syntax::MethodDeclaration*>(type->Members().At(0)), nullptr)
+        << "a non-matching Finalize keeps the method form";
+}
+
+// A destructor carrying the try-finally-base call body is unwrapped to just
+// the body.
+TEST(PatternStatementTransformTest, DestructorBodyIsSimplified)
+{
+    PatternStatementFixture fx;
+    auto typeDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        "MyClass", std::string(), TS::FullTypeName("MyClass"),
+        TS::TypeKind::Class, TS::Accessibility::Public, fx.compilation, nullptr);
+
+    auto* destructor = new Syntax::DestructorDeclaration();
+    destructor->Name("MyClass");
+    auto* outerBody = new Syntax::BlockStatement();
+    Syntax::BlockStatement* work = nullptr;
+    outerBody->Statements().Add(MakeFinalizeBody(&work));
+    destructor->Body(outerBody);
+
+    auto type = std::make_unique<Syntax::TypeDeclaration>();
+    type->Members().Add(destructor);
+    type->AddAnnotation(
+        std::make_shared<Sem::TypeResolveResult>(typeDef));
+
+    RunTransform(*type, fx, true, true, typeDef.get());
+
+    EXPECT_EQ(destructor->Body(), work)
+        << "the try body unwraps into the destructor body";
 }
 
 // ---- The Run shell ---------------------------------------------------------------------
