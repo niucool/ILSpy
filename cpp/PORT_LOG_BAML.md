@@ -1456,3 +1456,67 @@ it (process exit reclaims strays); the GUI host should adopt
 The assembly-list bulk-load fan-out (the bennu `--parallel` arm) has
 no C# ILSpyX-side consumer to port against (the C# app fans out in
 its own UI layer), so the edge primitive ships instead.
+
+---
+
+# Ported: the WebCIL container reader (two slices, one feature)
+
+Un-blocks the WebCilFileLoader deferral from the Phase 1 list (the
+LoadResult.hpp note; the registry's commented-out registration). TDD
+throughout; the ported C# test suite is
+ICSharpCode.Decompiler.Tests/Metadata/WebCilFileTests.cs.
+
+## Slice A -- the pure container reader
+
+`cpp/Decompiler/Metadata/WebCilFile.hpp/.cpp` ports the static
+structural surface of the C# `WebCilFile`:
+
+* `TryParse` (the `FromFile` structural half): the WASM magic/version
+  gates, the section walk (id + ULEB128 size per section, the Custom-0
+  terminator), the Data-section probe (two segments, the first
+  skipped), and `TryReadWebCilSegment` (the WbIL header, the COFF-style
+  section table, the CLI-header read via the section translation).
+  Every crafted/truncated shape the C# catch reduces to null maps to
+  the port's std::out_of_range catch (the EndOfStream/Overflow/
+  BadImageFormat -> out_of_range mapping documented on the header).
+* `TryGetSectionDataRange`: the C# internal verbatim (64-bit-widened
+  arithmetic, the RawDataSize-minus-delta length rule, the view-bounds
+  checks). All six C# range tests port one-for-one, plus the two
+  FromFile rejection tests and a garbage-file rejection pin.
+
+## Slice B -- the loader integration
+
+* `WebCilFileLoader` (ILSpyX/FileLoaders/) ports the C# loader: the
+  ParentBundle-null decline, the FromFile-over-the-path parse (the
+  passed bytes unused, exactly as the C# uses them), the nullopt
+  decline on any parse failure.
+* **The adapter decision** (the port's one divergence, documented on
+  `WebCilFile::BuildPeImage`): the C# models WebCilFile as its own
+  MetadataFile kind (a MetadataReaderProvider over the extracted
+  metadata stream). The port's MetadataFile is PE-shaped and
+  non-polymorphic, so instead of a subclass the adapter lays the
+  original container bytes behind a synthetic minimal PE header whose
+  section table is the WebCIL COFF table verbatim (the raw pointers
+  shifted into the adapted image) and whose COM directory points at
+  the REAL CLI header inside the payload. The winmd database and the
+  MethodBodyReader then parse the genuine metadata and bodies through
+  the established PE paths with zero reader changes; the payload is
+  byte-preserved (only the DOS/NT headers around it are fabricated).
+  The winmd source tree stays verbatim (the C#
+  MetadataReaderProvider.FromMetadataStream raw-stream entry point was
+  the alternative and would have required a vendored-code edit).
+* The registry registration (Xamarin, WebCil, Bundle, PE, Archive --
+  the C# order minus the remaining MetadataFileLoader deferral) and
+  the LoadResult.hpp deferral note updated (MetadataFileLoader is now
+  the only Phase-1 loader gap).
+* Tests: the end-to-end container load over the real ConnIdRes
+  metadata (extracted from the fixture PE in the test) asserting the
+  adapter image parses as a valid MetadataFile with the fixture's
+  assembly definition (Name == connid_res); the loader's bundle-entry
+  decline; the registry-order update to five loaders.
+
+Verification: the 10 WebCilFileTest + the 2 WebCilFileLoaderTest + the
+updated registry tests all green in the plain and ASan builds; the
+full-suite failure set is identical to the pre-change baseline (251
+pre-existing corpus-gated failures; only a gtest timing field differs
+in the raw output).

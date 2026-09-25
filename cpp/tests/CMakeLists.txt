@@ -27,6 +27,7 @@ add_executable(ilspy_tests
     Decompiler/Xml/XNode_Test.cpp
     Decompiler/Xml/XObject_Test.cpp
     Decompiler/Metadata/Metadata_Test.cpp
+    Decompiler/Metadata/WebCilFile_Test.cpp
     Decompiler/Metadata/MetadataAttributes_Test.cpp
     Decompiler/Metadata/MethodBody_Test.cpp
     Decompiler/Metadata/MethodSemanticsLookup_Test.cpp
