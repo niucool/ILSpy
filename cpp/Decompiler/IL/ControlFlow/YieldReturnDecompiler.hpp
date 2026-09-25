@@ -36,6 +36,7 @@
 #include "Decompiler/Util/LongSet.hpp"
 
 #include <map>
+#include <memory>
 #include <vector>
 
 namespace ILSpy::Decompiler::IL {
@@ -43,6 +44,7 @@ namespace ILSpy::Decompiler::IL {
 class Block;
 class BlockContainer;
 class ILVariable;
+class StLoc;
 
 class YieldReturnDecompiler : public IILTransform {
 public:
@@ -76,6 +78,15 @@ public:
         std::map<const TypeSystem::IField*, ILVariable*>& fieldToParameterMap,
         std::uint32_t getEnumeratorMethod);
 
+    // The C# `internal static void TranslateFieldsToLocalAccess(ILFunction
+    // function, ILInstruction inst, Dictionary<IField, ILVariable>
+    // fieldToVariableMap, bool isCompiledWithMono = false)`: rewrites the
+    // this-field accesses to the hoisted local variables.
+    static void TranslateFieldsToLocalAccess(
+        ILFunction& function, ILInstruction* inst,
+        std::map<const TypeSystem::IField*, ILVariable*>& fieldToVariableMap,
+        bool isCompiledWithMono = false);
+
 private:
     // The C# member analyses.
     bool MatchEnumeratorCreationPattern(ILFunction& function,
@@ -84,6 +95,20 @@ private:
     void AnalyzeCurrentProperty(ILTransformContext& context);
     void ResolveIEnumerableIEnumeratorFieldMapping(ILTransformContext& context);
     void ConstructExceptionTable(ILTransformContext& context);
+    // The C# `BlockContainer AnalyzeMoveNext(ILFunction function)`: the
+    // MoveNext decode + the copy propagation + the state-field fallback +
+    // the Mono skip-finally discovery + the field-copy propagation + the
+    // range analysis + the body conversion. Returns the converted body
+    // (null on failure -- the caller leaves the state machine as-is).
+    std::unique_ptr<BlockContainer> AnalyzeMoveNext(
+        ILFunction& function, ILTransformContext& context);
+    // The C# `void PropagateCopiesOfFields(BlockContainer body)`: undo the
+    // Roslyn optimization that copies the immutable fields into locals.
+    void PropagateCopiesOfFields(BlockContainer& body);
+    // The C# `BlockContainer ConvertBody(BlockContainer oldBody,
+    // StateRangeAnalysis rangeAnalysis)`.
+    std::unique_ptr<BlockContainer> ConvertBody(
+        BlockContainer& oldBody, ControlFlow::StateRangeAnalysis& rangeAnalysis);
 
     // The transform state (the C# fields; the raw tokens replace the SRM
     // handles, the port's raw-token convention).
@@ -102,6 +127,13 @@ private:
     std::map<const TypeSystem::IField*, ILVariable*> fieldToParameterMap_;
     std::map<const TypeSystem::IMethod*, Util::LongSet> finallyMethodToStateRange_;
     bool hasFinallyMethodToStateRange_ = false;
+    // The C# temporary stores for 'yield break' (the state-variable stores
+    // whose loads become the new-body leaves).
+    std::vector<StLoc*> returnStores_;
+    // The Mono/VB local flags + the cached state vars (the C# fields).
+    ILVariable* skipFinallyBodies_ = nullptr;
+    ILVariable* doFinallyBodies_ = nullptr;
+    std::vector<ILVariable*> cachedStateVars_;
 };
 
 } // namespace ILSpy::Decompiler::IL

@@ -168,6 +168,14 @@ ILVariablePtr ILFunction::RegisterVariable(VariableKind kind, TypeSystem::ITypeP
     return v;
 }
 
+void ILFunction::RegisterExistingVariable(const ILVariablePtr& variable) {
+    if (!variable) return;
+    for (const ILVariablePtr& existing : Variables) {
+        if (existing == variable) return;
+    }
+    Variables.push_back(variable);
+}
+
 void ILFunction::RecombineVariables(ILVariablePtr variable1, ILVariablePtr variable2) {
     if (!variable1 || !variable2 || variable1.get() == variable2.get()) return;
     ReassignUses(Body.get(), variable1, variable2.get());

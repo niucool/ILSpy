@@ -32,12 +32,19 @@
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"  // LdFlda
 #include "Decompiler/IL/PatternMatching.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
+#include "Decompiler/IL/Instructions/InvalidInstructions.hpp"
+#include "Decompiler/IL/Instructions/Rethrow.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/TryInstructions.hpp"
+#include "Decompiler/IL/Instructions/YieldReturn.hpp"
+#include "Decompiler/IL/Transforms/CopyPropagation.hpp"
 #include "Decompiler/IL/Transforms/SplitVariables.hpp"
 #include "Decompiler/Metadata/CodeMappingInfo.hpp"  // IsCompilerGeneratorEnumerator
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/TypeSystem/ICompilation.hpp"
 #include "Decompiler/TypeSystem/MetadataModule.hpp"
-#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // IsKnownType
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
+
 
 namespace ILSpy::Decompiler::IL {
 
@@ -62,6 +69,21 @@ bool MatchLdcI4(ILInstruction* inst, int& value) {
         return false;
     }
     value = ldc->Value;
+    return true;
+}
+
+// File-local MatchLdLoc out-form (the C# `MatchLdLoc(out ILVariable
+// variable)`, PatternMatching.cs lines 100-113): an LdLoc reporting its
+// variable. Same file-local discipline as MatchLdcI4 above -- the shared
+// MatchLdLoc overload is the match-against-variable form, and a shared
+// out-form would hijack it (the D66/D94 trap).
+bool MatchLdLocOut(ILInstruction* inst, ILVariable*& variable) {
+    auto* ldloc = dynamic_cast<LdLoc*>(inst);
+    if (ldloc == nullptr) {
+        variable = nullptr;
+        return false;
+    }
+    variable = ldloc->Variable.get();
     return true;
 }
 
@@ -198,8 +220,9 @@ void YieldReturnDecompiler::Run(ILFunction& function,
     finallyMethodToStateRange_.clear();
     hasFinallyMethodToStateRange_ = false;
 
-    if (!MatchEnumeratorCreationPattern(function, context))
+    if (!MatchEnumeratorCreationPattern(function, context)) {
         return;
+    }
     try {
         AnalyzeCtor(context);
         AnalyzeCurrentProperty(context);
@@ -209,26 +232,124 @@ void YieldReturnDecompiler::Run(ILFunction& function,
         // The C# adds a warning and leaves the state machine as-is.
         return;
     }
-    // SLICE STATE (parts 3-4): AnalyzeMoveNext / the body rewrite / the
-    // try-finally reconstruction are not ported yet; the transform has
-    // matched and analyzed but does not rewrite.
+    context.StepOnce("Replacing body with MoveNext() body");
+    std::unique_ptr<BlockContainer> newBody;
+    try {
+        newBody = AnalyzeMoveNext(function, context);
+    } catch (const ControlFlow::SymbolicAnalysisFailedException&) {
+        return;
+    } catch (const std::exception&) {
+        return;
+    }
+    if (newBody == nullptr)
+        return;
+    function.IsIterator = true;
+    auto oldBody = std::move(function.Body);
+    function.Body = std::move(newBody);
+    function.Body->Parent = &function;
+    function.Body->ChildIndex = 0;
+    // register any locals used in the new body (the C#
+    // Variables.AddRange(newBody.Descendants.OfType<IStoreInstruction>)):
+    // the walk collects every instruction's variable.
+    {
+        std::vector<ILInstruction*> stack{function.Body.get()};
+        while (!stack.empty()) {
+            ILInstruction* node = stack.back();
+            stack.pop_back();
+            if (auto* stloc = dynamic_cast<StLoc*>(node)) {
+                if (stloc->Variable != nullptr)
+                    function.RegisterExistingVariable(stloc->Variable);
+            } else if (auto* ldloc = dynamic_cast<LdLoc*>(node)) {
+                if (ldloc->Variable != nullptr)
+                    function.RegisterExistingVariable(ldloc->Variable);
+            } else if (auto* ldloca = dynamic_cast<LdLoca*>(node)) {
+                if (ldloca->Variable != nullptr)
+                    function.RegisterExistingVariable(ldloca->Variable);
+            }
+            for (int i = 0; i < node->ChildCount(); i++) {
+                if (ILInstruction* child = node->GetChild(i))
+                    stack.push_back(child);
+            }
+        }
+    }
+    // SLICE STATE (part 4): the try-finally reconstruction (the MS
+    // DecompileFinallyBlocks + ReconstructTryFinallyBlocks; the Mono/VB
+    // CleanSkipFinallyBodies / CleanDoFinallyBodies /
+    // CleanFinallyStateChecks) is not ported yet -- the finally-method
+    // calls stay as calls until it lands.
+    context.StepOnce("Translate fields to local accesses");
+    if (function.Body != nullptr) {
+        TranslateFieldsToLocalAccess(function, function.Body.get(),
+                                     fieldToParameterMap_,
+                                     isCompiledWithMono_);
+    }
+    // On mono, we still need to remove traces of the state variable(s):
+    if (isCompiledWithMono_ || isCompiledWithVisualBasic_) {
+        // The C# reads stateField's StoreInstructions through the
+        // field-to-parameter map; the port collects the state-variable's
+        // stores by the walk (the missing per-variable list, D11/D62/D68).
+        // (Deferred with the Mono arms -- the no-VB-discriminator staging
+        // leaves the state stores in place; part 4's cleanups handle them.)
+    }
+    if (!returnStores_.empty()) {
+        context.StepOnce("Remove temporaries");
+        for (StLoc* store : returnStores_) {
+            if (store->Variable != nullptr && store->Variable->LoadCount == 0 &&
+                store->Variable->AddressCount == 0) {
+                if (auto* block = dynamic_cast<Block*>(store->Parent)) {
+                    for (auto it = block->Instructions.begin();
+                         it != block->Instructions.end(); ++it) {
+                        if (it->get() == store) {
+                            block->Instructions.erase(it);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        returnStores_.clear();
+    }
+    // Re-run control flow simplification over the newly constructed set of
+    // gotos, and inlining because TranslateFieldsToLocalAccess might have
+    // opened up new inlining opportunities (the C# EarlyILTransforms()).
+    {
+        ControlFlowSimplification cfs;
+        cfs.Run(function, context);
+        SplitVariables().Run(function, context);
+        ILInlining().Run(function, context);
+    }
 }
 
 bool YieldReturnDecompiler::MatchEnumeratorCreationPattern(
     ILFunction& function, ILTransformContext& context) {
     Block* body = SingleBlock(function.Body.get());
-    if (body == nullptr || body->Instructions.empty()) {
+    if (body == nullptr)
         return false;
-    }
 
     ILInstruction* newObj = nullptr;
+    // The C# 1-instruction path (`ret(newobj(...))`): the C# reader puts the
+    // terminator in the Instructions list; the port carries it in the final
+    // slot, so the shape is an empty instruction list with a final that is
+    // the return. (A 1-element list whose element is the return covers the
+    // hand-built shapes.)
+    bool oneInstructionReturn = false;
     if (body->Instructions.size() == 1) {
+        ILInstruction* value = nullptr;
+        if (MatchReturn(body->Instructions[0].get(), value)) {
+            newObj = value;
+            oneInstructionReturn = true;
+        }
+    } else if (body->Instructions.empty() &&
+               body->FinalInstruction != nullptr) {
+        ILInstruction* value = nullptr;
+        if (MatchReturn(body->FinalInstruction.get(), value)) {
+            newObj = value;
+            oneInstructionReturn = true;
+        }
+    }
+    if (oneInstructionReturn) {
         // No parameters passed to enumerator (not even 'this'):
         // ret(newobj(...))
-        ILInstruction* value = nullptr;
-        if (!MatchReturn(body->Instructions[0].get(), value))
-            return false;
-        newObj = value;
         if (MatchEnumeratorCreationNewObj(newObj, *metadata_, currentType_,
                                           enumeratorCtor_, enumeratorType_)) {
             return true;
@@ -250,8 +371,9 @@ bool YieldReturnDecompiler::MatchEnumeratorCreationPattern(
 
     // stloc(var_1, newobj(..))
     ILVariable* var1 = nullptr;
-    if (!MatchStLoc(body->Instructions[pos].get(), var1, newObj))
+    if (!MatchStLoc(body->Instructions[pos].get(), var1, newObj)) {
         return false;
+    }
     if (MatchEnumeratorCreationNewObj(newObj, *metadata_, currentType_,
                                       enumeratorCtor_, enumeratorType_)) {
         pos++;  // OK
@@ -287,7 +409,7 @@ bool YieldReturnDecompiler::MatchEnumeratorCreationPattern(
                                          storedField->MemberDefinition())
                                    : nullptr;
         ILVariable* parameter = nullptr;
-        if (MatchLdLoc(value, parameter) &&
+        if (MatchLdLocOut(value, parameter) &&
             parameter->Kind == VariableKind::Parameter) {
             fieldToParameterMap_[fieldDefinition] = parameter;
         } else if (auto* ldobj = dynamic_cast<LdObj*>(value);
@@ -306,13 +428,23 @@ bool YieldReturnDecompiler::MatchEnumeratorCreationPattern(
         }
     }
 
+    // The instruction at position p, falling back to the final slot (the
+    // port's terminator convention; the C# carries the return in the list).
+    auto instAt = [&](std::size_t p) -> ILInstruction* {
+        if (p < body->Instructions.size())
+            return body->Instructions[p].get();
+        if (p == body->Instructions.size() && body->FinalInstruction)
+            return body->FinalInstruction.get();
+        return nullptr;
+    };
     // In debug builds, the compiler may copy the var1 into another variable
     // (var2) before returning it.
     ILVariable* var2 = nullptr;
     {
         ILVariable* v2 = nullptr;
         ILInstruction* ldlocForStloc2 = nullptr;
-        if (MatchStLoc(body->Instructions[pos].get(), v2, ldlocForStloc2) &&
+        ILInstruction* at = instAt(pos);
+        if (at != nullptr && MatchStLoc(at, v2, ldlocForStloc2) &&
             MatchLdLoc(ldlocForStloc2, var1)) {
             // stloc(var_2, ldloc(var_1))
             var2 = v2;
@@ -325,7 +457,9 @@ bool YieldReturnDecompiler::MatchEnumeratorCreationPattern(
         ILInstruction* target = nullptr;
         const TypeSystem::IField* field = nullptr;
         ILInstruction* value = nullptr;
-        if (MatchStFld(body->Instructions[pos].get(), target, field, value) &&
+        ILInstruction* at = instAt(pos);
+        if (at != nullptr &&
+            MatchStFld(at, target, field, value) &&
             MatchLdLoc(target, var2 != nullptr ? var2 : var1) &&
             (MatchLdcI4(value, -2) || MatchLdcI4(value, 0))) {
             stateField_ = field != nullptr
@@ -336,7 +470,8 @@ bool YieldReturnDecompiler::MatchEnumeratorCreationPattern(
         }
     }
     ILInstruction* retVal = nullptr;
-    if (MatchReturn(body->Instructions[pos].get(), retVal) &&
+    ILInstruction* at = instAt(pos);
+    if (at != nullptr && MatchReturn(at, retVal) &&
         MatchLdLoc(retVal, var2 != nullptr ? var2 : var1)) {
         // ret(ldloc(var_2))
         return true;
@@ -373,9 +508,13 @@ bool YieldReturnDecompiler::MatchEnumeratorCreationNewObj(
         return false;
     if (!(initialState == -2 || initialState == 0))
         return false;
-    if (newObj->Method == nullptr)
+    if (newObj->Method == nullptr && newObj->MethodToken == 0)
         return false;
-    std::uint32_t handle = newObj->Method->MetadataToken();
+    // The reader's deferred-resolution convention: a decoded call may carry
+    // only the raw token (Method null), so the identity falls back to it.
+    std::uint32_t handle = newObj->Method != nullptr
+                               ? newObj->Method->MetadataToken()
+                               : newObj->MethodToken;
     enumeratorCtor =
         IsMethodDefToken(handle) ? handle : 0;
     enumeratorType = enumeratorCtor != 0
@@ -402,9 +541,13 @@ bool YieldReturnDecompiler::MatchMonoEnumeratorCreationNewObj(
         return false;
     if (newObj->Arguments.size() != 0)
         return false;
-    if (newObj->Method == nullptr)
+    if (newObj->Method == nullptr && newObj->MethodToken == 0)
         return false;
-    std::uint32_t handle = newObj->Method->MetadataToken();
+    // The reader's deferred-resolution convention (see the Roslyn-form
+    // match above).
+    std::uint32_t handle = newObj->Method != nullptr
+                               ? newObj->Method->MetadataToken()
+                               : newObj->MethodToken;
     enumeratorCtor = IsMethodDefToken(handle) ? handle : 0;
     enumeratorType = enumeratorCtor != 0
                          ? metadata.GetMethodDeclaringTypeToken(enumeratorCtor)
@@ -431,7 +574,7 @@ void YieldReturnDecompiler::AnalyzeCtor(ILTransformContext& context) {
         ILInstruction* value = nullptr;
         ILVariable* arg = nullptr;
         if (MatchStFld(inst.get(), target, field, value) &&
-            MatchLdThis(target) && MatchLdLoc(value, arg) &&
+            MatchLdThis(target) && MatchLdLocOut(value, arg) &&
             arg->Kind == VariableKind::Parameter && arg->Index == 0) {
             stateField_ = field != nullptr
                               ? static_cast<const TypeSystem::IField*>(
@@ -452,20 +595,24 @@ void YieldReturnDecompiler::AnalyzeCurrentProperty(ILTransformContext& context) 
     if (body == nullptr)
         throw ControlFlow::SymbolicAnalysisFailedException(
             "get_Current has no body");
-    if (body->Instructions.size() == 1) {
+    // The port's terminator convention carries the sole `ret` in the
+    // FinalInstruction slot (the C# reads the same instruction from the
+    // instructions list); MatchReturn accepts the leave carrying the value.
+    ILInstruction* final = body->FinalInstruction.get();
+    if (body->Instructions.empty() && final != nullptr) {
         // release builds directly return the current field
         // ret(ldfld F(ldloc(this)))
         ILInstruction* retVal = nullptr;
         ILInstruction* target = nullptr;
         const TypeSystem::IField* field = nullptr;
-        if (MatchReturn(body->Instructions[0].get(), retVal) &&
+        if (MatchReturn(final, retVal) &&
             MatchLdFld(retVal, target, field) && MatchLdThis(target)) {
             currentField_ = field != nullptr
                                 ? static_cast<const TypeSystem::IField*>(
                                       field->MemberDefinition())
                                 : nullptr;
         }
-    } else if (body->Instructions.size() == 2) {
+    } else if (body->Instructions.size() == 1 && final != nullptr) {
         // debug builds store the return value in a temporary
         // stloc V = ldfld F(ldloc(this))
         // ret(ldloc V)
@@ -476,7 +623,7 @@ void YieldReturnDecompiler::AnalyzeCurrentProperty(ILTransformContext& context) 
         ILInstruction* retVal = nullptr;
         if (MatchStLoc(body->Instructions[0].get(), v, ldfld) &&
             MatchLdFld(ldfld, target, field) && MatchLdThis(target) &&
-            MatchReturn(body->Instructions[1].get(), retVal) &&
+            MatchReturn(final, retVal) &&
             MatchLdLoc(retVal, v)) {
             currentField_ = field != nullptr
                                 ? static_cast<const TypeSystem::IField*>(
@@ -628,6 +775,860 @@ void YieldReturnDecompiler::ConstructExceptionTable(ILTransformContext& context)
                                         Util::LongSet::Universe());
         finallyMethodToStateRange_ = rangeAnalysis.FinallyMethodToStateRange();
         hasFinallyMethodToStateRange_ = true;
+    }
+}
+
+
+std::unique_ptr<BlockContainer> YieldReturnDecompiler::AnalyzeMoveNext(
+    ILFunction& function, ILTransformContext& context) {
+    context.StepOnce("AnalyzeMoveNext");
+    std::uint32_t moveNextMethod =
+        FindMethod(*metadata_, enumeratorType_, "MoveNext");
+    auto moveNextFunction = CreateILAst(moveNextMethod, context);
+    if (moveNextFunction == nullptr)
+        throw ControlFlow::SymbolicAnalysisFailedException(
+            "MoveNext did not decode");
+
+    // Copy-propagate temporaries holding a copy of 'this' (the old
+    // pre-Roslyn compiler likes to store 'this' in temporary variables),
+    // then stack slots holding a 32 bit integer. The C# iterates
+    // Descendants.OfType<StLoc>() snapshots; the port collects first.
+    {
+        std::vector<StLoc*> thisCopies;
+        std::vector<StLoc*> intSlots;
+        std::vector<ILInstruction*> stack{moveNextFunction.get()};
+        while (!stack.empty()) {
+            ILInstruction* node = stack.back();
+            stack.pop_back();
+            if (auto* stloc = dynamic_cast<StLoc*>(node)) {
+                if (stloc->Variable != nullptr &&
+                    stloc->Variable->IsSingleDefinition() &&
+                    MatchLdThis(stloc->Value.get()))
+                    thisCopies.push_back(stloc);
+                else if (stloc->Variable != nullptr &&
+                         stloc->Variable->Kind == VariableKind::StackSlot &&
+                         stloc->Variable->IsSingleDefinition() &&
+                         stloc->Value != nullptr &&
+                         stloc->Value->Op == OpCode::LdcI4)
+                    intSlots.push_back(stloc);
+            }
+            for (int i = node->ChildCount() - 1; i >= 0; i--) {
+                if (ILInstruction* child = node->GetChild(i))
+                    stack.push_back(child);
+            }
+        }
+        for (StLoc* stloc : thisCopies)
+            CopyPropagation::Propagate(stloc, context);
+        for (StLoc* stloc : intSlots)
+            CopyPropagation::Propagate(stloc, context);
+    }
+    // The C# `block.Instructions.RemoveAll(inst => OpCode == LdcI4)` over
+    // every block.
+    {
+        std::vector<Block*> blocks;
+        std::vector<ILInstruction*> stack{moveNextFunction.get()};
+        while (!stack.empty()) {
+            ILInstruction* node = stack.back();
+            stack.pop_back();
+            if (auto* block = dynamic_cast<Block*>(node))
+                blocks.push_back(block);
+            for (int i = node->ChildCount() - 1; i >= 0; i--) {
+                if (ILInstruction* child = node->GetChild(i))
+                    stack.push_back(child);
+            }
+        }
+        for (Block* block : blocks) {
+            block->Instructions.erase(
+                std::remove_if(block->Instructions.begin(),
+                               block->Instructions.end(),
+                               [](const std::unique_ptr<ILInstruction>& inst) {
+                                   return inst->Op == OpCode::LdcI4;
+                               }),
+                block->Instructions.end());
+        }
+    }
+
+    auto* body = dynamic_cast<BlockContainer*>(moveNextFunction->Body.get());
+    if (body == nullptr)
+        throw ControlFlow::SymbolicAnalysisFailedException(
+            "MoveNext body is not a container");
+    // The TryFault unwrap (the Roslyn debug-build shape).
+    if (body->Blocks.size() == 1 &&
+        body->Blocks[0]->Instructions.size() == 1) {
+        if (auto* tryFault =
+                dynamic_cast<TryFault*>(body->Blocks[0]->Instructions[0].get())) {
+            body = dynamic_cast<BlockContainer*>(tryFault->TryBlock.get());
+            auto* faultBlockContainer =
+                dynamic_cast<BlockContainer*>(tryFault->FaultBlock.get());
+            if (faultBlockContainer == nullptr ||
+                faultBlockContainer->Blocks.size() != 1)
+                throw ControlFlow::SymbolicAnalysisFailedException(
+                    "Unexpected number of blocks in MoveNext() fault block");
+            Block* faultBlock = faultBlockContainer->Blocks[0].get();
+            BlockContainer* dummy = nullptr;
+            bool ok = faultBlock->Instructions.size() == 2 &&
+                      dynamic_cast<Call*>(faultBlock->Instructions[0].get()) !=
+                          nullptr &&
+                      faultBlock->Instructions[1]->Op == OpCode::Leave;
+            if (ok) {
+                auto* call =
+                    dynamic_cast<Call*>(faultBlock->Instructions[0].get());
+                ok = call->Method != nullptr &&
+                     call->Method->MetadataToken() == disposeMethod_ &&
+                     call->Arguments.size() == 1 &&
+                     MatchLdThis(call->Arguments[0].get());
+            }
+            if (ok) {
+                ok = MatchLeave(faultBlock->Instructions[1].get(),
+                                dummy) &&
+                     MatchLeave(faultBlock->Instructions[1].get(),
+                                faultBlockContainer);
+            }
+            if (!ok)
+                throw ControlFlow::SymbolicAnalysisFailedException(
+                    "Unexpected fault block contents in MoveNext()");
+        }
+    }
+    // The legacyVB pre-shape is deferred with the VB discriminator.
+
+    if (stateField_ == nullptr) {
+        // With mono-compiled state machines, the state field may be
+        // implicitly initialized to 0; discover it from MoveNext's first
+        // instruction.
+        if (!body->EntryPoint()->Instructions.empty() &&
+            body->EntryPoint()->Instructions[0]->Op == OpCode::StLoc) {
+            auto* stloc =
+                dynamic_cast<StLoc*>(
+                    body->EntryPoint()->Instructions[0].get());
+            ILInstruction* target = nullptr;
+            const TypeSystem::IField* field = nullptr;
+            if (stloc != nullptr && MatchLdFld(stloc->Value.get(), target, field) &&
+                MatchLdThis(target) && field != nullptr &&
+                TypeSystem::IsKnownType(field->ReturnType(),
+                                        TypeSystem::KnownTypeCode::Int32)) {
+                stateField_ = static_cast<const TypeSystem::IField*>(
+                    field->MemberDefinition());
+            }
+        }
+        if (stateField_ == nullptr)
+            throw ControlFlow::SymbolicAnalysisFailedException(
+                "Could not find state field.");
+    }
+
+    skipFinallyBodies_ = nullptr;
+    if (isCompiledWithMono_) {
+        // Mono uses skipFinallyBodies; find out which variable that is.
+        std::vector<TryFinally*> tryFinalies;
+        std::vector<ILInstruction*> stack{body};
+        while (!stack.empty()) {
+            ILInstruction* node = stack.back();
+            stack.pop_back();
+            if (auto* tf = dynamic_cast<TryFinally*>(node))
+                tryFinalies.push_back(tf);
+            for (int i = node->ChildCount() - 1; i >= 0; i--) {
+                if (ILInstruction* child = node->GetChild(i))
+                    stack.push_back(child);
+            }
+        }
+        for (TryFinally* tryFinally : tryFinalies) {
+            auto* finallyContainer =
+                dynamic_cast<BlockContainer*>(tryFinally->FinallyBlock.get());
+            if (finallyContainer == nullptr ||
+                finallyContainer->EntryPoint()->Instructions.empty())
+                continue;
+            auto* ifInst = dynamic_cast<IfInstruction*>(
+                finallyContainer->EntryPoint()->Instructions[0].get());
+            if (ifInst == nullptr)
+                continue;
+            ILVariable* v = nullptr;
+            // The file-local MatchLogicNot shape (the
+            // PatternMatchingTransform precedent): comp(arg == 0) -- the
+            // negated-condition form the Mono finally guards use.
+            ILInstruction* notArg = nullptr;
+            bool isNot = false;
+            if (auto* comp =
+                    dynamic_cast<Comp*>(ifInst->Condition.get())) {
+                if (comp->Kind == ComparisonKind::Equality) {
+                    auto* rhs = dynamic_cast<LdcI4*>(comp->Right.get());
+                    if (rhs != nullptr && rhs->Value == 0) {
+                        notArg = comp->Left.get();
+                        isNot = true;
+                    }
+                }
+            }
+            if (isNot && MatchLdLocOut(notArg, v) && v->Type != nullptr &&
+                TypeSystem::IsKnownType(*v->Type,
+                                         TypeSystem::KnownTypeCode::Boolean)) {
+                bool isInitializedInEntryBlock = false;
+                for (int i = 0; i < 3; i++) {
+                    if (i >= static_cast<int>(
+                                 body->EntryPoint()->Instructions.size()))
+                        break;
+                    auto* stloc = dynamic_cast<StLoc*>(
+                        body->EntryPoint()
+                            ->Instructions[static_cast<std::size_t>(i)]
+                            .get());
+                    if (stloc != nullptr && stloc->Variable.get() == v &&
+                        MatchLdcI4(stloc->Value.get(), 0)) {
+                        isInitializedInEntryBlock = true;
+                        break;
+                    }
+                }
+                if (isInitializedInEntryBlock) {
+                    skipFinallyBodies_ = v;
+                    break;
+                }
+            }
+        }
+    }
+
+    PropagateCopiesOfFields(*body);
+
+    // Note: body may contain try-catch or try-finally statements that have
+    // nested block containers, but those cannot contain any yield
+    // statements. So for reconstructing the control flow, we only consider
+    // the blocks directly within body.
+
+    ControlFlow::StateRangeAnalysis rangeAnalysis(
+        ControlFlow::StateRangeAnalysisMode::IteratorMoveNext, stateField_,
+        /*cachedStateVar=*/nullptr, isCompiledWithLegacyVisualBasic_);
+    rangeAnalysis.skipFinallyBodies = skipFinallyBodies_;
+    rangeAnalysis.doFinallyBodies = doFinallyBodies_;
+    rangeAnalysis.AssignStateRanges(body, Util::LongSet::Universe());
+    cachedStateVars_ = rangeAnalysis.CachedStateVars();
+
+    auto newBody = ConvertBody(*body, rangeAnalysis);
+    moveNextFunction->Variables.clear();
+    // (The C# ReleaseRef drops the old function's references to the moved
+    // instructions; the port's unique_ptr tree owns them and the move into
+    // newBody already transferred ownership.)
+    return newBody;
+}
+
+void YieldReturnDecompiler::PropagateCopiesOfFields(BlockContainer& body) {
+    // Roslyn may optimize MoveNext() by copying fields from the iterator
+    // class into local variables at the beginning of MoveNext(). Undo this
+    // optimization. The C# collects the mutable fields
+    // (Descendants.OfType<LdFlda> not under an LdObj); the port walks.
+    std::vector<const TypeSystem::IField*> mutableFields;
+    {
+        std::vector<ILInstruction*> stack{&body};
+        while (!stack.empty()) {
+            ILInstruction* node = stack.back();
+            stack.pop_back();
+            if (auto* ldflda = dynamic_cast<LdFlda*>(node)) {
+                if (ldflda->Parent == nullptr ||
+                    ldflda->Parent->Op != OpCode::LdObj) {
+                    if (ldflda->Field != nullptr)
+                        mutableFields.push_back(
+                            static_cast<const TypeSystem::IField*>(
+                                ldflda->Field->MemberDefinition()));
+                }
+            }
+            for (int i = node->ChildCount() - 1; i >= 0; i--) {
+                if (ILInstruction* child = node->GetChild(i))
+                    stack.push_back(child);
+            }
+        }
+    }
+    auto isMutable = [&mutableFields](const TypeSystem::IField* f) {
+        return std::find(mutableFields.begin(), mutableFields.end(), f) !=
+               mutableFields.end();
+    };
+    // The C# reads `store.Variable.LoadInstructions` (the per-variable load
+    // list the port does not maintain, D11/D62/D68): the loads are
+    // collected by a walk over the body.
+    for (std::size_t i = 0; i < body.EntryPoint()->Instructions.size(); i++) {
+        auto* store = dynamic_cast<StLoc*>(
+            body.EntryPoint()->Instructions[i].get());
+        if (store == nullptr || store->Variable == nullptr ||
+            !store->Variable->IsSingleDefinition())
+            break;
+        auto* ldobj = dynamic_cast<LdObj*>(store->Value.get());
+        auto* ldflda =
+            ldobj != nullptr && ldobj->Target != nullptr
+                ? dynamic_cast<LdFlda*>(ldobj->Target.get())
+                : nullptr;
+        if (ldflda == nullptr || !MatchLdThis(ldflda->Target.get()))
+            break;  // unknown instruction
+        const TypeSystem::IField* field =
+            ldflda->Field != nullptr
+                ? static_cast<const TypeSystem::IField*>(
+                      ldflda->Field->MemberDefinition())
+                : nullptr;
+        if (!isMutable(field)) {
+            // perform copy propagation: (unlike
+            // CopyPropagation.Propagate(), copy the ldobj arguments as
+            // well) -- the loads of the stored variable are replaced with
+            // clones of the store's value.
+            std::vector<LdLoc*> loads;
+            std::vector<ILInstruction*> stack{&body};
+            while (!stack.empty()) {
+                ILInstruction* node = stack.back();
+                stack.pop_back();
+                if (auto* ldloc = dynamic_cast<LdLoc*>(node)) {
+                    if (ldloc->Variable.get() == store->Variable.get())
+                        loads.push_back(ldloc);
+                    continue;
+                }
+                for (int j = node->ChildCount() - 1; j >= 0; j--) {
+                    if (ILInstruction* child = node->GetChild(j))
+                        stack.push_back(child);
+                }
+            }
+            for (LdLoc* expr : loads) {
+                if (expr->Parent != nullptr && store->Value != nullptr) {
+                    expr->Parent->SetChild(expr->ChildIndex,
+                                           store->Value->Clone());
+                }
+            }
+            body.EntryPoint()->Instructions.erase(
+                body.EntryPoint()->Instructions.begin() +
+                static_cast<std::ptrdiff_t>(i));
+            i--;
+        } else if (stateField_ != nullptr && field != nullptr &&
+                   field->MemberDefinition() ==
+                       stateField_->MemberDefinition()) {
+            continue;
+        } else {
+            break;  // unsupported: load of mutable field (other than state
+                   // field)
+        }
+    }
+}
+
+
+namespace {
+
+// The shared_ptr for a raw variable pointer (the raw views the matchers
+// hand back; the owning handle lives in the function's Variables list).
+ILVariablePtr FindVariableHandle(ILFunction& function, ILVariable* raw) {
+    for (const ILVariablePtr& v : function.Variables) {
+        if (v.get() == raw) return v;
+    }
+    return nullptr;
+}
+
+// The ConvertBody state (the C# local functions close over these).
+struct ConvertBodyContext {
+    YieldReturnDecompiler& self;
+    BlockContainer& oldBody;
+    std::unique_ptr<BlockContainer> newBody;
+    Util::LongDict<Block*> blockStateMap;
+    std::vector<const TypeSystem::IMethod*>* finallyMethods = nullptr;
+    const TypeSystem::IField* stateField = nullptr;
+    const TypeSystem::IField* currentField = nullptr;
+    const TypeSystem::IField* disposingField = nullptr;
+    bool isCompiledWithMono = false;
+    ILVariable* skipFinallyBodies = nullptr;
+    ILVariable* doFinallyBodies = nullptr;
+    std::vector<StLoc*>* returnStores = nullptr;
+    ILTransformContext* context = nullptr;
+    // The current block being filled (the C# `newBlock` local the loop
+    // reassigns).
+    Block* newBlock = nullptr;
+};
+
+// The C# `void ReportError(ILInstruction inst)`: ConvertBody is still
+// called within the try-catch, so throwing suppresses the conversion.
+void ReportError(ILInstruction* inst) {
+    std::string message = "ConvertBody error";
+    if (auto* invalidBranch = dynamic_cast<InvalidBranch*>(inst))
+        message = invalidBranch->Message.value_or(message);
+    else if (auto* invalidExpr = dynamic_cast<InvalidExpression*>(inst))
+        message = invalidExpr->Message.value_or(message);
+    throw ControlFlow::SymbolicAnalysisFailedException(message);
+}
+
+// The C# `ILInstruction MakeGoTo(int v)`.
+ILInstruction* MakeGoTo(ConvertBodyContext& ctx, int v) {
+    Block* targetBlock = nullptr;
+    if (ctx.blockStateMap.TryGetValue(v, targetBlock) &&
+        targetBlock != nullptr) {
+        if (targetBlock->Parent == &ctx.oldBody) {
+            auto& blocks = ctx.newBody->Blocks;
+            std::size_t idx = static_cast<std::size_t>(
+                targetBlock->ChildIndex);
+            if (idx < blocks.size())
+                return new Branch(blocks[idx].get());
+            return new InvalidBranch("Could not find block for state");
+        }
+        return new Branch(targetBlock);
+    }
+    ReportError(new InvalidBranch("Could not find block for state " +
+                                  std::to_string(v)));
+    return nullptr;  // unreachable
+}
+
+// The C# `void UpdateBranchTargets(ILInstruction inst)`.
+void UpdateBranchTargets(ConvertBodyContext& ctx, ILInstruction* inst) {
+    if (auto* branch = dynamic_cast<Branch*>(inst)) {
+        if (branch->TargetContainer() == &ctx.oldBody) {
+            auto& blocks = ctx.newBody->Blocks;
+            std::size_t idx = static_cast<std::size_t>(
+                branch->TargetBlock->ChildIndex);
+            if (idx < blocks.size())
+                branch->TargetBlock = blocks[idx].get();
+        }
+    } else if (auto* leave = dynamic_cast<Leave*>(inst)) {
+        ILInstruction* value = nullptr;
+        if (MatchReturn(leave, value)) {
+            bool validYieldBreak = false;
+            if (value != nullptr && MatchLdcI4(value, 0)) {
+                validYieldBreak = true;
+            } else if (value != nullptr) {
+                ILVariable* v = nullptr;
+                if (MatchLdLocOut(value, v) && v != nullptr &&
+                    (v->Kind == VariableKind::Local ||
+                     v->Kind == VariableKind::StackSlot)) {
+                    // The C# checks all of v's stores are `stloc v(0)` and
+                    // collects them as return stores (the missing
+                    // per-variable list, D11/D62/D68 -- a walk over the old
+                    // body collects them).
+                    bool allZero = true;
+                    std::vector<StLoc*> stores;
+                    std::vector<ILInstruction*> stack{&ctx.oldBody};
+                    while (!stack.empty()) {
+                        ILInstruction* node = stack.back();
+                        stack.pop_back();
+                        if (auto* stloc = dynamic_cast<StLoc*>(node)) {
+                            if (stloc->Variable.get() == v)
+                                stores.push_back(stloc);
+                            continue;
+                        }
+                        for (int i = node->ChildCount() - 1; i >= 0; i--) {
+                            if (ILInstruction* child = node->GetChild(i))
+                                stack.push_back(child);
+                        }
+                    }
+                    for (StLoc* store : stores) {
+                        if (store->Value == nullptr ||
+                            !MatchLdcI4(store->Value.get(), 0)) {
+                            allZero = false;
+                            break;
+                        }
+                    }
+                    if (allZero && !stores.empty()) {
+                        validYieldBreak = true;
+                        ctx.returnStores->insert(ctx.returnStores->end(),
+                                                 stores.begin(), stores.end());
+                    }
+                }
+            }
+            if (validYieldBreak) {
+                // yield break
+                leave->Parent->SetChild(
+                    leave->ChildIndex,
+                    std::unique_ptr<ILInstruction>(
+                        new Leave(ctx.newBody.get())));
+            } else {
+                // don't treat this as an error, it might just be
+                // unreachable code that will be removed soon
+                leave->Parent->SetChild(
+                    leave->ChildIndex,
+                    std::unique_ptr<ILInstruction>(new InvalidBranch(
+                        "Unexpected return in MoveNext()")));
+            }
+            // The C# keeps iterating the original leave's children (the GC
+            // keeps it alive across the replacement); the port's SetChild
+            // destroys the replaced node, so the walk must stop here. The
+            // replaced node's only child is the return value (an ldc/ldloc),
+            // which never carries branch targets -- skipping it is
+            // semantically identical to the C# recursion.
+            return;
+        } else {
+            if (leave->TargetContainer == &ctx.oldBody) {
+                leave->TargetContainer = ctx.newBody.get();
+            }
+        }
+    }
+    for (int i = 0; i < inst->ChildCount(); i++) {
+        if (ILInstruction* child = inst->GetChild(i))
+            UpdateBranchTargets(ctx, child);
+    }
+}
+
+// The C# `Block SplitBlock(Block newBlock, ILInstruction oldInst)`.
+Block* SplitBlock(ConvertBodyContext& ctx, ILInstruction* oldInst) {
+    if (ctx.newBlock->Instructions.size() > 0) {
+        auto newBlock2 = std::make_unique<Block>();
+        Block* result = newBlock2.get();
+        ctx.newBody->Blocks.push_back(std::move(newBlock2));
+        ctx.newBlock->SetFinal(
+            std::unique_ptr<ILInstruction>(new Branch(result)));
+        ctx.newBlock = result;
+    }
+    return ctx.newBlock;
+}
+
+// The port's position reader: the C# reads the block's instruction list
+// (where the reader puts every instruction, terminators included); the
+// port's reader carries the terminator in the FinalInstruction slot, so a
+// position at the end of the list reads the final.
+ILInstruction* InstructionAt(Block* block, int pos) {
+    if (block == nullptr)
+        return nullptr;
+    if (pos >= 0 && pos < static_cast<int>(block->Instructions.size()))
+        return block->Instructions[static_cast<std::size_t>(pos)].get();
+    if (pos == static_cast<int>(block->Instructions.size()))
+        return block->FinalInstruction.get();
+    return nullptr;
+}
+
+// The C# `void ConvertBranchAfterYieldReturn(Block newBlock, Block
+// oldBlock, int pos)`.
+void ConvertBranchAfterYieldReturn(ConvertBodyContext& ctx,
+                                    Block* oldBlock, int pos) {
+    Block* targetBlock = nullptr;
+    if (ctx.isCompiledWithMono && ctx.disposingField != nullptr) {
+        // Mono skips over the state assignment if 'this.disposing' is set.
+        ILInstruction* cond = nullptr;
+        ILInstruction* unusedTrue = nullptr;
+        ILInstruction* unusedFalse = nullptr;
+        if (pos < static_cast<int>(oldBlock->Instructions.size()) &&
+            MatchIfInstruction(oldBlock->Instructions[static_cast<std::size_t>(
+                                   pos)].get(), cond, unusedTrue, unusedFalse)) {
+            ILInstruction* condTarget = nullptr;
+            const TypeSystem::IField* condField = nullptr;
+            if (MatchLdFld(cond, condTarget, condField) &&
+                MatchLdThis(condTarget) && condField != nullptr &&
+                condField->MemberDefinition() ==
+                    ctx.disposingField->MemberDefinition() &&
+                pos + 1 < static_cast<int>(oldBlock->Instructions.size()) &&
+                MatchBranch(oldBlock->Instructions[static_cast<std::size_t>(
+                                pos + 1)].get(), targetBlock) &&
+                targetBlock->Parent == oldBlock->Parent) {
+                oldBlock = targetBlock;
+                pos = 0;
+            }
+        }
+    }
+
+    // Visual Basic Compiler emits additional stores to variables.
+    // (Deferred with the VB arms.)
+    int localNewState = 0;
+    bool hasLocalNewState = false;
+    if (pos < static_cast<int>(oldBlock->Instructions.size())) {
+        if (MatchLdcI4(oldBlock->Instructions[static_cast<std::size_t>(pos)]
+                           .get(),
+                       localNewState)) {
+            hasLocalNewState = true;
+            pos++;
+        }
+    }
+
+    int newState = 0;
+    if (pos < static_cast<int>(oldBlock->Instructions.size())) {
+        ILInstruction* target = nullptr;
+        const TypeSystem::IField* field = nullptr;
+        ILInstruction* value = nullptr;
+        ILVariable* var = nullptr;
+        if (MatchStLoc(oldBlock->Instructions[static_cast<std::size_t>(pos)]
+                           .get(), var, value) &&
+            MatchLdcI4(value, localNewState) && hasLocalNewState) {
+            // the VB local-state form (deferred; unreachable in the
+            // non-VB staging)
+            pos++;
+        } else if (MatchStFld(oldBlock->Instructions[
+                                   static_cast<std::size_t>(pos)]
+                                   .get(),
+                               target, field, value) &&
+                   MatchLdThis(target) && field != nullptr &&
+                   field->MemberDefinition() ==
+                       ctx.stateField->MemberDefinition() &&
+                   MatchLdcI4(value, newState) &&
+                   (!hasLocalNewState || localNewState == newState)) {
+            pos++;
+        } else {
+            ctx.newBlock->Add(std::unique_ptr<ILInstruction>(
+                new InvalidBranch(
+                    "Unable to find new state assignment for yield return")));
+            ReportError(ctx.newBlock->Instructions.back().get());
+            return;
+        }
+    } else {
+        ctx.newBlock->Add(std::unique_ptr<ILInstruction>(
+            new InvalidBranch(
+                "Unable to find new state assignment for yield return")));
+        ReportError(ctx.newBlock->Instructions.back().get());
+        return;
+    }
+    // Mono may have 'br setSkipFinallyBodies' here, so follow the branch
+    {
+        ILInstruction* at = InstructionAt(oldBlock, pos);
+        if (at != nullptr && MatchBranch(at, targetBlock) &&
+            targetBlock->Parent == oldBlock->Parent) {
+            oldBlock = targetBlock;
+            pos = 0;
+        }
+    }
+    {
+        ILInstruction* at = InstructionAt(oldBlock, pos);
+        ILVariable* var = nullptr;
+        ILInstruction* value = nullptr;
+        if (at != nullptr && MatchStLoc(at, var, value) &&
+            var == ctx.skipFinallyBodies) {
+            if (!MatchLdcI4(value, 1)) {
+                ReportError(new InvalidBranch(
+                    "Unexpected assignment to skipFinallyBodies"));
+            }
+            pos++;
+        }
+    }
+    {
+        ILInstruction* at = InstructionAt(oldBlock, pos);
+        ILVariable* var = nullptr;
+        ILInstruction* value = nullptr;
+        if (at != nullptr && MatchStLoc(at, var, value) &&
+            var != nullptr && var->Kind == VariableKind::Local &&
+            ctx.doFinallyBodies != nullptr &&
+            var->Index == ctx.doFinallyBodies->Index) {
+            if (!MatchLdcI4(value, 0)) {
+                ReportError(new InvalidBranch(
+                    "Unexpected assignment to doFinallyBodies"));
+            }
+            pos++;
+        }
+    }
+
+    bool found = false;
+    {
+        ILInstruction* at = InstructionAt(oldBlock, pos);
+        ILInstruction* retVal = nullptr;
+        if (at != nullptr && MatchReturn(at, retVal) &&
+            MatchLdcI4(retVal, 1)) {
+            found = true;  // OK, found return directly after state assignment
+        } else if (at != nullptr && MatchBranch(at, targetBlock) &&
+                   targetBlock->Parent == oldBlock->Parent) {
+            // The C# reads the target's first instruction; the port's
+            // convention may hold the ret in the target's FinalInstruction.
+            ILInstruction* targetAt =
+                !targetBlock->Instructions.empty()
+                    ? targetBlock->Instructions[0].get()
+                    : targetBlock->FinalInstruction.get();
+            ILInstruction* retVal2 = nullptr;
+            if (targetAt != nullptr && MatchReturn(targetAt, retVal2) &&
+                MatchLdcI4(retVal2, 1)) {
+                found = true;  // OK, jump to common return block (e.g. on Mono)
+            }
+        }
+    }
+    if (!found) {
+        ctx.newBlock->Add(std::unique_ptr<ILInstruction>(new InvalidBranch(
+            "Unable to find 'return true' for yield return")));
+        ReportError(ctx.newBlock->Instructions.back().get());
+        return;
+    }
+    ctx.newBlock->SetFinal(
+        std::unique_ptr<ILInstruction>(MakeGoTo(ctx, newState)));
+}
+
+} // namespace
+
+std::unique_ptr<BlockContainer> YieldReturnDecompiler::ConvertBody(
+    BlockContainer& oldBody, ControlFlow::StateRangeAnalysis& rangeAnalysis) {
+    ConvertBodyContext ctx{*this, oldBody, nullptr,
+                           rangeAnalysis.GetBlockStateSetMapping(oldBody),
+                           nullptr, stateField_, currentField_, disposingField_,
+                           isCompiledWithMono_, skipFinallyBodies_,
+                           doFinallyBodies_, &returnStores_, context_};
+    ctx.newBody = std::make_unique<BlockContainer>();
+    // create all new blocks so that they can be referenced by gotos
+    for (std::size_t blockIndex = 0; blockIndex < oldBody.Blocks.size();
+         blockIndex++) {
+        auto block = std::make_unique<Block>();
+        ctx.newBody->Blocks.push_back(std::move(block));
+    }
+    // convert contents of blocks
+    for (std::size_t i = 0; i < oldBody.Blocks.size(); i++) {
+        Block* oldBlock = oldBody.Blocks[i].get();
+        ctx.newBlock = ctx.newBody->Blocks[i].get();
+        // Set when the yield-return arm consumed the block's remainder (the
+        // terminator included): its final must not be cloned (the arm itself
+        // installs the branch to the next state as the final).
+        bool brokeEarly = false;
+        for (auto& oldInst : oldBlock->Instructions) {
+            // The state-field store / current-field store / finally-method
+            // call arms.
+            ILInstruction* target = nullptr;
+            const TypeSystem::IField* field = nullptr;
+            ILInstruction* value = nullptr;
+            if (MatchStFld(oldInst.get(), target, field, value) &&
+                MatchLdThis(target)) {
+                if (stateField_ != nullptr && field != nullptr &&
+                    field->MemberDefinition() ==
+                        stateField_->MemberDefinition()) {
+                    int newState = 0;
+                    if (MatchLdcI4(value, newState)) {
+                        // On state change, break up the block: (this
+                        // allows us to consider each block individually for
+                        // try-finally reconstruction)
+                        ctx.newBlock = SplitBlock(ctx, oldInst.get());
+                    } else {
+                        ctx.newBlock->Add(std::unique_ptr<ILInstruction>(
+                            new InvalidExpression(
+                                "Assigned non-constant to iterator.state "
+                                "field")));
+                        ReportError(ctx.newBlock->Instructions.back().get());
+                        continue;  // don't copy over this instruction
+                    }
+                } else if (currentField_ != nullptr && field != nullptr &&
+                           field->MemberDefinition() ==
+                               currentField_->MemberDefinition()) {
+                    // create yield return
+                    ctx.newBlock->Add(std::unique_ptr<ILInstruction>(
+                        new YieldReturn(value != nullptr ? value->Clone()
+                                                         : nullptr)));
+                    ConvertBranchAfterYieldReturn(
+                        ctx, oldBlock, oldInst->ChildIndex + 1);
+                    brokeEarly = true;
+                    break;  // we're done with this basic block
+                }
+            } else if (auto* call = dynamic_cast<Call*>(oldInst.get())) {
+                bool isFinallyMethod = false;
+                if (!call->IsNewObj && call->Arguments.size() == 1 &&
+                    MatchLdThis(call->Arguments[0].get()) &&
+                    call->Method != nullptr) {
+                    const TypeSystem::IMethod* def =
+                        dynamic_cast<const TypeSystem::IMethod*>(
+                            call->Method->MemberDefinition());
+                    isFinallyMethod = def != nullptr &&
+                                      finallyMethodToStateRange_.count(def) != 0;
+                }
+                if (isFinallyMethod) {
+                    // Break up the basic block on a call to a finally
+                    // method (this allows us to consider each block
+                    // individually for try-finally reconstruction)
+                    ctx.newBlock = SplitBlock(ctx, oldInst.get());
+                }
+            }
+            // (The Mono/VB try-finally recursion arm is deferred with the
+            // Mono/VB discriminators; the legacyVB if-arm likewise.)
+            // copy over the instruction to the new block
+            ctx.newBlock->Add(oldInst->Clone());
+            UpdateBranchTargets(ctx, ctx.newBlock->Instructions.back().get());
+        }
+        // The C# clones the terminator from the block's instruction list
+        // (the C# reader puts it in the list); the port's convention carries
+        // it in the FinalInstruction slot, so a block whose loop completed
+        // (the yield-return path breaks out earlier) also clones its final
+        // -- the state-dispatch switch, the `return false` leaves, and the
+        // intra-state branches all ride here.
+        if (!brokeEarly && oldBlock->FinalInstruction != nullptr) {
+            auto clonedFinal = oldBlock->FinalInstruction->Clone();
+            ILInstruction* clonedFinalRaw = clonedFinal.get();
+            ctx.newBlock->SetFinal(std::move(clonedFinal));
+            UpdateBranchTargets(ctx, clonedFinalRaw);
+        }
+    }
+
+    // Insert new artificial block as entry point, and jump to the initial
+    // state. This causes the method to start directly at the first user
+    // code, and the whole compiler-generated state-dispatching logic
+    // becomes unreachable code and gets deleted.
+    int initialState = isCompiledWithLegacyVisualBasic_ ? -1 : 0;
+    {
+        auto entryBlock = std::make_unique<Block>();
+        entryBlock->SetFinal(
+            std::unique_ptr<ILInstruction>(MakeGoTo(ctx, initialState)));
+        ctx.newBody->Blocks.insert(ctx.newBody->Blocks.begin(),
+                                   std::move(entryBlock));
+    }
+    return std::move(ctx.newBody);
+}
+
+void YieldReturnDecompiler::TranslateFieldsToLocalAccess(
+    ILFunction& function, ILInstruction* inst,
+    std::map<const TypeSystem::IField*, ILVariable*>& fieldToVariableMap,
+    bool isCompiledWithMono) {
+    auto* ldflda = dynamic_cast<LdFlda*>(inst);
+    if (ldflda != nullptr && MatchLdThis(ldflda->Target.get())) {
+        const TypeSystem::IField* fieldDef =
+            ldflda->Field != nullptr
+                ? static_cast<const TypeSystem::IField*>(
+                      ldflda->Field->MemberDefinition())
+                : nullptr;
+        if (fieldDef == nullptr)
+            return;
+        auto it = fieldToVariableMap.find(fieldDef);
+        ILVariable* v = nullptr;
+        if (it != fieldToVariableMap.end()) {
+            v = it->second;
+        } else {
+            std::string name;
+            const std::string& fieldName = fieldDef->Name();
+            if (!fieldName.empty() && fieldName[0] == '<') {
+                std::size_t pos = fieldName.find('>');
+                if (pos > 1)
+                    name = fieldName.substr(1, pos - 1);
+            }
+            ILVariablePtr registered = function.RegisterVariable(
+                VariableKind::Local, nullptr, name);
+            // The C# reads ldflda.Field.ReturnType for the variable's
+            // type; the resolved field's type rides the variable
+            // registration through the type override below.
+            registered->InitialValueIsInitialized = true;
+            registered->UsesInitialValue = true;
+            registered->StateMachineField = ldflda->Field.get();
+            v = registered.get();
+            function.RegisterExistingVariable(registered);
+            fieldToVariableMap.emplace(fieldDef, v);
+        }
+        if (v != nullptr && inst->Parent != nullptr) {
+            ILVariablePtr shared = FindVariableHandle(function, v);
+            if (shared != nullptr) {
+                if (v->StackType() == StackType::Ref) {
+                    inst->Parent->SetChild(
+                        inst->ChildIndex,
+                        std::unique_ptr<ILInstruction>(new LdLoc(shared)));
+                } else {
+                    inst->Parent->SetChild(
+                        inst->ChildIndex,
+                        std::unique_ptr<ILInstruction>(new LdLoca(shared)));
+                }
+            }
+        }
+    } else if (!isCompiledWithMono && MatchLdThis(inst)) {
+        if (inst->Parent != nullptr) {
+            auto replacement =
+                std::make_unique<InvalidExpression>("stateMachine");
+            replacement->ExpectedResultType = inst->ResultType();
+            inst->Parent->SetChild(inst->ChildIndex,
+                                   std::move(replacement));
+        }
+    } else {
+        for (int i = 0; i < inst->ChildCount(); i++) {
+            if (ILInstruction* child = inst->GetChild(i))
+                TranslateFieldsToLocalAccess(function, child,
+                                              fieldToVariableMap,
+                                              isCompiledWithMono);
+        }
+        auto* ldobj = dynamic_cast<LdObj*>(inst);
+        if (ldobj != nullptr && ldobj->Target != nullptr) {
+            if (auto* ldloca =
+                    dynamic_cast<LdLoca*>(ldobj->Target.get())) {
+                if (ldloca->Variable != nullptr &&
+                    ldloca->Variable->StateMachineField != nullptr) {
+                    inst->Parent->SetChild(
+                        inst->ChildIndex,
+                        std::unique_ptr<ILInstruction>(
+                            new LdLoc(ldloca->Variable)));
+                }
+            }
+        } else if (auto* stobj = dynamic_cast<StObj*>(inst)) {
+            if (stobj->Target != nullptr) {
+                if (auto* ldloca2 =
+                        dynamic_cast<LdLoca*>(stobj->Target.get())) {
+                    if (ldloca2->Variable != nullptr &&
+                        ldloca2->Variable->StateMachineField != nullptr) {
+                        inst->Parent->SetChild(
+                            inst->ChildIndex,
+                            std::unique_ptr<ILInstruction>(new StLoc(
+                                ldloca2->Variable, std::move(stobj->Value))));
+                    }
+                }
+            }
+        }
     }
 }
 

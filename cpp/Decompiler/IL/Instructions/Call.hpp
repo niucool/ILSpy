@@ -102,6 +102,12 @@ public:
     // DelegateConstruction.MatchDelegateConstruction (the C# `case NewObj call:`)
     // and the seed's `new Type(args)` rendering path.
     bool IsNewObj = false;
+    // The raw method token the instruction decoded from (0x06 MethodDef,
+    // 0x0A MemberRef, 0x2B MethodSpec). The IL reader sets it; kept when
+    // `Method` stays null (the reader's deferred-resolution convention, the
+    // LdFlda::FieldToken precedent) so consumers can resolve the identity
+    // through the metadata file directly.
+    std::uint32_t MethodToken = 0;
     // True when the resolved method is a C# operator overload -- a method
     // whose name (the part after '::') is one of the recognised `op_*` names
     // (op_Equality, op_Addition, op_Implicit, ...). The C# models this as

@@ -26,12 +26,16 @@
 
 #include "Decompiler/IL/ControlFlow/YieldReturnDecompiler.hpp"
 
+#include <algorithm>
+#include <vector>
+
 #include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/YieldReturn.hpp"
 #include "Decompiler/IL/PatternMatching.hpp"
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
 #include "Decompiler/Metadata/CodeMappingInfo.hpp"  // IsCompilerGeneratorEnumerator
@@ -54,8 +58,12 @@ namespace TS = ::ILSpy::Decompiler::TypeSystem;
 namespace MD = ::ILSpy::Decompiler::Metadata;
 namespace IL = ::ILSpy::Decompiler::IL;
 
-constexpr const char* kNet48Mscorlib =
-    "/home/jim/ilspy-test-fixtures/net48/mscorlib.dll";
+// The locally-compiled iterator fixture (a REAL Roslyn state machine -- the
+// net48 corpus is the REFERENCE-assembly set, whose method bodies are
+// stripped stubs that decode to empty). Built with the box's csc over the
+// net8.0 refs; the oracle decompiles it to `yield return` shapes.
+constexpr const char* kIteratorFixture =
+    "/home/jim/ilspy-test-fixtures/yield_fixture/IteratorFixture.dll";
 
 // A resolved-method stub carrying a MethodDef token (the pattern matchers
 // read `newObj.Method.MetadataToken`).
@@ -185,13 +193,13 @@ struct MscorlibEnumeratorFixture {
     bool Load() {
         namespace fs = std::filesystem;
         std::error_code ec;
-        if (!fs::exists(kNet48Mscorlib, ec))
+        if (!fs::exists(kIteratorFixture, ec))
             return false;
-        file = std::make_unique<MD::MetadataFile>(kNet48Mscorlib);
+        file = std::make_unique<MD::MetadataFile>(kIteratorFixture);
         if (!file->IsValid())
             return false;
         resolver = std::make_unique<MD::UniversalAssemblyResolver>(
-            std::string(kNet48Mscorlib), false,
+            std::string(kIteratorFixture), false,
             MD::DetectTargetFrameworkId(*file).value_or(std::string()));
         ts = std::make_unique<TS::DecompilerTypeSystem>(*file, *resolver);
         // Scan for a Roslyn-style enumerator: a compiler-generated nested
@@ -202,7 +210,7 @@ struct MscorlibEnumeratorFixture {
         for (const auto& t : file->TypeDefs()) {
             if (!MD::IsCompilerGeneratorEnumerator(*file, t.Token))
                 continue;
-            // The net48 mscorlib iterators implement the interface members
+            // Roslyn's iterators implement the interface members
             // EXPLICITLY ("System.Collections.IEnumerator.get_Current" as
             // the metadata name, matched through the MethodImpl table),
             // so the IsMethod-based lookup (the transform's own helper
@@ -242,7 +250,7 @@ struct MscorlibEnumeratorFixture {
 TEST(YieldReturnDecompilerPart2, MatchEnumeratorCreationNewObjOverMetadata) {
     MscorlibEnumeratorFixture fixture;
     if (!fixture.Load())
-        GTEST_SKIP() << "the net48 fixture set is not provisioned";
+        GTEST_SKIP() << "the iterator fixture is not provisioned";
     ASSERT_NE(fixture.enumeratorType, 0u);
 
     // newobj Enumerator::.ctor(ldc.i4 -2)
@@ -266,7 +274,7 @@ TEST(YieldReturnDecompilerPart2, MatchEnumeratorCreationNewObjOverMetadata) {
 TEST(YieldReturnDecompilerPart2, MatchEnumeratorCreationRejectsForeignType) {
     MscorlibEnumeratorFixture fixture;
     if (!fixture.Load())
-        GTEST_SKIP() << "the net48 fixture set is not provisioned";
+        GTEST_SKIP() << "the iterator fixture is not provisioned";
     ASSERT_NE(fixture.enumeratorType, 0u);
 
     auto ctorStub =
@@ -283,6 +291,73 @@ TEST(YieldReturnDecompilerPart2, MatchEnumeratorCreationRejectsForeignType) {
         newObj.get(), *fixture.file, 0x02000001u, outCtor, outType));
 }
 
+// The end-to-end conversion over the REAL creating-method body: the decoded
+// `Numbers` method (the one-instruction `ret(newobj(-2))` shape the reader
+// produces) drives the full pipeline -- the pattern match over the reader's
+// call token, the four metadata analyses, the MoveNext state-machine
+// inversion, and the field-to-local translation.
+TEST(YieldReturnDecompilerPart2, ConvertsTheRealCreatingMethodBody) {
+    MscorlibEnumeratorFixture fixture;
+    if (!fixture.Load())
+        GTEST_SKIP() << "the iterator fixture is not provisioned";
+    ASSERT_NE(fixture.enumeratorType, 0u);
+
+    // The real Numbers body (the no-parameter iterator: `ret(newobj(-2))`).
+    std::uint32_t numbersToken = 0, numbersRva = 0;
+    for (const auto& m : fixture.file->GetMethods(fixture.currentType)) {
+        if (m.Name == "Numbers" && m.RVA != 0) {
+            numbersToken = m.Token;
+            numbersRva = m.RVA;
+            break;
+        }
+    }
+    ASSERT_NE(numbersToken, 0u);
+    auto fn = IL::ReadIL(*fixture.file, numbersToken, numbersRva);
+    ASSERT_NE(fn, nullptr);
+    // The reader leaves the function's method unresolved; the Run gate
+    // reads the declaring type through the method token.
+    auto methodStub = std::make_shared<TokenMethodStub>(numbersToken);
+    methodStub->SetReturnType(
+        std::make_shared<TS::KnownType>(
+            TS::KnownTypeCode::IEnumerableOfT));
+    fn->Method = methodStub.get();
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.YieldReturn = true;
+    ctx.Metadata = fixture.file.get();
+    ctx.TypeSystem = fixture.ts.get();
+    ctx.DelegateBodyResolver =
+        [&fixture](std::uint32_t token,
+                   std::uint32_t rva) -> std::unique_ptr<IL::ILFunction> {
+        if (rva == 0) return nullptr;
+        return IL::ReadIL(*fixture.file, token, rva);
+    };
+
+    IL::YieldReturnDecompiler transform;
+    transform.Run(*fn, ctx);
+
+    EXPECT_TRUE(fn->IsIterator) << "the state machine was inverted";
+    std::size_t yieldReturns = 0;
+    std::vector<int> yieldedValues;
+    std::vector<IL::ILInstruction*> stack{fn->Body.get()};
+    while (!stack.empty()) {
+        IL::ILInstruction* node = stack.back();
+        stack.pop_back();
+        if (auto* yr = dynamic_cast<IL::YieldReturn*>(node)) {
+            yieldReturns++;
+            if (auto* ldc = dynamic_cast<IL::LdcI4*>(yr->Value.get()))
+                yieldedValues.push_back(ldc->Value);
+        }
+        for (int i = 0; i < node->ChildCount(); i++) {
+            if (IL::ILInstruction* child = node->GetChild(i))
+                stack.push_back(child);
+        }
+    }
+    EXPECT_EQ(yieldReturns, 3u);
+    std::sort(yieldedValues.begin(), yieldedValues.end());
+    EXPECT_EQ(yieldedValues, (std::vector<int>{1, 2, 3}));
+}
+
 // The four analyses over the real state machine: Run over a hand-built
 // creating-method body drives AnalyzeCtor (the state field),
 // AnalyzeCurrentProperty (the current field), the GetEnumerator mapping, and
@@ -290,7 +365,7 @@ TEST(YieldReturnDecompilerPart2, MatchEnumeratorCreationRejectsForeignType) {
 TEST(YieldReturnDecompilerPart2, AnalyzesTheRealStateMachine) {
     MscorlibEnumeratorFixture fixture;
     if (!fixture.Load())
-        GTEST_SKIP() << "the net48 fixture set is not provisioned";
+        GTEST_SKIP() << "the iterator fixture is not provisioned";
     ASSERT_NE(fixture.enumeratorType, 0u);
 
     // The creating method's body: `stloc v(newobj Enumerator::.ctor(-2));
@@ -308,12 +383,12 @@ TEST(YieldReturnDecompilerPart2, AnalyzesTheRealStateMachine) {
     v->StoreCount = 1;
     v->LoadCount = 1;
     auto stloc = std::make_unique<IL::StLoc>(v, std::move(newObj));
-    auto ret = std::make_unique<IL::Leave>(nullptr, std::make_unique<IL::LdLoc>(v));
-
     auto fn = std::make_unique<IL::ILFunction>();
     fn->Kind = IL::ILFunctionKind::TopLevelFunction;
     fn->Method = nullptr;  // Run's current-type gate needs the method token
     auto container = std::make_unique<IL::BlockContainer>();
+    auto ret = std::make_unique<IL::Leave>(container.get(),
+                                           std::make_unique<IL::LdLoc>(v));
     auto block = std::make_unique<IL::Block>();
     block->Kind = IL::BlockKind::ControlFlow;
     IL::Block* blockPtr = block.get();
@@ -358,16 +433,50 @@ TEST(YieldReturnDecompilerPart2, AnalyzesTheRealStateMachine) {
         };
 
     IL::YieldReturnDecompiler transform;
-    // The transform runs the full part-2 pipeline (match + the four
-    // analyses); the part-3 body rewrite is not ported, so Run returns
-    // after the analyses. The observable: it does not throw (the
-    // SymbolicAnalysisFailedException paths are swallowed into the early
-    // return), and -- for the matched enumerator -- the analyses resolved
-    // the state and current fields. The transform's members are private;
-    // the part-2 observable is indirect: Run completing without altering
-    // the body (the instructions are unchanged).
-    std::size_t instructionCountBefore = blockPtr->Instructions.size();
+    // The full pipeline: match + the four analyses + the MoveNext
+    // conversion + the field translation. The observable: the function's
+    // body is REPLACED with the converted MoveNext body carrying yield
+    // return nodes (the hand-built creating-method body is gone).
     transform.Run(*fn, ctx);
-    EXPECT_EQ(blockPtr->Instructions.size(), instructionCountBefore)
-        << "part 2 does not rewrite the body";
+    ASSERT_NE(fn->Body.get(), nullptr);
+    // Count the YieldReturn nodes in the new body (the C# IsIterator flag
+    // mirrors the successful conversion).
+    EXPECT_TRUE(fn->IsIterator)
+        << "the state machine was inverted";
+    std::size_t yieldReturns = 0;
+    std::vector<IL::ILInstruction*> stack{fn->Body.get()};
+    while (!stack.empty()) {
+        IL::ILInstruction* node = stack.back();
+        stack.pop_back();
+        if (dynamic_cast<IL::YieldReturn*>(node) != nullptr)
+            yieldReturns++;
+        for (int i = 0; i < node->ChildCount(); i++) {
+            if (IL::ILInstruction* child = node->GetChild(i))
+                stack.push_back(child);
+        }
+    }
+    EXPECT_GE(yieldReturns, 1u)
+        << "the converted body carries at least one yield return";
+    // The fixture's Numbers() iterator yields 1, 2, 3 -- the exact count
+    // and values pin the state-machine inversion (every state-block became
+    // a yield return carrying the former current-field store).
+    EXPECT_EQ(yieldReturns, 3u)
+        << "the three-yield iterator fully converted";
+    std::vector<int> yieldedValues;
+    stack = {fn->Body.get()};
+    while (!stack.empty()) {
+        IL::ILInstruction* node = stack.back();
+        stack.pop_back();
+        if (auto* yr = dynamic_cast<IL::YieldReturn*>(node)) {
+            if (auto* ldc = dynamic_cast<IL::LdcI4*>(yr->Value.get()))
+                yieldedValues.push_back(ldc->Value);
+        }
+        for (int i = 0; i < node->ChildCount(); i++) {
+            if (IL::ILInstruction* child = node->GetChild(i))
+                stack.push_back(child);
+        }
+    }
+    std::sort(yieldedValues.begin(), yieldedValues.end());
+    EXPECT_EQ(yieldedValues, (std::vector<int>{1, 2, 3}))
+        << "the yielded constants survive the conversion";
 }

@@ -157,6 +157,12 @@ public:
     ILVariablePtr RegisterVariable(VariableKind kind, TypeSystem::ITypePtr type,
                                    const std::string& name = std::string());
 
+    // Adopt an already-created variable into this function's Variables list
+    // (the C# `function.Variables.AddRange(...)` over the new body's
+    // variable-operand instructions -- the decoded MoveNext body's locals
+    // arriving with the converted body). Deduplicates by pointer identity.
+    void RegisterExistingVariable(const ILVariablePtr& variable);
+
     // Recombine split variables by replacing all occurrences of variable2 with
     // variable1 (the C# ILFunction.RecombineVariables). variable1 and variable2
     // are "equal" per the C# ILVariableEqualityComparer -- split fragments of one

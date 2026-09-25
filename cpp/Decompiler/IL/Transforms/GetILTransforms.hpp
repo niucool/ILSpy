@@ -84,6 +84,7 @@
 #include "Decompiler/IL/ControlFlow/ControlFlowSimplification.hpp"
 #include "Decompiler/IL/ControlFlow/DetectExitPoints.hpp"
 #include "Decompiler/IL/ControlFlow/DetectPinnedRegions.hpp"
+#include "Decompiler/IL/ControlFlow/YieldReturnDecompiler.hpp"
 #include "Decompiler/IL/ControlFlow/LoopDetection.hpp"
 #include "Decompiler/IL/ControlFlow/RemoveRedundantReturn.hpp"
 #include "Decompiler/IL/ControlFlow/SwitchDetection.hpp"
@@ -148,6 +149,9 @@ inline void RunILTransformsThroughBlockTransforms(ILFunction& function, ILTransf
     // Detect pinned regions (`fixed` blocks): must run after inlining
     // and before loop detection (per the C# GetILTransforms() order).
     DetectPinnedRegions().Run(function, context);
+    // YieldReturnDecompiler (iterator methods): must run after inlining
+    // but before loop detection (per the C# GetILTransforms() order).
+    YieldReturnDecompiler().Run(function, context);
     // Detect catch-when filter entry points: a `catch (T e) when (...)`
     // filter starts with a redundant isinst type test (the catch is
     // already typed T); drop it so the entry branches straight to the

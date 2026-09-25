@@ -631,6 +631,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             call->ParameterIType = callSig->ParameterTypes;
             call->IsInstanceCall = callSig->IsInstance && op != ILOpCode::Newobj;
             call->IsNewObj = (op == ILOpCode::Newobj);
+            call->MethodToken = tok;
             call->DeclaringType = file.ResolveMethodDeclaringType(tok, s.ownerMethodToken);
             call->IsOperator = IsOperatorName(call->MethodName);
             call->TypeArgumentsCount = file.GetMethodSpecTypeArgumentCount(tok);

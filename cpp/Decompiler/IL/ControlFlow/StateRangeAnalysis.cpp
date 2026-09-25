@@ -26,6 +26,7 @@
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"  // StObj
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"  // LdcI8/F4/F8 (MatchDefaultOrNullOrZero)
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
+#include "Decompiler/IL/Instructions/ILFunction.hpp"  // ILFunction (IsLeavingFunction)
 #include "Decompiler/IL/PatternMatching.hpp"
 
 namespace ILSpy::Decompiler::IL::ControlFlow {
@@ -240,14 +241,11 @@ Util::LongSet StateRangeAnalysis::AssignStateRanges(
                 const TypeSystem::IMember* definition =
                     field != nullptr ? field->MemberDefinition() : nullptr;
                 if (definition == stateField_ && value != nullptr) {
-                    int stored = 0;
-                    if (MatchLdcI4(value, stored)) {
-                        if (stored == -2) {
-                            // Roslyn 4.13 sets the state field in Dispose()
-                            // to mark the iterator as disposed; don't
-                            // consider this user code.
-                            return stateRange;
-                        }
+                    if (MatchLdcI4(value, -2)) {
+                        // Roslyn 4.13 sets the state field in Dispose()
+                        // to mark the iterator as disposed; don't
+                        // consider this user code.
+                        return stateRange;
                     }
                 }
                 if (value != nullptr && MatchDefaultOrNullOrZero(value)) {
@@ -267,12 +265,11 @@ Util::LongSet StateRangeAnalysis::AssignStateRanges(
     // IsLeavingFunction Leave in IteratorDispose does not throw.)
     if (auto* leave = dynamic_cast<Leave*>(inst)) {
         if (mode_ == StateRangeAnalysisMode::IteratorDispose &&
-            leave->TargetContainer == nullptr) {
-            // The port's Leave carries no explicit IsLeavingFunction bit; a
-            // leave targeting the function's own body container is the C#
-            // leaving-function shape. The caller's analysis root is not
-            // tracked here, so a null/unknown target container is treated as
-            // the leaving shape.
+            leave->TargetContainer != nullptr &&
+            dynamic_cast<ILFunction*>(leave->TargetContainer->Parent) !=
+                nullptr) {
+            // The C# `IsLeavingFunction` (Leave.cs lines 97-99): the leave's
+            // target container's parent is the ILFunction itself.
             return Util::LongSet::Empty();
         }
     }

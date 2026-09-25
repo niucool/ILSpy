@@ -33,6 +33,10 @@
 #include <string>
 #include <vector>
 
+namespace ILSpy::Decompiler::TypeSystem {
+class IField;
+}  // namespace ILSpy::Decompiler::TypeSystem
+
 namespace ILSpy::Decompiler::IL {
 
 class BlockContainer;
@@ -85,6 +89,13 @@ public:
     // the owning tree is the ILFunction. Read by the ported DeclareVariables scope
     // analysis to place a captured variable's declaration outside its capture scope.
     BlockContainer* CaptureScope = nullptr;
+
+    // The C# `public IField? StateMachineField { get; internal set; }` --
+    // the state-machine field this variable was hoisted from (set by
+    // YieldReturnDecompiler's TranslateFieldsToLocalAccess; the
+    // field-to-local rewrites consult it). Non-owning: the type system
+    // owns the field.
+    const TypeSystem::IField* StateMachineField = nullptr;
 
     // The C# `public bool UsesInitialValue { get; set; }` -- whether the variable's
     // initial value is used (the `.locals init` semantics). The C# setter refuses to
