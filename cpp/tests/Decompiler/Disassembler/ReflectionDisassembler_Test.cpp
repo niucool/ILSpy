@@ -1844,6 +1844,52 @@ TEST(ReflectionDisassemblerTest, DisassembleMethodHeaderMetadataTokenComment)
 // explicit-interface override with a body, and the .permissionset raw dump.
 // ---------------------------------------------------------------------------
 
+// The sweep's T12 companion (net065): the C# DisassembleMethodBlock gates
+// the body on the SRMExtensions HasBody extension -- Abstract and
+// PinvokeImpl attributes plus InternalCall/Native/Unmanaged/Runtime impl
+// attributes carry no body even when an RVA exists (the mixed-mode
+// pinvokeimpl thunks whose "bodies" are native stubs). The port's gate was
+// RVA-only and rendered the thunk bodies as garbage-decoded IL. Patching
+// the netmodule's Tiny.Add Flags with the PinvokeImpl bit reproduces the
+// shape: the header must render with no body block.
+TEST(ReflectionDisassemblerTest, DisassembleMethodPinvokeImplWithRvaHasNoBody)
+{
+    std::string bytes = TinyNetModuleBytes();
+    ASSERT_FALSE(bytes.empty());
+    // Locate the Add MethodDef row by its (RVA, ImplFlags, Flags) prefix and
+    // set the PinvokeImpl attribute bit (0x2000, the Flags column's high
+    // byte).
+    const std::uint8_t rowPrefix[] = {0x50, 0x20, 0x00, 0x00,  // RVA 0x2050
+                                      0x00, 0x00,              // ImplFlags
+                                      0x96, 0x00};             // Flags
+    int matches = 0;
+    std::size_t at = 0;
+    for (std::size_t i = 0; i + sizeof(rowPrefix) <= bytes.size(); ++i) {
+        if (std::memcmp(bytes.data() + i, rowPrefix, sizeof(rowPrefix)) == 0) {
+            ++matches;
+            at = i;
+        }
+    }
+    ASSERT_EQ(matches, 1u) << "the Add row must locate uniquely";
+    bytes[at + 7] |= 0x20;  // Flags |= 0x2000 (PinvokeImpl -- the high byte)
+    namespace fs = std::filesystem;
+    fs::path path = fs::temp_directory_path() / "ilspy_tiny_pinvoke.dll";
+    std::FILE* out = std::fopen(path.string().c_str(), "wb");
+    ASSERT_NE(out, nullptr);
+    std::fwrite(bytes.data(), 1, bytes.size(), out);
+    std::fclose(out);
+
+    MD::MetadataFile f(path.string());
+    ASSERT_TRUE(f.IsValid());
+    ASSERT_EQ(f.GetMethodAttributes(0x06000001u) & 0x2000, 0x2000u);
+    std::string actual = RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleMethod(f, 0x06000001u);
+    });
+    EXPECT_NE(actual.find("pinvokeimpl"), std::string::npos) << actual;
+    EXPECT_EQ(actual.find("// Method begins"), std::string::npos) << actual;
+    std::remove(path.string().c_str());
+}
+
 TEST(ReflectionDisassemblerTest, DisassembleMethodFullNoBodyPinvokeAlias)
 {
     MD::MetadataFile f(MscorlibPath());

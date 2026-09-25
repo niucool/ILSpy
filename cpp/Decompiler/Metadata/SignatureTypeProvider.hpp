@@ -464,7 +464,13 @@ SignatureTypeProviderDecoder<TProvider>::DecodeTypeWithPrefixes() {
         if (b == kPinned) {
             Byte();
             TType inner = DecodeTypeWithPrefixes();
-            return provider_.GetPinnedType(std::move(inner));
+            // The C# decode folds the already-read cmod modifiers AROUND the
+            // pinned element (the net065 locals render
+            // "uint8& pinned modopt(IsExplicitlyDereferenced)"): the pinned
+            // arm is not a leaf -- discarding the modifiers here dropped
+            // every cmod that preceded the pinned marker.
+            return FoldModifiers(std::move(modifiers),
+                provider_.GetPinnedType(std::move(inner)));
         }
         break;
     }

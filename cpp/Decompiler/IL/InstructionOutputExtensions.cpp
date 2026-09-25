@@ -393,13 +393,19 @@ void WriteTo(const MetadataFile& module, ITextOutput& output,
         }
         case 0x11:  // HandleKind.StandaloneSignature
         {
-            // The C# `header.Kind == SignatureKind.Method` decode; every other
-            // kind falls into the `@token /* signature <Kind> */` spelling.
+            // The C# `header.Kind == SignatureKind.Method` decode. SRM's
+            // SignatureHeader.Kind collapses every low-nibble calling
+            // convention (<= 5: default/cdecl/stdcall/thiscall/fastcall/
+            // vararg) to SignatureKind.Method -- a calli's unmanaged-header
+            // signatures decode here too; every other nibble falls into the
+            // `@token /* signature <Kind> */` spelling the C# fallback
+            // prints over the enum's ToString (the decompiled
+            // InstructionOutputExtensions.cs StandaloneSignature arm).
             auto blob = module.GetStandaloneSignatureBlob(entityToken);
             if (!blob || blob->empty())
                 throw std::logic_error("standalone signature");
             std::uint8_t rawKind = (*blob)[0] & 0x0F;
-            if (rawKind == 0x00) {  // SignatureKind.Method
+            if (rawKind <= 0x05) {  // SignatureKind.Method (the SRM collapse)
                 Disassembler::DisassemblerSignatureTypeProvider provider(module, output);
                 Metadata::SignatureTypeProviderDecoder decoder(provider, module);
                 Metadata::MethodSignatureT methodSignature =
@@ -414,7 +420,7 @@ void WriteTo(const MetadataFile& module, ITextOutput& output,
                     case 0x06: kindName = "Field"; break;
                     case 0x07: kindName = "LocalVariables"; break;
                     case 0x08: kindName = "Property"; break;
-                    case 0x0A: kindName = "FunctionPointer"; break;
+                    case 0x0A: kindName = "MethodSpecification"; break;
                     default: kindName = nullptr; break;
                 }
                 char buf[48];

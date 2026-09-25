@@ -35,6 +35,7 @@
 #include "Decompiler/Metadata/MetadataGenericContext.hpp"
 #include "Decompiler/Metadata/SRMExtensions.hpp"
 #include "Decompiler/Output/PlainTextOutput.hpp"
+#include "TestFixtures/SsSynth.hpp"
 
 #include <gtest/gtest.h>
 
@@ -926,6 +927,33 @@ TEST(InstructionOutputExtensionsTest, StandaloneSignatureArmRendersOtherKindsAtT
         break;
     }
     ASSERT_TRUE(found) << "no LocalVariables-kind StandaloneSig found";
+}
+
+// The sweep's T12 (net065's `calli @11000003 /* signature 2 */` fallback):
+// a CALLI operand's standalone-signature header byte carries the CALLING
+// CONVENTION in the low nibble, and the C# System.Reflection.Metadata
+// SignatureHeader.Kind collapses every nibble <= 5 (default, cdecl,
+// stdcall, thiscall, fastcall, vararg) to SignatureKind.Method -- the
+// disassembler's Method arm then decodes the full signature. The port's
+// `rawKind == 0x00` test sent those rows to the `@token /* signature N */`
+// fallback. The SsSynth crafted manifest's 0x01 (cdecl) and 0x05 (vararg)
+// method rows drive the same gate deterministically.
+TEST(InstructionOutputExtensionsTest, StandaloneSignatureMethodConventionHeadersDecode) {
+    MetadataFile f(WriteSsSynthDll());
+    ASSERT_TRUE(f.IsValid());
+    // Row 10: the 0x01 unmanaged-cdecl method sig, `void ()` -- the C#
+    // Method-kind arm writes the return type and the parameter list with
+    // NO separating space (the same quirk the 0x00-row test pins).
+    EXPECT_EQ(Render([&](Output::ITextOutput& out) {
+                  IL::WriteTo(f, out, MetadataGenericContext{}, 0x1100000Au);
+              }),
+        "unmanaged cdecl void()");
+    // Row 9: the 0x05 vararg method sig -- int32 required, then the vararg
+    // sentinel, then string.
+    EXPECT_EQ(Render([&](Output::ITextOutput& out) {
+                  IL::WriteTo(f, out, MetadataGenericContext{}, 0x11000009u);
+              }),
+        "vararg void(int32, ..., string)");
 }
 
 TEST(SignatureTypeProviderDecoderTest, MethodSpecSignatureDecodesTypeList) {
