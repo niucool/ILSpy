@@ -524,3 +524,80 @@ cosmetic note). The parity claim is closed on the evidence: every --il row
 either decompiles to the oracle's bytes or refuses exactly as the oracle
 refuses.
 
+## PD11 -- the T10 bisect: the silent-stop is disproven, the truncation decomposed (2026-09-24)
+
+The controller's next chunk: the T10 "silent-stop" shape (the rc=0-with-
+truncated-output rows on capa07/47/48). The question: where does the early
+return happen -- which decompile path swallows the abort? The answer, from
+a temporarily-instrumented walk (a main.cpp probe, reverted after the run;
+stdout byte-identical before/after): **there is no early return and no
+swallowed abort**. The `--csharp` walk (main.cpp's Phase-5 seed scaffold)
+completes over every non-`<Module>` TypeDef and every method the metadata
+enumerates; rc=0 with the shorter output is the seed's honest, complete
+shape. The truncation decomposes into four precisely-measured parts.
+
+### The decomposition (capa07, 0953cc3b77: port 438 lines vs oracle 3520)
+
+The method-table ground truth (`--dump-table MethodDef`): 310 MethodDef
+rows, 183 with RVA != 0, 127 with RVA 0. The port's GetMethods enumerates
+all 235 non-`<Module>` rows (310 - 75; `<Module>`'s MethodList range is
+[1,76) -- the obfuscator parks 75 rows there) -- **the enumeration is
+complete, no metadata-layer gap**. The walk's skips:
+
+1. **The `<Module>` skip** (the seed's `if (t.Name == "<Module>") continue`):
+   75 methods -- 2 with bodies (`.cctor`, `Initializer`) plus 73 extern
+   pinvoke stubs. The oracle renders all of them (its `<Module>` block).
+2. **The RVA==0 skip** (the seed's `if (m.RVA == 0) continue`): 126
+   methods. The oracle renders EXACTLY 126 `extern ? ();` one-line stubs
+   (the counts match to the row -- the C# back end renders the no-body
+   methods as anonymous extern stubs, `?` the failed-signature render).
+3. **The ReadIL degrade** (the seed's `if (!fn) continue`): 36 method
+   bodies. The mechanism is pinned: `MergeStackIntoTarget` sets
+   `mergeFailed` on a stack-height/type mismatch at a branch join
+   (ILReader.cpp, the "invalid IL: mismatched stack heights at a join"
+   site) and `ReadIL` returns nullptr at the `if (s.mergeFailed)` bail --
+   the SAME invalid-IL condition the oracle detects and RENDERS with its
+   `//IL_00xx->IL00xx: Incompatible stack heights: N vs M` +
+   `/*Error: Could not find block for branch target*/` annotations (the
+   C# degrades-but-emits; the port bails). Of the 36: 5 render in the
+   oracle WITH those annotations (the same invalid IL), **23 render
+   CLEANLY** (the C#'s stack analysis accepts joins the port's merge
+   rejects -- e.g. `lpuQ6c3UIYPf1YE8a7vLPTvQV`, a loop-heavy float64
+   method that disassembles clean through the byte-identical `--il`
+   path), and 8 do not appear in the oracle's output at all.
+4. **The scaffolding** (the line bulk): 192 class shells with nesting and
+   braces, the usings/assembly-attribute header, and the real-C#-body
+   content difference. Decisive for the family classification: **capa47
+   and capa48 lose ZERO methods** (1 type, 2 methods, both render) and
+   **net016 loses ZERO methods** (10 types, 11 methods, all render) --
+   their 43/197-line diffs are PURE scaffolding.
+
+### The lane decision
+
+The fix for the shape is the whole-project C# decompiler back end: the
+usings/attributes/class-structure/all-members rendering (cpp/Decompiler/
+CSharp/, the Phase-5/7 back end), the in-output error-comment degrade the
+C# renders for invalid-IL bodies, and the ILAst reader's stack-merge
+robustness for the 23 clean-rendering methods (cpp/Decompiler/IL/
+ILReader.cpp -- main-line seed scope). None of it is Disassembler-lane or
+cli/-scoped: the three skip sites in main.cpp are the seed's documented
+contract ("a documented divergence until the -t/-m decompile paths land"),
+and a stderr loudness note would itself diverge from the C# CLI's
+observable behavior -- the oracle's stderr on this sample carries only its
+version-check notice; the degradation comments go IN the output. PD6's
+"the CLI should fail loudly when a type's decompile aborts" flag is
+resolved by the bisect itself: nothing aborts, and the loudness fix lands
+with the back end's error-comment render, not in the seed's stderr.
+
+### The repro for ilspy (the main-line ticket)
+
+* Sample: `/home/jim/source/capa-testfiles/0953cc3b77ed2974b09e3a00708f
+  88de931d681e2d0cb64afbaf714610beabe6.exe_` (any 0953cc3b77 variant).
+* `ilspy_cli <sample> --csharp` -> 438 lines, rc 0; `ilspycmd <sample>`
+  (the C# default mode) -> 3520 lines, rc 0.
+* The gap: 75 `<Module>` methods + 126 extern stubs + 36 ReadIL-nullptr
+  bodies (23 of which the C# decompiles cleanly) + the whole-project
+  scaffolding.
+* The ReadIL bail to close for the 23: the `mergeFailed` path
+  (MergeStackIntoTarget -> the `if (s.mergeFailed) return nullptr` bail in
+  ReadIL) rejecting joins the C# ILReader's stack analysis accepts.
