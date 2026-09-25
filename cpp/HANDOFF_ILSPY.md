@@ -621,15 +621,45 @@ CORPUS RESULT: the PresentationFramework base-list diff went 79 -> 0
 qualification, nested spelling, arguments, constraints -- is
 oracle-exact). The connid pin `aa0c7056...` held through every slice.
 
+THE MEMBER-SIGNATURE SLICES (landed after the base-list family):
+  * `bdd7be98a` -- the member-signature qualification: the signature
+    arms (the return/param/field/property/event types + the
+    explicit-impl interface names) render through RenderBaseTypeName
+    with the type-level scopeResolver. The name decision needs the
+    DEFINITIONS, so the arms prefer the ENTITY path (the
+    method/property/field entities' resolved return types +
+    parameters, the no-op-deleter ITypePtr aliasing) with the
+    file-signature decode as the fallback (the decode yields
+    unresolved simple types). The method arm also gained the
+    body-decode-failure fallback: a reference assembly's stale RVAs
+    never decode, and the members previously VANISHED (the
+    DecompileMethodToString failure had no else arm); they now render
+    as declarations with the reference-assembly empty-body comment.
+    Corpus: 51 -> 241 qualified rows of the oracle's 321 code rows.
+  * `928819a5d` -- the .override forwarder synthesis (the C#
+    AddInterfaceImplHelpers): a plain-named method with a MethodImpl
+    row binding it to an interface contract renders the synthesized
+    explicit-impl forwarder (the member's return type + params, the
+    interface through the name decision, the generated comment, the
+    forwarding call). The RED fixture is crafted (the MetadataBuilder
+    recipe at /home/jim/tmp-build/overrideprobe/ -- the
+    /home/jim/ilspy-test-fixtures/override_fixture/OverrideSynth.dll;
+    the MethodList ranges must point at the right rows or the types
+    leak each other's methods).
+
 THE NEXT QUEUE for this family (the corpus remainder):
-  * The member-signature qualification: the oracle qualifies the
-    return/param/explicit-impl types through the same visitor (129
-    rows on PF: `public System.Collections.IEnumerable GetChildren(...)`,
-    `System.Collections.IEnumerator
-    System.Collections.IEnumerable.GetEnumerator()`); the port's
-    method/property/field text arms still render the reflection
-    spelling for nested names and skip the decision. The machinery is
-    all in place -- thread the scopeResolver into those arms.
+  * THE WORKLIST (the biggest remaining corpus gap): the oracle
+    renders the hidden iterator state machines
+    (`<ProtectedGetEnumerator>d__16` etc.) because the C#'s
+    DoDecompileType worklist re-enqueues HIDDEN members whose types
+    the rendered declarations still reference (the
+    [IteratorStateMachine(typeof(...))] attribute's typeof is a
+    TypeResolveResult over a nested type -> EnqueueReferencedMembers
+    puts it on the worklist -> "Decompile compiler-generated members
+    that are still needed", CSharpDecompiler.cs ~1687-1790). The port
+    hides the state machines unconditionally; the corpus's 17
+    .override forwarders + their state machine types all live behind
+    this mechanism.
   * The nested-generic declaring instantiation bound (the recursion
     renders the declaring type argument-less when the parameterized
     form lacks a generic-type chain).
