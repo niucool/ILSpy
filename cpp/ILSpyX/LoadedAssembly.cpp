@@ -187,31 +187,38 @@ void LoadedAssembly::AddLoadedListener(std::function<void()> listener)
     }
 }
 
+std::shared_future<void> LoadedAssembly::StartLoad() const
+{
+    std::lock_guard<std::mutex> lock(loadMutex_);
+    if (!loadStarted_) {
+        loadStarted_ = true;
+        // The promise is captured by the worker; the mutex guards only
+        // this transition (LoadCore itself runs unlocked, so a load that
+        // recursively demands another assembly's load cannot
+        // self-deadlock, and status polls proceed while the load runs).
+        auto done = std::make_shared<std::promise<void>>();
+        loadDone_ = done->get_future().share();
+        loadThread_ = std::make_unique<std::thread>(
+            [this, done] { RunLoad(done); });
+    }
+    return loadDone_;
+}
+
 void LoadedAssembly::EnsureLoaded() const
 {
-    std::shared_future<void> done;
-    bool start = false;
-    {
-        std::lock_guard<std::mutex> lock(loadMutex_);
-        if (!loadStarted_) {
-            loadStarted_ = true;
-            // The promise is captured by the worker; the mutex guards
-            // only this transition (LoadCore itself runs unlocked, so a
-            // load that recursively demands another assembly's load
-            // cannot self-deadlock, and status polls proceed while the
-            // load runs).
-            auto done2 = std::make_shared<std::promise<void>>();
-            loadDone_ = done2->get_future().share();
-            loadThread_ = std::make_unique<std::thread>(
-                [this, done2] { RunLoad(done2); });
-            start = true;
-        }
-        done = loadDone_;
-    }
-    (void)start;
     // Every demander (including the one that started the work) waits on
     // the shared future -- the C# `await loadingTask`.
-    done.wait();
+    StartLoad().wait();
+}
+
+bool LoadedAssembly::WaitForLoaded(
+    std::chrono::milliseconds timeout) const
+{
+    // The demand plus the bounded wait (the bennu wait_for arm): the
+    // deadline arm stops here -- the library never abandons a load; a
+    // host applying detach must _Exit the process (session.cpp) or keep
+    // the object alive until the load lands (the destructor joins).
+    return StartLoad().wait_for(timeout) == std::future_status::ready;
 }
 
 void LoadedAssembly::RunLoad(

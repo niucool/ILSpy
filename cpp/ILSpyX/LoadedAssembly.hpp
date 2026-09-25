@@ -92,6 +92,7 @@
 #include "Decompiler/Metadata/ReferenceLoadInfo.hpp"
 #include "ILSpyX/FileLoaders/LoadResult.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <future>
@@ -218,6 +219,17 @@ public:
     // task).
     bool HasLoadError() const;
 
+    // The bounded wait (the bennu host-edge primitive; no C#
+    // analogue -- the C# host would Task.Wait(timeout)). A demand: it
+    // starts the load if it has not started, then waits at most the
+    // deadline. True when the load completed within the deadline; false
+    // while it is still in flight (the caller must keep the object
+    // alive until the load completes -- the destructor joins). The
+    // deadline arm stops here: detach belongs to the host, which may
+    // _Exit the process on a hard deadline (the bennu session.cpp
+    // pattern) -- the library never abandons a load.
+    bool WaitForLoaded(std::chrono::milliseconds timeout) const;
+
     // The C# `public bool IsAutoLoaded { get; set; }`.
     bool IsAutoLoaded() const { return isAutoLoaded_; }
     void SetIsAutoLoaded(bool value) { isAutoLoaded_ = value; }
@@ -323,6 +335,10 @@ public:
     std::string Text() const;
 
 private:
+    // The start-once step both EnsureLoaded and WaitForLoaded share:
+    // starts the worker on the first call, returns the shared future
+    // (the mutex guards only this transition).
+    std::shared_future<void> StartLoad() const;
     void EnsureLoaded() const;
     // The worker body: runs LoadCore() with no lock held, records the
     // outcome in the fault slots, then satisfies the promise and fires

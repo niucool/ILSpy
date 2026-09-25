@@ -420,6 +420,39 @@ TEST(LoadedAssemblyTest, ConcurrentDemandersShareOneLoad) {
     }
 }
 
+TEST(LoadedAssemblyTest, WaitForLoadedTimesOutWhileTheLoadIsInFlight) {
+    AssemblyList list;
+    FileLoaders::FileLoaderRegistry registry;
+    auto loader = std::make_unique<ParkingLoader>();
+    ParkingLoader* raw = loader.get();
+    registry.Register(std::move(loader));
+    LoadedAssembly::Options options;
+    options.FileLoaders = &registry;
+    std::string file = WriteBytes("ilspy_la_waitfor.bin",
+        "parked bytes, not an image");
+    auto la = std::make_unique<LoadedAssembly>(list, file, options);
+
+    // The bounded wait is a demand: it starts the load, then waits at
+    // most the deadline (the bennu wait_for arm; no C# analogue -- the
+    // C# host would Task.Wait(timeout)).
+    EXPECT_FALSE(la->WaitForLoaded(std::chrono::milliseconds(50)));
+    EXPECT_FALSE(la->IsLoaded());
+    raw->Release();
+    EXPECT_TRUE(la->WaitForLoaded(std::chrono::seconds(2)));
+    EXPECT_TRUE(la->IsLoaded());
+    EXPECT_TRUE(la->HasLoadError());
+}
+
+TEST(LoadedAssemblyTest, WaitForLoadedAfterCompletionReturnsImmediately) {
+    AssemblyList list;
+    std::string file = ILSpy::Tests::WriteConnIdResDll();
+    LoadedAssembly& asm_ = list.OpenAssembly(file);
+    (void)asm_.GetLoadResult();
+    // Completed loads satisfy the wait instantly, even with a zero
+    // deadline.
+    EXPECT_TRUE(asm_.WaitForLoaded(std::chrono::milliseconds(0)));
+}
+
 TEST(LoadedAssemblyTest, DestructionWaitsForTheInFlightLoad) {
     AssemblyList list;
     FileLoaders::FileLoaderRegistry registry;
