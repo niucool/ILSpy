@@ -20,6 +20,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/MetadataGenericContext.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/MetadataExtensions.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/MethodSemanticsLookup.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/PropertyAndEventBackingFieldLookup.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/CodeMappingInfo.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/NamespaceDefinition.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/CustomAttributeDecoder.cpp

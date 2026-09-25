@@ -30,6 +30,7 @@
 #include "Decompiler/Metadata/MethodBody.hpp"
 #include "Decompiler/Metadata/LocalTypeInfo.hpp"
 #include "Decompiler/Metadata/MethodSemanticsLookup.hpp"
+#include "Decompiler/Metadata/PropertyAndEventBackingFieldLookup.hpp"
 #include "Decompiler/Metadata/NamespaceDefinition.hpp"
 #include "Decompiler/Metadata/PortablePdb.hpp"
 #include "Decompiler/Disassembler/ReflectionAttributes.hpp"
@@ -890,6 +891,16 @@ public:
     // as the MetadataFile. Never throws (an invalid file yields the empty
     // lookup).
     const MethodSemanticsLookup& GetMethodSemanticsLookup() const;
+
+    // The C# `internal PropertyAndEventBackingFieldLookup
+    // PropertyAndEventBackingFieldLookup { get; }` (MetadataFile.cs): the
+    // lazily-built compiler-naming-convention map from backing-field rows to
+    // their property or event rows. Same single-threaded lazy-build
+    // convention as GetMethodSemanticsLookup (the returned reference stays
+    // alive as long as the MetadataFile; an invalid file yields the empty
+    // lookup). Never throws.
+    const PropertyAndEventBackingFieldLookup&
+    GetPropertyAndEventBackingFieldLookup() const;
 
     // Custom attributes applied to an entity (TypeDef/MethodDef/Field/Property
     // token). Returns the attribute type namespace+name for each; never throws.

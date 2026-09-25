@@ -162,6 +162,21 @@ struct MetadataFile::Impl {
         return *methodSemanticsLookup;
     }
 
+    // The backing-field lookup (the C# MetadataFile's lazy
+    // PropertyAndEventBackingFieldLookup property -- the header's
+    // GetPropertyAndEventBackingFieldLookup contract; same
+    // lazy-build-in-impl shape).
+    std::unique_ptr<PropertyAndEventBackingFieldLookup>
+        propertyAndEventBackingFieldLookup;
+
+    PropertyAndEventBackingFieldLookup& BackingFieldLookup(
+        const MetadataFile* owner) {
+        if (!propertyAndEventBackingFieldLookup)
+            propertyAndEventBackingFieldLookup =
+                std::make_unique<PropertyAndEventBackingFieldLookup>(*owner);
+        return *propertyAndEventBackingFieldLookup;
+    }
+
     explicit Impl(std::string_view p) : path(p) {
         // winmd throws std::invalid_argument for a missing/unreadable file (out
         // of is_database()'s file_view ctor) and for a malformed image (out of
@@ -1673,6 +1688,15 @@ MetadataFile::MethodSemanticsRows() const {
 
 const MethodSemanticsLookup& MetadataFile::GetMethodSemanticsLookup() const {
     return impl_->SemanticsLookup(this);
+}
+
+// The C# `internal PropertyAndEventBackingFieldLookup
+// PropertyAndEventBackingFieldLookup { get; }` (MetadataFile.cs): the lazy
+// accessor the automatic-events family consults (the same single-threaded
+// lazy-build convention as the MethodSemanticsLookup accessor above).
+const PropertyAndEventBackingFieldLookup&
+MetadataFile::GetPropertyAndEventBackingFieldLookup() const {
+    return impl_->BackingFieldLookup(this);
 }
 
 ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::GetFieldSignature(std::uint32_t fieldToken) const {
