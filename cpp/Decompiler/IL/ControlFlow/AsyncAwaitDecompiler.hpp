@@ -22,19 +22,25 @@
 // async/await -- matches the compiler-generated state machine, inlines its
 // MoveNext body, and converts the await points into Await instructions.
 //
-// SLICE STATE (parts 1-2): the task-creation pattern match + the MoveNext
-// analyses (AnalyzeMoveNext / ValidateCatchBlock / AnalyzeDisposeAsync)
-// + InlineBodyOfMoveNext + CleanUpBodyOfMoveNext are ported; the state
-// machine await analysis (AnalyzeStateMachine / DetectAwaitPattern / the
-// final translations) is not ported yet -- Run stops after the body
-// inlining. The async-enumerator arms (the
-// MatchAsyncEnumeratorCreationPattern family) are deferred with the
-// enumerator slice.
+// SLICE STATE (parts 1-3): the task-creation pattern match, the MoveNext
+// analyses + body inlining, and the state machine await analysis
+// (AnalyzeStateMachine / DetectAwaitPattern / the tail cleanups) are
+// ported -- the await points become Await nodes and Run drives the whole
+// tail (TranslateFieldsToLocalAccess / FinalizeInlineMoveNext). The
+// dynamic-call arms (NormalizeAwaitOnCompletedDualBranch,
+// DynamicCallSiteTransform, CoalesceDynamicAwaiterBlocks, the dynamic
+// GetAwaiter/GetResult sites) and the async-enumerator arms (the
+// MatchAsyncEnumeratorCreationPattern family, yield return / yield break,
+// the dispose mode) are deferred with their slices, as are the
+// Visual Basic arms (the doFinallyBodies elimination beyond the null
+// early-out, the VB catch order), the pre-roslyn stack save/restore, and
+// the AsyncDebugInfo map (no ILFunction surface).
 
 #pragma once
 
 #include "Decompiler/IL/ControlFlow/StateRangeAnalysis.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
+#include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
@@ -42,6 +48,7 @@
 
 #include <map>
 #include <memory>
+#include <set>
 #include <vector>
 
 namespace ILSpy::Decompiler::IL {
@@ -147,6 +154,47 @@ private:
     // 1202-1215).
     bool MatchStateAssignment(ILInstruction* inst, int& newState);
 
+    // The C# `void AnalyzeStateMachine(ILFunction function)` (lines
+    // 1306-1398): per container, a state range analysis maps states to
+    // blocks; the blocks ending in a MoveNext leave become await blocks
+    // (Await + branch to the resume block), and the container's entry
+    // skips the state dispatcher.
+    void AnalyzeStateMachine(ILFunction& function);
+    // The C# `bool AnalyzeAwaitBlock(Block, out awaiter, out awaiterField,
+    // out state, out yieldOffset)` (lines 1645-1712): the await block tail
+    // (the awaiter field store, the AwaitUnsafeOnCompleted call, the state
+    // assignment) -- matched and removed, leaving the block to carry the
+    // Await node.
+    bool AnalyzeAwaitBlock(Block* block, ILVariable*& awaiter,
+                           const TypeSystem::IField*& awaiterField,
+                           int& state, int& yieldOffset);
+    // The C# `void DetectAwaitPattern(ILFunction function)` + the block
+    // overload (lines 1789-1930): the
+    // stloc-awaiter/if-IsCompleted/br-awaitBlock shape collapses into the
+    // Await node over the awaited value.
+    void DetectAwaitPattern(ILFunction& function);
+    void DetectAwaitPattern(Block* block);
+    // The C# `bool CheckAwaitBlock(Block, out resumeBlock, out
+    // stackField)` (lines 1968-1989).
+    bool CheckAwaitBlock(Block* block, Block*& resumeBlock,
+                         const TypeSystem::IField*& stackField);
+    // The C# `bool CheckResumeBlock(Block, awaiterVar, awaiterField,
+    // completedBlock, stackField)` (lines 1991-2112).
+    bool CheckResumeBlock(Block* block, ILVariable* awaiterVar,
+                          const TypeSystem::IField* awaiterField,
+                          Block* completedBlock,
+                          const TypeSystem::IField* stackField);
+    // The C# `void CleanDoFinallyBodies(ILFunction function)` (lines
+    // 2158-2197): the VB-family doFinallyBodies elimination.
+    void CleanDoFinallyBodies(ILFunction& function);
+    // The C# `void TranslateCachedFieldsToLocals()` (lines 2215-2229):
+    // the cached field loads become the parameter locals.
+    void TranslateCachedFieldsToLocals();
+    // The C# `void FinalizeInlineMoveNext(ILFunction function)` (lines
+    // 1272-1297): the undetected await leaves become InvalidBranch + the
+    // dead cached-state stores go.
+    void FinalizeInlineMoveNext(ILFunction& function);
+
     ILTransformContext* context_ = nullptr;
 
     // These fields are set by MatchTaskCreationPattern() (the C# field
@@ -173,6 +221,14 @@ private:
     Block* setResultYieldBlock_ = nullptr;  // the 'yield return' block
     ILVariable* doFinallyBodies_ = nullptr;
     std::vector<bool> blocksAnalyzed_;
+
+    // The C# `HashSet<Leave> moveNextLeaves` (line 103) + the await bookkeeping
+    // (lines 102-112): the leaves carried over from MoveNext (the await
+    // candidates), the blocks recognized as await points, and the smallest
+    // awaiter variable index.
+    std::set<Leave*> moveNextLeaves_;
+    std::map<Block*, std::pair<ILVariable*, const TypeSystem::IField*>> awaitBlocks_;
+    int smallestAwaiterVarIndex_ = -1;
 };
 
 } // namespace ILSpy::Decompiler::IL

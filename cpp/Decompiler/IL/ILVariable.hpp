@@ -65,6 +65,14 @@ public:
     // every fresh recompute.
     std::vector<ILInstruction*> AddressInstructions;
 
+    // The C# `public readonly List<IStoreInstruction> StoreInstructions`
+    // (ILVariable.cs): every store site (StLoc / MatchInstruction /
+    // UsingInstruction / a handler's exception slot), in tree order.
+    // Populated by ComputeVariableUsage (the reader-event equivalent), like
+    // AddressInstructions. Non-owning; `StoreCount` equals this list's size
+    // on every fresh recompute (plus the parameter initial-value store).
+    std::vector<ILInstruction*> StoreInstructions;
+
     // Set by transforms (e.g. RemoveInfeasiblePathTransform) to mark a variable
     // whose dead stores RemoveDeadVariableInit should drop even when the
     // RemoveDeadStores setting is off (ILVariable.RemoveIfRedundant in the C#).

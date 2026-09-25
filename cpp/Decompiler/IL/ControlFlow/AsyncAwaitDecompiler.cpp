@@ -38,10 +38,16 @@
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
+#include "Decompiler/IL/Instructions/Await.hpp"
+#include "Decompiler/IL/Instructions/Branch.hpp"
+#include "Decompiler/IL/Instructions/Comp.hpp"
+#include "Decompiler/IL/Instructions/Conv.hpp"
+#include "Decompiler/IL/Instructions/InvalidInstructions.hpp"
 #include "Decompiler/IL/PatternMatching.hpp"
 #include "Decompiler/Metadata/CodeMappingInfo.hpp"  // IsCompilerGeneratedStateMachine
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/TypeSystem/MetadataModule.hpp"
+#include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
 #include "Decompiler/TypeSystem/TaskType.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
@@ -87,6 +93,92 @@ ILInstruction* BlockInstructionAt(Block* block, int pos) {
     if (pos == static_cast<int>(block->Instructions.size()))
         return block->FinalInstruction.get();
     return nullptr;
+}
+
+// The block's last instruction in the C# list sense: the final if the
+// slot is set, else the last list entry (the C# `block.Instructions.Last()`).
+ILInstruction* LastInstruction(Block* block) {
+    if (block->FinalInstruction != nullptr)
+        return block->FinalInstruction.get();
+    if (!block->Instructions.empty())
+        return block->Instructions.back().get();
+    return nullptr;
+}
+
+// The C# `ILInlining.FindFirstInlinedCall` (ILInlining.cs lines 915-928):
+// walks the children while the slot accepts inlining, returning the first
+// call found. The port has no per-child SlotInfo; the per-class
+// CanInlineIntoSlot overrides carry the same gates (the default is
+// permissive, the port's inliner convention).
+Call* FindFirstInlinedCall(ILInstruction* inst) {
+    for (int i = 0; i < inst->ChildCount(); i++) {
+        ILInstruction* child = inst->GetChild(i);
+        if (child == nullptr) continue;
+        if (!inst->CanInlineIntoSlot(i, child)) break;
+        if (Call* call = FindFirstInlinedCall(child))
+            return call;
+    }
+    return dynamic_cast<Call*>(inst);
+}
+
+// The C# resolves every call's `Method` through the module's type system
+// at ILAst-construction time; this port's deferred-resolution convention
+// leaves out-of-module methods (a MemberRef into a referenced assembly)
+// null. The Await nodes carry their methods for the result type and the AST
+// emission, so a null surface synthesizes a FakeMethod from the reader's
+// already-resolved call surfaces (the CreateDynamicAwaiterMethod precedent).
+std::shared_ptr<TypeSystem::IMethod> CallMethodSurface(
+    const Call* call, ILTransformContext* context) {
+    if (call->Method != nullptr)
+        return call->Method;
+    if (context == nullptr || context->TypeSystem == nullptr)
+        return nullptr;
+    auto method = std::make_shared<TypeSystem::Implementation::FakeMethod>(
+        *context->TypeSystem, TypeSystem::SymbolKind::Method);
+    method->SetName(MethodNameTail(call->MethodName));
+    if (call->ReturnIType != nullptr)
+        method->SetReturnType(call->ReturnIType);
+    if (call->DeclaringType != nullptr)
+        method->SetDeclaringType(call->DeclaringType);
+    return method;
+}
+
+// The C# `static ILInstruction UnwrapConvUnknown(ILInstruction inst)`
+// (lines 1932-1940): a conv to the unknown target type unwraps to its
+// argument.
+ILInstruction* UnwrapConvUnknown(ILInstruction* inst) {
+    if (auto* conv = dynamic_cast<Conv*>(inst)) {
+        if (conv->TargetType == PrimitiveType::Unknown)
+            return conv->Argument.get();
+    }
+    return inst;
+}
+
+// Port of ILInstruction.MatchLogicNot(out arg) (the
+// ExpressionTransforms/NullableLifting precedent): logic.not(X) is this
+// port's `comp(eq, X, ldc.i4 0)`.
+bool MatchLogicNotLocal(ILInstruction* inst, ILInstruction*& arg) {
+    arg = nullptr;
+    if (inst == nullptr || inst->Op != OpCode::Comp) return false;
+    auto* comp = static_cast<Comp*>(inst);
+    if (comp->Kind != ComparisonKind::Equality || comp->Unsigned) return false;
+    if (!comp->Right || comp->Right->Op != OpCode::LdcI4) return false;
+    if (static_cast<LdcI4*>(comp->Right.get())->Value != 0) return false;
+    arg = comp->Left.get();
+    return true;
+}
+
+// The C# `MatchLdLoc(variable, out value)` match-against-variable store
+// form (used as `stloc awaiterVar(ldfld ...)`): the C# checks the stored
+// variable's identity and reports the value.
+bool MatchStLocOf(ILInstruction* inst, const ILVariable* variable,
+                  ILInstruction*& value) {
+    value = nullptr;
+    auto* stloc = dynamic_cast<StLoc*>(inst);
+    if (stloc == nullptr || stloc->Variable.get() != variable)
+        return false;
+    value = stloc->Value.get();
+    return true;
 }
 
 // The shared PatternMatching MatchStFld (stobj over ldflda), unshadowed
@@ -135,6 +227,20 @@ bool MatchLdLocOut(ILInstruction* inst, ILVariable*& variable) {
     return true;
 }
 
+// The C# `static ILInstruction StackSlotValue(ILInstruction inst)` (lines
+// 1714-1727): a single-definition stack-slot load resolves to the value its
+// one store holds; anything else is returned unchanged.
+ILInstruction* StackSlotValueLocal(ILInstruction* inst) {
+    ILVariable* v = nullptr;
+    if (MatchLdLocOut(inst, v) && v != nullptr &&
+        v->Kind == VariableKind::StackSlot && v->IsSingleDefinition() &&
+        v->StoreInstructions.size() == 1) {
+        if (auto* stloc = dynamic_cast<StLoc*>(v->StoreInstructions[0]))
+            return stloc->Value.get();
+    }
+    return inst;
+}
+
 } // namespace
 
 void AsyncAwaitDecompiler::Run(ILFunction& function,
@@ -166,11 +272,25 @@ void AsyncAwaitDecompiler::Run(ILFunction& function,
     InlineBodyOfMoveNext(function);
     CleanUpBodyOfMoveNext(function);
 
-    // SLICE STATE (part 3): AnalyzeStateMachine + DetectAwaitPattern +
-    // CleanDoFinallyBodies + the field translations + FinalizeInlineMoveNext.
-    // Until they land, Run stops after the body inlining (the function is
-    // marked async and carries the inlined MoveNext body, but the await
-    // points stay as their raw state-machine instructions).
+    AnalyzeStateMachine(function);
+    DetectAwaitPattern(function);
+    CleanDoFinallyBodies(function);
+
+    context_->StepOnce("Translate fields to local accesses");
+    YieldReturnDecompiler::TranslateFieldsToLocalAccess(
+        function, function.Body.get(), fieldToParameterMap_);
+    TranslateCachedFieldsToLocals();
+
+    FinalizeInlineMoveNext(function);
+    // The C# sets the container's expected result type from the underlying
+    // return (the enumerator shapes are deferred with their arms).
+    if (auto* container =
+            dynamic_cast<BlockContainer*>(function.Body.get())) {
+        container->ExpectedResultType =
+            underlyingReturnType_ != nullptr
+                ? StackTypeOf(underlyingReturnType_.get())
+                : StackType::Unknown;
+    }
 }
 
 void AsyncAwaitDecompiler::AnalyzeMoveNext() {
@@ -610,10 +730,30 @@ void AsyncAwaitDecompiler::InlineBodyOfMoveNext(ILFunction& function) {
                 stack.push_back(child);
         }
     }
-    // The C# adds the setResultYieldBlock (the enumerator shape) and
-    // retargets the leaves from moveNextFunction.Body to the new body --
-    // the enumerator arms are deferred, and the function-level leaves
-    // already target the (transferred) container.
+    // The C# retargets the leaves that came over from MoveNext (they still
+    // target the moveNext function's root container) to the new body and
+    // records them as the await candidates; the setResultYieldBlock
+    // (the enumerator shape) is deferred with the enumerator arms.
+    {
+        std::vector<ILInstruction*> stack{function.Body.get()};
+        while (!stack.empty()) {
+            ILInstruction* node = stack.back();
+            stack.pop_back();
+            if (auto* leave = dynamic_cast<Leave*>(node)) {
+                if (leave->TargetContainer ==
+                    dynamic_cast<BlockContainer*>(
+                        moveNextFunction_->Body.get())) {
+                    leave->TargetContainer =
+                        dynamic_cast<BlockContainer*>(function.Body.get());
+                    moveNextLeaves_.insert(leave);
+                }
+            }
+            for (int i = 0; i < node->ChildCount(); i++) {
+                if (ILInstruction* child = node->GetChild(i))
+                    stack.push_back(child);
+            }
+        }
+    }
     // Register the variables the inlined body uses.
     if (resultVar_ != nullptr)
         function.RegisterExistingVariable(
@@ -1081,6 +1221,697 @@ AsyncAwaitDecompiler::ResolveStateMachineType(
         return module->GetDefinition(t.Token);
     }
     return nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// AnalyzeStateMachine (the C# lines 1306-1398) + DetectAwaitPattern (the C#
+// lines 1789-1930) + the tail cleanups.
+// ---------------------------------------------------------------------------
+
+void AsyncAwaitDecompiler::AnalyzeStateMachine(ILFunction& function) {
+    context_->StepOnce("AnalyzeStateMachine()");
+    smallestAwaiterVarIndex_ = std::numeric_limits<int>::max();
+    // function.Descendants.OfType<BlockContainer>() -- pre-order.
+    std::vector<BlockContainer*> containers;
+    {
+        std::vector<ILInstruction*> stack{function.Body.get()};
+        while (!stack.empty()) {
+            ILInstruction* node = stack.back();
+            stack.pop_back();
+            if (auto* container = dynamic_cast<BlockContainer*>(node))
+                containers.push_back(container);
+            for (int i = 0; i < node->ChildCount(); i++) {
+                if (ILInstruction* child = node->GetChild(i))
+                    stack.push_back(child);
+            }
+        }
+    }
+    for (auto* container : containers) {
+        // The NormalizeAwaitOnCompletedDualBranch fold (the runtime
+        // ICriticalNotifyCompletion type check Roslyn emits for dynamic /
+        // some generic awaiters) and DynamicCallSiteTransform are deferred
+        // with the dynamic-callsite arms.
+        // Use a separate state range analysis per container.
+        ControlFlow::StateRangeAnalysis sra(
+            ControlFlow::StateRangeAnalysisMode::AsyncMoveNext, stateField_,
+            cachedStateVar_);
+        sra.doFinallyBodies = doFinallyBodies_;
+        sra.AssignStateRanges(container, Util::LongSet::Universe());
+        auto stateToBlockMap = sra.GetBlockStateSetMapping(*container);
+
+        for (auto& blockPtr : container->Blocks) {
+            Block* block = blockPtr.get();
+            // This is likely an 'await' block.
+            if (auto* leave = dynamic_cast<Leave*>(LastInstruction(block))) {
+                if (moveNextLeaves_.count(leave) != 0) {
+                    ILVariable* awaiter = nullptr;
+                    const TypeSystem::IField* awaiterField = nullptr;
+                    int state = 0;
+                    int yieldOffset = -1;
+                    bool matched = AnalyzeAwaitBlock(
+                        block, awaiter, awaiterField, state, yieldOffset);
+                    if (matched) {
+                        block->Instructions.push_back(
+                            std::make_unique<Await>(std::make_unique<LdLoca>(
+                                ILVariablePtr(ILVariablePtr(), awaiter))));
+                        Block* targetBlock = stateToBlockMap.GetOrDefault(state);
+                        if (targetBlock != nullptr) {
+                            // The C# records the await debug info
+                            // (yieldOffset -> the resume block's offset);
+                            // the port's ILFunction carries no
+                            // AsyncDebugInfo surface (deferred with it).
+                            block->SetFinal(
+                                std::make_unique<Branch>(targetBlock));
+                        } else {
+                            auto invalid =
+                                std::make_unique<InvalidBranch>();
+                            invalid->Message =
+                                "Could not find block for state " +
+                                std::to_string(state);
+                            block->SetFinal(std::move(invalid));
+                        }
+                        awaitBlocks_[block] = {awaiter, awaiterField};
+                        if (awaiter->Index < smallestAwaiterVarIndex_)
+                            smallestAwaiterVarIndex_ = awaiter->Index;
+                    }
+                }
+            }
+            // The `else if` branch-to-setResultYieldBlock arm (the async
+            // enumerator 'yield return') and the
+            // TransformYieldBreak / SimplifyIfDisposeMode arms are deferred
+            // with the enumerator slice.
+        }
+        // Skip the state dispatcher and directly jump to the initial state.
+        Block* entryPoint = stateToBlockMap.GetOrDefault(initialState_);
+        if (entryPoint != nullptr) {
+            auto newBlock = std::make_unique<Block>();
+            newBlock->SetFinal(std::make_unique<Branch>(entryPoint));
+            container->Blocks.insert(
+                container->Blocks.begin(), std::move(newBlock));
+            // The insert shifted the blocks; re-parent and re-index (the
+            // ChildIndex slots drive the container walks).
+            for (std::size_t i = 0; i < container->Blocks.size(); i++) {
+                container->Blocks[i]->Parent = container;
+                container->Blocks[i]->ChildIndex = i;
+            }
+        }
+        container->SortBlocks(true);
+        // CoalesceDynamicAwaiterBlocks (the dynamic callsite re-join) is
+        // deferred with the dynamic arms.
+    }
+}
+
+bool AsyncAwaitDecompiler::AnalyzeAwaitBlock(
+    Block* block, ILVariable*& awaiter, const TypeSystem::IField*& awaiterField,
+    int& state, int& yieldOffset) {
+    awaiter = nullptr;
+    awaiterField = nullptr;
+    state = 0;
+    yieldOffset = -1;
+    const int count = static_cast<int>(block->Instructions.size()) +
+                      (block->FinalInstruction != nullptr ? 1 : 0);
+    int pos = count - 2;
+    if (pos >= 0 && doFinallyBodies_ != nullptr &&
+        dynamic_cast<StLoc*>(BlockInstructionAt(block, pos)) != nullptr) {
+        auto* storeDoFinallyBodies =
+            static_cast<StLoc*>(BlockInstructionAt(block, pos));
+        if (!(storeDoFinallyBodies->Variable != nullptr &&
+              storeDoFinallyBodies->Variable->Kind == VariableKind::Local &&
+              storeDoFinallyBodies->Variable->Type != nullptr &&
+              TypeSystem::IsKnownType(
+                  *storeDoFinallyBodies->Variable->Type,
+                  TypeSystem::KnownTypeCode::Boolean) &&
+              storeDoFinallyBodies->Variable->Index ==
+                  doFinallyBodies_->Index)) {
+            return false;
+        }
+        int stored = 0;
+        if (!MatchLdcI4Out(storeDoFinallyBodies->Value.get(), stored) ||
+            stored != 0)
+            return false;
+        pos--;
+    }
+
+    std::vector<ILInstruction*> callArgs;
+    if (pos >= 0 && MatchCall(BlockInstructionAt(block, pos),
+                              "AwaitUnsafeOnCompleted", callArgs)) {
+        // call AwaitUnsafeOnCompleted(ldflda <>t__builder(ldloc this),
+        // ldloca awaiter, ldloc this)
+    } else if (pos >= 0 && MatchCall(BlockInstructionAt(block, pos),
+                                     "AwaitOnCompleted", callArgs)) {
+        // call AwaitOnCompleted(ldflda <>t__builder(ldloc this), ldloca
+        // awaiter, ldloc this): the non-unsafe call when the awaiter does
+        // not implement ICriticalNotifyCompletion.
+    } else {
+        return false;
+    }
+    if (callArgs.size() != 3)
+        return false;
+    if (!IsBuilderFieldOnThis(callArgs[0]))
+        return false;
+    if (!MatchLdLocaOut(callArgs[1], awaiter))
+        return false;
+    if (MatchLdThis(callArgs[2])) {
+        // OK (if state machine is a struct)
+        pos--;
+    } else {
+        ILVariable* tempVar = nullptr;
+        if (!MatchLdLocaOut(callArgs[2], tempVar))
+            return false;
+        // Roslyn, non-optimized uses a class for the state machine:
+        // stloc tempVar(ldloc this)
+        // call AwaitUnsafeOnCompleted(..., ldloca awaiter, ldloca tempVar)
+        ILInstruction* tempVal = nullptr;
+        if (!(pos > 0 && MatchStLocOf(BlockInstructionAt(block, pos - 1),
+                                      tempVar, tempVal)))
+            return false;
+        if (!MatchLdThis(tempVal))
+            return false;
+        pos -= 2;
+    }
+    // stfld StateMachine.<>awaiter(ldloc this, ldloc awaiter)
+    ILInstruction* target = nullptr;
+    ILInstruction* value = nullptr;
+    if (!MatchStFldRaw(BlockInstructionAt(block, pos), target, awaiterField,
+                       value))
+        return false;
+    if (!MatchLdThis(target))
+        return false;
+    {
+        ILVariable* loaded = nullptr;
+        if (!MatchLdLocOut(value, loaded) || loaded != awaiter)
+            return false;
+    }
+    pos--;
+    // Store IL offset for debug info:
+    if (pos >= 0 && BlockInstructionAt(block, pos) != nullptr)
+        yieldOffset = BlockInstructionAt(block, pos)->EndILOffset;
+
+    // stloc S_10(ldloc this)
+    // stloc S_11(ldc.i4 0)
+    // stloc cachedStateVar(ldloc S_11)
+    // stfld <>1__state(ldloc S_10, ldloc S_11)
+    const TypeSystem::IField* stateStoreField = nullptr;
+    if (!MatchStFldRaw(BlockInstructionAt(block, pos), target,
+                       stateStoreField, value))
+        return false;
+    if (!MatchLdThis(StackSlotValueLocal(target)))
+        return false;
+    const TypeSystem::IMember* fieldDefinition =
+        stateStoreField != nullptr ? stateStoreField->MemberDefinition()
+                                   : nullptr;
+    if (fieldDefinition != stateField_)
+        return false;
+    if (!MatchLdcI4Out(StackSlotValueLocal(value), state))
+        return false;
+    if (pos > 0) {
+        if (auto* stloc = dynamic_cast<StLoc*>(
+                BlockInstructionAt(block, pos - 1))) {
+            if (stloc->Variable != nullptr &&
+                stloc->Variable->Kind == VariableKind::Local &&
+                cachedStateVar_ != nullptr &&
+                stloc->Variable->Index == cachedStateVar_->Index) {
+                int cachedValue = 0;
+                if (MatchLdcI4Out(StackSlotValueLocal(stloc->Value.get()),
+                                  cachedValue) &&
+                    cachedValue == state) {
+                    // also delete the assignment to cachedStateVar
+                    pos--;
+                }
+            }
+        }
+    }
+    // Delete the matched tail (the C# RemoveRange over the list -- the
+    // port's terminator slot included, so the leave goes too).
+    if (pos < 0)
+        pos = 0;
+    if (pos <= static_cast<int>(block->Instructions.size()))
+        block->Instructions.erase(
+            block->Instructions.begin() + static_cast<std::size_t>(pos),
+            block->Instructions.end());
+    block->FinalInstruction.reset();
+    // delete preceding dead stores:
+    while (pos > 0) {
+        auto* stloc2 =
+            dynamic_cast<StLoc*>(BlockInstructionAt(block, pos - 1));
+        if (stloc2 == nullptr || stloc2->Variable == nullptr) break;
+        if (!stloc2->Variable->IsSingleDefinition()) break;
+        if (stloc2->Variable->LoadCount != 0) break;
+        if (stloc2->Variable->Kind != VariableKind::StackSlot) break;
+        if (!IsPure(stloc2->Value != nullptr ? stloc2->Value->Flags()
+                                             : InstructionFlags::None))
+            break;
+        pos--;
+    }
+    if (pos > 0 && pos <= static_cast<int>(block->Instructions.size())) {
+        block->Instructions.erase(
+            block->Instructions.begin() + static_cast<std::size_t>(pos),
+            block->Instructions.end());
+    }
+    return true;
+}
+
+
+void AsyncAwaitDecompiler::DetectAwaitPattern(ILFunction& function) {
+    context_->StepOnce("DetectAwaitPattern");
+    std::vector<BlockContainer*> containers;
+    {
+        std::vector<ILInstruction*> stack{function.Body.get()};
+        while (!stack.empty()) {
+            ILInstruction* node = stack.back();
+            stack.pop_back();
+            if (auto* container = dynamic_cast<BlockContainer*>(node))
+                containers.push_back(container);
+            for (int i = 0; i < node->ChildCount(); i++) {
+                if (ILInstruction* child = node->GetChild(i))
+                    stack.push_back(child);
+            }
+        }
+    }
+    for (auto* container : containers) {
+        for (auto& block : container->Blocks)
+            DetectAwaitPattern(block.get());
+        container->SortBlocks(true);
+    }
+}
+
+void AsyncAwaitDecompiler::DetectAwaitPattern(Block* block) {
+    // block:
+    //   stloc awaiterVar(callvirt GetAwaiter(...))
+    //   if (call get_IsCompleted(ldloca awaiterVar)) br completedBlock
+    //   br awaitBlock
+    // awaitBlock:
+    //   ..
+    //   br resumeBlock
+    // resumeBlock:
+    //   ..
+    //   br completedBlock
+    // The C# shape carries the if and the branch-to-awaitBlock as two list
+    // entries; this port's reader lowers the brtrue to an if in the
+    // FinalInstruction slot with the fall-through to the await block left
+    // implicit (the block model convention), so the await block is the next
+    // block in the container.
+    const int count = static_cast<int>(block->Instructions.size()) +
+                      (block->FinalInstruction != nullptr ? 1 : 0);
+    for (auto& i2 : block->Instructions)
+        std::fprintf(stderr, " %s",
+                     i2->ToString().substr(0, 46).c_str());
+    if (block->FinalInstruction != nullptr)
+        std::fprintf(stderr, " |F| %s",
+                      block->FinalInstruction->ToString().substr(0, 26)
+                          .c_str());
+    std::fprintf(stderr, "\n");
+    if (count < 2)
+        return;
+    // stloc awaiterVar(callvirt GetAwaiter(...))
+    auto* stLocAwaiter =
+        dynamic_cast<StLoc*>(block->Instructions.back().get());
+    if (stLocAwaiter == nullptr)
+        return;
+    ILVariable* awaiterVar = stLocAwaiter->Variable.get();
+    ILInstruction* awaitedValue = nullptr;
+    std::shared_ptr<TypeSystem::IMethod> getAwaiterMethod;
+    // The dynamic-await arm (DynamicInvokeMemberInstruction /
+    // DynamicGetMemberInstruction) is deferred with the dynamic-callsite
+    // arms.
+    {
+        auto* getAwaiterCall =
+            dynamic_cast<Call*>(stLocAwaiter->Value.get());
+        if (getAwaiterCall == nullptr || getAwaiterCall->IsNewObj)
+            return;
+        if (getAwaiterCall->Method != nullptr) {
+            if (getAwaiterCall->Method->Name() != "GetAwaiter")
+                return;
+        } else if (MethodNameTail(getAwaiterCall->MethodName) !=
+                   "GetAwaiter") {
+            return;
+        }
+        if (getAwaiterCall->Arguments.size() != 1)
+            return;
+        // The C# `(!call.Method.IsStatic || call.Method.IsExtensionMethod)`:
+        // the port's resolved surface has no static bit; the reader's
+        // instance-call bit is the equivalent (a Task.GetAwaiter is a
+        // callvirt).
+        if (!getAwaiterCall->IsInstanceCall)
+            return;
+        awaitedValue = getAwaiterCall->Arguments[0].get();
+        getAwaiterMethod = CallMethodSurface(getAwaiterCall, context_);
+    }
+    // if (call get_IsCompleted(ldloca awaiterVar)) br completedBlock
+    auto* ifInst = dynamic_cast<IfInstruction*>(block->FinalInstruction.get());
+    if (ifInst == nullptr)
+        return;
+    ILInstruction* condition = ifInst->Condition.get();
+    auto* trueBranch = dynamic_cast<Branch*>(ifInst->TrueInst.get());
+    if (trueBranch == nullptr)
+        return;
+    Block* completedBlock = trueBranch->TargetBlock;
+    // br awaitBlock -- the port's implicit fall-through to the next block.
+    auto* parent = dynamic_cast<BlockContainer*>(block->Parent);
+    if (parent == nullptr || block->ChildIndex < 0 ||
+        static_cast<std::size_t>(block->ChildIndex) + 1 >=
+            parent->Blocks.size())
+        return;
+    Block* awaitBlock =
+        parent->Blocks[static_cast<std::size_t>(block->ChildIndex) + 1]
+            .get();
+    // condition might be inverted, swap branches:
+    ILInstruction* negatedCondition = nullptr;
+    if (MatchLogicNotLocal(condition, negatedCondition)) {
+        condition = negatedCondition;
+        std::swap(completedBlock, awaitBlock);
+    }
+    // continue matching call get_IsCompleted(ldloca awaiterVar)
+    std::vector<ILInstruction*> isCompletedArgs;
+    if (!MatchCall(condition, "get_IsCompleted", isCompletedArgs) ||
+        isCompletedArgs.size() != 1) {
+        return;
+    }
+    {
+        ILVariable* loaded = nullptr;
+        if (!MatchLdLocRef(UnwrapConvUnknown(isCompletedArgs[0]), loaded) ||
+            loaded != awaiterVar)
+            return;
+    }
+    // Check awaitBlock and resumeBlock:
+    auto awaitIt = awaitBlocks_.find(awaitBlock);
+    if (awaitIt == awaitBlocks_.end())
+        return;
+    ILVariable* awaitBlockVar = awaitIt->second.first;
+    if (awaitBlockVar != awaiterVar)
+        return;
+    Block* resumeBlock = nullptr;
+    const TypeSystem::IField* stackField = nullptr;
+    if (!CheckAwaitBlock(awaitBlock, resumeBlock, stackField))
+    if (!CheckResumeBlock(resumeBlock, awaiterVar,
+                          awaitIt->second.second, completedBlock,
+                          stackField))
+        return;
+    // Check completedBlock. The first instruction involves the GetResult
+    // call, but it might have been inlined into another instruction.
+    if (completedBlock->Instructions.empty())
+        return;
+    Call* getResultCall =
+        FindFirstInlinedCall(completedBlock->Instructions[0].get());
+    if (getResultCall == nullptr)
+        return;
+    std::vector<ILInstruction*> getResultArgs;
+    if (!MatchCall(getResultCall, "GetResult", getResultArgs) ||
+        getResultArgs.size() != 1)
+        return;
+    {
+        ILVariable* loaded = nullptr;
+        if (!MatchLdLocRef(UnwrapConvUnknown(getResultArgs[0]), loaded) ||
+            loaded != awaiterVar)
+            return;
+    }
+    // All checks successful, let's transform.
+    // The awaited value and the methods are captured before the stores are
+    // removed (the GetAwaiter call is destroyed with its stloc).
+    std::unique_ptr<ILInstruction> awaitedValueOwned;
+    std::shared_ptr<TypeSystem::IMethod> getResultMethod =
+        CallMethodSurface(getResultCall, context_);
+    if (awaitedValue != nullptr && awaitedValue->Parent != nullptr)
+        awaitedValueOwned = awaitedValue->Parent->TakeChild(
+            awaitedValue->ChildIndex);
+    // remove getAwaiter call
+    block->Instructions.pop_back();
+    // remove if (isCompleted); instead, directly jump to completed block
+    block->SetFinal(std::make_unique<Branch>(completedBlock));
+    auto awaitInst = std::make_unique<Await>(
+        std::unique_ptr<ILInstruction>(UnwrapConvUnknown(
+            awaitedValueOwned.release())));
+    awaitInst->GetResultMethod = getResultMethod;
+    awaitInst->GetAwaiterMethod = getAwaiterMethod;
+    getResultCall->ReplaceWith(std::move(awaitInst));
+
+    // Remove useless reset of awaiterVar.
+    if (completedBlock->Instructions.size() > 1) {
+        if (auto* stobj = dynamic_cast<StObj*>(
+                completedBlock->Instructions[1].get())) {
+            ILVariable* resetVar = nullptr;
+            if (MatchLdLocaOut(stobj->Target.get(), resetVar) &&
+                resetVar == awaiterVar &&
+                stobj->Value != nullptr &&
+                stobj->Value->Op == OpCode::DefaultValue) {
+                completedBlock->Instructions.erase(
+                    completedBlock->Instructions.begin() + 1);
+            }
+        }
+    }
+}
+
+bool AsyncAwaitDecompiler::CheckAwaitBlock(Block* block,
+                                           Block*& resumeBlock,
+                                           const TypeSystem::IField*& stackField) {
+    // awaitBlock:
+    //   (pre-roslyn: save stack)
+    //   await(ldloca V_2)
+    //   br resumeBlock
+    resumeBlock = nullptr;
+    stackField = nullptr;
+    const int count = static_cast<int>(block->Instructions.size()) +
+                      (block->FinalInstruction != nullptr ? 1 : 0);
+    if (count < 2)
+        return false;
+    int pos = 0;
+    if (dynamic_cast<StLoc*>(BlockInstructionAt(block, pos)) != nullptr) {
+        auto* stloc = static_cast<StLoc*>(BlockInstructionAt(block, pos));
+        if (stloc->Variable != nullptr &&
+            stloc->Variable->IsSingleDefinition()) {
+            ILInstruction* target = nullptr;
+            ILInstruction* value = nullptr;
+            if (!MatchStFldRaw(BlockInstructionAt(block, pos + 1), target,
+                               stackField, value))
+                return false;
+            if (!MatchLdThis(target))
+                return false;
+            pos += 2;
+        }
+    }
+    // await(ldloca awaiterVar)
+    if (BlockInstructionAt(block, pos) == nullptr ||
+        BlockInstructionAt(block, pos)->Op != OpCode::Await)
+        return false;
+    // br resumeBlock
+    auto* branch =
+        dynamic_cast<Branch*>(BlockInstructionAt(block, pos + 1));
+    if (branch == nullptr)
+        return false;
+    resumeBlock = branch->TargetBlock;
+    return true;
+}
+
+bool AsyncAwaitDecompiler::CheckResumeBlock(
+    Block* block, ILVariable* awaiterVar,
+    const TypeSystem::IField* awaiterField, Block* completedBlock,
+    const TypeSystem::IField* stackField) {
+    int pos = 0;
+    // The C# RestoreStack (the pre-roslyn stack save/restore) is reached
+    // only with a stackField; null means nothing to restore.
+    if (stackField != nullptr) {
+        // The pre-roslyn stack restore is deferred with the legacy
+        // codegen arms (the Roslyn shapes carry no stack field).
+        return false;
+    }
+
+    // stloc awaiterVar(ldfld awaiterField(ldloc this))
+    {
+        ILInstruction* value = nullptr;
+        if (!MatchStLocOf(BlockInstructionAt(block, pos), awaiterVar, value))
+            return false;
+        // If the awaiter is a reference type, it might get stored in a
+        // field of type `object` and cast back to the awaiter type in the
+        // resume block.
+        if (auto* castClass = dynamic_cast<CastClass*>(value)) {
+            value = castClass->Argument.get();
+        }
+        ILInstruction* target = nullptr;
+        const TypeSystem::IField* field = nullptr;
+        if (!MatchLdFld(value, target, field))
+            return false;
+        if (!MatchLdThis(target))
+            return false;
+        if (field != awaiterField)
+            return false;
+        pos++;
+    }
+
+    // [optional] stfld awaiterField(ldloc this, default.value)
+    // (the C# MatchResetAwaiterField)
+    {
+        ILInstruction* target = nullptr;
+        const TypeSystem::IField* field = nullptr;
+        ILInstruction* value = nullptr;
+        if (MatchStFldRaw(BlockInstructionAt(block, pos), target, field,
+                          value) &&
+            MatchLdThis(target) && field == awaiterField &&
+            value != nullptr &&
+            (value->Op == OpCode::DefaultValue || value->Op == OpCode::LdNull)) {
+            pos++;
+        } else {
+            // {stloc V_6(default.value TaskAwaiter)}
+            // {stobj TaskAwaiter(ldflda awaiterField, ldloc V_6)}
+            ILVariable* variable = nullptr;
+            auto* resetTmp = dynamic_cast<StLoc*>(
+                BlockInstructionAt(block, pos));
+            if (resetTmp != nullptr)
+                variable = resetTmp->Variable.get();
+            ILInstruction* resetValue =
+                resetTmp != nullptr ? resetTmp->Value.get() : nullptr;
+            if (resetTmp != nullptr && variable != nullptr &&
+                resetValue != nullptr &&
+                resetValue->Op == OpCode::DefaultValue &&
+                MatchStFldRaw(BlockInstructionAt(block, pos + 1), target,
+                              field, value) &&
+                field == awaiterField) {
+                ILVariable* stored = nullptr;
+                if (MatchLdLocOut(value, stored) && stored == variable)
+                    pos += 2;
+            }
+        }
+    }
+
+    // stloc S_28(ldc.i4 -1)
+    // stloc cachedStateVar(ldloc S_28)
+    // stfld <>1__state(ldloc this, ldloc S_28)
+    // (the C# MatchStateFieldAssignement; the Visual Basic order is
+    // deferred with the VB arms)
+    {
+        ILVariable* m1Var = nullptr;
+        auto* stlocM1 =
+            dynamic_cast<StLoc*>(BlockInstructionAt(block, pos));
+        if (stlocM1 != nullptr) {
+            int stored = 0;
+            if (stlocM1->Variable != nullptr &&
+                stlocM1->Variable->Kind == VariableKind::StackSlot &&
+                MatchLdcI4Out(stlocM1->Value.get(), stored) &&
+                stored == initialState_) {
+                m1Var = stlocM1->Variable.get();
+                pos++;
+            }
+        }
+        if (dynamic_cast<StLoc*>(BlockInstructionAt(block, pos)) !=
+            nullptr) {
+            auto* stlocCachedState =
+                static_cast<StLoc*>(BlockInstructionAt(block, pos));
+            if (stlocCachedState->Variable != nullptr &&
+                stlocCachedState->Variable->Kind == VariableKind::Local &&
+                cachedStateVar_ != nullptr &&
+                stlocCachedState->Variable->Index ==
+                    cachedStateVar_->Index) {
+                ILVariable* cachedSource = nullptr;
+                int cachedConst = 0;
+                if ((MatchLdLocOut(stlocCachedState->Value.get(),
+                                   cachedSource) &&
+                     cachedSource == m1Var) ||
+                    (MatchLdcI4Out(stlocCachedState->Value.get(),
+                                   cachedConst) &&
+                     cachedConst == initialState_)) {
+                    pos++;
+                }
+            }
+        }
+        ILInstruction* target = nullptr;
+        const TypeSystem::IField* field = nullptr;
+        ILInstruction* value = nullptr;
+        if (!MatchStFldRaw(BlockInstructionAt(block, pos), target, field,
+                           value))
+            return false;
+        if (!MatchLdThis(target))
+            return false;
+        const TypeSystem::IMember* fieldDefinition =
+            field != nullptr ? field->MemberDefinition() : nullptr;
+        if (stateField_ == nullptr ||
+            fieldDefinition != stateField_->MemberDefinition())
+            return false;
+        ILVariable* storedVar = nullptr;
+        int storedConst = 0;
+        if (!((MatchLdcI4Out(value, storedConst) &&
+               storedConst == initialState_) ||
+              (MatchLdLocOut(value, storedVar) && storedVar == m1Var)))
+            return false;
+        pos++;
+    }
+    auto* branch =
+        dynamic_cast<Branch*>(BlockInstructionAt(block, pos));
+    return branch != nullptr && branch->TargetBlock == completedBlock;
+}
+
+void AsyncAwaitDecompiler::CleanDoFinallyBodies(ILFunction& function) {
+    if (doFinallyBodies_ == nullptr) {
+        return;  // roslyn-compiled code doesn't use doFinallyBodies
+    }
+    context_->StepOnce("CleanDoFinallyBodies");
+    // The doFinallyBodies elimination (the entry-point init removal, the
+    // misdetected-variable rollback, and the try-finally if removal) is
+    // deferred with the Visual Basic / legacy-codegen arms; the Roslyn
+    // shapes reach this method with a null doFinallyBodies only.
+    (void)function;
+}
+
+void AsyncAwaitDecompiler::TranslateCachedFieldsToLocals() {
+    // The cachedFieldToParameterMap capture (the entry-stloc caching of
+    // parameter fields) is deferred with it; the map is always empty, so
+    // the parameter-variable rewrites have nothing to do.
+}
+
+void AsyncAwaitDecompiler::FinalizeInlineMoveNext(ILFunction& function) {
+    context_->StepOnce("FinalizeInlineMoveNext()");
+    std::vector<ILInstruction*> stack{function.Body.get()};
+    while (!stack.empty()) {
+        ILInstruction* node = stack.back();
+        stack.pop_back();
+        if (auto* leave = dynamic_cast<Leave*>(node)) {
+            if (moveNextLeaves_.count(leave) != 0) {
+                auto invalid = std::make_unique<InvalidBranch>();
+                invalid->Message =
+                    "leave MoveNext - await not detected correctly";
+                leave->ReplaceWith(std::move(invalid));
+                // ReplaceWith destroys the leave; it has no children to
+                // walk (the port's ownership, the yield-part precedent).
+                continue;
+            }
+        }
+        for (int i = 0; i < node->ChildCount(); i++) {
+            if (ILInstruction* child = node->GetChild(i))
+                stack.push_back(child);
+        }
+    }
+    // Delete dead loads of the state cache variable:
+    std::vector<Block*> blocks;
+    {
+        std::vector<ILInstruction*> stack{function.Body.get()};
+        while (!stack.empty()) {
+            ILInstruction* node = stack.back();
+            stack.pop_back();
+            if (auto* b = dynamic_cast<Block*>(node))
+                blocks.push_back(b);
+            for (int i = 0; i < node->ChildCount(); i++) {
+                if (ILInstruction* child = node->GetChild(i))
+                    stack.push_back(child);
+            }
+        }
+    }
+    for (auto* block : blocks) {
+        for (int i = static_cast<int>(block->Instructions.size()) - 1;
+             i >= 0; i--) {
+            auto* stloc = dynamic_cast<StLoc*>(
+                block->Instructions[static_cast<std::size_t>(i)].get());
+            if (stloc == nullptr || stloc->Variable == nullptr)
+                continue;
+            if (!stloc->Variable->IsSingleDefinition()) continue;
+            if (stloc->Variable->LoadCount != 0) continue;
+            if (cachedStateVar_ == nullptr) continue;
+            ILVariable* loaded = nullptr;
+            if (stloc->Value == nullptr) continue;
+            if (!MatchLdLocOut(stloc->Value.get(), loaded) ||
+                loaded != cachedStateVar_)
+                continue;
+            block->Instructions.erase(
+                block->Instructions.begin() + static_cast<std::size_t>(i));
+        }
+    }
 }
 
 } // namespace ILSpy::Decompiler::IL

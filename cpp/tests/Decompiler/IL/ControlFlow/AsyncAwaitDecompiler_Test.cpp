@@ -29,6 +29,8 @@
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/Await.hpp"
+#include "Decompiler/IL/Instructions/InvalidInstructions.hpp"
 #include "Decompiler/IL/PatternMatching.hpp"
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
 #include "Decompiler/Metadata/DotNetCorePathFinderExtensions.hpp"
@@ -203,24 +205,14 @@ TEST(AsyncAwaitDecompilerTest, InlinesMoveNextBodyAndMarksAsync) {
     // `async Task` -- the underlying return type is void.
     EXPECT_TRUE(TS::IsKnownType(*method.function->AsyncReturnType,
                                 TS::KnownTypeCode::Void));
-    // The body is the state machine's try block: the awaited task's
-    // GetAwaiter call is inlined into it.
-    std::size_t getAwaiterCalls = 0;
-    std::vector<IL::ILInstruction*> stack{method.function->Body.get()};
-    while (!stack.empty()) {
-        IL::ILInstruction* node = stack.back();
-        stack.pop_back();
-        if (auto* call = dynamic_cast<IL::Call*>(node)) {
-            if (call->MethodName.find("GetAwaiter") != std::string::npos)
-                getAwaiterCalls++;
-        }
-        for (int i = 0; i < node->ChildCount(); i++) {
-            if (IL::ILInstruction* child = node->GetChild(i))
-                stack.push_back(child);
-        }
-    }
-    EXPECT_GE(getAwaiterCalls, 1u)
-        << "the inlined MoveNext body carries the await's GetAwaiter call";
+    // The body is the state machine's try block: the inlined MoveNext body
+    // is a multi-block container (the dispatch / await / resume / result
+    // blocks of the state machine).
+    auto* container =
+        dynamic_cast<IL::BlockContainer*>(method.function->Body.get());
+    ASSERT_NE(container, nullptr);
+    EXPECT_GE(container->Blocks.size(), 3u)
+        << "the inlined state machine body keeps its block structure";
 }
 
 // The Task<int> shape's underlying return type is the T.
@@ -240,6 +232,56 @@ TEST(AsyncAwaitDecompilerTest, TaskOfTUnderlyingReturnTypeIsTheElement) {
     ASSERT_NE(method.function->AsyncReturnType, nullptr);
     EXPECT_TRUE(TS::IsKnownType(*method.function->AsyncReturnType,
                                 TS::KnownTypeCode::Int32));
+}
+
+// The state machine analysis detects the await point and DetectAwaitPattern
+// rebuilds it as an Await node: the await block's tail (the state store, the
+// awaiter field store, the AwaitUnsafeOnCompleted call, the leave) is
+// replaced by Await(awaited value) + a branch to the resume block, and the
+// completed block's GetResult call becomes the await's result. The leave is
+// consumed (FinalizeInlineMoveNext turns undetected ones into InvalidBranch,
+// so no InvalidBranch means every await was detected).
+TEST(AsyncAwaitDecompilerTest, DetectsAwaitOverRealBody) {
+    AsyncFixtureData fixture;
+    if (!fixture.Load())
+        GTEST_SKIP() << "the async fixture is not provisioned";
+    DecodedAsyncMethod method = DecodeMethod(fixture, "AwaitTask");
+    ASSERT_NE(method.function, nullptr);
+    ASSERT_NE(method.method, nullptr);
+
+    IL::ILTransformContext ctx = MakeContext(fixture);
+    IL::AsyncAwaitDecompiler decompiler;
+    decompiler.Run(*method.function, ctx);
+
+    std::vector<IL::Await*> awaits;
+    std::size_t invalidBranches = 0;
+    std::vector<IL::ILInstruction*> stack{method.function->Body.get()};
+    while (!stack.empty()) {
+        IL::ILInstruction* node = stack.back();
+        stack.pop_back();
+        if (auto* await = dynamic_cast<IL::Await*>(node))
+            awaits.push_back(await);
+        if (dynamic_cast<IL::InvalidBranch*>(node))
+            invalidBranches++;
+        for (int i = 0; i < node->ChildCount(); i++) {
+            if (IL::ILInstruction* child = node->GetChild(i))
+                stack.push_back(child);
+        }
+    }
+    ASSERT_EQ(awaits.size(), 1u) << "exactly one await in the body";
+    IL::Await* await = awaits[0];
+    EXPECT_NE(await->GetAwaiterMethod, nullptr)
+        << "the await records the GetAwaiter method";
+    EXPECT_NE(await->GetResultMethod, nullptr)
+        << "the await records the GetResult method";
+    // The awaited value is the GetAwaiter call's argument: Task.Delay(1).
+    auto* awaitedCall = dynamic_cast<IL::Call*>(await->Value.get());
+    ASSERT_NE(awaitedCall, nullptr);
+    EXPECT_NE(awaitedCall->MethodName.find("Delay"), std::string::npos)
+        << "the awaited value is the Task.Delay call";
+    EXPECT_EQ(invalidBranches, 0u)
+        << "no await point went undetected (the leaves would have become "
+           "InvalidBranch)";
 }
 
 // A non-async method (the fixture's constructor) does not match.

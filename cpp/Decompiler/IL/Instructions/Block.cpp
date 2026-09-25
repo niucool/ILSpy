@@ -113,6 +113,25 @@ static void CollectBranchTargetsIn(const Block* block,
                 stack.push_back(child);
         }
     }
+    // The C# ILAst carries no positional fall-through (every block ends with
+    // an explicit terminator, so the fall-through is itself a Branch in the
+    // list); this port's reader leaves the fall-through implicit in the
+    // FinalInstruction slot. A block whose final is absent or conditional
+    // falls through to the next block in its container, so that edge is a
+    // successor too (appended last, matching the position the C#'s explicit
+    // fall-through branch would occupy).
+    if (block->Parent == container) {
+        const int idx = block->ChildIndex;
+        const ILInstruction* fin = block->FinalInstruction.get();
+        bool fallsThrough = fin == nullptr ||
+                            fin->Op == OpCode::IfInstruction;
+        if (fallsThrough && idx >= 0 &&
+            static_cast<std::size_t>(idx) + 1 < container->Blocks.size()) {
+            successors.push_back(
+                container->Blocks[static_cast<std::size_t>(idx) + 1]
+                    .get());
+        }
+    }
 }
 
 std::vector<Block*> BlockContainer::TopologicalSort(

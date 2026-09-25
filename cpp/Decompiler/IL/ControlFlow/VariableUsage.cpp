@@ -46,7 +46,10 @@ void CountUsage(ILInstruction* inst) {
         }
         case OpCode::StLoc: {
             auto* st = static_cast<StLoc*>(inst);
-            if (st->Variable) ++st->Variable->StoreCount;
+            if (st->Variable) {
+                ++st->Variable->StoreCount;
+                st->Variable->StoreInstructions.push_back(st);
+            }
             break;
         }
         // MatchInstruction is an IStoreInstruction (it captures the matched
@@ -54,14 +57,20 @@ void CountUsage(ILInstruction* inst) {
         // Connected() hook that calls variable.AddStoreInstruction(this).
         case OpCode::MatchInstruction: {
             auto* m = static_cast<MatchInstruction*>(inst);
-            if (m->Variable) ++m->Variable->StoreCount;
+            if (m->Variable) {
+                ++m->Variable->StoreCount;
+                m->Variable->StoreInstructions.push_back(m);
+            }
             break;
         }
         // UsingInstruction is an IStoreInstruction (it stores the resource into
         // Variable), so it counts as a store -- mirroring the C# Connected() hook.
         case OpCode::UsingInstruction: {
             auto* u = static_cast<UsingInstruction*>(inst);
-            if (u->Variable) ++u->Variable->StoreCount;
+            if (u->Variable) {
+                ++u->Variable->StoreCount;
+                u->Variable->StoreInstructions.push_back(u);
+            }
             break;
         }
         case OpCode::LdLoca: {
@@ -75,7 +84,10 @@ void CountUsage(ILInstruction* inst) {
         case OpCode::TryCatchHandler: {
             // The runtime stores the exception into the handler variable.
             auto* h = static_cast<TryCatchHandler*>(inst);
-            if (h->Variable) ++h->Variable->StoreCount;
+            if (h->Variable) {
+                ++h->Variable->StoreCount;
+                h->Variable->StoreInstructions.push_back(h);
+            }
             break;
         }
         default:
@@ -123,6 +135,7 @@ void ComputeVariableUsage(ILFunction& function) {
         v->LoadCount = 0;
         v->AddressCount = 0;
         v->AddressInstructions.clear();
+        v->StoreInstructions.clear();
         v->StoreCount = (v->Kind == VariableKind::Parameter) ? 1 : 0;
         all.insert(v.get());
     }
