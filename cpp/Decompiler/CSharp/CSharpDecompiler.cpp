@@ -308,6 +308,20 @@ std::string ConstantFieldLiteral(const TS::IField& field) {
     return std::string();
 }
 
+// The C# MemberIsHidden's state machine arms (the whole-type skip): the
+// compiler-generated state machine types the de-sugar replaces do not
+// render when their transforms are enabled (the C# gates consult
+// DecompilerSettings; the pipeline context's defaults carry the same
+// on-by-default gates).
+bool TypeIsHiddenFromRender(const Metadata::MetadataFile& file,
+                            std::uint32_t typeToken) {
+    const IL::ILTransformSettings transformSettings;
+    return (transformSettings.YieldReturn &&
+            Metadata::IsCompilerGeneratorEnumerator(file, typeToken)) ||
+           (transformSettings.AsyncAwait &&
+            Metadata::IsCompilerGeneratedStateMachine(file, typeToken));
+}
+
 // The C# TypeDefinitionNameableInBaseList (the f41b12c01 fix for #3230):
 // whether a type's base list can NAME the type. A type may name its own
 // nested types (and those of its enclosing types) regardless of
@@ -471,18 +485,8 @@ bool DecompileTypeToStringBody(
     const Metadata::MetadataFile& file, TS::DecompilerTypeSystem* typeSystem,
     TS::MetadataModule& module, const Metadata::PartialTypeInfo* partialType,
     std::uint32_t typeToken, std::string& out) {
-    // The C# MemberIsHidden's state machine arms (the whole-type skip):
-    // the compiler-generated state machine types the de-sugar replaces do
-    // not render when their transforms are enabled (the C# gates consult
-    // DecompilerSettings; the pipeline context's defaults carry the same
-    // on-by-default gates).
-    const IL::ILTransformSettings transformSettings;
-    if ((transformSettings.YieldReturn &&
-         Metadata::IsCompilerGeneratorEnumerator(file, typeToken)) ||
-        (transformSettings.AsyncAwait &&
-         Metadata::IsCompilerGeneratedStateMachine(file, typeToken))) {
+    if (TypeIsHiddenFromRender(file, typeToken))
         return false;
-    }
     // The C# DecompileType member iteration: the partial-type info gates
     // the members (the C# `DoDecompileMember`'s
     // `partialType.IsDeclaredMember(entity) -> return` skip, and the
@@ -1141,17 +1145,37 @@ std::string CSharpDecompiler::DecompileWholeModuleToString() {
     // The C# DecompileWholeModuleAsSingleFile composition over THIS
     // instance's wiring: the attribute sections, then every type in
     // metadata order through the instance entries (the registry
-    // consults this instance's map).
+    // consults this instance's map) grouped by namespace (the
+    // DoDecompileTypes NamespaceDeclaration emission: consecutive
+    // same-namespace types nest under one block; the empty namespace
+    // renders at the root; a hidden type does not break the group).
     std::string out;
     out += DecompileModuleAndAssemblyAttributesToString(
         state_->typeSystem->MainMetadataModule());
+    std::string currentNamespace;
+    bool namespaceOpen = false;
     for (const auto& t : state_->file->TypeDefs()) {
         if (t.Name == "<Module>")
             continue;
+        if (TypeIsHiddenFromRender(*state_->file, t.Token))
+            continue;
+        if (t.Namespace != currentNamespace) {
+            if (namespaceOpen)
+                out += "}\n";
+            if (!t.Namespace.empty()) {
+                out += "namespace " + t.Namespace + "\n{\n";
+                namespaceOpen = true;
+            } else {
+                namespaceOpen = false;
+            }
+            currentNamespace = t.Namespace;
+        }
         std::string text;
         if (DecompileTypeToString(t.Token, text))
             out += text;
     }
+    if (namespaceOpen)
+        out += "}\n";
     return out;
 }
 
@@ -1331,14 +1355,33 @@ std::string CSharpDecompiler::DecompileWholeModuleToString(
     // DoDecompileModuleAndAssemblyAttributes call at line 917).
     out += DecompileModuleAndAssemblyAttributesToString(
         typeSystem.MainMetadataModule());
-    // The types (the C# DoDecompileTypes loop in metadata order).
+    // The types (the C# DoDecompileTypes loop in metadata order), grouped
+    // by namespace (the NamespaceDeclaration emission; a hidden type does
+    // not break the group).
+    std::string currentNamespace;
+    bool namespaceOpen = false;
     for (const auto& t : file.TypeDefs()) {
         if (t.Name == "<Module>")
             continue;
+        if (TypeIsHiddenFromRender(file, t.Token))
+            continue;
+        if (t.Namespace != currentNamespace) {
+            if (namespaceOpen)
+                out += "}\n";
+            if (!t.Namespace.empty()) {
+                out += "namespace " + t.Namespace + "\n{\n";
+                namespaceOpen = true;
+            } else {
+                namespaceOpen = false;
+            }
+            currentNamespace = t.Namespace;
+        }
         std::string text;
         if (DecompileTypeToString(file, t.Token, text))
             out += text;
     }
+    if (namespaceOpen)
+        out += "}\n";
     return out;
 }
 

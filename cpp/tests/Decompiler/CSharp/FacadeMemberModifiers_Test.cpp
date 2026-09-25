@@ -486,6 +486,33 @@ TEST(FacadeMemberModifiersTest, InterfacePropertyKeepsTheStubForm)
         << text;
 }
 
+// The whole-module render groups the types by namespace (the C#
+// DoDecompileTypes' NamespaceDeclaration emission): consecutive
+// same-namespace types nest under one `namespace X { }` block; types
+// with no namespace render at the root.
+TEST(FacadeMemberModifiersTest, WholeModuleGroupsTypesByNamespace)
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::exists(kModifierFixture, ec))
+        GTEST_SKIP() << "the modifier fixture is not provisioned";
+    Metadata::MetadataFile file(kModifierFixture);
+    ASSERT_TRUE(file.IsValid());
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    CSharp::CSharpDecompiler decompiler(file, settings);
+    std::string whole = decompiler.DecompileWholeModuleToString();
+    std::size_t nsPos = whole.find("namespace ModifierFixture\n{\n");
+    EXPECT_NE(nsPos, std::string::npos) << whole.substr(0, 400);
+    // The type headers nest inside the namespace block.
+    std::size_t typePos = whole.find("public class ModifierShapes");
+    ASSERT_NE(typePos, std::string::npos);
+    EXPECT_LT(nsPos, typePos) << whole.substr(0, 400);
+    // One namespace block, not one per type.
+    EXPECT_EQ(whole.find("namespace ModifierFixture\n{\n", nsPos + 10),
+              std::string::npos)
+        << "the consecutive same-namespace types share one block";
+}
+
 // The constructor's implicit no-argument base call does not render (the
 // C# constructor-initializer convention: a base ctor call renders only
 // with arguments; the no-arg form is the implicit default).
