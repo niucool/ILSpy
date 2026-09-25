@@ -3,7 +3,16 @@
 Read this + `PORT_PLAN.md` + `cpp/README.md` (and the sibling
 `cpp/PORT_LOG_BAML.md` / `cpp/PORT_LOG_DISASM.md` logs) at the start of a
 fresh session.
-Standing baseline: **connid_csharp sha256 `abf6a844eba7c0b3`** (re-pinned
+Standing baseline: **connid_csharp sha256 `51ae0b55e6017c2e`** (re-pinned
+DELIBERATELY at the member/type-modifier slices: the type-level render now
+carries the member declaration modifiers -- the oracle's `public Button
+_okButton;` / `private void OKButton_Click(...)` -- the body-less
+abstract/interface method declarations that previously vanished, and the
+type headers' modifiers + base-type lists (`public class Page1 :
+Application, IComponentConnector`; the unconditional `partial` stand-in is
+gone -- partial renders only for a registered partial half). Intermediate
+pins: `af05cf1b7861f69b` (the member modifiers), prior
+`abf6a844eba7c0b3` (re-pinned
 DELIBERATELY at the facade-transform-wiring slice: the facade's
 GetAstTransforms now registers the eight merged-but-unwired transforms
 (IntroduceUsingDeclarations among them), so the attribute sections carry the
@@ -373,6 +382,39 @@ without the `<T>d__` state machine classes. 18 gtest cases in
 hand-built render arms + the three facade end-to-ends + the
 hidden-state-machine whole-module pair). The sweep baseline moved to
 13016 ran / same failure set; the connid hash is unchanged.
+
+### The facade member/type modifiers (commits fb66d3a22/7f46ba335)
+
+The type-level render's declaration surfaces, composed from the ported
+TypeSystemAstBuilder pieces (GetMemberModifiers /
+ModifierFromAccessibility / ConvertField's const-readonly-volatile bits)
+over the module entities (GetDefinitionField/Method/Property/Event):
+- **The member modifiers** (`fb66d3a22`): the declaration keywords in
+  the AllModifiers order; GetMemberModifiers already handles the
+  accessibility suppression (explicit interface implementations, static
+  constructors, interface members) and the virtual family
+  (virtual/override/sealed override/abstract). The body-less method arm
+  (the C# DoDecompileMethod no-body path): abstract and interface
+  members render as declarations (`public abstract int M();`) instead
+  of vanishing (RVA-less methods were skipped outright); a body-less
+  non-abstract non-interface member takes extern.
+- **The type modifiers + base types** (`7f46ba335`): the accessibility,
+  the static/abstract/sealed chain, the kind adjustments (struct/enum
+  drop sealed; interface drops abstract; readonly struct gains
+  readonly), partial only for a registered partial half (the C#
+  partialTypeInfo != null arm -- the unconditional partial stand-in is
+  gone), and the base-type list (DirectBaseTypes minus Object, minus
+  the struct's ValueType, the enum's Enum replaced by the underlying
+  type when not int). The C#'s BaseTypeAccessibleFrom filter stays
+  deferred with the MemberLookup resolver surface.
+
+Fixture: `/home/jim/ilspy-test-fixtures/modifier_fixture/
+ModifierFixture.dll` (the modifier matrix; the build recipe is in
+ModifierFixture.cs). 11 gtest cases in
+`tests/Decompiler/CSharp/FacadeMemberModifiers_Test.cpp`. The
+accessor-visibility (`private set`) and accessor-body (`{ get { ... } }`)
+forms remain the documented stand-in gap (the property renders `get;`
+stubs); the member attributes ([GeneratedCode] etc.) remain deferred.
 
 - `a81b94216` -- the ReplaceMethodCallsWithOperators follow-up arms: the
   String.Concat reduction (the params-array flattening, the
