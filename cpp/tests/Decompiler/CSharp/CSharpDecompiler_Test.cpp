@@ -27,6 +27,9 @@
 
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
 #include "TestFixtures/ConnIdResFixtures.hpp"
+#include "Decompiler/CSharp/Syntax/Attribute.hpp"
+#include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
+#include "Decompiler/CSharp/Syntax/SyntaxTree.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/TypeSystem/ICompilation.hpp"
 #include "Decompiler/TypeSystem/INamespace.hpp"
@@ -102,6 +105,7 @@ private:
     TS::KnownType knownType_{ TS::KnownTypeCode::Object };
 };
 namespace CSharp = ::ILSpy::Decompiler::CSharp;
+namespace Syntax = ::ILSpy::Decompiler::CSharp::Syntax;
 using ILVariablePtr = std::shared_ptr<IL::ILVariable>;
 
 TEST(CSharpDecompilerTest, GetILTransformsAliasesTheILNamespaceFactory)
@@ -304,6 +308,46 @@ TEST(CSharpDecompilerTest, PartialTypeInfosMergeForTheSameType)
 // CSharpDecompiler.cs line 838): the connid_res corpus renders
 // `[assembly: ...]` attribute lines (the C# `[assembly: Attr(...)]`
 // section shape; the attribute arguments render from the FixedArguments).
+// The C# `public SyntaxTree DecompileModuleAndAssemblyAttributes()` (line
+// 823): the AST path -- the attribute sections built through the
+// TypeSystemAstBuilder's ConvertAttribute, the transform pipeline run over
+// the tree. Each section carries its target and exactly one attribute.
+TEST(CSharpDecompilerTest, DecompileModuleAndAssemblyAttributesBuildsTree)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+    ConnIdCompilation compilation;
+    TS::MetadataModule module{compilation, &file, TS::TypeSystemOptions::Default};
+    compilation.SetMainModule(&module);
+
+    std::unique_ptr<Syntax::SyntaxTree> tree(
+        CSharp::CSharpDecompiler::DecompileModuleAndAssemblyAttributes(
+            module));
+    ASSERT_NE(tree, nullptr);
+    int assemblySections = 0;
+    int moduleSections = 0;
+    for (int i = 0; i < tree->Members().Count(); i++) {
+        auto* section =
+            dynamic_cast<Syntax::AttributeSection*>(tree->Members().At(i));
+        ASSERT_NE(section, nullptr)
+            << "every member is an attribute section";
+        ASSERT_EQ(section->Attributes().Count(), 1)
+            << "each section holds exactly one attribute";
+        if (section->AttributeTarget() == "assembly")
+            assemblySections++;
+        else if (section->AttributeTarget() == "module")
+            moduleSections++;
+        else
+            FAIL() << "unexpected target " << section->AttributeTarget();
+    }
+    EXPECT_GT(assemblySections, 0)
+        << "the corpus assembly carries assembly attributes";
+    EXPECT_GT(moduleSections, 0)
+        << "the corpus module carries the RefSafetyRules attribute";
+}
+
 TEST(CSharpDecompilerTest, DecompileModuleAndAssemblyAttributesRender)
 {
     std::string path = ILSpy::Tests::WriteConnIdResDll();
@@ -323,12 +367,13 @@ TEST(CSharpDecompilerTest, DecompileModuleAndAssemblyAttributesRender)
     EXPECT_NE(text.find("[module:"), std::string::npos)
         << "the module section carries the module target";
     // The corpus rows (the mscorlib-backed decode): the compiler-emitted
-    // set over a csc net10.0 library.
-    EXPECT_NE(text.find("CompilationRelaxationsAttribute"), std::string::npos);
-    EXPECT_NE(text.find("RuntimeCompatibilityAttribute"), std::string::npos);
-    EXPECT_NE(text.find("DebuggableAttribute"), std::string::npos);
-    EXPECT_NE(text.find("AssemblyVersionAttribute"), std::string::npos);
-    EXPECT_NE(text.find("RefSafetyRulesAttribute"), std::string::npos);
+    // set over a csc net10.0 library, in the C#-faithful short-name form
+    // (the TypeSystemAstBuilder strips the trailing "Attribute" suffix).
+    EXPECT_NE(text.find("CompilationRelaxations"), std::string::npos);
+    EXPECT_NE(text.find("RuntimeCompatibility"), std::string::npos);
+    EXPECT_NE(text.find("Debuggable"), std::string::npos);
+    EXPECT_NE(text.find("AssemblyVersion"), std::string::npos);
+    EXPECT_NE(text.find("RefSafetyRules"), std::string::npos);
     if (std::getenv("TET_TRACE")) {
         std::fprintf(stderr, "TET-ATTR: %s\n", text.c_str());
     }
@@ -345,9 +390,10 @@ TEST(CSharpDecompilerTest, DecompileModuleAndAssemblyAttributesRender)
 // `ErrorExpression("Could not decode attribute arguments.")`, which renders
 // purely as its comment): an attribute whose blob fails to decode (the
 // connid Debuggable row's enum argument resolves through a referenced core
-// library the connid-only compilation does not carry) renders as
-// `Name(/* Could not decode attribute arguments. */)` and sorts first in
-// its section.
+// library the connid-only compilation does not carry) renders in the
+// output-visitor form: `Debuggable (/*Could not decode attribute
+// arguments.*/)` (the multi-line comment carries no inner padding, the
+// NRefactory trivia-writer shape).
 TEST(CSharpDecompilerTest,
      DecompileModuleAttributesRenderDecodeErrorsAsComments)
 {
@@ -362,8 +408,7 @@ TEST(CSharpDecompilerTest,
         CSharp::CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
             module);
     EXPECT_NE(
-        text.find("DebuggableAttribute(/* Could not decode attribute "
-                  "arguments. */)"),
+        text.find("Debuggable (/*Could not decode attribute arguments.*/)"),
         std::string::npos)
         << "the decode-error attribute renders as the C# comment form: "
         << text;
@@ -438,9 +483,10 @@ TEST(CSharpDecompilerTest, DecompileModuleAttributesRenderFixedArguments)
     std::string text =
         CSharp::CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
             module);
-    // CompilationRelaxationsAttribute(8): the compiler-emitted relaxation
-    // value renders as the numeric literal.
-    EXPECT_NE(text.find("CompilationRelaxationsAttribute(8)"),
+    // CompilationRelaxations (8): the compiler-emitted relaxation value
+    // renders as the numeric literal (the short-name + the Mono policy's
+    // space-before-call-parentheses, the output-visitor form).
+    EXPECT_NE(text.find("CompilationRelaxations (8)"),
               std::string::npos)
         << "the int fixed argument renders: " << text;
     if (std::getenv("TET_TRACE")) {

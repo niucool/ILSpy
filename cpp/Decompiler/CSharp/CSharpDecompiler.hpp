@@ -63,6 +63,7 @@ namespace Syntax {
 class AstNode;
 class TypeSystemAstBuilder;
 class EntityDeclaration;
+class SyntaxTree;
 } // namespace Syntax
 namespace Transforms { class IAstTransform; }
 
@@ -159,6 +160,23 @@ public:
     // `[module: ...]` attribute sections over the module's attribute rows.
     static std::string DecompileModuleAndAssemblyAttributesToString(
         const ::ILSpy::Decompiler::TypeSystem::MetadataModule& module);
+
+    // The C# `public SyntaxTree DecompileModuleAndAssemblyAttributes()`
+    // (CSharpDecompiler.cs line 823): the AST path -- the attribute
+    // sections built through the TypeSystemAstBuilder's ConvertAttribute
+    // and the transform pipeline run over the tree. The caller owns the
+    // returned tree (the port's node model is non-owning-new).
+    static Syntax::SyntaxTree* DecompileModuleAndAssemblyAttributes(
+        const ::ILSpy::Decompiler::TypeSystem::MetadataModule& module);
+
+    // The C# `void DoDecompileModuleAndAssemblyAttributes(DecompileRun,
+    // ITypeResolveContext, SyntaxTree)` (line 843): the section builder
+    // the two entries above share (the public one and the whole-module
+    // path).
+    static void DoDecompileModuleAndAssemblyAttributes(
+        const ::ILSpy::Decompiler::DecompileRun& decompileRun,
+        const ::ILSpy::Decompiler::TypeSystem::MetadataModule& module,
+        Syntax::SyntaxTree& syntaxTree);
 
     // The C# `public void AddPartialTypeDefinition(PartialTypeInfo info)`
     // (CSharpDecompiler.cs line 1481): register the partial-type info under

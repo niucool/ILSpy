@@ -17,9 +17,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#include "Decompiler/CSharp/CSharpDecompiler.hpp"
 #include "Decompiler/CSharp/Annotations.hpp"
+#include "Decompiler/CSharp/CSharpDecompiler.hpp"
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
+#include "Decompiler/CSharp/RequiredNamespaceCollector.hpp"
+#include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
+#include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
+#include "Decompiler/CSharp/Syntax/SyntaxTree.hpp"
+#include "Decompiler/TypeSystem/INamespace.hpp"
 #include "Decompiler/DecompileRun.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/CSharp/Transforms/ReplaceMethodCallsWithOperators.hpp"
@@ -254,133 +259,117 @@ const Metadata::PartialTypeInfo* CSharpDecompiler::FindPartialTypeInfo(
     return it == PartialTypes().end() ? nullptr : &it->second;
 }
 
+namespace {
+
+namespace TS = ::ILSpy::Decompiler::TypeSystem;
+
+// The C# `typeSystem.GetNamespaceByFullName(ns)` (CreateDecompileRun's
+// resolver, line 758): the root-namespace walk over the dotted name.
+const TS::INamespace* ResolveNamespaceFullName(const TS::INamespace& root,
+                                              const std::string& fullName) {
+    const TS::INamespace* current = &root;
+    std::size_t start = 0;
+    while (current != nullptr) {
+        std::size_t dot = fullName.find('.', start);
+        std::string part =
+            fullName.substr(start,
+                            dot == std::string::npos ? std::string::npos
+                                                    : dot - start);
+        if (part.empty())
+            return nullptr;
+        current = current->GetChildNamespace(part);
+        if (dot == std::string::npos)
+            break;
+        start = dot + 1;
+    }
+    return current;
+}
+
+} // namespace
+
+// The C# `public SyntaxTree DecompileModuleAndAssemblyAttributes()`
+// (CSharpDecompiler.cs line 823): the AST path -- the attribute sections
+// built through the TypeSystemAstBuilder's ConvertAttribute, then the
+// transform pipeline (RunTransforms) over the tree. The tree is returned
+// raw (the caller owns it; the port's node model is non-owning-new).
+Syntax::SyntaxTree* CSharpDecompiler::DecompileModuleAndAssemblyAttributes(
+    const TS::MetadataModule& module) {
+    // The C# `RequiredNamespaceCollector.CollectAttributeNamespaces(module,
+    // namespaces)` + `CreateDecompileRun(namespaces)`: the namespaces feed
+    // the run's using scope (the IntroduceUsingDeclarations transform's
+    // input; that transform is deferred, so the scope content is inert
+    // today, but the run is wired the C# way).
+    std::unordered_set<std::string> namespaces;
+    // The collector takes the mutable module (the C# metadata walk);
+    // const_cast mirrors the C# nullability-free contract. The free
+    // function form (the C# static class method ports as a namespace-scope
+    // function).
+    CollectAttributeNamespaces(const_cast<TS::MetadataModule&>(module),
+                              namespaces);
+    std::vector<const TS::INamespace*> resolvedNamespaces;
+    for (const std::string& ns : namespaces) {
+        const TS::INamespace* resolvedNamespace =
+            ResolveNamespaceFullName(module.RootNamespace(), ns);
+        if (resolvedNamespace != nullptr)
+            resolvedNamespaces.push_back(resolvedNamespace);
+    }
+    auto usingScope = std::make_shared<CSharp::TypeSystem::UsingScope>(
+        std::make_shared<CSharp::TypeSystem::CSharpTypeResolveContext>(module),
+        module.RootNamespace(), resolvedNamespaces);
+
+    DecompilerSettings settings;
+    DecompileRun decompileRun(&settings, usingScope);
+
+    auto* syntaxTree = new Syntax::SyntaxTree();
+    DoDecompileModuleAndAssemblyAttributes(decompileRun, module, *syntaxTree);
+    RunAstTransforms(*syntaxTree, decompileRun);
+    return syntaxTree;
+}
+
+// The C# `void DoDecompileModuleAndAssemblyAttributes(DecompileRun
+// decompileRun, ITypeResolveContext decompilationContext, SyntaxTree
+// syntaxTree)` (line 843): the `[assembly: ...]` / `[module: ...]`
+// attribute sections over the module's attribute rows, each attribute
+// rendered through the TypeSystemAstBuilder (the ConvertAttribute shape:
+// the type name with the trailing "Attribute" suffix stripped, the fixed
+// and named arguments as their constant literals, the decode-error arm as
+// the comment form). The C# try/catch -> DecompilerException wrapping is
+// deferred with the exception surface.
+void CSharpDecompiler::DoDecompileModuleAndAssemblyAttributes(
+    const DecompileRun& decompileRun, const TS::MetadataModule& module,
+    Syntax::SyntaxTree& syntaxTree) {
+    for (const TS::IAttribute* a : module.GetAssemblyAttributes()) {
+        if (a == nullptr)
+            continue;
+        auto astBuilder = CreateAstBuilder(decompileRun.Settings());
+        auto* attrSection = new Syntax::AttributeSection(
+            astBuilder.ConvertAttribute(*a));
+        attrSection->AttributeTarget("assembly");
+        syntaxTree.Members().Add(attrSection);
+    }
+    for (const TS::IAttribute* a : module.GetModuleAttributes()) {
+        if (a == nullptr)
+            continue;
+        auto astBuilder = CreateAstBuilder(decompileRun.Settings());
+        auto* attrSection = new Syntax::AttributeSection(
+            astBuilder.ConvertAttribute(*a));
+        attrSection->AttributeTarget("module");
+        syntaxTree.Members().Add(attrSection);
+    }
+}
+
 // The C# `public string DecompileModuleAndAssemblyAttributesToString()`
-// (CSharpDecompiler.cs line 838, the DoDecompileModuleAndAssemblyAttributes
-// shape): the `[assembly: ...]` and `[module: ...]` sections over the
-// module's attribute rows. The attribute render is `Target(attrType(args))`
-// -- the C# TypeSystemAstBuilder.ConvertAttribute shape -- with the fixed
-// arguments as their literal form; the named arguments ride the same
-// surface (the C# renders named arguments for the property setters). The
-// C# `try/catch -> DecompilerException` wrapping is deferred with the
-// exception surface.
-
-std::string RenderNumericAttributeLiteral(const std::any& v) {
-    if (auto i = std::any_cast<std::int8_t>(&v))
-        return std::to_string(static_cast<int>(*i));
-    if (auto i = std::any_cast<std::int16_t>(&v))
-        return std::to_string(static_cast<int>(*i));
-    if (auto i = std::any_cast<std::int32_t>(&v)) return std::to_string(*i);
-    if (auto i = std::any_cast<std::int64_t>(&v)) return std::to_string(*i);
-    if (auto u = std::any_cast<std::uint8_t>(&v))
-        return std::to_string(static_cast<unsigned>(*u));
-    if (auto u = std::any_cast<std::uint16_t>(&v))
-        return std::to_string(static_cast<unsigned>(*u));
-    if (auto u = std::any_cast<std::uint32_t>(&v)) return std::to_string(*u);
-    if (auto u = std::any_cast<std::uint64_t>(&v)) return std::to_string(*u);
-    if (auto f = std::any_cast<float>(&v)) return std::to_string(*f) + "f";
-    if (auto d = std::any_cast<double>(&v)) return std::to_string(*d);
-    return "";
-}
-
-// The C# ConvertAttribute argument render (the constant-literal shapes over
-// the boxed value: a string in double quotes, a bool as true/false, a char
-// quoted, a System.Type as typeof(...), an array in braces; the numerics
-// via RenderNumericAttributeLiteral). The nested-array arm recurses.
-std::string RenderAttributeArgument(
-    const ::ILSpy::Decompiler::TypeSystem::CustomAttributeTypedArgument& arg);
-
-std::string RenderAttributeArgument(
-    const ::ILSpy::Decompiler::TypeSystem::CustomAttributeTypedArgument& arg) {
-    const std::any& v = arg.Value();
-    if (!v.has_value()) return "null";
-    if (auto b = std::any_cast<bool>(&v)) return *b ? "true" : "false";
-    if (auto s = std::any_cast<std::string>(&v)) return '"' + *s + '"';
-    if (auto c = std::any_cast<char16_t>(&v)) {
-        return std::string("'") + static_cast<char>(*c) + "'";
-    }
-    if (auto t = std::any_cast<::ILSpy::Decompiler::TypeSystem::ITypePtr>(&v)) {
-        return "typeof(" +
-               (*t ? (*t)->ReflectionName() : std::string("null")) + ')';
-    }
-    if (auto arr =
-            std::any_cast<std::vector<::ILSpy::Decompiler::TypeSystem::CustomAttributeTypedArgument>>(
-                &v)) {
-        std::string out = "new[] { ";
-        for (std::size_t i = 0; i < arr->size(); ++i) {
-            if (i != 0) out += ", ";
-            out += RenderAttributeArgument((*arr)[i]);
-        }
-        out += " }";
-        return out;
-    }
-    return RenderNumericAttributeLiteral(v);
-}
-
-// The numeric literal shapes (the C# ConvertConstantValue primitive arms):
-// the typed numeric text; an unrecognized box renders empty (the decoder's
-// malformed-blob case).
-
+// (CSharpDecompiler.cs line 838): `SyntaxTreeToString(
+// DecompileModuleAndAssemblyAttributes())` -- the tree built by the AST
+// path, rendered through the output visitor (the port's AstNode::ToString
+// with the Mono defaults, the C# `settings.CSharpFormattingOptions`
+// equivalent; the settings-carrying formatting options land with the
+// instance surface).
 std::string CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
     const ::ILSpy::Decompiler::TypeSystem::MetadataModule& module) {
-    std::string out;
-    auto renderSection = [&out](const char* target,
-                                std::vector<const ::ILSpy::Decompiler::TypeSystem::IAttribute*>
-                                    attributes) {
-        for (const ::ILSpy::Decompiler::TypeSystem::IAttribute* a : attributes) {
-            if (a == nullptr) continue;
-            out += "[";
-            out += target;
-            out += ": ";
-            out += a->AttributeType().Name();
-            out += '(';
-            // The C# `HasDecodeErrors` arm: `HasArgumentList = true` plus
-            // the ErrorExpression("Could not decode attribute arguments."),
-            // which renders purely as its comment -- the argument list is
-            // the comment, nothing else.
-            if (a->HasDecodeErrors()) {
-                out += "/* Could not decode attribute arguments. */)";
-                out += "]\n";
-                continue;
-            }
-            // The C# TypeSystemAstBuilder.ConvertAttribute renders the
-            // positional (fixed) arguments after the type: each argument as
-            // its constant literal (a string in double quotes, a bool as
-            // true/false, a char quoted, the numerics as their text, a
-            // System.Type as typeof(...), an array in braces). The enum
-            // arguments render as their numeric text (the C# resolves the
-            // enum member names when the type system can; the port's
-            // arg.Type Kind derivation does not classify enums here yet).
-            bool first = true;
-            auto renderArg = [&out, &first](
-                                 const ::ILSpy::Decompiler::TypeSystem::CustomAttributeTypedArgument&
-                                     arg) {
-                if (!first) out += ", ";
-                first = false;
-                out += RenderAttributeArgument(arg);
-            };
-            for (const auto& fixedArg : a->FixedArguments()) {
-                renderArg(fixedArg);
-            }
-            // The named arguments ride the same surface (the C# renders the
-            // property setters as `Name = value`).
-            for (const auto& named : a->NamedArguments()) {
-                if (!first) out += ", ";
-                first = false;
-                out += named.Name();
-                out += " = ";
-                // The value renders without the pair separator (the C#
-                // CustomAttributeNamedArgument.Name/value split).
-                out += RenderAttributeArgument(
-                    ::ILSpy::Decompiler::TypeSystem::CustomAttributeTypedArgument(named.Type(),
-                                                             named.Value()));
-            }
-            out += ')';
-            out += "]\n";
-        }
-    };
-    renderSection("assembly", module.GetAssemblyAttributes());
-    renderSection("module", module.GetModuleAttributes());
-    return out;
+    std::unique_ptr<Syntax::SyntaxTree> syntaxTree(
+        DecompileModuleAndAssemblyAttributes(module));
+    return syntaxTree->ToString(nullptr);
 }
 
 std::vector<std::unique_ptr<Transforms::IAstTransform>>
