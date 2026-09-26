@@ -1831,9 +1831,16 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
             }
         }
         if (!block->FinalInstruction) {
-            // Fell off the end without a terminal: not valid IL, or our walk
-            // stopped early. Bail.
-            return nullptr;
+            // The C# ILReader's fall-through tail (ILReader.cs lines
+            // 570-590): a block that is not EndPointUnreachable and has
+            // no remaining bytes ends with an InvalidBranch carrying the
+            // error -- the statements decoded before it render, followed
+            // by the inline error comment. (The remaining-bytes arm --
+            // the fall-through into a later block -- is handled inside
+            // the decode loop's branch-target check.)
+            FlushExpressionStack(s, block);
+            block->SetFinal(std::make_unique<InvalidBranch>(
+                std::string("End of method reached without returning.")));
         }
     }
 
