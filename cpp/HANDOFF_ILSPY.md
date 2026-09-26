@@ -1029,9 +1029,13 @@ THE MERGED-TREE CORPUS DRIFT -- PARTIALLY CLOSED (`593f10185`): the
 interop-property family (the accessor attributes -- [MethodImpl],
 [SuppressUnmanagedCodeSecurity], the [return: MarshalAs] return-type
 sections over the accessor-block form, 37 rows). THE REMAINING
-~39/34: the generic-constraint near-misses (the contract-validation
-methods' `where T : class` clauses), the misc property/method header
-pairs -- sample before picking.
+~39/34, SAMPLED: (a) THE METHOD CONSTRAINT CLAUSES DROP ON THE CORPUS
+(the sampled `public static void IsNotNull<T>(T value) where T :
+class` renders WITHOUT the where clause -- the connid's
+`IsNull<T>(T item) where T : class` renders fine, so the gate or the
+flag read differs for these shapes; probe the method's chain-sliced
+type parameters' HasReferenceTypeConstraint against the metadata
+GenericParam flags); (b) the misc property/method header pairs.
 
     (f's HISTORICAL MAP: the connid's references are System.Runtime +
     System.Collections (10.0.0.0) -- a .NETCoreApp shape. With those
