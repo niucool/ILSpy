@@ -253,6 +253,23 @@ public:
     // A flattened `Type.Member` (or deeper `NS.Type.Member`) renders as the
     // bare member when the type prefix names the current function's
     // declaring type.
+    // The C# member-of-type access: a static member's declaring type
+    // renders its SHORT name (`Button.ClickEvent`, not the full dotted
+    // chain) -- the scope resolves the type; the emitter has no resolver,
+    // so the declaring type's last segment is the spelling (the corpus
+    // and connid oracles' form).
+    std::string ShortQualifiedMember(const std::string& name) const {
+        auto lastDot = name.rfind('.');
+        if (lastDot == std::string::npos || lastDot == 0)
+            return name;
+        std::string typePart = name.substr(0, lastDot);
+        auto typeDot = typePart.rfind('.');
+        return (typeDot == std::string::npos)
+                   ? name
+                   : typePart.substr(typeDot + 1) + "." +
+                         name.substr(lastDot + 1);
+    }
+
     std::string SimplifyQualifiedMember(const std::string& name) const {
         if (currentTypeName_.empty())
             return name;
@@ -2371,8 +2388,11 @@ private:
             return obj == "this" ? SimpleName(field) : obj + "." + SimpleName(field);
         }
         if (target.Op == OpCode::LdsFlda) {
-            return SimplifyQualifiedMember(FlattenMetadataName(
-                static_cast<const LdsFlda&>(target).FieldName));
+            std::string flattened = FlattenMetadataName(
+                static_cast<const LdsFlda&>(target).FieldName);
+            std::string simplified = SimplifyQualifiedMember(flattened);
+            return simplified == flattened ? ShortQualifiedMember(flattened)
+                                           : simplified;
         }
         if (target.Op == OpCode::LdElema) return ElementAccess(static_cast<const LdElema&>(target));
         auto byref = ByRefVarName(target);
@@ -2679,9 +2699,14 @@ private:
                 std::string obj = f.Target ? Expr(*f.Target) : "(default)";
                 return obj == "this" ? SimpleName(field) : obj + "." + SimpleName(field);
             }
-            case OpCode::LdsFlda:
-                return SimplifyQualifiedMember(FlattenMetadataName(
-                    static_cast<const LdsFlda&>(inst).FieldName));
+            case OpCode::LdsFlda: {
+                std::string flattened = FlattenMetadataName(
+                    static_cast<const LdsFlda&>(inst).FieldName);
+                std::string simplified = SimplifyQualifiedMember(flattened);
+                return simplified == flattened
+                           ? ShortQualifiedMember(flattened)
+                           : simplified;
+            }
             case OpCode::LdElema:
                 return ElementAccess(static_cast<const LdElema&>(inst));
             case OpCode::NewArr: {
