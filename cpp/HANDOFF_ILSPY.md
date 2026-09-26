@@ -956,9 +956,13 @@ lines) -- SIX DIVERGENCE CATEGORIES, each a queued slice:
 (c) THE BOOL-STORE LITERAL: `_contentLoaded = 1` vs the oracle's
     `= true` (an int constant stored to a bool field renders the
     boolean literal);
-(d) THE EVENT BACKING FIELD: `private RoutedEventHandler Click;`
-    renders as a member next to `public event RoutedEventHandler
-    Click;` (the field-like event's backing field must hide);
+(d) CLOSED (the automatic-event backing field hides, gated on the
+    isAutomaticEvent classification; the custom-block events keep
+    their fields) -- the pin moved to d6cbe93ef...;
+    NOTE: the corpus stands at the MERGED tree's 60/51 baseline (the
+    port-baml merge + the tab migration moved it from the pre-merge
+    40/31, stash-verified -- the drift is the merge's own render
+    changes, the remaining audit items);
 (e) THE USING-SET OVER-COLLECTION: `using System.Collections;` +
     `using System.Threading.Tasks;` render where the oracle's set is
     smaller;
