@@ -295,10 +295,36 @@ struct CustomAttributeRowInfo {
 
 class MetadataFile {
 public:
+    // The C# `public enum MetadataFileKind` (MetadataFile.cs). WebCIL is
+    // listed for completeness; the port's WebCIL path constructs through
+    // the PE-image ctor and reads as PortableExecutable (the documented
+    // adapter collapse -- no observable differs: both report
+    // IsMetadataOnly == false).
+    enum class MetadataFileKind {
+        PortableExecutable,
+        ProgramDebugDatabase,
+        WebCIL,
+        Metadata,
+    };
+
     explicit MetadataFile(std::string_view path);
     // The in-memory form (the port's addition the ILSpyX loaders use): the
     // image bytes supplied instead of read from the path.
     MetadataFile(std::string fileName, std::vector<std::uint8_t> image);
+    // The C# `MetadataFile(MetadataFileKind kind, string fileName,
+    // MetadataReaderProvider metadata, ...)` -- the metadata-only shape
+    // the MetadataFileLoader produces: the raw ECMA-335 metadata stream
+    // (no PE, no method bodies). The port wraps the stream bytes in a
+    // minimal synthetic PE image (the WebCIL adapter's mechanics) so the
+    // winmd database parses them; the wrapper is a parse vehicle only --
+    // no MethodBodyReader is built, so the body reads collapse to the
+    // invalid-body arm exactly like the C#'s throws. The stream must
+    // begin with the BSJB magic; anything else leaves the file invalid
+    // (the C# FromMetadataStream's BadImageFormatException, which the
+    // loader's catch turns into the null decline). kind selects Metadata
+    // or ProgramDebugDatabase (the C# loader's .pdb arm).
+    MetadataFile(std::string fileName, MetadataFileKind kind,
+        std::vector<std::uint8_t> metadataStream);
     ~MetadataFile();
 
     MetadataFile(const MetadataFile&) = delete;
@@ -308,6 +334,15 @@ public:
 
     // True if the file was recognised as a PE/CLI module and parsed.
     bool IsValid() const noexcept;
+
+    // The C# `MetadataFileKind Kind` (the metadata-only ctor's kind; the
+    // PE paths read PortableExecutable).
+    MetadataFileKind Kind() const noexcept;
+
+    // The C# `virtual bool IsMetadataOnly` (true on the base; the PE-like
+    // kinds override false). The LoadedAssembly.IsLoadedAsValidAssembly
+    // `IsMetadataOnly: false` gate consumes this.
+    bool IsMetadataOnly() const noexcept;
 
     // The C# `PEFile.FileName`: the path the file was opened from, exactly
     // as passed to the constructor (the PdbProvider's PDB discovery derives

@@ -1571,3 +1571,89 @@ PE image, plus the corpus-anchored case.
 Verification: 17 WebCil/registry tests green plain and under ASan
 (the corpus pair green with ILSPY_TEST_MSCORLIB set), the full-suite
 failure set identical to the pre-change baseline.
+
+# The MetadataFileLoader (the last Phase 1 loader deferral)
+
+The sixth assignment: ICSharpCode.ILSpyX/FileLoaders/MetadataFileLoader.cs
+-- the loader that reads a raw ECMA-335 metadata stream (a .pdb or a
+bare-metadata file) into the metadata-only MetadataFile shape.
+
+## What the C# loader does
+
+Load(stream, fileName, context): the kind comes from the extension
+(.pdb, case-insensitive -> ProgramDebugDatabase, else Metadata); the
+bytes go to MetadataReaderProvider.FromMetadataStream(stream,
+PrefetchMetadata | LeaveOpen); the provider wraps in `new
+MetadataFile(kind, fileName, metadata)`; BadImageFormatException ->
+null (decline).
+
+## The port
+
+* **The metadata-only MetadataFile shape** (`MetadataFile(fileName,
+  MetadataFileKind, vector<uint8_t> metadataStream)` -- the C#
+  `MetadataFile(kind, fileName, provider)` ctor). The winmd database
+  requires a PE, so the port wraps the stream in a minimal synthetic
+  PE image -- DOS/NT headers, one section covering the image, and a
+  COR20 header whose MetaData directory points at the stream -- and
+  parses the genuine metadata tables over it. The wrapper is a parse
+  vehicle only: no MethodBodyReader is built, so the body reads
+  collapse to the invalid-body arm exactly like the C#'s throws (the
+  C# GetMethodBody throws BadImageFormat; the port's never-throw
+  convention degrades to the empty body; GetContainingSectionIndex
+  degrades to -1). The stream must start with the BSJB magic;
+  anything else (or a parse failure) leaves the file invalid -- the
+  loader's decline, mirroring the C# catch's null.
+* **The kind surface**: `MetadataFileKind` (PortableExecutable,
+  ProgramDebugDatabase, WebCIL, Metadata -- the C# enum) +
+  `Kind()` + `IsMetadataOnly()` (the C# virtual: true on the
+  metadata-only base shapes; the PE-like kinds read false). The
+  LoadedAssembly.IsLoadedAsValidAssembly `IsMetadataOnly: false`
+  gate now consumes it: a metadata-only load is not a valid ASSEMBLY
+  load. (The port's WebCIL path still reads as PortableExecutable --
+  the documented adapter collapse; no observable differs.)
+* **The loader**: the .pdb extension folds OrdinalIgnoreCase-style to
+  the ProgramDebugDatabase kind, else Metadata; the bytes go to the
+  metadata-stream ctor; IsValid() gates the claim (the C#
+  FromMetadataStream's BadImageFormat -> the catch's null).
+* **Registered**: Xamarin, WebCil, Metadata, Bundle, PE, Archive --
+  the C# order, verbatim. The Phase 1 loader deferrals are now none.
+
+## The two pre-existing breaks this slice uncovered
+
+* **The dropped ILSpyX test registrations**: the port-disassembler
+  merge (fdacc29ee) removed the whole ILSpyX test block from
+  cpp/tests/CMakeLists.txt -- the same drop class the Disassembler
+  repair (e442b18df) already fixed for its own files. Every ILSpyX
+  test written since the LoadedAssembly slices (LoadedAssembly_Test,
+  AssemblyList_Test, FileLoaders_Test, Settings_Test, GuessFileType,
+  CollectionExtensions, LoadedPackage, ILanguage) was silently absent
+  from the suite. The registration is restored (10 files).
+* **The in-memory parse regression**: the same merge rewrote the
+  MetadataFile buffer ctor from parsing the supplied bytes (the MZ
+  gate + database over the copy) to is_database(path) over the
+  original path. For the WebCIL loader and every stream-backed load
+  that produced a hollow module (valid=true with db=null; the WebCIL
+  loader's own LoadsAValidContainer test would have crashed on
+  GetAssemblyDefinition) -- masked only by the dropped registrations.
+  The buffer ctor is restored to the f3d115765 in-memory parse; the
+  WebCIL/Xamarin/PE loader tests pass again, and valid=true now
+  always means "the database parsed".
+
+## Verification
+
+* 4 MetadataFileLoaderTest tests + the Kind/registry tests green in
+  the ninja and ASan builds (the corpus-backed cases use the ConnIdRes
+  fixture's extracted metadata stream).
+* The full ILSpyX surface (67 tests: LoadedAssembly, resolver,
+  extensions, AssemblyList, manager, LoadedPackage, GuessFileType,
+  CollectionExtensions, ILanguage, Settings) green.
+* The full-suite failure set is byte-identical to the pre-change
+  baseline (modulo test timings). Two PRE-EXISTING mainline issues
+  surfaced while comparing, both reproducible on the bare HEAD, both
+  NOT from this slice: the ILSPY_TEST_MSCORLIB-gated
+  MetadataNamespaceTest.ChildCacheIsStable aborts with an out-of-range
+  std::vector access, and SpecializeTest.FieldCreateArms segfaults --
+  the corpus-gated suite on the merged mainline needs triage in its
+  own lane.
+* No DBG litter remains (the probe harness lived in /tmp; the two
+  temporary fprintf probes were removed before the final runs).

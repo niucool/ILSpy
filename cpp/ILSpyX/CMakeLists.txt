@@ -14,6 +14,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/AssemblyListManager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/LoadedAssemblyExtensions.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/AssemblyList.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/FileLoaders/MetadataFileLoader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/FileLoaders/PEFileLoader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/FileLoaders/WebCilFileLoader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/FileLoaders/BundleFileLoader.cpp

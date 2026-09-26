@@ -91,6 +91,7 @@ std::shared_ptr<const std::vector<std::uint8_t>> ReadAllBytes(std::string_view p
 
 struct MetadataFile::Impl {
     std::string path;
+    MetadataFileKind kind = MetadataFileKind::PortableExecutable;
     bool valid = false;
     std::unique_ptr<winmd::reader::database> db;
     std::shared_ptr<const std::vector<std::uint8_t>> image;  // for method bodies
@@ -192,15 +193,110 @@ struct MetadataFile::Impl {
     }
 
     // The in-memory form (the port's addition the ILSpyX loaders use): the
-    // image bytes are supplied instead of read from the path.
-    Impl(std::string p, std::vector<std::uint8_t> imageBytes)
+    // same parse over caller-supplied bytes. The MZ gate mirrors
+    // is_database()'s PE check so a non-PE buffer reports invalid without
+    // constructing the database (which would throw for garbage and land in
+    // the catch anyway -- the gate keeps the failure deterministic for
+    // buffers the caller already screened). The buffer is parsed in
+    // memory, NOT via the path: the loaders also feed it adapted images
+    // (WebCIL) and stream loads whose path may not exist on disk. A file
+    // is valid iff the database parsed; anything else leaves db unset and
+    // valid false, never a hollow module.
+    explicit Impl(std::string p, std::vector<std::uint8_t> bytes)
         : path(std::move(p)) {
         try {
-            image = std::make_shared<const std::vector<std::uint8_t>>(
-                std::move(imageBytes));
-            if (winmd::reader::database::is_database(path))
-                db = std::make_unique<winmd::reader::database>(path);
+            if (bytes.size() < 2 || bytes[0] != 'M' || bytes[1] != 'Z')
+                return;
+            auto shared = std::make_shared<const std::vector<std::uint8_t>>(
+                std::move(bytes));
+            std::vector<std::uint8_t> copy(*shared);
+            db = std::make_unique<winmd::reader::database>(std::move(copy));
+            image = std::move(shared);
             if (image) bodyReader = std::make_unique<MethodBodyReader>(image);
+            valid = true;
+        } catch (const std::exception&) {
+            db.reset();
+            valid = false;
+        }
+    }
+    // The metadata-stream form (the C# `MetadataFile(kind, fileName,
+    // metadata)` the MetadataFileLoader consumes): the stream is wrapped
+    // in a minimal synthetic PE image -- the DOS/NT headers, one section
+    // covering the image, and a COR20 header whose MetaData directory
+    // points at the stream -- so the winmd database's PE walk parses the
+    // genuine metadata tables. The wrapper is a parse vehicle only: no
+    // MethodBodyReader is built (the metadata-only shape has no method
+    // bodies; the C# GetMethodBody throws and the port's body reads
+    // collapse to the invalid-body arm). The stream must start with the
+    // BSJB magic; anything else (or a parse failure) leaves the file
+    // invalid, which the loader's gate turns into the decline.
+    Impl(std::string p, MetadataFileKind metadataKind,
+        std::vector<std::uint8_t> metadataStream)
+        : path(std::move(p)), kind(metadataKind) {
+        try {
+            constexpr std::size_t dosSize = 64;
+            constexpr std::size_t ntSize = 248;
+            constexpr std::size_t sectionSize = 40;
+            constexpr std::size_t cor20Size = 72;
+            constexpr std::size_t headerEnd =
+                dosSize + ntSize + sectionSize;
+            constexpr std::size_t metadataOffset = headerEnd + cor20Size;
+
+            if (metadataStream.size() < 4 ||
+                metadataStream[0] != 0x42 || metadataStream[1] != 0x53 ||
+                metadataStream[2] != 0x4a || metadataStream[3] != 0x42) {
+                return;  // not a metadata stream: the C# FromMetadataStream
+                         // throws BadImageFormat for these; the loader's
+                         // gate reads this as the decline.
+            }
+            std::vector<std::uint8_t> image;
+            image.reserve(metadataOffset + metadataStream.size());
+            // The header block spans the DOS/NT/section headers AND the
+            // synthetic COR20 header that follows them; the metadata
+            // bytes then start at metadataOffset.
+            image.resize(metadataOffset, 0);
+            auto* dos = reinterpret_cast<winmd::impl::image_dos_header*>(
+                image.data());
+            dos->e_signature = 0x5A4D;  // "MZ"
+            dos->e_lfanew = static_cast<std::int32_t>(dosSize);
+            auto* nt = reinterpret_cast<winmd::impl::image_nt_headers32*>(
+                image.data() + dosSize);
+            nt->Signature = 0x00004550;  // "PE\0\0"
+            nt->FileHeader.Machine = 0x014C;  // IMAGE_FILE_MACHINE_I386
+            nt->FileHeader.NumberOfSections = 1;
+            nt->FileHeader.SizeOfOptionalHeader =
+                sizeof(winmd::impl::image_optional_header32);
+            nt->FileHeader.Characteristics = 0x0102;
+            auto& optional = nt->OptionalHeader;
+            optional.Magic = 0x10B;  // PE32
+            optional.NumberOfRvaAndSizes = 16;
+            optional.DataDirectory[14].VirtualAddress =
+                static_cast<std::uint32_t>(headerEnd);
+            optional.DataDirectory[14].Size = cor20Size;
+            auto* section =
+                reinterpret_cast<winmd::impl::image_section_header*>(
+                    image.data() + dosSize + ntSize);
+            section->Misc.VirtualSize =
+                static_cast<std::uint32_t>(metadataOffset +
+                    metadataStream.size());
+            section->VirtualAddress = 0;
+            section->SizeOfRawData = static_cast<std::uint32_t>(
+                metadataOffset + metadataStream.size());
+            section->PointerToRawData = 0;
+
+            auto* cor20 = reinterpret_cast<winmd::impl::image_cor20_header*>(
+                image.data() + headerEnd);
+            cor20->cb = cor20Size;
+            cor20->MajorRuntimeVersion = 2;
+            cor20->MinorRuntimeVersion = 5;
+            cor20->MetaData.VirtualAddress =
+                static_cast<std::uint32_t>(metadataOffset);
+            cor20->MetaData.Size = static_cast<std::uint32_t>(
+                metadataStream.size());
+
+            image.insert(image.end(), metadataStream.begin(),
+                metadataStream.end());
+            db = std::make_unique<winmd::reader::database>(std::move(image));
             valid = true;
         } catch (const std::exception&) {
             db.reset();
@@ -216,6 +312,11 @@ MetadataFile::MetadataFile(std::string fileName,
     std::vector<std::uint8_t> image)
     : impl_(std::make_unique<Impl>(std::move(fileName), std::move(image))) {}
 
+MetadataFile::MetadataFile(std::string fileName, MetadataFileKind kind,
+    std::vector<std::uint8_t> metadataStream)
+    : impl_(std::make_unique<Impl>(std::move(fileName), kind,
+          std::move(metadataStream))) {}
+
 MetadataFile::~MetadataFile() = default;
 
 MetadataFile::MetadataFile(MetadataFile&&) noexcept = default;
@@ -223,6 +324,14 @@ MetadataFile& MetadataFile::operator=(MetadataFile&&) noexcept = default;
 
 bool MetadataFile::IsValid() const noexcept {
     return impl_ && impl_->valid;
+}
+
+MetadataFile::MetadataFileKind MetadataFile::Kind() const noexcept {
+    return impl_ ? impl_->kind : MetadataFileKind::PortableExecutable;
+}
+
+bool MetadataFile::IsMetadataOnly() const noexcept {
+    return impl_ && impl_->kind != MetadataFileKind::PortableExecutable;
 }
 
 const std::string& MetadataFile::FileName() const noexcept {

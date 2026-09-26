@@ -38,14 +38,14 @@
 //    wrapping the bundle; the port carries the same wrapper (raw pointer
 //    -- the loaders only read its nullness, and the wrapper is owned by
 //    the caller's AssemblyList).
-//  * DEFERRED: MetadataFileLoader (MetadataReaderProvider
-//    .FromMetadataStream -- the metadata-only MetadataFile shape the
-//    port's PE-only reader does not construct; see MetadataFile::Name()'s
-//    note). It is not registered in FileLoaderRegistry and is recorded in
-//    PORT_LOG_BAML.md. The WebCilFileLoader deferral has since been
-//    filled (the container reader in Metadata/WebCilFile.hpp; the loader
+//  * Both previously-deferred loaders are now ported: WebCilFileLoader
+//    (the container reader in Metadata/WebCilFile.hpp; the loader
 //    presents the container as the PE-shaped MetadataFile over the
-//    adapted image).
+//    adapted image) and MetadataFileLoader (the raw metadata stream
+//    wrapped in a synthetic PE image for the parse; the
+//    Metadata/ProgramDebugDatabase kind comes from the extension, and
+//    IsMetadataOnly() is true -- the IsLoadedAsValidAssembly
+//    `IsMetadataOnly: false` gate consumes it).
 
 #pragma once
 

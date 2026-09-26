@@ -72,6 +72,14 @@ add_executable(ilspy_tests
     Decompiler/DebugInfo/IDebugInfoProvider_Test.cpp
     ILSpyX/PdbProvider/PortableDebugInfoProvider_Test.cpp
     ILSpyX/PdbProvider/DebugInfoUtils_Test.cpp
+    ILSpyX/Util/GuessFileType_Test.cpp
+    ILSpyX/Extensions/CollectionExtensions_Test.cpp
+    ILSpyX/LoadedPackage_Test.cpp
+    ILSpyX/LoadedAssembly_Test.cpp
+    ILSpyX/AssemblyList_Test.cpp
+    ILSpyX/FileLoaders/FileLoaders_Test.cpp
+    ILSpyX/Abstractions/ILanguage_Test.cpp
+    ILSpyX/Settings/Settings_Test.cpp
     ILSpyCmd/IlspyCmdProgram_Test.cpp
     ILSpyCmd/ResourceExtensions_Test.cpp
     ILSpyCmd/MetadataTableDumper_Test.cpp

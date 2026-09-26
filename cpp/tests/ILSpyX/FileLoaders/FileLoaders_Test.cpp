@@ -24,6 +24,7 @@
 #include "ILSpyX/FileLoaders/ArchiveFileLoader.hpp"
 #include "ILSpyX/FileLoaders/BundleFileLoader.hpp"
 #include "ILSpyX/FileLoaders/FileLoaderRegistry.hpp"
+#include "ILSpyX/FileLoaders/MetadataFileLoader.hpp"
 #include "ILSpyX/FileLoaders/PEFileLoader.hpp"
 #include "ILSpyX/FileLoaders/WebCilFileLoader.hpp"
 #include "ILSpyX/FileLoaders/XamarinCompressedFileLoader.hpp"
@@ -351,23 +352,26 @@ std::vector<std::uint8_t> BuildWebCilContainerOverPe(
 TEST(FileLoaderRegistryTest, DefaultRegistrationOrder)
 {
     FL::FileLoaderRegistry registry;
-    // Xamarin, WebCil, Bundle, PE, Archive (Metadata is the one remaining
-    // documented deferral -- see LoadResult.hpp).
-    ASSERT_EQ(registry.RegisteredLoaders().size(), 5u);
+    // Xamarin, WebCil, Metadata, Bundle, PE, Archive (the C# order,
+    // verbatim -- no remaining deferrals).
+    ASSERT_EQ(registry.RegisteredLoaders().size(), 6u);
     EXPECT_NE(dynamic_cast<const FL::XamarinCompressedFileLoader*>(
                   registry.RegisteredLoaders()[0].get()),
         nullptr);
     EXPECT_NE(dynamic_cast<const FL::WebCilFileLoader*>(
                   registry.RegisteredLoaders()[1].get()),
         nullptr);
-    EXPECT_NE(dynamic_cast<const FL::BundleFileLoader*>(
+    EXPECT_NE(dynamic_cast<const FL::MetadataFileLoader*>(
                   registry.RegisteredLoaders()[2].get()),
         nullptr);
-    EXPECT_NE(dynamic_cast<const FL::PEFileLoader*>(
+    EXPECT_NE(dynamic_cast<const FL::BundleFileLoader*>(
                   registry.RegisteredLoaders()[3].get()),
         nullptr);
-    EXPECT_NE(dynamic_cast<const FL::ArchiveFileLoader*>(
+    EXPECT_NE(dynamic_cast<const FL::PEFileLoader*>(
                   registry.RegisteredLoaders()[4].get()),
+        nullptr);
+    EXPECT_NE(dynamic_cast<const FL::ArchiveFileLoader*>(
+                  registry.RegisteredLoaders()[5].get()),
         nullptr);
 }
 
@@ -925,4 +929,108 @@ TEST(WebCilFileLoaderTest, CorpuMscorlibBodiesDecodeThroughWebCil) {
 
     std::error_code ec;
     fs::remove(fs::path(containerPath), ec);
+}
+
+// ---- The MetadataFileLoader (the raw ECMA-335 metadata stream; the
+// corpus-backed stream is the ConnIdRes fixture's extracted metadata).
+
+// A metadata-only file loaded through the loader presents as the
+// metadata-only MetadataFile shape: the tables work, IsMetadataOnly is
+// true, and IsLoadedAsValidAssembly is false (the C#
+// `IsMetadataOnly: false` gate).
+TEST(MetadataFileLoaderTest, LoadsTheMetadataStreamAsTheMetadataOnlyShape)
+{
+    std::vector<std::uint8_t> metadata = ExtractMetadataFromConnIdRes();
+    std::string path = fs::temp_directory_path() /
+        "ilspy_metadata_only.dll";
+    {
+        std::ofstream out(path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(metadata.data()),
+            static_cast<std::streamsize>(metadata.size()));
+    }
+
+    // The manager-backed list carries the default registry (the C# app
+    // path); a bare list's null registry falls back to LoadPEFile, which
+    // cannot parse the raw metadata stream.
+    auto provider = std::make_shared<ILSpy::Tests::InMemorySettingsProvider>();
+    ILSpy::ILSpyX::AssemblyListManager manager(provider);
+    AssemblyList list(manager, "MetadataOnlyE2E");
+    LoadedAssembly& asm_ = list.OpenAssembly(path);
+    const auto& loadResult = asm_.GetLoadResult();
+    ASSERT_NE(loadResult.MetadataFile, nullptr);
+    EXPECT_TRUE(loadResult.MetadataFile->IsValid());
+    EXPECT_EQ(loadResult.MetadataFile->Name(), "connid_res");
+    EXPECT_TRUE(loadResult.MetadataFile->IsMetadataOnly());
+    EXPECT_EQ(loadResult.MetadataFile->Kind(),
+        ILSpy::Decompiler::Metadata::MetadataFile::MetadataFileKind::
+            Metadata);
+    // The C# `MetadataFile is { IsMetadataOnly: false }` gate: the
+    // metadata-only load is not a valid ASSEMBLY load.
+    EXPECT_FALSE(asm_.IsLoadedAsValidAssembly());
+
+    std::error_code ec;
+    fs::remove(fs::path(path), ec);
+}
+
+// The .pdb arm: the same stream under the .pdb extension reads as the
+// ProgramDebugDatabase kind.
+TEST(MetadataFileLoaderTest, PdbExtensionSelectsTheProgramDebugDatabaseKind)
+{
+    std::vector<std::uint8_t> metadata = ExtractMetadataFromConnIdRes();
+    std::string path = fs::temp_directory_path() /
+        "ilspy_metadata_only.PDB";
+    {
+        std::ofstream out(path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(metadata.data()),
+            static_cast<std::streamsize>(metadata.size()));
+    }
+
+    FL::MetadataFileLoader loader;
+    FL::FileLoadContext context;
+    auto result = loader.Load(path, metadata.data(), metadata.size(),
+        context);
+    std::error_code ec;
+    fs::remove(fs::path(path), ec);
+    ASSERT_TRUE(result.has_value());
+    ASSERT_NE(result->MetadataFile, nullptr);
+    EXPECT_EQ(result->MetadataFile->Kind(),
+        ILSpy::Decompiler::Metadata::MetadataFile::MetadataFileKind::
+            ProgramDebugDatabase);
+    EXPECT_TRUE(result->MetadataFile->IsMetadataOnly());
+}
+
+// A non-metadata stream declines (the C# FromMetadataStream's
+// BadImageFormatException -> the null return): the loader yields
+// nullopt so the later loaders still run.
+TEST(MetadataFileLoaderTest, DeclinesNonMetadataStreams)
+{
+    const std::string garbage = "definitely not a BSJB metadata stream";
+    FL::MetadataFileLoader loader;
+    FL::FileLoadContext context;
+    EXPECT_FALSE(loader
+            .Load("/tmp/ilspy_metadata_garbage.bin",
+                reinterpret_cast<const std::uint8_t*>(garbage.data()),
+                garbage.size(), context)
+            .has_value());
+}
+
+// The method-body arm of the metadata-only shape: no bodies exist, so
+// the body reads collapse to the invalid-body arm (the C#
+// GetMethodBody throws; the port's never-throw convention degrades to
+// the empty body). The shape is constructed through the metadata-stream
+// ctor (the path ctor models the C# PEFile path ctor and reads the file
+// as a PE, which a raw metadata stream is not).
+TEST(MetadataFileLoaderTest, MetadataOnlyShapeHasNoMethodBodies)
+{
+    std::vector<std::uint8_t> metadata = ExtractMetadataFromConnIdRes();
+    ILSpy::Decompiler::Metadata::MetadataFile file(
+        "ilspy_metadata_only_bodies.dll",
+        ILSpy::Decompiler::Metadata::MetadataFile::MetadataFileKind::
+            Metadata,
+        metadata);
+    ASSERT_TRUE(file.IsValid());
+    EXPECT_TRUE(file.IsMetadataOnly());
+    // Any body read degrades to the invalid body (nothing to read).
+    EXPECT_FALSE(file.GetMethodBody(0).IsValid());
+    EXPECT_EQ(file.GetContainingSectionIndex(0), -1);
 }
