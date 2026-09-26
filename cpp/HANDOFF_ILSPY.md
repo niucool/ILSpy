@@ -766,11 +766,22 @@ AccessorBodyText). The member-decl families that remain:
     `returnType + " " + methodName`; the conversions pass the
     implicit/explicit keyword in the return-type slot). Corpus:
     791/744 -> 717/670.
-  * The remaining 'other' family (~717 rows): the `new` modifier rows
-    on the interface re-implementations (~63), the destructor
-    `~StructuralCache()` rows, the static-array-init field spellings,
-    the `object IEnumerator<object>.Current` property rows -- sample
-    before picking.
+  * THE NEW MODIFIER -- CLOSED (`bbec91e22`): the C# SetNewModifier
+    port (MemberHidesBaseMember -- the non-interface base-type walk,
+    the methods by signature, the others by name; the accessibility
+    through the ported MemberLookup). THE GATE IS THE CRUX: the walk
+    runs only when the method's Virtual flag equals its NewSlot flag
+    (the plain methods + the new-slot virtuals); a
+    Virtual-without-NewSlot (the first declaration OR the override --
+    both the C# IMethod.IsOverride) NEVER takes `new`. Without the
+    gate the corpus BLEW UP (+1000 spurious `new override` rows). The
+    properties/events gate on their accessor; the fields/types walk
+    unconditionally. Corpus: 717/670 -> 636/653.
+  * The remaining 'other' family (~640 rows): the destructor
+    `~StructuralCache()` rows, the static-array-init field spellings
+    (`__StaticArrayInitTypeSize=14 ...`), the
+    `object IEnumerator<object>.Current` rows, the near-miss pairs --
+    sample before picking.
   * The EXPLICIT-IMPL PROPERTY NAMES -- CLOSED (`77df0389a`): the
     interface-qualified rewrite mirrors the event arm's (the first
     explicitly implemented member's declaring type through
