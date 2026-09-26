@@ -777,11 +777,23 @@ AccessorBodyText). The member-decl families that remain:
     gate the corpus BLEW UP (+1000 spurious `new override` rows). The
     properties/events gate on their accessor; the fields/types walk
     unconditionally. Corpus: 717/670 -> 636/653.
-  * The remaining 'other' family (~640 rows): the destructor
-    `~StructuralCache()` rows, the static-array-init field spellings
-    (`__StaticArrayInitTypeSize=14 ...`), the
-    `object IEnumerator<object>.Current` rows, the near-miss pairs --
-    sample before picking.
+  * THE EXPLICIT-IMPL INTERFACE INSTANTIATION -- CLOSED (`031c7054d`):
+    the explicit-implementation names render the interface WITH its
+    type arguments (`IEnumerator<XmlNamespaceMapping>.Current`) -- the
+    MethodImpl row resolves the definition form; the constructed form
+    comes from the class's own DIRECT-base list (a RECURSIVE walk was
+    tried and rejected: it finds the DEFINITION's own unsubstituted
+    base, `IEnumerable<T>` from IList`1). The already-parameterized
+    resolved declaring types (the inherited shapes, `ICollection<Uri>`)
+    pass through. Corpus: 621/652 -> 604/639.
+  * THE DESTRUCTORS -- CLOSED (`9d1be5467`): the Finalize overrides
+    render `~TypeName()` (no modifiers, no return type; the emitter
+    shares the constructor's no-return form).
+  * The remaining 'other' family (~604 rows): the static-array-init
+    field spellings (`private struct __StaticArrayInitTypeSize=48` /
+    the `60C5002D...` fields), the enum-member near-misses
+    (`CLOSE`/`BESTEFFORT` -- the enum-value display rows), the
+    constructor parameter near-misses -- sample before picking.
   * The EXPLICIT-IMPL PROPERTY NAMES -- CLOSED (`77df0389a`): the
     interface-qualified rewrite mirrors the event arm's (the first
     explicitly implemented member's declaring type through
