@@ -1021,9 +1021,17 @@ field, ac9664c96 the using set -- each pin move deliberate).
 THE FINAL GATES (all green on one build): the facade suite holds its
 one pre-existing merged-tree failure (the tab-migration test-string
 gap); the sweep 13,166 ran / 15 baseline failures; the net48 corpus
-60 oracle-only / 50 mine-only (from the merged tree's 60/51 baseline;
-the remaining rows are the merged-tree render drift -- the audit's
-open follow-ups if the corpus parity matters next); the connid 0/0.
+39 oracle-only / 34 mine-only (the merged-tree drift 60/51 -> 60/50
+-> 39/34 across the using-set fix and the interop-property closure);
+the connid 0/0.
+
+THE MERGED-TREE CORPUS DRIFT -- PARTIALLY CLOSED (`593f10185`): the
+interop-property family (the accessor attributes -- [MethodImpl],
+[SuppressUnmanagedCodeSecurity], the [return: MarshalAs] return-type
+sections over the accessor-block form, 37 rows). THE REMAINING
+~39/34: the generic-constraint near-misses (the contract-validation
+methods' `where T : class` clauses), the misc property/method header
+pairs -- sample before picking.
 
     (f's HISTORICAL MAP: the connid's references are System.Runtime +
     System.Collections (10.0.0.0) -- a .NETCoreApp shape. With those
