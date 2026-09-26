@@ -2739,6 +2739,11 @@ bool DecompileTypeToStringBody(
             accessorTokens.insert(accessors.RaiserToken);
             for (std::uint32_t token : accessors.OtherTokens)
                 accessorTokens.insert(token);
+            // The C# field-like event's backing field: the private
+            // same-name field the compiler emits alongside the event
+            // declaration does not render (the event declaration names
+            // it; the C# hides it like the property's k__BackingField).
+            backingFieldNames.insert(e.Name);
             std::string eventTypeName = "object";
             const TS::IEvent* event = module.GetDefinitionEvent(e.Token);
             // The member documentation: the E: ID form.
@@ -2859,6 +2864,12 @@ bool DecompileTypeToStringBody(
                     "Delegate.Combine(") != std::string::npos &&
                 trimmedEventBody(removerBody).find(
                     "Delegate.Remove(") != std::string::npos;
+            // The C# field-like event's backing field: the private
+            // same-name field hides only for the RECOGNIZED automatic
+            // event (the AutoEventDecompiler's backing field); an
+            // accessor-block (custom) event keeps its field visible.
+            if (isAutomaticEvent)
+                backingFieldNames.insert(e.Name);
             if (isExplicitImplementation ||
                 (accessorsHaveBodies && !isAutomaticEvent)) {
                 out += "\n{\n";
