@@ -1289,7 +1289,42 @@ Expression* TypeSystemAstBuilder::ConvertConstantValue(TS::IType& expectedType, 
             return expr;
         }
     } else if (const auto* typeofType = std::any_cast<TS::ITypePtr>(&constantValue)) {
-        auto* expr = new TypeOfExpression(ConvertType(const_cast<TS::IType&>(**typeofType)));
+        // The C# attribute typeof argument over a type nested in a GENERIC
+        // declaring type: the compiler emits the TypeSpec (the instantiated
+        // nested reference -- CS0416 blocks every source form), and the
+        // render carries the declaring type with the UNBOUND type-argument
+        // markers (`RBTree<>.<...>d__39`). The port's ca-blob decode
+        // resolves the argument to the bare definition, so the unbound
+        // form is rebuilt here: the declaring type's name with an empty
+        // type-argument child per declaring parameter (the
+        // UnboundTypeArgument spelling), then the nested member name. The
+        // manual MemberType composition bypasses the AlwaysUseShortTypeNames
+        // short path the attribute builder carries (the C# produces the
+        // full form through the qualify-ambiguous-names visitor's own
+        // builder, which the flat render does not run).
+        const TS::ITypeDefinition* typeofDefinition =
+            (*typeofType) != nullptr ? (*typeofType)->GetDefinition() : nullptr;
+        const TS::ITypeDefinition* declaringDefinition =
+            typeofDefinition != nullptr
+                ? typeofDefinition->DeclaringTypeDefinition()
+                : nullptr;
+        AstType* typeNode;
+        if (typeofDefinition != nullptr && declaringDefinition != nullptr &&
+            declaringDefinition->TypeParameterCount() > 0) {
+            auto* target = MakeSimpleType(declaringDefinition->Name());
+            for (int i = 0; i < declaringDefinition->TypeParameterCount();
+                 i++) {
+                target->AddChild(MakeSimpleType(std::string()),
+                                 &Slots::TypeArgument);
+            }
+            auto* memberType = new MemberType();
+            memberType->Target(target);
+            memberType->MemberName(typeofDefinition->Name());
+            typeNode = memberType;
+        } else {
+            typeNode = ConvertType(const_cast<TS::IType&>(**typeofType));
+        }
+        auto* expr = new TypeOfExpression(typeNode);
         if (AddResolveResultAnnotations())
             expr->AddAnnotation(std::make_shared<Sem::TypeOfResolveResult>(
                 type.shared_from_this(), *typeofType));
