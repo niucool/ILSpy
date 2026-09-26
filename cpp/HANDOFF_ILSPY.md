@@ -743,9 +743,27 @@ AccessorBodyText). The member-decl families that remain:
     literal's underlying-type suffix preservation (the suffix is the
     decimal literal's part after the LEADING digits -- `0x10u`).
     Corpus: 1650/1589 -> 1402/1343.
-  * The P/Invoke declarations (`public static extern bool ShowWindow(
-    IntPtr hwnd, SW nCmdShow);`) + the `[StructLayout]` struct
-    members in the remaining 'other' family.
+  * THE PARAMETER ATTRIBUTES + THE UNSAFE POINTER SIGNATURES -- CLOSED
+    (`e2f6b9d2e`-era): (1) the [In]/[Out]/[MarshalAs] parameter
+    attributes render as the compact bracket-adjacent sections before
+    the modifiers (ParameterAttributesText, forward-declared in the
+    early anon namespace -- the use at the top of the file); (2) the
+    `unsafe` modifier on pointer signatures (TypeContainsPointer/
+    MemberSignatureHasPointer -- the method's return/params, the
+    field, the delegate's Invoke; the IntroduceUnsafeModifier
+    transform only runs over the AST pipeline, so the empty-body
+    reference members need the declaration-level rule); (3) the
+    composite types (pointer/byref/array) recurse on the element
+    through the name decision in RenderBaseTypeName -- a sibling
+    nested type inside a pointer renders `FSPOINT*` (the C# wraps the
+    CONVERTED element); (4) the unresolved nested references render
+    the dotted form (`+`->`.`), not the reflection spelling. Corpus:
+    1219/1156 -> 791/744.
+  * The remaining 'other' family (~790 rows): the operator rows
+    (`public static implicit operator`, 74), the `new` modifier rows
+    on the interface re-implementations, the static-array-init field
+    spellings, the remaining near-miss pairs -- sample before
+    picking.
   * The EXPLICIT-IMPL PROPERTY NAMES -- CLOSED (`77df0389a`): the
     interface-qualified rewrite mirrors the event arm's (the first
     explicitly implemented member's declaring type through
