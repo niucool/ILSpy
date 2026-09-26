@@ -1062,15 +1062,15 @@ family, 34 rows); the connid pin unchanged.
   reference fixture set -- System.Runtime/System.Collections/
   System.Private.CoreLib from the .NET 10 runtime; without them the
   pin is 54895b5b...).
-- THE CORPUS: 17 oracle-only / 13 mine-only (the arc: the merged tree
+- THE CORPUS: 13 oracle-only / 10 mine-only (the arc: the merged tree
   60/51 -> the using-set fix 60/50 -> the interop properties 39/34 ->
   the constraint clauses 22/17 -> the conversion operators 19/14 ->
-  the complement forms 17/13, `5f3adcbbb`: the encoded-in-mask gate on
-  the complement fired trivially for zero values).
-  THE REMAINING ~17/13 (sampled): the `Contract.Requires<...>` body
+  the complement forms 17/13 -> the explicit indexers 13/10:
+  `Interface.this[...]` with no modifiers -- the GetExplicitInterfaceType
+  rewrite the plain property arm already had).
+  THE REMAINING ~13/10 (sampled): the `Contract.Requires<...>` body
   rows, the `base..ctor();`/`_id = Guid.NewGuid();` constructor-
-  initializer rows, the `IDictionary.this[...]`/`IList.this[...]`
-  indexer header rows, the `public virtual extern IEnumString
+  initializer rows, the `public virtual extern IEnumString
   SupportedLanguages` row, and the cross-module `new void
   SetValue(...)` miss.
 - THE GATES: the sweep 13,166 ran / 15 baseline (env -u
