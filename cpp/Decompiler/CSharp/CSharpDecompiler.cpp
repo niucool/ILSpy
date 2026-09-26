@@ -1820,6 +1820,36 @@ bool DecompileTypeToStringBody(
             out += CSharpDecompiler::MethodDeclString(
                 indexParameters, true, indexNames, scopeResolver.get());
             out += ']';
+        } else if (propertyEntity != nullptr &&
+                   p.Name.find('.') != std::string::npos &&
+                   !propertyEntity->IsExplicitInterfaceImplementation()) {
+            // A dotted metadata name on a NON-explicit property (the
+            // indexer-with-dots shape) keeps the metadata name.
+            out += p.Name;
+        } else if (propertyEntity != nullptr &&
+                   propertyEntity->IsExplicitInterfaceImplementation() &&
+                   p.Name.find('.') != std::string::npos) {
+            // The C# GetExplicitInterfaceType: the name's last segment
+            // qualified by the first implemented member's declaring type
+            // through the name decision.
+            std::string propertyName =
+                p.Name.substr(p.Name.find_last_of('.') + 1);
+            std::string interfaceName;
+            std::vector<const TS::IMember*> implemented =
+                propertyEntity->ExplicitlyImplementedInterfaceMembers();
+            if (!implemented.empty() && implemented[0] != nullptr &&
+                implemented[0]->DeclaringType() != nullptr) {
+                const TS::ITypePtr& interfaceType =
+                    implemented[0]->DeclaringType();
+                interfaceName = RenderBaseTypeName(
+                    interfaceType != nullptr ? interfaceType->GetDefinition()
+                                             : nullptr,
+                    interfaceType, scopeResolver.get());
+            }
+            if (interfaceName.empty())
+                out += p.Name;
+            else
+                out += interfaceName + "." + propertyName;
         } else {
             out += p.Name;
         }
