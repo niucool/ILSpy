@@ -2271,7 +2271,44 @@ bool DecompileTypeToStringBody(
                 typeModifiers =
                     typeModifiers | SyntaxNS::Modifiers::Unsafe;
         }
-        out += MemberAttributesText(typeDef);
+        // The C# DoDecompileType's tail: the [DefaultMember] attribute
+        // drops when the type declares a NON-explicit indexer (the
+        // compiler generates it from the indexer; the source never
+        // expressed it).
+        bool typeDeclaresIndexer = false;
+        for (const auto& p : file.GetProperties(typeToken)) {
+            const TS::IProperty* propEntity =
+                module.GetDefinitionProperty(p.Token);
+            if (propEntity == nullptr)
+                continue;
+            if (!propEntity->Parameters().empty() &&
+                !propEntity->IsExplicitInterfaceImplementation())
+                typeDeclaresIndexer = true;
+        }
+        std::string typeAttributeText = MemberAttributesText(typeDef);
+        if (typeDeclaresIndexer) {
+            // Drop the [DefaultMember(...)] line (the attribute section
+            // renders one per line).
+            const std::string defaultMemberMarker =
+                "[DefaultMember(";
+            std::size_t search = 0;
+            std::string filtered;
+            while (search < typeAttributeText.size()) {
+                std::size_t lineEnd =
+                    typeAttributeText.find('\n', search);
+                std::string line = typeAttributeText.substr(
+                    search, lineEnd == std::string::npos
+                                ? std::string::npos
+                                : lineEnd - search + 1);
+                if (line.find(defaultMemberMarker) == std::string::npos)
+                    filtered += line;
+                search = lineEnd == std::string::npos
+                             ? typeAttributeText.size()
+                             : lineEnd + 1;
+            }
+            typeAttributeText = filtered;
+        }
+        out += typeAttributeText;
         for (SyntaxNS::Modifiers modifier :
              SyntaxNS::CSharpModifiers::AllModifiers) {
             if (modifier == SyntaxNS::Modifiers::Any)
