@@ -789,11 +789,22 @@ AccessorBodyText). The member-decl families that remain:
   * THE DESTRUCTORS -- CLOSED (`9d1be5467`): the Finalize overrides
     render `~TypeName()` (no modifiers, no return type; the emitter
     shares the constructor's no-return form).
-  * The remaining 'other' family (~604 rows): the static-array-init
-    field spellings (`private struct __StaticArrayInitTypeSize=48` /
-    the `60C5002D...` fields), the enum-member near-misses
-    (`CLOSE`/`BESTEFFORT` -- the enum-value display rows), the
-    constructor parameter near-misses -- sample before picking.
+  * THE NULLABLE SHORTHAND -- CLOSED (`126903e67`): the Nullable<T>
+    value types render `T?` (the AstBuilder's nullable specifier; the
+    argument recurses through the same name decision). 56 rows.
+  * THE EXTENSION + GENERIC METHOD FORMS -- CLOSED (`ce3c281f3`): the
+    `this` on the first parameter (the entity's IsExtensionMethod, a
+    new defaulted MethodDeclString parameter), the method's own
+    type-parameter list after the name (the chain-merged surface
+    sliced at the declaring type's chain size), and the method-level
+    `where` clauses through the extracted ConstraintClausesText (the
+    shared skip rule; A HAZARD: the clause renders AFTER the closing
+    paren -- an arm wrote it inside the parens first). Corpus:
+    604/639 -> 497/532 across the two commits.
+  * The remaining 'other' family (~497 rows): the static-array-init
+    field spellings, the enum-member near-misses, the constructor
+    parameter near-misses, the `virtual` modifier near-misses (the
+    ShowDialog pair) -- sample before picking.
   * The EXPLICIT-IMPL PROPERTY NAMES -- CLOSED (`77df0389a`): the
     interface-qualified rewrite mirrors the event arm's (the first
     explicitly implemented member's declaring type through
