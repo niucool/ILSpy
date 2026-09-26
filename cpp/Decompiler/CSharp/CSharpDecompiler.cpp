@@ -436,6 +436,154 @@ const TS::INamespace* ResolveNamespaceFullName(const TS::INamespace& root,
 // it -- plus static and the virtual family) with ConvertField's
 // const/readonly/volatile bits, rendered as the declaration's leading
 // keywords in the AllModifiers output order.
+// The C# ConvertEnumValue's [Flags] arms: the union form
+// (`NODRAWCAPTION | NODRAWICON`), the complement form (`~X`), and the
+// multi-bit-within-mask rule (keep numeric). The members iterate by
+// weight DESCENDING (stable -- the declaration order within a weight),
+// skip the zero values, the self row, and the later rows (the row-order
+// rule: a member can only reference members declared before it). The
+// complement competes when its expression has fewer terms; a byte- or
+// ushort-based enum never takes it (the initializer would not convert
+// back). Returns the empty string when no composition form applies.
+std::string EnumFlagsComposition(
+    const Metadata::MetadataFile& file, const TS::MetadataModule& module,
+    std::uint32_t enumToken, const std::any& constantValue,
+    std::uint32_t declaringRow) {
+    std::int64_t val = 0;
+    bool hasVal = false;
+    if (auto* p = std::any_cast<std::int32_t>(&constantValue)) {
+        val = *p; hasVal = true;
+    } else if (auto* p = std::any_cast<std::uint32_t>(&constantValue)) {
+        val = static_cast<std::int64_t>(*p); hasVal = true;
+    } else if (auto* p = std::any_cast<std::int64_t>(&constantValue)) {
+        val = *p; hasVal = true;
+    }
+    if (!hasVal)
+        return std::string();
+    // The members with their weights (the single-bit count), kept in
+    // the declaration order; the iteration sorts by weight descending
+    // (stable).
+    struct Candidate {
+        std::int64_t value;
+        std::string name;
+        std::uint32_t row;
+        int weight;
+    };
+    std::vector<Candidate> candidates;
+    for (const auto& other : file.GetFields(enumToken)) {
+        const TS::IField* otherEntity = module.GetDefinitionField(other.Token);
+        if (otherEntity == nullptr || !otherEntity->IsConst())
+            continue;
+        std::any otherValue;
+        try {
+            otherValue = otherEntity->GetConstantValue();
+        } catch (const std::exception&) {
+            continue;
+        }
+        std::int64_t v = 0;
+        if (auto* p = std::any_cast<std::int32_t>(&otherValue))
+            v = *p;
+        else if (auto* p = std::any_cast<std::uint32_t>(&otherValue))
+            v = static_cast<std::int64_t>(*p);
+        else if (auto* p = std::any_cast<std::int64_t>(&otherValue))
+            v = *p;
+        else
+            continue;
+        int weight = 0;
+        std::uint64_t u = static_cast<std::uint64_t>(v);
+        while (u != 0) {
+            u &= u - 1;
+            ++weight;
+        }
+        candidates.push_back({v, other.Name, other.Token & 0xFFFFFF, weight});
+    }
+    std::stable_sort(candidates.begin(), candidates.end(),
+                     [](const Candidate& a, const Candidate& b) {
+                         return a.weight > b.weight;
+                     });
+    // The C# limits the negated value to the underlying range for the
+    // byte/short/int families only -- a 64-bit underlying type keeps
+    // the full complement (whose high bits never clear, so a long-based
+    // enum's complement never completes and stays numeric; masking it
+    // to 32 bits would wrongly complete it).
+    std::int64_t enumValue = val;
+    std::int64_t negatedValue;
+    if (auto* p = std::any_cast<std::int64_t>(&constantValue))
+        negatedValue = ~*p;
+    else if (auto* p = std::any_cast<std::uint64_t>(&constantValue))
+        negatedValue = static_cast<std::int64_t>(~*p);
+    else if (auto* p = std::any_cast<std::uint32_t>(&constantValue))
+        negatedValue =
+            static_cast<std::int64_t>(~*p & 0xFFFFFFFFu);
+    else if (auto* p = std::any_cast<std::int32_t>(&constantValue))
+        negatedValue = static_cast<std::int64_t>(
+            ~static_cast<std::uint32_t>(*p) & 0xFFFFFFFFu);
+    else if (auto* p = std::any_cast<std::uint16_t>(&constantValue))
+        negatedValue = static_cast<std::int64_t>(~*p & 0xFFFFu);
+    else if (auto* p = std::any_cast<std::int16_t>(&constantValue))
+        negatedValue = static_cast<std::int64_t>(
+            ~static_cast<std::uint16_t>(*p) & 0xFFFFu);
+    else if (auto* p = std::any_cast<std::uint8_t>(&constantValue))
+        negatedValue = static_cast<std::int64_t>(~*p & 0xFFu);
+    else if (auto* p = std::any_cast<std::int8_t>(&constantValue))
+        negatedValue = static_cast<std::int64_t>(
+            ~static_cast<std::uint8_t>(*p) & 0xFFu);
+    else
+        return std::string();
+    std::vector<std::string> unionTerms;
+    std::vector<std::string> negatedTerms;
+    for (const Candidate& candidate : candidates) {
+        if (candidate.value == 0 || candidate.row >= declaringRow)
+            // The C# skips the None member and the later rows.
+            continue;
+        if ((candidate.value & enumValue) == candidate.value) {
+            unionTerms.push_back(candidate.name);
+            enumValue &= ~candidate.value;
+        }
+        if ((candidate.value & negatedValue) == candidate.value) {
+            negatedTerms.push_back(candidate.name);
+            negatedValue &= ~candidate.value;
+        }
+    }
+    // The multi-bit-within-mask rule: a value lying entirely within a
+    // LARGER, previously declared member is a field encoding inside
+    // that mask, not a union of flags -- keep it numeric.
+    bool encodedInEarlierMask = false;
+    for (const Candidate& candidate : candidates) {
+        if (candidate.value == val || candidate.row >= declaringRow)
+            continue;
+        if ((candidate.value & val) == val && candidate.value != val) {
+            encodedInEarlierMask = true;
+            break;
+        }
+    }
+    if (enumValue == 0 && !unionTerms.empty() && !encodedInEarlierMask) {
+        if (!(negatedValue == 0 && !negatedTerms.empty() &&
+              negatedTerms.size() < unionTerms.size())) {
+            std::string out;
+            for (std::size_t i = 0; i < unionTerms.size(); ++i) {
+                if (i != 0)
+                    out += " | ";
+                out += unionTerms[i];
+            }
+            return out;
+        }
+    }
+    if (negatedValue == 0 && !negatedTerms.empty() &&
+        (enumValue != 0 || unionTerms.empty() ||
+         negatedTerms.size() < unionTerms.size()) &&
+        !encodedInEarlierMask) {
+        std::string out = "~";
+        for (std::size_t i = 0; i < negatedTerms.size(); ++i) {
+            if (i != 0)
+                out += " | ";
+            out += negatedTerms[i];
+        }
+        return out;
+    }
+    return std::string();
+}
+
 // The boxed-constant equality over the metadata constant forms (the
 // enum members' underlying integral types).
 bool ValuesEqual(const std::any& a, const std::any& b) {
@@ -2788,6 +2936,17 @@ bool DecompileTypeToStringBody(
                     literal = other.Name;
                     literalIsAlias = true;
                     break;
+                }
+                if (!literalIsAlias && enumIsFlags) {
+                    // The C# ConvertEnumValue's [Flags] composition
+                    // arms: the union (`A | B`) and the complement
+                    // (`~X`) forms over the earlier single-bit members.
+                    std::string composition = EnumFlagsComposition(
+                        file, module, typeToken, constantValue, declaringRow);
+                    if (!composition.empty()) {
+                        literal = composition;
+                        literalIsAlias = true;
+                    }
                 }
                 if (displayMode == EnumValueDisplayMode::AllHex &&
                     !literalIsAlias) {
