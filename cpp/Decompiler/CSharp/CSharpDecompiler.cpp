@@ -436,6 +436,33 @@ const TS::INamespace* ResolveNamespaceFullName(const TS::INamespace& root,
 // it -- plus static and the virtual family) with ConvertField's
 // const/readonly/volatile bits, rendered as the declaration's leading
 // keywords in the AllModifiers output order.
+// The boxed-constant equality over the metadata constant forms (the
+// enum members' underlying integral types).
+bool ValuesEqual(const std::any& a, const std::any& b) {
+    auto asLong = [](const std::any& v) -> std::optional<std::int64_t> {
+        if (auto* p = std::any_cast<std::int32_t>(&v))
+            return *p;
+        if (auto* p = std::any_cast<std::uint32_t>(&v))
+            return static_cast<std::int64_t>(*p);
+        if (auto* p = std::any_cast<std::int64_t>(&v))
+            return *p;
+        if (auto* p = std::any_cast<std::uint64_t>(&v))
+            return static_cast<std::int64_t>(*p);
+        if (auto* p = std::any_cast<std::int8_t>(&v))
+            return *p;
+        if (auto* p = std::any_cast<std::uint8_t>(&v))
+            return *p;
+        if (auto* p = std::any_cast<std::int16_t>(&v))
+            return *p;
+        if (auto* p = std::any_cast<std::uint16_t>(&v))
+            return *p;
+        return std::nullopt;
+    };
+    auto av = asLong(a);
+    auto bv = asLong(b);
+    return av.has_value() && bv.has_value() && *av == *bv;
+}
+
 // The C# SetNewModifier: a member introduced in a class or struct hides
 // an accessible same-name member (or nested type) in a NON-INTERFACE base
 // type -- the methods hide by signature (the name, the type-parameter
@@ -2701,9 +2728,69 @@ bool DecompileTypeToStringBody(
                 (displayMode == EnumValueDisplayMode::FirstOnly &&
                  firstMember);
             if (withInitializer) {
+                // The C# ConvertEnumValue's direct-match arm: an enum
+                // member whose value equals an EARLIER member of the same
+                // enum renders that member's name (`NORMAL =
+                // SHOWNORMAL`), not the numeric literal -- a member can
+                // only reference members declared before it (the C#
+                // row-number rule), and in a [Flags] enum only the
+                // single-bit members are referenced directly (the
+                // combined values are built from their flag components;
+                // the zero members stay numeric).
                 std::string literal =
                     ConstantFieldLiteral(*fieldEntity);
-                if (displayMode == EnumValueDisplayMode::AllHex) {
+                bool literalIsAlias = false;
+                std::any constantValue;
+                try {
+                    constantValue = fieldEntity->GetConstantValue();
+                } catch (const std::exception&) {
+                }
+                const std::uint32_t declaringRow = f.Token & 0xFFFFFF;
+                const bool enumIsFlags = Metadata::HasKnownAttribute(
+                    file, typeToken, TS::KnownAttribute::Flags);
+                for (const auto& other : file.GetFields(typeToken)) {
+                    if (other.Token == f.Token)
+                        continue;
+                    const TS::IField* otherEntity =
+                        module.GetDefinitionField(other.Token);
+                    if (otherEntity == nullptr || !otherEntity->IsConst())
+                        continue;
+                    std::any otherValue;
+                    try {
+                        otherValue = otherEntity->GetConstantValue();
+                    } catch (const std::exception&) {
+                        continue;
+                    }
+                    if (!ValuesEqual(constantValue, otherValue))
+                        continue;
+                    if ((other.Token & 0xFFFFFF) >= declaringRow)
+                        // The C# row-order rule: only EARLIER members
+                        // are referenceable.
+                        continue;
+                    if (enumIsFlags) {
+                        std::int64_t v = 0;
+                        if (auto* p =
+                                std::any_cast<std::int32_t>(&otherValue))
+                            v = *p;
+                        else if (auto* p =
+                                     std::any_cast<std::uint32_t>(
+                                         &otherValue))
+                            v = static_cast<std::int64_t>(*p);
+                        else if (auto* p =
+                                     std::any_cast<std::int64_t>(
+                                         &otherValue))
+                            v = *p;
+                        const bool singleBit =
+                            v != 0 && (v & (v - 1)) == 0;
+                        if (v == 0 || !singleBit)
+                            continue;
+                    }
+                    literal = other.Name;
+                    literalIsAlias = true;
+                    break;
+                }
+                if (displayMode == EnumValueDisplayMode::AllHex &&
+                    !literalIsAlias) {
                     // The C# AllHex arm: values >= 10 render as 0x + the
                     // uppercase hex form, KEEPING the decimal literal's
                     // underlying-type suffix (the LiteralFormat flip over
