@@ -1008,6 +1008,13 @@ public:
     // a transform can distinguish a generic-instantiation call
     // (e.g. `Activator.CreateInstance<T>()`) from a non-generic overload.
     int GetMethodSpecTypeArgumentCount(std::uint32_t methodToken) const;
+    // The MethodSpec Instantiation blob's generic-argument type names
+    // (ReflectionName form; empty for a non-MethodSpec token or a
+    // malformed blob). The Call node renders them as the generic
+    // argument list of an instantiated static call
+    // (`Contract.Requires<ArgumentNullException>(...)`).
+    std::vector<std::string> GetMethodSpecTypeArgumentNames(
+        std::uint32_t methodToken) const;
 
     // Decode the method body at `rva` (from a MethodDefInfo::RVA). Returns an
     // invalid MethodBody for abstract/extern methods (RVA 0) or a malformed

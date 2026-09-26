@@ -664,8 +664,8 @@ TEST(LockTransform, SeedRendersLockStatement) {
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "object obj");
     EXPECT_NE(text.find("lock (obj)"), std::string::npos);
-    // The body call flattens "::" to ".": "System.Foo::Bar" -> "System.Foo.Bar".
-    EXPECT_NE(text.find("System.Foo.Bar"), std::string::npos);
+    // The body call flattens "::" to ".": "System.Foo::Bar" -> "Foo.Bar".
+    EXPECT_NE(text.find("Foo.Bar"), std::string::npos);
 }
 
 // ---- mscorlib sweep ----

@@ -209,7 +209,7 @@ TEST(ILAstToCSharp, VoidCallStatementAndStringEscapes) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "");
-    EXPECT_NE(text.find(R"(	System.Console.WriteLine("a\nb\"\\");)"),
+    EXPECT_NE(text.find(R"(	Console.WriteLine("a\nb\"\\");)"),
               std::string::npos) << text;
 }
 

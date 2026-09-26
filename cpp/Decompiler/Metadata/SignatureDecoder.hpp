@@ -102,6 +102,15 @@ TypeSystem::ITypePtr DecodeTypeSpecBlob(const winmd::reader::database& db,
 int DecodeMethodSpecTypeArgCount(const winmd::reader::database& db,
                                  const std::uint8_t* data, std::size_t size);
 
+// Decode the generic-argument type list of a MethodSpec Instantiation blob
+// (the MethodSpecSig's Type blobs). Returns empty for a malformed blob or
+// one whose first byte is not the 0x0A marker; the types carry the
+// ReflectionName form for the rendered argument list of an instantiated
+// call (`Contract.Requires<ArgumentNullException>(...)`).
+std::vector<TypeSystem::ITypePtr> DecodeMethodSpecTypeArgs(
+    const winmd::reader::database& db, const std::uint8_t* data,
+    std::size_t size);
+
 // Decode a LOCAL_SIG blob (0x07 marker + count + types) -- the local-variable
 // signature referenced by a method body's fat header. Returns the local types
 // (with their pinned flag) in index order; an empty/partial vector on a

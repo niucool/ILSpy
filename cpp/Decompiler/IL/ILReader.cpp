@@ -640,6 +640,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             call->DeclaringType = file.ResolveMethodDeclaringType(tok, s.ownerMethodToken);
             call->IsOperator = IsOperatorName(call->MethodName);
             call->TypeArgumentsCount = file.GetMethodSpecTypeArgumentCount(tok);
+            call->TypeArgumentNames = file.GetMethodSpecTypeArgumentNames(tok);
             std::vector<std::unique_ptr<ILInstruction>> args;
             args.reserve(argCount);
             for (int i = 0; i < argCount; ++i) {

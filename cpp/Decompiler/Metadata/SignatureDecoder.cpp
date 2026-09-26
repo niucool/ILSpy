@@ -421,4 +421,20 @@ int DecodeMethodSpecTypeArgCount(const winmd::reader::database& db,
     return static_cast<int>(count);
 }
 
+std::vector<TypeSystem::ITypePtr> DecodeMethodSpecTypeArgs(
+    const winmd::reader::database& db, const std::uint8_t* data,
+    std::size_t size) {
+    BlobReader r{ data, data + size, &db, false };
+    std::uint8_t marker = r.Byte();
+    if (r.failed || marker != 0x0A) return {};
+    std::uint32_t count = r.CompressedUnsigned();
+    if (r.failed) return {};
+    std::vector<TypeSystem::ITypePtr> args;
+    args.reserve(count);
+    for (std::uint32_t i = 0; i < count && !r.failed; ++i)
+        args.push_back(DecodeTypeBlob(r));
+    if (r.failed) return {};
+    return args;
+}
+
 } // namespace ILSpy::Decompiler::Metadata

@@ -131,6 +131,14 @@ public:
     // non-generic overload (e.g. NullableLiftingTransform.IsGenericNewPattern
     // checks `Activator.CreateInstance` with exactly one type argument).
     int TypeArgumentsCount = 0;
+    // The MethodSpec Instantiation blob's generic-argument type names
+    // (ReflectionName form; empty when TypeArgumentsCount is 0). The
+    // call emitter renders them as the generic argument list of an
+    // instantiated static call (`Contract.Requires<ArgumentNullException>
+    // (...)`); a VAR/MVAR argument (a `!`/`!!`-prefixed reflection name)
+    // suppresses the list -- the type-parameter naming is
+    // emitter-context work that the flat body renderer does not carry.
+    std::vector<std::string> TypeArgumentNames;
     // Whether this is a lifted user-defined operator call. Faithful to the C#
     // `CallInstruction.IsLifted` (`Method is CSharp.Resolver.ILiftedOperator`),
     // a resolver-level concept: the C# resolver wraps a lifted operator's

@@ -103,7 +103,7 @@ TEST(ILAstToCSharpAsyncDynamicArmsTest, AwaitStatementRenders) {
     taskCall->AddArg(std::make_unique<::ILSpy::Decompiler::IL::LdcI4>(1));
     f.block->Add(std::make_unique<::ILSpy::Decompiler::IL::Await>(std::move(taskCall)));
     std::string text = f.Render();
-    EXPECT_NE(text.find("await System.Threading.Tasks.Task.Delay(1);"),
+    EXPECT_NE(text.find("await Task.Delay(1);"),
               std::string::npos)
         << text;
 }
@@ -122,7 +122,7 @@ TEST(ILAstToCSharpAsyncDynamicArmsTest, AwaitValueRenders) {
         std::make_unique<::ILSpy::Decompiler::IL::Await>(
             std::move(taskCall))));
     std::string text = f.Render();
-    EXPECT_NE(text.find("await System.Threading.Tasks.Task.Delay(1)"),
+    EXPECT_NE(text.find("await Task.Delay(1)"),
               std::string::npos)
         << text;
     EXPECT_EQ(text.find("(default)"), std::string::npos) << text;

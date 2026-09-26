@@ -200,8 +200,8 @@ TEST(UsingInstruction, SeedRendersUsingStatement) {
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "object res");
     EXPECT_NE(text.find("using (res)"), std::string::npos) << text;
-    // The body call flattens "::" to ".": "System.Foo::Bar" -> "System.Foo.Bar".
-    EXPECT_NE(text.find("System.Foo.Bar"), std::string::npos) << text;
+    // The body call flattens "::" to ".": "System.Foo::Bar" -> "Foo.Bar".
+    EXPECT_NE(text.find("Foo.Bar"), std::string::npos) << text;
 }
 
 // A `using (null) { }` (the degenerate `using (null)` the C# compiler emits for

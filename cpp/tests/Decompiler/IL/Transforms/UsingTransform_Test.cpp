@@ -431,7 +431,7 @@ TEST(UsingTransform, SeedRendersUsingStatement) {
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "object obj");
     EXPECT_NE(text.find("using (obj)"), std::string::npos);
-    EXPECT_NE(text.find("System.Foo.Bar"), std::string::npos);
+    EXPECT_NE(text.find("Foo.Bar"), std::string::npos);
 }
 
 // ---- Negatives ----

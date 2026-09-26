@@ -230,8 +230,8 @@ TEST(NullableInstructions, SeedRendersNullableRewrap) {
     fn->CheckInvariant(ILPhase::Normal);
     std::string text = ILAstToCSharp(*fn, "void", "M", "object a");
     // The rewrap is implicit; the access chain (the call) renders directly as
-    // the flattened `System.Foo.M(a)` (the seed's CallText replaces `::` with `.`).
-    EXPECT_NE(text.find("System.Foo.M(a)"), std::string::npos) << text;
+    // the flattened `Foo.M(a)` (the seed's CallText replaces `::` with `.`).
+    EXPECT_NE(text.find("Foo.M(a)"), std::string::npos) << text;
     // The rewrap mnemonic must NOT appear in the C# output.
     EXPECT_EQ(text.find("nullable.rewrap"), std::string::npos) << text;
 }

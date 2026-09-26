@@ -2225,6 +2225,30 @@ ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::ResolveMethodDeclaringType
     return nullptr;
 }
 
+std::vector<std::string> MetadataFile::GetMethodSpecTypeArgumentNames(
+    std::uint32_t methodToken) const {
+    if (!IsValid()) return {};
+    std::uint32_t table = methodToken >> 24;
+    std::uint32_t row = methodToken & 0x00FFFFFFu;
+    try {
+        if (table == 0x2B && row && row <= impl_->db->MethodSpec.size()) {
+            std::uint32_t blobIndex = impl_->db->MethodSpec.get_value<std::uint32_t>(row - 1, 1);
+            auto blob = impl_->db->get_blob(blobIndex);
+            auto args = DecodeMethodSpecTypeArgs(
+                *impl_->db, blob.begin(),
+                static_cast<std::size_t>(blob.end() - blob.begin()));
+            std::vector<std::string> names;
+            names.reserve(args.size());
+            for (const auto& t : args)
+                names.push_back(t ? t->ReflectionName() : std::string());
+            return names;
+        }
+    } catch (const std::exception&) {
+        return {};
+    }
+    return {};
+}
+
 int MetadataFile::GetMethodSpecTypeArgumentCount(std::uint32_t methodToken) const {
     if (!IsValid()) return 0;
     std::uint32_t table = methodToken >> 24;

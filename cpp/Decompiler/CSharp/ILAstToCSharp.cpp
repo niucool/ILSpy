@@ -2214,6 +2214,18 @@ private:
                 // The static call: the own-type member renders
                 // unqualified.
                 typeName = SimplifyQualifiedMember(typeName);
+                // Otherwise the target type renders its short name --
+                // the C# name lookup through the using directives (the
+                // oracle's `Guid.NewGuid()` and `Contract.Requires`
+                // over the full metadata names; the resolver-based
+                // collision qualification rides with the
+                // name-qualification family).
+                auto dot = typeName.rfind('.');
+                if (dot != std::string::npos && dot > 0) {
+                    auto prev = typeName.rfind('.', dot - 1);
+                    if (prev != std::string::npos)
+                        typeName = typeName.substr(prev + 1);
+                }
             } else {
                 // A new-expression's type renders its short name (the C#
                 // name lookup through the using directives; the oracle's
@@ -2224,6 +2236,28 @@ private:
                 auto dot = typeName.rfind('.');
                 if (dot != std::string::npos)
                     typeName = typeName.substr(dot + 1);
+            }
+        }
+        // The instantiated static call renders its generic argument list
+        // (`Contract.Requires<ArgumentNullException>(...)`). A VAR/MVAR
+        // argument (a `!`/`!!` reflection-name marker) suppresses the
+        // list: the type-parameter naming is emitter-context work.
+        if (!call.TypeArgumentNames.empty()) {
+            bool allConcrete = true;
+            for (const auto& tn : call.TypeArgumentNames)
+                if (tn.find('!') != std::string::npos) allConcrete = false;
+            if (allConcrete) {
+                typeName += "<";
+                for (std::size_t i = 0; i < call.TypeArgumentNames.size(); ++i) {
+                    if (i > 0) typeName += ", ";
+                    // The short form (the C# name lookup through the using
+                    // directives; the last-segment convention).
+                    const std::string& tn = call.TypeArgumentNames[i];
+                    auto dot = tn.rfind('.');
+                    typeName += (dot != std::string::npos)
+                        ? tn.substr(dot + 1) : tn;
+                }
+                typeName += ">";
             }
         }
         std::string text = prefix + typeName + "(";
