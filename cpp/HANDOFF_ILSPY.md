@@ -973,7 +973,35 @@ the compiler-generated ones -- CLOSED (`1ad5f83e9` + the test
 inversion): the public parameterless empty-body ctor elides (the
 connid 24/4 -> 16/4; the pin at 9c683c94...; the corpus unchanged).
 The remaining queue: (f) the Debuggable decode and (e) the using-set
-over-collection. THE SWITCH-BODY SIMPLIFICATION -- CLOSED (`a2ad46ced`):
+over-collection -- BOTH ROOT-CAUSED (the audit's final two):
+
+(f) THE DEBUGGABLE DECODE: the attribute blob's enum argument
+    (DebuggingModes) resolves through GetTypeFromSerializedName ->
+    ParseReflectionName, which consults the MODULE's OWN types only
+    (probed: both the bare and the assembly-qualified names return an
+    unresolved SimpleType, def=null) -- the nested enum's definition
+    lives in the REFERENCED mscorlib, and the reflection-name path
+    never consults the referenced modules. Copying the net48 mscorlib
+    next to the fixture (/tmp) does NOT help -- the resolution gap is
+    in the path, not the file availability. THE FIX (a proper slice):
+    extend the ParseReflectionName/SimpleTypeResolveContext resolution
+    to fall back to the compilation's referenced modules (the merged
+    tree the facade already builds for the qualification machinery),
+    mirroring the C#'s SimpleTypeResolveContext(module) resolving
+    TypeRefs through the module's references. The whole attribute
+    currently renders `/*Could not decode attribute arguments.*/`
+    because CustomAttribute::DecodeValue catches the
+    EnumUnderlyingTypeResolveException (GetUnderlyingEnumType throws
+    on the unresolved definition, TypeProvider.cpp:320).
+
+(e) THE USING OVER-COLLECTION: System.Collections and
+    System.Threading.Tasks render where the oracle's set is smaller
+    (the oracle derives its usings from the types the RENDERED SYNTAX
+    names; the port's MinimalUsingSetOf approximates from the metadata
+    signatures and bodies). The two extra namespaces' sources are NOT
+    yet identified -- the assembly attributes and the rendered members
+    name neither; probe the per-type minimal sets to find the
+    contributing type before fixing. THE SWITCH-BODY SIMPLIFICATION -- CLOSED (`a2ad46ced`):
 the default section whose thunk targets the exit is the FALL-THROUGH
 shape (the after-switch code IS the default path) -- it drops from the
 inlining targets, renders no `default:` label or body, and the case
