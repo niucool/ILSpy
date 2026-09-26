@@ -3780,9 +3780,24 @@ std::vector<std::string> WholeModuleUsingSet(
                 emitted.insert(ns);
         }
     }
+    // The attribute sweep uses the MINIMAL collector (the per-type
+    // sweep's settings): the default constructor seeds the known-type
+    // namespaces (System, System.Collections, System.Collections.Generic,
+    // System.Threading.Tasks, System.Numerics -- the attribute-literal
+    // rendering's resolvable known types), which the whole-module header
+    // must not carry (the oracle's using set names only the namespaces
+    // the rendered declarations actually reference).
     std::unordered_set<std::string> attributeNamespaces;
-    CollectAttributeNamespaces(const_cast<TS::MetadataModule&>(module),
-                                attributeNamespaces);
+    {
+        RequiredNamespaceCollector collector(attributeNamespaces,
+                                              /*seedKnownTypeNamespaces=*/
+                                                  false,
+                                              /*minimalUsingSet=*/true);
+        collector.HandleAttributes(
+            const_cast<TS::MetadataModule&>(module).GetAssemblyAttributes());
+        collector.HandleAttributes(
+            const_cast<TS::MetadataModule&>(module).GetModuleAttributes());
+    }
     for (const std::string& ns : attributeNamespaces) {
         if (!ns.empty())
             emitted.insert(ns);
