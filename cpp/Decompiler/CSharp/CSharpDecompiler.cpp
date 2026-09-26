@@ -660,7 +660,10 @@ BaseNameDecision DecideBaseName(const TS::ITypeDefinition* typeDef,
 
 // The C# UseKeywordsForBuiltinTypes over a type definition: the primitive
 // definitions render their keyword spelling (uint, string, ...) in every
-// name position. Null when the definition is not a keyword type.
+// name position. Null when the definition is not a keyword type. The
+// native integers stay OFF: only the ELEMENT_TYPE_I/U signature forms
+// render nint/nuint; a plain System.IntPtr type reference (the net48
+// corpus's fields) renders the full name.
 const char* BuiltinTypeKeyword(const TS::ITypeDefinition* typeDef) {
     if (typeDef == nullptr)
         return nullptr;
@@ -672,8 +675,7 @@ const char* BuiltinTypeKeyword(const TS::ITypeDefinition* typeDef) {
         {"System.Int64", "long"},    {"System.UInt64", "ulong"},
         {"System.Single", "float"},  {"System.Double", "double"},
         {"System.Decimal", "decimal"}, {"System.String", "string"},
-        {"System.Object", "object"}, {"System.IntPtr", "nint"},
-        {"System.UIntPtr", "nuint"},  {"System.Void", "void"},
+        {"System.Object", "object"}, {"System.Void", "void"},
     };
     const std::string full = typeDef->Namespace() + "." + typeDef->Name();
     auto it = kBuiltinKeywords.find(full);

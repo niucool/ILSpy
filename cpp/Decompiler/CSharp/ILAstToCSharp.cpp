@@ -3167,7 +3167,10 @@ std::string CSharpTypeName(const TypeSystem::ITypePtr& type) {
     // The builtin type keywords (the C# UseKeywordsForBuiltinTypes over
     // any type whose reflection name is a known primitive -- the entity
     // model resolves System.UInt32 to a SimpleType, not a KnownType, so
-    // the dynamic_cast arm above misses it).
+    // the dynamic_cast arm above misses it). The native integers stay
+    // OFF this map: only the ELEMENT_TYPE_I/U signature forms (the
+    // KnownType arm above) render the nint/nuint keywords; a plain
+    // System.IntPtr type reference renders the full name.
     static const std::map<std::string, const char*> kBuiltinKeywords = {
         {"System.Boolean", "bool"},   {"System.Char", "char"},
         {"System.SByte", "sbyte"},   {"System.Byte", "byte"},
@@ -3176,8 +3179,7 @@ std::string CSharpTypeName(const TypeSystem::ITypePtr& type) {
         {"System.Int64", "long"},    {"System.UInt64", "ulong"},
         {"System.Single", "float"},  {"System.Double", "double"},
         {"System.Decimal", "decimal"}, {"System.String", "string"},
-        {"System.Object", "object"}, {"System.IntPtr", "nint"},
-        {"System.UIntPtr", "nuint"},
+        {"System.Object", "object"},
     };
     auto builtin = kBuiltinKeywords.find(rn);
     if (builtin != kBuiltinKeywords.end())
