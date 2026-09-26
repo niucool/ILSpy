@@ -1104,6 +1104,34 @@ bool TypeIsHiddenFromRender(const Metadata::MetadataFile& file,
     for (const auto& t : file.TypeDefs()) {
         if (t.Token != typeToken)
             continue;
+        // The C# IsAnonymousType: a generated name containing
+        // AnonType/AnonymousType, compiler-generated, with only
+        // read-only properties -- hidden under AnonymousTypes (on by
+        // default; the C# re-synthesizes the declarations from the
+        // usage sites).
+        const std::string name = t.Name;
+        if (t.Namespace.empty() &&
+            name.rfind("<>", 0) == 0 &&
+            (name.find("AnonType") != std::string::npos ||
+             name.find("AnonymousType") != std::string::npos) &&
+            Metadata::HasKnownAttribute(
+                file, typeToken,
+                TS::KnownAttribute::CompilerGenerated)) {
+            // HasOnlyReadOnlyProperties over the raw rows: every
+            // property is getter-only (the C# checks the properties
+            // alone -- the compiler-generated Equals/GetHashCode/
+            // ToString overrides are not part of the rule).
+            bool onlyReadOnlyProperties = true;
+            for (const auto& pr : file.GetProperties(typeToken)) {
+                auto accessors = file.GetPropertyAccessors(pr.Token);
+                if (accessors.SetterToken != 0) {
+                    onlyReadOnlyProperties = false;
+                    break;
+                }
+            }
+            if (onlyReadOnlyProperties)
+                return true;
+        }
         return std::string(t.Name).rfind(
                    "<PrivateImplementationDetails>", 0) == 0 &&
                t.Namespace.empty() &&
