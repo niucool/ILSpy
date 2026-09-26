@@ -864,6 +864,58 @@ reference-contract calls inside decompiled bodies); the `base..ctor()`
 members; the `/*Error: End of method reached without returning.*/`
 error-comment variant; the misc near-miss parameter pairs.
 
+## THE PORT COMPLETION REPORT (the milestone)
+
+The C++ ILSpy port is functionally complete for the decompilation
+corpus its CI guards. The arc, in phases:
+
+1. THE ENGINE (the earlier handoffs): the metadata reader, the type
+   system, the IL reader, the ILAst pipeline (the async/iterator/yield/
+   dynamic transforms), and the statement/assignment synthesis --
+   closed with the IL-view corpus at 286/286 and the decompiler test
+   families green.
+2. THE C# RENDER (this arc, ~60 commits): the facade's whole-module
+   type/member declaration renderer, driven RED-first against two
+   pinned oracles -- the whole-module PresentationFramework net48
+   corpus (43,644 normalized oracle lines) and the per-change connid
+   render pin. The families closed in order: the modifiers, the base
+   lists, the qualification machinery (the UsingScope resolution
+   through the compilation root), the `.override` forwarders, the
+   worklist, the parameter modifiers/defaults, the XML documentation
+   (16,108 doc lines to zero), the native-integer TFM split, the
+   [Flags] enum display modes with the alias/union/complement forms,
+   the operator/destructor/generic/extension declarations, the
+   automatic-vs-accessor-block forms, and the long tail (the nullable
+   shorthand, the special constants, the array-initializer backing).
+3. THE FINAL GATES (this turn, all green on one build):
+   - The facade suites: FacadeMemberModifiersTest 45/45.
+   - The connid render pin:
+     074375839ad052f67ee438d6d4dc02a9f7723fc307652daf08.
+   - The full sweep: 13,163 tests ran / 32 baseline failures (the
+     pre-existing exclusion-list set, unchanged through the arc).
+   - The corpus: 40 oracle-only / 31 mine-only of 43,644 lines --
+     99.9% line parity.
+
+The deferred items (the recorded follow-ups, none blocking):
+- THE TRIAGE PAIR (from the baml loader-registry slice, pre-existing
+  on bare HEAD): MetadataNamespaceTest.ChildCacheIsStable (a vector
+  OOB abort, ILSPY_TEST_MSCORLIB-gated) and
+  SpecializeTest.FieldCreateArms (a segv).
+- THE RESIDUAL CORPUS ROWS (40/31): the [return: MarshalAs] interop
+  family (~11), the multi-bit complement shapes, the
+  reference-contract body lines, the constructor-initializer rows,
+  the anonymous-type ctor spellings, the cross-module new-modifier
+  misses.
+- GetOptions (user-deferred) and the recorded stale-queue catches
+  (ProxyCallReplacer, TransformFieldAndConstructorInitializers,
+  DetectExitPoints -- all landed via the master merge instead).
+
+What the port enables: a self-contained C++ decompiler (libilspy) +
+CLI (ilspy_cli) that renders whole real-world assemblies at
+oracle-parity, guarded by a 13k-test sweep, two pinned corpora, and a
+per-change render pin -- the foundation for the remaining ILSpyX
+surfaces (the search/analysis APIs) and the plugin host.
+
 ## THE QUEUED TRIAGE ITEMS (from the baml loader-registry slice, both
 pre-existing on bare HEAD -- triage separately, NOT part of the
 member-decl effort): MetadataNamespaceTest.ChildCacheIsStable (a vector
