@@ -1062,7 +1062,7 @@ family, 34 rows); the connid pin unchanged.
   reference fixture set -- System.Runtime/System.Collections/
   System.Private.CoreLib from the .NET 10 runtime; without them the
   pin is 54895b5b...).
-- THE CORPUS: 9 oracle-only / 7 mine-only (the arc: the merged tree
+- THE CORPUS: 9 oracle-only / 6 mine-only (the arc: the merged tree
   60/51 -> the using-set fix 60/50 -> the interop properties 39/34 ->
   the constraint clauses 22/17 -> the conversion operators 19/14 ->
   the complement forms 17/13 -> the explicit indexers 13/10:
@@ -1079,9 +1079,11 @@ family, 34 rows); the connid pin unchanged.
   initializer rows, the `public virtual extern IEnumString
   SupportedLanguages` row, the `/*Error: End of method reached
   without returning.*/;` variant, the cross-module `new` misses (2),
-  the anonymous-type hides (the `<>f__AnonymousType0` + its member
-  rows), and the `[DefaultMember("Item")]` extra (the C# removes it
-  when the type declares an indexer).
+  and the anonymous-type hides (the `<>f__AnonymousType0` + its
+  member rows -- the C#'s anonymous-type rule in MemberIsHidden).
+  CLOSED THIS TURN: the `[DefaultMember("Item")]` extra (the
+  compiler-generated attribute drops when the type declares a
+  non-explicit indexer, `8179a690f`).
 - THE GATES: the sweep 13,166 ran / 15 baseline (env -u
   ILSPY_TEST_MSCORLIB); the facade suite 45 with the ONE pre-existing
   merged-tree failure (XmlDocumentationCommentsRenderOnMembers -- the
