@@ -1062,21 +1062,24 @@ family, 34 rows); the connid pin unchanged.
   reference fixture set -- System.Runtime/System.Collections/
   System.Private.CoreLib from the .NET 10 runtime; without them the
   pin is 54895b5b...).
-- THE CORPUS: 12 oracle-only / 9 mine-only (the arc: the merged tree
+- THE CORPUS: 9 oracle-only / 9 mine-only (the arc: the merged tree
   60/51 -> the using-set fix 60/50 -> the interop properties 39/34 ->
   the constraint clauses 22/17 -> the conversion operators 19/14 ->
   the complement forms 17/13 -> the explicit indexers 13/10:
   `Interface.this[...]` with no modifiers -- the GetExplicitInterfaceType
   rewrite the plain property arm already had) -> the special constants
-  on the enum members 12/9 (`uint.MaxValue` over the AllHex path).
-  THE REMAINING ~12/9 (sampled): the `Contract.Requires<...>` body
-  rows, the `base..ctor();`/`_id = Guid.NewGuid();` constructor-
-  initializer rows, the `[return: MarshalAs(...)]` METHOD rows (the
-  accessor slice did the properties; the methods need the same), the
-  `public virtual extern IEnumString SupportedLanguages` row, the
-  `/*Error: End of method reached without returning.*/;` variant, and
-  the cross-module `new void SetValue(...)`/`new CollectionRecord
-  this[...]` misses.
+  on the enum members 12/9 (`uint.MaxValue` over the AllHex path) ->
+  the methods' return-type attributes 9/9 (the [return: MarshalAs]
+  sections on the stub + empty-body arms, the accessor slice's
+  AccessorReturnAttributesText applied to the methods).
+  THE REMAINING ~9/9 (sampled): the `Contract.Requires<...>` body
+  rows (3), the `base..ctor();`/`_id = Guid.NewGuid();` constructor-
+  initializer rows, the `public virtual extern IEnumString
+  SupportedLanguages` row, the `/*Error: End of method reached
+  without returning.*/;` variant, the cross-module `new` misses (2),
+  and the anonymous-type hides (the `<>f__AnonymousType0` renders
+  where the oracle hides them -- the C#'s anonymous-type rule in
+  MemberIsHidden).
 - THE GATES: the sweep 13,166 ran / 15 baseline (env -u
   ILSPY_TEST_MSCORLIB); the facade suite 45 with the ONE pre-existing
   merged-tree failure (XmlDocumentationCommentsRenderOnMembers -- the
