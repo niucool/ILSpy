@@ -2293,23 +2293,43 @@ bool DecompileTypeToStringBody(
         // the compiler emits the angle-bracket names) or its accessors
         // carry no bodies (an interface member); a real accessor body
         // renders as its block.
-        bool hasBackingField = false;
+        bool anyAccessor = false;
+        std::string getterBody, setterBody;
+        getterBody = AccessorBodyText(file, typeSystem,
+                                      accessors.GetterToken, "get");
+        setterBody = AccessorBodyText(file, typeSystem,
+                                      accessors.SetterToken, "set");
+        // The C# automatic-property form: the stub renders when the
+        // accessors carry NO bodies (an interface or abstract member) or
+        // when they decompile to the backing-field pattern
+        // (PatternStatementTransform's `return <X>k__BackingField;` /
+        // `<X>k__BackingField = value;` -- the backing field must exist,
+        // only the compiler emits the angle-bracket names). A reference
+        // assembly's stale-RVA accessors fail to decode and render the
+        // empty-body error blocks instead -- a NON-decoding body does
+        // not collapse to the stub.
         const std::string backingName = "<" + p.Name + ">k__BackingField";
+        bool hasBackingField = false;
         for (const auto& f : file.GetFields(typeToken)) {
             if (f.Name == backingName) {
                 hasBackingField = true;
                 break;
             }
         }
-        bool anyAccessor = false;
-        std::string getterBody, setterBody;
-        if (!hasBackingField) {
-            getterBody = AccessorBodyText(file, typeSystem,
-                                          accessors.GetterToken, "get");
-            setterBody = AccessorBodyText(file, typeSystem,
-                                          accessors.SetterToken, "set");
-        }
-        if (hasBackingField || (getterBody.empty() && setterBody.empty())) {
+        auto trimmedBody = [](const std::string& body) {
+            std::size_t start = body.find_first_not_of(" \t\r\n");
+            if (start == std::string::npos)
+                return std::string();
+            std::size_t end = body.find_last_not_of(" \t\r\n");
+            return body.substr(start, end - start + 1);
+        };
+        bool backingPattern =
+            hasBackingField &&
+            (getterBody.empty() ||
+             trimmedBody(getterBody) == "return " + backingName + ";") &&
+            (setterBody.empty() ||
+             trimmedBody(setterBody) == backingName + " = value;");
+        if (backingPattern || (getterBody.empty() && setterBody.empty())) {
             out += " { ";
             if (accessors.GetterToken != 0) {
                 out += AccessorVisibilityText(
@@ -2355,6 +2375,8 @@ bool DecompileTypeToStringBody(
         if (!anyAccessor) {
             out += "\n{\n";
             if (accessors.GetterToken != 0) {
+                out += MemberAttributesText(
+                    module.GetDefinitionMethod(accessors.GetterToken));
                 out += AccessorVisibilityText(
                     module.GetDefinitionMethod(accessors.GetterToken),
                     propertyEntity);
@@ -2366,6 +2388,8 @@ bool DecompileTypeToStringBody(
                 anyAccessor = true;
             }
             if (accessors.SetterToken != 0) {
+                out += MemberAttributesText(
+                    module.GetDefinitionMethod(accessors.SetterToken));
                 out += AccessorVisibilityText(
                     module.GetDefinitionMethod(accessors.SetterToken),
                     propertyEntity);
@@ -2481,18 +2505,58 @@ bool DecompileTypeToStringBody(
             out += eventTypeName;
             out += ' ';
             out += eventName;
-            if (isExplicitImplementation) {
+            // The C# DoDecompileEvent's UseCustomEvents gate: the
+            // add/remove block form renders when the accessors carry
+            // bodies (the metadata HasBody; a reference assembly's
+            // stale RVA counts, and its never-decoding bodies render the
+            // empty-body error blocks). The field form renders when
+            // neither accessor has a body (a crafted or interface-like
+            // event) -- the recognized automatic pattern (the connid's
+            // real bodies) is a later refinement.
+            std::string adderBody = AccessorBodyText(
+                file, typeSystem, accessors.AdderToken, "add");
+            std::string removerBody = AccessorBodyText(
+                file, typeSystem, accessors.RemoverToken, "remove");
+            bool accessorsHaveBodies =
+                !adderBody.empty() || !removerBody.empty();
+            // The C# AutoEventDecompiler.IsAutomaticEvent: both
+            // accessors compiler-generated AND decompiling to the
+            // Delegate.Combine/Remove pattern over the backing field
+            // render the field-like form (the C# matches the IL pattern;
+            // the port approximates over the rendered bodies -- the
+            // compiler-generated flag plus the combine/remove text; a
+            // never-decoding reference-assembly body has neither).
+            auto trimmedEventBody = [](const std::string& body) {
+                std::size_t start = body.find_first_not_of(" \t\r\n");
+                if (start == std::string::npos)
+                    return std::string();
+                std::size_t end = body.find_last_not_of(" \t\r\n");
+                return body.substr(start, end - start + 1);
+            };
+            bool isAutomaticEvent =
+                accessorsHaveBodies && !adderBody.empty() &&
+                !removerBody.empty() &&
+                Metadata::HasKnownAttribute(
+                    file, accessors.AdderToken,
+                    TS::KnownAttribute::CompilerGenerated) &&
+                Metadata::HasKnownAttribute(
+                    file, accessors.RemoverToken,
+                    TS::KnownAttribute::CompilerGenerated) &&
+                trimmedEventBody(adderBody).find(
+                    "Delegate.Combine(") != std::string::npos &&
+                trimmedEventBody(removerBody).find(
+                    "Delegate.Remove(") != std::string::npos;
+            if (isExplicitImplementation ||
+                (accessorsHaveBodies && !isAutomaticEvent)) {
                 out += "\n{\n";
                 if (accessors.AdderToken != 0) {
                     out += "add\n{\n";
-                    out += AccessorBodyText(file, typeSystem,
-                                            accessors.AdderToken, "add");
+                    out += adderBody;
                     out += "}\n";
                 }
                 if (accessors.RemoverToken != 0) {
                     out += "remove\n{\n";
-                    out += AccessorBodyText(file, typeSystem,
-                                            accessors.RemoverToken, "remove");
+                    out += removerBody;
                     out += "}\n";
                 }
                 out += "}\n";
