@@ -824,12 +824,28 @@ AccessorBodyText). The member-decl families that remain:
     name; the [Flags] single-bit-only rule; the AllHex skip for
     aliases -- the first form concatenated the hex digits with the
     alias). 47 rows. Corpus: 274/309 -> 126/165 across the two.
-  * The remaining 'other' family (~126 rows): the [Flags]
-    complement/composition forms (`ENABLED = ~DOES_NOT_EXIST`, the
-    `Item1 | Item2` unions -- the C# ConvertEnumValue's flags arms),
-    the static-array-init field spellings, the const-double literal
-    forms (`1638.0`), the error-comment variants (`End of method
-    reached without returning`) -- sample before picking.
+  * THE [FLAGS] UNION/COMPLEMENT -- CLOSED (`9c411ca86`): the C#
+    ConvertEnumValue flags arms (the union `A | B` over the earlier
+    single-bit members by weight descending; the complement `~X`; the
+    multi-bit-within-mask numeric rule). THE MASK CRUX: the negated
+    value masks to the underlying range for byte/short/int only -- a
+    64-bit underlying type keeps the full complement (its high bits
+    never clear -- masking to 32 bits wrongly completed a 30-term
+    bogus complement on the oracle's long-based enum). Corpus:
+    126/165 -> 101/141.
+  * THE REMAINING TAIL (~101 rows, the finish line): (a) the QUALIFIED
+    const-field enum forms (`public const XmlToken PositionValues =
+    XmlToken.Left | ...` -- the same EnumFlagsComposition with
+    qualify=true + NO row rule, declaringEnumMember=null in the C#;
+    also the `(XmlToken)17` cast fallback); (b) the static-array-init
+    field spellings (mine renders the hash-named fields the oracle
+    hides -- the <PrivateImplementationDetails> type is hidden, the
+    array initializers render inline); (c) the const-double literal
+    forms (`1638.0`); (d) the error-comment variants (`End of method
+    reached without returning`); (e) the `DOES_NOT_EXIST = uint
+    .MaxValue` special-constant forms. Once at parity: the final
+    full-gate sequence (the facade tests + the connid pin + the sweep)
+    + the completion summary.
   * The EXPLICIT-IMPL PROPERTY NAMES -- CLOSED (`77df0389a`): the
     interface-qualified rewrite mirrors the event arm's (the first
     explicitly implemented member's declaring type through
