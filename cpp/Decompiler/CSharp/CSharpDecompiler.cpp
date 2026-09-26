@@ -427,6 +427,105 @@ const TS::INamespace* ResolveNamespaceFullName(const TS::INamespace& root,
 // it -- plus static and the virtual family) with ConvertField's
 // const/readonly/volatile bits, rendered as the declaration's leading
 // keywords in the AllModifiers output order.
+// The C# SetNewModifier: a member introduced in a class or struct hides
+// an accessible same-name member (or nested type) in a NON-INTERFACE base
+// type -- the methods hide by signature (the name, the type-parameter
+// count, and the parameter list including the reference kinds), the
+// fields, properties, events, and types by name alone. The hide grants
+// the `new` modifier. The comparison runs at the definition level (the
+// port's base-type walk yields the definitions, not the constructed
+// instantiations, so a generic base's substituted signature may
+// under-match -- the corpus shapes are the non-generic re-implementations).
+bool MemberHidesBaseMember(const TS::IMember* member,
+                            const TS::MetadataModule& module) {
+    if (member == nullptr || member->DeclaringType() == nullptr)
+        return false;
+    const TS::ITypeDefinition* declaringDef =
+        member->DeclaringType()->GetDefinition();
+    if (declaringDef == nullptr)
+        return false;
+    const Resolver::MemberLookup lookup(declaringDef, &module);
+    const bool hideBasedOnSignature =
+        dynamic_cast<const TS::ITypeDefinition*>(member) == nullptr &&
+        member->SymbolKind() != TS::SymbolKind::Field &&
+        member->SymbolKind() != TS::SymbolKind::Property &&
+        member->SymbolKind() != TS::SymbolKind::Event;
+    const auto* entityMethod =
+        dynamic_cast<const TS::IMethod*>(member);
+    const std::size_t entityTypeParameterCount =
+        entityMethod != nullptr ? entityMethod->TypeParameters().size()
+                                : 0;
+    for (const TS::IType* baseType :
+         TS::GetNonInterfaceBaseTypes(*member->DeclaringType())) {
+        if (baseType->GetDefinition() == declaringDef)
+            // The C# `entity.DeclaringType != t` -- the declaring type's
+            // own members are the re-declaration itself, not a hide.
+            continue;
+        const TS::ITypeDefinition* baseDef = baseType->GetDefinition();
+        if (baseDef == nullptr)
+            continue;
+        if (!hideBasedOnSignature) {
+            // The name-based hide: a nested type or a same-name
+            // non-indexer member.
+            for (const TS::ITypeDefinition* nested : baseDef->NestedTypes())
+                if (nested != nullptr && nested->Name() == member->Name() &&
+                    lookup.IsAccessible(*nested, true))
+                    return true;
+            for (const TS::IField* f : baseDef->Fields())
+                if (f != nullptr && f->Name() == member->Name() &&
+                    lookup.IsAccessible(*f, true))
+                    return true;
+            for (const TS::IProperty* p : baseDef->Properties())
+                if (p != nullptr && p->SymbolKind() !=
+                                        TS::SymbolKind::Indexer &&
+                    p->Name() == member->Name() &&
+                    lookup.IsAccessible(*p, true))
+                    return true;
+            for (const TS::IEvent* e : baseDef->Events())
+                if (e != nullptr && e->Name() == member->Name() &&
+                    lookup.IsAccessible(*e, true))
+                    return true;
+        } else {
+            // The signature-based hide: a same-name member that is not a
+            // method at all, or a method whose parameter list (the count,
+            // the reference kinds, and the types) and type-parameter count
+            // match. The indexers, constructors, and destructors never
+            // participate.
+            for (const TS::IMethod* m : baseDef->Methods()) {
+                if (m == nullptr || m->Name() != member->Name() ||
+                    m->SymbolKind() == TS::SymbolKind::Indexer ||
+                    m->SymbolKind() == TS::SymbolKind::Constructor ||
+                    m->SymbolKind() == TS::SymbolKind::Destructor ||
+                    !lookup.IsAccessible(*m, true))
+                    continue;
+                if (entityMethod == nullptr)
+                    return true;
+                if (m->TypeParameters().size() !=
+                    entityTypeParameterCount)
+                    continue;
+                if (entityMethod->Parameters().size() !=
+                    m->Parameters().size())
+                    continue;
+                bool signaturesEqual = true;
+                for (std::size_t i = 0; i < m->Parameters().size(); ++i) {
+                    const TS::IParameter* a = entityMethod->Parameters()[i];
+                    const TS::IParameter* b = m->Parameters()[i];
+                    if (a == nullptr || b == nullptr ||
+                        a->ReferenceKind() != b->ReferenceKind() ||
+                        a->Type().ReflectionName() !=
+                            b->Type().ReflectionName()) {
+                        signaturesEqual = false;
+                        break;
+                    }
+                }
+                if (signaturesEqual)
+                    return true;
+            }
+        }
+    }
+    return false;
+}
+
 // The C# operator declarations (the TypeSystemAstBuilder's ConvertOperator
 // name mapping): the ECMA op_* special-name methods render as the C#
 // operator spellings -- the binary/unary operators as `operator <token>`
@@ -519,6 +618,50 @@ std::string MemberModifiersText(const TS::IMember* member) {
     }
     if (MemberSignatureHasPointer(member))
         m = m | SyntaxNS::Modifiers::Unsafe;
+    // The C# SetNewModifier: the hide of an accessible same-name (or
+    // same-signature) base member grants the `new` modifier. The module
+    // rides the member's own (the lookup's internal access consults it).
+    // The C# gates the walk on the metadata's Virtual/NewSlot pair --
+    // a method whose Virtual flag equals its NewSlot flag (the plain
+    // methods and the new-slot virtuals); a Virtual-without-NewSlot
+    // method (the first virtual declaration OR the override -- the C#
+    // IMethod.IsOverride covers both shapes by its (NewSlot|Virtual|
+    // Static)==Virtual definition) never takes `new`. The properties and
+    // events gate on their accessor's shape; the fields and types walk
+    // unconditionally.
+    if (member != nullptr && member->ParentModule() != nullptr) {
+        bool newModifierGate = true;
+        if (const auto* methodMember =
+                dynamic_cast<const TS::IMethod*>(member)) {
+            newModifierGate =
+                !methodMember->IsOverride() &&
+                !methodMember->IsExplicitInterfaceImplementation();
+        } else if (const auto* propertyMember =
+                       dynamic_cast<const TS::IProperty*>(member)) {
+            const TS::IMethod* accessor =
+                propertyMember->Getter() != nullptr
+                    ? propertyMember->Getter()
+                    : propertyMember->Setter();
+            newModifierGate =
+                accessor != nullptr && !accessor->IsOverride() &&
+                !accessor->IsExplicitInterfaceImplementation();
+        } else if (const auto* eventMember =
+                       dynamic_cast<const TS::IEvent*>(member)) {
+            const TS::IMethod* accessor =
+                eventMember->AddAccessor() != nullptr
+                    ? eventMember->AddAccessor()
+                    : eventMember->RemoveAccessor();
+            newModifierGate =
+                accessor != nullptr && !accessor->IsOverride() &&
+                !accessor->IsExplicitInterfaceImplementation();
+        }
+        if (newModifierGate &&
+            MemberHidesBaseMember(
+                member,
+                *dynamic_cast<const TS::MetadataModule*>(
+                     member->ParentModule())))
+            m = m | SyntaxNS::Modifiers::New;
+    }
     std::string out;
     for (SyntaxNS::Modifiers modifier : SyntaxNS::CSharpModifiers::AllModifiers) {
         if (modifier == SyntaxNS::Modifiers::Any)
