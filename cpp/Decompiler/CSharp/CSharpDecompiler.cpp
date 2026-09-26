@@ -1013,8 +1013,17 @@ std::string ConstantValueText(const std::any& value,
         }
         if (auto* str = std::any_cast<std::string>(&value))
             return "\"" + *str + "\"";
-        if (auto* ch = std::any_cast<char16_t>(&value))
-            return std::string("'") + static_cast<char>(*ch) + "'";
+        if (auto* ch = std::any_cast<char16_t>(&value)) {
+            // The C# char literal's escaped forms (the TextWriter's
+            // EscapeString): the backslash and the quote render their
+            // escape sequences.
+            char c = static_cast<char>(*ch);
+            if (c == '\\')
+                return "'\\\\'";
+            if (c == '\'')
+                return "'\\''";
+            return std::string("'") + c + "'";
+        }
     } else if (type.IsReferenceType()) {
         return "null";
     }
