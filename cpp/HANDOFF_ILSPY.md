@@ -737,9 +737,15 @@ AccessorBodyText). The member-decl families that remain:
     method-body entry, AND the instance's state_->typeSystem.emplace
     -- the last is easy to miss; the connid pin catches it). Corpus:
     2160/2099 -> 1650/1589 normalized rows.
+  * The [FLAGS] enum display mode -- CLOSED (`eba37b718`): the
+    [Flags] check at the analysis's head (the C# returns early; the
+    walk's out-of-order fallback must not overwrite it) + the hex
+    literal's underlying-type suffix preservation (the suffix is the
+    decimal literal's part after the LEADING digits -- `0x10u`).
+    Corpus: 1650/1589 -> 1402/1343.
   * The P/Invoke declarations (`public static extern bool ShowWindow(
     IntPtr hwnd, SW nCmdShow);`) + the `[StructLayout]` struct
-    members + the enum-value rows in the ~972 'other' family.
+    members in the remaining 'other' family.
   * The `bool ITextSelection.IsInterimSelection` explicit-impl
     property rows.
 All in the normalized set diff over /tmp/pf_oracle.txt vs
