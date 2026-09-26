@@ -3354,6 +3354,13 @@ bool DecompileTypeToStringBody(
             partialType->IsDeclaredMember(m.Token)) {
             continue;
         }
+        // The C# MemberIsHidden's constructor arm: a parameterless
+        // constructor with no body on an IMPORTED type (a ComImport
+        // co-class -- the runtime synthesizes the constructor; the source
+        // never expressed it) does not render.
+        if (m.Name == ".ctor" && m.RVA == 0 &&
+            (file.GetTypeDefAttributes(typeToken) & 0x1000u) != 0)
+            continue;
         // The constructor arm (the C# DoDecompileMember's constructor
         // case): the instance/type constructor renders with the TYPE name
         // and no return type.
