@@ -2691,6 +2691,18 @@ bool DecompileTypeToStringBody(
                     methodName = "operator " + token;
             }
         }
+        // The C# ConvertDestructor: the Finalize overrides render as
+        // `~TypeName()` -- the name from the declaring type, no
+        // modifiers, no return type (the DestructorDeclaration carries
+        // none; the accessibility and the override shape are implied).
+        bool isDestructor =
+            !isConstructor && methodEntity != nullptr &&
+            methodEntity->SymbolKind() == TS::SymbolKind::Destructor;
+        if (isDestructor) {
+            methodName = "~" + typeName;
+            modifiers.clear();
+            returnType.clear();
+        }
         // The C# AddInterfaceImplHelpers (the .override directive
         // synthesis): a plain-named method bound to an interface contract
         // through a MethodImpl row (the VB-style explicit implementation
@@ -2774,7 +2786,9 @@ bool DecompileTypeToStringBody(
             }
             out += MemberAttributesText(methodEntity);
             out += modifiers;
-            out += isConstructor ? std::string() : returnType + " ";
+            out += (isConstructor || returnType.empty())
+                       ? std::string()
+                       : returnType + " ";
             out += methodName;
             out += "(" + paramDecl + ");\n";
             renderOverrideForwarders();
@@ -2786,8 +2800,8 @@ bool DecompileTypeToStringBody(
         bool iteratorDecompiled = false;
         if (CSharpDecompiler::DecompileMethodToString(
                 file, typeSystem, m.Token, m.RVA, methodName, text,
-                isConstructor, &asyncDecompiled, &iteratorDecompiled,
-                scopeResolver.get())) {
+                isConstructor || isDestructor, &asyncDecompiled,
+                &iteratorDecompiled, scopeResolver.get())) {
             out += MemberAttributesText(methodEntity, asyncDecompiled,
                                         iteratorDecompiled);
             out += modifiers;
@@ -2802,7 +2816,9 @@ bool DecompileTypeToStringBody(
             // members previously vanished from the render here).
             out += MemberAttributesText(methodEntity);
             out += modifiers;
-            out += isConstructor ? std::string() : returnType + " ";
+            out += (isConstructor || returnType.empty())
+                       ? std::string()
+                       : returnType + " ";
             out += methodName;
             out += "(" + paramDecl + ")\n";
             out += "{\n";
