@@ -673,8 +673,12 @@ TEST(CSharpDecompilerTest, DecompileTypeRendersConstructors)
         std::string text;
         ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
             module, t.Token, text));
-        EXPECT_NE(text.find("EventSetter()"), std::string::npos)
-            << "the constructor renders with the type name: " << text;
+        // The implicit default constructor is ELIDED (the compiler's
+        // default over the object base -- the oracle renders the bare
+        // property members with no constructor at all), and the raw
+        // metadata constructor name never leaks.
+        EXPECT_EQ(text.find("EventSetter()"), std::string::npos)
+            << "the implicit default constructor is elided: " << text;
         EXPECT_EQ(text.find(".ctor"), std::string::npos)
             << "the raw metadata constructor name does not leak: " << text;
         return;
