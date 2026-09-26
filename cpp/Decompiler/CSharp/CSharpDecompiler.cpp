@@ -123,6 +123,26 @@ std::string CSharpDecompiler::DecompileFunctionToString(
     return IL::ILAstToCSharp(function, returnType, methodName, paramDecl);
 }
 
+// The native-integer type-system option (the C# GetOptions'
+// NativeIntegersWithoutAttribute under the DecompilerSettings'
+// NumericIntPtr flag): the oracle's effective behavior renders every
+// System.IntPtr as nint on the modern .NET targets and keeps the full
+// name on the .NETFramework ones (the language-version gate the
+// settings' ctor applies turns NumericIntPtr off below C# 11; the TFM
+// approximates the boundary the oracle's renders show).
+TS::TypeSystemOptions NativeIntegerOptionsFor(
+    const Metadata::MetadataFile& file) {
+    TS::TypeSystemOptions options = TS::TypeSystemOptions::Default;
+    const std::string tfm =
+        Metadata::DetectTargetFrameworkId(file).value_or(std::string());
+    // The .NETFramework family (and its legacy siblings) keeps the full
+    // names; the modern targets render the native-integer keywords.
+    if (tfm.find(".NETFramework") == 0 || tfm.find("Silverlight") == 0 ||
+        tfm.find(".NETPortable") == 0)
+        return options;
+    return options | TS::TypeSystemOptions::NativeIntegersWithoutAttribute;
+}
+
 namespace {
 
 // The base-list/member-signature name composition (the C#
@@ -259,7 +279,8 @@ bool CSharpDecompiler::DecompileMethodToString(
     // per call, kept alive through the render below.
     Metadata::UniversalAssemblyResolver resolver(
         file.FileName(), false, Metadata::DetectTargetFrameworkId(file));
-    TS::DecompilerTypeSystem typeSystem(file, resolver);
+    TS::DecompilerTypeSystem typeSystem(file, resolver,
+                                        NativeIntegerOptionsFor(file));
     return DecompileMethodToString(file, &typeSystem, methodToken,
                                    methodRva, methodName, out, isConstructor);
 }
@@ -2443,7 +2464,8 @@ bool CSharpDecompiler::DecompileTypeToString(
     // + the reference-loaded type system, one pair per call.
     Metadata::UniversalAssemblyResolver resolver(
         file.FileName(), false, Metadata::DetectTargetFrameworkId(file));
-    TS::DecompilerTypeSystem typeSystem(file, resolver);
+    TS::DecompilerTypeSystem typeSystem(file, resolver,
+                                        NativeIntegerOptionsFor(file));
     // The -t render's using set (the type's own collected namespaces) for
     // the resolver's scope; the whole-module loop overrides it with the
     // module-wide set (one DecompileRun over every type).
@@ -2553,7 +2575,8 @@ CSharpDecompiler::CSharpDecompiler(
     state_->resolver =
         std::make_unique<Metadata::UniversalAssemblyResolver>(
             file.FileName(), false, Metadata::DetectTargetFrameworkId(file));
-    state_->typeSystem.emplace(file, *state_->resolver);
+    state_->typeSystem.emplace(file, *state_->resolver,
+                                NativeIntegerOptionsFor(file));
 }
 
 CSharpDecompiler::~CSharpDecompiler() = default;
@@ -2841,7 +2864,8 @@ std::string CSharpDecompiler::DecompileWholeModuleToString(
     // The static scaffold's per-call wiring (the note above).
     Metadata::UniversalAssemblyResolver resolver(
         file.FileName(), false, Metadata::DetectTargetFrameworkId(file));
-    TS::DecompilerTypeSystem typeSystem(file, resolver);
+    TS::DecompilerTypeSystem typeSystem(file, resolver,
+                                        NativeIntegerOptionsFor(file));
 
     std::string out;
     // The leading attribute sections (the whole-module path's

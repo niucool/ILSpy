@@ -76,11 +76,15 @@ enum class TypeSystemOptions : std::uint32_t {
 	FirstClassSpanTypes = 0x40000,
 	ExtensionMembers = 0x80000,
 	RuntimeAsync = 0x100000,
-	// The C# `Default` composite (the bitwise OR of the 19 listed constituents, the same
-	// `|`-in-initializer form `ConversionFlags::StandardConversionFlags` uses). It does NOT
-	// include `OnlyPublicAPI` (0x8), `Uncached` (0x10), or `KeepModifiers` (0x40) -- the three
-	// flags the C# `Default` deliberately omits; the computed value is 0x1FFFA7 (pinned
-	// independently in the test).
+	// The `Default` composite (the bitwise OR of the listed constituents, the
+	// same `|`-in-initializer form `ConversionFlags::StandardConversionFlags`
+	// uses). It does NOT include `OnlyPublicAPI` (0x8), `Uncached` (0x10),
+	// `KeepModifiers` (0x40), or `NativeIntegersWithoutAttribute` (0x8000) --
+	// the C# GetOptions(DecompilerSettings) sets the last only under the
+	// non-default NumericIntPtr setting (every IntPtr would become nint,
+	// attribute or not; the C# default requires the [NativeInteger]
+	// attribute, so a plain System.IntPtr reference -- the net48 corpus's
+	// fields -- keeps its full name).
 	Default = Dynamic |
 		Tuple |
 		ExtensionMethods |
@@ -93,7 +97,6 @@ enum class TypeSystemOptions : std::uint32_t {
 		NativeIntegers |
 		FunctionPointers |
 		ScopedRef |
-		NativeIntegersWithoutAttribute |
 		RefReadOnlyParameters |
 		ParamsCollections |
 		FirstClassSpanTypes |

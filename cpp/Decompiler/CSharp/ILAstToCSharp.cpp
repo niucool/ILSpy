@@ -3136,8 +3136,10 @@ std::string CSharpTypeName(const TypeSystem::ITypePtr& type) {
             case TypeSystem::KnownTypeCode::Decimal: return "decimal";
             case TypeSystem::KnownTypeCode::String: return "string";
             case TypeSystem::KnownTypeCode::Object: return "object";
-            case TypeSystem::KnownTypeCode::IntPtr: return "nint";
-            case TypeSystem::KnownTypeCode::UIntPtr: return "nuint";
+            // The IntPtr/UIntPtr known types render the FULL NAMES (the
+            // C# keyword table has no entries for them); the nint/nuint
+            // keywords belong to the ELEMENT_TYPE_I/U forms (the
+            // NInt/NUInt kinds, the by-kind switch below).
             default: break;
         }
     }

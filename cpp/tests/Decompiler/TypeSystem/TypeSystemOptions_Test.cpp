@@ -87,7 +87,6 @@ TEST(TypeSystemOptionsTest, DefaultIsBitwiseOrOfConstituents)
         TypeSystemOptions::NativeIntegers |
         TypeSystemOptions::FunctionPointers |
         TypeSystemOptions::ScopedRef |
-        TypeSystemOptions::NativeIntegersWithoutAttribute |
         TypeSystemOptions::RefReadOnlyParameters |
         TypeSystemOptions::ParamsCollections |
         TypeSystemOptions::FirstClassSpanTypes |
@@ -95,7 +94,7 @@ TEST(TypeSystemOptionsTest, DefaultIsBitwiseOrOfConstituents)
         TypeSystemOptions::RuntimeAsync;
     EXPECT_EQ(TypeSystemOptions::Default, expected);
     // The C# computed value (0x1FFFFA7), pinned independently of the `|` form.
-    EXPECT_EQ(static_cast<std::uint32_t>(TypeSystemOptions::Default), 0x1FFFA7u);
+    EXPECT_EQ(static_cast<std::uint32_t>(TypeSystemOptions::Default), 0x1F7FA7u);
 }
 
 // ---------------------------------------------------------------------------
