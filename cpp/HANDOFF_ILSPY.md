@@ -972,8 +972,16 @@ plus the empty default constructors render where the oracle hides
 the compiler-generated ones -- CLOSED (`1ad5f83e9` + the test
 inversion): the public parameterless empty-body ctor elides (the
 connid 24/4 -> 16/4; the pin at 9c683c94...; the corpus unchanged).
-The remaining queue: (f) the Debuggable decode, (a) the switch-body
-simplification, (e) the using-set over-collection. THE
+The remaining queue: (f) the Debuggable decode and (e) the using-set
+over-collection. THE SWITCH-BODY SIMPLIFICATION -- CLOSED (`a2ad46ced`):
+the default section whose thunk targets the exit is the FALL-THROUGH
+shape (the after-switch code IS the default path) -- it drops from the
+inlining targets, renders no `default:` label or body, and the case
+bodies inline with their break/return terminators (the
+exit-is-target gate rejected the whole switch before, leaving the raw
+goto form). The connid 14/2 -> 3/1 (the pin at 54895b5b...); the
+corpus unchanged. THE CONNID IS NOW 3/1: the Debuggable decode (1)
++ the two extra usings -- the last two items of the audit. THE
 BUTTON.CLICKEVENT QUALIFICATION -- CLOSED (`7771054c3`): the static
 members' declaring types render SHORT (`Button.ClickEvent`) -- the
 emitter's ShortQualifiedMember after the same-type simplification;
