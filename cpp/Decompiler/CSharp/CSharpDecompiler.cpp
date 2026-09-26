@@ -3506,6 +3506,29 @@ bool DecompileTypeToStringBody(
                 file, typeSystem, m.Token, m.RVA, methodName, text,
                 isConstructor || isDestructor, &asyncDecompiled,
                 &iteratorDecompiled, scopeResolver.get())) {
+            // The C# default-constructor elision: a PUBLIC PARAMETERLESS
+            // instance constructor whose decompiled body renders empty
+            // (the compiler's implicit default over the object base --
+            // nothing the source expressed) does not render.
+            if (m.Name == ".ctor" && paramDecl.empty() &&
+                modifiers.find("public ") == 0) {
+                std::size_t open = text.find("{\n");
+                std::size_t close = text.rfind("\n}");
+                std::string body =
+                    (open != std::string::npos &&
+                     close != std::string::npos && close > open + 2)
+                        ? text.substr(open + 2, close - (open + 2))
+                        : std::string();
+                bool emptyBody = true;
+                for (char c : body)
+                    if (c != ' ' && c != '\t' && c != '\r' && c != '\n')
+                        emptyBody = false;
+                if (emptyBody) {
+                    renderOverrideForwarders();
+                    rendered = true;
+                    continue;
+                }
+            }
             out += MemberAttributesText(methodEntity, asyncDecompiled,
                                         iteratorDecompiled);
             out += modifiers;
