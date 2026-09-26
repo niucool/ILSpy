@@ -2648,6 +2648,13 @@ bool DecompileTypeToStringBody(
                 } else if (currentValue <= previousValue) {
                     outOfOrder = true;
                     break;
+                } else if (!allConsecutive && !allPowersOfTwo) {
+                    // The C#'s per-member early abort: the values are
+                    // neither consecutive nor all powers of two, so every
+                    // value displays as-is (the All mode) -- no need to
+                    // walk the rest.
+                    displayMode = EnumValueDisplayMode::All;
+                    break;
                 }
                 previousValue = currentValue;
             }
