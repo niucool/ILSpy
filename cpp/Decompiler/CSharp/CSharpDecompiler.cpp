@@ -60,6 +60,7 @@
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/PartialTypeInfo.hpp"
 #include "Decompiler/Metadata/UniversalAssemblyResolver.hpp"
+#include "Decompiler/Metadata/SRMExtensions.hpp"
 #include "Decompiler/Metadata/DotNetCorePathFinderExtensions.hpp"
 #include "Decompiler/TypeSystem/DecompilerTypeSystem.hpp"
 #include "Decompiler/TypeSystem/IProperty.hpp"
@@ -2048,7 +2049,15 @@ bool DecompileTypeToStringBody(
         // fields' values.
         enum class EnumValueDisplayMode { None, FirstOnly, All, AllHex };
         EnumValueDisplayMode displayMode = EnumValueDisplayMode::None;
-        {
+        // The C# DetectBestEnumValueDisplayMode's head: a [Flags] enum
+        // always renders the hexadecimal form.
+        if (Metadata::HasKnownAttribute(
+                file, typeToken, TS::KnownAttribute::Flags))
+            displayMode = EnumValueDisplayMode::AllHex;
+        // The walk only runs when the [Flags] check did not decide (the
+        // C# returns early; the walk's out-of-order fallback would
+        // otherwise overwrite the hexadecimal form).
+        if (displayMode == EnumValueDisplayMode::None) {
             bool first = true, allConsecutive = true, allPowersOfTwo = true;
             std::int64_t firstValue = 0, previousValue = 0;
             bool outOfOrder = false;
@@ -2154,7 +2163,9 @@ bool DecompileTypeToStringBody(
                     ConstantFieldLiteral(*fieldEntity);
                 if (displayMode == EnumValueDisplayMode::AllHex) {
                     // The C# AllHex arm: values >= 10 render as 0x + the
-                    // uppercase hex form.
+                    // uppercase hex form, KEEPING the decimal literal's
+                    // underlying-type suffix (the LiteralFormat flip over
+                    // the already-suffixed literal).
                     std::any constant = fieldEntity->GetConstantValue();
                     std::int64_t v = 0;
                     if (auto* p = std::any_cast<std::int32_t>(&constant))
@@ -2168,8 +2179,17 @@ bool DecompileTypeToStringBody(
                     if (v >= 10) {
                         char buf[32];
                         std::snprintf(buf, sizeof(buf), "0x%llX",
-                                       static_cast<unsigned long long>(v));
-                        literal = buf;
+                                      static_cast<unsigned long long>(v));
+                        std::string hex = buf;
+                        // The suffix from the decimal literal (the part
+                        // after the leading digits: u/L/uL).
+                        std::size_t firstNonDigit = 0;
+                        while (firstNonDigit < literal.size() &&
+                               literal[firstNonDigit] >= '0' &&
+                               literal[firstNonDigit] <= '9')
+                            firstNonDigit++;
+                        hex += literal.substr(firstNonDigit);
+                        literal = hex;
                     }
                 }
                 if (!literal.empty())
