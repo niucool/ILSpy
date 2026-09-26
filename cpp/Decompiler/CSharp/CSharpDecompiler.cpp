@@ -977,6 +977,23 @@ TS::ITypePtr InterfaceInstantiationFor(
 std::string RenderBaseTypeName(const TS::ITypeDefinition* typeDef,
                                const TS::ITypePtr& instantiation,
                                const Resolver::CSharpResolver* resolver) {
+    // The C# nullable shorthand: System.Nullable<T> renders `T?` (the
+    // AstBuilder's ComposedType with the nullable specifier; T is a
+    // value type by the definition's struct constraint).
+    if (typeDef != nullptr &&
+        typeDef->KnownTypeCode() == TS::KnownTypeCode::NullableOfT) {
+        const auto* nullableParameterized =
+            dynamic_cast<const TS::ParameterizedType*>(
+                instantiation.get());
+        if (nullableParameterized != nullptr &&
+            nullableParameterized->TypeArguments().size() == 1) {
+            const TS::ITypePtr& argument =
+                nullableParameterized->TypeArguments()[0];
+            return RenderBaseTypeName(argument->GetDefinition(), argument,
+                                      resolver) +
+                   "?";
+        }
+    }
     if (typeDef == nullptr && instantiation != nullptr) {
         // A type-parameter argument renders its declared name (the C#
         // MakeSimpleType over the parameter's Name); other non-definition
