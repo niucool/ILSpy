@@ -857,8 +857,15 @@ std::string AccessorBodyText(const Metadata::MetadataFile& file,
         return std::string();
     std::string text;
     if (!CSharpDecompiler::DecompileMethodToString(
-            file, typeSystem, accessorToken, rva, accessorName, text))
-        return std::string();
+            file, typeSystem, accessorToken, rva, accessorName, text)) {
+        // The C# DecompileMethod's body-decode failure over an accessor:
+        // the block with the reference-assembly empty-body comment (a
+        // reference assembly's stale RVA never decodes, and the property
+        // falls back to the stub form when the failure is swallowed
+        // here).
+        return "/*Error: Empty body found. Decompiled assembly might be "
+               "a reference assembly.*/;\n";
+    }
     std::size_t open = text.find("{\n");
     std::size_t close = text.rfind("\n}");
     if (open == std::string::npos || close == std::string::npos ||
@@ -1464,7 +1471,25 @@ bool DecompileTypeToStringBody(
         out += MemberModifiersText(propertyEntity);
         out += propertyTypeName;
         out += ' ';
-        out += p.Name;
+        // The C# ConvertProperty's indexer arm: a property with index
+        // parameters names `this[<parameters>]`, never the metadata name
+        // (Item).
+        std::vector<const TS::IParameter*> indexParameters;
+        if (propertyEntity != nullptr)
+            indexParameters = propertyEntity->Parameters();
+        if (!indexParameters.empty()) {
+            std::vector<std::string> indexNames;
+            for (const TS::IParameter* indexParameter : indexParameters)
+                indexNames.push_back(indexParameter != nullptr
+                                         ? indexParameter->Name()
+                                         : std::string());
+            out += "this[";
+            out += CSharpDecompiler::MethodDeclString(
+                indexParameters, true, indexNames, scopeResolver.get());
+            out += ']';
+        } else {
+            out += p.Name;
+        }
         // The accessor forms (the C# TransformAutomaticProperty's decision
         // + ConvertAccessor): the stub form (`get; set;`) when the property
         // has its compiler-generated `<Name>k__BackingField` field (only

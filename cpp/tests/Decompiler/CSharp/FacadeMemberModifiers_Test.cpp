@@ -927,6 +927,22 @@ TEST(FacadeMemberModifiersTest, DelegateTypesRenderTheInvokeSignature)
         << generic;
 }
 
+// The indexer property (the C# ConvertProperty over IsIndexer): the
+// declaration names `this[<index parameters>]`, never the metadata
+// name (Item); the index parameters render through the same parameter
+// builder as the methods.
+TEST(FacadeMemberModifiersTest, IndexerPropertiesRenderTheThisForm)
+{
+    constexpr const char* kNestedFixture =
+        "/home/jim/ilspy-test-fixtures/nested_fixture/NestedBase.dll";
+    std::string text;
+    if (!RenderType(kNestedFixture, "Indexer", text))
+        GTEST_SKIP() << "the nested-base fixture is not provisioned";
+    EXPECT_NE(text.find("public string this[int index]"),
+              std::string::npos)
+        << text;
+}
+
 // The whole-module render's using header carries the module-wide
 // required set (the C# IntroduceUsingDeclarations over the whole-module
 // tree), not just the assembly-attribute namespaces: the connid module's
