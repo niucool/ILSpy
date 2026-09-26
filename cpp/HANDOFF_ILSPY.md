@@ -801,10 +801,23 @@ AccessorBodyText). The member-decl families that remain:
     shared skip rule; A HAZARD: the clause renders AFTER the closing
     paren -- an arm wrote it inside the parens first). Corpus:
     604/639 -> 497/532 across the two commits.
-  * The remaining 'other' family (~497 rows): the static-array-init
+  * THE ACCESSOR-BLOCK FORMS -- CLOSED (`84fe2b30e` + the test fix):
+    the automatic forms (`{ get; set; }` / `event X Y;`) render only
+    when the accessors carry NO bodies or decompile to the recognized
+    pattern; the reference assemblies' stale-RVA accessors render the
+    add/remove/get/set blocks with the empty-body comments. THE
+    PROPERTY PATTERN: the backing field + the TRIMMED rendered bodies
+    (`return <X>k__BackingField;` / `<X>k__BackingField = value;` --
+    the body text carries leading indentation!). THE EVENT PATTERN:
+    both accessors [CompilerGenerated] + the Delegate.Combine/Remove
+    text (the connid's real events -- its pin broke TWICE during the
+    slice, both pattern regressions). The property blocks render the
+    accessor attributes; the event blocks do not. The stale test
+    expectation (the field form) was updated to the block form.
+    Corpus: 486/521 -> 274/309 (212 rows, the biggest family yet).
+  * The remaining 'other' family (~274 rows): the static-array-init
     field spellings, the enum-member near-misses, the constructor
-    parameter near-misses, the `virtual` modifier near-misses (the
-    ShowDialog pair) -- sample before picking.
+    parameter near-misses -- sample before picking.
   * The EXPLICIT-IMPL PROPERTY NAMES -- CLOSED (`77df0389a`): the
     interface-qualified rewrite mirrors the event arm's (the first
     explicitly implemented member's declaring type through
