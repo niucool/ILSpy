@@ -920,6 +920,32 @@ oracle-parity, guarded by a 13k-test sweep, two pinned corpora, and a
 per-change render pin -- the foundation for the remaining ILSpyX
 surfaces (the search/analysis APIs) and the plugin host.
 
+## THE MSCORLIB GATING COMPLETE + THE PIN/MERGE STATE NOTE
+
+The mscorlib-loading test family is fully availability-gated now
+(MetadataModule_Test, Specialize_Test, MetadataTypeDefinition_Test,
+TypeProvider_Test -- the REQUIRE_MSCORLIB macro after every fixture
+construction; GTEST_SKIP only works from a void test body -- it
+expands to a void return, so the value-returning fixture helpers
+cannot carry it). THE VERIFICATION: the FULL suite (no exclusion
+filter) with ILSPY_TEST_MSCORLIB unset completes with no crash signal
+(13,453 tests, the 267 assertion failures being the by-design excluded
+set); the canonical excluded run: 13,166 ran / 15-20 failed (the
+pre-existing baseline; the count varies with the mscorlib family
+skipping), no crash.
+
+THE CONNID PIN -- RE-BASE NEEDED, NOT A REGRESSION OF THIS TURN: the
+tree gained the port-baml merge (d0850c67c) and the C# render tab
+migration (3ce63a4ab) between turns; the render output changed shape
+(the sha dfb728fb5... vs the old pin 074375839ad0...). The normalized
+content comparison against a fresh oracle render shows residual
+divergences in the MERGED tree's render (the raw IL_006B switch/goto
+labels in the Page1 Connect method, the += event-attachment forms --
+31 mine-only / 9 oracle-only normalized lines) -- the follow-up is to
+re-establish the pin and audit the merged render's connid shape (the
+corpus oracle re-render included), NOT a this-turn regression: the
+test-gating turns touched only test files.
+
 ## THE UNGUARDED MSCORLIB GOLD FAMILY -- CLOSED (`bc345d63c`): the
 MetadataModule_Test mscorlib family ran with no availability check --
 on a runner without the default mono mscorlib the module loads empty,
