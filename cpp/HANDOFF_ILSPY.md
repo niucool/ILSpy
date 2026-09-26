@@ -759,11 +759,18 @@ AccessorBodyText). The member-decl families that remain:
     CONVERTED element); (4) the unresolved nested references render
     the dotted form (`+`->`.`), not the reflection spelling. Corpus:
     1219/1156 -> 791/744.
-  * The remaining 'other' family (~790 rows): the operator rows
-    (`public static implicit operator`, 74), the `new` modifier rows
-    on the interface re-implementations, the static-array-init field
-    spellings, the remaining near-miss pairs -- sample before
-    picking.
+  * THE OPERATOR DECLARATIONS -- CLOSED (`69f41692a`): the op_*
+    special names render as `operator !=(...)` / `implicit operator
+    RetType(...)` -- the rewrite on the shared methodName/returnType
+    pair after the signature computation (every render arm composes
+    `returnType + " " + methodName`; the conversions pass the
+    implicit/explicit keyword in the return-type slot). Corpus:
+    791/744 -> 717/670.
+  * The remaining 'other' family (~717 rows): the `new` modifier rows
+    on the interface re-implementations (~63), the destructor
+    `~StructuralCache()` rows, the static-array-init field spellings,
+    the `object IEnumerator<object>.Current` property rows -- sample
+    before picking.
   * The EXPLICIT-IMPL PROPERTY NAMES -- CLOSED (`77df0389a`): the
     interface-qualified rewrite mirrors the event arm's (the first
     explicitly implemented member's declaring type through
