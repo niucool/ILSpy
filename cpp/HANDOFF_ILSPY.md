@@ -916,11 +916,26 @@ oracle-parity, guarded by a 13k-test sweep, two pinned corpora, and a
 per-change render pin -- the foundation for the remaining ILSpyX
 surfaces (the search/analysis APIs) and the plugin host.
 
-## THE QUEUED TRIAGE ITEMS (from the baml loader-registry slice, both
-pre-existing on bare HEAD -- triage separately, NOT part of the
-member-decl effort): MetadataNamespaceTest.ChildCacheIsStable (a vector
-OOB abort, ILSPY_TEST_MSCORLIB-gated) and SpecializeTest.FieldCreateArms
-(a segv).
+## THE TRIAGE PAIR -- CLOSED: both tests assumed the MONO mscorlib's
+shapes and failed under ILSPY_TEST_MSCORLIB pointing at the net48
+corpus mscorlib. ChildCacheIsStable asserted the cached children by
+hardcoded index (first[2]) -- the net48 mscorlib has only two root
+namespaces, so the index aborted the vector access (the assertion
+frame reports the INamespace vector; the earlier triage note's
+ITypeDefinition vector was the imprecise recollection); the assertion
+now locates the children by name. FieldCreateArms looked up List`1's
+implementation fields -- the net48 mscorlib is a REFERENCE assembly
+and strips the private fields (its List`1 carries none), so the null
+lookup segfaulted in the Specialize call; the test now skips with a
+message when the selected mscorlib lacks the shapes. THE WIDER
+mscorlib-env FAMILY (the gold-value and digest tests pinned to the
+mono mscorlib's layout -- ~35 tests under the net48 gate, e.g.
+WholeTypeSpecializeDigests, RootChildrenOrderMatchesGold, the
+BlockBuilder/ILFunctionMethod mscorlib sweeps) is the REMAINING
+fixture-selection concern: they fail against the reference assembly by
+design and need either the mono mscorlib on the CI or the same
+skip-gating treatment (the default suite -- no env var -- skips them
+cleanly; the baseline sweep stays 32).
   * The EXPLICIT-IMPL PROPERTY NAMES -- CLOSED (`77df0389a`): the
     interface-qualified rewrite mirrors the event arm's (the first
     explicitly implemented member's declaring type through
