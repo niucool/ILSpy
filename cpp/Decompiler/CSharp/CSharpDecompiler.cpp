@@ -620,8 +620,7 @@ std::string EnumFlagsComposition(
     }
     if (negatedValue == 0 && !negatedTerms.empty() &&
         (enumValue != 0 || unionTerms.empty() ||
-         negatedTerms.size() < unionTerms.size()) &&
-        !encodedInEarlierMask) {
+         negatedTerms.size() < unionTerms.size())) {
         std::string out = "~";
         for (std::size_t i = 0; i < negatedTerms.size(); ++i) {
             if (i != 0)
