@@ -943,6 +943,33 @@ TEST(FacadeMemberModifiersTest, IndexerPropertiesRenderTheThisForm)
         << text;
 }
 
+// The XML documentation comments (the C# AddXmlDocumentationTransform
+// over the type declarations): the adjacent .xml file's member content
+// renders as the leading /// lines -- the first non-empty line's
+// indentation stripped, the trailing empty lines dropped.
+TEST(FacadeMemberModifiersTest, XmlDocumentationCommentsRenderOnTypeDeclarations)
+{
+    constexpr const char* kNestedFixture =
+        "/home/jim/ilspy-test-fixtures/nested_fixture/NestedBase.dll";
+    std::string text;
+    if (!RenderType(kNestedFixture, "RefOut", text))
+        GTEST_SKIP() << "the nested-base fixture is not provisioned";
+    EXPECT_NE(text.find("/// <summary>\n/// The parameter modifier shapes: "
+                        "ref/out/in and the params array.\n/// </summary>"),
+              std::string::npos)
+        << text;
+    EXPECT_NE(text.find("/// <remarks>\n/// The member-name scanner reads "
+                        "the adjacent XML file.\n/// </remarks>"),
+              std::string::npos)
+        << text;
+    std::string generic;
+    ASSERT_TRUE(RenderType(kNestedFixture, "Gen", generic));
+    EXPECT_NE(generic.find("/// <summary>The generic container for the "
+                           "typeof shapes.</summary>"),
+              std::string::npos)
+        << generic;
+}
+
 // The whole-module render's using header carries the module-wide
 // required set (the C# IntroduceUsingDeclarations over the whole-module
 // tree), not just the assembly-attribute namespaces: the connid module's

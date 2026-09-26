@@ -31,6 +31,7 @@
 #include "Decompiler/TypeSystem/StringComparer.hpp"
 #include "Decompiler/Util/CacheManager.hpp"
 #include "Decompiler/DecompileRun.hpp"
+#include "Decompiler/Documentation/XmlDocumentationProvider.hpp"
 #include "Decompiler/CSharp/Transforms/TransformContext.hpp"
 #include "Decompiler/CSharp/Transforms/ReplaceMethodCallsWithOperators.hpp"
 #include "Decompiler/CSharp/Transforms/TransformFieldAndConstructorInitializers.hpp"
@@ -1064,6 +1065,122 @@ std::set<std::uint32_t> AttributeReferencedNestedTypes(
     return result;
 }
 
+// The C# IdStringProvider's type-documentation ID: `T:` + the dotted
+// declaring chain (the nested names joined by '.', not '+') with the
+// root's namespace prefix; the metadata name keeps the generic arity
+// suffix (the doc IDs spell `List`1`).
+std::string TypeDocId(const Metadata::MetadataFile& file,
+                      std::uint32_t typeToken) {
+    std::vector<std::string> names;
+    std::uint32_t current = typeToken;
+    std::string rootNamespace;
+    while (true) {
+        auto info = file.GetTypeDefNameInfo(current);
+        if (!info.has_value())
+            return std::string();
+        names.push_back(info->Name);
+        if (info->DeclaringTypeToken == 0) {
+            rootNamespace = info->Namespace;
+            break;
+        }
+        current = info->DeclaringTypeToken;
+    }
+    std::reverse(names.begin(), names.end());
+    std::string id = "T:";
+    if (!rootNamespace.empty())
+        id += rootNamespace + ".";
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        if (i != 0)
+            id += '.';
+        id += names[i];
+    }
+    return id;
+}
+
+// The C# AddXmlDocumentationTransform's InsertXmlDocumentation lifted to
+// the flat renderer: the first non-empty line's indentation strips from
+// every line, the trailing empty lines drop, and the empty lines between
+// render as bare `///` (the C# Comment(string.Empty,
+// CommentType.Documentation) -- no trailing space).
+std::string DocumentationCommentLines(const std::string& documentation) {
+    std::string out;
+    // The line splitter (the C# StringReader.ReadLine: \r, \n, or
+    // \r\n endings).
+    std::vector<std::string> lines;
+    std::size_t position = 0;
+    while (position < documentation.size()) {
+        std::size_t end = position;
+        while (end < documentation.size() && documentation[end] != '\r' &&
+               documentation[end] != '\n')
+            end++;
+        lines.push_back(documentation.substr(position, end - position));
+        if (end < documentation.size()) {
+            if (documentation[end] == '\r' && end + 1 < documentation.size() &&
+                documentation[end + 1] == '\n')
+                end += 2;
+            else
+                end += 1;
+        }
+        position = end;
+    }
+    // The first non-empty line's indentation.
+    std::size_t firstLine = lines.size();
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        bool whitespaceOnly = true;
+        for (char c : lines[i]) {
+            if (c != ' ' && c != '\t' && c != '\r') {
+                whitespaceOnly = false;
+                break;
+            }
+        }
+        if (!whitespaceOnly) {
+            firstLine = i;
+            break;
+        }
+    }
+    if (firstLine == lines.size())
+        return std::string();
+    std::size_t indentation = 0;
+    while (indentation < lines[firstLine].size() &&
+           (lines[firstLine][indentation] == ' ' ||
+            lines[firstLine][indentation] == '\t'))
+        indentation++;
+    // Copy to the end except the trailing whitespace-only lines; the
+    // empty lines between render as bare `///`.
+    std::size_t lastLine = lines.size();
+    while (lastLine > firstLine) {
+        bool whitespaceOnly = true;
+        for (char c : lines[lastLine - 1]) {
+            if (c != ' ' && c != '\t' && c != '\r') {
+                whitespaceOnly = false;
+                break;
+            }
+        }
+        if (!whitespaceOnly)
+            break;
+        lastLine--;
+    }
+    for (std::size_t i = firstLine; i < lastLine; ++i) {
+        const std::string& line = lines[i];
+        bool whitespaceOnly = true;
+        for (char c : line) {
+            if (c != ' ' && c != '\t' && c != '\r') {
+                whitespaceOnly = false;
+                break;
+            }
+        }
+        if (whitespaceOnly) {
+            out += "///\n";
+        } else {
+            std::string content = line.size() > indentation
+                                      ? line.substr(indentation)
+                                      : line;
+            out += "/// " + content + "\n";
+        }
+    }
+    return out;
+}
+
 bool DecompileTypeToStringBody(
     const Metadata::MetadataFile& file, TS::DecompilerTypeSystem* typeSystem,
     TS::MetadataModule& module,
@@ -1071,6 +1188,13 @@ bool DecompileTypeToStringBody(
         partialLookup,
     const std::vector<std::string>* usingNamespaces,
     std::uint32_t typeToken, std::string& out) {
+    // The adjacent-.xml documentation provider (the C#
+    // CreateDefaultDocumentationProvider over XmlDocLoader): null when
+    // no file sits beside the module.
+    std::shared_ptr<Documentation::XmlDocumentationProvider>
+        documentationProvider =
+            Documentation::XmlDocumentationProvider::LoadBeside(
+                file.FileName());
     const Metadata::PartialTypeInfo* partialType = partialLookup(typeToken);
     // The C# DecompileType member iteration: the partial-type info gates
     // the members (the C# `DoDecompileMember`'s
@@ -1114,6 +1238,14 @@ bool DecompileTypeToStringBody(
         if (tick != std::string::npos)
             bareName = bareName.substr(0, tick);
         typeName = bareName;
+        // The C# AddXmlDocumentationTransform over the type declaration:
+        // the adjacent-.xml documentation lines lead the declaration.
+        if (documentationProvider != nullptr) {
+            std::string documentation = documentationProvider->GetDocumentation(
+                TypeDocId(file, typeToken));
+            if (!documentation.empty())
+                out += DocumentationCommentLines(documentation);
+        }
         const char* keyword = "class";
         switch (t.Kind) {
             case ::ILSpy::Decompiler::TypeSystem::TypeKind::Struct:
