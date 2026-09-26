@@ -436,6 +436,33 @@ const TS::INamespace* ResolveNamespaceFullName(const TS::INamespace& root,
 // it -- plus static and the virtual family) with ConvertField's
 // const/readonly/volatile bits, rendered as the declaration's leading
 // keywords in the AllModifiers output order.
+// The boxed-constant equality over the metadata constant forms (the
+// enum members' underlying integral types).
+bool ValuesEqual(const std::any& a, const std::any& b) {
+    auto asLong = [](const std::any& v) -> std::optional<std::int64_t> {
+        if (auto* p = std::any_cast<std::int32_t>(&v))
+            return *p;
+        if (auto* p = std::any_cast<std::uint32_t>(&v))
+            return static_cast<std::int64_t>(*p);
+        if (auto* p = std::any_cast<std::int64_t>(&v))
+            return *p;
+        if (auto* p = std::any_cast<std::uint64_t>(&v))
+            return static_cast<std::int64_t>(*p);
+        if (auto* p = std::any_cast<std::int8_t>(&v))
+            return *p;
+        if (auto* p = std::any_cast<std::uint8_t>(&v))
+            return *p;
+        if (auto* p = std::any_cast<std::int16_t>(&v))
+            return *p;
+        if (auto* p = std::any_cast<std::uint16_t>(&v))
+            return *p;
+        return std::nullopt;
+    };
+    auto av = asLong(a);
+    auto bv = asLong(b);
+    return av.has_value() && bv.has_value() && *av == *bv;
+}
+
 // The C# ConvertEnumValue's [Flags] arms: the union form
 // (`NODRAWCAPTION | NODRAWICON`), the complement form (`~X`), and the
 // multi-bit-within-mask rule (keep numeric). The members iterate by
@@ -448,7 +475,7 @@ const TS::INamespace* ResolveNamespaceFullName(const TS::INamespace& root,
 std::string EnumFlagsComposition(
     const Metadata::MetadataFile& file, const TS::MetadataModule& module,
     std::uint32_t enumToken, const std::any& constantValue,
-    std::uint32_t declaringRow) {
+    std::uint32_t declaringRow, const std::string& qualifier) {
     std::int64_t val = 0;
     bool hasVal = false;
     if (auto* p = std::any_cast<std::int32_t>(&constantValue)) {
@@ -536,12 +563,15 @@ std::string EnumFlagsComposition(
         if (candidate.value == 0 || candidate.row >= declaringRow)
             // The C# skips the None member and the later rows.
             continue;
+        std::string reference = qualifier.empty()
+                                    ? candidate.name
+                                    : qualifier + "." + candidate.name;
         if ((candidate.value & enumValue) == candidate.value) {
-            unionTerms.push_back(candidate.name);
+            unionTerms.push_back(reference);
             enumValue &= ~candidate.value;
         }
         if ((candidate.value & negatedValue) == candidate.value) {
-            negatedTerms.push_back(candidate.name);
+            negatedTerms.push_back(reference);
             negatedValue &= ~candidate.value;
         }
     }
@@ -584,31 +614,96 @@ std::string EnumFlagsComposition(
     return std::string();
 }
 
-// The boxed-constant equality over the metadata constant forms (the
-// enum members' underlying integral types).
-bool ValuesEqual(const std::any& a, const std::any& b) {
-    auto asLong = [](const std::any& v) -> std::optional<std::int64_t> {
-        if (auto* p = std::any_cast<std::int32_t>(&v))
-            return *p;
-        if (auto* p = std::any_cast<std::uint32_t>(&v))
-            return static_cast<std::int64_t>(*p);
-        if (auto* p = std::any_cast<std::int64_t>(&v))
-            return *p;
-        if (auto* p = std::any_cast<std::uint64_t>(&v))
-            return static_cast<std::int64_t>(*p);
-        if (auto* p = std::any_cast<std::int8_t>(&v))
-            return *p;
-        if (auto* p = std::any_cast<std::uint8_t>(&v))
-            return *p;
-        if (auto* p = std::any_cast<std::int16_t>(&v))
-            return *p;
-        if (auto* p = std::any_cast<std::uint16_t>(&v))
-            return *p;
-        return std::nullopt;
-    };
-    auto av = asLong(a);
-    auto bv = asLong(b);
-    return av.has_value() && bv.has_value() && *av == *bv;
+// The C# specialConstants table (the TypeSystemAstBuilder): the
+// integral constants at the type boundaries render as the well-known
+// member names (`uint.MaxValue`), when the constant's OWN type matches
+// (the C# dictionary keys by the boxed value -- the type check comes
+// from the field's declared type).
+std::string SpecialConstantText(const std::any& value,
+                                const TS::IType& type) {
+    auto* i32 = std::any_cast<std::int32_t>(&value);
+    auto* u32 = std::any_cast<std::uint32_t>(&value);
+    auto* i64 = std::any_cast<std::int64_t>(&value);
+    auto* u64 = std::any_cast<std::uint64_t>(&value);
+    auto* i16 = std::any_cast<std::int16_t>(&value);
+    auto* u16 = std::any_cast<std::uint16_t>(&value);
+    auto* i8 = std::any_cast<std::int8_t>(&value);
+    auto* u8 = std::any_cast<std::uint8_t>(&value);
+    if (u32 != nullptr && *u32 == 0xFFFFFFFFu)
+        return "uint.MaxValue";
+    if (i32 != nullptr && *i32 == 2147483647)
+        return "int.MaxValue";
+    if (i32 != nullptr && *i32 == (-2147483647 - 1))
+        return "int.MinValue";
+    if (u64 != nullptr && *u64 == 0xFFFFFFFFFFFFFFFFull)
+        return "ulong.MaxValue";
+    if (i64 != nullptr && *i64 == 9223372036854775807LL)
+        return "long.MaxValue";
+    if (i64 != nullptr && *i64 == (-9223372036854775807LL - 1))
+        return "long.MinValue";
+    if (u16 != nullptr && *u16 == 0xFFFFu)
+        return "ushort.MaxValue";
+    if (i16 != nullptr && *i16 == 32767)
+        return "short.MaxValue";
+    if (i16 != nullptr && *i16 == -32768)
+        return "short.MinValue";
+    if (u8 != nullptr && *u8 == 0xFFu)
+        return "byte.MaxValue";
+    if (i8 != nullptr && *i8 == 127)
+        return "sbyte.MaxValue";
+    if (i8 != nullptr && *i8 == -128)
+        return "sbyte.MinValue";
+    return std::string();
+}
+
+// The C# ConvertEnumValue over a const FIELD's enum-typed constant
+// (declaringEnumMember == null): the QUALIFIED member references (no
+// row rule), the [Flags] composition with the same qualification, or
+// the `(EnumType)value` cast fallback. Returns the empty string when
+// the field is not an enum-typed constant.
+std::string EnumConstantFieldExpression(
+    const Metadata::MetadataFile& file, const TS::MetadataModule& module,
+    const TS::IField& field) {
+    const TS::IType& fieldType = field.Type();
+    const TS::ITypeDefinition* enumDef = fieldType.GetDefinition();
+    if (enumDef == nullptr || enumDef->Kind() != TS::TypeKind::Enum)
+        return std::string();
+    std::any constantValue;
+    try {
+        constantValue = field.GetConstantValue();
+    } catch (const std::exception&) {
+        return std::string();
+    }
+    const std::uint32_t enumToken = enumDef->MetadataToken();
+    const std::string enumName = enumDef->Name();
+    // The direct member match: the FIRST equal-value member, any row.
+    for (const auto& other : file.GetFields(enumToken)) {
+        const TS::IField* otherEntity = module.GetDefinitionField(other.Token);
+        if (otherEntity == nullptr || !otherEntity->IsConst())
+            continue;
+        std::any otherValue;
+        try {
+            otherValue = otherEntity->GetConstantValue();
+        } catch (const std::exception&) {
+            continue;
+        }
+        if (ValuesEqual(constantValue, otherValue))
+            return enumName + "." + other.Name;
+    }
+    // The [Flags] composition, qualified.
+    if (Metadata::HasKnownAttribute(file, enumToken,
+                                    TS::KnownAttribute::Flags)) {
+        std::string composition = EnumFlagsComposition(
+            file, module, enumToken, constantValue,
+            0xFFFFFFFFu, enumName);
+        if (!composition.empty())
+            return composition;
+    }
+    // The cast fallback: `(EnumType)value` (the numeric literal).
+    std::string numeric = ConstantValueText(constantValue, fieldType);
+    if (numeric.empty())
+        return std::string();
+    return "(" + enumName + ")" + numeric;
 }
 
 // The C# SetNewModifier: a member introduced in a class or struct hides
@@ -2942,7 +3037,8 @@ bool DecompileTypeToStringBody(
                     // arms: the union (`A | B`) and the complement
                     // (`~X`) forms over the earlier single-bit members.
                     std::string composition = EnumFlagsComposition(
-                        file, module, typeToken, constantValue, declaringRow);
+                        file, module, typeToken, constantValue,
+                        declaringRow, std::string());
                     if (!composition.empty()) {
                         literal = composition;
                         literalIsAlias = true;
@@ -3035,6 +3131,26 @@ bool DecompileTypeToStringBody(
         out += f.Name;
         if (fieldEntity != nullptr && fieldEntity->IsConst()) {
             std::string literal = ConstantFieldLiteral(*fieldEntity);
+            // The enum-typed const fields render the qualified member
+            // reference / composition / cast form (the C#
+            // ConvertEnumValue with declaringEnumMember null); the
+            // integral boundaries render the well-known member names
+            // (the specialConstants table).
+            std::string enumExpression = EnumConstantFieldExpression(
+                file, module, *fieldEntity);
+            if (!enumExpression.empty())
+                literal = enumExpression;
+            else if (!literal.empty()) {
+                std::any specialValue;
+                try {
+                    specialValue = fieldEntity->GetConstantValue();
+                } catch (const std::exception&) {
+                }
+                std::string special =
+                    SpecialConstantText(specialValue, fieldEntity->Type());
+                if (!special.empty())
+                    literal = special;
+            }
             if (!literal.empty())
                 out += " = " + literal;
         }
