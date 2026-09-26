@@ -160,7 +160,10 @@ public:
             const ::ILSpy::Decompiler::TypeSystem::IParameter*>& parameters,
         bool isInstance, const std::vector<std::string>& parameterNames,
         const ::ILSpy::Decompiler::CSharp::Resolver::CSharpResolver*
-            scopeResolver = nullptr);
+            scopeResolver = nullptr,
+        // The C# extension-method form: the FIRST parameter renders the
+        // `this` modifier.
+        bool isExtensionMethod = false);
 
     // The per-method decompile entry (the C# Decompile(params handles[])
     // method-body half): decode the body, run the pipeline, render. False

@@ -201,7 +201,8 @@ std::string CSharpDecompiler::MethodDeclString(
 std::string CSharpDecompiler::MethodDeclString(
     const std::vector<const TS::IParameter*>& parameters, bool isInstance,
     const std::vector<std::string>& parameterNames,
-    const Resolver::CSharpResolver* scopeResolver) {
+    const Resolver::CSharpResolver* scopeResolver,
+    bool isExtensionMethod) {
     std::string paramDecl;
     const int base = isInstance ? 1 : 0;
     for (std::size_t i = 0; i < parameters.size(); ++i) {
@@ -209,6 +210,12 @@ std::string CSharpDecompiler::MethodDeclString(
         const TS::IParameter* parameter = parameters[i];
         if (parameter == nullptr)
             continue;
+        // The C# extension-method form: the first parameter of an
+        // extension method renders the `this` modifier (the method's
+        // Extension attribute classification; the C# AstBuilder emits it
+        // through the ParameterDeclaration's extension-method flag).
+        if (i == 0 && isExtensionMethod)
+            paramDecl += "this ";
         // The C# ConvertParameter's attribute half: the parameter's
         // attributes render as the compact bracket-adjacent sections
         // before the modifiers.
@@ -342,7 +349,8 @@ bool CSharpDecompiler::DecompileMethodToString(
         auto paramNames = file.GetParameterNames(methodToken);
         paramDecl = MethodDeclString(parameters,
                                       !resolvedMethod->IsStatic(), paramNames,
-                                      scopeResolver);
+                                      scopeResolver,
+                                      resolvedMethod->IsExtensionMethod());
     } else if (auto sig = file.GetMethodSignature(methodToken)) {
         if (sig->ReturnType &&
             sig->ReturnType->ReflectionName() != "System.Void")
@@ -945,6 +953,84 @@ const char* BuiltinTypeKeyword(const TS::ITypeDefinition* typeDef) {
 // The type arguments render as the <...> tail (each argument through the
 // short-name renderer -- the arguments' own decision rides with the
 // member-signature work). An empty instantiation is the plain definition.
+// The C# constraint clauses (`where T : class, IFoo, new()`) for a
+// member's or type's OWN type-parameter slice: no clause when the
+// parameter has no special, nullability, or non-Object/ValueType
+// constraint (the C# skip rule). The caller slices the chain-merged
+// TypeParameters surface at its own start (the outer-parameter-skip
+// precedent: a type's declaring chain, a method's declaring type).
+std::string ConstraintClausesText(
+    const std::vector<const TS::ITypeParameter*>& typeParameters,
+    std::size_t startIndex, const Resolver::CSharpResolver* resolver) {
+    std::string out;
+    for (std::size_t i = startIndex; i < typeParameters.size(); ++i) {
+        const TS::ITypeParameter* tp = typeParameters[i];
+        if (tp == nullptr)
+            continue;
+        bool hasTypeConstraint = false;
+        for (const TS::TypeConstraint& tc : tp->TypeConstraints()) {
+            if (tc.Type() == nullptr)
+                continue;
+            const bool objectOrValueType =
+                TS::IsKnownType(*tc.Type(),
+                                TS::KnownTypeCode::Object) ||
+                TS::IsKnownType(*tc.Type(),
+                                TS::KnownTypeCode::ValueType);
+            if (!objectOrValueType || !tc.Attributes().empty()) {
+                hasTypeConstraint = true;
+                break;
+            }
+        }
+        if (!tp->HasDefaultConstructorConstraint() &&
+            !tp->HasReferenceTypeConstraint() &&
+            !tp->HasValueTypeConstraint() &&
+            !tp->AllowsRefLikeType() &&
+            tp->NullabilityConstraint() != TS::Nullability::NotNullable &&
+            !hasTypeConstraint)
+            continue;
+        out += " where ";
+        out += tp->Name();
+        out += " :";
+        bool first = true;
+        auto appendConstraint = [&](const std::string& item) {
+            out += first ? " " : ", ";
+            out += item;
+            first = false;
+        };
+        if (tp->HasReferenceTypeConstraint()) {
+            appendConstraint(
+                tp->NullabilityConstraint() == TS::Nullability::Nullable
+                    ? "class?"
+                    : "class");
+        } else if (tp->HasValueTypeConstraint()) {
+            appendConstraint(
+                tp->HasUnmanagedConstraint() ? "unmanaged" : "struct");
+        } else if (tp->NullabilityConstraint() ==
+                   TS::Nullability::NotNullable) {
+            appendConstraint("notnull");
+        }
+        for (const TS::TypeConstraint& tc : tp->TypeConstraints()) {
+            if (tc.Type() == nullptr)
+                continue;
+            const bool objectOrValueType =
+                TS::IsKnownType(*tc.Type(),
+                                TS::KnownTypeCode::Object) ||
+                TS::IsKnownType(*tc.Type(),
+                                TS::KnownTypeCode::ValueType);
+            if (objectOrValueType && tc.Attributes().empty())
+                continue;
+            appendConstraint(RenderBaseTypeName(tc.Type()->GetDefinition(),
+                                               tc.Type(), resolver));
+        }
+        if (tp->HasDefaultConstructorConstraint() &&
+            !tp->HasValueTypeConstraint())
+            appendConstraint("new()");
+        if (tp->AllowsRefLikeType())
+            appendConstraint("allows ref struct");
+    }
+    return out;
+}
+
 // The C# explicit-implementation name's interface type: the rendered
 // name carries the class's own instantiation --
 // `IEnumerator<XmlNamespaceMapping>`, not the bare definition. The
@@ -2724,7 +2810,7 @@ bool DecompileTypeToStringBody(
             auto paramNames = file.GetParameterNames(m.Token);
             paramDecl = CSharpDecompiler::MethodDeclString(
                 parameters, !methodEntity->IsStatic(), paramNames,
-                scopeResolver.get());
+                scopeResolver.get(), methodEntity->IsExtensionMethod());
         } else if (auto sig = file.GetMethodSignature(m.Token)) {
             if (sig->ReturnType &&
                 sig->ReturnType->ReflectionName() != "System.Void")
@@ -2768,6 +2854,59 @@ bool DecompileTypeToStringBody(
             methodName = "~" + typeName;
             modifiers.clear();
             returnType.clear();
+        }
+        // The C# generic method name: the method's OWN type parameters
+        // render as the `<T1, T2>` list after the name. The port's
+        // TypeParameters surface on a method is chain-merged (the
+        // declaring type's parameters first, the method's own last), so
+        // the own slice starts at the declaring type's chain size (the
+        // type-header outer-parameter-skip precedent). The constructors
+        // render the declaring TYPE's list (the C# `public Foo<T>()`),
+        // the operators cannot be generic, and an explicit-implementation
+        // name carries the interface form already.
+        std::string methodTypeParameterList;
+        if (!isConstructor && !isDestructor &&
+            methodEntity != nullptr &&
+            !methodEntity->IsExplicitInterfaceImplementation() &&
+            methodName.rfind("operator", 0) != 0) {
+            const std::vector<const TS::ITypeParameter*>& typeParameters =
+                methodEntity->TypeParameters();
+            const TS::ITypeDefinition* declaringTypeDefinition =
+                methodEntity->DeclaringTypeDefinition();
+            if (declaringTypeDefinition != nullptr &&
+                declaringTypeDefinition->TypeParameters().size() <
+                    typeParameters.size()) {
+                bool first = true;
+                for (std::size_t i =
+                         declaringTypeDefinition->TypeParameters().size();
+                     i < typeParameters.size(); ++i) {
+                    const TS::ITypeParameter* tp = typeParameters[i];
+                    if (tp == nullptr)
+                        continue;
+                    methodTypeParameterList += first ? "<" : ", ";
+                    methodTypeParameterList += tp->Name();
+                    first = false;
+                }
+                if (!methodTypeParameterList.empty())
+                    methodTypeParameterList += ">";
+            }
+            methodName += methodTypeParameterList;
+        }
+        // The C# method-level constraint clauses: the generic method's
+        // own type parameters' `where` clauses render after the
+        // parameter list (the same skip rule and forms as the type
+        // header's).
+        std::string methodConstraints;
+        if (!methodTypeParameterList.empty() &&
+            methodEntity != nullptr) {
+            const TS::ITypeDefinition* declaringTypeDefinition =
+                methodEntity->DeclaringTypeDefinition();
+            methodConstraints = ConstraintClausesText(
+                methodEntity->TypeParameters(),
+                declaringTypeDefinition != nullptr
+                    ? declaringTypeDefinition->TypeParameters().size()
+                    : 0,
+                scopeResolver.get());
         }
         // The C# AddInterfaceImplHelpers (the .override directive
         // synthesis): a plain-named method bound to an interface contract
@@ -2856,7 +2995,7 @@ bool DecompileTypeToStringBody(
                        ? std::string()
                        : returnType + " ";
             out += methodName;
-            out += "(" + paramDecl + ");\n";
+            out += "(" + paramDecl + ")" + methodConstraints + ";\n";
             renderOverrideForwarders();
             rendered = true;
             continue;
@@ -2886,7 +3025,7 @@ bool DecompileTypeToStringBody(
                        ? std::string()
                        : returnType + " ";
             out += methodName;
-            out += "(" + paramDecl + ")\n";
+            out += "(" + paramDecl + ")" + methodConstraints + "\n";
             out += "{\n";
             out += "/*Error: Empty body found. Decompiled assembly might "
                    "be a reference assembly.*/;\n";
