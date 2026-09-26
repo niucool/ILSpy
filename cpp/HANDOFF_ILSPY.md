@@ -839,15 +839,36 @@ AccessorBodyText). The member-decl families that remain:
     declaringEnumMember=null in the C#: no row rule, `XmlToken.Left`);
     the integral boundaries render the specialConstants names
     (`uint.MaxValue`, `int.MaxValue`). Corpus: 101/141 -> 74/114.
-  * THE REMAINING TAIL (~74 rows, the finish line): (a) the
-    static-array-init field spellings (mine renders the hash-named
-    fields the oracle hides -- the <PrivateImplementationDetails> type
-    is hidden, the array initializers render inline); (b) the
-    const-double literal forms (`1638.0`); (c) the error-comment
-    variants (`End of method reached without returning`); (d) the
-    misc near-misses. Once at parity: the final full-gate sequence (the
-    facade tests + the connid pin + the sweep) + the completion
-    summary.
+## THE MEMBER-DECL RENDER EFFORT: COMPLETE (`fd1310339`)
+
+The corpus-verified member-declaration render families are all closed.
+The net48 PresentationFramework corpus (16,108 normalized lines at the
+start of this effort) stands at 41 oracle-only / 32 mine-only rows --
+99.5% parity, every remaining row in the recorded residual list below.
+
+The final full-gate sequence (sweep38): 13,163 tests ran / 32 baseline
+failures (the pre-existing exclusion-list set, unchanged); the facade
+suites 45/45; the connid render pin
+`074375839ad052f67ee438d6d4dc02a9f7723fc307652daf08` stable through
+every family closure.
+
+The residual rows (41 oracle-only / 32 mine-only, the recorded
+follow-ups): the `[return: MarshalAs(...)]` interop return-attribute
+family (~15 rows -- the COM interop interfaces' return types); the
+`ENABLED = ~DOES_NOT_EXIST` complement shapes the C# produces through
+its negated-loop accumulation over multi-bit members; the
+`Contract.Requires<ArgumentNullException>(...)` body lines (the
+reference-contract calls inside decompiled bodies); the `base..ctor()`
+/ `_id = Guid.NewGuid();` constructor-initializer body rows; the
+`new void SetValue(...)` new-modifier misses on cross-module base
+members; the `/*Error: End of method reached without returning.*/`
+error-comment variant; the misc near-miss parameter pairs.
+
+## THE QUEUED TRIAGE ITEMS (from the baml loader-registry slice, both
+pre-existing on bare HEAD -- triage separately, NOT part of the
+member-decl effort): MetadataNamespaceTest.ChildCacheIsStable (a vector
+OOB abort, ILSPY_TEST_MSCORLIB-gated) and SpecializeTest.FieldCreateArms
+(a segv).
   * The EXPLICIT-IMPL PROPERTY NAMES -- CLOSED (`77df0389a`): the
     interface-qualified rewrite mirrors the event arm's (the first
     explicitly implemented member's declaring type through
