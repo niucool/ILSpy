@@ -1045,12 +1045,44 @@ them (the ref=1 rows carry hasTC=0; the hasTC=1 rows carry ref=0)
 -- CAVEAT: the WHERE-TP prints MIX the type-header callers with the
 method-level callers (both go through ConstraintClausesText), so the
 rows are not attributable without adding the caller to the print.
-THE NEXT PROBE: tag the WHERE-TP print with the caller (the
-method name vs the type name) and diff the render's entity flags
-against the probe's -- the remaining difference candidates are the
-type-system construction (the render's NativeIntegerOptionsFor +
-the detected-TFM resolver vs the probe's defaults) and the entity
-caching. (b) the misc property/method header pairs.
+CLOSED (`e2d4f9b18`): the caller-tagged probe showed the constraints
+COMPUTE CORRECTLY at the method level (`constraints=[ where T :
+class]`) -- the drop was DOWNSTREAM: the decompiled-body arm emits the
+emitter's text, which never carried them (the empty-body/stub arms
+did). The regression window's emitter-only commit flipped WHICH arm
+renders the stale-RVA bodies (they decode to empty bodies with the
+error comment through the DECOMPILED arm), exposing the gap. The
+constraints now thread through DecompileMethodToString into the
+emitter's method header. Corpus: 39/34 -> 22/17 (the constraint
+family, 34 rows); the connid pin unchanged.
+
+## THE RESUME STATE (the closing numbers)
+
+- THE CONNID: 0/0 (full parity, the pin acb64a2c... WITH the /tmp
+  reference fixture set -- System.Runtime/System.Collections/
+  System.Private.CoreLib from the .NET 10 runtime; without them the
+  pin is 54895b5b...).
+- THE CORPUS: 22 oracle-only / 17 mine-only (the arc: the merged tree
+  60/51 -> the audit's using-set fix 60/50 -> the interop properties
+  39/34 -> the constraint clauses 22/17). THE REMAINING ~22/17: the
+  misc property/method header pairs and the near-misses -- sample
+  before picking (the families so far each closed in one bounded
+  slice).
+- THE GATES: the sweep 13,166 ran / 15 baseline (env -u
+  ILSPY_TEST_MSCORLIB); the facade suite 45 with the ONE pre-existing
+  merged-tree failure (XmlDocumentationCommentsRenderOnMembers -- the
+  tab migration's expected-string gap, recorded as the merge's own);
+  the mscorlib-gated families all REQUIRE_MSCORLIB-gated.
+- THE FIXTURES: the net48 corpus at
+  /home/jim/ilspy-test-fixtures/net48/ (oracle /tmp/pf_oracle.txt, my
+  renders /home/jim/tmp-build/pf_*.txt); the connid /tmp/connid_res.dll
+  (oracle connid_oracle_new.txt) + ITS reference set in /tmp (the
+  sweeper can delete them -- restore from
+  /home/jim/.dotnet/shared/Microsoft.NETCore.App/10.0.12/); the
+  exclusion list /tmp/excl2.txt.
+- THE BUILD: cd cpp && export TMPDIR=/home/jim/tmp-build && export
+  PATH=/home/jim/cpp-tools/cmake/bin:/home/jim/cpp-tools/ninja-bin:
+  $PATH && ninja -C build/linux-ninja ilspy_tests ilspy_cli.
 
     (f's HISTORICAL MAP: the connid's references are System.Runtime +
     System.Collections (10.0.0.0) -- a .NETCoreApp shape. With those
