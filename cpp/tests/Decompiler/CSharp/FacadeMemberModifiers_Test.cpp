@@ -970,6 +970,47 @@ TEST(FacadeMemberModifiersTest, XmlDocumentationCommentsRenderOnTypeDeclarations
         << generic;
 }
 
+// The member documentation IDs (the C# IdStringProvider's M:/P:/F:
+// forms): the declaring type's dotted doc name, the escaped member
+// name (the explicit-implementation dots -> #), the method generic
+// count, and the parameter list in the doc type-name spelling (the
+// primitives' full names, the byref @, the array [], the generic
+// instantiation's brace-distributed arguments).
+TEST(FacadeMemberModifiersTest, XmlDocumentationCommentsRenderOnMembers)
+{
+    constexpr const char* kNestedFixture =
+        "/home/jim/ilspy-test-fixtures/nested_fixture/NestedBase.dll";
+    std::string text;
+    if (!RenderType(kNestedFixture, "RefOut", text))
+        GTEST_SKIP() << "the nested-base fixture is not provisioned";
+    EXPECT_NE(
+        text.find("/// <summary>The ref/out/in parameter shapes.</summary>\n"
+                 "public void Shape(ref int a, out string b, in double c)"),
+        std::string::npos)
+        << text;
+    EXPECT_NE(text.find("/// <summary>The params array shape.</summary>\n"
+                        "public void Values(params int[] numbers)"),
+              std::string::npos)
+        << text;
+    EXPECT_NE(
+        text.find("/// <summary>The default values shape.</summary>\n"
+                 "public void Def(int x = 5, string s = null, double d = 1.5)"),
+        std::string::npos)
+        << text;
+    std::string indexer;
+    ASSERT_TRUE(RenderType(kNestedFixture, "Indexer", indexer));
+    EXPECT_NE(indexer.find("/// <summary>The indexer shape.</summary>\n"
+                           "public string this[int index]"),
+              std::string::npos)
+        << indexer;
+    std::string holder;
+    ASSERT_TRUE(RenderType(kNestedFixture, "Holder", holder));
+    EXPECT_NE(holder.find("/// <summary>A field doc.</summary>\n"
+                          "public string Field;"),
+              std::string::npos)
+        << holder;
+}
+
 // The whole-module render's using header carries the module-wide
 // required set (the C# IntroduceUsingDeclarations over the whole-module
 // tree), not just the assembly-attribute namespaces: the connid module's

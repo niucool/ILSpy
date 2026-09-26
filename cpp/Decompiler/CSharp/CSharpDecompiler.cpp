@@ -1065,12 +1065,156 @@ std::set<std::uint32_t> AttributeReferencedNestedTypes(
     return result;
 }
 
-// The C# IdStringProvider's type-documentation ID: `T:` + the dotted
-// declaring chain (the nested names joined by '.', not '+') with the
-// root's namespace prefix; the metadata name keeps the generic arity
-// suffix (the doc IDs spell `List`1`).
-std::string TypeDocId(const Metadata::MetadataFile& file,
-                      std::uint32_t typeToken) {
+// The C# IdStringSignatureTypeProvider's doc type-name forms: the
+// primitives' full names (the ReflectionName carries them), the dotted
+// declaring chains (the '+' separators swap for '.'), the byref '@' and
+// pointer '*' suffixes, the sz-array '[]' and the multidimensional
+// zero-based dimension list, the generic-parameter markers ('`N' for a
+// type's, '``N' for a method's), and the generic instantiation's
+// brace-distributed arguments over the arity markers.
+std::string DocTypeName(const TS::ITypePtr& type) {
+    if (type == nullptr)
+        return std::string();
+    if (const auto* array = dynamic_cast<const TS::ArrayType*>(type.get())) {
+        if (array->Element() == nullptr)
+            return std::string("?");
+        std::string element = DocTypeName(array->Element());
+        if (array->IsSzArray())
+            return element + "[]";
+        std::string out = element + "[";
+        for (int i = 1; i < array->Rank(); ++i)
+            out += ",0:";
+        return out + "]";
+    }
+    if (const auto* byReference =
+            dynamic_cast<const TS::ByReferenceType*>(type.get())) {
+        return byReference->Element() != nullptr
+                   ? DocTypeName(byReference->Element()) + "@"
+                   : std::string("?");
+    }
+    if (const auto* pointer =
+            dynamic_cast<const TS::PointerType*>(type.get())) {
+        return pointer->Element() != nullptr
+                   ? DocTypeName(pointer->Element()) + "*"
+                   : std::string("?");
+    }
+    if (const auto* typeParameter =
+            dynamic_cast<const TS::ITypeParameter*>(type.get())) {
+        const bool methodParameter =
+            typeParameter->OwnerType() == TS::SymbolKind::Method;
+        return (methodParameter ? std::string("``") : std::string("`")) +
+               std::to_string(typeParameter->Index());
+    }
+    if (const auto* parameterized =
+            dynamic_cast<const TS::ParameterizedType*>(type.get())) {
+        std::vector<std::string> typeArguments;
+        for (const TS::ITypePtr& argument : parameterized->TypeArguments())
+            typeArguments.push_back(DocTypeName(argument));
+        // The C# GetGenericInstantiation: the arguments distribute over
+        // the generic name's `k arity markers (the nesting levels
+        // consume them outermost-first); a marker with too few
+        // remaining arguments keeps its verbatim spelling.
+        const std::string genericType = DocTypeName(parameterized->GenericType());
+        std::string out;
+        std::size_t nextArgument = 0;
+        std::size_t i = 0;
+        while (i < genericType.size()) {
+            char c = genericType[i];
+            if (c != '`' || i + 1 >= genericType.size() ||
+                !isdigit(static_cast<unsigned char>(genericType[i + 1]))) {
+                out += c;
+                i++;
+                continue;
+            }
+            std::size_t markerEnd = i + 1;
+            int arity = 0;
+            while (markerEnd < genericType.size() &&
+                   isdigit(static_cast<unsigned char>(genericType[markerEnd]))) {
+                arity = arity * 10 +
+                        (genericType[markerEnd] - '0');
+                markerEnd++;
+            }
+            if (static_cast<std::size_t>(arity) >
+                typeArguments.size() - nextArgument) {
+                out += genericType.substr(i, markerEnd - i);
+            } else {
+                out += '{';
+                for (int k = 0; k < arity; k++) {
+                    if (k != 0)
+                        out += ',';
+                    out += typeArguments[nextArgument++];
+                }
+                out += '}';
+            }
+            i = markerEnd;
+        }
+        if (nextArgument < typeArguments.size()) {
+            out += '{';
+            for (std::size_t k = nextArgument; k < typeArguments.size(); k++) {
+                if (k != nextArgument)
+                    out += ',';
+                out += typeArguments[k];
+            }
+            out += '}';
+        }
+        return out;
+    }
+    // The definitions/refs: the dotted declaring chain (the
+    // ReflectionName's '+' separators) with the arity suffix kept. The
+    // native integers resolve with the alias spellings (the port's
+    // KnownType renders `nint`/`nuint`); the doc IDs spell the full
+    // names (the C# PrimitiveTypeCode table).
+    std::string name = type->ReflectionName();
+    if (name == "nint")
+        name = "System.IntPtr";
+    else if (name == "nuint")
+        name = "System.UIntPtr";
+    std::replace(name.begin(), name.end(), '+', '.');
+    return name;
+}
+
+// The C# AppendMethodIdString / AppendPropertyIdString /
+// AppendFieldIdString: the declaring type's doc name + the escaped
+// member name (the explicit-implementation dots -> '#', the angle
+// brackets -> the braces) + the method generic count + the parameter
+// list + the conversion operator's return type.
+std::string EscapedMemberDocName(const std::string& name) {
+    std::string out;
+    for (char c : name) {
+        if (c == '.')
+            out += '#';
+        else if (c == '<')
+            out += '{';
+        else if (c == '>')
+            out += '}';
+        else
+            out += c;
+    }
+    return out;
+}
+
+std::string ParameterListDocText(
+    const std::vector<const TS::IParameter*>& parameters) {
+    std::string out;
+    if (!parameters.empty()) {
+        out += '(';
+        for (std::size_t i = 0; i < parameters.size(); ++i) {
+            if (i != 0)
+                out += ',';
+            if (parameters[i] != nullptr) {
+                TS::ITypePtr type(
+                    const_cast<TS::IType*>(&parameters[i]->Type()),
+                    [](TS::IType*) {});
+                out += DocTypeName(type);
+            }
+        }
+        out += ')';
+    }
+    return out;
+}
+
+std::string TypeDocName(const Metadata::MetadataFile& file,
+                        std::uint32_t typeToken) {
     std::vector<std::string> names;
     std::uint32_t current = typeToken;
     std::string rootNamespace;
@@ -1086,15 +1230,24 @@ std::string TypeDocId(const Metadata::MetadataFile& file,
         current = info->DeclaringTypeToken;
     }
     std::reverse(names.begin(), names.end());
-    std::string id = "T:";
+    std::string id;
     if (!rootNamespace.empty())
-        id += rootNamespace + ".";
+        id = rootNamespace + ".";
     for (std::size_t i = 0; i < names.size(); ++i) {
         if (i != 0)
             id += '.';
         id += names[i];
     }
     return id;
+}
+
+// The C# IdStringProvider's type-documentation ID: `T:` + the dotted
+// declaring chain (the nested names joined by '.', not '+') with the
+// root's namespace prefix; the metadata name keeps the generic arity
+// suffix (the doc IDs spell `List`1`).
+std::string TypeDocId(const Metadata::MetadataFile& file,
+                      std::uint32_t typeToken) {
+    return "T:" + TypeDocName(file, typeToken);
 }
 
 // The C# AddXmlDocumentationTransform's InsertXmlDocumentation lifted to
@@ -1140,11 +1293,12 @@ std::string DocumentationCommentLines(const std::string& documentation) {
     }
     if (firstLine == lines.size())
         return std::string();
-    std::size_t indentation = 0;
-    while (indentation < lines[firstLine].size() &&
-           (lines[firstLine][indentation] == ' ' ||
-            lines[firstLine][indentation] == '\t'))
-        indentation++;
+    std::string indentation;
+    for (char c : lines[firstLine]) {
+        if (c != ' ' && c != '\t')
+            break;
+        indentation += c;
+    }
     // Copy to the end except the trailing whitespace-only lines; the
     // empty lines between render as bare `///`.
     std::size_t lastLine = lines.size();
@@ -1172,8 +1326,13 @@ std::string DocumentationCommentLines(const std::string& documentation) {
         if (whitespaceOnly) {
             out += "///\n";
         } else {
-            std::string content = line.size() > indentation
-                                      ? line.substr(indentation)
+            // The C# conditional strip: a line that does not start with
+            // the documentation indentation keeps its full spelling (the
+            // wrapped continuations with less indentation).
+            bool startsWithIndentation =
+                line.compare(0, indentation.size(), indentation) == 0;
+            std::string content =
+                startsWithIndentation ? line.substr(indentation.size())
                                       : line;
             out += "/// " + content + "\n";
         }
@@ -1572,6 +1731,20 @@ bool DecompileTypeToStringBody(
         auto accessors = file.GetPropertyAccessors(p.Token);
         const TS::IProperty* propertyEntity =
             module.GetDefinitionProperty(p.Token);
+        // The member documentation: the P: ID form (the index parameters
+        // ride the parameter list).
+        if (documentationProvider != nullptr && propertyEntity != nullptr &&
+            propertyEntity->DeclaringTypeDefinition() != nullptr) {
+            std::string propertyId =
+                "P:" + TypeDocName(file, propertyEntity->DeclaringTypeDefinition()
+                                              ->MetadataToken()) +
+                "." + EscapedMemberDocName(p.Name) +
+                ParameterListDocText(propertyEntity->Parameters());
+            std::string documentation =
+                documentationProvider->GetDocumentation(propertyId);
+            if (!documentation.empty())
+                out += DocumentationCommentLines(documentation);
+        }
         std::string propertyTypeName = "var";
         if (propertyEntity != nullptr) {
             // The entity's resolved return type carries the definition
@@ -1739,6 +1912,18 @@ bool DecompileTypeToStringBody(
                 accessorTokens.insert(token);
             std::string eventTypeName = "object";
             const TS::IEvent* event = module.GetDefinitionEvent(e.Token);
+            // The member documentation: the E: ID form.
+            if (documentationProvider != nullptr && event != nullptr &&
+                event->DeclaringTypeDefinition() != nullptr) {
+                std::string eventId =
+                    "E:" + TypeDocName(file, event->DeclaringTypeDefinition()
+                                                   ->MetadataToken()) +
+                    "." + EscapedMemberDocName(e.Name);
+                std::string documentation =
+                    documentationProvider->GetDocumentation(eventId);
+                if (!documentation.empty())
+                    out += DocumentationCommentLines(documentation);
+            }
             out += MemberAttributesText(event);
             out += MemberModifiersText(event);
             if (event != nullptr) {
@@ -1860,6 +2045,20 @@ bool DecompileTypeToStringBody(
                 module.GetDefinitionField(f.Token);
             if (fieldEntity == nullptr || !fieldEntity->IsConst())
                 continue;
+            // The member documentation (the C# AddXmlDocumentationTransform
+            // over the enum-member declarations): the F: ID form.
+            if (documentationProvider != nullptr &&
+                fieldEntity->DeclaringTypeDefinition() != nullptr) {
+                std::string fieldId =
+                    "F:" +
+                    TypeDocName(file, fieldEntity->DeclaringTypeDefinition()
+                                     ->MetadataToken()) +
+                    "." + EscapedMemberDocName(f.Name);
+                std::string documentation =
+                    documentationProvider->GetDocumentation(fieldId);
+                if (!documentation.empty())
+                    out += DocumentationCommentLines(documentation);
+            }
             out += f.Name;
             bool withInitializer =
                 displayMode == EnumValueDisplayMode::All ||
@@ -1911,6 +2110,18 @@ bool DecompileTypeToStringBody(
         if (backingFieldNames.count(f.Name) != 0)
             continue;
         const TS::IField* fieldEntity = module.GetDefinitionField(f.Token);
+        // The member documentation: the F: ID form.
+        if (documentationProvider != nullptr && fieldEntity != nullptr &&
+            fieldEntity->DeclaringTypeDefinition() != nullptr) {
+            std::string fieldId =
+                "F:" + TypeDocName(file, fieldEntity->DeclaringTypeDefinition()
+                                               ->MetadataToken()) +
+                "." + EscapedMemberDocName(f.Name);
+            std::string documentation =
+                documentationProvider->GetDocumentation(fieldId);
+            if (!documentation.empty())
+                out += DocumentationCommentLines(documentation);
+        }
         auto fieldType = file.GetFieldSignature(f.Token);
         std::string fieldTypeName =
             fieldType
@@ -1956,6 +2167,30 @@ bool DecompileTypeToStringBody(
         // of the dotted metadata name.
         std::string methodName = isConstructor ? typeName : m.Name;
         const TS::IMethod* methodEntity = module.GetDefinitionMethod(m.Token);
+        // The member documentation (the C# AddXmlDocumentationTransform
+        // over the method declarations): the M: ID form (the constructors
+        // included -- `.ctor` escapes to `#ctor`).
+        if (documentationProvider != nullptr && methodEntity != nullptr &&
+            methodEntity->DeclaringTypeDefinition() != nullptr) {
+            std::string methodId = "M:" + TypeDocName(file,
+                methodEntity->DeclaringTypeDefinition()->MetadataToken()) +
+                "." + EscapedMemberDocName(m.Name);
+            if (!methodEntity->TypeParameters().empty())
+                methodId += "``" +
+                            std::to_string(methodEntity->TypeParameters().size());
+            methodId += ParameterListDocText(methodEntity->Parameters());
+            if (m.Name == "op_Implicit" || m.Name == "op_Explicit" ||
+                m.Name == "op_CheckedExplicit") {
+                TS::ITypePtr returnType(
+                    const_cast<TS::IType*>(&methodEntity->ReturnType()),
+                    [](TS::IType*) {});
+                methodId += "~" + DocTypeName(returnType);
+            }
+            std::string documentation =
+                documentationProvider->GetDocumentation(methodId);
+            if (!documentation.empty())
+                out += DocumentationCommentLines(documentation);
+        }
         if (!isConstructor && methodEntity != nullptr &&
             methodEntity->IsExplicitInterfaceImplementation()) {
             methodName = methodName.substr(
