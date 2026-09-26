@@ -3,8 +3,12 @@
 Read this + `PORT_PLAN.md` + `cpp/README.md` (and the sibling
 `cpp/PORT_LOG_BAML.md` / `cpp/PORT_LOG_DISASM.md` logs) at the start of a
 fresh session.
-Standing baseline: **connid_csharp sha256 `aa0c70560a254275`** (re-pinned
-DELIBERATELY at the whole-module using set -- the header carries the
+Standing baseline: **connid_csharp sha256 `dfb728fb5d6b0935`** (re-pinned
+DELIBERATELY at the tab-formatting migration -- the type members indent
+one level (one tab per level) and the seed bodies follow, per the C#
+SyntaxTreeToString convention; the blank separator before a type's
+closing brace drops; prior: `aa0c70560a254275` at the whole-module
+using set -- the header carries the
 module-wide required namespaces; prior: `1349c3bf...` the event +=/
 delegate foldings, `b15a4355...` the body-name simplification slices: the own-type
 static member accesses render unqualified (`f532f2d0...` -- the .cctor's

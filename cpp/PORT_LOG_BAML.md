@@ -1727,3 +1727,75 @@ The seventh assignment: the first bounded slice of the metadata-only
 3. The tab-formatting migration to the output visitor for the whole
    type render (the C# SyntaxTreeToString path), then the mscorlib
    227k-line declaration sweep.
+
+# The T3 slice 2: the output-visitor formatting migration (tabs)
+
+The eighth assignment: the formatting migration (the C# output
+conventions) over the metadata-only type render -- the bridge to the
+mscorlib 227k-line declaration sweep (the next slice).
+
+## What changed
+
+* **The tab indent unit**: the ILAstToCSharp seed emitter's `Line`
+  indents with one TAB per level (the C# SyntaxTreeToString
+  convention; the C# output visitor's IndentationString). The seed's
+  ~30 pin strings updated mechanically (the 4-space runs -> the
+  equivalent tabs; the untabbed remainder stays the test file's own
+  4-space style).
+* **The type render's member indentation**: DecompileTypeToStringBody
+  segments its output (the header through the opening brace, the
+  member block, the type's own closing brace) and indents the member
+  block one tab; empty separator lines stay empty; the blank
+  separator(s) immediately before the closing brace drop (the C# form:
+  the last member sits tight against the brace). The delegates render
+  header-only (no braces, nothing to indent).
+* **The CLI -t separator**: the blank line between the matched types
+  only (the last render ends at its closing brace -- the C# output
+  ends there too). The `using System;`-style extra usings are the
+  documented next-slice divergence (the collector pools the referenced
+  namespaces; the C# emits the usings the tree's rendered names
+  require, so the keyword-spelled primitives -- string/int/... -- pull
+  no using).
+
+## Verified
+
+* The ZipFile -t render now matches the committed
+  `System.IO.Compression.ZipFile_type_csharp.gold.txt` byte-for-byte
+  (CR-stripped) from the type's doc comment through the closing brace
+  -- the test pins the exact gold body and documents the leading
+  using-set divergence as the next slice's work.
+* The full-suite failure set is identical to the pre-slice baseline
+  (modulo timings); the ILReader corpus failures remain the
+  pre-existing HEAD set.
+* ASan clean on the slice's paths; the pre-existing
+  InstanceDecompilerOwnsItsPartialTypes leak (the ConvertAttributeType
+  Identifier chain) reproduces exactly as flagged last slice.
+* The connid whole-module baseline re-pinned per the handoff
+  discipline: `aa0c70560a254275` -> `dfb728fb5d6b0935` (the deliberate
+  tab-migration change; the members indent one level and the bodies
+  follow).
+
+## Coordination note (per the triage-lane request)
+
+The two failures under ilspy's triage -- MetadataNamespaceTest.
+ChildCacheIsStable (the vector OOB) and SpecializeTest.FieldCreateArms
+(the segfault) -- live in the TypeSystem/Specialize area; this slice
+touches neither file (the changes are in ILAstToCSharp.cpp, the
+CSharpDecompiler's flat render, and the ILAstToCSharp test pins). No
+overlap. The triage runs keep hitting the same shared abort gate
+(`--gtest_filter='-*ChildCacheIsStable'` still dies at FieldCreateArms
+before the later suites), so the corpus-gated suites AFTER
+SpecializeTest in registration order remain unexercised under the
+gate until ilspy lands the fix; the individual-suite filters used here
+sidestep the gate.
+
+## The next slices
+
+1. The using-set semantics (the keyword-spelled types pull no using;
+   the emitted usings follow the render's actually-used names) --
+   closes the facade's extra-using drift and the ZipFile's
+   `using System;` delta; then the facade gold re-pins to the
+   oracle-exact form.
+2. The mscorlib 227k-line declaration sweep: run
+   `ilspy_cli --csharp mscorlib.dll`, characterize the deltas against
+   the oracle capture, and file the defect list.

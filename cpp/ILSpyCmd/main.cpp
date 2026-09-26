@@ -616,8 +616,12 @@ int RunMain(int argc, char** argv) {
                 std::string typeText;
                 if (decompiler.DecompileTypeToString(t.Token, typeText,
                                                     /*wrapNamespace=*/true)) {
+                    // The blank separator rides BETWEEN the matched types
+                    // (the C# tree's inter-declaration spacing); the last
+                    // render ends at its closing brace like the C# output.
+                    if (typesPrinted > 0)
+                        text += '\n';
                     text += typeText;
-                    text += '\n';
                     ++typesPrinted;
                 }
             }
