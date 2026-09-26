@@ -996,16 +996,34 @@ over-collection -- BOTH ROOT-CAUSED (the audit's final two):
     /home/jim/.dotnet/shared/Microsoft.NETCore.App/10.0.12/). Without
     the files the pin is 54895b5b... (the attribute renders the
     gold-pinned error comment).
-    (e) REMAINS OPEN WITH A NEW MYSTERY: the three extra usings
-    (System.Collections, System.Numerics, System.Threading.Tasks)
-    appear in the CLI's RENDER but NOT in the probe's identical-looking
-    CollectRequiredNamespaces(module) computation (the module-wide set
-    lacks them; the render has them) -- the CLI's instance type system
-    loads references the probe's construction does not (the
-    detected-TFM resolver's search differs from the probe's
-    empty-string TFM). The next probe: replicate the CLI's exact
-    resolver construction (DetectTargetFrameworkId) and diff the
-    compilation's module lists.
+    (e) CLOSED (`ac9664c96`): the whole-module attribute sweep used the
+    RequiredNamespaceCollector's DEFAULT constructor -- it SEEDS the
+    known-type namespaces (System, System.Collections, System.Collections
+    .Generic, System.Threading.Tasks, System.Numerics -- every assembly
+    attribute contributed them; the per-type minimal sweep never did,
+    which is why the per-type probes showed nothing). The sweep now
+    uses the unseeded minimal collector, and the render names only the
+    namespaces the declarations actually reference.
+
+## THE AUDIT ARC COMPLETE: THE CONNID AT FULL PARITY
+
+`ac9664c96` closes the last audit item. THE CONNID RENDER MATCHES THE
+ORACLE WITH ZERO NORMALIZED-LINE DIVERGENCE IN EITHER DIRECTION (the
+31/9 at the audit's start -> 0/0). THE PIN (with the reference fixture
+set -- /tmp/{System.Runtime,System.Collections,
+System.Private.CoreLib}.dll from the .NET 10 runtime):
+acb64a2cf7506cbc22d4f0dacbbf3ccfd8b14c56b807461032e6aad5adeb7c4e
+(the three commits of the arc: a2ad46ced the switch fall-through,
+7771054c3 the short static qualification, 95fd01de7 the cast/bool
+forms, 1ad5f83e9 the default-ctor elision, 720bce5ee the event backing
+field, ac9664c96 the using set -- each pin move deliberate).
+
+THE FINAL GATES (all green on one build): the facade suite holds its
+one pre-existing merged-tree failure (the tab-migration test-string
+gap); the sweep 13,166 ran / 15 baseline failures; the net48 corpus
+60 oracle-only / 50 mine-only (from the merged tree's 60/51 baseline;
+the remaining rows are the merged-tree render drift -- the audit's
+open follow-ups if the corpus parity matters next); the connid 0/0.
 
     (f's HISTORICAL MAP: the connid's references are System.Runtime +
     System.Collections (10.0.0.0) -- a .NETCoreApp shape. With those
