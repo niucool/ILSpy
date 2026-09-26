@@ -3525,6 +3525,66 @@ bool DecompileTypeToStringBody(
     if (rendered) {
         out += "}\n";
     }
+    if (rendered) {
+        // The flat render's line conventions: the header (the doc
+        // comments, the attributes, the modifiers, the name, the base
+        // list, the opening brace) sits at the type's own level and the
+        // member block indents one level (one tab) deeper -- the C#
+        // output's nesting (the whole-module types ride the caller's
+        // namespace indent; the -t render's file-scoped namespace keeps
+        // the type at column 0). Empty separator lines stay empty (the
+        // C# blank lines carry no whitespace).
+        // Segment the text: the header (through the opening brace), the
+        // member block, and the type's own closing brace line. A delegate
+        // (no braces) renders header-only -- nothing to indent.
+        std::vector<std::string_view> lines;
+        std::size_t start = 0;
+        while (start < out.size()) {
+            const std::size_t nl = out.find('\n', start);
+            const std::size_t end = nl == std::string::npos
+                                        ? out.size()
+                                        : nl + 1;
+            lines.emplace_back(out.data() + start, end - start);
+            start = end;
+        }
+        std::size_t openIndex = std::string_view::npos;
+        std::size_t closeIndex = std::string_view::npos;
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            if (lines[i] == "{\n") {
+                openIndex = i;
+                break;
+            }
+        }
+        if (!lines.empty() && lines.back() == "}\n")
+            closeIndex = lines.size() - 1;
+        if (openIndex == std::string_view::npos ||
+            closeIndex == std::string_view::npos ||
+            closeIndex <= openIndex) {
+            return rendered;  // the header-only shape (the delegate arm)
+        }
+        // The blank separator immediately before the closing brace drops
+        // (the C# render keeps the last member tight against it).
+        std::size_t memberEnd = closeIndex;
+        while (memberEnd > openIndex + 1 && lines[memberEnd - 1] == "\n")
+            --memberEnd;
+        std::string indented;
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            const std::string_view& line = lines[i];
+            const bool inHeader = i <= openIndex || i >= closeIndex;
+            if (i >= memberEnd && i < closeIndex) {
+                continue;  // the dropped pre-brace blank lines
+            }
+            if (line == "\n") {
+                indented += "\n";
+            } else if (inHeader) {
+                indented += line;
+            } else {
+                indented += '\t';
+                indented += line;
+            }
+        }
+        out = std::move(indented);
+    }
     return rendered;
 }
 

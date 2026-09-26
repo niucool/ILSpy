@@ -388,7 +388,7 @@ private:
     }
 
     void Line(int indent, std::string_view text) {
-        out_.append(static_cast<std::size_t>(indent) * 4, ' ');
+        out_.append(static_cast<std::size_t>(indent), '\t');
         out_ += text;
         out_ += '\n';
     }

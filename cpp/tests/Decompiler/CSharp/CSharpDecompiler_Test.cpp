@@ -56,7 +56,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <algorithm>
 #include <string>
 
 namespace {
@@ -707,9 +709,10 @@ TEST(CSharpDecompilerTest, DecompileTypeRendersEvents)
         // semicolon form.
         if (std::getenv("TET_TRACE"))
             std::fprintf(stderr, "TET-EV: %s\n", text.c_str());
-        EXPECT_NE(text.find("event RoutedEventHandler Loaded\n{\nadd"),
+        EXPECT_NE(text.find("event RoutedEventHandler Loaded\n\t{\n\tadd"),
                   std::string::npos)
-            << "the event renders its accessor blocks: " << text;
+            << "the event renders its accessor blocks (the member block "
+               "indents one tab): " << text;
         return;
     }
     FAIL() << "the corpus has no FrameworkContentElement type";
@@ -901,6 +904,36 @@ TEST(CSharpDecompilerTest, MetadataOnlyTypeRenderCarriesTheMembers) {
     // The P/Invoke shape would carry extern; ZipFile has none -- the
     // whole type is HasBody()==true ref-pack bodies.
     EXPECT_EQ(out.find("extern "), std::string::npos);
+
+    // The formatting migration's acceptance: the declaration body (from
+    // the type's own doc comment through the closing brace) matches the
+    // committed ZipFile gold byte-for-byte, CR-stripped (the established
+    // convention). The leading using directives are the documented
+    // next-slice divergence: the port's collector pools the referenced
+    // namespaces while the C# emits the usings the tree's rendered names
+    // require (the keyword-spelled primitives pull no using), so the
+    // port carries one extra `using System;` here today.
+    const std::string kBodyAnchor = "/// <summary>Provides static methods";
+    const std::size_t portBody = out.find(kBodyAnchor);
+    ASSERT_NE(portBody, std::string::npos);
+    std::string goldText = [] {
+        std::ifstream in(
+            ILSPY_TESTS_SOURCE_DIR
+            "/fixtures/metadata_only/"
+            "System.IO.Compression.ZipFile_type_csharp.gold.txt",
+            std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)),
+                           std::istreambuf_iterator<char>());
+    }();
+    const std::size_t goldBody = goldText.find(kBodyAnchor);
+    ASSERT_NE(goldBody, std::string::npos);
+    auto stripCr = [](std::string text) {
+        text.erase(std::remove(text.begin(), text.end(), '\r'),
+                   text.end());
+        return text;
+    };
+    EXPECT_EQ(stripCr(out.substr(portBody)),
+              stripCr(goldText.substr(goldBody)));
 }
 } // namespace
 

@@ -112,7 +112,7 @@ TEST(ILAstToCSharp, StraightLineStoreAndEmptyReturn) {
     fn->CheckInvariant(ILPhase::Normal);
 
     EXPECT_EQ(ILAstToCSharp(*fn, "void", "M", ""),
-              "void M()\n{\n    var V_0 = 42;\n    return;\n}\n");
+              "void M()\n{\n	var V_0 = 42;\n	return;\n}\n");
 }
 
 TEST(ILAstToCSharp, ParametersAreAssignedNotDeclared) {
@@ -125,7 +125,7 @@ TEST(ILAstToCSharp, ParametersAreAssignedNotDeclared) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "int arg_1");
-    EXPECT_NE(text.find("\n    arg_1 = 5;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("\n	arg_1 = 5;\n"), std::string::npos) << text;
     EXPECT_EQ(text.find("var arg_1"), std::string::npos) << text;
 }
 
@@ -140,8 +140,8 @@ TEST(ILAstToCSharp, SecondStoreIsAssignmentNotRedeclaration) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "");
-    EXPECT_NE(text.find("    var V_0 = 1;\n"), std::string::npos) << text;
-    EXPECT_NE(text.find("    V_0 = 2;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	var V_0 = 1;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	V_0 = 2;\n"), std::string::npos) << text;
 }
 
 TEST(ILAstToCSharp, ArithmeticAndComparisonExpressions) {
@@ -160,7 +160,7 @@ TEST(ILAstToCSharp, ArithmeticAndComparisonExpressions) {
     fn->CheckInvariant(ILPhase::Normal);
 
     EXPECT_EQ(ILAstToCSharp(*fn, "bool", "Check", "int arg_1"),
-              "bool Check(int arg_1)\n{\n    var V_0 = (arg_1 + 1);\n    return (V_0 > 0);\n}\n");
+              "bool Check(int arg_1)\n{\n	var V_0 = (arg_1 + 1);\n	return (V_0 > 0);\n}\n");
 }
 
 TEST(ILAstToCSharp, ConditionalBranchEmitsIfGotoAndLabel) {
@@ -192,7 +192,7 @@ TEST(ILAstToCSharp, ConditionalBranchEmitsIfGotoAndLabel) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "");
-    EXPECT_NE(text.find("    if (1 == 1) goto IL_0020;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	if (1 == 1) goto IL_0020;\n"), std::string::npos) << text;
     EXPECT_NE(text.find("\nIL_0020:\n"), std::string::npos) << text;
 }
 
@@ -209,7 +209,7 @@ TEST(ILAstToCSharp, VoidCallStatementAndStringEscapes) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "");
-    EXPECT_NE(text.find(R"(    System.Console.WriteLine("a\nb\"\\");)"),
+    EXPECT_NE(text.find(R"(	System.Console.WriteLine("a\nb\"\\");)"),
               std::string::npos) << text;
 }
 
@@ -232,7 +232,7 @@ TEST(ILAstToCSharp, InstanceCallRendersAsReceiverDotMethod) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "int arg_1");
-    EXPECT_NE(text.find("    this.ToString(arg_1);\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	this.ToString(arg_1);\n"), std::string::npos) << text;
     EXPECT_EQ(text.find("System.Object.ToString("), std::string::npos) << "not a static-style call";
 }
 
@@ -252,7 +252,7 @@ TEST(ILAstToCSharp, ConstructorCallEmitsNewExpression) {
     std::string text = ILAstToCSharp(*fn, "void", "M", "int arg_1");
     // The new-expression's type renders its short name (the C# name lookup
     // through the using directives).
-    EXPECT_NE(text.find("    new StringBuilder(arg_1);\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	new StringBuilder(arg_1);\n"), std::string::npos) << text;
 }
 
 TEST(ILAstToCSharp, BaseConstructorCallEmitsBase) {
@@ -273,7 +273,7 @@ TEST(ILAstToCSharp, BaseConstructorCallEmitsBase) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", ".ctor", "int arg_1");
-    EXPECT_NE(text.find("    base(arg_1);\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	base(arg_1);\n"), std::string::npos) << text;
     EXPECT_EQ(text.find("new System.Object"), std::string::npos) << "base ctor call is not new";
 }
 
@@ -293,8 +293,8 @@ TEST(ILAstToCSharp, FieldStoreAndLoadThroughLdFlda) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "int", "get_Count", "");
-    EXPECT_NE(text.find("    count = 7;\n"), std::string::npos) << text;
-    EXPECT_NE(text.find("    return count;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	count = 7;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	return count;\n"), std::string::npos) << text;
 }
 
 TEST(ILAstToCSharp, ByRefVariableDerefIsImplicit) {
@@ -318,8 +318,8 @@ TEST(ILAstToCSharp, ByRefVariableDerefIsImplicit) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "int", "M", "ref int array");
-    EXPECT_NE(text.find("    array = 0;\n"), std::string::npos) << text;
-    EXPECT_NE(text.find("    return this;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	array = 0;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	return this;\n"), std::string::npos) << text;
     EXPECT_EQ(text.find("*("), std::string::npos) << "no explicit deref of a byref";
 }
 
@@ -331,7 +331,7 @@ TEST(ILAstToCSharp, ThrowEmitsThrowStatement) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "");
-    EXPECT_NE(text.find("    throw null;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	throw null;\n"), std::string::npos) << text;
 }
 
 TEST(ILAstToCSharp, SwitchInlinesLeaveFinalBodies) {
@@ -374,9 +374,9 @@ TEST(ILAstToCSharp, SwitchInlinesLeaveFinalBodies) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "");
-    EXPECT_NE(text.find("    switch (V_0)\n"), std::string::npos) << text;
-    EXPECT_NE(text.find("        case 0:\n"), std::string::npos) << text;
-    EXPECT_NE(text.find("        default:\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	switch (V_0)\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	case 0:\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	default:\n"), std::string::npos) << text;
     // The bodies inline: no thunk gotos, no IL_ labels.
     EXPECT_EQ(text.find("goto"), std::string::npos) << text;
     EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
@@ -584,8 +584,8 @@ TEST(ILAstToCSharp, CastsAndTypeOperators) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "System.String", "M", "object arg_1");
-    EXPECT_NE(text.find("    var V_0 = arg_1 as string;\n"), std::string::npos) << text;
-    EXPECT_NE(text.find("    return (string)(V_0);\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	var V_0 = arg_1 as string;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	return (string)(V_0);\n"), std::string::npos) << text;
 }
 
 TEST(ILAstToCSharp, RefAnyTypeRendersAsReftypeKeywordDotTypeHandle) {
@@ -631,8 +631,8 @@ TEST(ILAstToCSharp, ArrayAndLengthExpressions) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "int", "M", "int[] arg_1");
-    EXPECT_NE(text.find("    var V_0 = arg_1.Length;\n"), std::string::npos) << text;
-    EXPECT_NE(text.find("    return arg_1[V_0];\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	var V_0 = arg_1.Length;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	return arg_1[V_0];\n"), std::string::npos) << text;
 }
 
 TEST(ILAstToCSharp, ConvI4OverLdLenIsImplicit) {
@@ -649,7 +649,7 @@ TEST(ILAstToCSharp, ConvI4OverLdLenIsImplicit) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "int[] arg_1");
-    EXPECT_NE(text.find("    var V_0 = arg_1.Length;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	var V_0 = arg_1.Length;\n"), std::string::npos) << text;
     EXPECT_EQ(text.find("(int)"), std::string::npos) << "no redundant cast around ldlen";
 }
 
@@ -676,9 +676,9 @@ TEST(ILAstToCSharp, CompoundAssignmentForSelfBinaryStore) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "");
-    EXPECT_NE(text.find("    V_0 += 2;\n"), std::string::npos) << text;
-    EXPECT_NE(text.find("    V_0++;\n"), std::string::npos) << text;
-    EXPECT_NE(text.find("    V_0--;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	V_0 += 2;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	V_0++;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	V_0--;\n"), std::string::npos) << text;
 }
 
 TEST(ILAstToCSharp, PlainStoreWhenLeftIsNotTheTarget) {
@@ -696,7 +696,7 @@ TEST(ILAstToCSharp, PlainStoreWhenLeftIsNotTheTarget) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "int arg_1");
-    EXPECT_NE(text.find("    var V_0 = (arg_1 + 1);\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	var V_0 = (arg_1 + 1);\n"), std::string::npos) << text;
     EXPECT_EQ(text.find("V_0 += "), std::string::npos) << "not a compound assignment";
 }
 
@@ -716,8 +716,8 @@ TEST(ILAstToCSharp, TypedDeclarationUsesCSharpKeyword) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "");
-    EXPECT_NE(text.find("    int V_0 = 0;\n"), std::string::npos) << text;
-    EXPECT_NE(text.find("    var V_1 = 0;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	int V_0 = 0;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	var V_1 = 0;\n"), std::string::npos) << text;
 }
 
 TEST(ILAstToCSharp, SubtractionFromZeroIsUnaryNegation) {
@@ -734,7 +734,7 @@ TEST(ILAstToCSharp, SubtractionFromZeroIsUnaryNegation) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "int x");
-    EXPECT_NE(text.find("    var V_0 = -x;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	var V_0 = -x;\n"), std::string::npos) << text;
     EXPECT_EQ(text.find("(0 - x)"), std::string::npos) << "not a binary subtraction";
 }
 
@@ -800,7 +800,7 @@ TEST(ILAstToCSharp, RethrowEmitsBareThrow) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "");
-    EXPECT_NE(text.find("    throw;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	throw;\n"), std::string::npos) << text;
 }
 
 TEST(ILAstToCSharp, EmptyBodyEmitsEmptyMethod) {
@@ -1208,7 +1208,7 @@ TEST(ILAstToCSharp, GotoToTryEntryWithCodeBetweenEmitsLabelBeforeTry) {
     ASSERT_NE(labelPos, std::string::npos) << text;
     ASSERT_NE(tryPos, std::string::npos) << text;
     EXPECT_LT(labelPos, tryPos) << "the label must precede the `try` keyword:\n" << text;
-    EXPECT_EQ(text.find("try\n    {\nIL_0016:"), std::string::npos)
+    EXPECT_EQ(text.find("try\n	{\nIL_0016:"), std::string::npos)
         << "the label must not sit inside the try body:\n" << text;
 }
 
