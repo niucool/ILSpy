@@ -699,34 +699,36 @@ composition bypassing the attribute builder's
 AlwaysUseShortTypeNames short path). **The member-signature and
 base-declaration corpus categories now have ZERO differing rows.**
 
-THE NEXT MAJOR ITEM -- the XML documentation comments (the largest
-remaining corpus category: 16,108 oracle-only lines after the
-indentation normalization; the docs render from the ADJACENT
-PresentationFramework.xml, which the corpus directory carries). The
-C# surface to port (decompose as slices, the ID provider is the meat):
-  * `Documentation/IdStringProvider.cs` (1232 lines): the entity -> the
-    doc-ID string (`T:`, `M:`, `P:`, `F:`, `E:` + the dotted declaring
-    chain + the generic arity markers + the parameter type encodings
-    for overloads; the C++/CLI dialect candidate forms). Bounded first
-    slice: the TYPE ids alone (`T:` -- no parameter encodings).
-  * `Documentation/XmlDocumentationProvider.cs` (466 lines): the
-    adjacent `.xml` scan (the `<member name="X">` elements -> the
-    content map; the C# streams the file, a hand-rolled scanner
-    suffices) + `GetDocumentation(entity)` over the ID candidates.
-  * The facade wiring: the flat renderer's member arms emit the `///`
-    lines (the ported AddXmlDocumentationTransform.cpp already holds
-    the line-splitting + indentation-strip + cref-preserving logic --
-    port its InsertXmlDocumentation shape into the facade's per-member
-    emission; the AST-transform path itself runs only over the method
-    bodies today).
-  * The mscorlib/ref-pack loader paths (the C# XmlDocLoader's runtime
-    discovery) -- defer; the adjacent-file convention covers the
-    corpus + the fixture cases.
-The remaining other corpus gaps after the docs: ~1,198 member
-declarations (ref/out-suffixed signatures + specific member families)
-and ~978 event explicit-implementation declarations (the add/remove
-accessor form), all recorded in /tmp/pf_all_diff.txt (the raw diff;
-the indentation dominates it -- normalize before categorizing).
+THE XML DOCUMENTATION FEATURE -- LANDED (two slices, the category
+CLOSED at zero differing doc lines on the corpus, from 16,108):
+  * `f56c0ec37` -- the provider + the type docs:
+    `Documentation/XmlDocumentationProvider.{hpp,cpp}` (the adjacent
+    `<assembly>.xml` scan, the `<member name=...>` content captured
+    verbatim -- the C# ReadInnerXml shape; the port loads the whole
+    file into a map where the C# streams with an index, the bounded
+    divergence) + the T: IDs + the doc-line renderer (the
+    InsertXmlDocumentation lift: the first non-empty line's
+    indentation, the trailing empty lines dropped, the between-empty
+    lines as bare `///`).
+  * `bd399a97a` -- the member IDs: the M:/P:/F:/E: forms (the dotted
+    declaring chain, the escaped names, the `` ``N `` generic counts,
+    the doc type-name parameter encodings -- the byref '@', the arrays,
+    the generic-parameter markers, the instantiation's brace
+    distribution; the '~ReturnType' conversion suffix), the enum
+    member list's per-member F: docs, the constructors' '#ctor', and
+    the nint/nuint alias-to-full-name mapping (the doc IDs spell
+    System.IntPtr where the port's resolution renders the alias). The
+    indentation strip is CONDITIONAL (the C# StartsWith check -- an
+    unconditional strip chopped the wrapped continuations mid-word).
+THE REMAINING CORPUS GAP (after the docs): 2,177 oracle-only / 2,114
+mine-only normalized lines, all NON-doc: the member-decl family
+(~1,198 -- ref/out-suffixed signature shapes + specific member
+families), the event explicit-implementation declarations (~978, the
+add/remove accessor form), and the misc rows. All in the normalized
+set diff over /tmp/pf_oracle.txt vs the latest
+/home/jim/tmp-build/pf_mine_*.txt (strip + de-duplicate before
+categorizing -- the raw diff is dominated by the whole-module
+indentation divergence).
 
 THE NEXT QUEUE for this family (the corpus remainder):
   * The four families above (all in the final corpus diff at
