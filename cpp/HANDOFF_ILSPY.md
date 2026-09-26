@@ -1062,7 +1062,7 @@ family, 34 rows); the connid pin unchanged.
   reference fixture set -- System.Runtime/System.Collections/
   System.Private.CoreLib from the .NET 10 runtime; without them the
   pin is 54895b5b...).
-- THE CORPUS: 9 oracle-only / 9 mine-only (the arc: the merged tree
+- THE CORPUS: 9 oracle-only / 7 mine-only (the arc: the merged tree
   60/51 -> the using-set fix 60/50 -> the interop properties 39/34 ->
   the constraint clauses 22/17 -> the conversion operators 19/14 ->
   the complement forms 17/13 -> the explicit indexers 13/10:
@@ -1072,14 +1072,16 @@ family, 34 rows); the connid pin unchanged.
   the methods' return-type attributes 9/9 (the [return: MarshalAs]
   sections on the stub + empty-body arms, the accessor slice's
   AccessorReturnAttributesText applied to the methods).
-  THE REMAINING ~9/9 (sampled): the `Contract.Requires<...>` body
+  -> the ComImport co-class ctors 9/7 (the .ctor + RVA 0 + the
+  TypeAttributes.Import hide).
+  THE REMAINING ~9/7 (sampled): the `Contract.Requires<...>` body
   rows (3), the `base..ctor();`/`_id = Guid.NewGuid();` constructor-
   initializer rows, the `public virtual extern IEnumString
   SupportedLanguages` row, the `/*Error: End of method reached
   without returning.*/;` variant, the cross-module `new` misses (2),
-  and the anonymous-type hides (the `<>f__AnonymousType0` renders
-  where the oracle hides them -- the C#'s anonymous-type rule in
-  MemberIsHidden).
+  the anonymous-type hides (the `<>f__AnonymousType0` + its member
+  rows), and the `[DefaultMember("Item")]` extra (the C# removes it
+  when the type declares an indexer).
 - THE GATES: the sweep 13,166 ran / 15 baseline (env -u
   ILSPY_TEST_MSCORLIB); the facade suite 45 with the ONE pre-existing
   merged-tree failure (XmlDocumentationCommentsRenderOnMembers -- the
