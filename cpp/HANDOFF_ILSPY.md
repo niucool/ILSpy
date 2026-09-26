@@ -746,8 +746,12 @@ AccessorBodyText). The member-decl families that remain:
   * The P/Invoke declarations (`public static extern bool ShowWindow(
     IntPtr hwnd, SW nCmdShow);`) + the `[StructLayout]` struct
     members in the remaining 'other' family.
-  * The `bool ITextSelection.IsInterimSelection` explicit-impl
-    property rows.
+  * The EXPLICIT-IMPL PROPERTY NAMES -- CLOSED (`77df0389a`): the
+    interface-qualified rewrite mirrors the event arm's (the first
+    explicitly implemented member's declaring type through
+    RenderBaseTypeName + the name's last segment; the dotted metadata
+    name on a NON-explicit property keeps the metadata name). Corpus:
+    1402/1343 -> 1221/1158.
 All in the normalized set diff over /tmp/pf_oracle.txt vs
 /home/jim/tmp-build/pf_mine_nint2.txt (strip + de-duplicate before
 categorizing -- the raw diff is dominated by the whole-module
