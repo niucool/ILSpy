@@ -37,6 +37,7 @@
 // pin the deferral contracts alongside the real enumerations.
 
 #include "TestFixtures/AssemblyIdentityFixtures.hpp"
+#include <cstdio>
 #include <cstdlib>
 #include "TestFixtures/TinyNetModule.hpp"
 
@@ -122,8 +123,30 @@ private:
     TS::KnownType knownType_{ TS::KnownTypeCode::Object };
 };
 
+// The mscorlib availability gate (the Specialize_Test convention): the
+// gold counts, tokens, and member layouts below pin the MONO mscorlib;
+// without that file present (or with ILSPY_TEST_MSCORLIB pointing at a
+// reference assembly whose shapes differ), the assertions are
+// meaningless -- the tests skip instead of running against an empty
+// module and indexing into empty vectors.
+bool MscorlibFileExists(const char* path) {
+    FILE* file = std::fopen(path, "rb");
+    if (file == nullptr)
+        return false;
+    std::fclose(file);
+    return true;
+}
+
 // The mscorlib fixture: the real file, the module over it, and a compilation
 // whose main module it becomes (the probe's SimpleCompilation shape).
+// The per-test gate: skips when the selected mscorlib is absent (the
+// default mono path does not exist on every runner).
+#define REQUIRE_MSCORLIB()                                                    \
+    do {                                                                      \
+        if (!MscorlibFileExists(MscorlibPath()))                              \
+            GTEST_SKIP() << "mscorlib fixture not available";                 \
+    } while (0)
+
 struct MscorlibFixture {
     TM::MetadataFile file{ MscorlibPath() };
     MainModuleCompilation compilation;
@@ -161,6 +184,7 @@ std::string Join(const std::vector<const TS::INamespace*>& namespaces)
 TEST(MetadataModuleTest, CtorComputesAssemblyIdentityOverMscorlib)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
     EXPECT_EQ(f.module.AssemblyName(), "mscorlib");
     EXPECT_EQ(f.module.AssemblyVersion(), TS::Version(4, 0, 0, 0));
     EXPECT_EQ(f.module.AssemblyVersion().ToString(), "4.0.0.0");
@@ -215,6 +239,7 @@ TEST(MetadataModuleTest, CorruptAssemblyRowYieldsTheErrorNames)
 TEST(MetadataModuleTest, IsMainModuleComparesAgainstTheCompilationMainModule)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
     EXPECT_TRUE(f.module.IsMainModule());
 
     // A second module over the same compilation is not the main module.
@@ -236,6 +261,7 @@ TEST(MetadataModuleTest, IsMainModuleComparesAgainstTheCompilationMainModule)
 TEST(MetadataModuleTest, SymbolSurfaceMatchesGold)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
     EXPECT_EQ(f.module.Name(), "mscorlib");
     EXPECT_EQ(f.module.SymbolKind(), TS::SymbolKind::Module);
 
@@ -259,6 +285,7 @@ TEST(MetadataModuleTest, SymbolSurfaceMatchesGold)
 TEST(MetadataModuleTest, GetTypeDefinitionMissArmsReturnNull)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
     EXPECT_EQ(f.module.GetTypeDefinition(
                   TS::TopLevelTypeName("System", "NoSuchType", 0)),
               nullptr);
@@ -276,6 +303,7 @@ TEST(MetadataModuleTest, GetTypeDefinitionMissArmsReturnNull)
 TEST(MetadataModuleTest, GetTypeDefinitionHitResolvesTheDefinition)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
     // The reverse lookup hits System.String (0x02000073); the hit routes
     // through GetDefinition, whose entity cache constructs the real
     // MetadataTypeDefinition (the gold: kind Class, sealed, the String
@@ -298,6 +326,7 @@ TEST(MetadataModuleTest, GetTypeDefinitionHitResolvesTheDefinition)
 TEST(MetadataModuleTest, TypeEnumerationsMatchGold)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
     // The gold counts: 3356 TypeDef rows, 2696 of them top-level.
     EXPECT_EQ(f.module.TypeDefinitions().size(), 3356u);
     EXPECT_EQ(f.module.TopLevelTypeDefinitions().size(), 2696u);
@@ -318,6 +347,7 @@ TEST(MetadataModuleTest, TypeEnumerationsMatchGold)
 TEST(MetadataModuleTest, AttributeAndIvtDeferrals)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
     EXPECT_NO_THROW(f.module.GetAssemblyAttributes());
     EXPECT_NO_THROW(f.module.GetModuleAttributes());
     EXPECT_FALSE(f.module.GetAssemblyAttributes().empty());
@@ -338,6 +368,7 @@ TEST(MetadataModuleTest, AttributeAndIvtDeferrals)
 TEST(MetadataModuleTest, GetDefinitionPlumbing)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
     // The nil token (row 0) returns null.
     EXPECT_EQ(f.module.GetDefinition(0x02000000u), nullptr);
     // The <Module> row (row 1) constructs (an empty-namespace type).
@@ -369,6 +400,7 @@ TEST(MetadataModuleTest, GetDefinitionPlumbing)
 TEST(MetadataNamespaceTest, RootNamespaceSurfaceMatchesGold)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
     const TS::INamespace& root = f.module.RootNamespace();
     EXPECT_EQ(root.FullName(), "");
     EXPECT_EQ(root.Name(), "");
@@ -392,6 +424,7 @@ TEST(MetadataNamespaceTest, RootNamespaceSurfaceMatchesGold)
 TEST(MetadataNamespaceTest, RootChildrenOrderMatchesGold)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
     // The gold root order: the SRM tree's insertion order (Microsoft, Windows,
     // System -- the synthesized virtual intermediates first).
     EXPECT_EQ(Join(f.module.RootNamespace().ChildNamespaces()),
@@ -419,6 +452,7 @@ TEST(MetadataNamespaceTest, RootChildrenOrderMatchesGold)
 TEST(MetadataNamespaceTest, SystemNamespaceSurfaceMatchesGold)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
     const TS::INamespace& root = f.module.RootNamespace();
     const TS::INamespace* system = root.GetChildNamespace("System");
     ASSERT_NE(system, nullptr);
@@ -447,6 +481,7 @@ TEST(MetadataNamespaceTest, SystemNamespaceSurfaceMatchesGold)
 TEST(MetadataNamespaceTest, VirtualNamespacesCarryNoDirectTypes)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
     const TS::INamespace& root = f.module.RootNamespace();
 
     // The SRM-synthesized virtual intermediates carry no direct types: the
@@ -473,6 +508,7 @@ TEST(MetadataNamespaceTest, VirtualNamespacesCarryNoDirectTypes)
 TEST(MetadataNamespaceTest, DirectTypeNamespaceEnumeratesTheDefinitions)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
     // The System namespace carries 312 direct types (the gold count): the
     // Types() enumeration routes every token through GetDefinition, which
     // now constructs the real entities.
@@ -493,6 +529,7 @@ TEST(MetadataNamespaceTest, DirectTypeNamespaceEnumeratesTheDefinitions)
 TEST(MetadataNamespaceTest, NestedChainMatchesGold)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
     const TS::INamespace& root = f.module.RootNamespace();
     const TS::INamespace* system = root.GetChildNamespace("System");
     ASSERT_NE(system, nullptr);
@@ -517,6 +554,7 @@ TEST(MetadataNamespaceTest, NestedChainMatchesGold)
 TEST(MetadataNamespaceTest, ChildCacheIsStable)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
     // The LazyInit-cached child array: the same child instances across calls
     // (the C# reference-identity of the cached array).
     std::vector<const TS::INamespace*> first =
