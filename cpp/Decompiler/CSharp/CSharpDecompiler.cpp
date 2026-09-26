@@ -672,7 +672,7 @@ const char* BuiltinTypeKeyword(const TS::ITypeDefinition* typeDef) {
         {"System.Single", "float"},  {"System.Double", "double"},
         {"System.Decimal", "decimal"}, {"System.String", "string"},
         {"System.Object", "object"}, {"System.IntPtr", "nint"},
-        {"System.UIntPtr", "nuint"},
+        {"System.UIntPtr", "nuint"},  {"System.Void", "void"},
     };
     const std::string full = typeDef->Namespace() + "." + typeDef->Name();
     auto it = kBuiltinKeywords.find(full);
@@ -1156,6 +1156,11 @@ bool DecompileTypeToStringBody(
         }
         if (partialType != nullptr)
             typeModifiers = typeModifiers | SyntaxNS::Modifiers::Partial;
+        // The C# ConvertDelegate: `modifiers & ~Sealed` (the metadata
+        // marks delegates sealed) -- before the modifier emission.
+        if (typeDef != nullptr && TS::GetDelegateInvokeMethod(*typeDef) != nullptr)
+            typeModifiers = typeModifiers &
+                            ~SyntaxNS::Modifiers::Sealed;
         out += MemberAttributesText(typeDef);
         for (SyntaxNS::Modifiers modifier :
              SyntaxNS::CSharpModifiers::AllModifiers) {
@@ -1165,9 +1170,29 @@ bool DecompileTypeToStringBody(
                 out += SyntaxNS::CSharpModifiers::GetModifierName(modifier) +
                        std::string(" ");
         }
-        out += keyword;
-        out += ' ';
-        out += bareName;
+        // The C# ConvertTypeDefinition's Delegate arm: a delegate type
+        // renders the Invoke signature as `delegate Ret Name(params);`
+        // -- never the class shape or the runtime members (the .ctor,
+        // Invoke, BeginInvoke, EndInvoke). The sealed modifier strips
+        // (the metadata marks delegates sealed).
+        const TS::IMethod* delegateInvoke =
+            typeDef != nullptr ? TS::GetDelegateInvokeMethod(*typeDef)
+                               : nullptr;
+        if (delegateInvoke != nullptr) {
+            out += "delegate ";
+            TS::ITypePtr delegateReturnType(
+                const_cast<TS::IType*>(&delegateInvoke->ReturnType()),
+                [](TS::IType*) {});
+            out += RenderBaseTypeName(
+                delegateReturnType->GetDefinition(), delegateReturnType,
+                scopeResolver.get());
+            out += ' ';
+            out += bareName;
+        } else {
+            out += keyword;
+            out += ' ';
+            out += bareName;
+        }
         // The type-parameter list (the C# TypeDeclaration's
         // TypeParameters): the type's OWN parameters only -- the C#
         // skips the declaring type's count. The port's TypeParameters
@@ -1197,6 +1222,21 @@ bool DecompileTypeToStringBody(
                 }
                 out += '>';
             }
+        }
+        if (delegateInvoke != nullptr) {
+            // The delegate's parameter list (the Invoke signature's
+            // parameters) + the closing semicolon; the runtime members
+            // never render and no base list applies (the early return
+            // skips the member arms and the closing brace).
+            std::vector<const TS::IParameter*> parameters =
+                delegateInvoke->Parameters();
+            auto paramNames =
+                file.GetParameterNames(delegateInvoke->MetadataToken());
+            out += "(" +
+                   CSharpDecompiler::MethodDeclString(
+                       parameters, true, paramNames, scopeResolver.get()) +
+                   ");\n";
+            return true;
         }
         if (typeDef != nullptr) {
             std::vector<std::string> baseTypeNames;

@@ -903,6 +903,30 @@ TEST(FacadeMemberModifiersTest, NestedTypeParameterListSkipsOuterParameters)
     EXPECT_NE(text.find("class Gen<T>"), std::string::npos) << text;
 }
 
+// The delegate shape (the C# ConvertTypeDefinition's Delegate arm over
+// GetDelegateInvokeMethod): the declaration renders the Invoke
+// signature -- `delegate ReturnType Name(params);` -- never the class
+// shape or the .ctor/Invoke/BeginInvoke/EndInvoke members, with the
+// sealed modifier stripped and the type-parameter list + constraints
+// carried over.
+TEST(FacadeMemberModifiersTest, DelegateTypesRenderTheInvokeSignature)
+{
+    constexpr const char* kNestedFixture =
+        "/home/jim/ilspy-test-fixtures/nested_fixture/NestedBase.dll";
+    std::string text;
+    if (!RenderType(kNestedFixture, "CollectionCallback", text))
+        GTEST_SKIP() << "the nested-base fixture is not provisioned";
+    EXPECT_NE(text.find("public delegate void CollectionCallback(int x, "
+                        "string s);"),
+              std::string::npos)
+        << text;
+    std::string generic;
+    ASSERT_TRUE(RenderType(kNestedFixture, "Transformer", generic));
+    EXPECT_NE(generic.find("public delegate T Transformer<T>(T input);"),
+              std::string::npos)
+        << generic;
+}
+
 // The whole-module render's using header carries the module-wide
 // required set (the C# IntroduceUsingDeclarations over the whole-module
 // tree), not just the assembly-attribute namespaces: the connid module's
