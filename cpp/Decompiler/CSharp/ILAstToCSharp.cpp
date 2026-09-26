@@ -3186,6 +3186,16 @@ std::string CSharpTypeName(const TypeSystem::ITypePtr& type) {
     auto builtin = kBuiltinKeywords.find(rn);
     if (builtin != kBuiltinKeywords.end())
         return builtin->second;
+    // A nested type the render did not resolve (the file-signature
+    // decode's reference carries the reflection `+` chain): the nested
+    // name is only nameable through its enclosing type, so it renders
+    // the full dotted form (the C# simple type's dotted full name).
+    if (rn.find('+') != std::string::npos) {
+        std::string dotted = rn;
+        for (char& c : dotted)
+            if (c == '+') c = '.';
+        return dotted;
+    }
     auto pos = rn.rfind('.');
     return pos != std::string::npos ? rn.substr(pos + 1) : rn;
 }
