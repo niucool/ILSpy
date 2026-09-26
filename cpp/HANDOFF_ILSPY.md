@@ -1081,6 +1081,14 @@ family, 34 rows); the connid pin unchanged.
   without returning.*/;` variant, the cross-module `new` misses (2),
   and the anonymous-type hides (the `<>f__AnonymousType0` + its
   member rows -- the C#'s anonymous-type rule in MemberIsHidden).
+  THE EXTERN-PROPERTY ATTEMPT WAS REVERTED (the accessor-body
+  computation moved before the modifier emission to feed the extern
+  gate -- the restructure dropped the properties' modifiers wholesale
+  (the corpus blew to 4421/3959; the pin broke); the mechanism is
+  unclear and the slice needs a fresh investigation -- the C# rule is
+  `!getterHasBody && !setterHasBody && !IsAbstract && declaring kind
+  != Interface -> Modifiers.Extern`, the mirror of the method arm's
+  memberRendersExtern).
   CLOSED THIS TURN: the `[DefaultMember("Item")]` extra (the
   compiler-generated attribute drops when the type declares a
   non-explicit indexer, `8179a690f`).
