@@ -720,13 +720,31 @@ CLOSED at zero differing doc lines on the corpus, from 16,108):
     System.IntPtr where the port's resolution renders the alias). The
     indentation strip is CONDITIONAL (the C# StartsWith check -- an
     unconditional strip chopped the wrapped continuations mid-word).
-THE REMAINING CORPUS GAP (after the docs): 2,177 oracle-only / 2,114
-mine-only normalized lines, all NON-doc: the member-decl family
-(~1,198 -- ref/out-suffixed signature shapes + specific member
-families), the event explicit-implementation declarations (~978, the
-add/remove accessor form), and the misc rows. All in the normalized
-set diff over /tmp/pf_oracle.txt vs the latest
-/home/jim/tmp-build/pf_mine_*.txt (strip + de-duplicate before
+THE REMAINING CORPUS GAP (after the docs): 2,160 oracle-only / 2,099
+mine-only normalized lines. The event explicit-implementation family
+CLOSED (`25826ab44` -- the interface-qualified name + the add/remove
+accessor blocks, with the empty-body brace-overlap fix in
+AccessorBodyText). The member-decl families that remain:
+  * THE NATIVE-INTEGER SPELLING (the biggest visible family): the
+    net48 corpus renders `public IntPtr hwndParent;` where the port
+    renders `nint`. The C# keyword table
+    (KnownTypeReference.GetCSharpNameByTypeCode) has NO IntPtr/
+    UIntPtr entries -- a plain System.IntPtr type reference renders
+    the FULL NAME; only the ELEMENT_TYPE_I/U signature forms (the
+    connid's modern fields, whose pin renders nint) use the
+    keywords. The fix needs the NInt/NUInt TYPE-KIND split at the
+    IL::CSharpTypeName KnownType arm: drop the IntPtr/UIntPtr cases
+    (render the full names) and route the TypeKind::NInt/NUInt kinds
+    to the keywords -- THE CONNID PIN IS THE GUARD (its render uses
+    the ELEMENT_TYPE_I forms; verify which kind the port's decoder
+    produces for them before the change).
+  * The P/Invoke declarations (`public static extern bool ShowWindow(
+    IntPtr hwnd, SW nCmdShow);`) + the `[StructLayout]` struct
+    members + the enum-value rows in the ~972 'other' family.
+  * The `bool ITextSelection.IsInterimSelection` explicit-impl
+    property rows.
+All in the normalized set diff over /tmp/pf_oracle.txt vs
+/home/jim/tmp-build/pf_mine_nint2.txt (strip + de-duplicate before
 categorizing -- the raw diff is dominated by the whole-module
 indentation divergence).
 
