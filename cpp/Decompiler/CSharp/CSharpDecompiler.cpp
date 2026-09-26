@@ -280,6 +280,13 @@ std::string CSharpDecompiler::MethodDeclString(
             } catch (const std::exception&) {
                 literal = std::string();
             }
+            if (literal.empty() &&
+                parameter->Type().Kind() == TS::TypeKind::TypeParameter) {
+                // The C# default-value form for a type-parameter-typed
+                // optional parameter: `T value = default(T)` (the null
+                // constant over the parameter type).
+                literal = "default(" + parameter->Type().Name() + ")";
+            }
             if (!literal.empty())
                 paramDecl += " = " + literal;
         }
@@ -993,7 +1000,16 @@ std::string ConstantValueText(const std::any& value,
         if (auto* d = std::any_cast<double>(&value)) {
             char buffer[64];
             std::snprintf(buffer, sizeof(buffer), "%g", *d);
-            return buffer;
+            std::string text = buffer;
+            // The C# double literal always carries the decimal point
+            // (`5.0`, not `5` -- the PrimitiveExpression's double
+            // format).
+            if (text.find('.') == std::string::npos &&
+                text.find('e') == std::string::npos &&
+                text.find("inf") == std::string::npos &&
+                text.find("nan") == std::string::npos)
+                text += ".0";
+            return text;
         }
         if (auto* str = std::any_cast<std::string>(&value))
             return "\"" + *str + "\"";
