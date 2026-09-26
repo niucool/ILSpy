@@ -1487,7 +1487,22 @@ private:
             }
             case OpCode::StObj: {
                 const auto& st = static_cast<const StObj&>(inst);
-                Line(indent, StoreTargetText(*st.Target) + " = " + Expr(*st.Value) + ";");
+                std::string valueText = Expr(*st.Value);
+                // The C# stores a boolean through the boolean literal
+                // (the CSharpPrimitiveCast over the target type): an int
+                // constant stored to a bool-typed field renders
+                // true/false, not 1/0.
+                if (st.Type != nullptr &&
+                    st.Type->ReflectionName() == "System.Boolean") {
+                    if (auto* constant =
+                            dynamic_cast<const LdcI4*>(st.Value.get())) {
+                        if (constant->Value == 0)
+                            valueText = "false";
+                        else if (constant->Value == 1)
+                            valueText = "true";
+                    }
+                }
+                Line(indent, StoreTargetText(*st.Target) + " = " + valueText + ";");
                 return;
             }
             case OpCode::NumericCompoundAssign: {
@@ -1979,6 +1994,15 @@ private:
     // assignment (`recv.X += handler`), the handler's delegate
     // construction folding to the bare method group in the event-handler
     // position. Empty when the call is not an event accessor.
+    // The C# cast expression as a member-access receiver wraps itself
+    // (`((Button)target).AddHandler(...)`): the cast binds tighter than
+    // the dot, so the receiver parenthesizes when it is itself a cast.
+    bool IsCastInstruction(const ILInstruction* node) {
+        return node != nullptr &&
+               (node->Op == OpCode::CastClass || node->Op == OpCode::Unbox ||
+                node->Op == OpCode::UnboxAny);
+    }
+
     std::string EventAddRemoveText(const Call& call) {
         std::string_view name(call.MethodName);
         auto sep = name.rfind("::");
@@ -1996,6 +2020,10 @@ private:
             return std::string();
         std::string eventName(member.substr(isAdd ? 4 : 7));
         std::string receiver = Expr(*call.Arguments[0]);
+        // The cast receiver wraps like the call path (the cast binds
+        // tighter than the dot and the +=).
+        if (IsCastInstruction(call.Arguments[0].get()))
+            receiver = "(" + receiver + ")";
         // The handler: a delegate construction folds to its method group
         // (the event's handler type makes the conversion implicit).
         std::string handler;
@@ -2007,6 +2035,40 @@ private:
         }
         return receiver + "." + eventName + (isAdd ? " += " : " -= ") +
                handler;
+    }
+
+    // The C# CastExpression's operand parenthesization: a simple load
+    // or literal (the identifier-shaped forms) renders unparenthesized --
+    // `(Button)target`, not `(Button)(target)`; anything with looser-
+    // binding structure keeps the parens.
+    bool IsSimpleCastOperand(const ILInstruction* node) {
+        if (node == nullptr)
+            return true;
+        switch (node->Op) {
+            case OpCode::LdLoc:
+            case OpCode::LdLoca:
+            case OpCode::LdStr:
+            case OpCode::LdStrUtf8:
+            case OpCode::LdcI4:
+            case OpCode::LdcI8:
+            case OpCode::LdcF4:
+            case OpCode::LdcF8:
+            case OpCode::LdcDecimal:
+            case OpCode::LdNull:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    std::string CastText(const std::string& typeName,
+                         const std::unique_ptr<ILInstruction>& argument) {
+        if (!argument)
+            return "(" + typeName + ")(default)";
+        std::string operand = Expr(*argument);
+        if (!IsSimpleCastOperand(argument.get()))
+            operand = "(" + operand + ")";
+        return "(" + typeName + ")" + operand;
     }
 
     std::string CallText(const Call& call) {
@@ -2153,6 +2215,8 @@ private:
         if (!prop.empty()) {
             std::string recv = Expr(*call.Arguments[0]);
             bool needsParens = !recv.empty() && (recv[0] == '&' || recv[0] == '*');
+            if (IsCastInstruction(call.Arguments[0].get()))
+                needsParens = true;
             std::string target = (needsParens ? "(" + recv + ")" : recv) + "." + prop;
             if (call.MethodName.size() >= 4) {
                 auto pos = call.MethodName.rfind("::");
@@ -2169,6 +2233,8 @@ private:
         // binds looser than `.` -- parenthesize so the member access wins.
         bool needsParens = recv.size() >= 4 && recv.compare(0, 4, "ref ") == 0;
         if (!needsParens && !recv.empty()) needsParens = (recv[0] == '&' || recv[0] == '*');
+        if (IsCastInstruction(call.Arguments[0].get()))
+            needsParens = true;
         std::string text = (needsParens ? "(" + recv + ")" : recv) +
                            "." + ShortMethodName(call.MethodName) + "(";
         for (std::size_t i = 1; i < call.Arguments.size(); ++i) {
@@ -2554,18 +2620,15 @@ private:
             }
             case OpCode::CastClass: {
                 const auto& cast = static_cast<const CastClass&>(inst);
-                return "(" + TypeDisplayName(cast.Type) + ")(" +
-                       (cast.Argument ? Expr(*cast.Argument) : "(default)") + ")";
+                return CastText(TypeDisplayName(cast.Type), cast.Argument);
             }
             case OpCode::Unbox: {
                 const auto& unbox = static_cast<const Unbox&>(inst);
-                return "(" + TypeDisplayName(unbox.Type) + ")(" +
-                       (unbox.Argument ? Expr(*unbox.Argument) : "(default)") + ")";
+                return CastText(TypeDisplayName(unbox.Type), unbox.Argument);
             }
             case OpCode::UnboxAny: {
                 const auto& unbox = static_cast<const UnboxAny&>(inst);
-                return "(" + TypeDisplayName(unbox.Type) + ")(" +
-                       (unbox.Argument ? Expr(*unbox.Argument) : "(default)") + ")";
+                return CastText(TypeDisplayName(unbox.Type), unbox.Argument);
             }
             case OpCode::Box:
                 // Boxing is implicit in C#.
