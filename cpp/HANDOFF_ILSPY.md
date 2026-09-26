@@ -969,7 +969,12 @@ lines) -- SIX DIVERGENCE CATEGORIES, each a queued slice:
     not decode attribute arguments.*/)]` (the DebuggableAttribute
     ctor's DebuggingModes enum argument fails to decode);
 plus the empty default constructors render where the oracle hides
-the compiler-generated ones.
+the compiler-generated ones -- CLOSED (`1ad5f83e9` + the test
+inversion): the public parameterless empty-body ctor elides (the
+connid 24/4 -> 16/4; the pin at 9c683c94...; the corpus unchanged).
+The remaining queue: (f) the Debuggable decode, (a) the switch-body
+simplification, (e) the using-set over-collection, and the
+Button.ClickEvent member-of-type qualification.
 
 The pin guards the merged tree's CURRENT state; each fix above moves
 it deliberately (re-pin + the diff documented per slice).
