@@ -529,6 +529,25 @@ TEST(MetadataNamespaceTest, ChildCacheIsStable)
         EXPECT_EQ(first[i], second[i]);
     }
     // GetChildNamespace resolves through the same cached instances.
-    EXPECT_EQ(f.module.RootNamespace().GetChildNamespace("System"), first[2]);
-    EXPECT_EQ(f.module.RootNamespace().GetChildNamespace("Microsoft"), first[0]);
+    // The children are located BY NAME, not by index: the root-namespace
+    // set differs across the mscorlib builds the fixture accepts (the
+    // mono mscorlib carries more roots than the net48 one), so a
+    // hardcoded index aborts the vector access on the smaller set.
+    const TS::INamespace* system =
+        f.module.RootNamespace().GetChildNamespace("System");
+    const TS::INamespace* microsoft =
+        f.module.RootNamespace().GetChildNamespace("Microsoft");
+    ASSERT_NE(system, nullptr);
+    ASSERT_NE(microsoft, nullptr);
+    bool systemFromCache = false;
+    bool microsoftFromCache = false;
+    for (const TS::INamespace* cached : first)
+    {
+        systemFromCache |= cached == system;
+        microsoftFromCache |= cached == microsoft;
+    }
+    EXPECT_TRUE(systemFromCache)
+        << "the System child comes from the cached array";
+    EXPECT_TRUE(microsoftFromCache)
+        << "the Microsoft child comes from the cached array";
 }
