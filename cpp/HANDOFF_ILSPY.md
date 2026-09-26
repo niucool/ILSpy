@@ -725,19 +725,18 @@ mine-only normalized lines. The event explicit-implementation family
 CLOSED (`25826ab44` -- the interface-qualified name + the add/remove
 accessor blocks, with the empty-body brace-overlap fix in
 AccessorBodyText). The member-decl families that remain:
-  * THE NATIVE-INTEGER SPELLING (the biggest visible family): the
-    net48 corpus renders `public IntPtr hwndParent;` where the port
-    renders `nint`. The C# keyword table
-    (KnownTypeReference.GetCSharpNameByTypeCode) has NO IntPtr/
-    UIntPtr entries -- a plain System.IntPtr type reference renders
-    the FULL NAME; only the ELEMENT_TYPE_I/U signature forms (the
-    connid's modern fields, whose pin renders nint) use the
-    keywords. The fix needs the NInt/NUInt TYPE-KIND split at the
-    IL::CSharpTypeName KnownType arm: drop the IntPtr/UIntPtr cases
-    (render the full names) and route the TypeKind::NInt/NUInt kinds
-    to the keywords -- THE CONNID PIN IS THE GUARD (its render uses
-    the ELEMENT_TYPE_I forms; verify which kind the port's decoder
-    produces for them before the change).
+  * THE NATIVE-INTEGER SPELLING -- CLOSED (`5bd74eadd`): the port's
+    type-system Default carried NativeIntegersWithoutAttribute (the
+    flag the C# sets only under DecompilerSettings.NumericIntPtr,
+    which the language-version gate turns off below C# 11). The
+    oracle's empirical boundary: the modern .NET targets render every
+    IntPtr as nint, the .NETFramework family the full name -- the TFM
+    approximates it in NativeIntegerOptionsFor (the .NETFramework/
+    Silverlight/.NETPortable families keep the flag OFF), applied at
+    EVERY facade type-system construction (the static entries, the
+    method-body entry, AND the instance's state_->typeSystem.emplace
+    -- the last is easy to miss; the connid pin catches it). Corpus:
+    2160/2099 -> 1650/1589 normalized rows.
   * The P/Invoke declarations (`public static extern bool ShowWindow(
     IntPtr hwnd, SW nCmdShow);`) + the `[StructLayout]` struct
     members + the enum-value rows in the ~972 'other' family.
