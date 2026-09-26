@@ -948,14 +948,13 @@ lines) -- SIX DIVERGENCE CATEGORIES, each a queued slice:
     the raw `goto IL_0018` labels + `default:` (the control-flow
     simplification did not reduce the switch to the break-structured
     form the oracle renders);
-(b) THE CAST-RECEIVER PRECEDENCE: mine renders `(Button)(target)
-    .AddHandler(...)` -- the cast binds tighter than the member
-    access, changing the semantics; the oracle renders
-    `((Button)target).AddHandler(...)` (the parenthesized cast
-    expression needs the outer parens when it is a receiver);
-(c) THE BOOL-STORE LITERAL: `_contentLoaded = 1` vs the oracle's
-    `= true` (an int constant stored to a bool field renders the
-    boolean literal);
+(b) CLOSED (the operand parenthesizes only for the non-atomic forms;
+    a cast receiver wraps itself in the call, property, and event
+    paths) + (c) CLOSED (the bool-store literal: an int constant to a
+    bool field renders true/false) -- `95fd01de7`, the pin at
+    84ee064e..., the connid normalized diff 29/9 -> 24/4; the corpus
+    unchanged (these shapes are decompiled-body forms, absent from
+    the reference assembly's empty bodies);
 (d) CLOSED (the automatic-event backing field hides, gated on the
     isAutomaticEvent classification; the custom-block events keep
     their fields) -- the pin moved to d6cbe93ef...;
