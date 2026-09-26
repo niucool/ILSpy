@@ -975,24 +975,26 @@ connid 24/4 -> 16/4; the pin at 9c683c94...; the corpus unchanged).
 The remaining queue: (f) the Debuggable decode and (e) the using-set
 over-collection -- BOTH ROOT-CAUSED (the audit's final two):
 
-(f) THE DEBUGGABLE DECODE: the attribute blob's enum argument
-    (DebuggingModes) resolves through GetTypeFromSerializedName ->
-    ParseReflectionName, which consults the MODULE's OWN types only
-    (probed: both the bare and the assembly-qualified names return an
-    unresolved SimpleType, def=null) -- the nested enum's definition
-    lives in the REFERENCED mscorlib, and the reflection-name path
-    never consults the referenced modules. Copying the net48 mscorlib
-    next to the fixture (/tmp) does NOT help -- the resolution gap is
-    in the path, not the file availability. THE FIX (a proper slice):
-    extend the ParseReflectionName/SimpleTypeResolveContext resolution
-    to fall back to the compilation's referenced modules (the merged
-    tree the facade already builds for the qualification machinery),
-    mirroring the C#'s SimpleTypeResolveContext(module) resolving
-    TypeRefs through the module's references. The whole attribute
-    currently renders `/*Could not decode attribute arguments.*/`
-    because CustomAttribute::DecodeValue catches the
-    EnumUnderlyingTypeResolveException (GetUnderlyingEnumType throws
-    on the unresolved definition, TypeProvider.cpp:320).
+(f) THE DEBUGGABLE DECODE -- FULLY MAPPED, THE FIX IS THE NETCORE
+    FACADE CHAIN: the connid's references are System.Runtime +
+    System.Collections (10.0.0.0) -- a .NETCoreApp shape. With those
+    DLLs placed next to the fixture, the RESOLVER finds them and the
+    compilation loads them (probed: the modules list grows to 4) --
+    but the DebuggableAttribute's definition is NOT IN System.Runtime
+    (the runtime's System.Runtime.dll is a FACADE): it lives in
+    System.Private.CoreLib through System.Runtime's TYPE FORWARDERS.
+    The resolution needs the forwarder-following lookup (the C#
+    resolves the chain through its runtime). Two experiments were run
+    and REVERTED: (1) defaulting GetUnderlyingEnumType's unresolved
+    arm to Int32 decodes the attribute as `(DebuggingModes)2` but the
+    C#'s throw is GOLD-PINNED (the decoder tests break); (2) the net48
+    mscorlib copy is irrelevant (the reference is netcore). THE FIX (a
+    proper slice): the type-forwarder resolution through the loaded
+    facade references (GetExportedTypes/Resolve the forwards the way
+    the C#'s DecompilerTypeSystem does), or the netcore runtime-pack
+    discovery port. The attribute currently renders `/*Could not
+    decode attribute arguments.*/` via the gold-pinned
+    EnumUnderlyingTypeResolveException catch.
 
 (e) THE USING OVER-COLLECTION: System.Collections and
     System.Threading.Tasks render where the oracle's set is smaller
