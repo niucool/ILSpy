@@ -160,7 +160,7 @@ TEST(ILAstToCSharp, ArithmeticAndComparisonExpressions) {
     fn->CheckInvariant(ILPhase::Normal);
 
     EXPECT_EQ(ILAstToCSharp(*fn, "bool", "Check", "int arg_1"),
-              "bool Check(int arg_1)\n{\n	var V_0 = (arg_1 + 1);\n	return (V_0 > 0);\n}\n");
+              "bool Check(int arg_1)\n{\n	var V_0 = (arg_1 + 1);\n	return V_0 > 0;\n}\n");
 }
 
 TEST(ILAstToCSharp, ConditionalBranchEmitsIfGotoAndLabel) {

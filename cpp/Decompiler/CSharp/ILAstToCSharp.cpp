@@ -2669,8 +2669,16 @@ private:
                     case ComparisonKind::GreaterThan: op = ">"; break;
                     case ComparisonKind::GreaterThanOrEqual: op = ">="; break;
                 }
-                return "(" + (comp.Left ? Expr(*comp.Left) : "(default)") + " " + op + " " +
-                       (comp.Right ? Expr(*comp.Right) : "(default)") + ")";
+                // The comparison renders without the outer parentheses:
+                // the C# ast keeps the precedence and no context needs
+                // them (the call argument list, the if condition, the
+                // store, and the return all take the bare operator
+                // expression). A nested comparison (a comparison of a
+                // comparison result) would need precedence parens; that
+                // shape only arises from bool-typed stack stacking,
+                // which the bool-negation arms above rewrite.
+                return (comp.Left ? Expr(*comp.Left) : "(default)") + " " + op + " " +
+                       (comp.Right ? Expr(*comp.Right) : "(default)");
             }
             case OpCode::BinaryNumericInstruction: {
                 const auto& bin = static_cast<const BinaryNumericInstruction&>(inst);
