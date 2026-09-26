@@ -345,6 +345,11 @@ private:
         bool eligible = false;
         std::vector<const Block*> targets;
         const Block* exit = nullptr;
+        // The DEFAULT section whose thunk targets the exit renders as the
+        // fall-through: the after-switch code IS the default path, so the
+        // section emits neither a `default:` label nor a body.
+        bool defaultFallsToExit = false;
+        std::size_t defaultSectionIdx = static_cast<std::size_t>(-1);
         // Sections whose body is a direct Leave (a `return value;` or `throw`),
         // not a Branch thunk to a body block. They inline their Leave directly
         // under the case label (no body block, no thunk goto). Maps the section
@@ -1024,8 +1029,32 @@ private:
                 exit = outer->Blocks[targetIdx.back() + 1].get();
             }
         }
-        // The exit itself must not be a body target.
-        if (exit && tgtSet.count(exit)) return bail("exit-is-target");
+        // The exit itself must not be a body target -- EXCEPT the DEFAULT
+        // section whose thunk goes to the exit: the after-switch code is the
+        // default path, the section renders as the fall-through, and it
+        // carries no body block.
+        if (exit && tgtSet.count(exit)) {
+            bool defaultToExit = false;
+            for (std::size_t di = 0; di < sw.Sections.size(); ++di) {
+                const auto& section = sw.Sections[di];
+                if (!section || !section->Body) continue;
+                if (!section->Labels.IsEmpty() || section->HasNullLabel)
+                    continue;
+                auto* dbr = dynamic_cast<const Branch*>(section->Body.get());
+                if (dbr && dbr->TargetBlock == exit) {
+                    defaultToExit = true;
+                    plan.defaultSectionIdx = di;
+                    break;
+                }
+            }
+            if (!defaultToExit) return bail("exit-is-target");
+            plan.defaultFallsToExit = true;
+            auto tpos = std::find(targets.begin(), targets.end(), exit);
+            std::size_t tindex = static_cast<std::size_t>(tpos - targets.begin());
+            targets.erase(tpos);
+            if (tindex < targetIdx.size()) targetIdx.erase(targetIdx.begin() + tindex);
+            tgtSet.erase(exit);
+        }
         // Positional integrity: a body whose trailing lets control continue
         // positionally (null final, or a no-else `if (cond) br exit`) must
         // flow into the next outer block equal to the NEXT section's body
@@ -1677,6 +1706,12 @@ private:
                 for (std::size_t k = 0; k < sw.Sections.size(); ++k) {
                     const auto& section = sw.Sections[k];
                     if (!section) continue;
+                    // The default whose thunk targets the exit renders as the
+                    // fall-through: no label, no body (the after-switch code
+                    // is the default path).
+                    if (plan && plan->defaultFallsToExit &&
+                        k == plan->defaultSectionIdx)
+                        continue;
                     if (section->HasNullLabel) {
                         Line(indent + 1, "case null:");
                     }
@@ -1719,6 +1754,9 @@ private:
                         if (dp.first < k) --thunkIdx;
                     for (const auto& dp : plan->directThrowSections)
                         if (dp.first < k) --thunkIdx;
+                    if (plan->defaultFallsToExit &&
+                        k > plan->defaultSectionIdx)
+                        --thunkIdx;
                     const Block* body = plan->targets[thunkIdx];
                     for (const auto& inst : body->Instructions) {
                         if (!inst || inst->Op == OpCode::Nop) continue;
