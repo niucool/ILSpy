@@ -427,6 +427,38 @@ const TS::INamespace* ResolveNamespaceFullName(const TS::INamespace& root,
 // it -- plus static and the virtual family) with ConvertField's
 // const/readonly/volatile bits, rendered as the declaration's leading
 // keywords in the AllModifiers output order.
+// The C# operator declarations (the TypeSystemAstBuilder's ConvertOperator
+// name mapping): the ECMA op_* special-name methods render as the C#
+// operator spellings -- the binary/unary operators as `operator <token>`
+// (the return type precedes), the conversions as
+// `implicit/explicit operator <ReturnType>` (the return type MOVES after
+// the operator keyword). The empty string means the name is not a
+// C#-expressible operator (an unsupported ECMA form like op_Box renders
+// as the plain method name).
+std::string OperatorToken(const std::string& metadataName) {
+    static const std::map<std::string, const char*> kOperators = {
+        {"op_Addition", "+"}, {"op_CheckedAddition", "+"},
+        {"op_Subtraction", "-"}, {"op_CheckedSubtraction", "-"},
+        {"op_Multiply", "*"}, {"op_CheckedMultiply", "*"},
+        {"op_Division", "/"}, {"op_CheckedDivide", "/"},
+        {"op_Modulus", "%"},
+        {"op_BitwiseAnd", "&"}, {"op_BitwiseOr", "|"},
+        {"op_ExclusiveOr", "^"},
+        {"op_LeftShift", "<<"}, {"op_CheckedLeftShift", "<<"},
+        {"op_RightShift", ">>"},
+        {"op_Equality", "=="}, {"op_Inequality", "!="},
+        {"op_LessThan", "<"}, {"op_GreaterThan", ">"},
+        {"op_LessThanOrEqual", "<="}, {"op_GreaterThanOrEqual", ">="},
+        {"op_UnaryPlus", "+"},
+        {"op_UnaryNegation", "-"}, {"op_CheckedUnaryNegation", "-"},
+        {"op_LogicalNot", "!"}, {"op_OnesComplement", "~"},
+        {"op_Increment", "++"}, {"op_Decrement", "--"},
+        {"op_True", "true"}, {"op_False", "false"},
+    };
+    auto it = kOperators.find(metadataName);
+    return it != kOperators.end() ? it->second : std::string();
+}
+
 // The C# IntroduceUnsafeModifier's signature rule (the declaration-level
 // half): a member whose signature -- the method's return type or
 // parameter types, a field's type -- contains a pointer type renders
@@ -2493,6 +2525,28 @@ bool DecompileTypeToStringBody(
             auto paramNames = file.GetParameterNames(m.Token);
             paramDecl = CSharpDecompiler::MethodDeclString(
                 *sig, paramNames, scopeResolver.get());
+        }
+        // The C# operator declarations: the op_* special-name methods
+        // render as the operator spellings. The conversion operators move
+        // the return type after the operator keyword -- the shared render
+        // arms (the stub, the empty-body, and the ILAst body emitter) all
+        // compose `returnType + " " + methodName`, so the conversion
+        // renders its keyword in the return-type slot.
+        if (!isConstructor && !methodName.empty() &&
+            methodName.rfind("op_", 0) == 0) {
+            if (methodName == "op_Implicit" ||
+                methodName == "op_CheckedImplicit") {
+                methodName = "operator " + returnType;
+                returnType = "implicit";
+            } else if (methodName == "op_Explicit" ||
+                       methodName == "op_CheckedExplicit") {
+                methodName = "operator " + returnType;
+                returnType = "explicit";
+            } else {
+                std::string token = OperatorToken(methodName);
+                if (!token.empty())
+                    methodName = "operator " + token;
+            }
         }
         // The C# AddInterfaceImplHelpers (the .override directive
         // synthesis): a plain-named method bound to an interface contract
