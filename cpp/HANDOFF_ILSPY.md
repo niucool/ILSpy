@@ -916,6 +916,17 @@ oracle-parity, guarded by a 13k-test sweep, two pinned corpora, and a
 per-change render pin -- the foundation for the remaining ILSpyX
 surfaces (the search/analysis APIs) and the plugin host.
 
+## THE UNGUARDED MSCORLIB GOLD FAMILY -- CLOSED (`bc345d63c`): the
+MetadataModule_Test mscorlib family ran with no availability check --
+on a runner without the default mono mscorlib the module loads empty,
+the gold counts fail, and the indexing into the empty
+TopLevelTypeDefinitions vector SIGABRTs the whole binary (the earlier
+triage note's ITypeDefinition vector abort was THIS family). Every
+MscorlibFixture-using test now carries REQUIRE_MSCORLIB (the
+Specialize_Test convention). The default-env suite completes with NO
+SIGABRT; the four previously-failing gold tests skip; the baseline
+sweep drops 32 -> 28.
+
 ## THE TRIAGE PAIR -- CLOSED: both tests assumed the MONO mscorlib's
 shapes and failed under ILSPY_TEST_MSCORLIB pointing at the net48
 corpus mscorlib. ChildCacheIsStable asserted the cached children by
