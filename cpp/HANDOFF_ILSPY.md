@@ -1062,7 +1062,7 @@ family, 34 rows); the connid pin unchanged.
   reference fixture set -- System.Runtime/System.Collections/
   System.Private.CoreLib from the .NET 10 runtime; without them the
   pin is 54895b5b...).
-- THE CORPUS: 8 oracle-only / 7 mine-only (the arc: the merged tree
+- THE CORPUS: 4 oracle-only / 3 mine-only (the arc: the merged tree
   60/51 -> the using-set fix 60/50 -> the interop properties 39/34 ->
   the constraint clauses 22/17 -> the conversion operators 19/14 ->
   the complement forms 17/13 -> the explicit indexers 13/10:
@@ -1090,22 +1090,20 @@ family, 34 rows); the connid pin unchanged.
   `!getterHasBody && !setterHasBody && !IsAbstract && declaring kind
   != Interface -> Modifiers.Extern`, the mirror of the method arm's
   memberRendersExtern).
-- THE END-OF-METHOD VARIANT IS CLOSED (the ret-less bodies decode --
-  the InvalidBranch arm in the ILReader decode loop, the mirror of
-  the C# ILReader.cs lines 570-590). The corpus is 8/7: the error row
-  closed, and the newly-decoded bodies expose three emitter-level
-  near-misses on the SAME rows (the Contract/_id/Guid statements):
-  (1) the static-call qualification renders fully qualified
-  (`System.Guid.NewGuid()`, `System.Diagnostics.Contracts.Contract.
-  Requires(...)`) where the oracle renders the short form (`Guid.`,
-  `Contract.`) -- the ShortQualifiedMember treatment needs to reach
-  the ILAstToCSharp call emission; (2) the generic static call drops
-  its type arguments (the oracle renders `Contract.Requires<
-  ArgumentNullException>(...)` -- the call node needs the method's
-  generic arguments); (3) the boolean argument renders with doubled
-  parens (`((eventName != null))` vs `(eventName != null)`).
-  PLUS the two remaining known rows: the extern property (see the
-  reverted attempt above) and the cross-module `new` misses (2).
+- THE THREE EMITTER NEAR-MISSES ARE CLOSED (the corpus 8/7 -> 4/3):
+  (1) the static-call short qualification (the last two segments --
+  `Guid.NewGuid`, `Contract.Requires`; six synthetic-seed test
+  expectations updated to the short convention); (2) the generic
+  argument list (DecodeMethodSpecTypeArgs + the Call node's
+  TypeArgumentNames + the `<...>` render; a VAR/MVAR arg suppresses
+  the list); (3) the comparison's outer parens dropped (all contexts
+  take the bare operator expression).
+  THE REMAINING RESIDUE (4/3): the extern property (the reverted
+  attempt's mechanism recorded above) and the two cross-module `new`
+  misses (`public new CollectionRecord this[object o]` +
+  `internal new void SetValue(...)` -- the same member rows whose
+  `new` needs the base-member search through the referenced-module
+  chain).
   CLOSED THIS TURN: the `[DefaultMember("Item")]` extra (the
   compiler-generated attribute drops when the type declares a
   non-explicit indexer, `8179a690f`).
