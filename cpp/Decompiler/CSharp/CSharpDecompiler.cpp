@@ -713,6 +713,37 @@ std::string EnumConstantFieldExpression(
     return "(" + enumName + ")" + numeric;
 }
 
+// The C# accessor's return-type attributes: the `[return: ...]`
+// sections (the C# DoDecompileProperty's accessor arm renders them
+// inside the accessor block -- the stub form cannot carry them, so a
+// property whose accessor has return attributes takes the block form).
+std::string AccessorReturnAttributesText(const TS::IMethod* accessor) {
+    if (accessor == nullptr)
+        return std::string();
+    std::vector<const TS::IAttribute*> attributes =
+        accessor->GetReturnTypeAttributes();
+    if (attributes.empty())
+        return std::string();
+    OutputVisitor::CSharpFormattingOptions options =
+        SettingsFormattingOptions();
+    SyntaxNS::TypeSystemAstBuilder builder;
+    builder.ShowAttributes() = true;
+    builder.AlwaysUseShortTypeNames() = true;
+    std::string out;
+    for (const TS::IAttribute* a : attributes) {
+        if (a == nullptr)
+            continue;
+        Syntax::AttributeSection section(builder.ConvertAttribute(*a));
+        section.AttributeTarget("return");
+        std::string text = section.ToString(&options);
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r'))
+            text.pop_back();
+        if (!text.empty())
+            out += text + "\n";
+    }
+    return out;
+}
+
 // The C# SetNewModifier: a member introduced in a class or struct hides
 // an accessible same-name member (or nested type) in a NON-INTERFACE base
 // type -- the methods hide by signature (the name, the type-parameter
@@ -1685,6 +1716,8 @@ std::string ParameterAttributesText(const TS::IParameter* parameter) {
             out += text;
     }
     return out;
+
+
 }
 
 } // namespace
@@ -2642,7 +2675,30 @@ bool DecompileTypeToStringBody(
              trimmedBody(getterBody) == "return " + backingName + ";") &&
             (setterBody.empty() ||
              trimmedBody(setterBody) == backingName + " = value;");
-        if (backingPattern || (getterBody.empty() && setterBody.empty())) {
+        // The C# accessor-attribute rule: a property whose accessor
+        // carries attributes (the interop shapes -- [MethodImpl],
+        // [SuppressUnmanagedCodeSecurity], the [return: MarshalAs]
+        // return-type attributes) renders the ACCESSOR BLOCK form --
+        // the stub cannot carry them. The accessor has no body (an
+        // InternalCall), so the block's accessor renders `get;`.
+        const TS::IMethod* getterEntity =
+            accessors.GetterToken != 0
+                ? module.GetDefinitionMethod(accessors.GetterToken)
+                : nullptr;
+        const TS::IMethod* setterEntity =
+            accessors.SetterToken != 0
+                ? module.GetDefinitionMethod(accessors.SetterToken)
+                : nullptr;
+        bool accessorsHaveAttributes =
+            (getterEntity != nullptr &&
+             (!getterEntity->GetAttributes().empty() ||
+              !getterEntity->GetReturnTypeAttributes().empty())) ||
+            (setterEntity != nullptr &&
+             (!setterEntity->GetAttributes().empty() ||
+              !setterEntity->GetReturnTypeAttributes().empty()));
+        if (backingPattern ||
+            (getterBody.empty() && setterBody.empty() &&
+             !accessorsHaveAttributes)) {
             out += " { ";
             if (accessors.GetterToken != 0) {
                 out += AccessorVisibilityText(
@@ -2690,6 +2746,7 @@ bool DecompileTypeToStringBody(
             if (accessors.GetterToken != 0) {
                 out += MemberAttributesText(
                     module.GetDefinitionMethod(accessors.GetterToken));
+                out += AccessorReturnAttributesText(getterEntity);
                 out += AccessorVisibilityText(
                     module.GetDefinitionMethod(accessors.GetterToken),
                     propertyEntity);
@@ -2703,6 +2760,7 @@ bool DecompileTypeToStringBody(
             if (accessors.SetterToken != 0) {
                 out += MemberAttributesText(
                     module.GetDefinitionMethod(accessors.SetterToken));
+                out += AccessorReturnAttributesText(setterEntity);
                 out += AccessorVisibilityText(
                     module.GetDefinitionMethod(accessors.SetterToken),
                     propertyEntity);
