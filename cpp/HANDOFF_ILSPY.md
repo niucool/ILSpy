@@ -815,9 +815,21 @@ AccessorBodyText). The member-decl families that remain:
     accessor attributes; the event blocks do not. The stale test
     expectation (the field form) was updated to the block form.
     Corpus: 486/521 -> 274/309 (212 rows, the biggest family yet).
-  * The remaining 'other' family (~274 rows): the static-array-init
-    field spellings, the enum-member near-misses, the constructor
-    parameter near-misses -- sample before picking.
+  * THE ENUM DISPLAY-MODE ABORT -- CLOSED (`b09d311ae`): the C#'s
+    per-member early abort (neither consecutive nor all powers of two
+    -> the All mode) -- the walk only aborted on out-of-order before.
+    101 rows.
+  * THE ALIASED ENUM MEMBERS -- CLOSED (`6cfc4313d`): the C#
+    ConvertEnumValue direct-match arm (an EARLIER same-value member's
+    name; the [Flags] single-bit-only rule; the AllHex skip for
+    aliases -- the first form concatenated the hex digits with the
+    alias). 47 rows. Corpus: 274/309 -> 126/165 across the two.
+  * The remaining 'other' family (~126 rows): the [Flags]
+    complement/composition forms (`ENABLED = ~DOES_NOT_EXIST`, the
+    `Item1 | Item2` unions -- the C# ConvertEnumValue's flags arms),
+    the static-array-init field spellings, the const-double literal
+    forms (`1638.0`), the error-comment variants (`End of method
+    reached without returning`) -- sample before picking.
   * The EXPLICIT-IMPL PROPERTY NAMES -- CLOSED (`77df0389a`): the
     interface-qualified rewrite mirrors the event arm's (the first
     explicitly implemented member's declaring type through
