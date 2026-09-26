@@ -689,11 +689,44 @@ remaining row after the next three slices:
   * (this commit) -- the indexer `this[params]` form + the
     decode-failed accessors' reference-assembly blocks (the accessor
     helper previously swallowed the failure into the stub form).
-The one remaining row: the typeof argument's declaring-type
-qualification (`RBTree<>.<...>d__39`) -- the ATTRIBUTE-ARGUMENT type
-rendering (the Syntax TypeSystemAstBuilder's ConvertConstantValue/
-ConvertType path, NOT the facade's RenderBaseTypeName): the nested
-form through the declaring type with the UNBOUND-GENERIC marker.
+The last row CLOSED (`bfb458db8`): the attribute typeof argument over
+a type nested in a GENERIC declaring type renders `RBTree<>.<...>d__39`
+(the compiler's TypeSpec form -- CS0416 keeps every source form out;
+the ca-blob decode resolves to the bare definition in the port, so the
+typeof render rebuilds the unbound markers manually -- an empty
+type-argument child per declaring parameter, the MemberType
+composition bypassing the attribute builder's
+AlwaysUseShortTypeNames short path). **The member-signature and
+base-declaration corpus categories now have ZERO differing rows.**
+
+THE NEXT MAJOR ITEM -- the XML documentation comments (the largest
+remaining corpus category: 16,108 oracle-only lines after the
+indentation normalization; the docs render from the ADJACENT
+PresentationFramework.xml, which the corpus directory carries). The
+C# surface to port (decompose as slices, the ID provider is the meat):
+  * `Documentation/IdStringProvider.cs` (1232 lines): the entity -> the
+    doc-ID string (`T:`, `M:`, `P:`, `F:`, `E:` + the dotted declaring
+    chain + the generic arity markers + the parameter type encodings
+    for overloads; the C++/CLI dialect candidate forms). Bounded first
+    slice: the TYPE ids alone (`T:` -- no parameter encodings).
+  * `Documentation/XmlDocumentationProvider.cs` (466 lines): the
+    adjacent `.xml` scan (the `<member name="X">` elements -> the
+    content map; the C# streams the file, a hand-rolled scanner
+    suffices) + `GetDocumentation(entity)` over the ID candidates.
+  * The facade wiring: the flat renderer's member arms emit the `///`
+    lines (the ported AddXmlDocumentationTransform.cpp already holds
+    the line-splitting + indentation-strip + cref-preserving logic --
+    port its InsertXmlDocumentation shape into the facade's per-member
+    emission; the AST-transform path itself runs only over the method
+    bodies today).
+  * The mscorlib/ref-pack loader paths (the C# XmlDocLoader's runtime
+    discovery) -- defer; the adjacent-file convention covers the
+    corpus + the fixture cases.
+The remaining other corpus gaps after the docs: ~1,198 member
+declarations (ref/out-suffixed signatures + specific member families)
+and ~978 event explicit-implementation declarations (the add/remove
+accessor form), all recorded in /tmp/pf_all_diff.txt (the raw diff;
+the indentation dominates it -- normalize before categorizing).
 
 THE NEXT QUEUE for this family (the corpus remainder):
   * The four families above (all in the final corpus diff at
