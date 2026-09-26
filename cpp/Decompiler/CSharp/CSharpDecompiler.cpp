@@ -75,6 +75,7 @@
 #include <algorithm>
 #include <functional>
 #include <map>
+#include <set>
 #include <optional>
 #include <utility>
 
@@ -944,6 +945,35 @@ const char* BuiltinTypeKeyword(const TS::ITypeDefinition* typeDef) {
 // The type arguments render as the <...> tail (each argument through the
 // short-name renderer -- the arguments' own decision rides with the
 // member-signature work). An empty instantiation is the plain definition.
+// The C# explicit-implementation name's interface type: the rendered
+// name carries the class's own instantiation --
+// `IEnumerator<XmlNamespaceMapping>`, not the bare definition. The
+// MethodImpl-resolved declaring type already IS the constructed form in
+// the inherited-interface shapes (`ICollection<Uri>`); the
+// definition-level form needs the class's own direct-base-type entry
+// (the metadata's substituted interface reference). A recursive walk
+// through the base types would find the DEFINITION's own unsubstituted
+// base (`IEnumerable<T>` from IList`1), so only the declaring type's
+// direct list is scanned; anything else keeps the resolved declaring
+// type.
+TS::ITypePtr InterfaceInstantiationFor(
+    const TS::ITypeDefinition* declaringType,
+    const TS::ITypeDefinition* interfaceDef,
+    const TS::ITypePtr& resolvedDeclaringType) {
+    if (interfaceDef == nullptr)
+        return nullptr;
+    if (dynamic_cast<const TS::ParameterizedType*>(
+            resolvedDeclaringType.get()) != nullptr)
+        return resolvedDeclaringType;
+    if (declaringType == nullptr)
+        return nullptr;
+    for (const TS::ITypePtr& base : declaringType->DirectBaseTypes()) {
+        if (base != nullptr && base->GetDefinition() == interfaceDef)
+            return base;
+    }
+    return nullptr;
+}
+
 std::string RenderBaseTypeName(const TS::ITypeDefinition* typeDef,
                                const TS::ITypePtr& instantiation,
                                const Resolver::CSharpResolver* resolver) {
@@ -2135,10 +2165,17 @@ bool DecompileTypeToStringBody(
                 implemented[0]->DeclaringType() != nullptr) {
                 const TS::ITypePtr& interfaceType =
                     implemented[0]->DeclaringType();
+                TS::ITypePtr instantiation = InterfaceInstantiationFor(
+                    propertyEntity->DeclaringTypeDefinition(),
+                    interfaceType != nullptr
+                        ? interfaceType->GetDefinition()
+                        : nullptr,
+                    interfaceType);
+                if (instantiation == nullptr)
+                    instantiation = interfaceType;
                 interfaceName = RenderBaseTypeName(
-                    interfaceType != nullptr ? interfaceType->GetDefinition()
-                                             : nullptr,
-                    interfaceType, scopeResolver.get());
+                    instantiation->GetDefinition(), instantiation,
+                    scopeResolver.get());
             }
             if (interfaceName.empty())
                 out += p.Name;
@@ -2312,11 +2349,18 @@ bool DecompileTypeToStringBody(
                         implemented[0]->DeclaringType() != nullptr) {
                         const TS::ITypePtr& interfaceType =
                             implemented[0]->DeclaringType();
+                        TS::ITypePtr instantiation =
+                            InterfaceInstantiationFor(
+                                event->DeclaringTypeDefinition(),
+                                interfaceType != nullptr
+                                    ? interfaceType->GetDefinition()
+                                    : nullptr,
+                                interfaceType);
+                        if (instantiation == nullptr)
+                            instantiation = interfaceType;
                         interfaceName = RenderBaseTypeName(
-                            interfaceType != nullptr
-                                ? interfaceType->GetDefinition()
-                                : nullptr,
-                            interfaceType, scopeResolver.get());
+                            instantiation->GetDefinition(), instantiation,
+                            scopeResolver.get());
                     }
                 }
                 if (interfaceName.empty()) {
@@ -2627,10 +2671,15 @@ bool DecompileTypeToStringBody(
                 methodEntity->ExplicitlyImplementedInterfaceMembers();
             if (!implemented.empty() && implemented[0] != nullptr &&
                 implemented[0]->DeclaringType() != nullptr) {
+                TS::ITypePtr instantiation = InterfaceInstantiationFor(
+                    methodEntity->DeclaringTypeDefinition(),
+                    implemented[0]->DeclaringType()->GetDefinition(),
+                    implemented[0]->DeclaringType());
+                if (instantiation == nullptr)
+                    instantiation = implemented[0]->DeclaringType();
                 methodName =
                     RenderBaseTypeName(
-                        implemented[0]->DeclaringType()->GetDefinition(),
-                        implemented[0]->DeclaringType(),
+                        instantiation->GetDefinition(), instantiation,
                         scopeResolver.get()) +
                     "." + methodName;
             }
