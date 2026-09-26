@@ -1029,13 +1029,28 @@ THE MERGED-TREE CORPUS DRIFT -- PARTIALLY CLOSED (`593f10185`): the
 interop-property family (the accessor attributes -- [MethodImpl],
 [SuppressUnmanagedCodeSecurity], the [return: MarshalAs] return-type
 sections over the accessor-block form, 37 rows). THE REMAINING
-~39/34, SAMPLED: (a) THE METHOD CONSTRAINT CLAUSES DROP ON THE CORPUS
-(the sampled `public static void IsNotNull<T>(T value) where T :
-class` renders WITHOUT the where clause -- the connid's
-`IsNull<T>(T item) where T : class` renders fine, so the gate or the
-flag read differs for these shapes; probe the method's chain-sliced
-type parameters' HasReferenceTypeConstraint against the metadata
-GenericParam flags); (b) the misc property/method header pairs.
+~39/34, SAMPLED AND PROBED (the constraint-clause drop, the turn's
+findings): (a) the corpus's `IsNull<T>(T item) where T : class` and
+`IsNotNull<T>(T value) where T : class` (the Standard.Assert/Verify
+family) render WITHOUT the where clause -- the REGRESSION WINDOW is
+between the renders pf_mine_dl.txt (the where present, the
+fd1310339 era) and pf_mine_cb.txt (absent, the 95fd01de7 cast/bool
+turn -- which touched ONLY ILAstToCSharp.cpp, so the causality is
+NOT the facade's constraint code). THE PROBES: a standalone probe
+over `DecompilerTypeSystem(file, resolver)` (the default options,
+the empty-TFM resolver) reads the SAME methods' T with
+HasReferenceTypeConstraint=1 -- but the RENDER's env-gated WHERE-TP
+print inside ConstraintClausesText shows no ref=1+hasTC=1 row for
+them (the ref=1 rows carry hasTC=0; the hasTC=1 rows carry ref=0)
+-- CAVEAT: the WHERE-TP prints MIX the type-header callers with the
+method-level callers (both go through ConstraintClausesText), so the
+rows are not attributable without adding the caller to the print.
+THE NEXT PROBE: tag the WHERE-TP print with the caller (the
+method name vs the type name) and diff the render's entity flags
+against the probe's -- the remaining difference candidates are the
+type-system construction (the render's NativeIntegerOptionsFor +
+the detected-TFM resolver vs the probe's defaults) and the entity
+caching. (b) the misc property/method header pairs.
 
     (f's HISTORICAL MAP: the connid's references are System.Runtime +
     System.Collections (10.0.0.0) -- a .NETCoreApp shape. With those
