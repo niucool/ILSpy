@@ -2584,8 +2584,18 @@ bool DecompileTypeToStringBody(
                         sig->ParameterTypes[0], scopeResolver.get());
             }
         }
+        // The C# ConvertProperty's explicit-implementation indexer: an
+        // explicit interface implementation of Item names
+        // `Interface.this[...]` and carries NO modifiers (the interface
+        // qualification replaces them).
+        bool indexerIsExplicitImplementation =
+            propertyEntity != nullptr &&
+            propertyEntity->IsExplicitInterfaceImplementation() &&
+            p.Name.find('.') != std::string::npos;
         out += MemberAttributesText(propertyEntity);
-        out += MemberModifiersText(propertyEntity);
+        out += indexerIsExplicitImplementation
+                   ? std::string()
+                   : MemberModifiersText(propertyEntity);
         out += propertyTypeName;
         out += ' ';
         // The C# ConvertProperty's indexer arm: a property with index
@@ -2600,6 +2610,31 @@ bool DecompileTypeToStringBody(
                 indexNames.push_back(indexParameter != nullptr
                                          ? indexParameter->Name()
                                          : std::string());
+            if (indexerIsExplicitImplementation) {
+                // The same GetExplicitInterfaceType rewrite the plain
+                // property arm applies: the first implemented member's
+                // declaring type, instantiated when the class's own base
+                // list carries the parameterized form.
+                std::vector<const TS::IMember*> implemented =
+                    propertyEntity->ExplicitlyImplementedInterfaceMembers();
+                if (!implemented.empty() && implemented[0] != nullptr &&
+                    implemented[0]->DeclaringType() != nullptr) {
+                    const TS::ITypePtr& interfaceType =
+                        implemented[0]->DeclaringType();
+                    TS::ITypePtr instantiation = InterfaceInstantiationFor(
+                        propertyEntity->DeclaringTypeDefinition(),
+                        interfaceType != nullptr
+                            ? interfaceType->GetDefinition()
+                            : nullptr,
+                        interfaceType);
+                    if (instantiation == nullptr)
+                        instantiation = interfaceType;
+                    out += RenderBaseTypeName(
+                        instantiation->GetDefinition(), instantiation,
+                        scopeResolver.get());
+                    out += '.';
+                }
+            }
             out += "this[";
             out += CSharpDecompiler::MethodDeclString(
                 indexParameters, true, indexNames, scopeResolver.get());
