@@ -352,6 +352,17 @@ bool CSharpDecompiler::DecompileMethodToString(
                 resolvedReturnType->GetDefinition(), resolvedReturnType,
                 scopeResolver);
         }
+        // The conversion operators: the implicit/explicit keyword rides the
+        // return-type slot (the caller's name rewrite produced the `operator
+        // <Type>` name; this overload's own return-type computation must
+        // not override the keyword with the entity's return type).
+        if (resolvedMethod->Name() == "op_Implicit" ||
+            resolvedMethod->Name() == "op_CheckedImplicit") {
+            returnType = "implicit";
+        } else if (resolvedMethod->Name() == "op_Explicit" ||
+                   resolvedMethod->Name() == "op_CheckedExplicit") {
+            returnType = "explicit";
+        }
         std::vector<const TS::IParameter*> parameters =
             resolvedMethod->Parameters();
         auto paramNames = file.GetParameterNames(methodToken);
