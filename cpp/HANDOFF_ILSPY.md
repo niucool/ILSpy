@@ -934,17 +934,42 @@ set); the canonical excluded run: 13,166 ran / 15-20 failed (the
 pre-existing baseline; the count varies with the mscorlib family
 skipping), no crash.
 
-THE CONNID PIN -- RE-BASE NEEDED, NOT A REGRESSION OF THIS TURN: the
-tree gained the port-baml merge (d0850c67c) and the C# render tab
-migration (3ce63a4ab) between turns; the render output changed shape
-(the sha dfb728fb5... vs the old pin 074375839ad0...). The normalized
-content comparison against a fresh oracle render shows residual
-divergences in the MERGED tree's render (the raw IL_006B switch/goto
-labels in the Page1 Connect method, the += event-attachment forms --
-31 mine-only / 9 oracle-only normalized lines) -- the follow-up is to
-re-establish the pin and audit the merged render's connid shape (the
-corpus oracle re-render included), NOT a this-turn regression: the
-test-gating turns touched only test files.
+THE CONNID PIN -- RE-ESTABLISHED ON THE MERGED TREE:
+dfb728fb5d6b09351fae1c4705ed0bb6bf1c2cd2e9ea039bff08075c64aa8cbf
+(the old 074375839ad0... was the pre-tab-migration space-indented
+render; the port-baml merge d0850c67c + the tab migration 3ce63a4ab
+changed the shape between turns). THE CONNID CONTENT AUDIT (the
+normalized set-diff against a fresh oracle render -- the old and new
+oracle renders are byte-identical as sets, so the C# side and the
+fixture DLL are stable; 31 mine-only / 9 oracle-only normalized
+lines) -- SIX DIVERGENCE CATEGORIES, each a queued slice:
+
+(a) THE UNSIMPLIFIED SWITCH BODY: the Page1.Connect method renders
+    the raw `goto IL_0018` labels + `default:` (the control-flow
+    simplification did not reduce the switch to the break-structured
+    form the oracle renders);
+(b) THE CAST-RECEIVER PRECEDENCE: mine renders `(Button)(target)
+    .AddHandler(...)` -- the cast binds tighter than the member
+    access, changing the semantics; the oracle renders
+    `((Button)target).AddHandler(...)` (the parenthesized cast
+    expression needs the outer parens when it is a receiver);
+(c) THE BOOL-STORE LITERAL: `_contentLoaded = 1` vs the oracle's
+    `= true` (an int constant stored to a bool field renders the
+    boolean literal);
+(d) THE EVENT BACKING FIELD: `private RoutedEventHandler Click;`
+    renders as a member next to `public event RoutedEventHandler
+    Click;` (the field-like event's backing field must hide);
+(e) THE USING-SET OVER-COLLECTION: `using System.Collections;` +
+    `using System.Threading.Tasks;` render where the oracle's set is
+    smaller;
+(f) THE ASSEMBLY ATTRIBUTE DECODE: `[assembly: Debuggable(/*Could
+    not decode attribute arguments.*/)]` (the DebuggableAttribute
+    ctor's DebuggingModes enum argument fails to decode);
+plus the empty default constructors render where the oracle hides
+the compiler-generated ones.
+
+The pin guards the merged tree's CURRENT state; each fix above moves
+it deliberately (re-pin + the diff documented per slice).
 
 ## THE UNGUARDED MSCORLIB GOLD FAMILY -- CLOSED (`bc345d63c`): the
 MetadataModule_Test mscorlib family ran with no availability check --
