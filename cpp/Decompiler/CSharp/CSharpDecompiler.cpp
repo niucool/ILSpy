@@ -160,6 +160,11 @@ std::string RenderBaseTypeName(
 std::string ConstantValueText(const std::any& value,
                               const ::ILSpy::Decompiler::TypeSystem::IType& type);
 
+// The parameter-attribute renderer (the compact bracket-adjacent form),
+// the same forward-declaration pattern.
+std::string ParameterAttributesText(
+    const ::ILSpy::Decompiler::TypeSystem::IParameter* parameter);
+
 } // namespace
 
 // The C# Decompile path's parameter-declaration builder (the CLI's inline
@@ -203,6 +208,12 @@ std::string CSharpDecompiler::MethodDeclString(
         const TS::IParameter* parameter = parameters[i];
         if (parameter == nullptr)
             continue;
+        // The C# ConvertParameter's attribute half: the parameter's
+        // attributes render as the compact bracket-adjacent sections
+        // before the modifiers.
+        std::string parameterAttributes = ParameterAttributesText(parameter);
+        if (!parameterAttributes.empty())
+            paramDecl += parameterAttributes + " ";
         // The C# ConvertParameter's modifier composition: the params
         // array leads, then the reference kind.
         if (parameter->IsParams())
@@ -416,6 +427,49 @@ const TS::INamespace* ResolveNamespaceFullName(const TS::INamespace& root,
 // it -- plus static and the virtual family) with ConvertField's
 // const/readonly/volatile bits, rendered as the declaration's leading
 // keywords in the AllModifiers output order.
+// The C# IntroduceUnsafeModifier's signature rule (the declaration-level
+// half): a member whose signature -- the method's return type or
+// parameter types, a field's type -- contains a pointer type renders
+// the `unsafe` modifier. The transform's body-level uses (the pointer
+// dereferences inside decompiled bodies) ride the AST pipeline; the
+// reference-assembly empty-body members only have the signature.
+bool TypeContainsPointer(const TS::IType* type) {
+    if (type == nullptr)
+        return false;
+    if (dynamic_cast<const TS::PointerType*>(type) != nullptr)
+        return true;
+    if (const auto* array = dynamic_cast<const TS::ArrayType*>(type))
+        return TypeContainsPointer(array->Element().get());
+    if (const auto* byref =
+            dynamic_cast<const TS::ByReferenceType*>(type))
+        return TypeContainsPointer(byref->Element().get());
+    if (const auto* parameterized =
+            dynamic_cast<const TS::ParameterizedType*>(type)) {
+        for (const TS::ITypePtr& argument :
+             parameterized->TypeArguments())
+            if (TypeContainsPointer(argument.get()))
+                return true;
+    }
+    return false;
+}
+
+bool MemberSignatureHasPointer(const TS::IMember* member) {
+    if (member == nullptr)
+        return false;
+    if (const auto* method = dynamic_cast<const TS::IMethod*>(member)) {
+        if (TypeContainsPointer(&method->ReturnType()))
+            return true;
+        for (const TS::IParameter* parameter : method->Parameters())
+            if (parameter != nullptr &&
+                TypeContainsPointer(&parameter->Type()))
+                return true;
+        return false;
+    }
+    if (const auto* field = dynamic_cast<const TS::IField*>(member))
+        return TypeContainsPointer(&field->Type());
+    return false;
+}
+
 std::string MemberModifiersText(const TS::IMember* member) {
     if (member == nullptr)
         return std::string();
@@ -431,6 +485,8 @@ std::string MemberModifiersText(const TS::IMember* member) {
             m = m | SyntaxNS::Modifiers::Volatile;
         }
     }
+    if (MemberSignatureHasPointer(member))
+        m = m | SyntaxNS::Modifiers::Unsafe;
     std::string out;
     for (SyntaxNS::Modifiers modifier : SyntaxNS::CSharpModifiers::AllModifiers) {
         if (modifier == SyntaxNS::Modifiers::Any)
@@ -724,6 +780,30 @@ std::string RenderBaseTypeName(const TS::ITypeDefinition* typeDef,
                 dynamic_cast<const TS::ITypeParameter*>(
                     instantiation.get()))
             return typeParameter->Name();
+        // The composite forms recurse on the element through the same
+        // name decision (the C# converts the element type and wraps it
+        // in the pointer/array markup): a sibling nested type inside a
+        // pointer renders `FSPOINT*`, not the reflection chain. The
+        // by-reference form renders the element bare (the parameter's
+        // ref/out modifier already carries the reference kind).
+        if (const auto* pointer =
+                dynamic_cast<const TS::PointerType*>(
+                    instantiation.get()))
+            return RenderBaseTypeName(
+                       pointer->Element()->GetDefinition(),
+                       pointer->Element(), resolver) +
+                   "*";
+        if (const auto* byReference =
+                dynamic_cast<const TS::ByReferenceType*>(
+                    instantiation.get()))
+            return RenderBaseTypeName(
+                byReference->Element()->GetDefinition(),
+                byReference->Element(), resolver);
+        if (const auto* array =
+                dynamic_cast<const TS::ArrayType*>(instantiation.get()))
+            return RenderBaseTypeName(array->Element()->GetDefinition(),
+                                      array->Element(), resolver) +
+                   (array->IsSzArray() ? "[]" : "[,]");
         return IL::CSharpTypeName(instantiation);
     }
     if (typeDef == nullptr)
@@ -951,6 +1031,37 @@ std::string MemberAttributesText(const TS::IEntity* entity,
             text.pop_back();
         if (!text.empty())
             out += text + "\n";
+    }
+    return out;
+}
+
+// The C# ConvertParameter's attribute half (the TypeSystemAstBuilder):
+// the parameter's attributes render as the compact bracket-adjacent
+// sections -- the parameter placement joins them with no space
+// (`[In][MarshalAs(UnmanagedType.Bool)]`), unlike the member's leading
+// lines. The empty string when the parameter carries no attributes.
+std::string ParameterAttributesText(const TS::IParameter* parameter) {
+    if (parameter == nullptr)
+        return std::string();
+    std::vector<const TS::IAttribute*> attributes = parameter->GetAttributes();
+    if (attributes.empty())
+        return std::string();
+    OutputVisitor::CSharpFormattingOptions options =
+        SettingsFormattingOptions();
+    SyntaxNS::TypeSystemAstBuilder builder;
+    builder.ShowAttributes() = true;
+    builder.AlwaysUseShortTypeNames() = true;
+    std::string out;
+    for (const TS::IAttribute* a : attributes) {
+        if (a == nullptr)
+            continue;
+        Syntax::AttributeSection section(builder.ConvertAttribute(*a));
+        std::string text = section.ToString(&options);
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r'
+                                 || text.back() == ' '))
+            text.pop_back();
+        if (!text.empty())
+            out += text;
     }
     return out;
 }
@@ -1484,9 +1595,17 @@ bool DecompileTypeToStringBody(
             typeModifiers = typeModifiers | SyntaxNS::Modifiers::Partial;
         // The C# ConvertDelegate: `modifiers & ~Sealed` (the metadata
         // marks delegates sealed) -- before the modifier emission.
-        if (typeDef != nullptr && TS::GetDelegateInvokeMethod(*typeDef) != nullptr)
+        if (typeDef != nullptr && TS::GetDelegateInvokeMethod(*typeDef) != nullptr) {
             typeModifiers = typeModifiers &
                             ~SyntaxNS::Modifiers::Sealed;
+            // The C# IntroduceUnsafeModifier's delegate rule: a pointer
+            // in the Invoke signature (the return or the parameters)
+            // grants the delegate type the `unsafe` modifier.
+            if (MemberSignatureHasPointer(
+                    TS::GetDelegateInvokeMethod(*typeDef)))
+                typeModifiers =
+                    typeModifiers | SyntaxNS::Modifiers::Unsafe;
+        }
         out += MemberAttributesText(typeDef);
         for (SyntaxNS::Modifiers modifier :
              SyntaxNS::CSharpModifiers::AllModifiers) {
