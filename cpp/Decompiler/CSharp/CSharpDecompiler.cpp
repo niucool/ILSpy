@@ -1023,10 +1023,28 @@ std::string ConstantFieldLiteral(const TS::IField& field) {
 bool TypeIsHiddenFromRender(const Metadata::MetadataFile& file,
                             std::uint32_t typeToken) {
     const IL::ILTransformSettings transformSettings;
-    return (transformSettings.YieldReturn &&
-            Metadata::IsCompilerGeneratorEnumerator(file, typeToken)) ||
-           (transformSettings.AsyncAwait &&
-            Metadata::IsCompilerGeneratedStateMachine(file, typeToken));
+    if ((transformSettings.YieldReturn &&
+         Metadata::IsCompilerGeneratorEnumerator(file, typeToken)) ||
+        (transformSettings.AsyncAwait &&
+         Metadata::IsCompilerGeneratedStateMachine(file, typeToken)))
+        return true;
+    // The C# MemberIsHidden's top-level arm: a compiler-generated type
+    // named <PrivateImplementationDetails>... (the array-initializer
+    // backing: the __StaticArrayInitTypeSize structs and the hash-named
+    // data fields) is hidden under ArrayInitializers (on by default) --
+    // the array initializers render inline in the field declarations
+    // instead.
+    for (const auto& t : file.TypeDefs()) {
+        if (t.Token != typeToken)
+            continue;
+        return std::string(t.Name).rfind(
+                   "<PrivateImplementationDetails>", 0) == 0 &&
+               t.Namespace.empty() &&
+               Metadata::HasKnownAttribute(
+                   file, typeToken,
+                   TS::KnownAttribute::CompilerGenerated);
+    }
+    return false;
 }
 
 // The enclosing namespace of a (possibly nested) type: the declaring
@@ -3059,6 +3077,18 @@ bool DecompileTypeToStringBody(
                         v = static_cast<std::int64_t>(*p);
                     else if (auto* p =
                                  std::any_cast<std::int64_t>(&constant))
+                        v = *p;
+                    else if (auto* p =
+                                 std::any_cast<std::int16_t>(&constant))
+                        v = *p;
+                    else if (auto* p =
+                                 std::any_cast<std::uint16_t>(&constant))
+                        v = *p;
+                    else if (auto* p =
+                                 std::any_cast<std::int8_t>(&constant))
+                        v = *p;
+                    else if (auto* p =
+                                 std::any_cast<std::uint8_t>(&constant))
                         v = *p;
                     if (v >= 10) {
                         char buf[32];
