@@ -701,6 +701,12 @@ int RunMain(int argc, char** argv) {
     return 0;
 }
 
+#ifndef ILSPY_CMD_AS_LIB
+// ILSPY_CMD_AS_LIB (the ilspy_cmd_lib target, the bennu umbrella's
+// in-process dispatch surface — DOTNET_PLAN.md Phase B, mirroring hada_lib):
+// the TU contributes RunMain (and DecompileLib.cpp's ilspy:: / ilspycmd::
+// entries) but NOT a main symbol, so the umbrella can link this lib without
+// a main collision. The guard wraps the whole win/nix entry pair.
 #if defined(_WIN32)
 // The Windows entry point: the Unicode command line converted to UTF-8
 // before the option parse (the C runtime's narrow argv would transcode
@@ -732,4 +738,5 @@ int wmain(int argc, wchar_t** argv) {
 int main(int argc, char** argv) {
     return RunMain(argc, argv);
 }
-#endif
+#endif  // _WIN32
+#endif  // ILSPY_CMD_AS_LIB

@@ -19,3 +19,17 @@ target_sources(ilspy PRIVATE
 add_executable(ilspy_cli ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp)
 add_executable(ILSpy::ilspy_cli ALIAS ilspy_cli)
 target_link_libraries(ilspy_cli PRIVATE ILSpy::ilspy cxxopts::cxxopts)
+
+# ilspy_cmd_lib (DOTNET_PLAN.md Phase B): the SAME sources as the ilspy_cli
+# exe but compiled with ILSPY_CMD_AS_LIB so the TU contributes RunMain
+# (re-exported as ilspycmd::run_cli) plus ilspy::decompile_module_to_string
+# (DecompileLib.cpp — the direct whole-module C# render the session leg
+# calls) but NOT a main symbol. The bennu umbrella links this lib so
+# `blade decompile <managed>` / the analyze session dispatch in-process
+# without re-spawning the executable. Mirrors sleigh's hada_lib/HADA_AS_LIB.
+add_library(ilspy_cmd_lib STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/DecompileLib.cpp
+)
+target_compile_definitions(ilspy_cmd_lib PUBLIC ILSPY_CMD_AS_LIB)
+target_link_libraries(ilspy_cmd_lib PUBLIC ILSpy::ilspy cxxopts::cxxopts)
