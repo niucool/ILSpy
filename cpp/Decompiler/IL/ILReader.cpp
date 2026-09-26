@@ -24,6 +24,7 @@
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/InvalidInstructions.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
@@ -1591,7 +1592,31 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
 
     const auto* b = body.IL().data();
     std::size_t size = body.IL().size();
-    if (size == 0) return nullptr;
+    if (size == 0) {
+        // The C# ILReader.ReadInstructions' zero-length arm (ILReader.cs
+        // lines 485-495): a ref-pack body (RVA != 0, Code size == 0 -- the
+        // reference-assembly convention) plants the InvalidBranch as the
+        // entry block's single instruction and skips the IL decode. The
+        // parameters were bound before the early return, so they ride the
+        // function; the transform pipeline and the C# back end render the
+        // node as the Empty-body error comment.
+        auto fn = std::make_unique<ILFunction>();
+        auto container = std::make_unique<BlockContainer>();
+        auto block = std::make_unique<Block>();
+        block->StartILOffset = 0;
+        block->Add(std::make_unique<InvalidBranch>(
+            std::string(
+                "Empty body found. Decompiled assembly might be a "
+                "reference assembly.")));
+        container->AddBlock(std::move(block));
+        fn->Body = std::move(container);
+        fn->Body->Parent = fn.get();
+        fn->Body->ChildIndex = 0;
+        for (auto& v : s.parameters)
+            if (v) fn->Variables.push_back(v);
+        fn->CheckInvariant(ILPhase::InILReader);
+        return fn;
+    }
 
     // Pre-scan branch targets so the splitter knows where blocks begin.
     std::set<std::uint32_t> branchTargets;

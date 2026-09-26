@@ -1657,3 +1657,73 @@ null (decline).
   own lane.
 * No DBG litter remains (the probe harness lived in /tmp; the two
   temporary fprintf probes were removed before the final runs).
+
+# The T3 emission slice 1: the zero-length Empty-body path
+
+The seventh assignment: the first bounded slice of the metadata-only
+--csharp emission (the spec's item 2/3 pair).
+
+## The slice
+
+* **The ReadIL zero-length arm** (the C# ILReader.ReadInstructions'
+  early return, ILReader.cs 485-495): a ref-pack body (RVA != 0,
+  Code size == 0 -- every managed method in the net48 reference
+  corpus) now decodes: the function's entry block carries the single
+  `InvalidBranch("Empty body found. Decompiled assembly might be a
+  reference assembly.")` instruction, the parameters ride along, and
+  the transform pipeline consumes it. Previously ReadIL bailed
+  (`nullptr`), so every reference-assembly method was unrenderable.
+* **The seed emitter's InvalidBranch statement arm**: the C#
+  ExpressionBuilder.VisitInvalidBranch shape ("Error" + the optional
+  " near IL_xxxx" + ": message", printed as a comment statement with
+  the semicolon). The zero-length body renders
+  `{ /*Error: Empty body found. Decompiled assembly might be a
+  reference assembly.*/; }` -- the gold's exact text modulo the
+  indentation convention (the seed's 4-space indent; the tab
+  formatting lands with the output-visitor slice).
+* **The type-header modifier arms** (the flat render's ConvertType-
+  Definition equivalent): the accessibility from the raw
+  TypeAttributes, `static` for abstract+sealed, `abstract`/`sealed`
+  for the class arms, and **the partial gate** -- `partial` now
+  renders only for partial-types-registered types (the C#
+  DoDecompile `partialTypeInfo != null` gate). The connid pins
+  updated to the oracle-pinned `public class Page1`.
+* The extern arm is unchanged (true RVA==0 methods still carry it);
+  ZipFile renders none because every ref-pack method is HasBody()==true.
+
+## Verified
+
+* 3 new tests: the ReadIL zero-length arm (the exact C# message + the
+  StartILOffset 0 + the one-block shape), the per-method render (the
+  Empty-body comment, no extern), and the type-level render
+  (`public static class ZipFile` + the members + the Empty-body
+  comments + the partial gate).
+* The facade gold still matches byte-for-byte; the connid renders
+  `public class Page1` (the oracle shape).
+* The full-suite failure set is identical to the pre-slice baseline.
+* ASan clean on the new paths (the test-side use-after-free from a
+  dangling GetMethods pointer was caught and fixed in this slice's
+  TDD round).
+
+## Flagged for ilspy's triage lane (pre-existing, reproducible at HEAD)
+
+* `CSharpDecompilerTest.InstanceDecompilerOwnsItsPartialTypes` leaks
+  under ASan: the ConvertAttributeType -> SimpleType -> Identifier
+  chain allocates 5 unreleased nodes per attribute section (the
+  attribute AST ownership hand-off). Reproduced on the bare HEAD; not
+  from this slice.
+* The corpus-gated `MetadataNamespaceTest.ChildCacheIsStable` (vector
+  OOB assert) and `SpecializeTest.FieldCreateArms` (segfault) remain
+  from the earlier isolation.
+
+## The next emission slices (in order)
+
+1. The namespace/using-group emission for the `-t` path (the C#
+   DoDecompileTypes grouping + CalculateUsings/IntroduceUsing-
+   Declarations over the flat render's replacement -- the AST path).
+2. The XML doc comments (the IDocumentationProvider over the
+   `<Assembly>.xml` + the AddXmlDocumentationTransform, already in
+   GetAstTransforms) -- unblocks the full ZipFile gold text match.
+3. The tab-formatting migration to the output visitor for the whole
+   type render (the C# SyntaxTreeToString path), then the mscorlib
+   227k-line declaration sweep.

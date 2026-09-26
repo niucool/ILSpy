@@ -395,6 +395,7 @@ TEST(CSharpDecompilerTest, InstanceDecompilerOwnsItsPartialTypes)
     std::string whole = decompiler.DecompileWholeModuleToString();
     EXPECT_NE(whole.find("public class Page1 : Application, IComponentConnector"),
               std::string::npos);
+    EXPECT_EQ(whole.find("public partial class Page1"), std::string::npos);
     // The partial-type registration hides the member in THIS instance's
     // render.
     Metadata::PartialTypeInfo info(page1Token);
@@ -714,7 +715,11 @@ TEST(CSharpDecompilerTest, DecompileTypeRendersEvents)
     FAIL() << "the corpus has no FrameworkContentElement type";
 }
 
-TEST(CSharpDecompilerTest, DecompileTypeEmitsPartialHeader)
+// The C# partial gate (DoDecompile: partialTypeInfo != null ->
+// Modifiers.Partial): the flat render registers partials through the
+// same registry the C# DoDecompileTypes consumers use, so a plain
+// decompile renders `public class Page1` -- the oracle-pinned shape.
+TEST(CSharpDecompilerTest, DecompileTypePartialGateMatchesTheRegistry)
 {
     std::string path = ILSpy::Tests::WriteConnIdResDll();
     ASSERT_FALSE(path.empty());
@@ -726,13 +731,16 @@ TEST(CSharpDecompilerTest, DecompileTypeEmitsPartialHeader)
         ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
             module, t.Token, text));
         // A type with no registered partial half carries no partial
-        // modifier (the C# partialTypeInfo != null arm); the faithful
-        // header carries the accessibility and the base types.
+        // modifier (the C# partialTypeInfo != null arm; the designer-
+        // generated half is the consumer's registration, not the
+        // metadata's); the faithful header carries the accessibility and
+        // the base types.
         EXPECT_NE(text.find("public class Page1 : Application, IComponentConnector"),
                   std::string::npos)
             << "the type header renders: " << text;
         EXPECT_EQ(text.find("public partial class Page1"), std::string::npos)
-            << "no partial half is registered: " << text;
+            << "partial is registered-partial-types only, actual:\n"
+            << text;
         if (std::getenv("TET_TRACE")) {
             std::fprintf(stderr, "TET-TYPE: %s\n", text.c_str());
         }
@@ -796,6 +804,103 @@ TEST(CSharpDecompilerTest, ProbeDumpRender)
         CSharp::CSharpDecompiler::DecompileTypeToString(f, t.Token, text);
         std::fprintf(stderr, "RENDER:\n%s\n", text.c_str());
     }
+}
+
+// ---- The T3 metadata-only emission (the reference-assembly --csharp
+// shape; the corpus is the net48 reference System.IO.Compression.
+// FileSystem.dll whose ZipFile static class carries only zero-length
+// bodies at non-zero RVAs).
+
+const char* FileSystemCorpusPath() {
+    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB"); env != nullptr) {
+        static std::string cached;
+        cached = (std::filesystem::path(env).parent_path() /
+                  "System.IO.Compression.FileSystem.dll")
+                     .string();
+        return cached.c_str();
+    }
+    return "/usr/lib/mono/4.5/System.IO.Compression.FileSystem.dll";
+}
+
+// The C# DoDecompile(IMethod)'s HasBody arm: a zero-length body at a
+// non-zero RVA is HasBody()==true, so DecompileBody runs and renders
+// the Empty-body comment -- NOT the extern modifier (that arm is only
+// for true RVA==0 members). The oracle text (the ZipFile gold):
+// `public static ZipArchive OpenRead(string archiveFileName)` with the
+// body `{ /*Error: Empty body found. Decompiled assembly might be a
+// reference assembly.*/; }`.
+TEST(CSharpDecompilerTest, ZeroLengthBodyRendersTheEmptyBodyComment) {
+    const char* path = FileSystemCorpusPath();
+    if (!std::filesystem::exists(path)) {
+        GTEST_SKIP() << "corpus not provisioned";
+    }
+    ::ILSpy::Decompiler::Metadata::MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t openReadToken = 0;
+    std::uint32_t openReadRva = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Name != "ZipFile") continue;
+        for (const auto& m : f.GetMethods(t.Token)) {
+            if (m.Name != "OpenRead") continue;
+            openReadToken = m.Token;
+            openReadRva = m.RVA;
+        }
+    }
+    ASSERT_NE(openReadToken, 0u);
+
+    std::string out;
+    ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileMethodToString(
+        f, openReadToken, openReadRva, "OpenRead", out, false));
+    EXPECT_NE(out.find(
+        "/*Error: Empty body found. Decompiled assembly might be a "
+        "reference assembly.*/;"),
+        std::string::npos)
+        << "the Empty-body InvalidBranch renders as the C# comment form, "
+           "actual:\n"
+        << out;
+    EXPECT_EQ(out.find("extern "), std::string::npos)
+        << "HasBody()==true members take the body arm, not the extern arm";
+}
+
+// The type-level emission of the metadata-only ZipFile: the C# header
+// is `public static class ZipFile` (the ConvertTypeDefinition arms:
+// the accessibility + the static modifier from IsStatic; partial only
+// when partialTypes registered the type -- a reference assembly has no
+// registrations), every member renders (the declaration-first
+// ConvertEntity shape), and the zero-length bodies render the
+// Empty-body comment.
+TEST(CSharpDecompilerTest, MetadataOnlyTypeRenderCarriesTheMembers) {
+    const char* path = FileSystemCorpusPath();
+    if (!std::filesystem::exists(path)) {
+        GTEST_SKIP() << "corpus not provisioned";
+    }
+    ::ILSpy::Decompiler::Metadata::MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t zipFileToken = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Name != "ZipFile") continue;
+        zipFileToken = t.Token;
+    }
+    ASSERT_NE(zipFileToken, 0u);
+
+    std::string out;
+    ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
+        f, zipFileToken, out));
+    EXPECT_NE(out.find("public static class ZipFile"), std::string::npos)
+        << "actual:\n"
+        << out;
+    EXPECT_EQ(out.find("partial"), std::string::npos)
+        << "partial is registered-partial-types only (the C# gate)";
+    EXPECT_NE(out.find("public static ZipArchive OpenRead(string "
+                       "archiveFileName)"),
+              std::string::npos);
+    EXPECT_NE(out.find(
+        "/*Error: Empty body found. Decompiled assembly might be a "
+        "reference assembly.*/;"),
+        std::string::npos);
+    // The P/Invoke shape would carry extern; ZipFile has none -- the
+    // whole type is HasBody()==true ref-pack bodies.
+    EXPECT_EQ(out.find("extern "), std::string::npos);
 }
 } // namespace
 

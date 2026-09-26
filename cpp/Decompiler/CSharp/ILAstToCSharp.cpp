@@ -32,6 +32,7 @@
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/InvalidInstructions.hpp"
 #include "Decompiler/IL/Instructions/CastClass.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/Conv.hpp"
@@ -1436,6 +1437,18 @@ private:
         Line(indent, "}");
     }
 
+    // The ExpressionBuilder's ILOffsetHex shape (the " near IL_xxxx"
+    // suffix text): the zero-padded hex offset. File-local mirror (the
+    // seed does not include the ExpressionBuilder's internals).
+    static std::string ILOffsetText(std::int32_t offset) {
+        char buffer[16];
+        std::snprintf(buffer, sizeof(buffer), "%x",
+            static_cast<std::uint32_t>(offset));
+        std::string result(buffer);
+        while (result.size() < 4) result.insert(result.begin(), '0');
+        return result;
+    }
+
     void EmitStatement(const ILInstruction& inst, int indent) {
         if (DepthAtLimit()) {
             Line(indent, "/* max rendering depth: possible ILAst cycle */");
@@ -1856,6 +1869,22 @@ private:
                         ? Expr(*si.Arguments.back())
                         : std::string("(default)");
                 Line(indent, target + "[" + indices + "] = " + value + ";");
+                return;
+            }
+            case OpCode::InvalidBranch: {
+                // The C# ExpressionBuilder.VisitInvalidBranch (lines
+                // 5121-5133) renders the node as an ErrorExpression whose
+                // comment text is "Error" plus the optional " near
+                // IL_xxxx" suffix for a non-zero start offset and the
+                // optional ": message" tail; the statement prints the
+                // comment followed by the empty statement's semicolon.
+                auto* invalidBranch = static_cast<const InvalidBranch*>(&inst);
+                std::string message = "Error";
+                if (invalidBranch->StartILOffset != 0)
+                    message += " near IL_" + ILOffsetText(invalidBranch->StartILOffset);
+                if (invalidBranch->Message && !invalidBranch->Message->empty())
+                    message += ": " + *invalidBranch->Message;
+                Line(indent, "/*" + message + "*/;");
                 return;
             }
             default:
