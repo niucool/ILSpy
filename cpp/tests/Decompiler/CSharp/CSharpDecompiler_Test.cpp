@@ -699,12 +699,16 @@ TEST(CSharpDecompilerTest, DecompileTypeRendersEvents)
         std::string text;
         ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
             file, t.Token, text));
-        // Loaded: a RoutedEventHandler event (the WPF field-like shape).
+        // Loaded: a RoutedEventHandler event. The reference assembly's
+        // accessors carry stale RVAs that never decode, so the event
+        // renders the add/remove accessor blocks with the empty-body
+        // error comments (the oracle's form), not the field-like
+        // semicolon form.
         if (std::getenv("TET_TRACE"))
             std::fprintf(stderr, "TET-EV: %s\n", text.c_str());
-        EXPECT_NE(text.find("event RoutedEventHandler Loaded;"),
+        EXPECT_NE(text.find("event RoutedEventHandler Loaded\n{\nadd"),
                   std::string::npos)
-            << "the event renders as its declaration: " << text;
+            << "the event renders its accessor blocks: " << text;
         return;
     }
     FAIL() << "the corpus has no FrameworkContentElement type";
