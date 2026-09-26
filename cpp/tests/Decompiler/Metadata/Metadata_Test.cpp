@@ -28,6 +28,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 static const char* FixturePath() {
 #if defined(_WIN32)
@@ -71,4 +72,15 @@ TEST(Metadata_Smoke, RejectsNonCliFile) {
     EXPECT_FALSE(file.IsValid());
     EXPECT_EQ(file.TypeDefCount(), 0u);
     EXPECT_TRUE(file.TopTypeNames(4).empty());
+}
+
+// ---- The metadata-only shape (the C# `MetadataFile(kind, fileName,
+// metadata)` ctor the MetadataFileLoader consumes; the stream must be
+// the raw ECMA-335 metadata bytes).
+
+TEST(MetadataFileKindTest, DefaultKindIsPortableExecutable) {
+    ILSpy::Decompiler::Metadata::MetadataFile file("/dev/null");
+    EXPECT_EQ(file.Kind(),
+        ILSpy::Decompiler::Metadata::MetadataFile::MetadataFileKind::PortableExecutable);
+    EXPECT_FALSE(file.IsMetadataOnly());
 }

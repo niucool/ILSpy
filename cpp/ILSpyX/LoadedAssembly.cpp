@@ -417,7 +417,11 @@ bool LoadedAssembly::IsLoadedAsValidAssembly() const
            loadDone_.wait_for(std::chrono::seconds(0)) ==
                std::future_status::ready &&
            !faulted_ && loadResult_.has_value() &&
-           loadResult_->MetadataFile != nullptr;
+           loadResult_->MetadataFile != nullptr &&
+           // The C# `MetadataFile is { IsMetadataOnly: false }`: a
+           // metadata-only file (a .pdb or a raw metadata stream) is not
+           // a valid ASSEMBLY load.
+           !loadResult_->MetadataFile->IsMetadataOnly();
 }
 
 bool LoadedAssembly::HasLoadError() const

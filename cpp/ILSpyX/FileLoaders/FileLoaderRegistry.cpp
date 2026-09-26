@@ -24,6 +24,7 @@
 #include "ILSpyX/FileLoaders/ArchiveFileLoader.hpp"
 #include "ILSpyX/FileLoaders/BundleFileLoader.hpp"
 #include "ILSpyX/FileLoaders/PEFileLoader.hpp"
+#include "ILSpyX/FileLoaders/MetadataFileLoader.hpp"
 #include "ILSpyX/FileLoaders/WebCilFileLoader.hpp"
 #include "ILSpyX/FileLoaders/XamarinCompressedFileLoader.hpp"
 
@@ -33,15 +34,15 @@ namespace ILSpy::ILSpyX::FileLoaders {
 
 FileLoaderRegistry::FileLoaderRegistry()
 {
-    // The C# registration order, minus the one remaining deferral
-    // (MetadataFileLoader -- see LoadResult.hpp):
+    // The C# registration order, verbatim (no remaining deferrals):
     // Register(new XamarinCompressedFileLoader());
-    // Register(new MetadataFileLoader());     -- deferred
+    // Register(new MetadataFileLoader());
     // Register(new BundleFileLoader()); // bundles are PE files with a special signature, prefer over normal PE files
     // Register(new PEFileLoader()); // prefer PE format over archives, because ZIP has no fixed header
     // Register(new ArchiveFileLoader());
     Register(std::make_unique<XamarinCompressedFileLoader>());
     Register(std::make_unique<WebCilFileLoader>());
+    Register(std::make_unique<MetadataFileLoader>());
     Register(std::make_unique<BundleFileLoader>());
     Register(std::make_unique<PEFileLoader>());
     Register(std::make_unique<ArchiveFileLoader>());

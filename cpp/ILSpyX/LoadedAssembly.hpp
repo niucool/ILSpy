@@ -210,9 +210,10 @@ public:
     bool IsLoaded() const;
 
     // The C# `public bool IsLoadedAsValidAssembly`: loaded successfully
-    // as an assembly (not as a bundle). The port's PE-only MetadataFile
-    // is always the full-PE shape (the C# `IsMetadataOnly: false` arm),
-    // so the check reduces to a non-null module.
+    // as an assembly (not as a bundle) -- the C#
+    // `MetadataFile is { IsMetadataOnly: false }` gate reads the file's
+    // IsMetadataOnly (false for the PE/WebCIL shapes, true for the
+    // metadata-only shapes the MetadataFileLoader produces).
     bool IsLoadedAsValidAssembly() const;
 
     // The C# `public bool HasLoadError`: the load threw (the C# faulted
