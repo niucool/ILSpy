@@ -3613,6 +3613,7 @@ bool DecompileTypeToStringBody(
                 modifiers += "extern ";
             }
             out += MemberAttributesText(methodEntity);
+            out += AccessorReturnAttributesText(methodEntity);
             out += modifiers;
             out += (isConstructor || returnType.empty())
                        ? std::string()
@@ -3667,6 +3668,7 @@ bool DecompileTypeToStringBody(
             // assembly carries stale RVAs whose bodies never decode; the
             // members previously vanished from the render here).
             out += MemberAttributesText(methodEntity);
+            out += AccessorReturnAttributesText(methodEntity);
             out += modifiers;
             out += (isConstructor || returnType.empty())
                        ? std::string()
