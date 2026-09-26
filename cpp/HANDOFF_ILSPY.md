@@ -1062,12 +1062,18 @@ family, 34 rows); the connid pin unchanged.
   reference fixture set -- System.Runtime/System.Collections/
   System.Private.CoreLib from the .NET 10 runtime; without them the
   pin is 54895b5b...).
-- THE CORPUS: 22 oracle-only / 17 mine-only (the arc: the merged tree
-  60/51 -> the audit's using-set fix 60/50 -> the interop properties
-  39/34 -> the constraint clauses 22/17). THE REMAINING ~22/17: the
-  misc property/method header pairs and the near-misses -- sample
-  before picking (the families so far each closed in one bounded
-  slice).
+- THE CORPUS: 19 oracle-only / 14 mine-only (the arc: the merged tree
+  60/51 -> the using-set fix 60/50 -> the interop properties 39/34 ->
+  the constraint clauses 22/17 -> the conversion operators 19/14, the
+  `8dd38e041` slice: the body-decompile overload recomputed the return
+  type from the entity, overriding the implicit/explicit keyword).
+  THE REMAINING ~19/14 (sampled): the `Contract.Requires<...>` body
+  rows, the `base..ctor();`/`_id = Guid.NewGuid();` constructor-
+  initializer rows, the `~DOES_NOT_EXIST` complement shapes (the
+  multi-bit member accumulation in the negated loop), the
+  `IDictionary.this[...]`/`IList.this[...]` indexer header rows, the
+  `public virtual extern IEnumString SupportedLanguages` row, and the
+  cross-module `new void SetValue(...)` miss.
 - THE GATES: the sweep 13,166 ran / 15 baseline (env -u
   ILSPY_TEST_MSCORLIB); the facade suite 45 with the ONE pre-existing
   merged-tree failure (XmlDocumentationCommentsRenderOnMembers -- the
