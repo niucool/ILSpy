@@ -975,8 +975,39 @@ connid 24/4 -> 16/4; the pin at 9c683c94...; the corpus unchanged).
 The remaining queue: (f) the Debuggable decode and (e) the using-set
 over-collection -- BOTH ROOT-CAUSED (the audit's final two):
 
-(f) THE DEBUGGABLE DECODE -- FULLY MAPPED, THE FIX IS THE NETCORE
-    FACADE CHAIN: the connid's references are System.Runtime +
+(f) THE DEBUGGABLE DECODE -- CLOSED BY THE FIXTURE SET (no code
+    change: the port's reference queue ALREADY follows the type
+    forwarders -- DecompilerTypeSystem.cpp's ExportedTypes walk): the
+    connid's System.Runtime/System.Collections references resolve when
+    the runtime DLLs sit beside the fixture, and the forwarder queue
+    then loads System.Private.CoreLib through System.Runtime's
+    ExportedType rows. With
+    /tmp/{System.Runtime,System.Collections,System.Private.CoreLib}.dll
+    present (the .NET 10 runtime files), the attribute renders the
+    EXACT oracle form: `[assembly:
+    Debuggable(DebuggableAttribute.DebuggingModes
+    .IgnoreSymbolStoreSequencePoints)]`. THE CONNID IS 3 MINE-ONLY / 0
+    ORACLE-ONLY with the reference set present -- every oracle line
+    matches. THE PIN (with the reference fixture set):
+    e68b2358f6535ddcb3e8394f6de3d78e318ea723b2d6c72fe2a10d36e5796252
+    -- MEASURED WITH THE /tmp REFERENCE DLLS PRESENT (the fixture set
+    is part of the pin's contract now, like the net48 corpus's own
+    directory; the /tmp sweeper can break it -- restore from
+    /home/jim/.dotnet/shared/Microsoft.NETCore.App/10.0.12/). Without
+    the files the pin is 54895b5b... (the attribute renders the
+    gold-pinned error comment).
+    (e) REMAINS OPEN WITH A NEW MYSTERY: the three extra usings
+    (System.Collections, System.Numerics, System.Threading.Tasks)
+    appear in the CLI's RENDER but NOT in the probe's identical-looking
+    CollectRequiredNamespaces(module) computation (the module-wide set
+    lacks them; the render has them) -- the CLI's instance type system
+    loads references the probe's construction does not (the
+    detected-TFM resolver's search differs from the probe's
+    empty-string TFM). The next probe: replicate the CLI's exact
+    resolver construction (DetectTargetFrameworkId) and diff the
+    compilation's module lists.
+
+    (f's HISTORICAL MAP: the connid's references are System.Runtime +
     System.Collections (10.0.0.0) -- a .NETCoreApp shape. With those
     DLLs placed next to the fixture, the RESOLVER finds them and the
     compilation loads them (probed: the modules list grows to 4) --
