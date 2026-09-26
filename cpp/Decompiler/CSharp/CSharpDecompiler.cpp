@@ -283,12 +283,11 @@ bool DecompileTypeToStringBody(
     // form covers an unknown token -- the member iteration then renders no
     // constructor).
     std::string typeName;
-    // The type declaration header (the C# DecompileType's
-    // `TypeDeclaration` emission): `public partial class Name` -- the
-    // partial modifier rides the generated-half convention (the XAML
-    // code-behind shape) whenever the type renders members; the
-    // `Kind`-specific keyword (struct/interface) follows the
-    // TypeDef kind.
+    // The type declaration header (the C# ConvertTypeDefinition +
+    // DoDecompile shape): the accessibility and the
+    // static/abstract/sealed arms from the raw TypeAttributes, the
+    // `Kind`-specific keyword (struct/interface), and `partial` only
+    // when the partial-types registry registered the type.
     for (const auto& t : file.TypeDefs()) {
         if (t.Token != typeToken) continue;
         typeName = t.Name;
@@ -304,11 +303,39 @@ bool DecompileTypeToStringBody(
             default:
                 break;
         }
-        // The C# nests the type under `namespace ... { ... }`; the port's
-        // flat render carries the namespace in the call-site comment (the
-        // CLI's `// MyApp.Page1` header), so the declaration carries the
-        // bare name.
-        out += "public partial ";
+        // The C# ConvertTypeDefinition's modifier arms over the raw
+        // TypeAttributes (II.23.1.15): the accessibility (NestedPublic /
+        // Public -> public; everything else stays unannotated here --
+        // the flat render never claims internal), then
+        // `IsStatic -> static; else if IsAbstract -> abstract; else if
+        // IsSealed -> sealed`. `partial` rides the C# DoDecompile gate
+        // (registered partial types only -- a plain metadata render
+        // never carries it).
+        const std::uint32_t kVis = t.Flags & 0x00000007u;
+        if (kVis == 0x1 || kVis == 0x2)  // Public / NestedPublic
+            out += "public ";
+        if ((t.Flags & 0x00000080u) != 0 &&
+            (t.Flags & 0x00000100u) != 0) {
+            // IsStatic (the C# `if (typeDefinition.IsStatic)`): abstract
+            // and sealed together.
+            out += "static ";
+        } else if ((t.Flags & 0x00000080u) != 0) {
+            // IsAbstract (structs read abstract+sealed; the struct arm
+            // below keeps the plain keyword, matching the C#'s
+            // struct case which strips Sealed and the struct-shape
+            // abstract never occurs).
+            if (t.Kind != TS::TypeKind::Struct &&
+                t.Kind != TS::TypeKind::Enum)
+                out += "abstract ";
+        } else if ((t.Flags & 0x00000100u) != 0) {
+            if (t.Kind != TS::TypeKind::Struct &&
+                t.Kind != TS::TypeKind::Enum)
+                out += "sealed ";
+        }
+        // The C# `partial` gate (DoDecompile: partialTypes registered
+        // only); the flat path mirrors it over the partial-types
+        // registry lookup.
+        if (partialType != nullptr) out += "partial ";
         out += keyword;
         out += ' ';
         out += t.Name;

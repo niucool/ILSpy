@@ -28,6 +28,7 @@
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/DefaultValue.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/IL/Instructions/InvalidInstructions.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
@@ -44,6 +45,7 @@
 
 using namespace ILSpy::Decompiler::IL;
 using ILSpy::Decompiler::Metadata::MetadataFile;
+
 using ILSpy::Decompiler::TypeSystem::Sign;
 
 static const char* FixturePath() {
@@ -729,4 +731,61 @@ TEST(ILReader, InitObjSetsDefaultValueStackWasEmpty)
         walk(b->FinalInstruction.get());
     }
     EXPECT_EQ(defaultValues, 1);
+}
+
+// The C# ILReader.ReadInstructions' zero-length arm (ILReader.cs lines
+// 485-495): a ref-pack method body (RVA != 0, Code size == 0 -- the
+// reference-assembly convention) yields a one-block function whose
+// single instruction is the InvalidBranch with the exact message the
+// C# plants; the parameters still resolve (the C# leaves stackVariables
+// empty but the parameters were bound before the early return). The
+// corpus shape is System.IO.Compression.ZipFile::OpenRead in the net48
+// reference FileSystem.dll.
+TEST(ILReader, ZeroLengthBodyYieldsTheEmptyBodyInvalidBranch) {
+    const char* mscorlib = std::getenv("ILSPY_TEST_MSCORLIB");
+    if (mscorlib == nullptr || !std::filesystem::exists(mscorlib)) {
+        GTEST_SKIP() << "corpus not provisioned";
+    }
+    std::filesystem::path corpus =
+        std::filesystem::path(mscorlib).parent_path();
+    std::filesystem::path fileSystem =
+        corpus / "System.IO.Compression.FileSystem.dll";
+    if (!std::filesystem::exists(fileSystem)) {
+        GTEST_SKIP() << "FileSystem.dll not provisioned";
+    }
+    MetadataFile f(fileSystem.string());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t openReadToken = 0;
+    std::uint32_t openReadRva = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Name != "ZipFile") continue;
+        for (const auto& m : f.GetMethods(t.Token)) {
+            if (m.Name != "OpenRead") continue;
+            openReadToken = m.Token;
+            openReadRva = m.RVA;
+            break;
+        }
+        break;
+    }
+    ASSERT_NE(openReadToken, 0u) << "ZipFile::OpenRead not found";
+    EXPECT_NE(openReadRva, 0u)
+        << "the ref-pack convention carries a non-zero RVA";
+    auto body = f.GetMethodBody(openReadRva);
+    ASSERT_TRUE(body.IsValid());
+    EXPECT_EQ(body.CodeSize(), 0u);
+
+    auto fn = ReadIL(f, openReadToken, openReadRva);
+    ASSERT_NE(fn, nullptr)
+        << "the C# ILReader decodes a zero-length body (the early-return "
+           "InvalidBranch arm); the port must not bail";
+    ASSERT_NE(fn->Body, nullptr);
+    ASSERT_EQ(fn->Body->Blocks.size(), 1u);
+    ASSERT_EQ(fn->Body->Blocks[0]->Instructions.size(), 1u);
+    auto* invalid =
+        dynamic_cast<InvalidBranch*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_NE(invalid, nullptr);
+    ASSERT_TRUE(invalid->Message.has_value());
+    EXPECT_EQ(*invalid->Message,
+        "Empty body found. Decompiled assembly might be a reference assembly.");
+    EXPECT_EQ(invalid->StartILOffset, 0u);
 }
