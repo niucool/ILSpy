@@ -872,7 +872,11 @@ std::string AccessorBodyText(const Metadata::MetadataFile& file,
     if (open == std::string::npos || close == std::string::npos ||
         close <= open)
         return std::string();
-    std::string body = text.substr(open + 2, close - (open + 2));
+    // An EMPTY body's braces touch (`{\n}` -- the open brace's newline is
+    // the close brace's newline), so the span start can sit past the
+    // close; the count clamps to zero for that shape.
+    std::size_t bodyLength = close > open + 2 ? close - (open + 2) : 0;
+    std::string body = text.substr(open + 2, bodyLength);
     if (!body.empty() && body.back() != '\n')
         body += '\n';
     return body;
@@ -1938,11 +1942,68 @@ bool DecompileTypeToStringBody(
                     eventType->GetDefinition(), eventType,
                     scopeResolver.get());
             }
+            // The C# DoDecompileMember's event arm over an explicit
+            // implementation: the interface-qualified name (the dotted
+            // metadata name's last segment + the implemented interface
+            // through the name decision) and the add/remove accessor
+            // blocks -- never the field-like `;` form. A field-like event
+            // keeps the plain name + the semicolon.
+            bool isExplicitImplementation = e.Name.find('.') != std::string::npos;
+            std::string eventName = e.Name;
+            if (isExplicitImplementation) {
+                eventName = eventName.substr(
+                    eventName.find_last_of('.') + 1);
+                // The implemented interface: the event entity's explicit
+                // members' declaring type, else the dotted prefix.
+                std::string interfaceName;
+                if (event != nullptr) {
+                    std::vector<const TS::IMember*> implemented =
+                        event->ExplicitlyImplementedInterfaceMembers();
+                    if (!implemented.empty() &&
+                        implemented[0] != nullptr &&
+                        implemented[0]->DeclaringType() != nullptr) {
+                        const TS::ITypePtr& interfaceType =
+                            implemented[0]->DeclaringType();
+                        interfaceName = RenderBaseTypeName(
+                            interfaceType != nullptr
+                                ? interfaceType->GetDefinition()
+                                : nullptr,
+                            interfaceType, scopeResolver.get());
+                    }
+                }
+                if (interfaceName.empty()) {
+                    // The fallback: the dotted prefix rendered through the
+                    // last name decision (the metadata name's leading
+                    // segments).
+                    std::string prefix = e.Name.substr(
+                        0, e.Name.find_last_of('.'));
+                    eventName = prefix + "." + eventName;
+                } else {
+                    eventName = interfaceName + "." + eventName;
+                }
+            }
             out += "event ";
             out += eventTypeName;
             out += ' ';
-            out += e.Name;
-            out += ";\n";
+            out += eventName;
+            if (isExplicitImplementation) {
+                out += "\n{\n";
+                if (accessors.AdderToken != 0) {
+                    out += "add\n{\n";
+                    out += AccessorBodyText(file, typeSystem,
+                                            accessors.AdderToken, "add");
+                    out += "}\n";
+                }
+                if (accessors.RemoverToken != 0) {
+                    out += "remove\n{\n";
+                    out += AccessorBodyText(file, typeSystem,
+                                            accessors.RemoverToken, "remove");
+                    out += "}\n";
+                }
+                out += "}\n";
+            } else {
+                out += ";\n";
+            }
             rendered = true;
         }
     }

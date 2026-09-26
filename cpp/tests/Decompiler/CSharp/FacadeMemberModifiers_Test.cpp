@@ -1011,6 +1011,27 @@ TEST(FacadeMemberModifiersTest, XmlDocumentationCommentsRenderOnMembers)
         << holder;
 }
 
+// The explicit-implementation event (the C# DoDecompileMember's event
+// arm over IsExplicitImplementation): the interface-qualified name
+// through the name decision (the metadata's dotted name's last segment
+// + the implemented interface), and the add/remove accessor blocks
+// (never the field-like `;` form).
+TEST(FacadeMemberModifiersTest, ExplicitImplementationEventsRenderTheAccessorBlocks)
+{
+    constexpr const char* kNestedFixture =
+        "/home/jim/ilspy-test-fixtures/nested_fixture/NestedBase.dll";
+    std::string text;
+    if (!RenderType(kNestedFixture, "EventImpl", text))
+        GTEST_SKIP() << "the nested-base fixture is not provisioned";
+    EXPECT_NE(text.find("event EventHandler IShape.Shape"),
+              std::string::npos)
+        << text;
+    EXPECT_NE(text.find("add"), std::string::npos) << text;
+    EXPECT_NE(text.find("remove"), std::string::npos) << text;
+    // The field-like form never appears for the explicit implementation.
+    EXPECT_EQ(text.find("IShape.Shape;"), std::string::npos) << text;
+}
+
 // The whole-module render's using header carries the module-wide
 // required set (the C# IntroduceUsingDeclarations over the whole-module
 // tree), not just the assembly-attribute namespaces: the connid module's
