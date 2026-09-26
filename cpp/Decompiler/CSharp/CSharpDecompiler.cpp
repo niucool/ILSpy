@@ -3140,6 +3140,26 @@ bool DecompileTypeToStringBody(
                 // the zero members stay numeric).
                 std::string literal =
                     ConstantFieldLiteral(*fieldEntity);
+                bool literalIsSpecial = false;
+                // The specialConstants table applies to the enum members'
+                // numeric fallback too (the C# ConvertEnumValue's tail
+                // goes through ConvertConstantValue over the underlying
+                // type): the boundary values render `uint.MaxValue`, not
+                // the hexadecimal 0xFFFFFFFF form.
+                {
+                    std::any specialValue;
+                    try {
+                        specialValue = fieldEntity->GetConstantValue();
+                    } catch (const std::exception&) {
+                    }
+                    std::string special =
+                        SpecialConstantText(specialValue,
+                                           fieldEntity->Type());
+                    if (!special.empty()) {
+                        literal = special;
+                        literalIsSpecial = true;
+                    }
+                }
                 bool literalIsAlias = false;
                 std::any constantValue;
                 try {
@@ -3203,7 +3223,7 @@ bool DecompileTypeToStringBody(
                     }
                 }
                 if (displayMode == EnumValueDisplayMode::AllHex &&
-                    !literalIsAlias) {
+                    !literalIsAlias && !literalIsSpecial) {
                     // The C# AllHex arm: values >= 10 render as 0x + the
                     // uppercase hex form, KEEPING the decimal literal's
                     // underlying-type suffix (the LiteralFormat flip over
