@@ -194,7 +194,11 @@ public:
         // The render's using-scope resolver (the member-signature name
         // decision); null renders the short names alone.
         const ::ILSpy::Decompiler::CSharp::Resolver::CSharpResolver*
-            scopeResolver = nullptr);
+            scopeResolver = nullptr,
+        // The method-level constraint clauses, rendered after the
+        // parameter list (the decompiled-body emitter's text carries
+        // them; the empty string renders none).
+        const std::string& methodConstraints = std::string());
 
     // The type-level entry: the type's decodable method bodies rendered in
     // sequence. True when at least one body rendered (the C#

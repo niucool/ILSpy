@@ -287,7 +287,8 @@ public:
 
     void EmitMethod(const ILFunction& fn, std::string_view returnType,
                     std::string_view methodName, std::string_view paramDecl,
-                    bool isConstructor = false) {
+                    bool isConstructor = false,
+                    std::string_view methodConstraints = std::string_view()) {
         fn_ = &fn;
         SetCurrentTypeName(fn);
         returnTypeName_ = std::string(returnType);
@@ -304,7 +305,9 @@ public:
         }
         out_ += '(';
         out_ += paramDecl;
-        out_ += ")\n{\n";
+        out_ += ')';
+        out_ += methodConstraints;
+        out_ += "\n{\n";
         if (fn.Body) {
             CollectLoopHeaders(fn.Body.get());
             CollectLabels(fn.Body.get());
@@ -3359,10 +3362,12 @@ std::string ILAstToCSharp(const ILFunction& fn,
                           std::string_view returnType,
                           std::string_view methodName,
                           std::string_view paramDecl,
-                          bool isConstructor) {
+                          bool isConstructor,
+                          std::string_view methodConstraints) {
     std::string out;
     CEmitter emitter(out);
-    emitter.EmitMethod(fn, returnType, methodName, paramDecl, isConstructor);
+    emitter.EmitMethod(fn, returnType, methodName, paramDecl, isConstructor,
+                       methodConstraints);
     return out;
 }
 

@@ -48,6 +48,10 @@ std::string ILAstToCSharp(const ILFunction& fn,
                          std::string_view returnType,
                          std::string_view methodName,
                          std::string_view paramDecl,
-                         bool isConstructor = false);
+                         bool isConstructor = false,
+                         // The method-level constraint clauses (` where T :
+                         // class`) rendered after the parameter list, before
+                         // the body's opening brace.
+                         std::string_view methodConstraints = std::string_view());
 
 } // namespace ILSpy::Decompiler::IL

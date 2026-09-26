@@ -318,7 +318,8 @@ bool CSharpDecompiler::DecompileMethodToString(
     std::uint32_t methodRva, const std::string& methodName,
     std::string& out, bool isConstructor, bool* asyncDecompiled,
     bool* iteratorDecompiled,
-    const Resolver::CSharpResolver* scopeResolver) {
+    const Resolver::CSharpResolver* scopeResolver,
+    const std::string& methodConstraints) {
     auto fn = IL::ReadIL(file, methodToken, methodRva);
     if (!fn) return false;
     // The C# ILReader decodes the body through the method definition (the
@@ -379,7 +380,7 @@ bool CSharpDecompiler::DecompileMethodToString(
     if (iteratorDecompiled != nullptr)
         *iteratorDecompiled = fn->IsIterator;
     out = IL::ILAstToCSharp(*fn, returnType, methodName, paramDecl,
-                            isConstructor);
+                            isConstructor, methodConstraints);
     return true;
 }
 
@@ -3563,7 +3564,8 @@ bool DecompileTypeToStringBody(
         if (CSharpDecompiler::DecompileMethodToString(
                 file, typeSystem, m.Token, m.RVA, methodName, text,
                 isConstructor || isDestructor, &asyncDecompiled,
-                &iteratorDecompiled, scopeResolver.get())) {
+                &iteratorDecompiled, scopeResolver.get(),
+                methodConstraints)) {
             // The C# default-constructor elision: a PUBLIC PARAMETERLESS
             // instance constructor whose decompiled body renders empty
             // (the compiler's implicit default over the object base --
