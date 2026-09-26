@@ -55,6 +55,7 @@
 
 #include <gtest/gtest.h>
 #include <cstdlib>
+#include <cstdio>
 
 #include "Decompiler/Metadata/EnumUnderlyingTypeResolveException.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
@@ -83,6 +84,25 @@ namespace {
 namespace TS = ILSpy::Decompiler::TypeSystem;
 namespace TM = ILSpy::Decompiler::Metadata;
 namespace TestSupport = ILSpy::Decompiler::TypeSystem::TestSupport;
+
+// The mscorlib availability gate (the Specialize_Test convention): the
+// gold tokens and layouts below pin the MONO mscorlib + System pair;
+// when the files are absent the provider's lookups return null and the
+// test bodies would dereference -- the tests skip instead.
+bool MscorlibFileExists(const char* path) {
+    FILE* file = std::fopen(path, "rb");
+    if (file == nullptr)
+        return false;
+    std::fclose(file);
+    return true;
+}
+
+#define REQUIRE_MSCORLIB()                                                    \
+    do {                                                                      \
+        if (!MscorlibFileExists(MscorlibPath()) ||                             \
+            !MscorlibFileExists(SystemPath()))                                \
+            GTEST_SKIP() << "mscorlib/System fixtures not available";         \
+    } while (0)
 
 const char* MscorlibPath() {
 #if defined(_WIN32)
@@ -225,6 +245,7 @@ std::string IsRefStr(const TS::IType& t) {
 TEST(TypeProviderTest, PrimitiveMatrixMatchesGold)
 {
     MscorlibSystemFixture fx;
+    REQUIRE_MSCORLIB();
     TS::TypeProvider& provider = fx.Provider();
 
     struct Row { TM::PrimitiveTypeCode code; TS::TypeKind kind;
@@ -302,6 +323,7 @@ TEST(TypeProviderTest, PrimitiveMatrixMatchesGold)
 TEST(TypeProviderTest, CompositeArmsMatchGold)
 {
     MscorlibSystemFixture fx;
+    REQUIRE_MSCORLIB();
     TS::TypeProvider& provider = fx.Provider();
     TS::ITypePtr int32 = provider.GetPrimitiveType(
         TM::PrimitiveTypeCode::Int32);
@@ -441,6 +463,7 @@ TEST(TypeProviderTest, CompositeArmsMatchGold)
 TEST(TypeProviderTest, GenericContextScopesMatchGold)
 {
     MscorlibSystemFixture fx;
+    REQUIRE_MSCORLIB();
     TS::TypeProvider& provider = fx.Provider();
     std::uint32_t listToken = fx.TypeDefToken(
         fx.mscorlibFile, "System.Collections.Generic", "List`1");
@@ -540,6 +563,7 @@ TEST(TypeProviderTest, GenericContextScopesMatchGold)
 TEST(TypeProviderTest, RealBlobDecodesMatchGold)
 {
     MscorlibSystemFixture fx;
+    REQUIRE_MSCORLIB();
     TS::TypeProvider& provider = fx.Provider();
     std::uint32_t listToken = fx.TypeDefToken(
         fx.mscorlibFile, "System.Collections.Generic", "List`1");
@@ -655,6 +679,7 @@ TEST(TypeProviderTest, RealBlobDecodesMatchGold)
 TEST(TypeProviderTest, CraftedFnPtrMatrixMatchesGold)
 {
     MscorlibSystemFixture fx;
+    REQUIRE_MSCORLIB();
     TS::TypeProvider& provider = fx.Provider();
     TS::GenericContext gc(std::vector<const TS::ITypeParameter*>{});
     TM::SignatureTypeProviderDecoder<TS::TypeProvider> decoder(
@@ -939,6 +964,7 @@ TEST(TypeProviderTest, CraftedFnPtrMatrixMatchesGold)
 TEST(TypeProviderTest, DefinitionAndSpecificationResolutionMatchGold)
 {
     MscorlibSystemFixture fx;
+    REQUIRE_MSCORLIB();
     TS::TypeProvider& provider = fx.Provider();
 
     // F1: the raw byte never changes the resolution (the module-backed
@@ -1018,6 +1044,7 @@ TEST(TypeProviderTest, DefinitionAndSpecificationResolutionMatchGold)
 TEST(TypeProviderTest, TypeRefResolutionMatchGold)
 {
     MscorlibSystemFixture fx;
+    REQUIRE_MSCORLIB();
     TS::TypeProvider& systemProvider =
         const_cast<TS::TypeProvider&>(fx.systemModule->TypeProvider());
 
@@ -1102,6 +1129,7 @@ TEST(TypeProviderTest, TypeRefResolutionMatchGold)
 TEST(TypeProviderTest, AttributeProviderArmsMatchGold)
 {
     MscorlibSystemFixture fx;
+    REQUIRE_MSCORLIB();
     TS::TypeProvider& provider = fx.Provider();
 
     // G1: GetSystemType -> the mscorlib System.Type definition.
@@ -1235,6 +1263,7 @@ TEST(TypeProviderTest, AttributeProviderArmsMatchGold)
 TEST(TypeProviderTest, CompilationOnlyProviderDivergence)
 {
     MscorlibSystemFixture fx;
+    REQUIRE_MSCORLIB();
     TS::TypeProvider only(fx.compilation);
 
     EXPECT_EQ(&only.Compilation(), &fx.compilation);
@@ -1265,6 +1294,7 @@ TEST(TypeProviderTest, CompilationOnlyProviderDivergence)
 TEST(TypeProviderTest, ModuleOwnsTheProvider)
 {
     MscorlibSystemFixture fx;
+    REQUIRE_MSCORLIB();
     const TS::TypeProvider& p1 = fx.mscorlibModule->TypeProvider();
     const TS::TypeProvider& p2 = fx.mscorlibModule->TypeProvider();
     EXPECT_EQ(&p1, &p2);
@@ -1282,6 +1312,7 @@ TEST(TypeProviderTest, ModuleOwnsTheProvider)
 TEST(TypeProviderTest, PinnedTypeVisitorDispatch)
 {
     MscorlibSystemFixture fx;
+    REQUIRE_MSCORLIB();
     TS::TypeProvider& provider = fx.Provider();
     TS::ITypePtr int32 = provider.GetPrimitiveType(
         TM::PrimitiveTypeCode::Int32);

@@ -57,6 +57,18 @@ namespace {
 namespace TS = ILSpy::Decompiler::TypeSystem;
 namespace TM = ILSpy::Decompiler::Metadata;
 
+// The mscorlib availability gate (the Specialize_Test convention): the
+// gold values below pin the MONO mscorlib's layout; when the selected
+// file is absent, the fixture's lookups return null and the test
+// bodies would dereference -- the fixture helpers skip instead.
+bool MscorlibFileExists(const char* path) {
+    FILE* file = std::fopen(path, "rb");
+    if (file == nullptr)
+        return false;
+    std::fclose(file);
+    return true;
+}
+
 const char* MscorlibPath() {
 #if defined(_WIN32)
     return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
@@ -138,6 +150,15 @@ private:
 
 // The mscorlib fixture: the real file, the module over it, the compilation
 // it becomes the main module of.
+// The per-test gate (GTEST_SKIP only works from the void test body --
+// it expands to a void return): skips when the selected mscorlib is
+// absent, so the fixture lookups below do not dereference null.
+#define REQUIRE_MSCORLIB()                                                    \
+    do {                                                                      \
+        if (!MscorlibFileExists(MscorlibPath()))                              \
+            GTEST_SKIP() << "mscorlib fixture not available";                 \
+    } while (0)
+
 struct MscorlibFixture {
     TM::MetadataFile file{ MscorlibPath() };
     CacheCompilation compilation;
@@ -166,6 +187,7 @@ struct MscorlibFixture {
 TEST(MetadataTypeDefinitionTest, KindAndFlagMatrixMatchesGoldOverMscorlib)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
 
     struct Expected {
         const char* ns;
@@ -298,6 +320,7 @@ TEST(MetadataTypeDefinitionTest, KindAndFlagMatrixMatchesGoldOverMscorlib)
 TEST(MetadataTypeDefinitionTest, NameFamilyMatchesGold)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
 
     // List`1: Name strips the arity, MetadataName keeps it, FullName drops
     // it, ReflectionName keeps it (gold).
@@ -340,6 +363,7 @@ TEST(MetadataTypeDefinitionTest, NameFamilyMatchesGold)
 TEST(MetadataTypeDefinitionTest, NestedChainMatchesGold)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
 
     // Win32Native: 53 nested types; the first 8 in table order (gold).
     const TS::ITypeDefinition* win32 =
@@ -417,6 +441,7 @@ TEST(MetadataTypeDefinitionTest, NestedChainMatchesGold)
 TEST(MetadataTypeDefinitionTest, TypeParametersMatchGold)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
 
     // List`1's T: invariant, index 0, no constraints (gold: 2A00044E `0).
     const TS::ITypeDefinition* list =
@@ -495,6 +520,7 @@ TEST(MetadataTypeDefinitionTest, TypeParametersMatchGold)
 TEST(MetadataTypeDefinitionTest, NestedTypeParametersAliasTheOuter)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
 
     // Dictionary`2+KeyCollection has NO own GenericParam rows: its type
     // parameters are the OUTER's aliases (the C# Create copyFromOuter arm;
@@ -585,6 +611,7 @@ TEST(MetadataTypeDefinitionTest, RefAndReadOnlyStructFlagsMatchGoldOverCoreLib)
 TEST(MetadataTypeDefinitionTest, HasExtensionsMatchesGold)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
 
     // The mscorlib extension classes (the gold scan): static classes whose
     // [Extension] attribute the option-gated HasKnownAttribute scan finds.
@@ -642,6 +669,7 @@ TEST(MetadataTypeDefinitionTest, HasExtensionsMatchesGold)
 TEST(MetadataTypeDefinitionTest, EntityCacheAndEquality)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
 
     // Two lookups of System.String return the SAME instance (the C#
     // LazyInit entity cache).
@@ -697,6 +725,7 @@ TEST(MetadataTypeDefinitionTest, EntityCacheAndEquality)
 TEST(MetadataTypeDefinitionTest, DeferralContracts)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
     const TS::ITypeDefinition* string_ = f.Type("System", "String");
     ASSERT_NE(string_, nullptr);
 
@@ -806,6 +835,7 @@ TEST(MetadataTypeDefinitionTest, DeferralContracts)
 TEST(MetadataTypeDefinitionTest, NullableContextIsObliviousOverMscorlib)
 {
     MscorlibFixture f;
+    REQUIRE_MSCORLIB();
 
     // No .NET Framework 4.8 assembly carries [NullableContext] attributes,
     // so the real engine's NullableContext is Oblivious everywhere over
