@@ -669,18 +669,31 @@ batch):
   * `08b0eb6f4` -- the optional parameters' default values (the
     trailing-optional rule + the shared ConstantValueText with the
     float/double forms).
-Corpus position: the member-signature category at 322/321 code rows;
-the remaining 11/12 diffs are four small families:
-  * the state machines' type-parameter SUPPRESSION (the oracle renders
-    `<GetEnumerator>d__22 :` without `<TKey, TValue>` -- mine adds the
-    declared list; find the C#'s drop rule).
-  * the typeof argument's declaring-type qualification
-    (`RBTree<>.<...>d__39` -- the nested typeof through the declaring
-    type with the empty-generic marker).
-  * the DELEGATE shape (the oracle renders `public delegate void
-    CollectionSynchronizationCallback(...)` WITHOUT the Invoke/
-    BeginInvoke/EndInvoke members; mine emits them as externs).
-  * the indexer property (`this[string name]` vs `Item`).
+Corpus position: the member-signature comparison reached a SINGLE
+remaining row after the next three slices:
+  * `6d20af3f3` -- the outer-parameter skip: the port's TypeParameters
+    surface is the CHAIN-MERGED list (the declaring type's parameters
+    first, then the own -- probe it before assuming the C#'s own-list
+    semantics), so the header's own slice starts at the declaring
+    type's count; the state machines reference the enclosing generic's
+    parameters without re-declaring any, so they render no list.
+  * `ceed4b695` -- the delegate shape: `delegate Ret Name(params);`
+    over GetDelegateInvokeMethod (the free function in the TypeSystem
+    namespace), the sealed strip BEFORE the modifier emission, the
+    return type unconditionally (the keyword map gained
+    System.Void -> void), the early return skipping the base list +
+    the member arms + the brace. The connid pin RE-BASED
+    deliberately: `074375839ad0...` (the RoutedEventHandler stub now
+    matches the oracle's one-line form byte-for-byte, the known
+    whole-module indentation divergence aside).
+  * (this commit) -- the indexer `this[params]` form + the
+    decode-failed accessors' reference-assembly blocks (the accessor
+    helper previously swallowed the failure into the stub form).
+The one remaining row: the typeof argument's declaring-type
+qualification (`RBTree<>.<...>d__39`) -- the ATTRIBUTE-ARGUMENT type
+rendering (the Syntax TypeSystemAstBuilder's ConvertConstantValue/
+ConvertType path, NOT the facade's RenderBaseTypeName): the nested
+form through the declaring type with the UNBOUND-GENERIC marker.
 
 THE NEXT QUEUE for this family (the corpus remainder):
   * The four families above (all in the final corpus diff at
