@@ -973,8 +973,12 @@ the compiler-generated ones -- CLOSED (`1ad5f83e9` + the test
 inversion): the public parameterless empty-body ctor elides (the
 connid 24/4 -> 16/4; the pin at 9c683c94...; the corpus unchanged).
 The remaining queue: (f) the Debuggable decode, (a) the switch-body
-simplification, (e) the using-set over-collection, and the
-Button.ClickEvent member-of-type qualification.
+simplification, (e) the using-set over-collection. THE
+BUTTON.CLICKEVENT QUALIFICATION -- CLOSED (`7771054c3`): the static
+members' declaring types render SHORT (`Button.ClickEvent`) -- the
+emitter's ShortQualifiedMember after the same-type simplification;
+the connid 16/4 -> 14/2; the pin at af9265b1... (the CastsAndTypeOperators
+test's `(string)(V_0)` expectation updated to the bare-operand form).
 
 The pin guards the merged tree's CURRENT state; each fix above moves
 it deliberately (re-pin + the diff documented per slice).
