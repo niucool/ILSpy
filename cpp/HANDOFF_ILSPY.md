@@ -2342,6 +2342,44 @@ THE REAL PATHS FORWARD (recorded for the next session):
 THE ARC (dnlib, plain diff): unchanged at 80,775 (137,517 -> ... ->
 80,775 over the landed slices).
 
+## THE NULL-COALESCING SYNTHESIS -- ATTEMPTED, REVERTED (the shape ledger)
+
+THE MEASURE (the family's size): the oracle renders 319 `??` sites;
+the port 38 -- a ~280-site family. The port's dup-chains
+(`var dup_N = expr; var S_N = dup_N;` -- 37 measured heads) are the
+reader's dup-slot temporaries for the compiler's null check (the
+hello array2 family).
+
+THE ATTEMPT (three shape hypotheses, each measured with the debug
+counters; ALL reverted):
+(1) the block-FINAL if guard: ZERO if-finals exist in the scanned
+    containers;
+(2) the if as the block's LAST STATEMENT: the last statements are
+    StLoc(34)/Call(27)/StObj(63) -- no IfInstruction;
+(3) the four-statement single block (`a = expr; b = a; if (a) goto L;
+    b = alt;`): the dup-holding blocks are [StLoc Call Call StObj...]
+    mixes with NO IfInstruction inside them.
+THE FINDING: the IfInstruction that renders the `if (dup) { goto L; }`
+guard is NOT in the dup-holding block, not its final, and not its
+neighbor's tail -- the port's reader fragments these chains across
+blocks in a layout the flat render hides (the fall-through dropping
+merges them visually). The emitter-level fold needs the EXACT ILAst
+layout first.
+
+THE NEXT SESSION'S FIRST STEP (the recorded procedure): dump the
+container/block/instruction layout around a dup_-named store (the
+[NC]-style walk exists in the attempt's history: for each container,
+for each block, the instruction op list + the final) and design the
+fold against the REAL sequence -- not the rendered sequence. The
+compile-erroring last debug iteration was unreleased; the tree is
+clean at the three landed propagation slices (the plain diff 80,775,
+the pin ebf9b6e9...).
+
+THE ALTERNATIVE PATH (recorded): the reader-level fix -- the dup-slot
+modeling that CREATES the chains (the C# reader models the null check
+directly on the value, no temporary) -- the same root as hello's
+array2; the deepest fix, the biggest blast radius.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
