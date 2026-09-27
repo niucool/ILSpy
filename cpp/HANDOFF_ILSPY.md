@@ -1767,7 +1767,22 @@ CLOSED (the arc 68 -> 33 normalized diff lines):
   (the RIGHT-operand/tighter-parent and the ternary-branch-slots
   parenthesize; everything else bare; `checked(a + b)` single parens).
 
-THE REMAINING RESIDUE (21 lines; the arc 68 -> 33 -> 28 -> 23 -> 21):
+THE REMAINING RESIDUE (8 lines; the arc 68 -> 33 -> 28 -> 23 -> 21 -> 20 -> 8):
+- CLOSED: the blank-line member separator (the field arm's trailing
+  newline; the methods already self-separate; THE CONNID PIN MOVED to
+  fbda64dd -- the blank lines, normalized 0/0 against the fresh oracle).
+- CLOSED: the for-init hoist (the TransformFor two-phase pre-pass) and
+  the naming family (the loop counters i/j/k, the interface I-strip,
+  the num2-style suffix).
+- THE REMAINING ITEMS: (1) the dup-alias line `string[] array =
+  array3;` -- the block-valued store does not inline into the user's
+  local (the port's dup_160/dup_168 reader slots; investigate
+  InlineOneIfPossible/CanMoveInto for the ArrayInitializer block);
+  (2) the foreach -- the oracle renders `foreach (string text in
+  array2)`, the port an indexed `for (int i = 0; i < array.Length;
+  i++)` -- the C# PatternStatementTransform's TransformForeachOnArray
+  (the port's file has the entry stub); (3) the array_3/array_4 names
+  from the dup slots (fall away with the alias fix).
 - CLOSED: the array-initializer family's render pieces (the element-
   type fix -- the C# passes MatchNewArr's element type, not the store
   variable's array type; the `new T[dims] { elements }` render -- the
