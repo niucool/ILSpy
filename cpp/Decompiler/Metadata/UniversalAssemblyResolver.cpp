@@ -790,19 +790,27 @@ std::optional<std::string> GetHostRuntimeDirectory() {
     // search order below PATH) extend it so a bare environment (no
     // dotnet on PATH) still resolves the shared frameworks.
     if (!dotnetDir) {
-        // The hostfxr installation order below PATH: DOTNET_ROOT, then
-        // the Linux well-known install directories. The per-user
-        // install default ($HOME/.dotnet) is deliberately NOT probed:
-        // resolving the runtime changes the facade fixtures' using sets
-        // (the short-qualified Interlocked calls add System.Threading
-        // where the C# qualifies the calls and adds no using), and the
-        // gates pin the unresolved renders. See the handoff.
+        // The hostfxr installation search order below PATH: DOTNET_ROOT,
+        // then the well-known Linux install directories, then the per-user
+        // install default ($HOME/.dotnet -- the dotnet-install script's
+        // default location, the last hostfxr probe before giving up).
+        // The per-user probe used to be deliberately excluded because
+        // resolving the runtime changed the facade fixtures' using sets
+        // where the C# qualified the calls and added no using -- that
+        // divergence is fixed (the FindRequiredImports recording filters
+        // the emitted usings to what the render actually references), so
+        // the port now resolves by default like the C# oracle does (it
+        // always reads its host runtime's directory).
         const char* root = std::getenv("DOTNET_ROOT");
-        for (const std::string& candidate :
-             {root != nullptr && *root != '\0' ? std::string(root)
-                                                : std::string(),
-              std::string("/usr/share/dotnet"),
-              std::string("/usr/lib/dotnet")}) {
+        std::vector<std::string> candidates;
+        if (root != nullptr && *root != '\0')
+            candidates.push_back(root);
+        candidates.push_back("/usr/share/dotnet");
+        candidates.push_back("/usr/lib/dotnet");
+        const char* home = std::getenv("HOME");
+        if (home != nullptr && *home != '\0')
+            candidates.push_back(JoinPaths(home, ".dotnet"));
+        for (const std::string& candidate : candidates) {
             if (candidate.empty()) continue;
             if (FileExists(JoinPaths(candidate, "dotnet"))) {
                 dotnetDir = candidate;
