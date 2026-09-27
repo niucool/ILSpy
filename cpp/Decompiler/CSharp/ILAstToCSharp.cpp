@@ -2297,6 +2297,31 @@ private:
             }
         }
         std::string name = call.MethodName;
+        // The C# ReplaceMethodCallsWithOperators reductions that the flat
+        // emitter carries at the call site:
+        //  - `System.Type.GetTypeFromHandle(ldtoken X)` is the IL for
+        //    `typeof(X)` -- the wrapper renders as the typeof expression
+        //    itself.
+        //  - `System.String.Concat(a, b, ...)` is the IL for the string
+        //    concatenation `a + b + ...` (the StringConcat setting,
+        //    default true; every argument renders into the + chain).
+        {
+            std::string_view mn = call.MethodName;
+            if (mn == "System.Type::GetTypeFromHandle" &&
+                call.Arguments.size() == 1 && call.Arguments[0] &&
+                call.Arguments[0]->Op == OpCode::LdTypeToken)
+                return Expr(*call.Arguments[0]);
+            if (mn == "System.String::Concat" && call.Arguments.size() >= 2) {
+                std::string text;
+                for (std::size_t i = 0; i < call.Arguments.size(); ++i) {
+                    if (i) text += " + ";
+                    text += call.Arguments[i]
+                        ? Expr(*call.Arguments[i])
+                        : std::string("(default)");
+                }
+                return text;
+            }
+        }
         std::string prefix;
         static const std::string ctorSuffix = "::.ctor";
         static const std::string cctorSuffix = "::.cctor";
@@ -3197,8 +3222,20 @@ private:
             }
             case OpCode::SizeOf:
                 return "sizeof(" + static_cast<const SizeOf&>(inst).TypeName + ")";
-            case OpCode::LdTypeToken:
-                return "typeof(" + FlattenMetadataName(static_cast<const LdTypeToken&>(inst).TokenName) + ")";
+            case OpCode::LdTypeToken: {
+                // The C# name lookup renders the typeof's type through the
+                // using directives (`typeof(Circle)` over
+                // `typeof(Demo.Circle)`); the flat emitter takes the short
+                // name (the last segment -- the same convention as the
+                // static-call target type).
+                std::string typeName =
+                    FlattenMetadataName(static_cast<const LdTypeToken&>(inst).TokenName);
+                auto dot = typeName.rfind('.');
+                if (dot != std::string::npos &&
+                    typeName.find('<') == std::string::npos)
+                    typeName = typeName.substr(dot + 1);
+                return "typeof(" + typeName + ")";
+            }
             case OpCode::Arglist:
                 // The real back end's VisitArglist renders the ArgListAccess
                 // UndocumentedExpression as the `__arglist` keyword.
