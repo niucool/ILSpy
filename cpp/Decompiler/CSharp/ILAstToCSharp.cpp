@@ -678,24 +678,7 @@ private:
             if (c == nullptr) return;
             for (std::size_t k = 0; k < c->Blocks.size(); ++k) {
                 Block* b = c->Blocks[k].get();
-                if (b == nullptr || b->FinalInstruction == nullptr ||
-                    b->FinalInstruction->Op != OpCode::Leave)
-                    continue;
-                // The block's statements are limited to plain stores (the
-                // shared-exit assign-then-return shape: `x = ...; return
-                // x;`): anything more complex (a branch, a nested control
-                // flow) keeps the goto form.
-                bool onlyStores = true;
-                for (const auto& si : b->Instructions) {
-                    if (si == nullptr || si->Op != OpCode::StLoc) {
-                        onlyStores = false;
-                        break;
-                    }
-                }
-                if (!onlyStores)
-                    continue;
-                auto* lv = static_cast<Leave*>(b->FinalInstruction.get());
-                if (lv->TargetContainer != fn_->Body.get())
+                if (b == nullptr || b->FinalInstruction == nullptr)
                     continue;
                 if (preds[b] != 1 || k == 0)
                     continue;
@@ -1197,7 +1180,8 @@ private:
             auto prop = returnPropagation_.find(&br);
             if (prop != returnPropagation_.end() &&
                 prop->second != nullptr &&
-                prop->second->Instructions.empty()) {
+                prop->second->Instructions.empty() &&
+                prop->second->FinalInstruction->Op == OpCode::Leave) {
                 auto* lv = static_cast<const Leave*>(
                     prop->second->FinalInstruction.get());
                 if (lv->Value == nullptr)
@@ -2425,13 +2409,8 @@ private:
                         prop->second != nullptr) {
                         for (const auto& si : prop->second->Instructions)
                             if (si) EmitStatement(*si, indent);
-                        auto* lv = static_cast<const Leave*>(
-                            prop->second->FinalInstruction.get());
-                        if (lv->Value == nullptr) {
-                            Line(indent, "return;");
-                        } else {
-                            Line(indent, "return " + Expr(*lv->Value) + ";");
-                        }
+                        EmitStatement(*prop->second->FinalInstruction,
+                                      indent);
                         return;
                     }
                 }
