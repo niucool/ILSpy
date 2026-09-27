@@ -78,3 +78,16 @@ TEST(ForeachVariableNameTest, ElementNameFromTypeInference)
     EXPECT_EQ(text.find("foreach (byte byte in "), std::string::npos)
         << "the type keyword is not a legal element name: " << text;
 }
+
+// The store proposal (the C# GetNameFromInstruction): a local whose store
+// is a get_/Get*-method call takes the method-name remainder, not the
+// type-based fallback (`string[] names = GetNames()`, not `array`).
+TEST(ForeachVariableNameTest, StoreProposalNamesFromGetMethod)
+{
+    std::string text;
+    if (!RenderForEachShapes(text))
+        GTEST_SKIP() << "the foreach-name fixture is not provisioned";
+    EXPECT_NE(text.find("string[] names = "), std::string::npos)
+        << "the Get*-method store names the local from the method name: "
+        << text;
+}

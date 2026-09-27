@@ -17,6 +17,9 @@
 // DEALINGS IN THE SOFTWARE.
 
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
+#include "Decompiler/CSharp/OutputVisitor/CSharpKeywordCheck.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
@@ -102,6 +105,153 @@ std::string InferName(const TypeSystem::IType* type) {
     return name;
 }
 
+// The C# `static string CleanUpVariableName(string name)`
+// (AssignVariableNames.cs): strip the generic-arity backtick and the
+// m_ / _ field prefixes, reject non-printable, empty, and illegal names
+// and C# keywords, then lowercase the first character. Returns "" when
+// the name is unusable (the caller falls through to the next proposal).
+std::string CleanUpVariableName(std::string name) {
+    // remove the backtick (generics)
+    std::size_t pos = name.find('`');
+    if (pos != std::string::npos)
+        name = name.substr(0, pos);
+    // remove field prefix:
+    if (name.size() > 2 && name.compare(0, 2, "m_") == 0)
+        name = name.substr(2);
+    else if (name.size() > 1 && name[0] == '_' &&
+             (std::isalpha(static_cast<unsigned char>(name[1])) ||
+              name[1] == '_'))
+        name = name.substr(1);
+    if (name.empty() || name.find_first_not_of(
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            "0123456789_") != std::string::npos)
+        return "";
+    std::string lowerCaseName = name;
+    lowerCaseName[0] = static_cast<char>(
+        std::tolower(static_cast<unsigned char>(lowerCaseName[0])));
+    if (CSharp::OutputVisitor::IsKeyword(lowerCaseName))
+        return "";
+    return lowerCaseName;
+}
+
+// The method name after the `::` separator of a "Namespace.Type::Method"
+// reflection-style name ("" when there is none).
+std::string MethodNamePart(const std::string& full) {
+    std::size_t sep = full.rfind("::");
+    return sep == std::string::npos ? std::string()
+                                    : full.substr(sep + 2);
+}
+
+// The C# `static bool ExcludeMethodFromCandidates(IMethod m)`: the
+// operators, ToString, string Concat, and GetPinnableReference never
+// name a variable.
+bool ExcludeMethodFromCandidates(const std::string& name) {
+    return name.rfind("op_", 0) == 0 || name == "ToString" ||
+           name == "Concat" || name == "GetPinnableReference";
+}
+
+// The C# `static string GetNameFromInstruction(ILInstruction inst)`: the
+// name a store's value context suggests -- the field loads (the field
+// name, recursing into the target for compiler-generated fields), and the
+// get_/Get* property/method calls (the name remainder). Returns "" when
+// the instruction suggests nothing.
+std::string GetNameFromInstruction(ILInstruction* inst) {
+    if (inst == nullptr) return std::string();
+    switch (inst->Op) {
+        case OpCode::LdObj: {
+            // ldfld is LdObj(LdFlda(target, field), type): the field name.
+            auto* ldobj = static_cast<LdObj*>(inst);
+            return GetNameFromInstruction(ldobj->Target.get());
+        }
+        case OpCode::LdFlda: {
+            auto* ldflda = static_cast<LdFlda*>(inst);
+            if (ldflda->IsCompilerGeneratedField)
+                return GetNameFromInstruction(ldflda->Target.get());
+            return CleanUpVariableName(MethodNamePart(ldflda->FieldName));
+        }
+        case OpCode::LdsFlda: {
+            auto* ldsflda = static_cast<LdsFlda*>(inst);
+            return CleanUpVariableName(MethodNamePart(ldsflda->FieldName));
+        }
+        case OpCode::Call:
+        case OpCode::CallVirt: {
+            auto* call = static_cast<Call*>(inst);
+            std::string name = MethodNamePart(call->MethodName);
+            if (ExcludeMethodFromCandidates(name)) break;
+            if (name.rfind("get_", 0) == 0 && call->Arguments.empty()) {
+                // use name from properties, but not from indexers
+                return CleanUpVariableName(name.substr(4));
+            }
+            if (name.rfind("Get", 0) == 0 && name.size() >= 4 &&
+                std::isupper(static_cast<unsigned char>(name[3]))) {
+                // use name from Get-methods
+                return CleanUpVariableName(name.substr(3));
+            }
+            break;
+        }
+        default:
+            break;
+    }
+    return std::string();
+}
+
+// The C# `static string GetNameForArgument(ILInstruction parent, int i)`:
+// the name a load's use context suggests -- the field store target, and
+// the set_/Set-method call the argument feeds. (The C# also reads the
+// call's formal PARAMETER names and the Leave -> "result" arm; the port's
+// flat reader resolves no IMethod for the calls, so those arms stay
+// deferred -- recorded in the handoff.)
+std::string GetNameForArgument(ILInstruction* parent, int childIndex) {
+    if (parent == nullptr) return std::string();
+    switch (parent->Op) {
+        case OpCode::StObj: {
+            // stfld is StObj(LdFlda(target, field), value, type).
+            auto* stobj = static_cast<StObj*>(parent);
+            if (stobj->Target == nullptr) break;
+            if (stobj->Target->Op == OpCode::LdFlda)
+                return CleanUpVariableName(MethodNamePart(
+                    static_cast<LdFlda*>(stobj->Target.get())->FieldName));
+            if (stobj->Target->Op == OpCode::LdsFlda)
+                return CleanUpVariableName(MethodNamePart(
+                    static_cast<LdsFlda*>(stobj->Target.get())->FieldName));
+            break;
+        }
+        case OpCode::Call:
+        case OpCode::CallVirt: {
+            auto* call = static_cast<Call*>(parent);
+            if (childIndex < 0 ||
+                childIndex >= static_cast<int>(call->Arguments.size()))
+                break;
+            std::string name = MethodNamePart(call->MethodName);
+            if (ExcludeMethodFromCandidates(name)) return std::string();
+            // A single-argument setter call: the argument might be the
+            // value of a setter.
+            if (call->Arguments.size() == 1) {
+                if (name.rfind("set_", 0) == 0)
+                    return CleanUpVariableName(name.substr(4));
+                if (name.rfind("Set", 0) == 0 && name.size() >= 4 &&
+                    std::isupper(static_cast<unsigned char>(name[3])))
+                    return CleanUpVariableName(name.substr(3));
+            }
+            break;
+        }
+        case OpCode::Leave:
+            return "result";
+        default:
+            break;
+    }
+    return std::string();
+}
+
+// The trailing-digit strip (the C# SplitName's base-name half): a proposed
+// name like "text2" renames to "text" before the conflict suffix applies.
+std::string StripTrailingDigits(const std::string& name) {
+    std::size_t end = name.size();
+    while (end > 0 && std::isdigit(static_cast<unsigned char>(name[end - 1])))
+        --end;
+    return name.substr(0, end);
+}
+
 } // namespace
 
 // The C# GetNameByType's naming core, exposed for the flat emitter's
@@ -170,6 +320,21 @@ void CollectLoopCounters(ILInstruction* inst, std::set<ILVariable*>& counters) {
         CollectLoopCounters(inst->GetChild(c), counters);
 }
 
+// The LdLoc-site collection for the load proposal (see the Run).
+void CollectLoadSites(
+    ILInstruction* inst,
+    std::map<ILVariable*, std::vector<ILInstruction*>>& loadSites) {
+    if (inst == nullptr) return;
+    if (inst->Op == OpCode::LdLoc) {
+        ILVariable* variable =
+            static_cast<LdLoc*>(inst)->Variable.get();
+        if (variable != nullptr)
+            loadSites[variable].push_back(inst);
+    }
+    for (int c = 0; c < inst->ChildCount(); ++c)
+        CollectLoadSites(inst->GetChild(c), loadSites);
+}
+
 } // namespace
 
 void AssignVariableNames::Run(ILFunction& function, ILTransformContext& context) {
@@ -178,6 +343,12 @@ void AssignVariableNames::Run(ILFunction& function, ILTransformContext& context)
     std::set<ILVariable*> loopCounters;
     if (function.Body)
         CollectLoopCounters(function.Body.get(), loopCounters);
+    // The load sites per variable (the C# ILVariable.LoadInstructions --
+    // the port's reader computes only the counts, so the naming's load
+    // proposal walks the tree once): every LdLoc keyed by its variable.
+    std::map<ILVariable*, std::vector<ILInstruction*>> loadSites;
+    if (function.Body)
+        CollectLoadSites(function.Body.get(), loadSites);
     // Names already taken: parameters (kept as-is) and locals renamed so far.
     std::set<std::string> taken;
     for (auto& v : function.Variables) {
@@ -200,9 +371,47 @@ void AssignVariableNames::Run(ILFunction& function, ILTransformContext& context)
                 }
             }
         }
+        if (base.empty()) {
+            // The C# GenerateNameForVariable's store proposal: the names
+            // the variable's stores suggest (the field loads and the
+            // get_/Get* calls), used only when every store agrees.
+            std::set<std::string> storeNames;
+            for (ILInstruction* store : v->StoreInstructions) {
+                if (store->Op != OpCode::StLoc) continue;
+                // The C# adds the null suggestions to the set too: a
+                // store that suggests nothing makes the set ambiguous
+                // (a lone null singleton proposes nothing), so the empty
+                // string participates in the distinct-count.
+                storeNames.insert(GetNameFromInstruction(
+                    static_cast<StLoc*>(store)->Value.get()));
+            }
+            if (storeNames.size() == 1 && !storeNames.begin()->empty())
+                base = *storeNames.begin();
+        }
+        if (base.empty()) {
+            // The C# load proposal: the names the variable's loads
+            // suggest through their use context (the field store targets
+            // and the set_/Set-method arguments), again only when every
+            // load agrees.
+            std::set<std::string> loadNames;
+            auto it = loadSites.find(v.get());
+            if (it != loadSites.end()) {
+                for (ILInstruction* load : it->second) {
+                    // The store proposal's null rule applies here too
+                    // (the C# Except keeps the nulls as a distinct set
+                    // element): a load whose use context suggests nothing
+                    // vetoes the proposal.
+                    loadNames.insert(
+                        GetNameForArgument(load->Parent, load->ChildIndex));
+                }
+                if (loadNames.size() == 1 && !loadNames.begin()->empty())
+                    base = *loadNames.begin();
+            }
+        }
         if (base.empty())
             base = InferName(v->Type.get());
         if (base.empty()) continue;  // leave V_N when the type is unknown
+        base = StripTrailingDigits(base);
         std::string name = base;
         // The C# conflict suffix: the number directly appended (`num2`),
         // starting from 2 for the first conflict.
