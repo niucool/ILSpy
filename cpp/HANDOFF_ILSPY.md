@@ -2963,6 +2963,26 @@ memory target MET (below the oracle band); the wall time remains
 at parity (9.2s vs the oracle's ~9.9s -- the earlier "4.7x faster"
 was the debug-vs-release ratio, corrected in the record).
 
+## THE NULL-PROPAGATION FOLD -- LANDED (the 4th attempt, the probed shape)
+
+THE SHAPE (the [NP3] probe's answer): the guard's true arm is an
+INLINE Leave(ldnull) -- opcode 14 is LEAVE not BRANCH (the enum:
+InvalidBranch, InvalidExpression, Nop, ILFunction, BlockContainer,
+Block, PinnedRegion, BinaryNumericInstruction, ... Arglist, Branch(13),
+Leave(14), IfInstruction(15)) -- the earlier attempts required a
+Branch and fired zero. THE FOLD: [stloc dup = expr] + if-final(comp,
+Leave(ldnull)) + b1 [leave call M(ldloc dup, ...)] -> `return
+expr?.Member(args);`. THE MEASUREMENT: the `?.` sites 77 -> 100, the
+dnlib diff 80,585 -> 80,454; the flagship renders exactly
+`return self.Win32Resources?.Find(type, name, langId);`. THE GATES:
+the pin, hello 3, cui 1332, the sweep 15 -- all standing. THE
+FOLLOW-UP: the seed test (UsingTransform.FoldsNullPropagation, the
+programmatic-ILAst form like FoldsNullCoalescingChain) + the
+remaining ~123 `?.` gap (the non-dup shapes: the property/form
+accesses, the chains) -- each a dump-first pass. THE QUEUE: the
+FieldInitializerPass (35 cui sites), the label-merged regions, the
+switch case-range fall-through.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
