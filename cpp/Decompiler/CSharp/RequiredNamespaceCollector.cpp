@@ -62,13 +62,12 @@ RequiredNamespaceCollector::RequiredNamespaceCollector(
 void RequiredNamespaceCollector::CollectTypeReference(
     const TS::ITypePtr& type) {
     if (type == nullptr) return;
-    keepAliveTypes_.push_back(type);
     CollectTypeReference(type.get());
 }
 
 void RequiredNamespaceCollector::CollectTypeReference(const TS::IType* type) {
     if (type == nullptr) return;
-    if (!visitedTypes_.insert(type).second) return;
+    if (!visitedTypes_.insert(type->Name()).second) return;
     // The C# `case ParameterizedType`: the namespace + the generic type + the
     // type arguments, and an early return ("no need to collect base types
     // again" -- the generic type's own base sweep covers them).

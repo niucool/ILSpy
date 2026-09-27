@@ -106,18 +106,13 @@ private:
 
     std::unordered_set<std::string>& namespaces_;
     bool minimalUsingSet_ = false;
-    std::unordered_set<const TypeSystem::IType*, std::hash<const void*>,
-                       std::equal_to<>>
-        visitedTypes_;
-    // The visited types' keepalive registry: the set is pointer-keyed, and
-    // without ownership the address of a freed temporary (the resolution
-    // results, which die at each walk step) can be recycled by a later
-    // allocation and falsely dedup a new visit -- silently dropping its
-    // namespace. Holding the shared pointers here pins every visited type
-    // for the collector's lifetime (the C# needs no such registry: the GC
-    // keeps every visited instance alive and the HashSet<IType> compares by
-    // value).
-    std::vector<TypeSystem::ITypePtr> keepAliveTypes_;
+    // The visited types' gate, keyed by name: the same-name dedup is
+    // harmless for the namespace output (a same-name type contributes the
+    // same namespaces), and the name key needs no ownership -- the walk's
+    // temporaries die at each step without the address-recycling false
+    // dedup the pointer key suffered (the C#'s HashSet<IType> compares by
+    // value under the GC).
+    std::unordered_set<std::string> visitedTypes_;
 };
 
 // The C# `public static void CollectNamespaces(IEntity entity, MetadataModule
