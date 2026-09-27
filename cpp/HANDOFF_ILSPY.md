@@ -2429,6 +2429,38 @@ THE ARC: unchanged at 80,775 on the last VERIFIED binary (the rv3
 render); the current binary's dnlib number is meaningless until the
 clean rebuild.
 
+## THE BUILD ANOMALY -- RESOLVED (the disk quota)
+
+THE ROOT: the /tmp tmpfs hit the per-user DISK QUOTA mid-turn (the
+earlier turns' artifacts -- 2.8G of diffval, 595M of tm_il, 535M of
+arc, ... 13G total against the 16G tmpfs). The FILE redirects then
+silently wrote ZERO bytes (exit 0, empty stderr -- the failed writes
+surfaced nowhere), while the PIPE targets worked (the data never
+touched the disk). The "same source, different binary behavior" was
+an ILLUSION: the earlier "good" renders had disk; the later "broken"
+ones did not. The clean rebuild was innocent; the committed tree was
+never at fault. THE LESSON (recorded for every future gate run): a
+zero-byte render output with exit 0 means CHECK THE DISK FIRST (df -h
+/tmp; du -sh /tmp) before suspecting the build -- the shell's `>`
+reports nothing.
+
+THE EMERGENCY PROCEDURE EXECUTED: rm -rf build/linux-ninja + the
+fresh preset configure + the full rebuild (298 targets, clean); the
+/tmp cleanup (13G -> 6.9G, 8.5G free); the gates re-run in order,
+ALL GREEN ON THE CLEAN-REBUILT BINARY:
+- hello: the 3-line recorded residue (from the phantom 70);
+- dnlib: 89,454 lines, the plain diff 80,775 -- the verified arc;
+- the connid pin ebf9b6e9... (the current pin; the fbda64dd... in
+  the dispatch predates the namespace-indent re-pin, verified against
+  the fresh oracle at that commit);
+- the sweep: 13,173 ran / the unchanged 15-failure baseline.
+
+THE RESUMED WORK ORDER (the coalesce ledger, unchanged): the fold
+must COMPOSE with the port's existing 38 ?? sites (find the machinery
+that renders them first), the block-predecessor gate is mandatory
+(measured), and the dumped shape is the design reference: [a = expr,
+b = a, If(LdLoc a, Branch->L, Nop)] then [b = alt, Branch->L].
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
