@@ -25,6 +25,7 @@
 // expression rather than dropping text or crashing.
 
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
+#include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/CSharp/RequiredImportsRecorder.hpp"
 #include <algorithm>
 #include <functional>
@@ -1561,17 +1562,30 @@ private:
                         // type; the ldelema may carry the stelem.ref
                         // object form).
                         std::string elemType = "var";
+                        const TypeSystem::IType* elementType = nullptr;
                         if (av->Type) {
                             if (auto* at = dynamic_cast<
                                     const TypeSystem::ArrayType*>(
-                                    av->Type.get()))
+                                    av->Type.get())) {
                                 elemType = CSharpTypeName(at->Element());
-                            else
+                                elementType = at->Element().get();
+                            } else {
                                 elemType = CSharpTypeName(av->Type);
+                                elementType = av->Type.get();
+                            }
                         }
-                        std::string base = elemType == "string"
-                            ? "text"
-                            : (elemType == "var" ? "val" : elemType);
+                        // The element name is the type-based variable-name
+                        // suggestion (the C# foreach-on-array keeps the
+                        // loop variable's AssignName'd name), never the
+                        // rendered type text: a keyword (`byte`) is not a
+                        // legal identifier, and a class type renders its
+                        // lowercased form (ImageDebugDirectory ->
+                        // imageDebugDirectory), not the type name verbatim.
+                        std::string base =
+                            IL::AssignVariableNames::SuggestNameForType(
+                                elementType);
+                        if (base.empty())
+                            base = "val";
                         std::string elemName = base;
                         for (int n = 2; declared_.count(elemName); ++n)
                             elemName = base + std::to_string(n);

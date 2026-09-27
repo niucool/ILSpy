@@ -26,6 +26,7 @@
 #pragma once
 
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
 
 #include <string>
 
@@ -41,6 +42,15 @@ public:
     // whitespace) -- the assignment-eligibility check the transform's rename
     // and the CallBuilder argument-name mapping both consume.
     static bool IsValidName(const std::string& varName);
+
+    // The C# GetNameByType's naming core (the known-type dict, the
+    // array/pointer/byref names, the interface strip, the lowercased
+    // short type name): the type-based variable-name suggestion. Shared
+    // with the flat emitter's foreach element naming (the element takes
+    // the same name the ILAst transform would assign the loop variable --
+    // the rendered type text itself is never a name: a keyword like
+    // `byte` is not a legal identifier).
+    static std::string SuggestNameForType(const TypeSystem::IType* type);
 };
 
 } // namespace ILSpy::Decompiler::IL

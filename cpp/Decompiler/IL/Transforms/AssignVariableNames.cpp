@@ -104,6 +104,16 @@ std::string InferName(const TypeSystem::IType* type) {
 
 } // namespace
 
+// The C# GetNameByType's naming core, exposed for the flat emitter's
+// foreach element naming: the known-type dict (byte -> b, string ->
+// text), the array/pointer/byref names, the interface strip, and the
+// lowercased short type name. The rendered type text itself is never a
+// name (a keyword like `byte` is not a legal identifier).
+std::string AssignVariableNames::SuggestNameForType(
+    const TypeSystem::IType* type) {
+    return InferName(type);
+}
+
 // The C# `internal static bool IsValidName(string varName)` (line 677):
 // whitespace/empty fails, the first unit must be a letter or '_', every
 // following unit a letter, digit, or '_'. The C# `char.IsLetter` /
