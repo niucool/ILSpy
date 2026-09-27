@@ -20,6 +20,12 @@
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/LdLoc.hpp"
+
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/Util/Char.hpp"
@@ -83,6 +89,15 @@ std::string InferName(const TypeSystem::IType* type) {
     auto bt = name.find('`');
     if (bt != std::string::npos) name = name.substr(0, bt);  // arity suffix
     if (name.empty()) return "";
+    // The C# GetNameByType's interface strip: `remove the 'I' for
+    // interfaces` -- an I followed by an upper-case letter and a lower-case
+    // letter (IShape -> Shape; a name like `Int32` is untouched because its
+    // third letter is upper-case... `In32`-style names with a lower third
+    // letter do strip, matching the C# predicate).
+    if (name.size() >= 3 && name[0] == 'I' &&
+        std::isupper(static_cast<unsigned char>(name[1])) &&
+        std::islower(static_cast<unsigned char>(name[2])))
+        name = name.substr(1);
     name[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(name[0])));
     return name;
 }
@@ -111,8 +126,48 @@ bool AssignVariableNames::IsValidName(const std::string& varName) {
     return true;
 }
 
+namespace {
+
+// The C# loop-counter detection (AssignVariableNames.cs lines 87-98): the
+// variables incremented in a For container's increment block (`v = v + k`
+// stores) -- named i, j, k, l, m, n.
+void CollectLoopCounters(ILInstruction* inst, std::set<ILVariable*>& counters) {
+    if (inst == nullptr) return;
+    if (auto* container = dynamic_cast<BlockContainer*>(inst)) {
+        if (container->Kind == ContainerKind::For) {
+            for (const auto& block : container->Blocks) {
+                if (!block) continue;
+                for (const auto& stmt : block->Instructions) {
+                    if (!stmt || stmt->Op != OpCode::StLoc) continue;
+                    auto* st = static_cast<StLoc*>(stmt.get());
+                    if (!st->Variable || !st->Value ||
+                        st->Value->Op != OpCode::BinaryNumericInstruction)
+                        continue;
+                    auto* bin = static_cast<BinaryNumericInstruction*>(
+                        st->Value.get());
+                    if (bin->Operator != BinaryNumericOperator::Add &&
+                        bin->Operator != BinaryNumericOperator::Sub)
+                        continue;
+                    if (bin->Left && bin->Left->Op == OpCode::LdLoc &&
+                        static_cast<LdLoc*>(bin->Left.get())->Variable.get() ==
+                            st->Variable.get())
+                        counters.insert(st->Variable.get());
+                }
+            }
+        }
+    }
+    for (int c = 0; c < inst->ChildCount(); ++c)
+        CollectLoopCounters(inst->GetChild(c), counters);
+}
+
+} // namespace
+
 void AssignVariableNames::Run(ILFunction& function, ILTransformContext& context) {
     (void)context;
+    // The loop counters (the i/j/k/n naming below).
+    std::set<ILVariable*> loopCounters;
+    if (function.Body)
+        CollectLoopCounters(function.Body.get(), loopCounters);
     // Names already taken: parameters (kept as-is) and locals renamed so far.
     std::set<std::string> taken;
     for (auto& v : function.Variables) {
@@ -121,11 +176,28 @@ void AssignVariableNames::Run(ILFunction& function, ILTransformContext& context)
     }
     for (auto& v : function.Variables) {
         if (!v || v->Kind == VariableKind::Parameter) continue;
-        std::string base = InferName(v->Type.get());
+        // The C# GenerateNameForVariable's loop-counter arm: an int32 loop
+        // counter names from the i, j, k, l, m, n sequence.
+        std::string base;
+        if (v->Type && loopCounters.count(v.get()) != 0) {
+            auto* k = dynamic_cast<const TypeSystem::KnownType*>(v->Type.get());
+            if (k != nullptr && k->Code() == TypeSystem::KnownTypeCode::Int32) {
+                for (char c = 'i'; c <= 'n'; ++c) {
+                    if (!taken.count(std::string(1, c))) {
+                        base = std::string(1, c);
+                        break;
+                    }
+                }
+            }
+        }
+        if (base.empty())
+            base = InferName(v->Type.get());
         if (base.empty()) continue;  // leave V_N when the type is unknown
         std::string name = base;
-        for (int i = 1; taken.count(name); ++i)
-            name = base + "_" + std::to_string(i);
+        // The C# conflict suffix: the number directly appended (`num2`),
+        // starting from 2 for the first conflict.
+        for (int i = 2; taken.count(name); ++i)
+            name = base + std::to_string(i);
         taken.insert(name);
         v->Name = name;
     }

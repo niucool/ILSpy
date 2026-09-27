@@ -26,6 +26,7 @@
 
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
 #include <algorithm>
+#include <functional>
 #include <cmath>
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
@@ -313,6 +314,7 @@ public:
         if (fn.Body) {
             CollectLoopHeaders(fn.Body.get());
             CollectLabels(fn.Body.get());
+            HoistForInitializers(fn.Body.get());
             EmitContainer(*fn.Body, 1);
         }
         out_ += "}\n";
@@ -325,6 +327,16 @@ private:
     std::string returnTypeName_;  // the C# name of the function's return type
     std::string methodName_;  // the method's display name (for diagnostics)
     std::set<std::string> declared_;          // locals already introduced with `var`
+    // The for-initializer hoists (the C# PatternStatementTransform's
+    // TransformFor): the pre-pass moves a loop-preceding `v = init;` store
+    // into the for's initializer and records the rendered init text (and
+    // the variable name, for the declare-state) keyed by the loop
+    // container.
+    struct ForHoist {
+        std::string Text;
+        std::string VariableName;
+    };
+    std::map<const BlockContainer*, ForHoist> hoistedForInits_;
     std::map<const Block*, std::string> labels_;  // branch-target block -> IL_XXXX
     std::set<const Block*> loopHeaders_;  // first block of each Loop container
     // Blocks whose `IL_XXXX:` label was emitted BEFORE a construct keyword
@@ -474,6 +486,115 @@ private:
         for (const ILInstruction* p = br; p; p = p->Parent)
             if (p == loopContainer) return true;
         return false;
+    }
+
+    // The C# PatternStatementTransform's TransformFor hoist, as a render
+    // pre-pass: a For container whose preceding statement (the host
+    // block's previous instruction, or the previous sibling block's last
+    // instruction -- the loop pre-header's trailing store) is `v = init;`
+    // with v used by the loop's condition or increment, moves that store
+    // into the for's initializer. The declaration rides the hoist (the
+    // variable's first store): `for (T v = init; ...)`.
+    void HoistForInitializers(ILInstruction* inst) {
+        if (inst == nullptr) return;
+        // Phase 1: collect the candidate pairs (the walk must not mutate
+        // while descending -- the erase below shifts the sibling slots).
+        struct Hoist {
+            BlockContainer* container;
+            Block* hostBlock;
+            int idx;
+            StLoc* st;
+        };
+        std::vector<Hoist> candidates;
+        std::function<void(ILInstruction*)> collect =
+            [&](ILInstruction* node) {
+                if (node == nullptr) return;
+                if (auto* container = dynamic_cast<BlockContainer*>(node)) {
+                    if (container->Kind == ContainerKind::For &&
+                        !container->Blocks.empty() &&
+                        hoistedForInits_.find(container) ==
+                            hoistedForInits_.end()) {
+                        auto* parentBlock =
+                            dynamic_cast<Block*>(container->Parent);
+                        ILInstruction* prevStmt = nullptr;
+                        Block* hostBlock = parentBlock;
+                        int idx = container->ChildIndex;
+                        if (parentBlock != nullptr && idx > 0 &&
+                            static_cast<std::size_t>(idx) <=
+                                parentBlock->Instructions.size()) {
+                            --idx;
+                            prevStmt =
+                                parentBlock->Instructions[idx].get();
+                        } else if (parentBlock != nullptr) {
+                            auto* outer = dynamic_cast<BlockContainer*>(
+                                parentBlock->Parent);
+                            if (outer != nullptr) {
+                                for (std::size_t i = 0;
+                                     i < outer->Blocks.size(); ++i) {
+                                    if (outer->Blocks[i].get() !=
+                                            parentBlock ||
+                                        i == 0)
+                                        continue;
+                                    Block* prevBlock =
+                                        outer->Blocks[i - 1].get();
+                                    if (prevBlock != nullptr &&
+                                        !prevBlock->Instructions.empty()) {
+                                        prevStmt = prevBlock->Instructions
+                                                       .back()
+                                                       .get();
+                                        hostBlock = prevBlock;
+                                        idx = static_cast<int>(
+                                            prevBlock->Instructions.size() -
+                                            1);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        if (prevStmt != nullptr &&
+                            prevStmt->Op == OpCode::StLoc)
+                            candidates.push_back(Hoist{container, hostBlock,
+                                                       idx,
+                                                       static_cast<StLoc*>(
+                                                           prevStmt)});
+                    }
+                }
+                for (int c = 0; c < node->ChildCount(); ++c)
+                    collect(node->GetChild(c));
+            };
+        collect(inst);
+        // Phase 2: validate and apply (the loop-use check, the init text,
+        // the removal from the host block).
+        for (const Hoist& h : candidates) {
+            ILVariable* v = h.st->Variable.get();
+            if (v == nullptr || v->Kind == VariableKind::Parameter) continue;
+            bool loopUsesV = false;
+            std::function<void(const ILInstruction*)> usesVar =
+                [&](const ILInstruction* i) {
+                    if (i == nullptr) return;
+                    if (i->Op == OpCode::LdLoc &&
+                        static_cast<const LdLoc*>(i)->Variable.get() == v)
+                        loopUsesV = true;
+                    for (int c = 0; c < i->ChildCount(); ++c)
+                        usesVar(i->GetChild(c));
+                };
+            const Block* header = h.container->Blocks.front().get();
+            if (header && header->FinalInstruction)
+                usesVar(header->FinalInstruction.get());
+            for (const auto& b : h.container->Blocks) {
+                if (!b || b.get() == header) continue;
+                for (const auto& i2 : b->Instructions)
+                    if (i2) usesVar(i2.get());
+            }
+            if (!loopUsesV) continue;
+            hoistedForInits_[h.container] = ForHoist{
+                CSharpTypeName(v->Type) + " " + v->Name + " = " +
+                    (h.st->Value ? Expr(*h.st->Value)
+                                 : std::string("(default)")),
+                v->Name};
+            h.hostBlock->Instructions.erase(
+                h.hostBlock->Instructions.begin() + h.idx);
+        }
     }
 
     void CollectLabels(const ILInstruction* inst) {
@@ -1270,7 +1391,23 @@ private:
                     if (!incrText.empty()) incrText += ", ";
                     incrText += part;
                 }
-            }            Line(indent, "for (; " + cond + "; " + incrText + ")");
+            }
+            // The C# PatternStatementTransform's TransformFor hoist: the
+            // statement immediately before the for (`v = init;`) moves into
+            // the for's initializer when the loop's condition or increment
+            // uses v. The declaration rides the hoist (the variable's
+            // first store): `for (T v = init; ...)`.
+            std::string initText;
+            {
+                auto it = hoistedForInits_.find(&container);
+                if (it != hoistedForInits_.end()) {
+                    initText = it->second.Text;
+                    // The hoisted initializer declares the variable: the
+                    // later stores render without the type.
+                    declared_.insert(it->second.VariableName);
+                }
+            }
+            Line(indent, "for (" + initText + "; " + cond + "; " + incrText + ")");
             Line(indent, "{");
             // The for-loop header's preamble (a while-initialized value the
             // csc lowers to an entry statement, or a refreshed do-while local)

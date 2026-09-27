@@ -1489,7 +1489,7 @@ TEST(ILAstToCSharp, ForLoopContainerRendersForWithIncrementClause) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "");
-    EXPECT_NE(text.find("for (; num < 5; num++)"), std::string::npos) << text;
+    EXPECT_NE(text.find("for (var num = 0; num < 5; num++)"), std::string::npos) << text;
     EXPECT_NE(text.find("num *= 2;"), std::string::npos) << text;
     EXPECT_NE(text.find("continue;"), std::string::npos) << text;
     // The increment block's back-edge renders nothing extra: no `goto IL_`.
@@ -1549,7 +1549,7 @@ TEST(ILAstToCSharp, ForSplitIncrementEmitsNoTrailingContinue) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "");
-    EXPECT_NE(text.find("for (; num < 5; num++)"), std::string::npos) << text;
+    EXPECT_NE(text.find("for (var num = 0; num < 5; num++)"), std::string::npos) << text;
     EXPECT_NE(text.find("num *= 2"), std::string::npos) << text;
     // The body's trailing br-incr is the iteration, not a continue.
     EXPECT_EQ(text.find("continue;"), std::string::npos) << text;

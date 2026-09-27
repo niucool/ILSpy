@@ -18,8 +18,8 @@
 
 // AssignVariableNames tests (minimal subset). Locals and stack slots get a
 // name inferred from their type (System.Int32 -> num, System.String -> text,
-// ...), disambiguated against parameter names and earlier locals (num, num_1,
-// num_2). Parameters keep their metadata names.
+// ...), disambiguated against parameter names and earlier locals (num, num2,
+// num3 -- the C# conflict suffix). Parameters keep their metadata names.
 
 #include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
@@ -94,8 +94,8 @@ TEST(AssignVariableNames, DisambiguatesCollisions) {
     fn->Variables.push_back(MakeLocal("V_2", KnownTypeCode::Int32));
     AssignVariableNames().Run(*fn, Ctx());
     EXPECT_EQ(fn->Variables[0]->Name, "num");
-    EXPECT_EQ(fn->Variables[1]->Name, "num_1");
-    EXPECT_EQ(fn->Variables[2]->Name, "num_2");
+    EXPECT_EQ(fn->Variables[1]->Name, "num2");
+    EXPECT_EQ(fn->Variables[2]->Name, "num3");
 }
 
 TEST(AssignVariableNames, AvoidsParameterNameCollisions) {
@@ -107,7 +107,7 @@ TEST(AssignVariableNames, AvoidsParameterNameCollisions) {
     fn->Variables.push_back(MakeLocal("V_0", KnownTypeCode::Int32));  // would be "num"
     AssignVariableNames().Run(*fn, Ctx());
     EXPECT_EQ(fn->Variables[0]->Name, "num") << "parameter keeps its name";
-    EXPECT_EQ(fn->Variables[1]->Name, "num_1") << "local avoids the parameter name";
+    EXPECT_EQ(fn->Variables[1]->Name, "num2") << "local avoids the parameter name";
 }
 
 TEST(AssignVariableNames, KeepsParameterNames) {
