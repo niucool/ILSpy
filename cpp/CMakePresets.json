@@ -48,12 +48,24 @@
         "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
       },
       "condition": { "type": "notEquals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "linux-ninja-release",
+      "description": "Release build (the perf measurements and the shipped binary). Same as linux-ninja but optimized; the Debug default is unoptimized with live asserts.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linux-ninja-release",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "CMAKE_BUILD_TYPE": "Release"
+      },
+      "condition": { "type": "notEquals", "lhs": "${hostSystemName}", "rhs": "Windows" }
     }
   ],
   "buildPresets": [
     { "name": "windows-vs2026", "configurePreset": "windows-vs2026", "configuration": "Debug" },
     { "name": "windows-msvc2017", "configurePreset": "windows-msvc2017", "configuration": "Debug" },
     { "name": "windows-ninja", "configurePreset": "windows-ninja" },
-    { "name": "linux-ninja", "configurePreset": "linux-ninja" }
+    { "name": "linux-ninja", "configurePreset": "linux-ninja" },
+    { "name": "linux-ninja-release", "configurePreset": "linux-ninja-release" }
   ]
 }
