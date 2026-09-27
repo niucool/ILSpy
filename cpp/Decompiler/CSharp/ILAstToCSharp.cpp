@@ -2354,9 +2354,25 @@ private:
             if (ld.Variable && ld.Variable->Name == "this") {
                 // The C# constructor initializer renders a base call only
                 // with arguments; the no-argument form is the implicit
-                // default and renders nothing.
-                if (call.Arguments.size() == 1)
-                    return std::string();
+                // default and renders nothing -- but only when the call
+                // is the first statement of the constructor body (the
+                // IntroduceConstructorInitializers shape). A base call
+                // that appears later stays a statement and renders the
+                // raw method reference (`base..ctor();`).
+                if (call.Arguments.size() == 1) {
+                    const auto* blk =
+                        dynamic_cast<const Block*>(call.Parent);
+                    bool firstInBlock =
+                        blk != nullptr && !blk->Instructions.empty() &&
+                        blk->Instructions.front().get() == &call;
+                    bool entryBlock =
+                        fn_ != nullptr && fn_->Body != nullptr &&
+                        !fn_->Body->Blocks.empty() &&
+                        fn_->Body->Blocks.front().get() == blk;
+                    if (firstInBlock && entryBlock)
+                        return std::string();
+                    return std::string("base..ctor()");
+                }
                 std::string text = "base(";
                 for (std::size_t i = 1; i < call.Arguments.size(); ++i) {
                     if (i > 1) text += ", ";

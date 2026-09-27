@@ -792,6 +792,33 @@ bool MemberHidesBaseMember(const TS::IMember* member,
         const TS::ITypeDefinition* baseDef = baseType->GetDefinition();
         if (baseDef == nullptr)
             continue;
+        // The C# compares the base members through the substituted view
+        // of a parameterized base type (`B<string>.SetValue(object, T)`
+        // compares as `SetValue(object, string)`): a base method's
+        // class type parameter resolves to the corresponding type
+        // argument of the baseType instance. The C# walks the
+        // SpecializedMethod forms; the port substitutes the direct
+        // parameter type by index (the nested-generic case -- a
+        // parameter type mentioning T inside another generic -- keeps
+        // the unsubstituted name; no corpus row exercises it).
+        const auto* baseParamType =
+            dynamic_cast<const TS::ParameterizedType*>(baseType);
+        auto resolveParameterType = [&](const TS::IType* t) -> const TS::IType* {
+            if (baseParamType == nullptr || t == nullptr)
+                return t;
+            // The class type parameter (the VAR form: an
+            // ITypeParameter owned by the base type definition, the
+            // C# `type.OwnerType != SymbolKind.Method` shape).
+            const auto* tp = dynamic_cast<const TS::ITypeParameter*>(t);
+            if (tp != nullptr &&
+                tp->OwnerType() != TS::SymbolKind::Method) {
+                const auto& args = baseParamType->TypeArguments();
+                if (tp->Index() >= 0 &&
+                    static_cast<std::size_t>(tp->Index()) < args.size())
+                    return args[static_cast<std::size_t>(tp->Index())].get();
+            }
+            return t;
+        };
         if (!hideBasedOnSignature) {
             // The name-based hide: a nested type or a same-name
             // non-indexer member.
@@ -814,6 +841,40 @@ bool MemberHidesBaseMember(const TS::IMember* member,
                     lookup.IsAccessible(*e, true))
                     return true;
         } else {
+            // The C# SetNewModifier's indexer arm: an indexer introduced
+            // in a class or struct hides all base class indexers with
+            // the same signature (the parameter count and types).
+            if (member->SymbolKind() == TS::SymbolKind::Indexer) {
+                const auto* entityProperty =
+                    dynamic_cast<const TS::IProperty*>(member);
+                if (entityProperty != nullptr) {
+                    for (const TS::IProperty* p : baseDef->Properties()) {
+                        if (p == nullptr ||
+                            p->SymbolKind() != TS::SymbolKind::Indexer ||
+                            !lookup.IsAccessible(*p, true))
+                            continue;
+                        if (entityProperty->Parameters().size() !=
+                            p->Parameters().size())
+                            continue;
+                        bool parametersEqual = true;
+                        for (std::size_t i = 0;
+                             i < p->Parameters().size(); ++i) {
+                            const TS::IParameter* a =
+                                entityProperty->Parameters()[i];
+                            const TS::IParameter* b = p->Parameters()[i];
+                            if (a == nullptr || b == nullptr ||
+                                a->Type().ReflectionName() !=
+                                    resolveParameterType(&b->Type())
+                                        ->ReflectionName()) {
+                                parametersEqual = false;
+                                break;
+                            }
+                        }
+                        if (parametersEqual)
+                            return true;
+                    }
+                }
+            }
             // The signature-based hide: a same-name member that is not a
             // method at all, or a method whose parameter list (the count,
             // the reference kinds, and the types) and type-parameter count
@@ -841,7 +902,8 @@ bool MemberHidesBaseMember(const TS::IMember* member,
                     if (a == nullptr || b == nullptr ||
                         a->ReferenceKind() != b->ReferenceKind() ||
                         a->Type().ReflectionName() !=
-                            b->Type().ReflectionName()) {
+                            resolveParameterType(&b->Type())
+                                ->ReflectionName()) {
                         signaturesEqual = false;
                         break;
                     }
@@ -2658,9 +2720,29 @@ bool DecompileTypeToStringBody(
             propertyEntity->IsExplicitInterfaceImplementation() &&
             p.Name.find('.') != std::string::npos;
         out += MemberAttributesText(propertyEntity);
-        out += indexerIsExplicitImplementation
-                   ? std::string()
-                   : MemberModifiersText(propertyEntity);
+        std::string propertyModifiers = indexerIsExplicitImplementation
+            ? std::string()
+            : MemberModifiersText(propertyEntity);
+        // The C# DoDecompileProperty's extern arm (CSharpDecompiler.cs
+        // lines 2600-2612): a property whose accessors have no bodies
+        // (HasBody is the metadata RVA check -- RVA 0, the
+        // InternalCall/pinvoke-over-ComImport shapes), on a
+        // non-abstract member of a non-interface type, renders the
+        // extern modifier.
+        {
+            bool getterHasBody = accessors.GetterToken != 0 &&
+                                 file.GetMethodRVA(accessors.GetterToken) != 0;
+            bool setterHasBody = accessors.SetterToken != 0 &&
+                                 file.GetMethodRVA(accessors.SetterToken) != 0;
+            if (!getterHasBody && !setterHasBody &&
+                propertyEntity != nullptr && !propertyEntity->IsAbstract() &&
+                propertyEntity->DeclaringType() != nullptr &&
+                propertyEntity->DeclaringType()->Kind() !=
+                    TS::TypeKind::Interface &&
+                (accessors.GetterToken != 0 || accessors.SetterToken != 0))
+                propertyModifiers += "extern ";
+        }
+        out += propertyModifiers;
         out += propertyTypeName;
         out += ' ';
         // The C# ConvertProperty's indexer arm: a property with index
