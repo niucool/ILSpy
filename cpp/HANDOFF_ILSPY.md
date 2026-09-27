@@ -2257,6 +2257,22 @@ THE ARC (dnlib, plain diff): 137,517 -> 83,525 (the namespace indent)
 -> 83,275 (the propagation). The -w measure: 70,339 (the -w diff
 hides the indentation families).
 
+## THE GOTO FAMILY -- THE SECOND SLICE (the assign-then-return)
+
+THE EXTENSION: the propagation records the target BLOCK (the analysis
+admits all-StLoc bodies; the emitter's branch case renders the stores
++ the return; the leave-only shape keeps the GotoText fast path).
+89 more sites (160 total). The plain diff 83,275 -> 83,015; the gotos
+1,874 -> 1,785. The gates all green (the pin ebf9b6e9..., the corpus
+0/0, hello 3, the sweep 13,172/15).
+
+THE REMAINING GOTO WORK: the label-merged regions (1,717 -- the
+C#'s GotoRemoval/condition-combining, the multi-session arc) and the
+switch case-range fall-through slice (noted when the G2 probe showed
+`case -92..-1:` with the misplaced default body).
+
+THE ARC (dnlib, plain diff): 137,517 -> 83,525 -> 83,275 -> 83,015.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
