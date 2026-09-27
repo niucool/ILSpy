@@ -2906,6 +2906,28 @@ ILSpyCmd/main.cpp, the file-append form, preserved in the turn
 history -- instrument the ctor's internals the same way: a sample
 after the resolver, after the metadata module, after the known types).
 
+## THE PERF/MEMORY -- THE CTOR'S ANATOMY (the reading)
+
+THE CTOR = the reference-loading queue (the C# InitializeCoreAsync
+port): the main module's AssemblyReferences seed a queue; every
+LOADED assembly contributes its own ExportedTypes' forwarders; the
+tail adds the implicit .NETCoreApp/.NETStandard references. Each
+resolution loads a FULL MetadataFile into the type system. dnlib
+pulls ~10 assemblies (netstandard, System.Runtime, System.Private
+CoreLib, System.Memory, ...). THE PUZZLE: a MetadataFile alone is
+lazy (the 8.6MB post-metadata measurement) -- so the ~1GB is what the
+type system builds ON TOP of the loaded files (the entity/type
+materialization per assembly), not the file loads. THE NEXT PROBE
+(the file-append logger INSIDE the drain loop): one sample per
+LOADED assembly (the name + the RSS) -- the per-file contributions
+localize whether ONE file (System.Private.CoreLib -- the biggest)
+owns the mass or it is uniform. THE FIX CANDIDATES: (a) the C#
+model's lazy per-access entity construction (the big restructure);
+(b) the per-row representation sharing (if the entities are
+per-member std::string-heavy objects, shared/interned name storage
+cuts the mass without the restructure). MEASURE FIRST (the per-file
+sample), then the fix per the data.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
