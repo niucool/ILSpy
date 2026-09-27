@@ -2821,6 +2821,30 @@ THE TOOL: heaptrack or valgrind --tool=massif (the callgrind for
 the hot spots later). THE TARGET: the peak below 1GB, toward the
 oracle's ~400MB band.
 
+## THE PERF/MEMORY -- THE SUSPECTS NARROWED (the code read)
+
+THE CODE-READ FINDINGS: (1) the renderer EXONERATED --
+ILAstToCSharp(fn, ...) is a free function; the renderer + its
+analysis maps construct per method and destroy on return (suspect
+1 clear). (2) The ILAst (fn) is per-method, scoped in
+DecompileMethodToString (suspect 2 clear BY CONSTRUCTION -- unless
+the transform context wires shared ownership). (3) THE REMAINING
+SUSPECT: the whole-module-path shared state -- the ONE
+DecompilerTypeSystem (constructed once for the module) with its
+resolver caches growing per resolution, plus whatever
+DecompileTypeToStringBody retains per type (the XML provider, the
+partial-type cache).
+
+THE FAILED EXPERIMENT (recorded): the /proc/PID RSS sampling showed
+2MB constant -- the CLI's worker must fork/exec (or the env wrapper
+interfered); external sampling cannot see the work. THE NEXT
+SESSION'S TOOL: the IN-PROCESS RSS logger -- an env-gated
+(ILSPY_RSS_LOG) /proc/self/status VmRSS read every N types inside
+DecompileWholeModuleToString's type loop -- the per-type retention
+curve (steady climb = per-type retention; the slope localizes it),
+then the same logger inside the per-method loop. No external
+profiler is available (no heaptrack, no valgrind, no sudo).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
