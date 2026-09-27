@@ -2273,6 +2273,33 @@ switch case-range fall-through slice (noted when the G2 probe showed
 
 THE ARC (dnlib, plain diff): 137,517 -> 83,525 -> 83,275 -> 83,015.
 
+## THE LABEL-MERGED REGIONS -- THE FIRST SUB-SLICE (the general inlining)
+
+THE GENERALIZATION: the propagation admits ARBITRARY block content
+(the single-predecessor + no-fall-through + not-entry gates are the
+safety, not the content shape). THE CASCADE is the win: removing a
+label can make another block single-predecessor, so 513 more sites
+fire (673 total across the three slices); the gotos 1,785 -> 1,272;
+the plain diff 83,015 -> 80,775 (-2,240, the largest drop since the
+namespace indent). THE GATES all green (the pin ebf9b6e9..., the
+corpus 0/0, hello 3, the sweep 13,172/15 with the third seed
+InlinesSinglePredecessorLabelBlock).
+
+THE REMAINING 1,272 GOTOS (the true merged regions): the
+inverted-condition restructuring (`if (cond) goto L; <region> L:` ->
+the oracle's if/else with the region as the else and the label's
+content as the body) and the ternary/null-coalescing synthesis (the
+oracle renders `ResourceName resourceName = ((num6 & 0x80000000u) ==
+0) ? new ResourceName((int)num6) : new ResourceName(ReadString(...)
+?? string.Empty);` where the port keeps the dup-slot chains and the
+labels). THE DUPLICATION NOTE: the port's `var dup_194 = ...; var
+S_1 = dup_194;` chains are the reader's dup-slot modeling -- the
+recorded root fix (the hello arc's array2 residue is the same
+family).
+
+THE ARC (dnlib, plain diff): 137,517 -> 83,525 -> 83,275 -> 83,015 ->
+80,775.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
