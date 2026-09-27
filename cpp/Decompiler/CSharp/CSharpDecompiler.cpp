@@ -4110,7 +4110,11 @@ CSharpDecompiler::~CSharpDecompiler() = default;
 std::vector<std::string> WholeModuleUsingSet(
     const ::ILSpy::Decompiler::TypeSystem::MetadataModule& module) {
     std::set<std::string> emitted;
-    for (const TS::ITypeDefinition* type : module.TypeDefinitions()) {
+    // The top-level rows only: the entity walk recurses into the nested
+    // types itself (CollectNamespacesEntity's NestedTypes loop), so the
+    // full TypeDefinitions list would walk -- and materialize the members
+    // of -- every nested type twice.
+    for (const TS::ITypeDefinition* type : module.TopLevelTypeDefinitions()) {
         if (type == nullptr)
             continue;
         std::unordered_set<std::string> typeNamespaces;
