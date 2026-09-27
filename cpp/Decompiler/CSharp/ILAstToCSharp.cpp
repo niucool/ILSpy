@@ -327,6 +327,14 @@ private:
     std::string returnTypeName_;  // the C# name of the function's return type
     std::string methodName_;  // the method's display name (for diagnostics)
     std::set<std::string> declared_;          // locals already introduced with `var`
+    // The alias statement folded into a preceding ArrayInitializer render
+    // (skipped when the statement loop reaches it).
+    const StLoc* skippedAlias_ = nullptr;
+    // The foreach substitution: the for-shape whose body's only uses of
+    // the counter are the array element accesses renders as
+    // `foreach (T e in arr)` with the accesses substituted by `e`.
+    std::set<const LdElema*> foreachSubst_;
+    std::string foreachElementName_;
     // The for-initializer hoists (the C# PatternStatementTransform's
     // TransformFor): the pre-pass moves a loop-preceding `v = init;` store
     // into the for's initializer and records the rendered init text (and
@@ -1407,47 +1415,182 @@ private:
                     declared_.insert(it->second.VariableName);
                 }
             }
+            auto emitForBody = [&]() {
+                // The for-loop header's preamble (a while-initialized value
+                // the csc lowers to an entry statement, or a refreshed
+                // do-while local) executes at the top of every iteration
+                // -- render it at the body open.
+                if (header && !header->Instructions.empty()) {
+                    for (const auto& inst : header->Instructions)
+                        if (inst) EmitStatement(*inst, indent + 1);
+                }
+                // Index of the last emitted (non-empty) body block: only
+                // that block's trailing jump to the increment block is the
+                // iteration itself (a dangling `continue` before `}`), so
+                // it drops silently; a jump to the increment from any other
+                // position is a real `continue` (the for-update still runs
+                // -- the C# `continue`).
+                std::size_t lastBodyIdx = container.Blocks.size() - 1;
+                if (lastBodyIdx == incIdx) --lastBodyIdx;
+                for (std::size_t i = 1; i < container.Blocks.size(); ++i) {
+                    if (i == incIdx) continue;  // the increment block rendered in the header
+                    const auto& block = container.Blocks[i];
+                    if (!block) continue;
+                    // Drop an empty trailing block whose only edge is back
+                    // to the increment block (a dead segment of the
+                    // pre-for layout).
+                    if (block->Instructions.empty() && block->FinalInstruction &&
+                        block->FinalInstruction->Op == OpCode::Branch &&
+                        static_cast<const Branch*>(block->FinalInstruction.get())->TargetBlock == increment)
+                        continue;
+                    // Drop a trailing back-edge branch to the entry
+                    // (implicit iter), and (only on the last body block) a
+                    // trailing branch to the increment block (the
+                    // iteration -- dropping it anywhere else would erase a
+                    // real `continue`).
+                    bool dropFinal = false;
+                    if (block->FinalInstruction &&
+                        block->FinalInstruction->Op == OpCode::Branch) {
+                        auto* br = static_cast<Branch*>(block->FinalInstruction.get());
+                        if (br->TargetBlock == header) dropFinal = true;
+                        if (i == lastBodyIdx && br->TargetBlock == increment && increment)
+                            dropFinal = true;
+                    }
+                    EmitBlock(*block, indent + 1, dropFinal);
+                }
+            };
+            // The C# PatternStatementTransform's TransformForeachOnArray:
+            // a for over `i < arr.Length` with `i++` whose body's only
+            // uses of i are `arr[i]` element accesses renders as
+            // `foreach (T e in arr)`. The condition: comp(lt, ldloc i,
+            // ldlen(ldloc arr)) (the ldlen possibly conv-widened); the
+            // increment: the single `i = i + 1` store; every body use of
+            // i sits in an ldelema(arr, ldloc i).
+            {
+                const Comp* condComp =
+                    header && header->FinalInstruction &&
+                            header->FinalInstruction->Op ==
+                                OpCode::IfInstruction
+                        ? dynamic_cast<const Comp*>(static_cast<
+                              const IfInstruction&>(
+                              *header->FinalInstruction)
+                                  .Condition.get())
+                        : nullptr;
+                const LdLoc* counter = nullptr;
+                const LdLoc* arrLoc = nullptr;
+                if (condComp != nullptr &&
+                    condComp->Kind == ComparisonKind::LessThan &&
+                    condComp->Left &&
+                    condComp->Left->Op == OpCode::LdLoc) {
+                    counter = static_cast<const LdLoc*>(
+                        condComp->Left.get());
+                    const ILInstruction* len = condComp->Right.get();
+                    if (len != nullptr && len->Op == OpCode::Conv) {
+                        auto* cv = static_cast<const Conv*>(len);
+                        if (cv->Argument)
+                            len = cv->Argument.get();
+                    }
+                    if (len != nullptr && len->Op == OpCode::LdLen) {
+                        const ILInstruction* arr =
+                            len->GetChild(0);
+                        if (arr != nullptr && arr->Op == OpCode::LdLoc)
+                            arrLoc = static_cast<const LdLoc*>(arr);
+                    }
+                }
+                bool singleIncrement =
+                    increment != nullptr &&
+                    increment->Instructions.size() == 1 &&
+                    increment->Instructions[0] &&
+                    increment->Instructions[0]->Op == OpCode::StLoc;
+                if (counter != nullptr && arrLoc != nullptr &&
+                    singleIncrement && counter->Variable &&
+                    arrLoc->Variable) {
+                    ILVariable* iv = counter->Variable.get();
+                    ILVariable* av = arrLoc->Variable.get();
+                    // Every body use of iv is an ldelema(av, ldloc iv).
+                    std::vector<const LdElema*> accesses;
+                    bool allElement = true;
+                    std::function<void(const ILInstruction*)> walk =
+                        [&](const ILInstruction* node) {
+                            if (node == nullptr || !allElement) return;
+                            if (node->Op == OpCode::LdLoc &&
+                                static_cast<const LdLoc*>(node)
+                                        ->Variable.get() == iv) {
+                                // A load of the counter outside an
+                                // ldelema index disqualifies the shape.
+                                const ILInstruction* p = node->Parent;
+                                bool inIndex = false;
+                                while (p != nullptr &&
+                                       p->Op == OpCode::LdElema) {
+                                    auto* le = static_cast<const LdElema*>(p);
+                                    for (const auto& idx : le->Indices)
+                                        if (idx.get() == node) inIndex = true;
+                                    if (le->Array &&
+                                        le->Array->Op == OpCode::LdLoc &&
+                                        static_cast<const LdLoc*>(
+                                            le->Array.get())
+                                                ->Variable.get() == av &&
+                                        le->Indices.size() == 1 &&
+                                        le->Indices[0].get() == node) {
+                                        if (inIndex) accesses.push_back(le);
+                                        else allElement = false;
+                                        return;
+                                    }
+                                    p = p->Parent;
+                                }
+                                allElement = false;
+                                return;
+                            }
+                            for (int c = 0; c < node->ChildCount(); ++c)
+                                walk(node->GetChild(c));
+                        };
+                    for (std::size_t i = 1;
+                         i < container.Blocks.size(); ++i) {
+                        const auto& b = container.Blocks[i];
+                        if (!b || b.get() == header || b.get() == increment)
+                            continue;
+                        for (const auto& stmt : b->Instructions)
+                            walk(stmt.get());
+                        if (b->FinalInstruction)
+                            walk(b->FinalInstruction.get());
+                    }
+                    if (allElement && !accesses.empty()) {
+                        // The element type from the ARRAY's element type
+                        // (the C# TransformForeachOnArray reads the array
+                        // type; the ldelema may carry the stelem.ref
+                        // object form).
+                        std::string elemType = "var";
+                        if (av->Type) {
+                            if (auto* at = dynamic_cast<
+                                    const TypeSystem::ArrayType*>(
+                                    av->Type.get()))
+                                elemType = CSharpTypeName(at->Element());
+                            else
+                                elemType = CSharpTypeName(av->Type);
+                        }
+                        std::string base = elemType == "string"
+                            ? "text"
+                            : (elemType == "var" ? "val" : elemType);
+                        std::string elemName = base;
+                        for (int n = 2; declared_.count(elemName); ++n)
+                            elemName = base + std::to_string(n);
+                        declared_.insert(elemName);
+                        foreachSubst_.insert(accesses.begin(),
+                                             accesses.end());
+                        foreachElementName_ = elemName;
+                        Line(indent, "foreach (" + elemType + " " +
+                                        elemName + " in " +
+                                        av->Name + ")");
+                        Line(indent, "{");
+                        emitForBody();
+                        Line(indent, "}");
+                        return;
+                    }
+                }
+            }
             Line(indent, "for (" + initText + "; " + cond + "; " + incrText + ")");
             Line(indent, "{");
-            // The for-loop header's preamble (a while-initialized value the
-            // csc lowers to an entry statement, or a refreshed do-while local)
-            // executes at the top of every iteration -- render it at the body
-            // open.
-            if (header && !header->Instructions.empty()) {
-                for (const auto& inst : header->Instructions)
-                    if (inst) EmitStatement(*inst, indent + 1);
-            }
-            // Index of the last emitted (non-empty) body block: only that
-            // block's trailing jump to the increment block is the iteration
-            // itself (a dangling `continue` before `}`), so it drops silently;
-            // a jump to the increment from any other position is a real
-            // `continue` (the for-update still runs -- the C# `continue`).
-            std::size_t lastBodyIdx = container.Blocks.size() - 1;
-            if (lastBodyIdx == incIdx) --lastBodyIdx;
-            for (std::size_t i = 1; i < container.Blocks.size(); ++i) {
-                if (i == incIdx) continue;  // the increment block rendered in the header
-                const auto& block = container.Blocks[i];
-                if (!block) continue;
-                // Drop an empty trailing block whose only edge is back to the
-                // increment block (a dead segment of the pre-for layout).
-                if (block->Instructions.empty() && block->FinalInstruction &&
-                    block->FinalInstruction->Op == OpCode::Branch &&
-                    static_cast<const Branch*>(block->FinalInstruction.get())->TargetBlock == increment)
-                    continue;
-                // Drop a trailing back-edge branch to the entry (implicit iter),
-                // and (only on the last body block) a trailing branch to the
-                // increment block (the iteration -- dropping it anywhere else
-                // would erase a real `continue`).
-                bool dropFinal = false;
-                if (block->FinalInstruction &&
-                    block->FinalInstruction->Op == OpCode::Branch) {
-                    auto* br = static_cast<Branch*>(block->FinalInstruction.get());
-                    if (br->TargetBlock == header) dropFinal = true;
-                    if (i == lastBodyIdx && br->TargetBlock == increment && increment)
-                        dropFinal = true;
-                }
-                EmitBlock(*block, indent + 1, dropFinal);
-            }
+            emitForBody();
             Line(indent, "}");
             return;
         }
@@ -1538,6 +1681,19 @@ private:
         }
     }
 
+    // Whether the variable has any StLoc store in the tree (the dangling-
+    // alias check for the initializer fold).
+    static bool VariableHasStoreIn(const ILInstruction* inst,
+                                   const ILVariable* v) {
+        if (inst == nullptr) return false;
+        if (inst->Op == OpCode::StLoc &&
+            static_cast<const StLoc*>(inst)->Variable.get() == v)
+            return true;
+        for (int c = 0; c < inst->ChildCount(); ++c)
+            if (VariableHasStoreIn(inst->GetChild(c), v)) return true;
+        return false;
+    }
+
     void EmitBlock(const Block& block, int indent, bool dropFinal = false) {
         if (DepthAtLimit()) {
             Line(indent, "/* max rendering depth: possible ILAst cycle */");
@@ -1556,6 +1712,11 @@ private:
             out_ += ":\n";
         }
         for (const auto& inst : block.Instructions) {
+            if (inst.get() == skippedAlias_) {
+                // Folded into the preceding ArrayInitializer render.
+                skippedAlias_ = nullptr;
+                continue;
+            }
             if (inst && inst->Op != OpCode::Nop) EmitStatement(*inst, indent);
         }
         if (block.FinalInstruction && !dropFinal) EmitStatement(*block.FinalInstruction, indent);
@@ -2106,18 +2267,58 @@ private:
                 if (blk.Kind == BlockKind::ArrayInitializer) {
                     // An ArrayInitializer block in the statement position:
                     // the store's inline did not fold it into the user's
-                    // local (the dup-slot aliasing), so render it as the
-                    // explicit assignment through the initializer's final
-                    // variable -- `v = new T[n] { ... };` -- instead of the
-                    // braced statement block (the element stores and the
-                    // final load are the initializer's own shape).
+                    // local (the dup-slot aliasing), so render the explicit
+                    // assignment through the initializer's final variable --
+                    // `v = new T[n] { ... };` -- instead of the braced
+                    // statement block (the element stores and the final
+                    // load are the initializer's own shape). When the NEXT
+                    // statement is the alias store `T u = v;` over the
+                    // initializer's variable (the dup-slot chain the C#
+                    // inlines away), fold it: `T u = new T[n] { ... };` and
+                    // skip the alias.
                     const LdLoc* final =
                         dynamic_cast<const LdLoc*>(blk.FinalInstruction.get());
                     std::string var = final != nullptr && final->Variable
                         ? final->Variable->Name
                         : std::string();
                     if (!var.empty() && !blk.Instructions.empty()) {
-                        Line(indent, var + " = " +
+                        // The outer store's variable (the block's parent
+                        // StLoc): the alias chain's link.
+                        ILVariable* target = final->Variable.get();
+                        std::string decl;
+                        auto* parentBlock = dynamic_cast<Block*>(inst.Parent);
+                        int nextIdx = inst.ChildIndex + 1;
+                        if (parentBlock != nullptr &&
+                            static_cast<std::size_t>(nextIdx) <
+                                parentBlock->Instructions.size()) {
+                            auto* nextSt = dynamic_cast<StLoc*>(
+                                parentBlock->Instructions[nextIdx].get());
+                            // The alias fold: the next statement
+                            // `T u = v;` where v's store was replaced by
+                            // this initializer block (the dead-store
+                            // keep-expression arm consumed the store, so v
+                            // has no store left in the tree -- a dangling
+                            // load). Fold the alias into the initializer:
+                            // `T u = new ... { ... };`.
+                            if (nextSt != nullptr && nextSt->Variable &&
+                                nextSt->Value &&
+                                nextSt->Value->Op == OpCode::LdLoc) {
+                                ILVariable* loaded =
+                                    static_cast<LdLoc*>(
+                                        nextSt->Value.get())
+                                        ->Variable.get();
+                                if (loaded != nullptr &&
+                                    !VariableHasStoreIn(
+                                        fn_->Body.get(), loaded)) {
+                                    target = nextSt->Variable.get();
+                                    skippedAlias_ = nextSt;
+                                }
+                            }
+                        }
+                        if (target != final->Variable.get() &&
+                            declared_.insert(target->Name).second)
+                            decl = CSharpTypeName(target->Type) + " ";
+                        Line(indent, decl + target->Name + " = " +
                                         ArrayInitializerText(blk) + ";");
                         return;
                     }
@@ -2900,6 +3101,10 @@ private:
     }
 
     std::string ElementAccess(const LdElema& elema) {
+        // A foreach-substituted element access renders as the iteration
+        // variable.
+        if (foreachSubst_.count(&elema) != 0)
+            return foreachElementName_;
         std::string text = elema.Array ? Expr(*elema.Array) : "(default)";
         text += '[';
         for (std::size_t i = 0; i < elema.Indices.size(); ++i) {
