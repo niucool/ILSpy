@@ -2867,6 +2867,22 @@ THE BENNU CANARY (the user's note): the large-fixture pin bb5b83bf
 regression cannot hide under a perf win -- adopt it as a guard for
 every perf slice.
 
+## THE PERF/MEMORY -- THE KEEPALIVE ELIMINATED (the suspect cleared)
+
+THE FIX (committed): the visited gate is NAME-keyed (no ownership;
+the same-name dedup harmless for namespaces); the keepalive vector
+is GONE. THE MEASUREMENT: the output byte-identical, the peak
+UNCHANGED (1,095MB) -- the keepalive was NOT the 1GB (the pinned
+types are lightweight). THE REMAINING PRE-LOOP SUSPECTS: (1) the
+MetadataFile load (the whole-file read + the decoded tables); (2)
+the DecompilerTypeSystem construction (the resolver caches built at
+startup); (3) the WholeModuleUsingSet walk state (the strings).
+THE NEXT PROBE (the file-append logger, at the main/whole-module
+entry points, one sample per stage): after the MetadataFile, after
+the typeSystem, after the using-set -- the stage that owns the
+~1,090MB is the target. THE C# ORACLE'S 370MB SAYS ~700MB OF
+STRUCTURAL EXCESS in the port's load path.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
