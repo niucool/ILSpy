@@ -2527,6 +2527,31 @@ structural family after the ?? shapes).
 THE ARC (dnlib, plain diff): 137,517 -> ... -> 80,775 -> 80,739 ->
 80,734.
 
+## THE GENERAL SINGLE-USE ELISION -- LANDED (the first cut)
+
+THE RULE (the coalesce elision generalized): one load + one store +
+no address-taken + the store's expression PURE (IsPure(Flags)) + the
+use's block (the ancestor walk) in the SAME container, LATER than the
+declaration, the container not a loop. The coalesce-folded targets
+excluded (their own elision owns them).
+
+THE MEASURE: the family's total size is the ~1,257-local surplus
+(the port 4,755 local declarations vs the oracle 3,498 on dnlib); the
+conservative first cut elides 12 render lines (the cast locals -- the
+oracle's exact `return (type as TypeSpec)?.TypeSig;` forms), the
+plain diff 80,734 -> 80,732. THE GATES all green (the pin
+ebf9b6e9..., the corpus 0/0, hello 3, the sweep 13,174/15; the disk
+at 45%).
+
+THE NEXT LEVERS (the ledger): (1) the flow-insensitive inlining (the
+C#'s dominance analysis -- the use dominated by the declaration
+ACROSS containers, the purity the only other gate -- unlocks most of
+the 1,257); (2) the byref-use elision (the ldloca sites); (3) the
+remaining ~275 ?? shapes (each its own dump-first pass).
+
+THE ARC (dnlib, plain diff): 137,517 -> ... -> 80,775 -> 80,739 ->
+80,734 -> 80,732.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
