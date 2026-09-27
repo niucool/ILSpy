@@ -2928,6 +2928,25 @@ per-member std::string-heavy objects, shared/interned name storage
 cuts the mass without the restructure). MEASURE FIRST (the per-file
 sample), then the fix per the data.
 
+## THE PERF/MEMORY -- THE DRAIN OWNS IT (the ctor stages)
+
+THE CTOR STAGE SAMPLES (dnlib): post-drain 1,060MB (the
+missing-types loop adds only 1.3MB; the merged-namespace build
+after). THE MASS IS INSIDE THE DRAIN LOOP -- the
+assemblyResolver.Resolve(...) calls. The candidates inside a
+Resolve: (1) the whole-file buffer read (the port's "whole package
+image as one buffer" convention -- the CLI comment at
+IlspyCmdProgram.cpp:178) held per loaded assembly; (2) an EAGER
+metadata-table decode (the row objects materialized: CoreLib alone
+carries ~200k types / ~1.5M members); (3) the resolver's cache
+multiplying either. THE NEXT PROBE (one edit, the drain loop's
+`resolvedFiles.push_back(file)` site): the per-Resolve sample (the
+resolved name + the RSS) -- which FILE owns the mass (expect
+System.Private.CoreLib) and whether the jump is at the file READ or
+a subsequent eager decode. THEN THE FIX: (a) the lazy table decode
+(the C# model -- the MetadataFile's rows decode on access) or (b)
+the mmap/arena for the file buffers (no eager copy).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
