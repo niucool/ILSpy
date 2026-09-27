@@ -2613,6 +2613,31 @@ then the remaining coalesce variants. The arc stands at 80,715
 (verified: the pin ebf9b6e9..., the corpus 0/0, hello 3, the sweep
 13,174/15, the disk checked).
 
+## THE NULL-PROPAGATION DUMP (the design reference, via --ilast-all)
+
+THE SHAPE (FindWin32ResourceData, the exact ILAst):
+```
+Block {
+  stloc(dup_6, call get_Win32Resources(ldloc(self)))
+  stloc(S_0, ldloc(dup_6))
+  if (ldloc(dup_6)) br IL_000C       <- the NON-null path branches to the use
+}
+Block { leave ldnull }                <- the null path (the fall-through)
+Block (IL_000C) { leave call Find(ldloc(S_0), ...) }
+```
+THE DIFFERENCE FROM THE COALESCE CHAIN (inverted): the guard's TRUE
+arm (the non-null) branches FORWARD to the use; the fall-through is
+the null path (the early return). The synthesis target:
+`return self.Win32Resources?.Find(type, name, langId);` -- the value
+expression + the `?.` + the use's member call. THE PORT'S `?.`
+MACHINERY: 77 existing sites (find which instruction/emitter arm
+renders them first -- compose, as the coalesce did with the
+NullCoalescingInstruction). THE GATES: the dup loaded only by the
+copy+guard; S_0 loaded only by the use (the elision composes); the
+null path = the bare `leave ldnull`; the use's block single-pred
+(the guard's branch). The family: 223 oracle `?.` lines vs the port's
+77.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
