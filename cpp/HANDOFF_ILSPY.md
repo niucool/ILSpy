@@ -2019,6 +2019,43 @@ re-run the sweep under the changed default (the seeded using
 expectations could shift where fixtures resolve; the ILSPY_TEST_MSCORLIB
 gating may need revisiting).
 
+## THE MATRIX CLOSED (the probe slice -- the step 3 landing)
+
+THE CHANGE: the hostfxr installation search order now includes the
+per-user install default ($HOME/.dotnet) below DOTNET_ROOT and the
+well-known directories -- the port resolves its reference assemblies
+BY DEFAULT, like the C# oracle always did (it reads its host runtime's
+module directory as a managed process). The exclusion's reason (the
+facade fixtures' using-set divergence) is gone since the
+FindRequiredImports recording landed.
+
+THE MATRIX: the bare-environment dnlib render is BYTE-IDENTICAL to
+the resolved render (the 542-line delta closed; the 43 attribute-decode
+failures -- Guid/InterfaceType/DllImport, the raw (SecurityAction)8 --
+all gone); hello.dll drops to the 3-LINE residue (the kept `array2`
+alias + the foreach name -- the chain-geometry item, the last hello
+gap); the connid pin is byte-identical (fbda64dd...) and 0/0
+normalized against the fresh oracle; the net48 corpus 0/0.
+
+THE GUARDS under the changed default: the 13,166-ran sweep matches
+the 15-failure baseline test-for-test (the only textual diff: the
+XmlDocumentationCommentsRenderOnMembers timing 5ms -> 568ms -- the
+resolution cost, same result).
+
+THE PERF PROFILE: the release build pays the resolution by default --
+9.6s over dnlib against the oracle's own 9.4s (parity with what the
+C# pays for the same fidelity; the 2.2s bare-env figure returns when
+the runtime is genuinely undiscoverable: no DOTNET_ROOT, no
+well-known dirs, no $HOME/.dotnet -- e.g. a scrubbed CI container).
+
+THE REMAINING DNLIB GAP (the honest record): the port-vs-oracle
+dnlib diff is still ~138k lines -- the long-tail body-level divergences
+over a 1.1 MB real-world netstandard2.0 assembly (the using-line
+ORDER at the top differs, the attribute trivia spacing, and the
+per-method render differences) -- that was never this arc's gate (the
+gates were the port-vs-port renders and the fixed corpora); it is the
+ongoing porting long tail.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
