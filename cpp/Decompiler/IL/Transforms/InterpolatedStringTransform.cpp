@@ -23,6 +23,8 @@
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/BlockKind.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
@@ -59,16 +61,24 @@ bool MatchLdLoca(const ILInstruction* inst, const ILVariable* v) {
     return static_cast<const LdLoca*>(inst)->Variable.get() == v;
 }
 
+// The ldloca'd variable (or null when the instruction is not an ldloca).
+ILVariable* MatchLdLocaVariable(ILInstruction* inst) {
+    if (!inst || inst->Op != OpCode::LdLoca) return nullptr;
+    return static_cast<LdLoca*>(inst)->Variable.get();
+}
+
 // A known Append call -- an instance call on DefaultInterpolatedStringHandler
 // whose first arg is `ldloca v` and whose name/arity matches one of the
 // AppendLiteral / AppendFormatted overloads the C# compiler emits for the
 // interpolation holes. Mirrors the C# InterpolatedStringTransform.IsKnownCall.
 bool IsKnownCall(Block& block, int pos, const ILVariable* v) {
-    // The C# `pos >= block.Instructions.Count - 1` guard: the Append calls must
-    // leave room for the trailing ToStringAndClear, so an Append at the last
-    // instruction is rejected. The int cast keeps `size() - 1` signed (a 0-size
-    // block yields -1 and any pos >= -1 returns false).
-    if (pos >= static_cast<int>(block.Instructions.size()) - 1)
+    // The C# `pos >= block.Instructions.Count - 1` guard keeps the trailing
+    // ToStringAndClear in the same block; this port's control-flow cleanup
+    // does not merge a `br`-to-next-block tail, so the consumer can sit in
+    // the FOLLOWING sibling block and an Append at the last position is
+    // still valid. The guard relaxes to the block end; the consumer search
+    // (FindToStringAndClear) follows the fall-through when needed.
+    if (pos >= static_cast<int>(block.Instructions.size()))
         return false;
     auto* inst = block.Instructions[pos].get();
     if (!inst || inst->Op != OpCode::Call) return false;
@@ -104,6 +114,29 @@ bool IsKnownCall(Block& block, int pos, const ILVariable* v) {
     return false;
 }
 
+// The first instruction of the block that follows `block` in its container
+// (the fall-through target of a `br`-to-next tail). Null when the block has
+// no parent container, is the last block, or its final instruction does not
+// fall through (a terminal or an out-of-order branch).
+ILInstruction* NextBlockFirstInstruction(Block& block) {
+    auto* container = dynamic_cast<BlockContainer*>(block.Parent);
+    if (container == nullptr) return nullptr;
+    for (std::size_t i = 0; i + 1 < container->Blocks.size(); ++i) {
+        if (container->Blocks[i].get() == &block) {
+            auto* next = container->Blocks[i + 1].get();
+            // Only a fall-through reaches the next block: no final
+            // instruction, or a branch to the next block itself.
+            if (block.FinalInstruction == nullptr) return next ? next->Instructions.empty() ? nullptr : next->Instructions[0].get() : nullptr;
+            if (auto* br = dynamic_cast<Branch*>(block.FinalInstruction.get())) {
+                if (br->TargetBlock == next)
+                    return next->Instructions.empty() ? nullptr : next->Instructions[0].get();
+            }
+            return nullptr;
+        }
+    }
+    return nullptr;
+}
+
 // Locate the `call ToStringAndClear(ldloca v)` that consumes the handler and
 // yields the interpolated string. The C# searches block.Instructions[pos]
 // (pos == interpolationEnd, the first instruction after the Append calls) for a
@@ -114,16 +147,29 @@ bool IsKnownCall(Block& block, int pos, const ILVariable* v) {
 bool FindToStringAndClear(Block& block, int pos, int interpolationStart, int interpolationEnd,
                           const ILVariable* v, ILInstruction*& insertionPoint) {
     insertionPoint = nullptr;
-    if (pos >= static_cast<int>(block.Instructions.size()))
-        return false;
+    // The consumer instruction: block.Instructions[pos] when it exists, or
+    // the first instruction of the fall-through sibling block when the
+    // interpolation runs to the end of its block (the port's control-flow
+    // cleanup leaves the `br`-to-next shape unmerged; the C#'s merged block
+    // keeps the consumer in place).
+    ILInstruction* expr = nullptr;
+    if (pos < static_cast<int>(block.Instructions.size())) {
+        expr = block.Instructions[pos].get();
+    } else if (pos == static_cast<int>(block.Instructions.size())) {
+        // The statement after the last instruction is the block's final
+        // instruction (the inlined `leave call ToStringAndClear(...)`
+        // tail) when there is one, otherwise the first instruction of the
+        // fall-through sibling block.
+        expr = block.FinalInstruction ? block.FinalInstruction.get()
+                                      : NextBlockFirstInstruction(block);
+    }
+    if (!expr) return false;
     // The C# loop runs FindLoadInNext once per producer instruction
     // (interpolationEnd - interpolationStart times), all searching the same
     // block.Instructions[pos]; each iteration must return Found (the load is
     // there). A single call establishes the Found result and the load's parent;
     // the repeated calls only re-confirm Found (the load does not move between
     // iterations), so one call is equivalent.
-    auto* expr = block.Instructions[pos].get();
-    if (!expr) return false;
     auto* expressionBeingMoved = block.Instructions[interpolationStart].get();
     auto result = FindLoadInNext(expr, const_cast<ILVariable*>(v), expressionBeingMoved);
     if (result.type != FindResultType::Found || !result.loadInst)
@@ -144,45 +190,85 @@ void InterpolatedStringTransform::Run(Block& block, int pos, StatementTransformC
     if (pos < 0 || pos >= static_cast<int>(block.Instructions.size()))
         return;
     int interpolationStart = pos;
-    // stloc v(newobj DefaultInterpolatedStringHandler..ctor(ldc.i4, ldc.i4))
+    // The handler init. The C# ILAst folds a struct ctor on a local into
+    // `stloc v(newobj DefaultInterpolatedStringHandler..ctor(ldc.i4,
+    // ldc.i4))`; this port's reader keeps the raw call statement
+    // `call .ctor(ldloca v, ldc.i4, ldc.i4)`, so the pattern matches that
+    // shape (an instance ctor call on DefaultInterpolatedStringHandler
+    // whose first argument is the handler's address and whose remaining
+    // arguments are the two literal counts).
+    ILVariable* v = nullptr;
+    int literalArgCount = 0;
     auto* inst = block.Instructions[pos].get();
-    if (!inst || inst->Op != OpCode::StLoc) return;
-    auto* stloc = static_cast<StLoc*>(inst);
-    auto v = stloc->Variable;
-    if (!v || v->Kind != VariableKind::Local) return;
-    if (!NullableLiftingTransform::IsKnownType(v->Type.get(),
-                                               TypeSystem::KnownTypeCode::DefaultInterpolatedStringHandler))
-        return;
-    auto* value = stloc->Value.get();
-    if (!value || value->Op != OpCode::Call) return;
-    auto* newObj = static_cast<Call*>(value);
-    if (!newObj->IsNewObj) return;
-    if (newObj->Arguments.size() != 2) return;
-    if (!NullableLiftingTransform::IsKnownType(newObj->DeclaringType.get(),
-                                                TypeSystem::KnownTypeCode::DefaultInterpolatedStringHandler))
-        return;
-    if (!IsLdcI4(newObj->Arguments[0].get()) || !IsLdcI4(newObj->Arguments[1].get()))
-        return;
+    if (inst != nullptr && inst->Op == OpCode::StLoc) {
+        // The C# ILAst's fold: `stloc v(newobj DefaultInterpolatedStringHandler
+        // ..ctor(ldc.i4, ldc.i4))` (the seeded tests build this shape).
+        auto* stloc = static_cast<StLoc*>(inst);
+        v = stloc->Variable.get();
+        if (v == nullptr || v->Kind != VariableKind::Local) return;
+        if (!NullableLiftingTransform::IsKnownType(v->Type.get(),
+                                                   TypeSystem::KnownTypeCode::DefaultInterpolatedStringHandler))
+            return;
+        auto* value = stloc->Value.get();
+        if (value == nullptr || value->Op != OpCode::Call) return;
+        auto* newObj = static_cast<Call*>(value);
+        if (!newObj->IsNewObj) return;
+        literalArgCount = 2;
+        if (newObj->Arguments.size() != (std::size_t)literalArgCount) return;
+        if (!NullableLiftingTransform::IsKnownType(newObj->DeclaringType.get(),
+                                                    TypeSystem::KnownTypeCode::DefaultInterpolatedStringHandler))
+            return;
+        if (!IsLdcI4(newObj->Arguments[0].get()) || !IsLdcI4(newObj->Arguments[1].get()))
+            return;
+    } else {
+        // This port's reader keeps the raw call statement
+        // `call .ctor(ldloca v, ldc.i4, ldc.i4)` -- an instance ctor call
+        // on DefaultInterpolatedStringHandler whose first argument is the
+        // handler's address and whose remaining arguments are the two
+        // literal counts.
+        if (inst == nullptr || inst->Op != OpCode::Call) return;
+        auto* ctor = static_cast<Call*>(inst);
+        if (!ctor->IsInstanceCall) return;
+        if (ShortMethodName(ctor->MethodName) != ".ctor") return;
+        if (ctor->Arguments.size() != 3) return;
+        v = MatchLdLocaVariable(ctor->Arguments[0].get());
+        if (!NullableLiftingTransform::IsKnownType(ctor->DeclaringType.get(),
+                                                    TypeSystem::KnownTypeCode::DefaultInterpolatedStringHandler))
+            return;
+        if (!v || v->Kind != VariableKind::Local) return;
+        literalArgCount = 3;
+        if (!IsLdcI4(ctor->Arguments[1].get()) || !IsLdcI4(ctor->Arguments[2].get()))
+            return;
+    }
 
     // { call MethodName(ldloca v, ...) } -- collect the Append calls.
     int p = pos;
     do {
         p++;
-    } while (IsKnownCall(block, p, v.get()));
+    } while (IsKnownCall(block, p, v));
     int interpolationEnd = p;
 
     // ... call ToStringAndClear(ldloca v) ...
     ILInstruction* insertionPoint = nullptr;
     if (!FindToStringAndClear(block, interpolationEnd, interpolationStart, interpolationEnd,
-                              v.get(), insertionPoint))
+                              v, insertionPoint))
         return;
-    // The handler v is used exactly as the interpolation expects: one store
-    // (the stloc), AddressCount == interpolationEnd - interpolationStart (the N
-    // Append ldloca's + the ToStringAndClear ldloca), no loads.
-    if (!(v->StoreCount == 1 &&
-          v->AddressCount == interpolationEnd - interpolationStart &&
-          v->LoadCount == 0))
-        return;
+    // The handler v is used exactly as the interpolation expects: no loads,
+    // and the store/address counts match the shape -- the stloc shape has
+    // one store and AddressCount == the N Append ldloca's + the
+    // ToStringAndClear ldloa (== interpolationEnd - interpolationStart);
+    // the raw-call shape has no store and one more address (the ctor's own
+    // ldloca).
+    if (v->LoadCount != 0) return;
+    if (literalArgCount == 2) {
+        if (!(v->StoreCount == 1 &&
+              v->AddressCount == interpolationEnd - interpolationStart))
+            return;
+    } else {
+        if (!(v->StoreCount == 0 &&
+              v->AddressCount == interpolationEnd - interpolationStart + 1))
+            return;
+    }
 
     context.Base.StepOnce("Transform DefaultInterpolatedStringHandler");
     v->Kind = VariableKind::InitializerTarget;
