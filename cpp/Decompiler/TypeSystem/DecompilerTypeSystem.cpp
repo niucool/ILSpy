@@ -132,6 +132,14 @@ DecompilerTypeSystem::DecompilerTypeSystem(
     // The C# queue drain: resolve, append, walk the loaded assembly's
     // ExportedTypes.
     std::vector<const Metadata::MetadataFile*> resolvedFiles;
+    // The resolved-name gate: the queue dedups by (isAssembly, parent,
+    // token), but a referenced assembly's forwarder rows reach the SAME
+    // target through dozens of facade parents (netstandard's facade set
+    // queues System.Private.CoreLib once per parent) -- and the resolver
+    // loads a fresh file per entry, retaining every copy. The C# cache
+    // returns the one loaded instance; the name gate gives the port the
+    // same single-load semantics.
+    std::set<std::pair<bool, std::string>> resolvedNames;
     bool implicitReferencesArmed = false;
     while (true) {
         if (queue.empty()) {
@@ -190,15 +198,27 @@ DecompilerTypeSystem::DecompilerTypeSystem(
                 // feeding the resolver.
                 Metadata::AssemblyReference asmRef(*entry.parent,
                                                    entry.token);
+                if (!resolvedNames
+                         .insert(std::make_pair(true, asmRef.Name()))
+                         .second)
+                    continue;
                 file = assemblyResolver.Resolve(asmRef);
             } else {
                 // The C# `AssemblyNameReference.Parse(...)` for the
                 // implicit references.
                 Metadata::AssemblyNameReference asmRef =
                     Metadata::AssemblyNameReference::Parse(entry.name);
+                if (!resolvedNames
+                         .insert(std::make_pair(true, asmRef.Name()))
+                         .second)
+                    continue;
                 file = assemblyResolver.Resolve(asmRef);
             }
         } else {
+            if (!resolvedNames
+                     .insert(std::make_pair(false, entry.name))
+                     .second)
+                continue;
             file = assemblyResolver.ResolveModule(*entry.parent, entry.name);
         }
         if (file == nullptr)
