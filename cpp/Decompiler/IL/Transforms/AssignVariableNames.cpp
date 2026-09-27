@@ -37,6 +37,7 @@
 #include <cctype>
 #include <map>
 #include <set>
+#include <cstring>
 #include <string>
 
 namespace ILSpy::Decompiler::IL {
@@ -263,6 +264,78 @@ std::string AssignVariableNames::SuggestNameForType(
     const TypeSystem::IType* type) {
     return InferName(type);
 }
+
+// Vocabularies.Default's core rules, the subset the variable names hit):
+// the irregulars, -ies -> -y, the -es after the sibilants, and the plain
+// -s. A word that does not look plural returns unchanged (the caller's
+// IsPlural check: only a changed result counts as a plural).
+std::string SingularizeWord(const std::string& word) {
+    static const std::map<std::string, std::string> irregulars = {
+        {"data", "datum"},       {"men", "man"},
+        {"women", "woman"},       {"children", "child"},
+        {"people", "person"},    {"teeth", "tooth"},
+        {"feet", "foot"},        {"geese", "goose"},
+        {"mice", "mouse"},       {"criteria", "criterion"},
+        {"phenomena", "phenomenon"},
+    };
+    auto it = irregulars.find(word);
+    if (it != irregulars.end())
+        return it->second;
+    auto endsWith = [&](const char* suffix) {
+        std::size_t n = std::strlen(suffix);
+        return word.size() >= n && word.compare(word.size() - n, n, suffix) == 0;
+    };
+    if (endsWith("ies") && word.size() > 3)
+        return word.substr(0, word.size() - 3) + "y";
+    if (endsWith("ses") || endsWith("xes") || endsWith("zes") ||
+        endsWith("ches") || endsWith("shes"))
+        return word.substr(0, word.size() - 2);
+    if (endsWith("s") && !endsWith("ss") && !endsWith("us") &&
+        !endsWith("is") && word.size() > 1)
+        return word.substr(0, word.size() - 1);
+    return word;
+}
+
+// The C# GenerateForeachVariableName: the element name from the
+// collection expression (the singularized suggested name, the List-suffix
+// strip, the list -> item and children rules, the digit strip, the item
+// fallback). The conflict suffix is the caller's (the emitter's declared
+// set).
+std::string AssignVariableNames::SuggestForeachElementName(
+    ILInstruction* collection) {
+    std::string baseName;
+    if (collection != nullptr)
+        baseName = GetNameFromInstruction(collection);
+    if (baseName.empty() && collection != nullptr &&
+        collection->Op == OpCode::LdLoc) {
+        // The C#'s parameter arm: a collection held in a parameter keeps
+        // the parameter's name.
+        ILVariable* v = static_cast<LdLoc*>(collection)->Variable.get();
+        if (v != nullptr && v->Kind == VariableKind::Parameter)
+            baseName = v->Name;
+    }
+    std::string proposedName = "item";
+    if (!baseName.empty()) {
+        std::string singular = SingularizeWord(baseName);
+        if (singular != baseName) {
+            proposedName = singular;
+        } else if (baseName.size() > 4 &&
+                   baseName.compare(baseName.size() - 4, 4, "List") == 0) {
+            proposedName = baseName.substr(0, baseName.size() - 4);
+        } else if (baseName == "list") {
+            proposedName = "item";
+        } else if (baseName.size() >= 8 &&
+                   baseName.compare(baseName.size() - 8, 8, "children") == 0) {
+            proposedName = baseName.substr(0, baseName.size() - 3);
+        } else {
+            proposedName = baseName;
+        }
+    }
+    return StripTrailingDigits(proposedName);
+}
+
+// The minimal English singularization (the Humanizer
+
 
 // The C# `internal static bool IsValidName(string varName)` (line 677):
 // whitespace/empty fails, the first unit must be a letter or '_', every

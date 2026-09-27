@@ -442,6 +442,197 @@ private:
         out_ += '\n';
     }
 
+    // The whole-word replacement (the identifier boundaries): the
+    // foreach collapse renames the hoisted element local without touching
+    // longer identifiers that contain it.
+    static void ReplaceWholeWord(std::string& text, const std::string& from,
+                                 const std::string& to) {
+        std::size_t pos = 0;
+        while ((pos = text.find(from, pos)) != std::string::npos) {
+            bool leftOk = pos == 0 ||
+                !(std::isalnum(static_cast<unsigned char>(text[pos - 1])) ||
+                  text[pos - 1] == '_');
+            std::size_t end = pos + from.size();
+            bool rightOk = end >= text.size() ||
+                !(std::isalnum(static_cast<unsigned char>(text[end])) ||
+                  text[end] == '_');
+            if (leftOk && rightOk) {
+                text.replace(pos, from.size(), to);
+                pos += to.size();
+            } else {
+                pos += 1;
+            }
+        }
+    }
+
+    // The one-tab dedent: the collapsed foreach body replaces the
+    // using+while nesting, so each rendered line moves out one level.
+    static std::string DedentByOne(std::string text) {
+        std::string out;
+        out.reserve(text.size());
+        std::size_t i = 0;
+        while (i < text.size()) {
+            std::size_t eol = text.find('\n', i);
+            if (eol == std::string::npos) eol = text.size();
+            std::size_t lineStart = i;
+            if (lineStart < eol && text[lineStart] == '\t')
+                lineStart++;
+            out += text.substr(lineStart, eol - lineStart);
+            if (eol < text.size()) out += '\n';
+            i = eol + 1;
+        }
+        return out;
+    }
+
+    // The enumerator-foreach collapse (the C# StatementBuilder's
+    // TransformToForeach): `using (coll.GetEnumerator()) { while
+    // ((ref enum).MoveNext()) { ... enum.Current ... } }` renders
+    // `foreach (T e in coll) { ... }` with the element named by the
+    // C# GenerateForeachVariableName (the collection's name singularized).
+    // The element type comes from the hoisted `T v = ...Current;`
+    // declaration, else the collection type's first type argument, else
+    // var. Returns false on any shape mismatch (the caller keeps the
+    // using form).
+    bool TryCollapseEnumeratorForeach(const UsingInstruction& us,
+                                      const Call& getEnumerator,
+                                      int indent, std::string& result) {
+        const std::string enumName =
+            us.Variable ? us.Variable->Name : std::string();
+        if (enumName.empty() || us.Body == nullptr)
+            return false;
+        // The collection: the GetEnumerator call's receiver.
+        if (getEnumerator.Arguments.empty())
+            return false;
+        ILInstruction* receiver = getEnumerator.Arguments[0].get();
+        std::string collectionText = Expr(*receiver);
+        if (collectionText.empty())
+            return false;
+        // Render the using body with the normal machinery, then collapse
+        // the rendered while shape (the port's own deterministic output).
+        std::string saved;
+        saved.swap(out_);
+        EmitBraced(*us.Body, indent);
+        std::string bodyText;
+        bodyText.swap(out_);
+        out_.swap(saved);
+        // The while header: `while ((ref ENUM).MoveNext())`.
+        const std::string header = "while ((ref " + enumName + ").MoveNext())";
+        std::size_t headerPos = bodyText.find(header);
+        if (headerPos == std::string::npos)
+            return false;
+        // The loop body: the braces after the header line.
+        std::size_t open = bodyText.find('{', headerPos + header.size());
+        if (open == std::string::npos)
+            return false;
+        int depth = 0;
+        std::size_t close = std::string::npos;
+        for (std::size_t i = open; i < bodyText.size(); i++) {
+            if (bodyText[i] == '{') depth++;
+            else if (bodyText[i] == '}') {
+                depth--;
+                if (depth == 0) { close = i; break; }
+            }
+        }
+        if (close == std::string::npos)
+            return false;
+        std::string loopBody = bodyText.substr(open + 1, close - open - 1);
+        std::string trailing = bodyText.substr(close + 1);
+        // The element name: the C# GenerateForeachVariableName over the
+        // collection expression, with the conflict suffix.
+        std::string elemName =
+            IL::AssignVariableNames::SuggestForeachElementName(receiver);
+        if (elemName.empty())
+            elemName = "item";
+        {
+            std::string base = elemName;
+            for (int n = 2; declared_.count(elemName); ++n)
+                elemName = base + std::to_string(n);
+        }
+        declared_.insert(elemName);
+        // The element type: the hoisted `T v = ref ENUM.Current;` first
+        // statement, else the collection type's first argument.
+        std::string elemType = "var";
+        const std::string currentRead = "ref " + enumName + ".Current";
+        {
+            // The hoisted declaration: `TYPE NAME = ref ENUM.Current;`.
+            std::string pattern = " = " + currentRead + ";";
+            std::size_t declPos = loopBody.find(pattern);
+            if (declPos != std::string::npos) {
+                std::size_t lineStart =
+                    loopBody.rfind('\n', declPos) + 1;
+                std::size_t eq = loopBody.rfind(" = ", declPos);
+                if (eq != std::string::npos && eq >= lineStart) {
+                    std::string decl = loopBody.substr(lineStart, eq - lineStart);
+                    std::size_t sp = decl.rfind(' ');
+                    if (sp != std::string::npos) {
+                        elemType = decl.substr(0, sp);
+                        // The declaration line's leading tabs stay with the
+                        // erased statement, not the type text.
+                        std::size_t firstNonWs = elemType.find_first_not_of("\t ");
+                        if (firstNonWs != std::string::npos)
+                            elemType = elemType.substr(firstNonWs);
+                        std::string hoisted = decl.substr(sp + 1);
+                        if (!hoisted.empty()) {
+                            loopBody.erase(
+                                lineStart,
+                                loopBody.find('\n', declPos) - lineStart + 1);
+                            ReplaceWholeWord(loopBody, hoisted, elemName);
+                        }
+                    }
+                }
+            }
+        }
+        if (elemType == "var") {
+            // The collection's element type: a generic collection's first
+            // type argument (List<string> -> string).
+            const TypeSystem::IType* collectionType = nullptr;
+            if (auto* obj = dynamic_cast<const LdObj*>(receiver))
+                collectionType = obj->Type.get();
+            else if (auto* ldloc =
+                         dynamic_cast<const LdLoc*>(receiver))
+                collectionType = ldloc->Variable
+                                     ? ldloc->Variable->Type.get()
+                                     : nullptr;
+            if (auto* p = dynamic_cast<const TypeSystem::ParameterizedType*>(
+                    collectionType)) {
+                if (!p->TypeArguments().empty())
+                    elemType = CSharpTypeName(p->TypeArguments()[0]);
+            }
+        }
+        // The inline element reads become the element name.
+        ReplaceWholeWord(loopBody, currentRead, elemName);
+        // Any remaining enumerator uses (beyond Current) abort -- the
+        // foreach hides the enumerator, so a MoveNext/Dispose reference
+        // cannot render.
+        if (loopBody.find(enumName) != std::string::npos)
+            return false;
+        // The composition mirrors EmitBraced's geometry: the foreach at
+        // the using's level, the loop body dedented one level out of the
+        // while, the trailing statements (after the while) and the
+        // using's own closing brace folded the same way.
+        if (!trailing.empty() && trailing.back() == '}')
+            trailing.pop_back();
+        while (!trailing.empty() &&
+               (trailing.back() == '\t' || trailing.back() == '\n' ||
+                trailing.back() == ' '))
+            trailing.pop_back();
+        std::size_t firstNonWs = trailing.find_first_not_of("\t\n ");
+        trailing = firstNonWs == std::string::npos
+                       ? std::string()
+                       : trailing.substr(firstNonWs);
+        if (!trailing.empty())
+            trailing += '\n';
+        result.clear();
+        for (int i = 0; i < indent; i++) result += '\t';
+        result += "foreach (" + elemType + " " + elemName + " in " +
+                  collectionText + ")";
+        result += "\n";
+        for (int i = 0; i < indent; i++) result += '\t';
+        result += "{" + DedentByOne(loopBody) + "}\n";
+        result += DedentByOne(trailing);
+        return true;
+    }
+
     static std::string LabelFor(std::uint32_t offset) {
         char buf[16];
         std::snprintf(buf, sizeof(buf), "IL_%04X", offset);
@@ -2244,11 +2435,31 @@ private:
                 return;
             }
             case OpCode::UsingInstruction: {
+                const auto& us = static_cast<const UsingInstruction&>(inst);
+                // The enumerator-foreach shape: a using whose resource is a
+                // GetEnumerator call collapses to the foreach (the
+                // TryCollapseEnumeratorForeach note).
+                if (us.ResourceExpression &&
+                    (us.ResourceExpression->Op == OpCode::Call ||
+                     us.ResourceExpression->Op == OpCode::CallVirt)) {
+                    auto* call = static_cast<const Call*>(
+                        us.ResourceExpression.get());
+                    if (call->MethodName.size() >= 15 &&
+                        call->MethodName.rfind("::GetEnumerator") ==
+                            call->MethodName.size() - 15) {
+                        EmitBodyHeaderLabel(us.Body.get());
+                        std::string collapsed;
+                        if (TryCollapseEnumeratorForeach(
+                                us, *call, indent, collapsed)) {
+                            out_ += collapsed;
+                            return;
+                        }
+                    }
+                }
                 // The C# `using` statement: `using (resource) { body }` (the
                 // expression form). The UsingInstruction also carries the local
                 // the resource is stored into, but the seed elides it (the real
                 // back end declares the using-local via the using, not DeclareVariables).
-                const auto& us = static_cast<const UsingInstruction&>(inst);
                 EmitBodyHeaderLabel(us.Body.get());
                 Line(indent, "using (" +
                      (us.ResourceExpression ? Expr(*us.ResourceExpression) : std::string("null")) + ")");

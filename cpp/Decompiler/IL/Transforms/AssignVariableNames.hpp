@@ -51,6 +51,14 @@ public:
     // the rendered type text itself is never a name: a keyword like
     // `byte` is not a legal identifier).
     static std::string SuggestNameForType(const TypeSystem::IType* type);
+
+    // The C# GenerateForeachVariableName: the foreach element's name from
+    // the COLLECTION expression -- the collection's suggested name
+    // (the field or Get-method remainder) singularized (the Humanizer
+    // English rules: directories -> directory, data -> datum), the
+    // List-suffix / list / children adjustments, the digit strip, and
+    // the "item" fallback.
+    static std::string SuggestForeachElementName(ILInstruction* collection);
 };
 
 } // namespace ILSpy::Decompiler::IL

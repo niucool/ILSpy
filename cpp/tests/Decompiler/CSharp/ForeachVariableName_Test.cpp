@@ -91,3 +91,21 @@ TEST(ForeachVariableNameTest, StoreProposalNamesFromGetMethod)
         << "the Get*-method store names the local from the method name: "
         << text;
 }
+
+// The enumerator foreach (the C# TransformToForeach): a using whose
+// resource is a GetEnumerator call over a field-backed collection
+// collapses to `foreach`, with the element named by the singularized
+// collection name (words -> word).
+TEST(ForeachVariableNameTest, EnumeratorForeachCollapsesWithSingularName)
+{
+    std::string text;
+    if (!RenderForEachShapes(text))
+        GTEST_SKIP() << "the foreach-name fixture is not provisioned";
+    EXPECT_NE(text.find("foreach (string word in words)"),
+              std::string::npos)
+        << "the enumerator foreach collapses with the singular element "
+           "name: "
+        << text;
+    EXPECT_EQ(text.find("GetEnumerator()"), std::string::npos)
+        << "the collapsed form hides the enumerator: " << text;
+}
