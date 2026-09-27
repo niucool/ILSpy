@@ -1737,3 +1737,46 @@ hash only after a DELIBERATE change, documented in the commit message).
 Commit style: subject <= 72 chars, body explains the why, trailer
 `Assisted-by: GLM:glm-5.3-flash:pi`, `git commit -F /tmp/msg.txt`, local
 commits only, never push.
+## THE HELLO.NET8 COMPARISON ARC (the current work order)
+
+The net8 Debug fixture at /tmp/ilspy-cmp/ (out/hello.dll, the oracle
+csharp_oracle.cs, the diff gated with `diff -w csharp_oracle.cs cpp_now.cs`).
+THE GATE NEEDS DOTNET ON PATH (`export PATH=/home/jim/.dotnet:$PATH`) --
+the resolver's runtime discovery is a PATH scan for the dotnet
+executable; without it NO reference resolves (resolvedFiles=0). The
+C# tool always has its host module directory; the port's documented
+divergence (the GetHostRuntimeDirectory comment).
+
+CLOSED (the arc 68 -> 33 normalized diff lines):
+- The interpolation re-synthesis (4bdb4b1b5): the pattern matches BOTH
+  the C# stloc/newobj fold (the seeded tests) and the port's raw
+  `call .ctor(ldloca v, ldc.i4, ldc.i4)` shape; the consumer search
+  walks the next statement, the block's final instruction (the inlined
+  `leave call ToStringAndClear(...)` tail), then the fall-through
+  sibling block. The 13 transform tests pass; the corpus unaffected
+  (the net48 fixtures predate interpolated strings).
+- The [Debuggable] decode: NO CODE CHANGE -- the decode works once the
+  runtime is discoverable (the queue walks System.Runtime's forwarders
+  into System.Private.CoreLib, the enum resolves, the flags render).
+  The item was the environment, not a bug.
+- Math.PI / Math.E (f9b3fe6d0): SpecialDoubleConstantText in the
+  ILAstToCSharp (the FractionApprox continued fraction, the
+  IsValidFraction 2/3/5 rule, the multiply and division forms; the
+  raw-fraction and MathF arms documented as deferred).
+- The numeric-binary parenthesization (835a81f29): precedence-only
+  (the RIGHT-operand/tighter-parent and the ternary-branch-slots
+  parenthesize; everything else bare; `checked(a + b)` single parens).
+
+THE REMAINING RESIDUE (33 lines):
+- The int->bool ternary condition: `(num_1 % 3)` where the oracle has
+  `i % 3 != 0` (the cgt.un-not branch shape over an int remainder).
+- The array initializer: `new string[][2]` + the element stores + the
+  `/* unhandled statement op 32 */` (ldc.i4.s = op 32 in the array-init
+  walk) + the dangling array_2/array_3 aliases.
+- The loop-init hoist: `for (int i = 1; ...)` vs `int num_1 = 1; for
+  (; ...)`.
+- String.Concat -> `+` (the C# combines the string concat calls); the
+  typeof().FullName form; the file-scoped namespace (`namespace Demo;`);
+  the blank line after the field; the local naming (num/i, shape,
+  text).
+
