@@ -2300,6 +2300,48 @@ family).
 THE ARC (dnlib, plain diff): 137,517 -> 83,525 -> 83,275 -> 83,015 ->
 80,775.
 
+## THE INVERTED-CONDITION RESTRUCTURE -- ATTEMPTED, REVERTED (the finding)
+
+THE ATTEMPT (this turn): the ILAst pre-pass
+(RestructureInvertedConditionGotos) -- detect `if (cond) goto L;` +
+the region blocks + the single-pred L; move L's content into the if's
+true arm and the region into the false arm; suppress the sources.
+THREE iterations of the shape gates, each measured:
+(1) the strict shape (L at k+2, the single region block): 1 site.
+(2) the multi-block region (L at any m, the region = k+1..m-1, the
+    false arm = a BlockContainer): still 1 site.
+(3) THE DEBUG COUNTERS: 2,091 if-final instructions; 1,610 rejected
+    because the true-arm is a BLOCK wrapping the branch (unwrapped:
+    both the final-branch and the single-instruction forms); after
+    the unwrap, ONLY 8 of the branch targets sit in the SAME container
+    as the if. THE BLOCKER: the port's reader nests the label blocks
+    in DIFFERENT containers than the if -- the flat render hides this
+    (the indentation logic flattens the container nesting), but the
+    region-between-the-if-and-L is not a sequential block list across
+    containers, so the else-arm synthesis has no well-defined region.
+The one firing site rendered 8 lines worse (the container-arm
+rendering) -- REVERTED wholesale (the tree is back at the three
+landed propagation slices; the plain diff back at 80,775).
+
+THE REAL PATHS FORWARD (recorded for the next session):
+(a) THE READER-LEVEL restructure: model the if-goto as the C# reader
+    does (the value-carrying leave / the structured exit) so the
+    label regions never form -- the deepest fix, the same family as
+    the dup-slot modeling note below;
+(b) THE CROSS-CONTAINER analysis: the region = the blocks reachable
+    from the if's false path before L (a graph walk, not a list
+    slice) -- heavier but shape-faithful;
+(c) THE EXPRESSION-LEVEL synthesis first (the ternary/coalesce -- the
+    oracle's actual form for these regions is `cond ? A : B` and
+    `ReadString(...) ?? string.Empty`, NOT if/else!) -- the
+    dup_194/S_1 chains are the reader's dup-slot temporaries (the
+    same family as hello's array2 residue) and the coalesce
+    synthesis would collapse them at the expression level where the
+    C# does.
+
+THE ARC (dnlib, plain diff): unchanged at 80,775 (137,517 -> ... ->
+80,775 over the landed slices).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
