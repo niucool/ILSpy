@@ -4149,6 +4149,27 @@ std::vector<std::string> WholeModuleUsingSet(
     return sorted;
 }
 
+// The C# NamespaceDeclaration block form indents everything inside the
+// braces one level: a type rendered through the whole-module loop into an
+// open `namespace X {` block gains one leading tab on every line (the
+// file-scoped `namespace X;` form and the global-namespace types stay at
+// the root level).
+std::string IndentTypeIntoNamespaceBlock(std::string text) {
+    std::string out;
+    out.reserve(text.size() + text.size() / 8);
+    std::size_t i = 0;
+    while (i < text.size()) {
+        std::size_t eol = text.find('\n', i);
+        if (eol == std::string::npos) eol = text.size();
+        if (eol > i)
+            out += '\t';
+        out += text.substr(i, eol - i);
+        if (eol < text.size()) out += '\n';
+        i = eol + 1;
+    }
+    return out;
+}
+
 std::string WholeModuleAttributesText(
     const ::ILSpy::Decompiler::TypeSystem::MetadataModule& module,
     std::set<std::string>& usedNamespaces) {
@@ -4280,9 +4301,12 @@ std::string CSharpDecompiler::DecompileWholeModuleToString() {
                                                   t.Namespace);
             if (DecompileTypeToString(t.Token, text,
                                      /*wrapNamespace=*/false,
-                                     &moduleUsingSet))
-                out += text;
+                                     &moduleUsingSet) &&
+                namespaceOpen)
+                // The open namespace block indents its types one level.
+                text = IndentTypeIntoNamespaceBlock(std::move(text));
         }
+        out += text;
     }
     if (namespaceOpen)
         out += "}\n";
@@ -4579,9 +4603,12 @@ std::string CSharpDecompiler::DecompileWholeModuleToString(
                                                   t.Namespace);
             if (DecompileTypeToString(file, t.Token, text,
                                       /*wrapNamespace=*/false,
-                                      &moduleUsingSet))
-                out += text;
+                                      &moduleUsingSet) &&
+                namespaceOpen)
+                // The open namespace block indents its types one level.
+                text = IndentTypeIntoNamespaceBlock(std::move(text));
         }
+        out += text;
     }
     if (namespaceOpen)
         out += "}\n";

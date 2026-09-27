@@ -109,3 +109,26 @@ TEST(ForeachVariableNameTest, EnumeratorForeachCollapsesWithSingularName)
     EXPECT_EQ(text.find("GetEnumerator()"), std::string::npos)
         << "the collapsed form hides the enumerator: " << text;
 }
+
+// The namespace-block form indents its members one level (the C#
+// NamespaceDeclaration block braces): a type inside `namespace X {`
+// renders its declaration and members one tab deeper than the
+// file-scoped or global-namespace forms.
+TEST(ForeachVariableNameTest, NamespaceBlockIndentsMembers)
+{
+    // The whole-module render (the block-form namespace path; the -t
+    // render covers one type only).
+    std::string text;
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::exists(kForEachNameFixture, ec))
+        GTEST_SKIP() << "the foreach-name fixture is not provisioned";
+    Metadata::MetadataFile file(kForEachNameFixture);
+    ASSERT_TRUE(file.IsValid());
+    text = CSharp::CSharpDecompiler::DecompileWholeModuleToString(file);
+    // The fixture's second namespace renders in the block form (the
+    // global-namespace types keep it out of the file-scoped form).
+    EXPECT_NE(text.find("namespace ForEachName.Other\n{\n\tpublic class OtherShape"),
+              std::string::npos)
+        << "the block-form namespace indents its types one level: " << text;
+}
