@@ -2500,6 +2500,33 @@ without the dup) -- each needs its own dump-first pass.
 
 THE ARC (dnlib, plain diff): 137,517 -> ... -> 80,775 -> 80,739.
 
+## THE SINGLE-USE ELISION -- LANDED (the ILInlining lever)
+
+THE EXTENSION: the folded target with exactly ONE remaining load
+inlines the coalesce into that use (the declaration drops). THE GATES:
+the load's enclosing block via the ANCESTOR WALK (the use sits inside
+nested expressions -- the ctor's arguments -- the direct-statement
+search missed it), the same container, a LATER block than the
+declaration, not a loop container. The byref uses (ldloca) are
+excluded by the load-count gate (the conservative first cut -- the
+C# inlines those too; a later lever).
+
+THE MEASURE: 2 sites on dnlib, both the oracle's exact inline form
+(`WinMDHelpers.ToCLR((typeRef.Module ?? sourceModule), typeRef)` and
+the assignment inline `memberRef = (... ?? memberRef);`); the plain
+diff 80,739 -> 80,734. THE GATES all green (the pin ebf9b6e9...,
+the corpus 0/0, hello 3, the sweep 13,174/15; the disk at 45%).
+
+THE NEXT LEVERS (the ledger): (1) the remaining ~275 ?? sites (the
+other chain shapes, each its own dump-first pass); (2) the byref-use
+elision (the ldloca sites); (3) the GENERAL single-use local elision
+beyond the coalesce (the C# ILInlining's broader rule -- the port
+keeps `var` locals the oracle inlines -- the biggest remaining
+structural family after the ?? shapes).
+
+THE ARC (dnlib, plain diff): 137,517 -> ... -> 80,775 -> 80,739 ->
+80,734.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
