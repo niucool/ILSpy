@@ -1767,22 +1767,27 @@ CLOSED (the arc 68 -> 33 normalized diff lines):
   (the RIGHT-operand/tighter-parent and the ternary-branch-slots
   parenthesize; everything else bare; `checked(a + b)` single parens).
 
-THE REMAINING RESIDUE (8 lines; the arc 68 -> 33 -> 28 -> 23 -> 21 -> 20 -> 8):
+THE REMAINING RESIDUE (3 lines; the arc 68 -> 33 -> 28 -> 23 -> 21 -> 20 -> 8 -> 5 -> 3):
 - CLOSED: the blank-line member separator (the field arm's trailing
   newline; the methods already self-separate; THE CONNID PIN MOVED to
   fbda64dd -- the blank lines, normalized 0/0 against the fresh oracle).
 - CLOSED: the for-init hoist (the TransformFor two-phase pre-pass) and
   the naming family (the loop counters i/j/k, the interface I-strip,
   the num2-style suffix).
-- THE REMAINING ITEMS: (1) the dup-alias line `string[] array =
-  array3;` -- the block-valued store does not inline into the user's
-  local (the port's dup_160/dup_168 reader slots; investigate
-  InlineOneIfPossible/CanMoveInto for the ArrayInitializer block);
-  (2) the foreach -- the oracle renders `foreach (string text in
-  array2)`, the port an indexed `for (int i = 0; i < array.Length;
-  i++)` -- the C# PatternStatementTransform's TransformForeachOnArray
-  (the port's file has the entry stub); (3) the array_3/array_4 names
-  from the dup slots (fall away with the alias fix).
+- CLOSED: the dangling-alias fold (the initializer statement folds the
+  following `T u = v;` whose v lost its store to the dead-store
+  keep-expression arm) and the foreach (the flat for-render's
+  TransformForeachOnArray port: the `i < arr.Length` + `i++` +
+  all-element-access shape renders `foreach (T e in arr)` with the
+  element-type naming).
+- THE LAST RESIDUE (3 -w lines): the oracle KEEPS the `string[] array2
+  = array;` alias (its V_4 has two loads -- ldlen + ldelema -- so the
+  C# single-load inline gate leaves it; the foreach reads `in array2`).
+  The port's whole-function ILInlining pass inlines the multi-load
+  alias away (the foreach reads `in array`). The fix is a pipeline
+  fidelity question (which pass inline-what over multi-load
+  stack-slot aliases), recorded for the next session; the render-level
+  workaround would reintroduce the alias synthetically.
 - CLOSED: the array-initializer family's render pieces (the element-
   type fix -- the C# passes MatchNewArr's element type, not the store
   variable's array type; the `new T[dims] { elements }` render -- the
