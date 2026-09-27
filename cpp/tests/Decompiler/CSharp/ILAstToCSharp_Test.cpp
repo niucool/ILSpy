@@ -160,7 +160,7 @@ TEST(ILAstToCSharp, ArithmeticAndComparisonExpressions) {
     fn->CheckInvariant(ILPhase::Normal);
 
     EXPECT_EQ(ILAstToCSharp(*fn, "bool", "Check", "int arg_1"),
-              "bool Check(int arg_1)\n{\n	var V_0 = (arg_1 + 1);\n	return V_0 > 0;\n}\n");
+              "bool Check(int arg_1)\n{\n	var V_0 = arg_1 + 1;\n	return V_0 > 0;\n}\n");
 }
 
 TEST(ILAstToCSharp, ConditionalBranchEmitsIfGotoAndLabel) {
@@ -696,7 +696,7 @@ TEST(ILAstToCSharp, PlainStoreWhenLeftIsNotTheTarget) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "int arg_1");
-    EXPECT_NE(text.find("	var V_0 = (arg_1 + 1);\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	var V_0 = arg_1 + 1;\n"), std::string::npos) << text;
     EXPECT_EQ(text.find("V_0 += "), std::string::npos) << "not a compound assignment";
 }
 

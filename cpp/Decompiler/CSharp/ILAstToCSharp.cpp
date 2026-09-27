@@ -2275,6 +2275,31 @@ private:
         return text;
     }
 
+    // The C# operator precedence for the numeric binaries (the C#
+    // grammar: multiplicative > additive > shift > & > ^ > |).
+    static int BinaryPrecedence(BinaryNumericOperator op) {
+        switch (op) {
+            case BinaryNumericOperator::Mul:
+            case BinaryNumericOperator::Div:
+            case BinaryNumericOperator::Rem:
+                return 1;
+            case BinaryNumericOperator::Add:
+            case BinaryNumericOperator::Sub:
+                return 2;
+            case BinaryNumericOperator::ShiftLeft:
+            case BinaryNumericOperator::ShiftRight:
+                return 3;
+            case BinaryNumericOperator::BitAnd:
+                return 4;
+            case BinaryNumericOperator::BitXor:
+                return 5;
+            case BinaryNumericOperator::BitOr:
+                return 6;
+            default:
+                return 7;
+        }
+    }
+
     // The C# FractionApprox (TypeSystemAstBuilder.cs lines 1725-1784): the
     // continued-fraction approximation of `value` with denominators bounded
     // by `maxDenominator`. Returns (0, 0) for the out-of-range / degenerate
@@ -2830,9 +2855,34 @@ private:
                     case BinaryNumericOperator::ShiftRight: op = ">>"; break;
                     default: op = "?"; break;
                 }
-                std::string text = "(" + (bin.Left ? Expr(*bin.Left) : "(default)") + " " + op + " " +
-                                   (bin.Right ? Expr(*bin.Right) : "(default)") + ")";
-                if (bin.CheckForOverflow) text = "checked" + text;
+                std::string text = (bin.Left ? Expr(*bin.Left) : "(default)") + " " + op + " " +
+                                   (bin.Right ? Expr(*bin.Right) : "(default)");
+                if (bin.CheckForOverflow) text = "checked(" + text + ")";
+                // The C# ast parenthesizes by precedence: the flat emitter
+                // keeps the outer parens only where the tree shape demands
+                // them -- under a parent binary when this is the RIGHT
+                // operand or the parent binds tighter (e.g. `(a + b) * c`
+                // keeps, `a * b + c` drops), and in the ternary branch
+                // slots (the ILSpy conditional style). The parent-binary
+                // LEFT with an equal-or-looser parent (`(a * b) * c` ->
+                // `a * b * c`), the ternary condition slot, and the
+                // non-binary contexts (the store value, the call argument,
+                // the return tail) render bare.
+                bool parenthesize = false;
+                const ILInstruction* p = inst.Parent;
+                if (p != nullptr &&
+                    p->Op == OpCode::BinaryNumericInstruction) {
+                    const auto* pb =
+                        static_cast<const BinaryNumericInstruction*>(p);
+                    if (!(pb->Left.get() == &inst &&
+                          BinaryPrecedence(pb->Operator) >=
+                              BinaryPrecedence(bin.Operator)))
+                        parenthesize = true;
+                } else if (p != nullptr && p->Op == OpCode::IfInstruction &&
+                           inst.ChildIndex != 0) {
+                    parenthesize = true;
+                }
+                if (parenthesize) text = "(" + text + ")";
                 return text;
             }
             case OpCode::Conv: {
