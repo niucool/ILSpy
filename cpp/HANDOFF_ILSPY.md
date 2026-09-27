@@ -1900,6 +1900,74 @@ THE GUARDS (all held, debug AND release): the connid pin
 identical, the hello parity (the recorded 3-line residue; the
 release binary's render is byte-identical to the debug one).
 
+## THE RELEASE-FAITHFULNESS INVESTIGATION (the follow-up turn)
+
+THE QUESTION (the user's evidence): "the DEBUG build renders dnlib
+correctly; the RELEASE build shows 43 'Could not decode attribute
+arguments' sites, SecurityPermission as (SecurityAction)8, and
+fully-qualified nested types (~271 diff lines)."
+
+THE MATRIX (the first method step, {debug, release} x {bare, resolved}
+on dnlib): **debug == release, 0 diff lines in BOTH environments.**
+The user's two runs differed in ENV, not in build: the release run's
+2.06s wall clock is the BARE-env timing (the resolved run measures
+5.5s), and the debug render they compared against came from a resolved
+run. All three symptoms (the decode failures, the raw enum, the long
+qualifications) are exactly the bare-env degradation. Hypotheses (a)
+release-only UB and (c) uninitialized members are disproven; (b) the
+resolver env difference is confirmed.
+
+THE ROOT (why the bare env degrades): the C# oracle ALWAYS resolves --
+it runs as a managed process and reads its host's module directory.
+The port's bare env discovers no runtime, so the netcoreapp3.1
+reference assemblies (System.Private.CoreLib) stay unresolved: the
+attribute-blob decode fails (it needs the resolved enum/ctor types),
+and the qualification falls back to fully-qualified names. Making the
+port always resolve (the ~/.dotnet probe, deliberately excluded so
+far) is the fix -- but it is BLOCKED on the two findings below.
+
+FINDING 1 -- THE C#'S USINGS COME FROM AN AST-LEVEL SECOND PASS, not
+from the RequiredNamespaceCollector. IntroduceUsingDeclarations
+(CSharp/Transforms/IntroduceUsingDeclarations.cs) runs
+FindRequiredImports over the FINAL AST (after the field-like-event
+collapse!) and collects the namespaces of the type references that
+actually render. The collector's set only feeds the abbreviation
+candidate pool. THE PORT renders its using directives straight from
+the collector. With resolution on, the port would emit usings the C#
+drops (the modifier fixture: `using System.Threading;` over the
+Interlocked calls in the event accessors, which never render because
+the field-like event collapses the accessors away).
+
+FINDING 2 -- THE PORT'S visitedTypes_ DANGLING-POINTER BUG (the latent
+nondeterminism). RequiredNamespaceCollector::visitedTypes_ is
+pointer-keyed with NO ownership; the UnknownType/anonymous temporaries
+die mid-walk, malloc recycles their addresses, and the recycled
+address falsely dedups a later visit -- silently dropping namespaces.
+PROVEN with the [VISIT] instrumentation: the modifier fixture's four
+Interlocked visits all hit insert=0 (every address pre-seeded by a
+freed earlier type), so "System.Threading" never lands in the set.
+THIS IS WHAT MADE THE CACHES LOOK GUILTY: the memberRef/type caches
+keep the instances ALIVE (no recycling, no false dedup), so the
+namespace IS collected and `using System.Threading;` appears -- the
+caches were correct; the cacheless path is the buggy one, and it
+happens to produce the C#-matching output only by allocator luck. The
+C# has neither flaw (GC lifetimes + a value-equality HashSet<IType>).
+
+THE NEXT SLICE (the order matters): (1) give visitedTypes_ ownership
+(keep the visited types alive for the collector's lifetime; an
+unordered_set<shared_ptr> or a keepalive vector); this makes the
+collector deterministic and, combined with (2), keeps the fixture
+green. (2) port FindRequiredImports: the using lines = the namespaces
+the render ACTUALLY short-qualified -- the emitter consults the using
+set per reference already; record the hits and emit only those using
+lines (a two-pass render, or record during the single pass and emit
+the header after). BLAST RADIUS: every pinned using expectation (the
+connid pin, the corpus, the seeded tests) needs a re-pin against the
+fresh oracle. (3) THEN turn on the ~/.dotnet default probe (always
+resolve like the oracle) and re-verify: bare == resolved == the oracle
+on dnlib, hello, connid, and the corpus. The end state: no env-
+dependent renders at all.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
