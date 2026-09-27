@@ -4131,6 +4131,25 @@ std::string CSharpDecompiler::DecompileWholeModuleToString() {
                              moduleUsingSet);
     std::string currentNamespace;
     bool namespaceOpen = false;
+    // The C# NormalizeBlockStatements' file-scoped-namespace rule: a
+    // module whose non-nested types ALL sit in one non-empty namespace
+    // renders `namespace X;` (no braces); any second namespace, or a
+    // global-namespace type, keeps the block form.
+    std::set<std::string> topLevelNamespaces;
+    bool hasGlobalNamespaceType = false;
+    for (const auto& t : state_->file->TypeDefs()) {
+        if (t.Name == "<Module>")
+            continue;
+        auto nestedInfo0 = state_->file->GetTypeDefNameInfo(t.Token);
+        if (nestedInfo0.has_value() && nestedInfo0->DeclaringTypeToken != 0)
+            continue;
+        if (t.Namespace.empty())
+            hasGlobalNamespaceType = true;
+        else
+            topLevelNamespaces.insert(t.Namespace);
+    }
+    bool fileScoped =
+        !hasGlobalNamespaceType && topLevelNamespaces.size() == 1;
     for (const auto& t : state_->file->TypeDefs()) {
         if (t.Name == "<Module>")
             continue;
@@ -4143,15 +4162,20 @@ std::string CSharpDecompiler::DecompileWholeModuleToString() {
         if (nestedInfo.has_value() && nestedInfo->DeclaringTypeToken != 0)
             continue;
         if (t.Namespace != currentNamespace) {
-            if (namespaceOpen)
-                out += "}\n";
-            if (!t.Namespace.empty()) {
-                out += "namespace " + t.Namespace + "\n{\n";
-                namespaceOpen = true;
+            if (fileScoped) {
+                out += "namespace " + t.Namespace + ";\n\n";
+                currentNamespace = t.Namespace;
             } else {
-                namespaceOpen = false;
+                if (namespaceOpen)
+                    out += "}\n";
+                if (!t.Namespace.empty()) {
+                    out += "namespace " + t.Namespace + "\n{\n";
+                    namespaceOpen = true;
+                } else {
+                    namespaceOpen = false;
+                }
+                currentNamespace = t.Namespace;
             }
-            currentNamespace = t.Namespace;
         }
         std::string text;
         if (DecompileTypeToString(t.Token, text,
@@ -4344,6 +4368,25 @@ std::string CSharpDecompiler::DecompileWholeModuleToString(
     // The types (the C# DoDecompileTypes loop in metadata order), grouped
     // by namespace (the NamespaceDeclaration emission; a hidden type does
     // not break the group).
+    // The C# NormalizeBlockStatements' file-scoped-namespace rule: a
+    // file whose non-nested types ALL sit in one non-empty namespace
+    // renders `namespace X;` (no braces); any second namespace, or a
+    // global-namespace type, keeps the block form.
+    std::set<std::string> topLevelNamespaces;
+    bool hasGlobalNamespaceType = false;
+    for (const auto& t : file.TypeDefs()) {
+        if (t.Name == "<Module>")
+            continue;
+        auto nestedInfo = file.GetTypeDefNameInfo(t.Token);
+        if (nestedInfo.has_value() && nestedInfo->DeclaringTypeToken != 0)
+            continue;
+        if (t.Namespace.empty())
+            hasGlobalNamespaceType = true;
+        else
+            topLevelNamespaces.insert(t.Namespace);
+    }
+    bool fileScoped =
+        !hasGlobalNamespaceType && topLevelNamespaces.size() == 1;
     std::string currentNamespace;
     bool namespaceOpen = false;
     for (const auto& t : file.TypeDefs()) {
@@ -4355,15 +4398,20 @@ std::string CSharpDecompiler::DecompileWholeModuleToString(
         if (nestedInfo.has_value() && nestedInfo->DeclaringTypeToken != 0)
             continue;
         if (t.Namespace != currentNamespace) {
-            if (namespaceOpen)
-                out += "}\n";
-            if (!t.Namespace.empty()) {
-                out += "namespace " + t.Namespace + "\n{\n";
-                namespaceOpen = true;
+            if (fileScoped) {
+                out += "namespace " + t.Namespace + ";\n\n";
+                currentNamespace = t.Namespace;
             } else {
-                namespaceOpen = false;
+                if (namespaceOpen)
+                    out += "}\n";
+                if (!t.Namespace.empty()) {
+                    out += "namespace " + t.Namespace + "\n{\n";
+                    namespaceOpen = true;
+                } else {
+                    namespaceOpen = false;
+                }
+                currentNamespace = t.Namespace;
             }
-            currentNamespace = t.Namespace;
         }
         std::string text;
         if (DecompileTypeToString(file, t.Token, text,

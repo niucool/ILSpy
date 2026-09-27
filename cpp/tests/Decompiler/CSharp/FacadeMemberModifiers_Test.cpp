@@ -1072,16 +1072,18 @@ TEST(FacadeMemberModifiersTest, WholeModuleGroupsTypesByNamespace)
     ::ILSpy::Decompiler::DecompilerSettings settings;
     CSharp::CSharpDecompiler decompiler(file, settings);
     std::string whole = decompiler.DecompileWholeModuleToString();
-    std::size_t nsPos = whole.find("namespace ModifierFixture\n{\n");
+    // The fixture's single namespace renders file-scoped (the C#
+    // NormalizeBlockStatements rule): `namespace X;` once, no braces.
+    std::size_t nsPos = whole.find("namespace ModifierFixture;");
     EXPECT_NE(nsPos, std::string::npos) << whole.substr(0, 400);
-    // The type headers nest inside the namespace block.
+    // The type headers follow the file-scoped namespace declaration.
     std::size_t typePos = whole.find("public class ModifierShapes");
     ASSERT_NE(typePos, std::string::npos);
     EXPECT_LT(nsPos, typePos) << whole.substr(0, 400);
-    // One namespace block, not one per type.
-    EXPECT_EQ(whole.find("namespace ModifierFixture\n{\n", nsPos + 10),
+    // One declaration, not one per type.
+    EXPECT_EQ(whole.find("namespace ModifierFixture;", nsPos + 10),
               std::string::npos)
-        << "the consecutive same-namespace types share one block";
+        << "the consecutive same-namespace types share one declaration";
 }
 
 // The constructor's implicit no-argument base call does not render (the
