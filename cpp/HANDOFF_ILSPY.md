@@ -2573,6 +2573,31 @@ stands); (4) the switch case-range fall-through slice.
 THE ARC (dnlib, plain diff): 137,517 -> ... -> 80,734 -> 80,732 ->
 80,716.
 
+## THE BYREF/DUP-SLOT ELISION -- LANDED (the collection + the gate)
+
+THE TWO FIXES: (1) the elision candidates collected from the TREE
+(the reader's dup-slot temporaries live outside fn_->Variables --
+the [SU] debug measured zero S_/dup_ entries while the renders
+carried them); (2) the coalesce elision's ancestor-chain dominance
+(the same walk as the single-use elision -- the sibling-labeled-block
+uses now elide). THE FLAGSHIP: `(ref resourceName)..ctor((ReadString(...)
+?? String.Empty));` -- the oracle's inline form for the chain that
+opened the coalesce arc. THE MEASURE: the plain diff 80,716 ->
+80,715 (the arc's shapes are mostly the strict-gate rejections, not
+the byref uses -- the ldloca sites turned out to be a non-issue for
+the folded targets; their args were plain ldlocs).
+
+THE GATES all green (the pin ebf9b6e9..., the corpus 0/0, hello 3,
+the sweep 13,174/15; the disk at 45%).
+
+THE NEXT QUEUE (unchanged): the remaining ~275 ?? shapes (each its
+own dump-first pass); the label-merged regions (the container-nesting
+blocker); the switch case-range fall-through; the ~1,241 remaining
+local surplus (the purity-gated calls + the expression-tree
+restructuring).
+
+THE ARC (dnlib, plain diff): 137,517 -> ... -> 80,716 -> 80,715.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
