@@ -40,9 +40,12 @@
 
 #include <any>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <unordered_set>
 #include <vector>
+
+#include "Decompiler/TypeSystem/IType.hpp"
 
 namespace ILSpy::Decompiler::Metadata {
 class CodeMappingInfo;
@@ -80,6 +83,9 @@ public:
     // CollectNamespaces entries are the C# public API). Idempotent per type
     // (the visitedTypes gate).
     void CollectTypeReference(const TypeSystem::IType* type);
+    // The owning form for call sites holding a shared pointer (the
+    // resolution temporaries): pins the type past the walk step.
+    void CollectTypeReference(const TypeSystem::ITypePtr& type);
 
     // The C# `void HandleAttributes(IEnumerable<IAttribute>)` is private; the
     // port exposes it for the attribute-driven callers (the
@@ -103,6 +109,15 @@ private:
     std::unordered_set<const TypeSystem::IType*, std::hash<const void*>,
                        std::equal_to<>>
         visitedTypes_;
+    // The visited types' keepalive registry: the set is pointer-keyed, and
+    // without ownership the address of a freed temporary (the resolution
+    // results, which die at each walk step) can be recycled by a later
+    // allocation and falsely dedup a new visit -- silently dropping its
+    // namespace. Holding the shared pointers here pins every visited type
+    // for the collector's lifetime (the C# needs no such registry: the GC
+    // keeps every visited instance alive and the HashSet<IType> compares by
+    // value).
+    std::vector<TypeSystem::ITypePtr> keepAliveTypes_;
 };
 
 // The C# `public static void CollectNamespaces(IEntity entity, MetadataModule

@@ -21,6 +21,7 @@
 #include "Decompiler/CSharp/CSharpDecompiler.hpp"
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
 #include "Decompiler/CSharp/RequiredNamespaceCollector.hpp"
+#include "Decompiler/CSharp/RequiredImportsRecorder.hpp"
 #include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
@@ -1593,10 +1594,12 @@ std::string RenderBaseTypeName(const TS::ITypeDefinition* typeDef,
         return typeDef->Name() + args;
     BaseNameDecision decision =
         DecideBaseName(typeDef, instantiation, *resolver);
-    if (decision == BaseNameDecision::Short)
+    if (decision == BaseNameDecision::Short) {
+        RequiredImports::RecordNamespace(typeDef->Namespace());
         return typeDef->Name() + args;
+    }
     if (decision == BaseNameDecision::NotFound &&
-        typeDef->DeclaringTypeDefinition() == nullptr)
+        typeDef->DeclaringTypeDefinition() == nullptr) {
         // The not-found TOP-LEVEL tolerance: the port's compilation loads
         // a SUBSET of the C#'s reference modules (the netcore runtime-pack
         // discovery is not ported), so a name absent from the port's
@@ -1604,7 +1607,9 @@ std::string RenderBaseTypeName(const TS::ITypeDefinition* typeDef,
         // it renders short. A NESTED name the scope cannot resolve is real
         // (nested types are not namespace members -- only the enclosing
         // type's scope names them) and falls through to the dotted form.
+        RequiredImports::RecordNamespace(typeDef->Namespace());
         return typeDef->Name() + args;
+    }
     if (typeDef->DeclaringTypeDefinition() != nullptr) {
         // The C# MemberType form: the target is the declaring type
         // through the same decision; the parameterized form's generic type
@@ -1782,8 +1787,13 @@ std::string MemberAttributesText(const TS::IEntity* entity,
         std::string text = section.ToString(&options);
         while (!text.empty() && (text.back() == '\n' || text.back() == '\r'))
             text.pop_back();
-        if (!text.empty())
+        if (!text.empty()) {
+            // The rendered attribute's type name renders short; a using
+            // for its namespace is required (the C# FindRequiredImports
+            // collects the attribute AST's SimpleType nodes the same way).
+            RequiredImports::RecordNamespace(a->AttributeType().Namespace());
             out += text + "\n";
+        }
     }
     return out;
 }
@@ -2834,10 +2844,20 @@ bool DecompileTypeToStringBody(
         // renders as its block.
         bool anyAccessor = false;
         std::string getterBody, setterBody;
-        getterBody = AccessorBodyText(file, typeSystem,
-                                      accessors.GetterToken, "get");
-        setterBody = AccessorBodyText(file, typeSystem,
-                                      accessors.SetterToken, "set");
+        // The stub-vs-block decision renders the accessor bodies as a
+        // PROBE (the C# matches the backing-field pattern over the ILAst;
+        // the port approximates over the rendered text): the probe text
+        // is discarded, so its references must not feed the using
+        // recording. The block-emission arms re-render with the recording
+        // active when a real accessor body is emitted.
+        {
+            RequiredImports::RecordingScope probeScope(nullptr,
+                                                       std::string());
+            getterBody = AccessorBodyText(file, typeSystem,
+                                          accessors.GetterToken, "get");
+            setterBody = AccessorBodyText(file, typeSystem,
+                                          accessors.SetterToken, "set");
+        }
         // The C# automatic-property form: the stub renders when the
         // accessors carry NO bodies (an interface or abstract member) or
         // when they decompile to the backing-field pattern
@@ -2928,6 +2948,8 @@ bool DecompileTypeToStringBody(
                 trimmedBody.find(';') ==
                     trimmedBody.size() - 1;
             if (singleReturn) {
+                getterBody = AccessorBodyText(
+                    file, typeSystem, accessors.GetterToken, "get");
                 out += " => " +
                        trimmedBody.substr(7, trimmedBody.size() - 7 - 1) +
                        ";\n";
@@ -2946,6 +2968,8 @@ bool DecompileTypeToStringBody(
                 if (getterBody.empty()) {
                     out += "get;\n";
                 } else {
+                    getterBody = AccessorBodyText(
+                        file, typeSystem, accessors.GetterToken, "get");
                     out += "get\n{\n" + getterBody + "}\n";
                 }
                 anyAccessor = true;
@@ -2960,6 +2984,8 @@ bool DecompileTypeToStringBody(
                 if (setterBody.empty()) {
                     out += "set;\n";
                 } else {
+                    setterBody = AccessorBodyText(
+                        file, typeSystem, accessors.SetterToken, "set");
                     out += "set\n{\n" + setterBody + "}\n";
                 }
                 anyAccessor = true;
@@ -3082,10 +3108,15 @@ bool DecompileTypeToStringBody(
             // neither accessor has a body (a crafted or interface-like
             // event) -- the recognized automatic pattern (the connid's
             // real bodies) is a later refinement.
-            std::string adderBody = AccessorBodyText(
-                file, typeSystem, accessors.AdderToken, "add");
-            std::string removerBody = AccessorBodyText(
-                file, typeSystem, accessors.RemoverToken, "remove");
+            std::string adderBody, removerBody;
+            {
+                RequiredImports::RecordingScope probeScope(nullptr,
+                                                           std::string());
+                adderBody = AccessorBodyText(
+                    file, typeSystem, accessors.AdderToken, "add");
+                removerBody = AccessorBodyText(
+                    file, typeSystem, accessors.RemoverToken, "remove");
+            }
             bool accessorsHaveBodies =
                 !adderBody.empty() || !removerBody.empty();
             // The C# AutoEventDecompiler.IsAutomaticEvent: both
@@ -3126,11 +3157,18 @@ bool DecompileTypeToStringBody(
                 out += "\n{\n";
                 if (accessors.AdderToken != 0) {
                     out += "add\n{\n";
+                    if (!adderBody.empty())
+                        adderBody = AccessorBodyText(
+                            file, typeSystem, accessors.AdderToken, "add");
                     out += adderBody;
                     out += "}\n";
                 }
                 if (accessors.RemoverToken != 0) {
                     out += "remove\n{\n";
+                    if (!removerBody.empty())
+                        removerBody = AccessorBodyText(
+                            file, typeSystem, accessors.RemoverToken,
+                            "remove");
                     out += removerBody;
                     out += "}\n";
                 }
@@ -3933,23 +3971,42 @@ bool CSharpDecompiler::DecompileTypeToString(
     }
     if (TypeIsHiddenFromRender(file, typeToken))
         return false;
-    bool rendered = DecompileTypeToStringBody(
-        file, &typeSystem, typeSystem.MainMetadataModule(),
-        [](std::uint32_t token) {
-            return FindRegisteredPartialType(token);
-        },
-        usingSet, typeToken, out);
+    // The using directives come from the recording (the instance
+    // overload's note: the C# FindRequiredImports pass).
+    std::set<std::string> usedNamespaces;
+    std::string ns = RootNamespaceOf(file, typeToken);
+    bool rendered;
+    if (RequiredImports::IsRecording()) {
+        // A whole-module loop is rendering this type: its per-type scope
+        // accumulates (the instance overload's note).
+        rendered = DecompileTypeToStringBody(
+            file, &typeSystem, typeSystem.MainMetadataModule(),
+            [](std::uint32_t token) {
+                return FindRegisteredPartialType(token);
+            },
+            usingSet, typeToken, out);
+    } else {
+        RequiredImports::RecordingScope scope(&usedNamespaces, ns);
+        rendered = DecompileTypeToStringBody(
+            file, &typeSystem, typeSystem.MainMetadataModule(),
+            [](std::uint32_t token) {
+                return FindRegisteredPartialType(token);
+            },
+            usingSet, typeToken, out);
+    }
     if (rendered && wrapNamespace) {
         // The single-type render's leading using directives + the
         // namespace header (the C# -t render's file-scoped form:
         // `using ...;` then `namespace X;` before the declaration; a type
         // with no namespace renders the bare header).
-        std::string ns = RootNamespaceOf(file, typeToken);
         if (!ns.empty())
             out = "namespace " + ns + ";\n\n" + out;
-        out = UsingDirectivesText(file, typeSystem.MainMetadataModule(),
-                                 typeToken) +
-             out;
+        std::string usingText;
+        for (const std::string& used : usedNamespaces)
+            usingText += "using " + used + ";\n";
+        if (!usingText.empty())
+            usingText += "\n";
+        out = usingText + out;
     }
     return rendered;
 }
@@ -4092,6 +4149,32 @@ std::vector<std::string> WholeModuleUsingSet(
     return sorted;
 }
 
+std::string WholeModuleAttributesText(
+    const ::ILSpy::Decompiler::TypeSystem::MetadataModule& module,
+    std::set<std::string>& usedNamespaces) {
+    // The attribute sections: the attribute tree rendered without its own
+    // using declarations (the module-wide header replaces them). The
+    // sections sit at the file root, so the recording scope's namespace
+    // filter is the global one.
+    std::string out;
+    std::unique_ptr<Syntax::SyntaxTree> syntaxTree;
+    {
+        RequiredImports::RecordingScope scope(&usedNamespaces,
+                                              std::string());
+        syntaxTree.reset(
+            CSharpDecompiler::DecompileModuleAndAssemblyAttributes(module));
+        for (int i = syntaxTree->Members().Count() - 1; i >= 0; i--) {
+            if (dynamic_cast<Syntax::UsingDeclaration*>(
+                    syntaxTree->Members().At(i)) != nullptr)
+                syntaxTree->Members().At(i)->Remove();
+        }
+        OutputVisitor::CSharpFormattingOptions options =
+            SettingsFormattingOptions();
+        out = syntaxTree->ToString(&options);
+    }
+    return out;
+}
+
 std::string WholeModuleHeader(
     const ::ILSpy::Decompiler::TypeSystem::MetadataModule& module,
     const std::vector<std::string>& usingSet) {
@@ -4131,8 +4214,18 @@ std::string CSharpDecompiler::DecompileWholeModuleToString() {
     // tree: one using scope for every base-list decision).
     std::vector<std::string> moduleUsingSet =
         WholeModuleUsingSet(state_->typeSystem->MainMetadataModule());
-    out += WholeModuleHeader(state_->typeSystem->MainMetadataModule(),
-                             moduleUsingSet);
+    // The emitted using lines come from the recording (the C#
+    // FindRequiredImports over the finished whole-module tree): the
+    // attribute sections and every type render into the body buffer with
+    // the recording armed, then the header is composed from the recorded
+    // namespaces and prepended. The collector's set stays the
+    // qualification pool (the base-list scope).
+    std::set<std::string> usedNamespaces;
+    {
+        std::string attributes = WholeModuleAttributesText(
+            state_->typeSystem->MainMetadataModule(), usedNamespaces);
+        out += attributes;
+    }
     std::string currentNamespace;
     bool namespaceOpen = false;
     // The C# NormalizeBlockStatements' file-scoped-namespace rule: a
@@ -4182,13 +4275,47 @@ std::string CSharpDecompiler::DecompileWholeModuleToString() {
             }
         }
         std::string text;
-        if (DecompileTypeToString(t.Token, text,
-                                 /*wrapNamespace=*/false, &moduleUsingSet))
-            out += text;
+        {
+            RequiredImports::RecordingScope scope(&usedNamespaces,
+                                                  t.Namespace);
+            if (DecompileTypeToString(t.Token, text,
+                                     /*wrapNamespace=*/false,
+                                     &moduleUsingSet))
+                out += text;
+        }
     }
     if (namespaceOpen)
         out += "}\n";
-    return out;
+    // The using header (the C# IntroduceUsingDeclarations over the whole
+    // tree): only the namespaces the rendered declarations actually
+    // reference short. The module-level attribute sections' namespaces
+    // join the recording (they render at the file root, outside every
+    // namespace block).
+    {
+        std::unordered_set<std::string> attributeNamespaces;
+        RequiredNamespaceCollector collector(attributeNamespaces,
+                                              /*seedKnownTypeNamespaces=*/
+                                                  false,
+                                              /*minimalUsingSet=*/true);
+        collector.HandleAttributes(
+            const_cast<TS::MetadataModule&>(
+                state_->typeSystem->MainMetadataModule())
+                .GetAssemblyAttributes());
+        collector.HandleAttributes(
+            const_cast<TS::MetadataModule&>(
+                state_->typeSystem->MainMetadataModule())
+                .GetModuleAttributes());
+        for (const std::string& ans : attributeNamespaces) {
+            if (!ans.empty())
+                usedNamespaces.insert(ans);
+        }
+    }
+    std::string usingText;
+    for (const std::string& ns : usedNamespaces)
+        usingText += "using " + ns + ";\n";
+    if (!usingText.empty())
+        usingText += "\n";
+    return usingText + out;
 }
 
 bool CSharpDecompiler::DecompileTypeToString(
@@ -4208,20 +4335,47 @@ bool CSharpDecompiler::DecompileTypeToString(
     }
     if (TypeIsHiddenFromRender(*state_->file, typeToken))
         return false;
-    bool rendered = DecompileTypeToStringBody(
-        *state_->file, state_->typeSystem ? &state_->typeSystem.value()
-                                          : nullptr,
-        state_->typeSystem->MainMetadataModule(),
-        [this](std::uint32_t token) { return FindPartialTypeInfo(token); },
-        usingSet, typeToken, out);
+    // The using directives come from the recording (the C#
+    // IntroduceUsingDeclarations.FindRequiredImports pass over the
+    // finished AST): the body renders first with the collector's set as
+    // the qualification pool, and every short-name emission records its
+    // namespace; the emitted using lines name only those namespaces.
+    std::set<std::string> usedNamespaces;
+    std::string ns = RootNamespaceOf(*state_->file, typeToken);
+    bool rendered;
+    if (RequiredImports::IsRecording()) {
+        // A whole-module loop is rendering this type: its per-type scope
+        // (already carrying this type's namespace) accumulates the
+        // recording; no second scope is pushed (the innermost sink would
+        // otherwise swallow the records).
+        rendered = DecompileTypeToStringBody(
+            *state_->file, state_->typeSystem ? &state_->typeSystem.value()
+                                              : nullptr,
+            state_->typeSystem->MainMetadataModule(),
+            [this](std::uint32_t token) {
+                return FindPartialTypeInfo(token);
+            },
+            usingSet, typeToken, out);
+    } else {
+        RequiredImports::RecordingScope scope(&usedNamespaces, ns);
+        rendered = DecompileTypeToStringBody(
+            *state_->file, state_->typeSystem ? &state_->typeSystem.value()
+                                              : nullptr,
+            state_->typeSystem->MainMetadataModule(),
+            [this](std::uint32_t token) {
+                return FindPartialTypeInfo(token);
+            },
+            usingSet, typeToken, out);
+    }
     if (rendered && wrapNamespace) {
-        std::string ns = RootNamespaceOf(*state_->file, typeToken);
         if (!ns.empty())
             out = "namespace " + ns + ";\n\n" + out;
-        out = UsingDirectivesText(*state_->file,
-                                  state_->typeSystem->MainMetadataModule(),
-                                  typeToken) +
-             out;
+        std::string usingText;
+        for (const std::string& used : usedNamespaces)
+            usingText += "using " + used + ";\n";
+        if (!usingText.empty())
+            usingText += "\n";
+        out = usingText + out;
     }
     return rendered;
 }
@@ -4362,13 +4516,15 @@ std::string CSharpDecompiler::DecompileWholeModuleToString(
 
     std::string out;
     // The leading attribute sections (the whole-module path's
-    // DoDecompileModuleAndAssemblyAttributes call at line 917). The using
-    // set computes once and feeds both the header and every type render's
-    // base-list scope (the C# single DecompileRun over the whole tree).
+    // DoDecompileModuleAndAssemblyAttributes call at line 917). The
+    // collector's set computes once and stays the qualification pool (the
+    // C# single DecompileRun over the whole tree); the emitted using
+    // lines come from the recording (the C# FindRequiredImports pass).
     std::vector<std::string> moduleUsingSet =
         WholeModuleUsingSet(typeSystem.MainMetadataModule());
-    out += WholeModuleHeader(typeSystem.MainMetadataModule(),
-                             moduleUsingSet);
+    std::set<std::string> usedNamespaces;
+    out += WholeModuleAttributesText(typeSystem.MainMetadataModule(),
+                                     usedNamespaces);
     // The types (the C# DoDecompileTypes loop in metadata order), grouped
     // by namespace (the NamespaceDeclaration emission; a hidden type does
     // not break the group).
@@ -4418,14 +4574,45 @@ std::string CSharpDecompiler::DecompileWholeModuleToString(
             }
         }
         std::string text;
-        if (DecompileTypeToString(file, t.Token, text,
-                                  /*wrapNamespace=*/false,
-                                  &moduleUsingSet))
-            out += text;
+        {
+            RequiredImports::RecordingScope scope(&usedNamespaces,
+                                                  t.Namespace);
+            if (DecompileTypeToString(file, t.Token, text,
+                                      /*wrapNamespace=*/false,
+                                      &moduleUsingSet))
+                out += text;
+        }
     }
     if (namespaceOpen)
         out += "}\n";
-    return out;
+    // The using header (the C# IntroduceUsingDeclarations over the whole
+    // tree): only the namespaces the rendered declarations actually
+    // reference short. The module-level attribute sections' namespaces
+    // join the recording (they render at the file root, outside every
+    // namespace block).
+    std::unordered_set<std::string> attributeNamespaces;
+    {
+        RequiredNamespaceCollector collector(attributeNamespaces,
+                                              /*seedKnownTypeNamespaces=*/
+                                                  false,
+                                              /*minimalUsingSet=*/true);
+        collector.HandleAttributes(
+            const_cast<TS::MetadataModule&>(typeSystem.MainMetadataModule())
+                .GetAssemblyAttributes());
+        collector.HandleAttributes(
+            const_cast<TS::MetadataModule&>(typeSystem.MainMetadataModule())
+                .GetModuleAttributes());
+    }
+    for (const std::string& ans : attributeNamespaces) {
+        if (!ans.empty())
+            usedNamespaces.insert(ans);
+    }
+    std::string usingText;
+    for (const std::string& ns : usedNamespaces)
+        usingText += "using " + ns + ";\n";
+    if (!usingText.empty())
+        usingText += "\n";
+    return usingText + out;
 }
 
 std::vector<std::unique_ptr<Transforms::IAstTransform>>

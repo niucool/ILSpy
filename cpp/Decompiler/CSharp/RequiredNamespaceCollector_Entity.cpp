@@ -68,7 +68,7 @@ void HandleTypeParameters(RequiredNamespaceCollector& collector,
         if (typeParam == nullptr) continue;
         collector.HandleAttributes(typeParam->GetAttributes());
         for (const TS::ITypePtr& constraint : typeParam->DirectBaseTypes()) {
-            collector.CollectTypeReference(constraint.get());
+            collector.CollectTypeReference(constraint);
         }
     }
 }
@@ -88,7 +88,7 @@ void CollectNamespacesFromMethodBody(RequiredNamespaceCollector& collector,
             for (const TS::ITypePtr& type :
                  module.DecodeLocalSignature(body.LocalVarSigToken(),
                                              DefaultGenericContext())) {
-                collector.CollectTypeReference(type.get());
+                collector.CollectTypeReference(type);
             }
         } catch (const std::invalid_argument&) {
             // Issue #1211: ignore invalid local signatures
@@ -100,7 +100,7 @@ void CollectNamespacesFromMethodBody(RequiredNamespaceCollector& collector,
         try {
             TS::ITypePtr ty = module.ResolveType(region.ClassTokenOrFilterOffset,
                                                  DefaultGenericContext());
-            collector.CollectTypeReference(ty.get());
+            collector.CollectTypeReference(ty);
         } catch (const std::invalid_argument&) {
             continue;
         }
@@ -127,7 +127,7 @@ void CollectNamespacesFromMethodBody(RequiredNamespaceCollector& collector,
                     try {
                         TS::ITypePtr type = module.ResolveType(
                             raw, DefaultGenericContext());
-                        collector.CollectTypeReference(type.get());
+                        collector.CollectTypeReference(type);
                     } catch (const std::invalid_argument&) {
                         continue;
                     }
@@ -142,12 +142,12 @@ void CollectNamespacesFromMethodBody(RequiredNamespaceCollector& collector,
                         if (const auto* field =
                                 dynamic_cast<const TS::IField*>(member)) {
                             collector.CollectTypeReference(
-                                field->DeclaringType().get());
+                                field->DeclaringType());
                             collector.CollectTypeReference(&field->ReturnType());
                         } else if (const auto* method =
                                        dynamic_cast<const TS::IMethod*>(member)) {
                             collector.CollectTypeReference(
-                                method->DeclaringType().get());
+                                method->DeclaringType());
                             collector.CollectTypeReference(&method->ReturnType());
                             for (const TS::IParameter* param :
                                  method->Parameters()) {
@@ -155,7 +155,7 @@ void CollectNamespacesFromMethodBody(RequiredNamespaceCollector& collector,
                             }
                             for (const TS::ITypePtr& arg :
                                  method->TypeArguments()) {
-                                collector.CollectTypeReference(arg.get());
+                                collector.CollectTypeReference(arg);
                             }
                         }
                     } catch (const std::invalid_argument&) {
@@ -169,7 +169,7 @@ void CollectNamespacesFromMethodBody(RequiredNamespaceCollector& collector,
                             decoded = module.DecodeMethodSignature(
                                 raw, DefaultGenericContext());
                         if (decoded.Type != nullptr) {
-                            collector.CollectTypeReference(decoded.Type.get());
+                            collector.CollectTypeReference(decoded.Type);
                         }
                     } catch (const std::invalid_argument&) {
                         continue;
@@ -214,7 +214,7 @@ void CollectNamespacesEntity(RequiredNamespaceCollector& collector,
                  TS::IsKnownType(*baseType, TS::KnownTypeCode::Enum))) {
                 continue;
             }
-            collector.CollectTypeReference(baseType.get());
+            collector.CollectTypeReference(baseType);
         }
         for (const TS::ITypeDefinition* nested : td->NestedTypes()) {
             CollectNamespacesEntity(collector, nested, module, mappingInfo,

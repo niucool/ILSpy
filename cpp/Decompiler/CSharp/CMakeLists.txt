@@ -9,6 +9,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/ILAstToCSharp.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/RequiredNamespaceCollector.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/RequiredNamespaceCollector_Entity.cpp
+  RequiredImportsRecorder.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/CSharpDecompiler.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/AutoEventDecompiler.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Annotations.cpp

@@ -59,6 +59,13 @@ RequiredNamespaceCollector::RequiredNamespaceCollector(
 // the TypeWithElementType family = ArrayType/ByReferenceType/PointerType/
 // ModifiedType, TupleType, FunctionPointerType; the default adds the
 // namespace). Every arm terminates with the base-type namespace sweep.
+void RequiredNamespaceCollector::CollectTypeReference(
+    const TS::ITypePtr& type) {
+    if (type == nullptr) return;
+    keepAliveTypes_.push_back(type);
+    CollectTypeReference(type.get());
+}
+
 void RequiredNamespaceCollector::CollectTypeReference(const TS::IType* type) {
     if (type == nullptr) return;
     if (!visitedTypes_.insert(type).second) return;
@@ -68,9 +75,9 @@ void RequiredNamespaceCollector::CollectTypeReference(const TS::IType* type) {
     const auto* parameterized = dynamic_cast<const TS::ParameterizedType*>(type);
     if (parameterized != nullptr) {
         namespaces_.emplace(parameterized->Namespace());
-        CollectTypeReference(parameterized->GenericType().get());
+        CollectTypeReference(parameterized->GenericType());
         for (const TS::ITypePtr& arg : parameterized->TypeArguments()) {
-            CollectTypeReference(arg.get());
+            CollectTypeReference(arg);
         }
         return;
     }
@@ -78,21 +85,21 @@ void RequiredNamespaceCollector::CollectTypeReference(const TS::IType* type) {
     // types recurse into the element type and FALL THROUGH to the base-type
     // sweep.
     if (const auto* arrayType = dynamic_cast<const TS::ArrayType*>(type)) {
-        CollectTypeReference(arrayType->Element().get());
+        CollectTypeReference(arrayType->Element());
     } else if (const auto* byRefType =
                    dynamic_cast<const TS::ByReferenceType*>(type)) {
-        CollectTypeReference(byRefType->Element().get());
+        CollectTypeReference(byRefType->Element());
     } else if (const auto* pointerType =
                    dynamic_cast<const TS::PointerType*>(type)) {
-        CollectTypeReference(pointerType->Element().get());
+        CollectTypeReference(pointerType->Element());
     }
     // The C# `case TupleType`: the element types recurse (the fall-through to
     // the base sweep applies too -- a TupleType's underlying ValueTuple chain
     // contributes its namespaces).
     if (const auto* fnPtr = dynamic_cast<const TS::FunctionPointerType*>(type)) {
-        CollectTypeReference(fnPtr->ReturnType().get());
+        CollectTypeReference(fnPtr->ReturnType());
         for (const TS::ITypePtr& paramType : fnPtr->ParameterTypes()) {
-            CollectTypeReference(paramType.get());
+            CollectTypeReference(paramType);
         }
         return;
     }

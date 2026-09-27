@@ -25,6 +25,7 @@
 // expression rather than dropping text or crashing.
 
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
+#include "Decompiler/CSharp/RequiredImportsRecorder.hpp"
 #include <algorithm>
 #include <functional>
 #include <cmath>
@@ -2609,6 +2610,7 @@ private:
                     // renders `EqualityComparer<System.Object>.Default`.
                     std::string fullType(type);
                     FlattenReflectionArgs(fullType);
+                    ::ILSpy::Decompiler::CSharp::RequiredImports::RecordTypeName(fullType);
                     std::size_t lt = fullType.find('<');
                     std::size_t dot = fullType.rfind('.',
                         (lt == std::string::npos) ? std::string::npos : lt);
@@ -2681,6 +2683,7 @@ private:
             (call.IsNewObj && call.DeclaringType)
                 ? dynamic_cast<const TypeSystem::ParameterizedType*>(call.DeclaringType.get())
                 : nullptr;
+        ::ILSpy::Decompiler::CSharp::RequiredImports::RecordMethodTarget(call.MethodName);
         std::string typeName = genDecl ? CSharpTypeName(call.DeclaringType)
                                        : FlattenMetadataName(std::move(name));
         if (!genDecl) {
@@ -2727,6 +2730,7 @@ private:
                     // The short form (the C# name lookup through the using
                     // directives; the last-segment convention).
                     const std::string& tn = call.TypeArgumentNames[i];
+                    ::ILSpy::Decompiler::CSharp::RequiredImports::RecordTypeName(tn);
                     auto dot = tn.rfind('.');
                     typeName += (dot != std::string::npos)
                         ? tn.substr(dot + 1) : tn;
@@ -4106,6 +4110,7 @@ std::string CSharpTypeName(const TypeSystem::ITypePtr& type) {
         std::string base;
         if (p->GenericType()) {
             std::string rn = p->GenericType()->ReflectionName();
+            ::ILSpy::Decompiler::CSharp::RequiredImports::RecordTypeName(rn);
             auto dot = rn.rfind('.');
             base = dot != std::string::npos ? rn.substr(dot + 1) : rn;
         } else {
@@ -4147,11 +4152,13 @@ std::string CSharpTypeName(const TypeSystem::ITypePtr& type) {
     // name is only nameable through its enclosing type, so it renders
     // the full dotted form (the C# simple type's dotted full name).
     if (rn.find('+') != std::string::npos) {
+        ::ILSpy::Decompiler::CSharp::RequiredImports::RecordTypeName(rn);
         std::string dotted = rn;
         for (char& c : dotted)
             if (c == '+') c = '.';
         return dotted;
     }
+    ::ILSpy::Decompiler::CSharp::RequiredImports::RecordTypeName(rn);
     auto pos = rn.rfind('.');
     return pos != std::string::npos ? rn.substr(pos + 1) : rn;
 }
