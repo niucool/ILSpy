@@ -1767,7 +1767,28 @@ CLOSED (the arc 68 -> 33 normalized diff lines):
   (the RIGHT-operand/tighter-parent and the ternary-branch-slots
   parenthesize; everything else bare; `checked(a + b)` single parens).
 
-THE REMAINING RESIDUE (28 lines; the arc 68 -> 33 -> 28):
+THE REMAINING RESIDUE (21 lines; the arc 68 -> 33 -> 28 -> 23 -> 21):
+- CLOSED: the array-initializer family's render pieces (the element-
+  type fix -- the C# passes MatchNewArr's element type, not the store
+  variable's array type; the `new T[dims] { elements }` render -- the
+  C# TranslateArrayInitializer port; the statement-position fallback
+  `v = new T[n] { ... };` -- the op-32 was the initializer's final
+  ldloc rendered as an unhandled statement).
+- CLOSED: String.Concat -> the + chain; the GetTypeFromHandle unwrap;
+  the typeof short name.
+- THE REMAINING ITEMS: (1) the dup-alias line `string[] array =
+  array_2;` -- the block-valued store does not inline into the user's
+  local (the C# chain does; the port's dup_160/dup_168 slot chain
+  breaks the FindLoadInNext inline -- investigate
+  InlineOneIfPossible/CanMoveInto for the ArrayInitializer block);
+  (2) the foreach -- the oracle renders `foreach (string text in
+  array2)`, the port an indexed `for (; num < array.Length; num++)`
+  -- the foreach detection (the C# LoopDetection/HighLevelLoop
+  foreach pattern over the array enumerator); (3) the for-init hoist
+  `for (int i = 1; ...)` vs `int num_1 = 1; for (; ...)`; (4) the
+  local naming (num/i, iShape/shape, array_3/array -- the
+  AssignVariableNames heuristics); (5) the blank line after the
+  field declaration; (6) the Debuggable... all cosmetic-scale.
 - CLOSED: the int->bool ternary condition (the ConvertConditionText --
   the C# ConvertToBoolean port; an int-typed condition renders
   `x != 0`; the ternary style `((cond) ? (a) : (b))`).
