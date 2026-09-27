@@ -2638,6 +2638,22 @@ null path = the bare `leave ldnull`; the use's block single-pred
 (the guard's branch). The family: 223 oracle `?.` lines vs the port's
 77.
 
+## THE NULL-PROPAGATION MACHINERY (the compose-with piece, found)
+
+THE PORT'S `?.` = the NullableUnwrap/NullableRewrap INSTRUCTION PAIR
+(ILAst instructions; the emitter's NullableUnwrap case renders the
+null-conditional, the call arms with the nullable receiver render
+`x?.M(...)` -- the 77 existing sites come through these). THE FOLD
+DESIGN (complete): the dumped shape folds by constructing the
+NullableUnwrap over the value expression and threading it as the
+use-call's receiver (the same compose-don't-fight pattern as the
+NullCoalescingInstruction) -- `[stloc dup = expr, stloc S = dup,
+if (dup) br L] + [leave ldnull] + [L: the use]` becomes
+`return expr?.Member(args);`. THE GATES (recorded with the shape):
+the dup loaded only by copy+guard, S only by the use (the elision
+composes), the null path the bare `leave ldnull`, the use block
+single-pred. THE SIZE: 223 oracle lines vs the port's 77.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
