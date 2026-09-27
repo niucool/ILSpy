@@ -2697,6 +2697,19 @@ use's receiver; the comp's constant the null/zero form; the branch
 the true-arm) -- the implementation from the history needs only the
 shape alignment.
 
+## THE NULL-PROPAGATION -- SECOND ATTEMPT, REVERTED (the counters next)
+
+THE REALIGNED SHAPE (the comp-guard, no S_0 copy) ALSO fired zero
+sites. The tree reverted clean (the pin ebf9b6e9..., the plain diff
+80,715 verified standing). THE NEXT SESSION: the [NP] gate counters
+BEFORE any further shape guessing -- the probe showed the b0
+contents but the if's exact arm structure (which child is the
+branch, the comp's operator/constant forms) was not dumped; the
+counters on each gate (the b0 size, the if-final, the comp's left,
+the null path, the use-call's receiver, the counts, the preds) will
+localize the mismatch in one run. The implementation (both
+variants) is in the turn history and compiles clean.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
