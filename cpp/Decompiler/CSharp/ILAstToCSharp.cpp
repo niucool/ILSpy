@@ -2674,7 +2674,88 @@ private:
     // The condition expression for an `if`/`while`: strip redundant outer
     // parens so `if ((cond))` becomes `if (cond)`.
     std::string CondExpr(const ILInstruction& inst) {
-        return StripOuterParens(Expr(inst));
+        return StripOuterParens(ConvertConditionText(inst, false));
+    }
+
+    // The C# ExpressionBuilder.TranslateCondition ->
+    // TranslatedExpression.ConvertToBoolean: a condition consumer (the
+    // if/loop condition, the ternary condition) needs a Boolean
+    // expression. A Boolean-valued condition (a comparison, a short-
+    // circuit) renders bare; an integer-typed one renders `x != 0` (the
+    // negated form `x == 0`); an int32 constant folds to the bool
+    // literal. An unclassifiable (unknown-typed) condition renders bare
+    // -- the C# TypeKind.Unknown arm. The enum zero-member and the
+    // pointer-null arms are deferred (no fixture exercises them).
+    std::string ConvertConditionText(const ILInstruction& cond, bool negate) {
+        switch (cond.Op) {
+            case OpCode::Comp:
+            case OpCode::IfInstruction:
+                // Boolean-valued by construction.
+                return Expr(cond);
+            case OpCode::LdcI4: {
+                bool val = static_cast<const LdcI4&>(cond).Value != 0;
+                val ^= negate;
+                return val ? "true" : "false";
+            }
+            case OpCode::BinaryNumericInstruction:
+                return Expr(cond) + (negate ? " == 0" : " != 0");
+            case OpCode::LdLoc: {
+                const auto* ld = static_cast<const LdLoc*>(&cond);
+                const auto* k =
+                    ld->Variable && ld->Variable->Type
+                        ? dynamic_cast<const TypeSystem::KnownType*>(
+                              ld->Variable->Type.get())
+                        : nullptr;
+                if (k != nullptr) {
+                    switch (k->Code()) {
+                        case TypeSystem::KnownTypeCode::Boolean:
+                            return Expr(cond);
+                        case TypeSystem::KnownTypeCode::SByte:
+                        case TypeSystem::KnownTypeCode::Byte:
+                        case TypeSystem::KnownTypeCode::Int16:
+                        case TypeSystem::KnownTypeCode::UInt16:
+                        case TypeSystem::KnownTypeCode::Int32:
+                        case TypeSystem::KnownTypeCode::UInt32:
+                        case TypeSystem::KnownTypeCode::Int64:
+                        case TypeSystem::KnownTypeCode::UInt64:
+                        case TypeSystem::KnownTypeCode::Char:
+                            return Expr(cond) + (negate ? " == 0" : " != 0");
+                        default:
+                            return Expr(cond);
+                    }
+                }
+                return Expr(cond);
+            }
+            case OpCode::Call: {
+                const auto* call = static_cast<const Call*>(&cond);
+                const auto* k =
+                    call->ReturnIType
+                        ? dynamic_cast<const TypeSystem::KnownType*>(
+                              call->ReturnIType.get())
+                        : nullptr;
+                if (k != nullptr &&
+                    k->Code() == TypeSystem::KnownTypeCode::Boolean)
+                    return Expr(cond);
+                if (k != nullptr) {
+                    switch (k->Code()) {
+                        case TypeSystem::KnownTypeCode::SByte:
+                        case TypeSystem::KnownTypeCode::Byte:
+                        case TypeSystem::KnownTypeCode::Int16:
+                        case TypeSystem::KnownTypeCode::UInt16:
+                        case TypeSystem::KnownTypeCode::Int32:
+                        case TypeSystem::KnownTypeCode::UInt32:
+                        case TypeSystem::KnownTypeCode::Int64:
+                        case TypeSystem::KnownTypeCode::UInt64:
+                            return Expr(cond) + (negate ? " == 0" : " != 0");
+                        default:
+                            return Expr(cond);
+                    }
+                }
+                return Expr(cond);
+            }
+            default:
+                return Expr(cond);
+        }
     }
 
     std::string Expr(const ILInstruction& inst) {
@@ -3081,8 +3162,13 @@ private:
                     }
                     return Expr(*arm);
                 };
-                std::string cond = iff.Condition ? Expr(*iff.Condition) : "(default)";
-                return "(" + cond + " ? " + ArmExpr(iff.TrueInst) +
+                std::string cond = iff.Condition
+                    ? ConvertConditionText(*iff.Condition, false)
+                    : "(default)";
+                // The ILSpy conditional style: the condition and the
+                // branches each parenthesized, the whole conditional
+                // parenthesized (`((cond) ? (a) : (b))`).
+                return "((" + cond + ") ? " + ArmExpr(iff.TrueInst) +
                        " : " + ArmExpr(iff.FalseInst) + ")";
             }
             case OpCode::NullCoalescingInstruction: {
