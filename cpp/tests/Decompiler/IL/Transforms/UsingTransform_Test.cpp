@@ -754,9 +754,11 @@ TEST(UsingTransform, FoldsNullCoalescingChain)
 
     // block0: [a = obj, b = a] + the final if (a) goto L else Nop.
     // block1: [b = obj] + the final branch L.
-    // block2 (= L): the leave.
+    // block2 (= L): the leave -- its value is the target's single use,
+    // so the fold's elision inlines the coalesce here.
     auto* b2raw = new Block();
-    b2raw->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    b2raw->SetFinal(std::make_unique<Leave>(
+        fn->Body.get(), std::make_unique<LdLoc>(target)));
 
     auto b0 = std::make_unique<Block>();
     b0->Add(std::make_unique<StLoc>(temp, std::make_unique<LdLoc>(obj)));
@@ -782,9 +784,14 @@ TEST(UsingTransform, FoldsNullCoalescingChain)
     target->StoreCount = 2;
     fn->CheckInvariant(ILPhase::Normal);
 
-    std::string text = ILAstToCSharp(*fn, "void", "M", "object obj");
-    EXPECT_NE(text.find("var b = (obj ?? obj);"), std::string::npos)
-        << "the chain folds to the coalescing declaration: " << text;
+    std::string text = ILAstToCSharp(*fn, "object", "M", "object obj");
+    // The single-use elision: the target's only load (the leave's value)
+    // inlines the coalesce, and the declaration drops.
+    EXPECT_NE(text.find("return (obj ?? obj);"), std::string::npos)
+        << "the single-use target inlines the coalesce into its use: "
+        << text;
+    EXPECT_EQ(text.find("var b ="), std::string::npos)
+        << "the elided declaration drops: " << text;
     EXPECT_EQ(text.find("goto IL_"), std::string::npos)
         << "no goto remains for the folded guard: " << text;
 }

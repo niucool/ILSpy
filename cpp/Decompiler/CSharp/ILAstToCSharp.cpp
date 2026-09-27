@@ -340,6 +340,11 @@ private:
     // text form. The instances are owned here (the ILAst tree does not own
     // them; they live only for the render).
     std::map<const StLoc*, NullCoalescingInstruction*> coalesceFolds_;
+    // The elision extension: a folded target with exactly ONE remaining
+    // load site inlines the coalesce expression into that use (the C#
+    // ILInlining's single-use rule) and drops the declaration. The map
+    // holds the single LdLoc with the folded node.
+    std::map<const LdLoc*, NullCoalescingInstruction*> coalesceElisions_;
     std::set<const ILInstruction*> coalesceSkipped_;
     std::set<const Block*> coalesceSuppressed_;
     std::vector<std::unique_ptr<NullCoalescingInstruction>> coalesceKeepAlive_;
@@ -832,6 +837,62 @@ private:
                 coalesceSkipped_.insert(storeA);
                 coalesceSkipped_.insert(iff);
                 coalesceSuppressed_.insert(b1);
+                // The single-use elision: a target with exactly one load
+                // site inlines the coalesce into that use and drops the
+                // declaration (the C# oracle's form -- `new ResourceName(
+                // ReadString(...) ?? string.Empty)`). The safety gates:
+                // the load is in the same container, in a LATER block than
+                // the declaration (the straight-line flow -- a loop back
+                // edge would re-evaluate a side-effecting expression), and
+                // the container is not a loop.
+                if (target->LoadCount == 1) {
+                    const LdLoc* useSite = nullptr;
+                    std::function<void(const ILInstruction*)> findLoad =
+                        [&](const ILInstruction* i) {
+                        if (i == nullptr || useSite != nullptr) return;
+                        if (i->Op == OpCode::LdLoc) {
+                            auto* l = static_cast<const LdLoc*>(i);
+                            if (l->Variable.get() == target)
+                                useSite = l;
+                        }
+                        for (int ci = 0; ci < i->ChildCount(); ++ci)
+                            findLoad(i->GetChild(ci));
+                    };
+                    findLoad(root);
+                    if (useSite != nullptr) {
+                        // The use site sits inside a nested expression
+                        // (the ctor's arguments); walk the ancestors to its
+                        // enclosing block.
+                        const Block* useBlock = nullptr;
+                        for (const ILInstruction* p = useSite; p != nullptr;
+                             p = p->Parent) {
+                            if (p->Op == OpCode::Block) {
+                                useBlock = static_cast<const Block*>(p);
+                                break;
+                            }
+                        }
+                        if (useBlock != nullptr) {
+                            std::size_t useIndex = 0;
+                            bool foundUse = false;
+                            for (std::size_t ui = 0; ui < c->Blocks.size();
+                                 ++ui)
+                                if (c->Blocks[ui].get() == useBlock) {
+                                    useIndex = ui;
+                                    foundUse = true;
+                                    break;
+                                }
+                            if (foundUse && useIndex > k &&
+                                c->Kind != ContainerKind::Loop &&
+                                c->Kind != ContainerKind::While &&
+                                c->Kind != ContainerKind::For &&
+                                c->Kind != ContainerKind::DoWhile) {
+                                coalesceElisions_[useSite] =
+                                    coalesceKeepAlive_.back().get();
+                                coalesceSkipped_.insert(copyB);
+                            }
+                        }
+                    }
+                }
             }
             // The nested containers sit inside the blocks' instructions
             // (a container's direct children are Blocks), so the descent
@@ -3842,6 +3903,11 @@ private:
             }
             case OpCode::LdLoc: {
                 const auto& ld = static_cast<const LdLoc&>(inst);
+                // The elided coalesce target: the single use site renders
+                // the folded expression itself.
+                auto el = coalesceElisions_.find(&ld);
+                if (el != coalesceElisions_.end())
+                    return Expr(*el->second);
                 return ld.Variable ? ld.Variable->Name : "?";
             }
             case OpCode::StLoc: {
