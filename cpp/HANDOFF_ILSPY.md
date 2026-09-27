@@ -2883,6 +2883,29 @@ the typeSystem, after the using-set -- the stage that owns the
 ~1,090MB is the target. THE C# ORACLE'S 370MB SAYS ~700MB OF
 STRUCTURAL EXCESS in the port's load path.
 
+## THE PERF/MEMORY -- THE STAGE ANSWER (the 1GB named)
+
+THE CLI-SITE STAGE LOGGER (dnlib, the release build):
+```
+post-metadatafile   8.6MB    (the metadata load is LAZY -- trivial)
+post-typesystem   1066MB    (the CSharpDecompiler CTOR -- THE 1GB)
+post-render       1096MB    (the whole render adds only 30MB)
+```
+THE CULPRIT CHAIN: the ctor's `state_->typeSystem.emplace(file,
+resolver, ...)` -- THE DECOMPILERTYPESYSTEM CONSTRUCTION allocates
+~1,057MB AT STARTUP. The C# does the same wiring inside its 370MB
+total -- ~700MB of structural excess. THE NEXT SLICE: the
+DecompilerTypeSystem ctor's internals (Decompiler/TypeSystem/
+DecompilerTypeSystem.cpp) -- WHAT it builds eagerly (the known-types
+table? an entity construction for every TypeDef/MemberDef? the
+metadata-module cache?) vs the C#'s LAZY per-access construction.
+THE HYPOTHESIS: an eager whole-module entity/type materialization --
+the fix is deferring it to first use (the C# model) or sharing the
+per-row representations. THE PROBE (the CLI-site logger in
+ILSpyCmd/main.cpp, the file-append form, preserved in the turn
+history -- instrument the ctor's internals the same way: a sample
+after the resolver, after the metadata module, after the known types).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
