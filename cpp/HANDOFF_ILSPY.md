@@ -2133,6 +2133,43 @@ singularized).
 THE MEASURE (dnlib -w lines vs the oracle): 70,947 -> 70,917 (the
 foreach element names) -> 70,677 (the store/load proposals).
 
+## THE ENUMERATOR FOREACH -- LANDED (the singularization with it)
+
+THE SLICE: the flat emitter's UsingInstruction arm collapses the
+enumerator foreach (`using (coll.GetEnumerator()) { while ((ref
+enumerator).MoveNext()) ... }` -> `foreach (T e in coll)`), with the
+element named by the new
+AssignVariableNames::SuggestForeachElementName -- the C#
+GenerateForeachVariableName port: the collection's suggested name (the
+field / Get-method remainder via GetNameFromInstruction) SINGULARIZED
+(the minimal Humanizer: the irregulars data->datum/children->child,
+-ies->-y, the sibilant -es, the plain -s), the List-suffix strip, the
+list->item and children rules, the digit strip, the "item" fallback.
+The element type: the hoisted `T v = ...Current;` declaration, else
+the collection type's first type argument, else var. Any remaining
+enumerator reference beyond Current aborts the collapse.
+
+THE MEASURE (dnlib -w lines vs the oracle): 70,947 -> 70,917 (the
+foreach element names) -> 70,677 (the store/load proposals) -> 70,432
+(the enumerator foreach). FindDirectory now renders the oracle's
+exact `foreach (ResourceDirectory directory in directories)`.
+
+THE KNOWN RESIDUES (the collapse's own cosmetics, recorded): (1) the
+trailing statements after the loop dedent one level but can land one
+tab short (a cosmetic off-by-one in the composition); (2) the
+PRE-EXISTING double-return (the leave inside the try + the method
+exit -- the port's exit-block modeling renders `return x;` twice
+around a using) surfaces in the collapsed form too -- a separate
+control-flow item, NOT the collapse's doing; (3) the shape match is
+text-level over the port's own deterministic render -- a new render
+shape for the while body would need the match updated.
+
+THE NEXT NAMING/CONTROL-FLOW ITEMS (in measured order): the double-
+return/exit-block modeling (visible everywhere a using wraps a
+returning body); the member-name shadow filter
+(currentLowerCaseTypeOrMemberNames); the call-parameter-name arm of
+the load proposal (needs the resolved IMethod).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
