@@ -1780,14 +1780,34 @@ THE REMAINING RESIDUE (3 lines; the arc 68 -> 33 -> 28 -> 23 -> 21 -> 20 -> 8 ->
   TransformForeachOnArray port: the `i < arr.Length` + `i++` +
   all-element-access shape renders `foreach (T e in arr)` with the
   element-type naming).
-- THE LAST RESIDUE (3 -w lines): the oracle KEEPS the `string[] array2
-  = array;` alias (its V_4 has two loads -- ldlen + ldelema -- so the
-  C# single-load inline gate leaves it; the foreach reads `in array2`).
-  The port's whole-function ILInlining pass inlines the multi-load
-  alias away (the foreach reads `in array`). The fix is a pipeline
-  fidelity question (which pass inline-what over multi-load
-  stack-slot aliases), recorded for the next session; the render-level
-  workaround would reintroduce the alias synthetically.
+- THE LAST RESIDUE (3 -w lines) -- INVESTIGATED AND RECORDED: the
+  oracle KEEPS the `string[] array2 = array;` alias and the foreach
+  reads `in array2`; the port renders one statement (`in array`).
+  THE FINDING: the port's inline gates ARE the C#'s single-load rule
+  (VariableCanBeUsedForInlining matches the C# CanBeUsedForInlining
+  verbatim); the divergence is the CHAIN GEOMETRY. The port's reader
+  models `dup` with stack-slot temporaries, so the chain carries one
+  extra hop: [stloc(dup_160, newarr)] [stores] [stloc(dup_168, ldloc
+  dup_160)] [stloc(V_1, ldloc dup_168)] [stloc(V_4, ldloc V_1)]; the
+  initializer matches at the dup_160 statement and the statement
+  group's per-statement ILInlining then collapses the remaining hops
+  one per visit, folding the whole chain into `stloc(V_4, block)` --
+  the render-level dangling-alias fold then renders one statement. The
+  C#'s ILAst has no dup slots (the reader shares the expression), so
+  the initializer sits on V_1 and the C#'s chain stops a hop earlier,
+  leaving the array2 alias the oracle shows. WHICH C# gate stops the
+  last hop over the ArrayInitializer block value is unidentified (the
+  CanMoveInto/MayReorder over block values, or the per-statement
+  driver's revisit semantics); the root fix is the reader-level dup
+  modeling (the C#'s expression sharing) -- a change with corpus-wide
+  blast radius, deliberately out of this arc's scope.
+THE CLOSING NUMBERS: the hello.net8 arc 68 -> 33 -> 28 -> 23 -> 21 ->
+20 -> 8 -> 5 -> 3 -w lines (the remaining 3 = the kept-alias line +
+the foreach's array variable name); the render otherwise byte-identical
+to the oracle. Every guard held every slice: the full sweep 13,166 ran
+/ 15 baseline (identical failures), the connid pin fbda64dd... (the
+deliberate member-separator re-base; normalized 0/0 against the fresh
+C# oracle), the net48 PresentationFramework corpus 0/0 throughout.
 - CLOSED: the array-initializer family's render pieces (the element-
   type fix -- the C# passes MatchNewArr's element type, not the store
   variable's array type; the `new T[dims] { elements }` render -- the
