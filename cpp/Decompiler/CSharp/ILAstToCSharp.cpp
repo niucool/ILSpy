@@ -1004,28 +1004,60 @@ private:
                 continue;
             auto* container =
                 dynamic_cast<BlockContainer*>(storeBlock->Parent);
-            auto* useContainer =
-                dynamic_cast<BlockContainer*>(useBlock->Parent);
-            if (container == nullptr || container != useContainer)
+            if (container == nullptr)
                 continue;
-            if (container->Kind == ContainerKind::Loop ||
-                container->Kind == ContainerKind::While ||
-                container->Kind == ContainerKind::For ||
-                container->Kind == ContainerKind::DoWhile)
-                continue;
-            std::size_t storeIndex = 0, useIndex = 0;
-            bool foundStore = false, foundUse = false;
+            std::size_t storeIndex = 0;
+            bool foundStore = false;
             for (std::size_t ui = 0; ui < container->Blocks.size(); ++ui) {
                 if (container->Blocks[ui].get() == storeBlock) {
                     storeIndex = ui;
                     foundStore = true;
-                }
-                if (container->Blocks[ui].get() == useBlock) {
-                    useIndex = ui;
-                    foundUse = true;
+                    break;
                 }
             }
-            if (!foundStore || !foundUse || useIndex < storeIndex)
+            if (!foundStore)
+                continue;
+            // The dominance approximation (the C#'s flow-insensitive
+            // rule): walk up from the use's block through the nested
+            // containers; the use is dominated by the declaration when
+            // the chain reaches the declaration's container at a block
+            // index >= the declaration's. The loop containers are no
+            // longer excluded -- the pure gate covers the re-evaluation
+            // (a pure expression re-evaluated per iteration is
+            // semantically inert, and the C# inlines the same shapes).
+            bool dominated = false;
+            {
+                const Block* ub = useBlock;
+                auto* uc = dynamic_cast<BlockContainer*>(useBlock->Parent);
+                while (uc != nullptr) {
+                    if (uc == container) {
+                        for (std::size_t ui = 0; ui < container->Blocks.size();
+                             ++ui) {
+                            if (container->Blocks[ui].get() == ub) {
+                                if (ui >= storeIndex)
+                                    dominated = true;
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                    // Up one level: the container's parent block (the
+                    // container is an instruction inside it).
+                    const Block* pb = nullptr;
+                    for (const ILInstruction* p = uc->Parent; p != nullptr;
+                         p = p->Parent) {
+                        if (p->Op == OpCode::Block) {
+                            pb = static_cast<const Block*>(p);
+                            break;
+                        }
+                    }
+                    if (pb == nullptr)
+                        break;
+                    ub = pb;
+                    uc = dynamic_cast<BlockContainer*>(pb->Parent);
+                }
+            }
+            if (!dominated)
                 continue;
             singleUseElisions_[useSite] = store->Value.get();
             singleUseSkipped_.insert(store);
