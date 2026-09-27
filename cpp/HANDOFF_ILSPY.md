@@ -2196,6 +2196,40 @@ long-tail families (the blank-line residue at 1,486 hunks -- the
 spacing/normalization differences -- may be the next systematic
 family).
 
+## THE NAMESPACE-BLOCK INDENT -- LANDED (the disproof that found it)
+
+THE DISPROOF FIRST (the honest record): the handoff's "blank-line
+family (~1,486 hunks)" was WRONG -- difflib's opcode analysis finds
+exactly ONE blank-only difference in the whole 70k-line dnlib diff;
+the 1,486 was an artifact of the plain-diff hunk splitting (a
+plain-diff hunk can start with a blank line that rides along a content
+change). THE REAL FAMILY behind it: the whole-module render's
+namespace BLOCK form did not indent its types -- every member of
+every multi-namespace module rendered one tab shallow against the
+oracle (898 same-text-different-indent hunks; the -w diff HIDES it,
+the plain diff showed it). No gate saw it: the corpus compares
+whitespace-normalized lines, and the connid/hello gates use the
+file-scoped form.
+
+THE FIX: the whole-module loops indent a type's text one tab per line
+inside an open `namespace X {` block (both overloads; the file-scoped
+form and the global-namespace types stay at the root). THE CONNID PIN
+MOVED: fbda64dd... -> ebf9b6e9fd29112f... (the second deliberate
+re-pin -- the exact diff vs the fresh oracle improves 175 -> 25
+lines, the normalized comparison stays 0/0; regenerate the reference
+with DOTNET_ROOT=/home/jim/.dotnet ilspycmd /tmp/connid_res.dll).
+
+THE MEASURE: the dnlib PLAIN diff 137,517 -> 83,525 (-54k, the
+biggest single win of the arc); the -w measure unchanged at 70,339
+(the whitespace-insensitive diff cannot see this family -- use the
+plain diff for the indentation-class fixes).
+
+THE NEXT MEASURED FAMILIES (the plain-diff top shapes now): (1) the
+goto divergences (~1,633 hunks -- the oracle `return x;` where the
+port emits `goto IL_00D2;` -- the control-flow/loop-exit rendering);
+(2) the accessor shapes (~606 -- the get/set lines); then the queued
+naming items (the shadow filter, the parameter-name arm).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
