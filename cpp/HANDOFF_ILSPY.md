@@ -2170,6 +2170,32 @@ returning body); the member-name shadow filter
 (currentLowerCaseTypeOrMemberNames); the call-parameter-name arm of
 the load proposal (needs the resolved IMethod).
 
+## THE DOUBLE-RETURN -- FIXED (the exit-block modeling)
+
+THE ROOT: the reader models a construct that always exits (a using
+whose body leaves the function) as the construct PLUS a fall-through
+leave (the same block's final, or a following exit block) -- the try's
+leave already exited, so the duplicate is unreachable, but the flat
+emitter rendered both (`return num;` twice). THE FIX: the emitter's
+ConstructAlwaysExits walk (a using/try/lock body containing a leave to
+the function body -- the construct bodies are Blocks OR BlockContainers
+depending on the reader's modeling; the using body is a Block, which
+the first draft's container-only cast silently missed) + the skip in
+BOTH places (a following Leave statement in the same block AND the
+block's leave final -- the final renders outside the statements loop,
+which the first draft also missed). The trailing-dedent cosmetic is
+fixed with it (the statement-level indent restored after the dedent).
+
+THE MEASURE (dnlib -w lines vs the oracle): 70,432 -> 70,339. The arc:
+70,947 -> 70,917 -> 70,677 -> 70,432 -> 70,339.
+
+THE REMAINING NAMING/CONTROL-FLOW ITEMS: the member-name shadow filter
+(currentLowerCaseTypeOrMemberNames); the call-parameter-name arm of
+the load proposal (needs the resolved IMethod); the general
+long-tail families (the blank-line residue at 1,486 hunks -- the
+spacing/normalization differences -- may be the next systematic
+family).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
