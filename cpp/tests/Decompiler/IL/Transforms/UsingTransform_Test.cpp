@@ -609,3 +609,42 @@ TEST(UsingTransform, MscorlibSweepPreservesInvariant) {
     // foreach, the FileStream/StreamReader usings, etc.).
     EXPECT_GT(folded, 100);
 }
+
+// The goto-to-return propagation: a branch whose target block is only the
+// shared-exit leave (with the branch as the single predecessor and no
+// fall-through) renders the return at the branch site, not a goto -- the
+// C#'s reader models the value-returning exit as the leave itself, so the
+// oracle renders `return x;`.
+TEST(UsingTransform, PropagatesReturnFromGotoTargetBlock) {
+    auto obj = MakeParam("obj", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Variables.push_back(obj);
+
+    // block0: obj.Foo(); branch -> block2 (the shared exit).
+    // block1: terminator-guarded (unreachable here, keeps the fall-through
+    //         rule honest for block2's position).
+    // block2: leave(obj) -- the only content.
+    auto b0 = std::make_unique<Block>();
+    b0->Add(std::make_unique<Call>("System.Foo::Bar"));
+    auto* b2raw = new Block();
+    auto br = std::make_unique<Branch>(b2raw);
+    b0->SetFinal(std::move(br));
+    auto b1 = std::make_unique<Block>();
+    b1->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    b2raw->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdLoc>(obj)));
+
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::unique_ptr<Block>(b2raw));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "object", "M", "");
+    EXPECT_NE(text.find("return obj;"), std::string::npos)
+        << "the branch to the shared-exit leave renders the return: "
+        << text;
+    EXPECT_EQ(text.find("goto IL_"), std::string::npos)
+        << "no goto remains for the propagated return: " << text;
+}

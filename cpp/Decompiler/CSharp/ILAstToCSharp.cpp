@@ -316,6 +316,7 @@ public:
         if (fn.Body) {
             CollectLoopHeaders(fn.Body.get());
             CollectLabels(fn.Body.get());
+            AnalyzeReturnPropagation(fn.Body.get());
             HoistForInitializers(fn.Body.get());
             EmitContainer(*fn.Body, 1);
         }
@@ -390,6 +391,15 @@ private:
     std::unordered_map<const SwitchInstruction*, SwitchInlinePlan> switchInlinePlans_;
     std::set<const Block*> inlinedBodyBlocks_;
     std::set<const Branch*> breakBranches_;
+    // The goto-to-return propagation: a branch whose target block is only
+    // a function-body leave (the reader's shared-exit block), with the
+    // branch as the block's single predecessor and no fall-through into
+    // it, renders the leave's return at the branch site and the target
+    // block is suppressed (the C#'s reader models the same shape as a
+    // value-carrying leave at the branch, so the oracle renders `return
+    // x;` where the port emitted `goto IL_xxxx;`).
+    std::map<const Branch*, const Leave*> returnPropagation_;
+    std::set<const Block*> suppressedReturnBlocks_;
 
 
 
@@ -640,6 +650,73 @@ private:
         char buf[16];
         std::snprintf(buf, sizeof(buf), "IL_%04X", offset);
         return buf;
+    }
+
+    // The goto-to-return propagation analysis: find the blocks whose whole
+    // content is a leave to the function body, count their predecessors,
+    // and when exactly one branch reaches the block with no fall-through
+    // into it, record the branch -> leave mapping and suppress the block.
+    void AnalyzeReturnPropagation(ILInstruction* root) {
+        if (root == nullptr || fn_ == nullptr || fn_->Body == nullptr)
+            return;
+        // Count every branch targeting each block (the recursive walk,
+        // including switch-section bodies).
+        std::map<const Block*, int> preds;
+        std::function<void(const ILInstruction*)> countBranches =
+            [&](const ILInstruction* i) {
+            if (i == nullptr) return;
+            if (i->Op == OpCode::Branch) {
+                auto* br = static_cast<const Branch*>(i);
+                if (br->TargetBlock != nullptr)
+                    preds[br->TargetBlock]++;
+            }
+            for (int c = 0; c < i->ChildCount(); ++c)
+                countBranches(i->GetChild(c));
+        };
+        countBranches(root);
+        std::function<void(BlockContainer*)> scan = [&](BlockContainer* c) {
+            if (c == nullptr) return;
+            for (std::size_t k = 0; k < c->Blocks.size(); ++k) {
+                Block* b = c->Blocks[k].get();
+                if (b == nullptr || !b->Instructions.empty() ||
+                    b->FinalInstruction == nullptr ||
+                    b->FinalInstruction->Op != OpCode::Leave)
+                    continue;
+                auto* lv = static_cast<Leave*>(b->FinalInstruction.get());
+                if (lv->TargetContainer != fn_->Body.get())
+                    continue;
+                if (preds[b] != 1 || k == 0)
+                    continue;
+                // No fall-through: the preceding block must end in an
+                // unconditional control transfer.
+                const Block* prev = c->Blocks[k - 1].get();
+                if (prev == nullptr || prev->FinalInstruction == nullptr)
+                    continue;
+                OpCode f = prev->FinalInstruction->Op;
+                if (f != OpCode::Branch && f != OpCode::Leave &&
+                    f != OpCode::Throw && f != OpCode::SwitchInstruction)
+                    continue;
+                // Find the single branch reaching the block.
+                const Branch* src = nullptr;
+                std::function<void(const ILInstruction*)> find =
+                    [&](const ILInstruction* i) {
+                    if (i == nullptr || src != nullptr) return;
+                    if (i->Op == OpCode::Branch) {
+                        auto* br = static_cast<const Branch*>(i);
+                        if (br->TargetBlock == b) { src = br; return; }
+                    }
+                    for (int c2 = 0; c2 < i->ChildCount(); ++c2)
+                        find(i->GetChild(c2));
+                };
+                find(root);
+                if (src == nullptr) continue;
+                returnPropagation_[src] = lv;
+                suppressedReturnBlocks_.insert(b);
+            }
+            for (int c2 = 0; c2 < c->ChildCount(); ++c2)
+                scan(dynamic_cast<BlockContainer*>(c->GetChild(c2)));
+        };
+        scan(dynamic_cast<BlockContainer*>(root));
     }
 
     // Every branch-target block gets an IL_XXXX label; walk the whole tree so
@@ -1101,6 +1178,19 @@ private:
         // `break;` exits the switch, not the loop, even if the exit block is a
         // loop header.
         if (breakBranches_.count(&br)) return "break;";
+        // The propagated return: the goto's target block is only the shared
+        // exit leave, so the return renders here and the block is
+        // suppressed (the returnPropagation_ note).
+        {
+            auto prop = returnPropagation_.find(&br);
+            if (prop != returnPropagation_.end() && prop->second != nullptr) {
+                if (prop->second->Value == nullptr)
+                    return "return;";
+                return "return " +
+                       const_cast<CEmitter*>(this)->Expr(
+                           *prop->second->Value) + ";";
+            }
+        }
         if (br.TargetBlock) {
             // A branch to a loop header is a `continue` (the back-edge) only
             // when the branch is INSIDE the loop (the header's container is an
@@ -1974,6 +2064,9 @@ private:
         // A switch body block inlined into its case is not emitted again as a
         // standalone labeled block (see AnalyzeSwitchInline).
         if (inlinedBodyBlocks_.count(&block)) return;
+        // The propagated-return target block: its leave rendered at the
+        // goto site (the returnPropagation_ note).
+        if (suppressedReturnBlocks_.count(&block)) return;
         auto label = labels_.find(&block);
         if (label != labels_.end() && !emittedHeaderLabels_.count(&block)) {
             // C# labels start in column 0 by convention. A block whose label
