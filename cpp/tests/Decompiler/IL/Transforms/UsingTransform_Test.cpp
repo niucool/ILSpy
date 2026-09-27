@@ -648,3 +648,41 @@ TEST(UsingTransform, PropagatesReturnFromGotoTargetBlock) {
     EXPECT_EQ(text.find("goto IL_"), std::string::npos)
         << "no goto remains for the propagated return: " << text;
 }
+
+// The assign-then-return propagation: a branch whose target block is the
+// stores plus the shared-exit leave (the `x = ...; return x;` shape)
+// renders the stores and the return at the branch site.
+TEST(UsingTransform, PropagatesAssignThenReturnFromGotoTargetBlock) {
+    auto obj = MakeParam("obj", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Variables.push_back(obj);
+
+    // block0: obj.Foo(); branch -> block2 (the assign-and-exit).
+    // block1: a leave final (keeps the fall-through rule honest).
+    // block2: obj = obj.Foo(); leave(obj).
+    auto b0 = std::make_unique<Block>();
+    b0->Add(std::make_unique<Call>("System.Foo::Bar"));
+    auto* b2raw = new Block();
+    auto br = std::make_unique<Branch>(b2raw);
+    b0->SetFinal(std::move(br));
+    auto b1 = std::make_unique<Block>();
+    b1->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    b2raw->Add(std::make_unique<StLoc>(
+        obj, std::make_unique<LdLoc>(obj)));
+    b2raw->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdLoc>(obj)));
+
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::unique_ptr<Block>(b2raw));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "object", "M", "");
+    EXPECT_NE(text.find("obj = obj;"), std::string::npos)
+        << "the shared-exit store renders at the branch site: " << text;
+    EXPECT_NE(text.find("return obj;"), std::string::npos) << text;
+    EXPECT_EQ(text.find("goto IL_"), std::string::npos)
+        << "no goto remains for the propagated exit: " << text;
+}

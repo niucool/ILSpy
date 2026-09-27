@@ -398,7 +398,7 @@ private:
     // block is suppressed (the C#'s reader models the same shape as a
     // value-carrying leave at the branch, so the oracle renders `return
     // x;` where the port emitted `goto IL_xxxx;`).
-    std::map<const Branch*, const Leave*> returnPropagation_;
+    std::map<const Branch*, const Block*> returnPropagation_;
     std::set<const Block*> suppressedReturnBlocks_;
 
 
@@ -678,9 +678,21 @@ private:
             if (c == nullptr) return;
             for (std::size_t k = 0; k < c->Blocks.size(); ++k) {
                 Block* b = c->Blocks[k].get();
-                if (b == nullptr || !b->Instructions.empty() ||
-                    b->FinalInstruction == nullptr ||
+                if (b == nullptr || b->FinalInstruction == nullptr ||
                     b->FinalInstruction->Op != OpCode::Leave)
+                    continue;
+                // The block's statements are limited to plain stores (the
+                // shared-exit assign-then-return shape: `x = ...; return
+                // x;`): anything more complex (a branch, a nested control
+                // flow) keeps the goto form.
+                bool onlyStores = true;
+                for (const auto& si : b->Instructions) {
+                    if (si == nullptr || si->Op != OpCode::StLoc) {
+                        onlyStores = false;
+                        break;
+                    }
+                }
+                if (!onlyStores)
                     continue;
                 auto* lv = static_cast<Leave*>(b->FinalInstruction.get());
                 if (lv->TargetContainer != fn_->Body.get())
@@ -710,7 +722,7 @@ private:
                 };
                 find(root);
                 if (src == nullptr) continue;
-                returnPropagation_[src] = lv;
+                returnPropagation_[src] = b;
                 suppressedReturnBlocks_.insert(b);
             }
             for (int c2 = 0; c2 < c->ChildCount(); ++c2)
@@ -1183,12 +1195,16 @@ private:
         // suppressed (the returnPropagation_ note).
         {
             auto prop = returnPropagation_.find(&br);
-            if (prop != returnPropagation_.end() && prop->second != nullptr) {
-                if (prop->second->Value == nullptr)
+            if (prop != returnPropagation_.end() &&
+                prop->second != nullptr &&
+                prop->second->Instructions.empty()) {
+                auto* lv = static_cast<const Leave*>(
+                    prop->second->FinalInstruction.get());
+                if (lv->Value == nullptr)
                     return "return;";
                 return "return " +
                        const_cast<CEmitter*>(this)->Expr(
-                           *prop->second->Value) + ";";
+                           *lv->Value) + ";";
             }
         }
         if (br.TargetBlock) {
@@ -2397,6 +2413,28 @@ private:
                 return;
             }
             case OpCode::Branch: {
+                // The propagated shared exit: the goto's target block (the
+                // assign-then-return stores plus the leave) renders here
+                // and the target block is suppressed. The leave-only case
+                // goes through GotoText (a single return line); the stores
+                // need the statement renderer.
+                {
+                    const auto& br = static_cast<const Branch&>(inst);
+                    auto prop = returnPropagation_.find(&br);
+                    if (prop != returnPropagation_.end() &&
+                        prop->second != nullptr) {
+                        for (const auto& si : prop->second->Instructions)
+                            if (si) EmitStatement(*si, indent);
+                        auto* lv = static_cast<const Leave*>(
+                            prop->second->FinalInstruction.get());
+                        if (lv->Value == nullptr) {
+                            Line(indent, "return;");
+                        } else {
+                            Line(indent, "return " + Expr(*lv->Value) + ";");
+                        }
+                        return;
+                    }
+                }
                 // A dropped branch (redundant fall-through / loop-entry) yields an
                 // empty GotoText -- emit nothing, not a blank line.
                 std::string gt = GotoText(static_cast<const Branch&>(inst));
