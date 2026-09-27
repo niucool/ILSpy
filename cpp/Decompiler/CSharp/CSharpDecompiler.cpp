@@ -3491,7 +3491,11 @@ bool DecompileTypeToStringBody(
             if (!literal.empty())
                 out += " = " + literal;
         }
-        out += ";\n";
+        // The C# output separates the members inside a type body with one
+        // blank line; the method arm carries its own trailing separator
+        // (the `out += "\n"` after the method text), the field arm needs
+        // the same.
+        out += ";\n\n";
         rendered = true;
     }
     for (const auto& m : file.GetMethods(typeToken)) {
