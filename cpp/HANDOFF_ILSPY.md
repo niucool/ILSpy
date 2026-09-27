@@ -3027,6 +3027,26 @@ SET is the contract). THE STRUCTURAL: (c) -- reusing the render's
 own type walks (one pass, the namespaces recorded as the
 declarations build).
 
+## THE USING-SET MEMO -- IMPLEMENTED, MEASURED, REVERTED (the finding)
+
+THE MEMO (the subtree-contribution cache keyed by type name, the
+sink-swap wrapper around CollectTypeReference, threaded from
+WholeModuleUsingSet): the output BYTE-IDENTICAL, the wall UNCHANGED
+(9.32s vs 9.22s -- the noise band). THE FINDING: the 6.26s walk's
+cost is NOT the type-graph re-walks (the shared subgraphs replay
+fine) -- it is the ENTITY-LEVEL walk: CollectNamespacesEntity's
+per-member work (the member enumeration + the signature/type
+resolution -- the lazy entity materialization). The memo never
+touched that. THE NEXT SLICE (the real target): time
+CollectNamespacesEntity's internals -- the member enumeration
+(ITypeDefinition::Members -- the materialization) vs the signature
+resolutions; the fix is either the member-materialization cache (a
+per-module member list built once) or the C#-shape pass (c): record
+the namespaces during the render's own type walks (one pass, no
+second walk). THE MEMO'S IMPLEMENTATION (preserved in the turn
+history): correct-by-construction, zero output change -- keep it in
+mind if a future file shows the graph-re-walk profile.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
