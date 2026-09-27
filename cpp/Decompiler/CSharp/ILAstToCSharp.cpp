@@ -319,6 +319,7 @@ public:
             AnalyzeReturnPropagation(fn.Body.get());
             AnalyzeNullCoalescingChains(fn.Body.get());
             AnalyzeSingleUseLocals();
+            AnalyzeNullPropagation();
             HoistForInitializers(fn.Body.get());
             EmitContainer(*fn.Body, 1);
         }
@@ -354,6 +355,12 @@ private:
     // expression into the use and drops the declaration -- the port keeps
     // `var x = expr; use(x);` where the oracle renders `use(expr);`.
     std::map<const LdLoc*, ILInstruction*> singleUseElisions_;
+    // The null-propagation fold (the [NP3]-probed shape): b0 =
+    // [stloc dup = expr] + if-final(comp(dup == 0/null), Leave(ldnull),
+    // no false-arm); b1 = the fall-through use block [leave call
+    // M(ldloc dup, ...)]. The [stloc, if] skip; b1 renders
+    // `return expr?.Member(args);` through the map.
+    std::map<const Call*, ILInstruction*> nullPropagation_;
     std::set<const ILInstruction*> singleUseSkipped_;
     std::set<const ILInstruction*> coalesceSkipped_;
     std::set<const Block*> coalesceSuppressed_;
@@ -1108,6 +1115,112 @@ private:
             singleUseElisions_[useSite] = store->Value.get();
             singleUseSkipped_.insert(store);
         }
+    }
+
+    // The null-propagation fold: the two-block shape with the INLINE
+    // leave-null true arm (the `if (dup == 0) return null;` guard) and the
+    // fall-through use. The dup's uses counted from the tree (the reader
+    // does not track the dup slots' counts).
+    void AnalyzeNullPropagation() {
+        if (fn_ == nullptr || fn_->Body == nullptr)
+            return;
+        std::function<void(BlockContainer*)> scan = [&](BlockContainer* c) {
+            if (c == nullptr) return;
+            for (std::size_t k = 0; k + 1 < c->Blocks.size(); ++k) {
+                Block* b0 = c->Blocks[k].get();
+                Block* b1 = c->Blocks[k + 1].get();
+                if (b0 == nullptr || b1 == nullptr)
+                    continue;
+                if (b0->Instructions.size() != 1)
+                    continue;
+                auto* storeDup = dynamic_cast<StLoc*>(
+                    b0->Instructions[0].get());
+                if (storeDup == nullptr || storeDup->Value == nullptr)
+                    continue;
+                ILVariable* dup = storeDup->Variable.get();
+                if (dup == nullptr)
+                    continue;
+                if (b0->FinalInstruction == nullptr ||
+                    b0->FinalInstruction->Op != OpCode::IfInstruction)
+                    continue;
+                auto* iff = static_cast<IfInstruction*>(
+                    b0->FinalInstruction.get());
+                if (iff->Condition == nullptr ||
+                    iff->Condition->Op != OpCode::Comp ||
+                    iff->FalseInst != nullptr)
+                    continue;
+                auto* comp = static_cast<Comp*>(iff->Condition.get());
+                if (comp->Left == nullptr || comp->Right == nullptr ||
+                    comp->Left->Op != OpCode::LdLoc ||
+                    static_cast<LdLoc*>(comp->Left.get())->Variable.get() !=
+                        dup)
+                    continue;
+                // The true arm: the inline null return (`return null`).
+                if (iff->TrueInst == nullptr ||
+                    iff->TrueInst->Op != OpCode::Leave)
+                    continue;
+                auto* nullLeave = static_cast<Leave*>(iff->TrueInst.get());
+                if (nullLeave->Value == nullptr ||
+                    nullLeave->Value->Op != OpCode::LdNull)
+                    continue;
+                // The use: b1's final is a CALL whose first argument is
+                // the dup's own load.
+                if (!b1->Instructions.empty() ||
+                    b1->FinalInstruction == nullptr ||
+                    b1->FinalInstruction->Op != OpCode::Leave)
+                    continue;
+                auto* useLeave = static_cast<Leave*>(
+                    b1->FinalInstruction.get());
+                if (useLeave->Value == nullptr ||
+                    useLeave->Value->Op != OpCode::Call)
+                    continue;
+                auto* useCall = static_cast<Call*>(useLeave->Value.get());
+                if (useCall->Arguments.empty() ||
+                    useCall->Arguments[0]->Op != OpCode::LdLoc ||
+                    static_cast<LdLoc*>(useCall->Arguments[0].get())
+                            ->Variable.get() != dup)
+                    continue;
+                // The dup's uses from the tree: the guard's comp + the
+                // use's receiver = 2 loads, 1 store.
+                int dupLoads = 0, dupStores = 0;
+                std::function<void(const ILInstruction*)> countUses =
+                    [&](const ILInstruction* i) {
+                    if (i == nullptr) return;
+                    if (i->Op == OpCode::LdLoc) {
+                        auto* l = static_cast<const LdLoc*>(i);
+                        if (l->Variable.get() == dup) dupLoads++;
+                    }
+                    if (i->Op == OpCode::StLoc) {
+                        auto* st = static_cast<const StLoc*>(i);
+                        if (st->Variable.get() == dup) dupStores++;
+                    }
+                    for (int ci = 0; ci < i->ChildCount(); ++ci)
+                        countUses(i->GetChild(ci));
+                };
+                countUses(fn_->Body.get());
+                if (dupLoads != 2 || dupStores != 1)
+                    continue;
+                nullPropagation_[useCall] = storeDup->Value.get();
+                coalesceSkipped_.insert(storeDup);
+                coalesceSkipped_.insert(iff);
+            }
+            std::function<void(const ILInstruction*)> descend =
+                [&](const ILInstruction* i) {
+                if (i == nullptr) return;
+                if (auto* nested =
+                        dynamic_cast<const BlockContainer*>(i))
+                    scan(const_cast<BlockContainer*>(nested));
+                for (int ci = 0; ci < i->ChildCount(); ++ci)
+                    descend(i->GetChild(ci));
+            };
+            for (const auto& bi : c->Blocks) {
+                if (!bi) continue;
+                for (const auto& si : bi->Instructions) descend(si.get());
+                if (bi->FinalInstruction)
+                    descend(bi->FinalInstruction.get());
+            }
+        };
+        scan(dynamic_cast<BlockContainer*>(fn_->Body.get()));
     }
 
     // Every branch-target block gets an IL_XXXX label; walk the whole tree so
@@ -4166,10 +4279,30 @@ private:
                 return EscapeStringLiteral(static_cast<const LdStr&>(inst).Value);
             case OpCode::LdNull:
                 return "null";
-            case OpCode::Call:
-                return static_cast<const Call&>(inst).IsInstanceCall
-                    ? InstanceCallText(static_cast<const Call&>(inst))
-                    : CallText(static_cast<const Call&>(inst));
+            case OpCode::Call: {
+                const auto& callRef = static_cast<const Call&>(inst);
+                // The null-propagation fold: the use renders the value
+                // expression with the null-conditional.
+                auto np = nullPropagation_.find(&callRef);
+                if (np != nullPropagation_.end() && np->second != nullptr) {
+                    std::string method =
+                        callRef.MethodName.rfind("::") == std::string::npos
+                            ? callRef.MethodName
+                            : callRef.MethodName.substr(
+                                  callRef.MethodName.rfind("::") + 2);
+                    std::string args;
+                    for (std::size_t ai = 1; ai < callRef.Arguments.size();
+                         ++ai) {
+                        if (!args.empty()) args += ", ";
+                        args += Expr(*callRef.Arguments[ai]);
+                    }
+                    return Expr(*np->second) + "?." + method + "(" + args +
+                           ")";
+                }
+                return callRef.IsInstanceCall
+                    ? InstanceCallText(callRef)
+                    : CallText(callRef);
+            }
             case OpCode::Comp: {
                 const auto& comp = static_cast<const Comp&>(inst);
                 // `comp(eq, ldloc boolVar, ldc.i4 0)` is `!boolVar` (a Boolean
