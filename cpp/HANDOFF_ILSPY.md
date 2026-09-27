@@ -2380,6 +2380,55 @@ modeling that CREATES the chains (the C# reader models the null check
 directly on the value, no temporary) -- the same root as hello's
 array2; the deepest fix, the biggest blast radius.
 
+## THE COALESCE THIRD ATTEMPT + THE BUILD ANOMALY (the emergency record)
+
+THE DUMP-FIRST PROCEDURE APPLIED (the payoff): the real ILAst shape
+of the null-check chains, dumped and read:
+`[a = expr, b = a, If(LdLoc a, Branch->L, NOP)]` in one block, then
+`[b = alt, Branch->L]` in the next -- the false-arm is a NOP (not
+null!), the join is the shared L. THREE earlier hypotheses died on
+exactly these details (the null-vs-Nop check; the block-final vs the
+statement position; the missing descent THROUGH blocks into the
+nested containers -- a container's direct children are Blocks, so
+the container recursion must walk the blocks' instructions).
+
+THE FOLD'S THREE FAILURE MODES (all measured, all reverted):
+(1) no block-predecessor check on the alternative block -- another
+    branch targeting it loses its statements to the suppression
+    (the dnlib render truncated 42k lines);
+(2) with the predecessor gate: the fold CONSUMED the port's existing
+    38 ?? sites (the ?? count went to 0 -- the fold conflicts with
+    the port's existing coalesce synthesis paths, not composes with
+    them);
+(3) the hello parity broke to 70 lines -- see the anomaly below.
+THE NEXT SESSION: the fold must COMPOSE with the existing ?? paths
+(find them first: which machinery renders the 38 existing sites --
+the interpolation family? the NullableInstructions?) before the
+chain fold lands.
+
+**THE BUILD ANOMALY (the emergency)**: after the revert (the source
+md5-verified identical to HEAD -- b0ed934c7's tree), the REBUILT
+binary renders DIFFERENTLY than the same-source binary from the
+start of the turn: hello 3 -> 70 diff lines, dnlib 89,454 lines ->
+EMPTY (exit 0, zero bytes), while the connid pin, the PF corpus
+(0/0), the ForEachName fixture, and the type LIST all render
+correctly. THE SUSPECTS: (a) stale objects / a mis-link (the forced
+touch+recompile of ILAstToCSharp.cpp did not fix it); (b) UNDEFINED
+BEHAVIOR in the committed propagation/inlining code surfacing
+address-dependently per build (the AnalyzeReturnPropagation's
+find(root) walk, the suppressed-block rendering, the historical
+"mutation during descent segfaults" family). THE FIRST STEP OF THE
+NEXT SESSION: `ninja -C build/linux-ninja -t clean && ninja -C
+build/linux-ninja ilspy_cli ilspy_tests` (a full clean rebuild, ~15
+min), re-run the hello/dnlib/pin gates; if the anomaly persists,
+sanitize the propagation/inlining paths (the -fsanitize=address
+build) before ANY further work -- the dnlib-empty render means the
+dnlib gate is UNVERIFIABLE until the anomaly resolves.
+
+THE ARC: unchanged at 80,775 on the last VERIFIED binary (the rv3
+render); the current binary's dnlib number is meaningless until the
+clean rebuild.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
