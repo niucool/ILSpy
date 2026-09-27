@@ -2552,6 +2552,27 @@ remaining ~275 ?? shapes (each its own dump-first pass).
 THE ARC (dnlib, plain diff): 137,517 -> ... -> 80,775 -> 80,739 ->
 80,734 -> 80,732.
 
+## THE DOMINANCE RELAXATION -- LANDED
+
+THE RULE: the ancestor-chain walk (the use's block up through the
+nested containers to the declaration's container, the ancestor
+index >= the declaration's) replaces the same-container gate; the
+loop containers no longer excluded (the pure gate covers the
+re-evaluation). THE MEASURE: 26 more lines elide (the plain diff
+80,732 -> 80,716). THE GATES all green (the pin ebf9b6e9..., the
+corpus 0/0, hello 3, the sweep 13,174/15; the disk at 45%).
+
+THE REMAINING SURPLUS (the honest ledger): most of the 1,257-local
+gap is behind the PURITY GATE itself (correctly -- the call results
+stay) and the C#'s expression-tree/multi-store restructuring -- the
+next levers: (1) the byref-use elision (the ldloca sites); (2) the
+remaining ~275 ?? shapes; (3) the gotos' label-merged regions (the
+inverted-condition restructure -- the container-nesting blocker
+stands); (4) the switch case-range fall-through slice.
+
+THE ARC (dnlib, plain diff): 137,517 -> ... -> 80,734 -> 80,732 ->
+80,716.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
