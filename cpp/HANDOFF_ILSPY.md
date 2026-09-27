@@ -1968,6 +1968,57 @@ resolve like the oracle) and re-verify: bare == resolved == the oracle
 on dnlib, hello, connid, and the corpus. The end state: no env-
 dependent renders at all.
 
+## THE FINDREQUIREDIMPORTS PORT -- DONE (the investigation's next slices)
+
+THE TWO-SLICE LANDING (one commit, the RED-GREEN arc inside it):
+
+SLICE 1 (the lifetime fix): RequiredNamespaceCollector::visitedTypes_
+gained a keepalive registry (the vector of shared pointers beside the
+pointer-keyed dedup) -- the visited resolution temporaries stay pinned
+for the collector's lifetime, so a freed instance's recycled address
+can no longer falsely dedup a later visit. RED demonstrated: the
+modifier fixture's -t render grew `using System.Threading;` (the
+deterministic collection -- the C# collector also collects it; the C#
+then filters it away).
+
+SLICE 2 (the FindRequiredImports port): the emitted using directives
+now come from a RECORDING of what the render actually emits short --
+RequiredImportsRecorder.{hpp,cpp} -- a thread-local scope stack armed by
+the -t/whole-module drivers; every short-name emission site records its
+namespace (the emitter's CSharpTypeName terminal arms, the
+RenderBaseTypeName Short decisions, the call/newobj targets via
+RecordMethodTarget, the rendered attribute types); the
+IsParentOfCurrentNamespace filter (the C# FindRequiredImports rule)
+drops references that resolve through the enclosing namespace
+declaration. The accessor-body PROBES (the port's rendered-text
+automatic property/event pattern match) suspend the recording
+(a null-sink scope) and the block-emission arms re-render recorded.
+The collector's set stays the QUALIFICATION POOL (the resolver's
+scope), exactly the C#'s split. The nested -t renders inside the
+whole-module loop do not push a second scope (the innermost sink would
+swallow the records).
+
+THE RESULT: the modifier fixture green again AND matching the oracle
+under BOTH environments (the Interlocked divergence -- the blocker for
+the default ~/.dotnet resolution -- is gone). THE SURPRISE: zero
+re-pins -- the connid hash is byte-identical (fbda64dd...), the corpus
+0/0, the sweep 13,166/15 baseline identical, hello unchanged. dnlib
+drops two using lines the oracle also drops (`using dnlib;` and
+`using System.Configuration.Assemblies;`) -- the only render change,
+toward the oracle.
+
+THE MATRIX STATE (the remaining step 3): bare vs resolved still differs
+by 542 lines on dnlib -- the attribute-blob decode failures (the
+bare-env `[assembly: Debuggable(/*Could not decode...*/)]`, the raw
+`(SecurityAction)8` enum) and the qualification differences, all of
+which need the RUNTIME RESOLUTION itself. THE ~/.dotnet DEFAULT PROBE
+IS NOW UNBLOCKED (its blocker was the using-set divergence, now fixed)
+-- the next slice: enable it, re-verify the full matrix (bare ==
+resolved == the oracle on dnlib + hello + connid + the corpus), and
+re-run the sweep under the changed default (the seeded using
+expectations could shift where fixtures resolve; the ILSPY_TEST_MSCORLIB
+gating may need revisiting).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
