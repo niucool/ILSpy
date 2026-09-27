@@ -438,8 +438,11 @@ void TransformArrayInitializers::Run(Block& block, int pos,
         }
         values.emplace_back(std::move(element.indices), std::move(value));
     }
+    // The C# passes the MatchNewArr element type (the newarr's type
+    // operand), NOT the store variable's type -- the variable can be a
+    // stack slot typed as the ARRAY (the reader's dup-slot typing).
     auto initializerBlock = TransformArrayInitializersBuildBlock(
-        std::move(tempStore), stloc->Variable->Type, arrayLength,
+        std::move(tempStore), elementType, arrayLength,
         std::move(values));
     // Replace the stloc's value with the initializer block and drop the
     // consumed stelem instructions (the C# `body.Instructions[pos] =

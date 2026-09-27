@@ -25,6 +25,7 @@
 // expression rather than dropping text or crashing.
 
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
+#include <algorithm>
 #include <cmath>
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
@@ -1431,6 +1432,96 @@ private:
     // `,alignment` and/or `:format`). Faithful to the real back end's
     // TranslateInterpolatedString. The ToStringAndClear final is the implicit
     // conversion to string and is not emitted.
+    // The C# TranslateArrayInitializer (ExpressionBuilder.cs lines
+    // 3685-3760): an ArrayInitializer block evaluates to
+    // `new T[dims] { elements }`. The first instruction is
+    // stloc v(newarr T(dims)); the remaining instructions are the element
+    // stores stobj(ldelema(T, ldloc v, indices), value); the final is
+    // ldloc v (the implicit conversion, not rendered). The element values
+    // render in index order; a multi-dimensional initializer nests the
+    // initializer braces per dimension (the C# container stack).
+    std::string ArrayInitializerText(const Block& block) {
+        const StLoc* stloc = block.Instructions.empty()
+            ? nullptr
+            : dynamic_cast<const StLoc*>(block.Instructions[0].get());
+        const NewArr* newArr =
+            stloc != nullptr && stloc->Value != nullptr
+                ? dynamic_cast<const NewArr*>(stloc->Value.get())
+                : nullptr;
+        if (newArr == nullptr || newArr->Type == nullptr)
+            return "(default)";
+        std::string text = "new " + CSharpTypeName(newArr->Type) + "[";
+        for (std::size_t i = 0; i < newArr->Indices.size(); ++i) {
+            if (i) text += ", ";
+            text += newArr->Indices[i] ? Expr(*newArr->Indices[i]) : "(default)";
+        }
+        text += "]";
+        // The (index tuple -> rendered value) pairs in order.
+        std::vector<std::pair<std::vector<int>, std::string>> entries;
+        for (std::size_t i = 1; i < block.Instructions.size(); ++i) {
+            const StObj* stObj =
+                dynamic_cast<const StObj*>(block.Instructions[i].get());
+            if (stObj == nullptr || stObj->Target == nullptr) continue;
+            const LdElema* ldElema =
+                dynamic_cast<const LdElema*>(stObj->Target.get());
+            if (ldElema == nullptr) continue;
+            std::vector<int> indices;
+            bool constant = true;
+            for (const auto& idx : ldElema->Indices) {
+                if (!idx || idx->Op != OpCode::LdcI4) { constant = false; break; }
+                indices.push_back(static_cast<const LdcI4*>(idx.get())->Value);
+            }
+            if (!constant) continue;
+            entries.emplace_back(std::move(indices),
+                                 stObj->Value ? Expr(*stObj->Value)
+                                              : std::string("(default)"));
+        }
+        std::sort(entries.begin(), entries.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        // The nested braces per dimension: single-dim renders the flat
+        // `{ v0, v1 }`; a deeper tuple opens a brace per new row prefix.
+        text += " {";
+        std::vector<std::vector<int>> openRows;
+        bool first = true;
+        for (const auto& entry : entries) {
+            std::size_t depth = 0;
+            while (depth < openRows.size() &&
+                   depth + 1 < entry.first.size() &&
+                   openRows[depth] ==
+                       std::vector<int>(entry.first.begin(),
+                                        entry.first.begin() + depth + 1)) {
+                ++depth;
+            }
+            while (openRows.size() > depth) {
+                openRows.pop_back();
+                text += " }";
+                first = true;
+            }
+            while (openRows.size() + 1 < entry.first.size()) {
+                std::vector<int> prefix(entry.first.begin(),
+                                        entry.first.begin() +
+                                            static_cast<std::ptrdiff_t>(
+                                                openRows.size() + 1));
+                if (openRows.size() == 0 ||
+                    openRows.back() != prefix) {
+                    if (!first) text += ",";
+                    text += " {";
+                    openRows.push_back(prefix);
+                    first = true;
+                }
+            }
+            if (!first) text += ",";
+            text += " " + entry.second;
+            first = false;
+        }
+        while (!openRows.empty()) {
+            openRows.pop_back();
+            text += " }";
+        }
+        text += " }";
+        return text;
+    }
+
     std::string InterpolatedStringText(const Block& block) {
         std::string out = "$\"";
         for (std::size_t i = 1; i < block.Instructions.size(); ++i) {
@@ -1874,6 +1965,25 @@ private:
                 if (blk.Kind == BlockKind::InterpolatedString) {
                     Line(indent, InterpolatedStringText(blk) + ";");
                     return;
+                }
+                if (blk.Kind == BlockKind::ArrayInitializer) {
+                    // An ArrayInitializer block in the statement position:
+                    // the store's inline did not fold it into the user's
+                    // local (the dup-slot aliasing), so render it as the
+                    // explicit assignment through the initializer's final
+                    // variable -- `v = new T[n] { ... };` -- instead of the
+                    // braced statement block (the element stores and the
+                    // final load are the initializer's own shape).
+                    const LdLoc* final =
+                        dynamic_cast<const LdLoc*>(blk.FinalInstruction.get());
+                    std::string var = final != nullptr && final->Variable
+                        ? final->Variable->Name
+                        : std::string();
+                    if (!var.empty() && !blk.Instructions.empty()) {
+                        Line(indent, var + " = " +
+                                        ArrayInitializerText(blk) + ";");
+                        return;
+                    }
                 }
                 EmitBraced(inst, indent);
                 return;
@@ -2774,6 +2884,8 @@ private:
                 const auto& blk = static_cast<const Block&>(inst);
                 if (blk.Kind == BlockKind::InterpolatedString)
                     return InterpolatedStringText(blk);
+                if (blk.Kind == BlockKind::ArrayInitializer)
+                    return ArrayInitializerText(blk);
                 return "(default)/*op=" + std::to_string(static_cast<int>(inst.Op)) + "*/";
             }
             case OpCode::LdLoc: {
