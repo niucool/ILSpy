@@ -41,6 +41,7 @@
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
@@ -725,4 +726,65 @@ TEST(UsingTransform, InlinesSinglePredecessorLabelBlock) {
     EXPECT_NE(text.find("return obj;"), std::string::npos) << text;
     EXPECT_EQ(text.find("goto IL_"), std::string::npos)
         << "no goto remains for the inlined block: " << text;
+}
+
+// The null-coalescing chain fold (the dumped shape): the reader's dup-slot
+// chain for the compiler's null check -- `[a = expr, b = a]` as the last
+// two statements, the guard `if (a) goto L (else Nop)` as the block's
+// FINAL, then `[b = alt, branch L]` in the next block -- folds to the
+// composed NullCoalescingInstruction: `b = (expr ?? alt);`.
+TEST(UsingTransform, FoldsNullCoalescingChain)
+{
+    auto obj = MakeParam("obj", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto temp = std::make_shared<ILVariable>();
+    temp->Kind = VariableKind::Local;
+    temp->Type = std::make_shared<KnownType>(KnownTypeCode::Object);
+    temp->Name = "a";
+    auto target = std::make_shared<ILVariable>();
+    target->Kind = VariableKind::Local;
+    target->Type = std::make_shared<KnownType>(KnownTypeCode::Object);
+    target->Name = "b";
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Variables.push_back(obj);
+    fn->Variables.push_back(temp);
+    fn->Variables.push_back(target);
+
+    // block0: [a = obj, b = a] + the final if (a) goto L else Nop.
+    // block1: [b = obj] + the final branch L.
+    // block2 (= L): the leave.
+    auto* b2raw = new Block();
+    b2raw->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+
+    auto b0 = std::make_unique<Block>();
+    b0->Add(std::make_unique<StLoc>(temp, std::make_unique<LdLoc>(obj)));
+    b0->Add(std::make_unique<StLoc>(target, std::make_unique<LdLoc>(temp)));
+    auto guard = std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(temp),
+        std::make_unique<Branch>(b2raw),
+        std::make_unique<Nop>());
+    b0->SetFinal(std::move(guard));
+
+    auto b1 = std::make_unique<Block>();
+    b1->Add(std::make_unique<StLoc>(target, std::make_unique<LdLoc>(obj)));
+    b1->SetFinal(std::make_unique<Branch>(b2raw));
+
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::unique_ptr<Block>(b2raw));
+    // The usage counts the gates consult (the reader's
+    // ComputeVariableUsage equivalent for the hand-built seed).
+    temp->LoadCount = 2;
+    temp->StoreCount = 1;
+    target->LoadCount = 1;
+    target->StoreCount = 2;
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "object obj");
+    EXPECT_NE(text.find("var b = (obj ?? obj);"), std::string::npos)
+        << "the chain folds to the coalescing declaration: " << text;
+    EXPECT_EQ(text.find("goto IL_"), std::string::npos)
+        << "no goto remains for the folded guard: " << text;
 }

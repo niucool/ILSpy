@@ -24,7 +24,6 @@
 // parenthesization decisions). Unknown nodes degrade to a marked-up default
 // expression rather than dropping text or crashing.
 
-#include <cstdio>
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/CSharp/RequiredImportsRecorder.hpp"
@@ -317,6 +316,7 @@ public:
             CollectLoopHeaders(fn.Body.get());
             CollectLabels(fn.Body.get());
             AnalyzeReturnPropagation(fn.Body.get());
+            AnalyzeNullCoalescingChains(fn.Body.get());
             HoistForInitializers(fn.Body.get());
             EmitContainer(*fn.Body, 1);
         }
@@ -333,6 +333,16 @@ private:
     // The alias statement folded into a preceding ArrayInitializer render
     // (skipped when the statement loop reaches it).
     const StLoc* skippedAlias_ = nullptr;
+    // The null-coalescing chain fold (the dumped shape): `a = expr; b = a;
+    // if (a) goto L (else Nop);` in one block, then `b = alt; branch L` in
+    // the next, folds to `b = (expr ?? alt);` -- composed with the port's
+    // existing NullCoalescingInstruction rendering rather than a bespoke
+    // text form. The instances are owned here (the ILAst tree does not own
+    // them; they live only for the render).
+    std::map<const StLoc*, NullCoalescingInstruction*> coalesceFolds_;
+    std::set<const ILInstruction*> coalesceSkipped_;
+    std::set<const Block*> coalesceSuppressed_;
+    std::vector<std::unique_ptr<NullCoalescingInstruction>> coalesceKeepAlive_;
     // The foreach substitution: the for-shape whose body's only uses of
     // the counter are the array element accesses renders as
     // `foreach (T e in arr)` with the accesses substituted by `e`.
@@ -710,6 +720,137 @@ private:
             }
             for (int c2 = 0; c2 < c->ChildCount(); ++c2)
                 scan(dynamic_cast<BlockContainer*>(c->GetChild(c2)));
+        };
+        scan(dynamic_cast<BlockContainer*>(root));
+    }
+
+    // The null-coalescing chain fold (the dump-first design): the chain
+    // spans two blocks -- [.., a = expr, b = a, if (a) goto L else Nop]
+    // then [b = alt, branch L] -- and folds to a NullCoalescingInstruction
+    // composed with the existing ?? rendering. The safety gates: the
+    // temporary a is loaded only by the copy and the guard, the target b is
+    // stored only by the copy and the alternative, both paths join at L,
+    // and the alternative block has NO other branch predecessor (the
+    // measured constraint -- a suppression of a shared block loses other
+    // paths' statements).
+    void AnalyzeNullCoalescingChains(ILInstruction* root) {
+        if (root == nullptr || fn_ == nullptr || fn_->Body == nullptr)
+            return;
+        std::function<void(BlockContainer*)> scan = [&](BlockContainer* c) {
+            if (c == nullptr) return;
+            for (std::size_t k = 0; k + 1 < c->Blocks.size(); ++k) {
+                Block* b0 = c->Blocks[k].get();
+                Block* b1 = c->Blocks[k + 1].get();
+                if (b0 == nullptr || b1 == nullptr)
+                    continue;
+                if (b0->Instructions.size() < 2)
+                    continue;
+                // The dumped shape: [.., a = expr, b = a] as the last two
+                // statements, the guard if as the block's FINAL
+                // (If(LdLoc a, Branch->L, Nop)).
+                auto* storeA = dynamic_cast<StLoc*>(
+                    b0->Instructions[b0->Instructions.size() - 2].get());
+                auto* copyB = dynamic_cast<StLoc*>(
+                    b0->Instructions[b0->Instructions.size() - 1].get());
+                auto* iff = dynamic_cast<IfInstruction*>(
+                    b0->FinalInstruction.get());
+                if (storeA == nullptr || copyB == nullptr || iff == nullptr)
+                    continue;
+                // The guard: an if over the temporary, the true-arm a branch
+                // to L, the false-arm a Nop (the reader's empty-arm form).
+                if (iff->Condition == nullptr ||
+                    iff->Condition->Op != OpCode::LdLoc ||
+                    iff->TrueInst == nullptr ||
+                    iff->TrueInst->Op != OpCode::Branch)
+                    continue;
+                if (iff->FalseInst != nullptr &&
+                    iff->FalseInst->Op != OpCode::Nop)
+                    continue;
+                ILVariable* temp =
+                    static_cast<LdLoc*>(iff->Condition.get())->Variable.get();
+                auto* guardBr = static_cast<Branch*>(iff->TrueInst.get());
+                if (temp == nullptr || guardBr->TargetBlock == nullptr)
+                    continue;
+                if (copyB->Value == nullptr ||
+                    copyB->Value->Op != OpCode::LdLoc ||
+                    static_cast<LdLoc*>(copyB->Value.get())->Variable.get() !=
+                        temp)
+                    continue;
+                ILVariable* target = copyB->Variable.get();
+                if (target == nullptr || target == temp)
+                    continue;
+                if (storeA->Variable.get() != temp ||
+                    storeA->Value == nullptr)
+                    continue;
+                // The alternative block: the single `b = alt;` store whose
+                // final branches to L (both paths join there).
+                if (b1->Instructions.size() != 1)
+                    continue;
+                auto* alt = dynamic_cast<StLoc*>(b1->Instructions[0].get());
+                if (alt == nullptr || alt->Variable.get() != target ||
+                    alt->Value == nullptr)
+                    continue;
+                if (b1->FinalInstruction == nullptr ||
+                    b1->FinalInstruction->Op != OpCode::Branch ||
+                    static_cast<Branch*>(b1->FinalInstruction.get())
+                            ->TargetBlock != guardBr->TargetBlock)
+                    continue;
+                // The temporary's loads: exactly the copy and the guard.
+                if (temp->LoadCount != 2)
+                    continue;
+                // The target's stores: exactly the copy and the
+                // alternative.
+                if (target->StoreCount != 2)
+                    continue;
+                // The alternative block must have NO other branch
+                // predecessor (the measured constraint).
+                int b1Preds = 0;
+                std::function<void(const ILInstruction*)> countB1 =
+                    [&](const ILInstruction* i) {
+                    if (i == nullptr) return;
+                    if (i->Op == OpCode::Branch) {
+                        auto* b = static_cast<const Branch*>(i);
+                        if (b->TargetBlock == b1) b1Preds++;
+                    }
+                    for (int ci = 0; ci < i->ChildCount(); ++ci)
+                        countB1(i->GetChild(ci));
+                };
+                countB1(root);
+                if (b1Preds != 0)
+                    continue;
+                // The composed fold: the NullCoalescing takes the
+                // ownership of the two expressions (released from the
+                // skipped statements -- they are never rendered, so the
+                // null values are inert; the keepalive vector owns the
+                // node for the render's lifetime).
+                coalesceKeepAlive_.push_back(
+                    std::make_unique<NullCoalescingInstruction>(
+                        NullCoalescingKind::Ref,
+                        std::move(storeA->Value),
+                        std::move(alt->Value)));
+                coalesceFolds_[copyB] = coalesceKeepAlive_.back().get();
+                coalesceSkipped_.insert(storeA);
+                coalesceSkipped_.insert(iff);
+                coalesceSuppressed_.insert(b1);
+            }
+            // The nested containers sit inside the blocks' instructions
+            // (a container's direct children are Blocks), so the descent
+            // walks every instruction subtree for the containers.
+            std::function<void(const ILInstruction*)> descend =
+                [&](const ILInstruction* i) {
+                if (i == nullptr) return;
+                if (auto* nested =
+                        dynamic_cast<const BlockContainer*>(i))
+                    scan(const_cast<BlockContainer*>(nested));
+                for (int ci = 0; ci < i->ChildCount(); ++ci)
+                    descend(i->GetChild(ci));
+            };
+            for (const auto& bi : c->Blocks) {
+                if (!bi) continue;
+                for (const auto& si : bi->Instructions) descend(si.get());
+                if (bi->FinalInstruction)
+                    descend(bi->FinalInstruction.get());
+            }
         };
         scan(dynamic_cast<BlockContainer*>(root));
     }
@@ -2067,6 +2208,9 @@ private:
         // The propagated-return target block: its leave rendered at the
         // goto site (the returnPropagation_ note).
         if (suppressedReturnBlocks_.count(&block)) return;
+        // The coalesce fold's alternative block: its store folded into the
+        // declaration (the AnalyzeNullCoalescingChains note).
+        if (coalesceSuppressed_.count(&block)) return;
         auto label = labels_.find(&block);
         if (label != labels_.end() && !emittedHeaderLabels_.count(&block)) {
             // C# labels start in column 0 by convention. A block whose label
@@ -2082,6 +2226,23 @@ private:
                 skippedAlias_ = nullptr;
                 continue;
             }
+            // The coalesce fold's skipped statements (the temporary's
+            // store and the guard if).
+            if (inst && coalesceSkipped_.count(inst.get()) != 0)
+                continue;
+            // The coalesce fold's declaration: `b = a;` renders as
+            // `b = (expr ?? alt);` through the composed
+            // NullCoalescingInstruction.
+            if (inst && inst->Op == OpCode::StLoc) {
+                auto fold = coalesceFolds_.find(
+                    static_cast<StLoc*>(inst.get()));
+                if (fold != coalesceFolds_.end()) {
+                    Line(indent,
+                         "var " + fold->first->Variable->Name + " = " +
+                             Expr(*fold->second) + ";");
+                    continue;
+                }
+            }
             if (inst && inst->Op != OpCode::Nop) {
                 // An always-exiting construct makes the rest of the block
                 // unreachable; a following Leave to the function body is
@@ -2096,9 +2257,13 @@ private:
         }
         // The same unreachable-exit rule for the block's final: a leave
         // final after an always-exiting construct statement in this block
-        // is the reader's fall-through duplicate.
+        // is the reader's fall-through duplicate. The coalesce fold's
+        // guard-if is also a skipped final (its whole chain folded into the
+        // declaration).
         if (block.FinalInstruction && !dropFinal &&
-            !(exited && block.FinalInstruction->Op == OpCode::Leave))
+            !(exited && block.FinalInstruction->Op == OpCode::Leave) &&
+            coalesceSkipped_.find(block.FinalInstruction.get()) ==
+                coalesceSkipped_.end())
             EmitStatement(*block.FinalInstruction, indent);
     }
 
