@@ -1854,6 +1854,52 @@ C# oracle), the net48 PresentationFramework corpus 0/0 throughout.
   typeof().FullName form; the blank line after the field; the local
   naming (num/i, shape, text).
 
+## THE PERFORMANCE ARC -- CLOSED (the debug-build discovery)
+
+THE ENDING (the arc's real conclusion): **the whole performance
+problem was measuring a debug build.** The `linux-ninja` preset carries
+no `CMAKE_BUILD_TYPE`, so the tree built unoptimized with live asserts.
+Measured on dnlib.dll end-to-end (`ilspy_cli --csharp`, bare env):
+
+| build                          | wall    |
+|--------------------------------|---------|
+| Debug, before the RVA fix      | 36.5s   |
+| Debug, after the RVA fix       | 15.7s   |
+| **Release (new preset)**       | **2.0s**|
+| the C# oracle (ilspycmd)       | ~9.4s   |
+| Release, DOTNET_ROOT resolved  | 5.5s    |
+
+The port in Release is ~4.7x FASTER than the oracle. The target
+(under 20s, then the oracle's ~10s) is exceeded 5x over.
+
+THE PERMANENT ARTEFACTS: (1) the `linux-ninja-release` preset
+(CMakePresets.json, commit f96fe307b) -- `cmake --preset
+linux-ninja-release && cmake --build --preset linux-ninja-release`
+(needs VCPKG_ROOT on env, same as linux-ninja); (2) the README's
+perf-measurement rule (Release only, with the numbers); (3) the RVA
+fix itself (d597dc3bb, a real algorithmic win regardless of build
+type: the using-set collector's per-method RVA linear scan was
+quadratic in the module size).
+
+THE CACHES -- ABANDONED, NOT NEEDED: the token-keyed member-ref/
+type-resolution caches (the empty-generic-context shape) cut the
+Debug resolved path 87s -> 48s but each alone changes the modifier
+fixture's -t using set (`using System.Threading;` appears over the
+fixture's Interlocked calls where the C# qualifies the calls and adds
+no using). The mechanism, half-traced: cacheless, the collector's
+per-body walk never reaches the Interlocked MemberRef (the render
+resolves those tokens); with the cache, ONE collector visit of an
+UnknownType "Interlocked" appears between render resolutions -- which
+call it comes from and why the fresh path hides it remains open (the
+[NS]/[CMPXCHG]/[COLL] prints were the trail). With the Release build
+at 2.0s bare / 5.5s resolved, the win is not worth the risk; the
+cache code lives in the turn history if ever revisited.
+
+THE GUARDS (all held, debug AND release): the connid pin
+(fbda64dd...), the corpus 0/0, the sweep 13,166 ran / 15 baseline
+identical, the hello parity (the recorded 3-line residue; the
+release binary's render is byte-identical to the debug one).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
