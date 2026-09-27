@@ -2795,6 +2795,32 @@ use valgrind --tool=callgrind on a single-method sample (e.g. one
 dnlib type's --csharp with -t) or gprof-style timers on the render
 hot spots. RED = the measured before/after per slice.
 
+## THE PERF/MEMORY -- THE FIRST MEASURED SLICE (the anatomy finding)
+
+THE CORRECTED BASELINE (the CURRENT release binary, dnlib, the full
+env): 9.59s wall / 1,095MB peak RSS. THE STALE-BINARY TRAP: the
+release build directory predates the campaign -- any release
+measurement must REBUILD first (the earlier 9.66s/1,070MB base was a
+stale binary; the numbers happen to match but the OUTPUT differed
+by 145k lines). THE RELEASE==DEBUG OUTPUT: byte-identical (89,374
+lines) -- the release binary is a valid gate oracle.
+
+THE SLICE (reverted): out.reserve(4MB) + the using-text append fix
+-- THE MEASUREMENT: 9.59s / 1,095MB = NO WIN (the noise band). THE
+ANATOMY CONCLUSION: the output string is NOT the 1GB source (the
+final text is ~6MB; the growth copies are bounded). THE 1GB IS
+RETAINED STATE -- the candidates for the NEXT slice (in order):
+(1) the per-method/per-type renderer lifetime -- is one renderer
+constructed per DecompileTypeToString (freed) or shared (the maps
+grow)? Check the construction sites.
+(2) the ILAst + the reader state per method -- freed after the
+render or retained (a vector)?
+(3) the type-system caches (the resolver/known types) -- the
+C#-parity cost.
+THE TOOL: heaptrack or valgrind --tool=massif (the callgrind for
+the hot spots later). THE TARGET: the peak below 1GB, toward the
+oracle's ~400MB band.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
