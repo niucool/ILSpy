@@ -2728,6 +2728,25 @@ dup, ...)] -- the use renders `expr?.Member(args)`, the [stloc,
 if] skip, the USE block suppressed (NOT the null-return target --
 it may be shared). The dup's loads: the comp + the use's receiver.
 
+## THE NEW FILE: de4dot.cui.dll (the second real comparison)
+
+ARTIFACTS: /tmp/ilspy-cmp/{oracle_cui_try1.cs,cpp_cui_try1.cs} (the
+oracle and the pre-fix port render); PERF: the port ~0.32s vs the
+oracle ~0.9s (2.8x, recorded). THE DIFF AFTER THE NULL-LITERAL FIX:
+2401 -> 1332 (the fix landed; see below). TWO QUEUED ITEMS:
+(1) DONE: the null-literal comparison (the `== 0` -> `== null`
+typing; the reference-typed left renders null; the value-type
+codes keep the literal) -- 31 cui sites + 130 dnlib.
+(2) THE FIELD-INITIALIZER PASS: the oracle renders
+`private IList<IObfuscatedFile> files = new List<IObfuscatedFile>();`
+at the FIELDS (35 cui sites) while the port leaves the initializers
+in the ctors -- the C#'s FieldInitializerPass re-synthesizes them
+into the declarations. THE NEXT SLICE after the null-propagation
+fold (which still needs its use-block render path resolved -- the
+fold skips [stloc, if] but the use block must render `return
+expr?.M(...)` -- do NOT suppress b1; render its leave through the
+nullPropagation_ map which already inlines the value expr).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
