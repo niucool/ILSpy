@@ -2677,6 +2677,26 @@ verified with the [BLOCKS]-style dump (the fn.Body walk), not the
 analysis + the render hook + the tree-count fix all worked first
 try compile-wise).
 
+## THE NULL-PROPAGATION -- THE SHAPE CORRECTED (the probe's answer)
+
+THE REAL BLOCK LAYOUT (the [BLOCKS]-style probe on
+FindWin32ResourceData -- NOT the --ilast-all appearance):
+```
+Block { [34] dup_6 = call(...)          <- ONE stloc: NO S_0 copy
+        [15] if ([26] comp([32] ldloc dup_6, [42] ldc))   <- the COMP guard
+              [14] branch }             <- (not the bare truthiness!)
+Block { [14] leave([27] call ...) }
+```
+THE TWO CORRECTIONS vs the first attempt's shape: (1) NO S_0 copy
+(the dup is the receiver directly -- the use-call's first argument
+is the ldloc dup itself); (2) the guard is a COMP against a constant
+(the `dup == 0` / `dup != null` comparison), not the coalesce
+chain's bare `if (ldloc dup)`. THE NEXT SESSION: the fold's gates
+corrected to this shape (the dup's loads: the guard's comp + the
+use's receiver; the comp's constant the null/zero form; the branch
+the true-arm) -- the implementation from the history needs only the
+shape alignment.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
