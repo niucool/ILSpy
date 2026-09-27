@@ -2947,6 +2947,22 @@ a subsequent eager decode. THEN THE FIX: (a) the lazy table decode
 (the C# model -- the MetadataFile's rows decode on access) or (b)
 the mmap/arena for the file buffers (no eager copy).
 
+## THE PERF/MEMORY -- THE ~1GB MEMORY GAP CLOSED
+
+THE FIX (committed): the reference-loading queue's resolved-NAME
+gate -- the forwarder rows from the netstandard facades queued
+System.Private.CoreLib once per PARENT (~28 entries), and the
+resolver loaded a fresh 30MB file per entry, retaining every copy
+(~1GB of duplicates). The name gate gives the C# cache's
+single-load semantics. THE MEASUREMENT (dnlib, release): peak RSS
+1,095MB -> 142MB (7.7x, BELOW the oracle's ~370MB), wall 9.55s ->
+9.22s, the output byte-identical. THE GATES: the pin ebf9b6e9...,
+the hello 3, the dnlib 80,585, the cui 1,332, the sweep 15 (the
+pre-existing set) -- all standing. THE PERF/MEMORY THREAD: the
+memory target MET (below the oracle band); the wall time remains
+at parity (9.2s vs the oracle's ~9.9s -- the earlier "4.7x faster"
+was the debug-vs-release ratio, corrected in the record).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
