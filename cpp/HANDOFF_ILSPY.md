@@ -2101,6 +2101,38 @@ port renders `using (coll.GetEnumerator()) { while
 into the flat emitter; its element name goes through
 GenerateForeachVariableName (the COLLECTION's name singularized).
 
+## THE NAMING PROPOSALS -- LANDED (the store/load arms)
+
+THE SLICE (the general naming aligned with the C# model): the port's
+AssignVariableNames now runs the store proposal (GetNameFromInstruction
+-- the ldfld/ldsfld field names with the compiler-generated recursion,
+the get_/Get* call remainders) and the load proposal (GetNameForArgument
+-- the StObj field targets, the set_/Set arguments, the Leave ->
+"result") before the type fallback, with the C#'s NULL-VETO semantics
+(the distinct suggestion set counts the empty suggestions too -- a load
+that suggests nothing vetoes the proposal; the first draft missed this
+and regressed hello's accumulator to "result", fixed in the same
+commit). The trailing-digit strip (SplitName's base-name half) applies
+before the conflict suffix.
+
+THE DEFERRALS (recorded): (1) the call-parameter-name arm of the load
+proposal needs the resolved IMethod (the port's flat reader resolves
+none for the calls -- only the MethodName string); (2) the
+currentLowerCaseTypeOrMemberNames filter (the C# filters the proposals
+against the declaring type's member names and the scope's type names
+to avoid shadowing); (3) the SINGULARIZATION + List/list/children
+rules -- they live ONLY in GenerateVariableName/GenerateForeachVariableName
+(DeclareVariables' deconstructions, StatementBuilder's using/foreach
+statements) -- NOT in the general local pipeline -- so they ride the
+ENUMERATOR-FOREACH port (the next big naming slice: the port renders
+`using (coll.GetEnumerator()) { while ((ref enumerator).MoveNext())
+... }` where the oracle reconstructs `foreach (T e in coll)` with the
+element named by GenerateForeachVariableName -- the COLLECTION's name
+singularized).
+
+THE MEASURE (dnlib -w lines vs the oracle): 70,947 -> 70,917 (the
+foreach element names) -> 70,677 (the store/load proposals).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
