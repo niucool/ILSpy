@@ -2654,6 +2654,29 @@ the dup loaded only by copy+guard, S only by the use (the elision
 composes), the null path the bare `leave ldnull`, the use block
 single-pred. THE SIZE: 223 oracle lines vs the port's 77.
 
+## THE NULL-PROPAGATION FOLD -- FIRST ATTEMPT, REVERTED (the debug plan)
+
+THE IMPLEMENTATION (complete, reverted): AnalyzeNullPropagation (the
+dumped 3-block shape: [dup=expr, S=dup, If(LdLoc dup, Branch->L,
+Nop)] + [leave ldnull] + [L: leave call M(ldloc S, ...)]) with the
+tree-computed counts (the dup-slot LoadCount/StoreCount are
+UNTRACKED by the reader -- the same gap as the fn_->Variables list;
+count the tree, don't trust the fields) and the render hook (the
+use-call renders expr?.Member(args)). ZERO SITES FIRED -- a shape
+mismatch remains (the render identical, the code reverted to HEAD;
+the pin and the plain diff verified standing: ebf9b6e9..., 80715).
+
+THE NEXT SESSION'S DEBUG (the procedure): the [NP]-style gate
+counters on each check (the b0 size; the if-final vs the third
+instruction -- THE COALESCE LESSON says check this first; the null
+block's bare-leave; the use block's leave-call; the single-pred).
+The candidate mismatch: the `--ilast-all` dump prints the block
+content uniformly, so the if's position (final vs statement) must be
+verified with the [BLOCKS]-style dump (the fn.Body walk), not the
+--ilast-all form. The implementation is in the turn history (the
+analysis + the render hook + the tree-count fix all worked first
+try compile-wise).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
