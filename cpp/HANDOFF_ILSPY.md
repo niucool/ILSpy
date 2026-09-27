@@ -2747,6 +2747,24 @@ fold skips [stloc, if] but the use block must render `return
 expr?.M(...)` -- do NOT suppress b1; render its leave through the
 nullPropagation_ map which already inlines the value expr).
 
+## THE NULL-PROPAGATION -- THIRD ATTEMPT, REVERTED (the target mystery)
+
+THE CORRECTED 2-BLOCK FOLD (the away-branching guard, the no-suppress
+render path) ALSO fired zero sites. The tree reverted clean (the pin
+ebf9b6e9..., the plain diff 80585 verified). THE REMAINING MYSTERY:
+the [NP2] probe showed NO nested containers under fn.Body (only the
+2 blocks), yet the port RENDERS `if (dup == 0) { return null; }` --
+the if's true-arm content comes from the branch's TargetBlock, and
+that block was not found by the probe's GetChild-based walk. THE
+NEXT SESSION'S ONE COUNTER: print (a) guardBr->TargetBlock's address
+vs every block in the fn.Body tree (the membership question), and
+(b) the target's FinalInstruction op + its container. HYPOTHESIS:
+the BlockContainer's Blocks list is NOT enumerated by GetChild (the
+[NP2] walk printed the top container's blocks directly, then the
+GetChild recursion found nothing else -- so any nested containers
+WERE missed by the walk but the target lives in one); the fix is a
+Blocks-aware recursive scan in the probe and the fold's gates.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
