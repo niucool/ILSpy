@@ -1062,7 +1062,7 @@ family, 34 rows); the connid pin unchanged.
   reference fixture set -- System.Runtime/System.Collections/
   System.Private.CoreLib from the .NET 10 runtime; without them the
   pin is 54895b5b...).
-- THE CORPUS: 4 oracle-only / 3 mine-only (the arc: the merged tree
+- THE CORPUS: 0 oracle-only / 0 mine-only -- FULL PARITY (the arc: the merged tree
   60/51 -> the using-set fix 60/50 -> the interop properties 39/34 ->
   the constraint clauses 22/17 -> the conversion operators 19/14 ->
   the complement forms 17/13 -> the explicit indexers 13/10:
@@ -1090,20 +1090,29 @@ family, 34 rows); the connid pin unchanged.
   `!getterHasBody && !setterHasBody && !IsAbstract && declaring kind
   != Interface -> Modifiers.Extern`, the mirror of the method arm's
   memberRendersExtern).
-- THE THREE EMITTER NEAR-MISSES ARE CLOSED (the corpus 8/7 -> 4/3):
-  (1) the static-call short qualification (the last two segments --
-  `Guid.NewGuid`, `Contract.Requires`; six synthetic-seed test
-  expectations updated to the short convention); (2) the generic
-  argument list (DecodeMethodSpecTypeArgs + the Call node's
-  TypeArgumentNames + the `<...>` render; a VAR/MVAR arg suppresses
-  the list); (3) the comparison's outer parens dropped (all contexts
-  take the bare operator expression).
-  THE REMAINING RESIDUE (4/3): the extern property (the reverted
-  attempt's mechanism recorded above) and the two cross-module `new`
-  misses (`public new CollectionRecord this[object o]` +
-  `internal new void SetValue(...)` -- the same member rows whose
-  `new` needs the base-member search through the referenced-module
-  chain).
+- THE PORT COMPLETION MILESTONE (this turn): the PresentationFramework
+  corpus reached FULL PARITY -- 0 oracle-only / 0 mine-only normalized
+  lines. The final four rules (committed together, each verified in
+  sequence): (1) the DoDecompileProperty extern arm (the RVA-0
+  accessor check -- no reorder needed; the first attempt's
+  body-text-gate variant was the breakage); (2) the SetNewModifier
+  indexer arm (the indexer-vs-indexer signature hide -- Indexer is a
+  distinct SymbolKind, so the hide is signature-based); (3) the
+  substituted view of a parameterized base type (the class
+  ITypeParameter by index through the base's TypeArguments; verified
+  empirically against the C# with the synthetic B<T>/D:B<string>
+  fixture at /home/jim/tmp-build/hidetest); (4) the late base-ctor
+  statement (the no-arg elision only when the call is the first
+  statement of the entry block; the ret-less code-contracts bodies put
+  the base call after the field stores, and the C# renders the raw
+  `base..ctor();` statement form).
+  The full gate holds (13,166 ran / 15 baseline, identical failures)
+  and the connid pin is unchanged through every step. REMAINING KNOWN
+  GAPS (not corpus rows): the mscorlib-env gold family (the net48
+  ILSPY_TEST_MSCORLIB gate, gold values pin the mono layout), the
+  facade suite's one pre-existing merged-tree failure (the tab
+  migration's XmlDocumentationCommentsRenderOnMembers string), and
+  GetOptions (user-deferred).
   CLOSED THIS TURN: the `[DefaultMember("Item")]` extra (the
   compiler-generated attribute drops when the type declares a
   non-explicit indexer, `8179a690f`).
