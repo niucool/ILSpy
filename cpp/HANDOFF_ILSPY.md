@@ -2598,6 +2598,21 @@ restructuring).
 
 THE ARC (dnlib, plain diff): 137,517 -> ... -> 80,716 -> 80,715.
 
+## THE ??-FAMILY RE-MEASURE (the next session's entry point)
+
+THE MEASURE: the oracle 319 `??` lines vs the port 44; the 16
+"remaining dup-chains" are NOT coalesce rejections -- the sampled
+shape is the NULL-PROPAGATION family: `var dup_6 = self.Win32Resources;
+if (dup_6 == 0) { return null; } return dup_6.Find(...);` where the
+oracle renders `return self.Win32Resources?.Find(type, name, langId);`
+-- the `?.` synthesis (the oracle uses it heavily: typeSpec?.TypeSig,
+sig?.Params.Count, the null-guard-and-use shapes). THE NEXT SLICE:
+the null-propagation synthesis (the dump-first pass over these
+shapes: the dup + the == 0/null guard + the early return vs the use),
+then the remaining coalesce variants. The arc stands at 80,715
+(verified: the pin ebf9b6e9..., the corpus 0/0, hello 3, the sweep
+13,174/15, the disk checked).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
