@@ -61,6 +61,7 @@
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/CompoundAssignmentInstruction.hpp"
 #include "Decompiler/IL/Instructions/NullableInstructions.hpp"
+#include "Decompiler/IL/InstructionFlags.hpp"
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/PinnedRegion.hpp"
 #include "Decompiler/IL/Instructions/RefAnyType.hpp"
@@ -317,6 +318,7 @@ public:
             CollectLabels(fn.Body.get());
             AnalyzeReturnPropagation(fn.Body.get());
             AnalyzeNullCoalescingChains(fn.Body.get());
+            AnalyzeSingleUseLocals();
             HoistForInitializers(fn.Body.get());
             EmitContainer(*fn.Body, 1);
         }
@@ -345,6 +347,14 @@ private:
     // ILInlining's single-use rule) and drops the declaration. The map
     // holds the single LdLoc with the folded node.
     std::map<const LdLoc*, NullCoalescingInstruction*> coalesceElisions_;
+    // The GENERAL single-use elision (the same rule without the coalesce):
+    // a local with exactly one load and one store, never address-taken,
+    // whose store's expression is pure and whose use sits after the
+    // declaration in the same container's straight-line flow, inlines the
+    // expression into the use and drops the declaration -- the port keeps
+    // `var x = expr; use(x);` where the oracle renders `use(expr);`.
+    std::map<const LdLoc*, ILInstruction*> singleUseElisions_;
+    std::set<const ILInstruction*> singleUseSkipped_;
     std::set<const ILInstruction*> coalesceSkipped_;
     std::set<const Block*> coalesceSuppressed_;
     std::vector<std::unique_ptr<NullCoalescingInstruction>> coalesceKeepAlive_;
@@ -914,6 +924,112 @@ private:
             }
         };
         scan(dynamic_cast<BlockContainer*>(root));
+    }
+
+    // The general single-use elision (the C# ILInlining's single-use rule):
+    // one load, one store, no address-taken, the store's expression pure,
+    // and the use after the declaration in a non-loop container's
+    // straight-line flow. The byref uses (ldloca) are excluded by the
+    // load-count gate; the coalesce-folded targets are already handled
+    // (their elisions recorded by the fold).
+    void AnalyzeSingleUseLocals() {
+        if (fn_ == nullptr || fn_->Body == nullptr)
+            return;
+        for (const auto& v : fn_->Variables) {
+            if (v == nullptr || v->Kind != VariableKind::Local)
+                continue;
+            if (v->LoadCount != 1 || v->StoreCount != 1 ||
+                v->AddressCount != 0)
+                continue;
+            // The coalesce fold already owns the single-use targets it
+            // elided.
+            bool coalesced = false;
+            for (const auto& [stLoc, nc] : coalesceFolds_)
+                if (stLoc->Variable.get() == v.get()) {
+                    coalesced = true;
+                    break;
+                }
+            if (coalesced)
+                continue;
+            // The single store (the StLoc) and the single load (the walk).
+            StLoc* store = nullptr;
+            std::function<void(ILInstruction*)> findStore =
+                [&](ILInstruction* i) {
+                if (i == nullptr || store != nullptr) return;
+                if (i->Op == OpCode::StLoc) {
+                    auto* st = static_cast<StLoc*>(i);
+                    if (st->Variable.get() == v.get())
+                        store = st;
+                }
+                for (int ci = 0; ci < i->ChildCount(); ++ci)
+                    findStore(i->GetChild(ci));
+            };
+            findStore(fn_->Body.get());
+            if (store == nullptr || store->Value == nullptr)
+                continue;
+            // The pure gate: a side-effecting expression re-evaluated at
+            // the use site (or moved across a branch) changes behavior.
+            if (!IsPure(store->Value->Flags()))
+                continue;
+            const LdLoc* useSite = nullptr;
+            std::function<void(const ILInstruction*)> findLoad =
+                [&](const ILInstruction* i) {
+                if (i == nullptr || useSite != nullptr) return;
+                if (i->Op == OpCode::LdLoc) {
+                    auto* l = static_cast<const LdLoc*>(i);
+                    if (l->Variable.get() == v.get())
+                        useSite = l;
+                }
+                for (int ci = 0; ci < i->ChildCount(); ++ci)
+                    findLoad(i->GetChild(ci));
+            };
+            findLoad(fn_->Body.get());
+            if (useSite == nullptr)
+                continue;
+            // The enclosing blocks (the ancestor walk -- the use sits
+            // inside nested expressions).
+            const Block* storeBlock = nullptr;
+            for (const ILInstruction* p = store; p != nullptr; p = p->Parent)
+                if (p->Op == OpCode::Block) {
+                    storeBlock = static_cast<const Block*>(p);
+                    break;
+                }
+            const Block* useBlock = nullptr;
+            for (const ILInstruction* p = useSite; p != nullptr; p = p->Parent)
+                if (p->Op == OpCode::Block) {
+                    useBlock = static_cast<const Block*>(p);
+                    break;
+                }
+            if (storeBlock == nullptr || useBlock == nullptr)
+                continue;
+            auto* container =
+                dynamic_cast<BlockContainer*>(storeBlock->Parent);
+            auto* useContainer =
+                dynamic_cast<BlockContainer*>(useBlock->Parent);
+            if (container == nullptr || container != useContainer)
+                continue;
+            if (container->Kind == ContainerKind::Loop ||
+                container->Kind == ContainerKind::While ||
+                container->Kind == ContainerKind::For ||
+                container->Kind == ContainerKind::DoWhile)
+                continue;
+            std::size_t storeIndex = 0, useIndex = 0;
+            bool foundStore = false, foundUse = false;
+            for (std::size_t ui = 0; ui < container->Blocks.size(); ++ui) {
+                if (container->Blocks[ui].get() == storeBlock) {
+                    storeIndex = ui;
+                    foundStore = true;
+                }
+                if (container->Blocks[ui].get() == useBlock) {
+                    useIndex = ui;
+                    foundUse = true;
+                }
+            }
+            if (!foundStore || !foundUse || useIndex < storeIndex)
+                continue;
+            singleUseElisions_[useSite] = store->Value.get();
+            singleUseSkipped_.insert(store);
+        }
     }
 
     // Every branch-target block gets an IL_XXXX label; walk the whole tree so
@@ -2290,6 +2406,9 @@ private:
             // The coalesce fold's skipped statements (the temporary's
             // store and the guard if).
             if (inst && coalesceSkipped_.count(inst.get()) != 0)
+                continue;
+            // The general single-use elision's dropped declaration.
+            if (inst && singleUseSkipped_.count(inst.get()) != 0)
                 continue;
             // The coalesce fold's declaration: `b = a;` renders as
             // `b = (expr ?? alt);` through the composed
@@ -3908,6 +4027,9 @@ private:
                 auto el = coalesceElisions_.find(&ld);
                 if (el != coalesceElisions_.end())
                     return Expr(*el->second);
+                auto su = singleUseElisions_.find(&ld);
+                if (su != singleUseElisions_.end())
+                    return Expr(*su->second);
                 return ld.Variable ? ld.Variable->Name : "?";
             }
             case OpCode::StLoc: {
