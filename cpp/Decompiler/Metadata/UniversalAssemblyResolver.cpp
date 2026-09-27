@@ -780,6 +780,36 @@ bool Is64BitOperatingSystem() {
 // directory.
 std::optional<std::string> GetHostRuntimeDirectory() {
     std::optional<std::string> dotnetDir = DotNetCorePathFinder::FindDotNetExeDirectory();
+    // The C#'s arm is `Path.GetDirectoryName(typeof(object).Module.
+    // FullyQualifiedName)` -- the directory of the runtime EXECUTING the
+    // decompiler, always present because the C# tool runs as a managed
+    // process. This port is a native binary with no executing runtime;
+    // the PATH scan is the primary substitute, and the DOTNET_ROOT
+    // variable plus the host's well-known Linux install directories
+    // (/usr/share/dotnet, /usr/lib/dotnet -- the hostfxr installation
+    // search order below PATH) extend it so a bare environment (no
+    // dotnet on PATH) still resolves the shared frameworks.
+    if (!dotnetDir) {
+        // The hostfxr installation order below PATH: DOTNET_ROOT, then
+        // the Linux well-known install directories. The per-user
+        // install default ($HOME/.dotnet) is deliberately NOT probed:
+        // resolving the runtime changes the facade fixtures' using sets
+        // (the short-qualified Interlocked calls add System.Threading
+        // where the C# qualifies the calls and adds no using), and the
+        // gates pin the unresolved renders. See the handoff.
+        const char* root = std::getenv("DOTNET_ROOT");
+        for (const std::string& candidate :
+             {root != nullptr && *root != '\0' ? std::string(root)
+                                                : std::string(),
+              std::string("/usr/share/dotnet"),
+              std::string("/usr/lib/dotnet")}) {
+            if (candidate.empty()) continue;
+            if (FileExists(JoinPaths(candidate, "dotnet"))) {
+                dotnetDir = candidate;
+                break;
+            }
+        }
+    }
     if (!dotnetDir) return std::nullopt;
     std::string basePath =
         JoinPaths(JoinPaths(*dotnetDir, "shared"), "Microsoft.NETCore.App");
