@@ -872,7 +872,12 @@ private:
                     if (useSite != nullptr) {
                         // The use site sits inside a nested expression
                         // (the ctor's arguments); walk the ancestors to its
-                        // enclosing block.
+                        // enclosing block, then the ancestor-chain
+                        // dominance (the single-use elision's rule: the
+                        // chain reaches the declaration's container at an
+                        // index >= the declaration's; the loops are
+                        // covered by the coalesce's own purity -- the
+                        // folded expression is the original store's).
                         const Block* useBlock = nullptr;
                         for (const ILInstruction* p = useSite; p != nullptr;
                              p = p->Parent) {
@@ -881,25 +886,41 @@ private:
                                 break;
                             }
                         }
+                        bool dominated = false;
                         if (useBlock != nullptr) {
-                            std::size_t useIndex = 0;
-                            bool foundUse = false;
-                            for (std::size_t ui = 0; ui < c->Blocks.size();
-                                 ++ui)
-                                if (c->Blocks[ui].get() == useBlock) {
-                                    useIndex = ui;
-                                    foundUse = true;
+                            const Block* ub = useBlock;
+                            auto* uc =
+                                dynamic_cast<BlockContainer*>(useBlock->Parent);
+                            while (uc != nullptr) {
+                                if (uc == c) {
+                                    for (std::size_t ui = 0;
+                                         ui < c->Blocks.size(); ++ui) {
+                                        if (c->Blocks[ui].get() == ub) {
+                                            if (ui > k)
+                                                dominated = true;
+                                            break;
+                                        }
+                                    }
                                     break;
                                 }
-                            if (foundUse && useIndex > k &&
-                                c->Kind != ContainerKind::Loop &&
-                                c->Kind != ContainerKind::While &&
-                                c->Kind != ContainerKind::For &&
-                                c->Kind != ContainerKind::DoWhile) {
-                                coalesceElisions_[useSite] =
-                                    coalesceKeepAlive_.back().get();
-                                coalesceSkipped_.insert(copyB);
+                                const Block* pb = nullptr;
+                                for (const ILInstruction* p = uc->Parent;
+                                     p != nullptr; p = p->Parent) {
+                                    if (p->Op == OpCode::Block) {
+                                        pb = static_cast<const Block*>(p);
+                                        break;
+                                    }
+                                }
+                                if (pb == nullptr)
+                                    break;
+                                ub = pb;
+                                uc = dynamic_cast<BlockContainer*>(pb->Parent);
                             }
+                        }
+                        if (dominated) {
+                            coalesceElisions_[useSite] =
+                                coalesceKeepAlive_.back().get();
+                            coalesceSkipped_.insert(copyB);
                         }
                     }
                 }
@@ -935,7 +956,32 @@ private:
     void AnalyzeSingleUseLocals() {
         if (fn_ == nullptr || fn_->Body == nullptr)
             return;
-        for (const auto& v : fn_->Variables) {
+        // The variable collection walks the tree, not fn_->Variables: the
+        // reader's dup-slot temporaries (the S_/dup_ names) are created
+        // outside the function's registered variable list, so the list
+        // iteration missed them entirely (measured: the [SU] debug showed
+        // zero S_/dup_ entries while the renders carried them).
+        std::vector<ILVariable*> variables;
+        {
+            std::set<ILVariable*> seen;
+            std::function<void(const ILInstruction*)> collect =
+                [&](const ILInstruction* i) {
+                if (i == nullptr) return;
+                ILVariable* var = nullptr;
+                if (i->Op == OpCode::StLoc)
+                    var = static_cast<const StLoc*>(i)->Variable.get();
+                else if (i->Op == OpCode::LdLoc)
+                    var = static_cast<const LdLoc*>(i)->Variable.get();
+                else if (i->Op == OpCode::LdLoca)
+                    var = static_cast<const LdLoca*>(i)->Variable.get();
+                if (var != nullptr && seen.insert(var).second)
+                    variables.push_back(var);
+                for (int ci = 0; ci < i->ChildCount(); ++ci)
+                    collect(i->GetChild(ci));
+            };
+            collect(fn_->Body.get());
+        }
+        for (const auto& v : variables) {
             if (v == nullptr || v->Kind != VariableKind::Local)
                 continue;
             if (v->LoadCount != 1 || v->StoreCount != 1 ||
@@ -945,7 +991,7 @@ private:
             // elided.
             bool coalesced = false;
             for (const auto& [stLoc, nc] : coalesceFolds_)
-                if (stLoc->Variable.get() == v.get()) {
+                if (stLoc->Variable.get() == v) {
                     coalesced = true;
                     break;
                 }
@@ -958,7 +1004,7 @@ private:
                 if (i == nullptr || store != nullptr) return;
                 if (i->Op == OpCode::StLoc) {
                     auto* st = static_cast<StLoc*>(i);
-                    if (st->Variable.get() == v.get())
+                    if (st->Variable.get() == v)
                         store = st;
                 }
                 for (int ci = 0; ci < i->ChildCount(); ++ci)
@@ -977,7 +1023,7 @@ private:
                 if (i == nullptr || useSite != nullptr) return;
                 if (i->Op == OpCode::LdLoc) {
                     auto* l = static_cast<const LdLoc*>(i);
-                    if (l->Variable.get() == v.get())
+                    if (l->Variable.get() == v)
                         useSite = l;
                 }
                 for (int ci = 0; ci < i->ChildCount(); ++ci)
