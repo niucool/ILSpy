@@ -277,13 +277,11 @@ void CollectNamespacesEntity(RequiredNamespaceCollector& collector,
                 // part's body through the metadata layer's MethodDef table
                 // walk (the part token IS a MethodDef token).
                 try {
-                    std::uint32_t rva = 0;
-                    for (const MD::MethodDefInfo& mi : metadata->MethodDefs()) {
-                        if (mi.Token == part) {
-                            rva = mi.RVA;
-                            break;
-                        }
-                    }
+                    // The metadata layer's token->RVA lookup (a map probe);
+                    // the earlier linear scan over the module's whole
+                    // MethodDef table made the using-set walk quadratic in
+                    // the module's method count.
+                    std::uint32_t rva = metadata->GetMethodRVA(part);
                     if (rva == 0) continue;
                     const MD::MethodBody body = metadata->GetMethodBody(rva);
                     CollectNamespacesFromMethodBody(collector, module,
@@ -413,7 +411,7 @@ void CollectRequiredNamespaces(
     collector.HandleAttributes(module.GetModuleAttributes());
 }
 
-// The C# `public static void CollectAttributeNamespaces(MetadataModule,
+
 // HashSet<string>)`: the assembly + module attribute sweep only.
 void CollectAttributeNamespaces(TS::MetadataModule& module,
                                 std::unordered_set<std::string>& namespaces) {
