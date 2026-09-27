@@ -2056,6 +2056,51 @@ per-method render differences) -- that was never this arc's gate (the
 gates were the port-vs-port renders and the fixed corpora); it is the
 ongoing porting long tail.
 
+## THE DNLIB LONG TAIL -- THE FIRST SLICE (the foreach element names)
+
+THE MEASUREMENT (the diff categorization over the 70,947 -w lines /
+27,773 hunks): the top families are all LOCAL VARIABLE NAME
+divergences -- the declarations, the conditions, the assignments, the
+foreach headers -- the port's names differ from the oracle's across
+thousands of small hunks (no single dominant family; the long tail).
+
+THE FIRST ROOT FOUND (the foreach element names): the flat emitter
+named the element from the RENDERED TYPE TEXT -- `foreach (byte byte
+in ...)` (the keyword -- an INVALID C# identifier, a real bug) and
+`foreach (ImageDebugDirectory ImageDebugDirectory in ...)`. THE FIX
+(committed with the ForEachName fixture as the RED): the element takes
+AssignVariableNames::SuggestNameForType (the C# GetNameByType port:
+the known-type dict byte->b/string->text, the lowercased short type
+name with the interface strip). dnlib: -30 -w lines, zero invalid
+keyword identifiers.
+
+THE C# NAMING MODEL (the next slices' reference -- read before touching
+the name inference again): the ILAst AssignVariableNames has THREE
+proposals before the type fallback (AssignVariableNames.cs):
+(1) the STORE's value-context name -- GetNameFromInstruction: the
+ldfld/ldsfld -> the field name; the get_/Get* calls -> the property/
+method-name remainder; the stloc-of-newobj -> the GuessType'd type;
+(2) the LOAD's argument name -- GetNameForArgument: the stobj's field
+target; the call's set_/Set method; the call's PARAMETER names; the
+Leave -> "result";
+(3) the type fallback -- GetNameByType (the dict, the array/ptr names,
+the interface strip, the lowercased short name).
+THEN the SINGULARIZATION (the Humanizer Vocabularies.Default -- data ->
+datum, directories -> directory) + the List-suffix strip + the
+"list"->"item" + the "children" -3 strip + the number strip + the
+conflict suffix. THE PORT has the type fallback + the counters + the
+num2 suffix + the I-strip; IT LACKS the store/load proposals and the
+singularization -- those drive the oracle's semantic names
+(`directory` from `directories`, `name` from a Get-method call) and
+are the next-highest-leverage naming slices.
+THE ENUMERATOR FOREACH (the other gap visible in the sample): the
+port renders `using (coll.GetEnumerator()) { while
+((ref enumerator).MoveNext()) ... }` where the oracle reconstructs
+`foreach (T e in coll)` -- the foreach-over-enumerable pattern
+(the C# PatternStatementTransform's enumerator arm) is not ported
+into the flat emitter; its element name goes through
+GenerateForeachVariableName (the COLLECTION's name singularized).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
