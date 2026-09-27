@@ -2845,6 +2845,28 @@ curve (steady climb = per-type retention; the slope localizes it),
 then the same logger inside the per-method loop. No external
 profiler is available (no heaptrack, no valgrind, no sudo).
 
+## THE PERF/MEMORY -- THE CURVE'S ANSWER (the retention localized)
+
+THE RSS CURVE (the in-process logger, dnlib, 710 types): the FIRST
+type already reads 1,088MB; the whole per-type climb after is only
+~8MB (1,088 -> 1,096). THE RETENTION IS THE PRE-LOOP SETUP -- the
+module load, the DecompilerTypeSystem construction, and the
+WholeModuleUsingSet collection pass (the collector walks every
+type/member BEFORE any render). THE PRIME SUSPECT (from the arc's
+own history): the visitedTypes_ KEEPALIVE REGISTRY (the 5dbb77a4b
+lifetime fix) -- it retains every visited type object for the whole
+module to keep the collection deterministic; if it holds shared_ptr
+copies of large type objects, it IS the 1GB. THE NEXT SLICE: read
+RequiredImportsRecorder/RequiredNamespaceCollector's keepalive
+registry (what it stores, its lifetime) and the collector's walk
+state; measure with the logger's bisect variant (NOTE: the stderr
+printf variant produced no output in the CLI pipe -- put the
+samples in the same FILE-append form that worked, not stderr).
+THE BENNU CANARY (the user's note): the large-fixture pin bb5b83bf
+(8,452 lines) renders the big fixture before/after so a fidelity
+regression cannot hide under a perf win -- adopt it as a guard for
+every perf slice.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
