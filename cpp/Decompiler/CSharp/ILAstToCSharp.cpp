@@ -24,6 +24,7 @@
 // parenthesization decisions). Unknown nodes degrade to a marked-up default
 // expression rather than dropping text or crashing.
 
+#include <cstdio>
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/CSharp/RequiredImportsRecorder.hpp"
@@ -80,7 +81,6 @@
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 
 #include <cctype>
-#include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <set>
@@ -629,7 +629,10 @@ private:
         result += "\n";
         for (int i = 0; i < indent; i++) result += '\t';
         result += "{" + DedentByOne(loopBody) + "}\n";
-        result += DedentByOne(trailing);
+        if (!trailing.empty()) {
+            for (int i = 0; i < indent; i++) result += '\t';
+            result += DedentByOne(trailing);
+        }
         return true;
     }
 
@@ -1883,6 +1886,33 @@ private:
                     break;
                 }
             }
+            // The reader's fall-through duplicate: after an always-exiting
+            // construct (a using/try whose body leaves the function), a
+            // following block that only carries a Leave to the function body
+            // is unreachable -- the construct's own leave already exited.
+            // Skip it (the C#'s dead-code handling drops the same shape;
+            // the oracle renders one return).
+            bool unreachableExit = false;
+            if (block->FinalInstruction &&
+                block->FinalInstruction->Op == OpCode::Leave) {
+                auto* lv = static_cast<const Leave*>(
+                    block->FinalInstruction.get());
+                if (fn_ && lv->TargetContainer == fn_->Body.get()) {
+                    for (std::size_t j = 0; j < i; ++j) {
+                        const auto& prev = container.Blocks[j];
+                        if (!prev || prev->Instructions.empty()) continue;
+                        bool anyExit = false;
+                        for (const auto& stmt : prev->Instructions) {
+                            if (stmt && ConstructAlwaysExits(stmt.get())) {
+                                anyExit = true;
+                                break;
+                            }
+                        }
+                        if (anyExit) { unreachableExit = true; break; }
+                    }
+                }
+            }
+            if (unreachableExit) continue;
             EmitBlock(*block, indent, dropFinal);
         }
     }
@@ -1898,6 +1928,41 @@ private:
         for (int c = 0; c < inst->ChildCount(); ++c)
             if (VariableHasStoreIn(inst->GetChild(c), v)) return true;
         return false;
+    }
+
+    // Whether a construct statement (using/try/lock) always exits the
+    // function: its body contains a Leave to the function body. The C#
+    // ILAst's dead-code handling drops the fall-through leave the reader
+    // leaves after such a construct (the try's leave already exited), so
+    // the port must not render the unreachable duplicate.
+    bool ConstructAlwaysExits(const ILInstruction* inst) {
+        // The construct bodies are Blocks or BlockContainers depending
+        // on the reader's modeling (the using body is a Block, the try
+        // bodies are containers), so the walk starts from whichever body
+        // the construct carries.
+        const ILInstruction* body = nullptr;
+        if (auto* u = dynamic_cast<const UsingInstruction*>(inst))
+            body = u->Body.get();
+        else if (auto* tf = dynamic_cast<const TryFinally*>(inst))
+            body = tf->TryBlock.get();
+        else if (auto* tc = dynamic_cast<const TryCatch*>(inst))
+            body = tc->TryBlock.get();
+        else if (auto* l = dynamic_cast<const LockInstruction*>(inst))
+            body = l->Body.get();
+        if (body == nullptr || fn_ == nullptr)
+            return false;
+        std::function<bool(const ILInstruction*)> exits =
+            [&](const ILInstruction* i) -> bool {
+            if (i == nullptr) return false;
+            if (auto* lv = dynamic_cast<const Leave*>(i)) {
+                if (lv->TargetContainer == fn_->Body.get())
+                    return true;
+            }
+            for (int c = 0; c < i->ChildCount(); ++c)
+                if (exits(i->GetChild(c))) return true;
+            return false;
+        };
+        return exits(body);
     }
 
     void EmitBlock(const Block& block, int indent, bool dropFinal = false) {
@@ -1917,15 +1982,31 @@ private:
             out_ += label->second;
             out_ += ":\n";
         }
+        bool exited = false;
         for (const auto& inst : block.Instructions) {
             if (inst.get() == skippedAlias_) {
                 // Folded into the preceding ArrayInitializer render.
                 skippedAlias_ = nullptr;
                 continue;
             }
-            if (inst && inst->Op != OpCode::Nop) EmitStatement(*inst, indent);
+            if (inst && inst->Op != OpCode::Nop) {
+                // An always-exiting construct makes the rest of the block
+                // unreachable; a following Leave to the function body is
+                // the reader's fall-through duplicate of the construct's
+                // own exit (the double-return shape) -- drop it.
+                if (exited && inst->Op == OpCode::Leave)
+                    continue;
+                EmitStatement(*inst, indent);
+                if (ConstructAlwaysExits(inst.get()))
+                    exited = true;
+            }
         }
-        if (block.FinalInstruction && !dropFinal) EmitStatement(*block.FinalInstruction, indent);
+        // The same unreachable-exit rule for the block's final: a leave
+        // final after an always-exiting construct statement in this block
+        // is the reader's fall-through duplicate.
+        if (block.FinalInstruction && !dropFinal &&
+            !(exited && block.FinalInstruction->Op == OpCode::Leave))
+            EmitStatement(*block.FinalInstruction, indent);
     }
 
     // Render a Block(InterpolatedString) as a C# `$"..."` interpolation.
