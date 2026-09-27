@@ -1854,3 +1854,45 @@ C# oracle), the net48 PresentationFramework corpus 0/0 throughout.
   typeof().FullName form; the blank line after the field; the local
   naming (num/i, shape, text).
 
+## THE PERFORMANCE ARC (the priority work order)
+
+THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
+the C# oracle ~9.4s / ~375MB; the port was ~36.5s bare / ~87s with the
+runtime references resolved.
+
+CLOSED (1f0ca... the RVA fix): the using-set collector's per-method RVA
+linear scan over the whole MethodDef table (the quadratic) replaced
+with the metadata layer's GetMethodRVA map probe. The bare whole-
+module render: 36.5s -> 15.7s (under the 20s target), zero render
+delta. THE GUARDS: all four held (the pin, the corpus, the sweep, the
+hello parity).
+
+THE MEASURED BREAKDOWN (the resolved path, post-fix): the using-set
+walk ~66s (the body walk ~19s over 9094 bodies + the member-signature
+sweeps ~16s + the rest), the type renders ~19s, the ctor ~0.3s.
+
+THE ATTEMPTED-AND-REVERTED CACHES (the next session's entry point):
+the token-keyed member-ref and type-resolution caches over the
+EMPTY-GENERIC-CONTEXT shape cut the resolved path 87 -> 48s with a
+zero dnlib render delta -- but they add `using System.Threading;` to
+the modifier fixture's -t render (the fixture's Interlocked calls)
+where the C# qualifies the calls and adds no using. WHY: unidentified
+-- the cache makes some resolution observable that the fresh per-call
+path hides (the pointer-identity dedup in the collector's
+visitedTypes_ set, or a lazily-computed member surviving across the
+cached instance, are the candidates). Bisect: EACH cache alone
+reproduces it; the RVA fix alone does not. The cache code is in the
+turn's history (the memberRefCache_/fieldRefCache_/typeTokenCache_
+members + the cacheable gates in ResolveMethodReference/
+ResolveFieldReference/ResolveType).
+
+THE REMAINING HOT SPOTS (in measured order): (1) the member-signature
+first-touch in the using-set sweeps (~16s resolved -- the per-method
+GetAttributes/ReturnType/Parameters lazy entity construction over
+the signature decode); (2) the body walk (~11s -- the per-body IL
+cursor + the EH parse + the local-sig decode); (3) the per-type
+renders (~19s -- the per-method ReadIL + the transform pipeline + the
+flat render). The C# comparison: the oracle's whole run is ~9.4s, so
+the port's per-unit work is ~2x -- the caches are the lever, gated on
+the fixture regression.
+
