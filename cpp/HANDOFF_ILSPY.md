@@ -2765,6 +2765,36 @@ GetChild recursion found nothing else -- so any nested containers
 WERE missed by the walk but the target lives in one); the fix is a
 Blocks-aware recursive scan in the probe and the fold's gates.
 
+## THE PERF/MEMORY INVESTIGATION (the user's controlled numbers, the reconciliation)
+
+THE CONTROLLED MEASUREMENTS (dnlib, release, 3 runs):
+--ilast-all (the full decode + dump): 0.10s / 10.6MB -- the decode
+is nearly free. --csharp (the full render): 9.58s / 1.07GB. THE
+ORACLE: ~9.9s / ~370MB. THE AUTHORITATIVE NUMBERS (these).
+
+THE 2.19s RECONCILIATION: the earlier arc recorded "2.0s bare /
+5.5s resolved / ~9.6-9.7s with the default probe" -- the 2.0s was a
+NO-PROBE/RESOLUTION-LIGHT configuration, NOT the full --csharp
+render; the full render was always ~9.6s (parity with the oracle).
+The "4.7x faster" claim was the PORT's debug-vs-release ratio, not
+port-vs-oracle. THE CORRECTION: the port's full render is at PARITY
+with the oracle on time (9.58 vs 9.9s) and ~2.9x WORSE on memory
+(1.07GB vs 370MB).
+
+THE MEMORY ANATOMY (the candidates, in the user's order):
+(1) THE PER-METHOD ARENA RESET -- the transform state (the analysis
+maps: returnPropagation_, coalesceFolds_, singleUseElisions_,
+nullPropagation_) need not outlive each method's render; a scoped
+reset between methods.
+(2) THE OUTPUT STREAMING -- write-as-you-render instead of
+accumulating the whole-module output string (the ~4,700 types).
+(3) THE STRING-BUILDING -- the += chains -> reserve+append in the
+Expr/Emit hot paths.
+THE PROFILING: the perf events are blocked (zero-sized records);
+use valgrind --tool=callgrind on a single-method sample (e.g. one
+dnlib type's --csharp with -t) or gprof-style timers on the render
+hot spots. RED = the measured before/after per slice.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
