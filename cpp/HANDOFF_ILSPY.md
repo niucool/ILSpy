@@ -1767,16 +1767,29 @@ CLOSED (the arc 68 -> 33 normalized diff lines):
   (the RIGHT-operand/tighter-parent and the ternary-branch-slots
   parenthesize; everything else bare; `checked(a + b)` single parens).
 
-THE REMAINING RESIDUE (33 lines):
-- The int->bool ternary condition: `(num_1 % 3)` where the oracle has
-  `i % 3 != 0` (the cgt.un-not branch shape over an int remainder).
-- The array initializer: `new string[][2]` + the element stores + the
-  `/* unhandled statement op 32 */` (ldc.i4.s = op 32 in the array-init
-  walk) + the dangling array_2/array_3 aliases.
+THE REMAINING RESIDUE (28 lines; the arc 68 -> 33 -> 28):
+- CLOSED: the int->bool ternary condition (the ConvertConditionText --
+  the C# ConvertToBoolean port; an int-typed condition renders
+  `x != 0`; the ternary style `((cond) ? (a) : (b))`).
+- CLOSED: the file-scoped namespace (the single-namespace module
+  renders `namespace X;`; both whole-file paths; the connid and the
+  70-namespace corpus keep the block form).
+- THE ARRAY-INITIALIZER FAMILY (the next big item): the port's dup-slot
+  modeling (`stloc(dup_160, newarr ...)` + `stloc(dup_168, ldloc
+  (dup_160))` + `stloc(V_1, ldloc(dup_168))`) breaks the
+  TransformArrayInitializers pattern (the C#'s HandleSimpleArrayInitializer
+  needs the element stores on ONE local). The render shows `new string[]
+  [2]` (the render-stage NewArr.Type wraps to the ARRAY type somewhere
+  in the pipeline -- the raw reader holds the element type; the wrapping
+  transform is NOT yet identified), the element stores as separate
+  statements, the `/* unhandled statement op 32 */` (a dangling
+  ldc-statement left by the pipeline over the dup flow), and the
+  dangling array_2/array_3 aliases. The C#'s reader handles `dup`
+  without temporaries (the stack-value aliasing); the port's dup_160/
+  dup_168 slots are the divergence to fix.
 - The loop-init hoist: `for (int i = 1; ...)` vs `int num_1 = 1; for
   (; ...)`.
 - String.Concat -> `+` (the C# combines the string concat calls); the
-  typeof().FullName form; the file-scoped namespace (`namespace Demo;`);
-  the blank line after the field; the local naming (num/i, shape,
-  text).
+  typeof().FullName form; the blank line after the field; the local
+  naming (num/i, shape, text).
 
