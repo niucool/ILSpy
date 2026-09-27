@@ -3047,6 +3047,27 @@ second walk). THE MEMO'S IMPLEMENTATION (preserved in the turn
 history): correct-by-construction, zero output change -- keep it in
 mind if a future file shows the graph-re-walk profile.
 
+## THE DOUBLE-VISIT FIX (committed) + THE WALK'S TRUE COST NAMED
+
+THE FIX: the whole-module using-set loop iterates
+TopLevelTypeDefinitions() (the entity walk recurses into nested
+itself -- the full list walked every nested type TWICE). THE
+MEASUREMENT: the output byte-identical, the wall 9.22 -> 8.98s (the
+nested share is small). THE CONCLUSION: the walk's remaining ~6.0s is
+the ONCE-EACH per-member materialization (the lazy entity
+construction: Fields/Properties/Events/Methods + the signature
+resolutions), inherent to a SECOND pass over the module. THE
+STRUCTURAL FIX (c) -- THE C#-SHAPE SINGLE PASS: record the
+namespaces during the render's own type walks (the render already
+materializes every member -- the using set becomes a byproduct, the
+second walk disappears entirely): the RequiredImportsRecorder's
+existing recording machinery is the seam (the render-scope
+thread-local already records the method targets and the base names);
+extend it to the member-signature arms (the fields' types, the
+properties' types, the methods' signatures -- the C#
+FindRequiredImports runs over the BUILT tree for exactly this
+reason). THE GATES (all standing): the pin, hello 3, the sweep 15.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
