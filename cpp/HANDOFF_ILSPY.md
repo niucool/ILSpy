@@ -2230,6 +2230,33 @@ port emits `goto IL_00D2;` -- the control-flow/loop-exit rendering);
 (2) the accessor shapes (~606 -- the get/set lines); then the queued
 naming items (the shadow filter, the parameter-name arm).
 
+## THE GOTO FAMILY -- THE FIRST SLICE (the shared-exit propagation)
+
+THE MEASURED SPLIT (the port's 1,945 gotos vs the oracle's 2): 104
+target a plain return; 124 an assign-then-return; 1,717 the
+label-merged regions (the deep restructuring). THE SLICE (landed):
+the goto-to-return propagation -- AnalyzeReturnPropagation finds the
+leave-only exit blocks with a single branch predecessor and no
+fall-through; the branch renders the leave's return at its site and
+the block is suppressed. 71 sites fire on dnlib (the conservative
+gates); the plain diff 83,525 -> 83,275; the gotos 1,945 -> 1,874.
+THE RED: a hand-built ILAst seed (the compiler's small methods keep
+returns inline, so no compiled fixture produces the shape -- see
+UsingTransform.PropagatesReturnFromGotoTargetBlock).
+
+THE NEXT GOTO SUB-FAMILIES (in order): (1) the assign-then-return
+targets (124 -- the `x = ...; return x;` exit blocks; the same
+propagation with the two-statement body); (2) the label-merged
+regions (1,717 -- the C#'s GotoRemoval/condition-combining work, the
+multi-session arc); (3) the switch case-range fall-through shape
+(spotted in the G2 probe: `case -92..-1:` + the misplaced default
+body -- the switch rendering family, related to the ~606 accessor
+shapes measurement).
+
+THE ARC (dnlib, plain diff): 137,517 -> 83,525 (the namespace indent)
+-> 83,275 (the propagation). The -w measure: 70,339 (the -w diff
+hides the indentation families).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
