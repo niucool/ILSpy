@@ -2461,6 +2461,45 @@ that renders them first), the block-predecessor gate is mandatory
 (measured), and the dumped shape is the design reference: [a = expr,
 b = a, If(LdLoc a, Branch->L, Nop)] then [b = alt, Branch->L].
 
+## THE COALESCE FOLD -- LANDED (the third attempt, the composed design)
+
+THE SHAPE (the dump-first payoff, the crucial detail): the guard if is
+the block's FINAL (`[a = expr, b = a]` the last two statements +
+`If(LdLoc a, Branch->L, Nop)` as the FinalInstruction) -- a
+container's dump lists the instructions and the final as SIBLINGS,
+and the earlier "no if-finals" finding was the missing descent (a
+container's children are Blocks; the nested containers sit inside
+the blocks' instructions).
+
+THE COMPOSITION (the design constraint from the second attempt): the
+fold constructs a NullCoalescingInstruction (OWNING the two
+expressings, released from the skipped statements) and renders through
+the existing ?? emitter arm -- the same path as the port's 38 existing
+sites -- instead of a bespoke text form. THE GATES (all measured): the
+temp loaded only by the copy+guard, the target stored only by the
+copy+alt, both paths joining at L, and NO other branch predecessor on
+the alternative block (the second attempt's missing gate truncated
+42k lines).
+
+THE MEASURE: 6 sites on dnlib (the conservative gates reject the
+chains with extra uses -- the S_1 referenced beyond the fold); the ??
+count 38 -> 44; the plain diff 80,775 -> 80,739. THE GATES all green
+(the pin ebf9b6e9..., the corpus 0/0, hello 3, the sweep 13,174/15
+with the FoldsNullCoalescingChain seed; the disk checked at 45%
+before each run -- the quota lesson).
+
+THE NEXT COALESCE LEVERS (the ledger): (1) the shape variants beyond
+the strict gates (the chains whose temp/target have extra uses -- the
+C# oracle inlines the coalesce INTO the use site, eliminating the
+target local entirely -- the port keeps `var S_1 = (...);` where the
+oracle writes `new ResourceName(ReadString(...) ?? string.Empty)`;
+the full win needs the single-use local elision, the ILInlining
+family); (2) the remaining ~275 ?? sites (the oracle 319 vs the port
+44) -- the other shapes (the field chains, the method-result checks
+without the dup) -- each needs its own dump-first pass.
+
+THE ARC (dnlib, plain diff): 137,517 -> ... -> 80,775 -> 80,739.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
