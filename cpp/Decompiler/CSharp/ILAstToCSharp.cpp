@@ -4224,6 +4224,55 @@ private:
                     }
                     if (isBoolLeft)
                         return comp.Kind == ComparisonKind::Equality ? "!" + leftExpr : leftExpr;
+                    // The null-literal typing: a reference-typed left makes
+                    // the zero constant the null reference (the C# oracle
+                    // renders `x == null`, not `x == 0`). The value types
+                    // keep the numeric literal.
+                    bool isRefLeft = false;
+                    const TypeSystem::IType* leftType = nullptr;
+                    if (comp.Left->Op == OpCode::LdLoc) {
+                        auto* ld = static_cast<const LdLoc*>(
+                            comp.Left.get());
+                        if (ld->Variable) leftType = ld->Variable->Type.get();
+                    } else if (comp.Left->Op == OpCode::Call) {
+                        leftType = static_cast<const Call*>(
+                            comp.Left.get())->ReturnIType.get();
+                    }
+                    if (leftType != nullptr) {
+                        auto* k = dynamic_cast<const TypeSystem::KnownType*>(
+                            leftType);
+                        if (k == nullptr) {
+                            isRefLeft = true;
+                        } else {
+                            switch (k->Code()) {
+                                case TypeSystem::KnownTypeCode::Boolean:
+                                case TypeSystem::KnownTypeCode::Char:
+                                case TypeSystem::KnownTypeCode::SByte:
+                                case TypeSystem::KnownTypeCode::Byte:
+                                case TypeSystem::KnownTypeCode::Int16:
+                                case TypeSystem::KnownTypeCode::UInt16:
+                                case TypeSystem::KnownTypeCode::Int32:
+                                case TypeSystem::KnownTypeCode::UInt32:
+                                case TypeSystem::KnownTypeCode::Int64:
+                                case TypeSystem::KnownTypeCode::UInt64:
+                                case TypeSystem::KnownTypeCode::Single:
+                                case TypeSystem::KnownTypeCode::Double:
+                                    break;
+                                default:
+                                    isRefLeft = true;
+                                    break;
+                            }
+                        }
+                    }
+                    if (isRefLeft) {
+                        return (comp.Left ? Expr(*comp.Left)
+                                           : std::string("(default)")) +
+                               " " +
+                               (comp.Kind == ComparisonKind::Equality
+                                    ? "=="
+                                    : "!=") +
+                               " null";
+                    }
                 }
                 const char* op = "==";
                 switch (comp.Kind) {
