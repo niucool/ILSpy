@@ -2983,6 +2983,50 @@ accesses, the chains) -- each a dump-first pass. THE QUEUE: the
 FieldInitializerPass (35 cui sites), the label-merged regions, the
 switch case-range fall-through.
 
+## THE DnLIB DEEP-DIVE PROFILE (the measured breakdown, release, the
+## file-append logger + the accumulated timers; ILSPY_PROFILE +
+## ILSPY_RSS_LOG gate the instrumentation -- the probe code is in the
+## turn history, revert-clean)
+
+| stage | wall | RSS |
+|---|---|---|
+| MetadataFile (lazy) | ~0 | 8.7MB |
+| typeSystem ctor (post-dedup) | 42ms | 103.5MB |
+| THE USING-SET WALK (WholeModuleUsingSet) | 6,257ms | (flat) |
+| the type bodies (all types, nested incl.) | 3,011ms | +25MB |
+| -- the method pipeline (10,804 methods, 238,077 inst) | 1,385ms | |
+| ---- decode 102ms / transform 1,201ms / emit 82ms | | |
+| -- the type-level overhead (signatures, attrs, decls) | 1,626ms | |
+| the output write | ~0 | 142.6MB |
+
+THE ANSWER TO "WHY DNLIB TAKES SO LONG": **the using-set collector
+walk owns 6.26s of the 9.2s (68%)** -- the pre-loop
+CollectRequiredNamespaces pass over every type/member (the code's
+own comment calls it "the render's most expensive" step). The
+per-method decode is 0.10s (nearly free, as the --ilast-all
+measurement said); the transforms are 1.2s; the emit 0.08s.
+
+THE RANKED FRUIT LIST:
+1. THE USING-SET WALK (6.26s, 68%) -- the structural target. The
+   candidates: (a) the resolution memoization (the per-member
+   GetTypeDefinition/type resolutions cached -- the walk re-resolves
+   shared base types and generic args per member); (b) the
+   namespace-early-exit (skip a subtree's recursion when every
+   namespace it can contribute is already collected); (c) the
+   C#'s shape: the AST-level second pass (FindRequiredImports over
+   the BUILT tree -- the port walks the METADATA instead, re-deriving
+   the member graphs the render later rebuilds anyway).
+2. The transform pipeline (1.2s, 13%) -- the known cost, parity-
+   bounded.
+3. The type-level overhead (1.63s, 18%) -- the lazy entity
+   materialization per member (the resolution caches amortize it).
+
+THE LOW-HANGING FRUIT: (a) + (b) -- both are inside the collector,
+measurable in one run, and do not change the output (the namespace
+SET is the contract). THE STRUCTURAL: (c) -- reusing the render's
+own type walks (one pass, the namespaces recorded as the
+declarations build).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
