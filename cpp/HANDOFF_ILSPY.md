@@ -2710,6 +2710,24 @@ the null path, the use-call's receiver, the counts, the preds) will
 localize the mismatch in one run. The implementation (both
 variants) is in the turn history and compiles clean.
 
+## THE NULL-PROPAGATION -- THE COUNTERS' ANSWER (the alignment)
+
+THE [NP2] PROBE (the IPEImage overload, 2 blocks -- the --ilast-all
+3-block form was a DIFFERENT overload):
+```
+b0: 1 inst (stloc dup) + final=15 if(cond=26 comp, true=14 branch, false=-1)
+b1: 0 insts + final=14 (leave -- THE USE: leave call M(ldloc dup, ...))
+```
+THE GUARD IS INVERTED FROM BOTH ATTEMPTS: the comp `dup == 0` TRUE
+(the null) branches AWAY (to a null-return block elsewhere -- not a
+sibling in this container); the FALSE (the non-null) FALLS THROUGH
+to b1 (the use). THE FOLD'S CORRECT SHAPE: [stloc dup = expr] +
+if-final(comp(dup == const), Branch -> <a null-return block
+anywhere>, no false-arm) with the NEXT block [leave call M(ldloc
+dup, ...)] -- the use renders `expr?.Member(args)`, the [stloc,
+if] skip, the USE block suppressed (NOT the null-return target --
+it may be shared). The dup's loads: the comp + the use's receiver.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
