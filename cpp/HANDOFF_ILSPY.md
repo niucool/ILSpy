@@ -3172,6 +3172,53 @@ initializers vs the port's ctor placements); (3) the label-merged
 regions (the cross-container analysis); (4) the switch case-range
 fall-through.
 
+## THE FIELD-INITIALIZER PASS -- THE DESIGN (the dump-first pass done)
+
+THE RED EVIDENCE (the cui artifacts + the source at
+/home/jim/source/de4dot/Release/netcoreapp3.1/de4dot.cui.dll -- the
+/tmp copy was cleaned): the oracle's field 107
+`private IList<IObfuscatedFile> files = new List<...>();` vs the
+port's bare field 146 + the ctor store 178. THE DUMPED CTOR SHAPE
+(the --ilast-all dump, /tmp/cui_ilast.txt):
+```
+stobj(T, ldflda(this->field), call T::.ctor(...))   <- the leading field stores
+... (5 of them in CommandLineParser::.ctor)
+call System.Object::.ctor(ldloc(this))              <- THE BASE-CTOR BOUNDARY
+stobj(..., ldflda(this->deobfuscatorInfos), ldloc(param))  <- the ctor body proper
+```
+THE C#'S PASS (TransformFieldAndConstructorInitializers, the
+AST-level transform): the leading `this.field = expr` stores move
+to the field declarations; the multi-ctor agreement gate (every
+ctor must initialize the field identically -- the IsMatch
+machinery); the this/base-ctor calls become the `: base(...)`
+initializer syntax (a separate sub-slice).
+
+THE PORT'S DESIGN (the compose-don't-fight seam): (1) THE TYPE-BODY
+PRE-PASS: for each instance ctor, ReadIL the raw ILAst (no
+transforms -- the stobj shapes are the raw form), scan the first
+block's leading `stobj(ldflda(this->field), <value>)` stores UP TO
+the base-ctor call; (2) THE AGREEMENT GATE: the same (fieldToken ->
+value) set across ALL the type's instance ctors (a single ctor
+trivially agrees); (3) THE VALUE TEXT: `call T::.ctor(args)` ->
+`new <T-short>(<args>)` -- T from the call's method name (the part
+before ::, the backtick-arity + the [[args]] parsed -- reuse the
+existing method-name parsing machinery); (4) THE FIELD RENDER: the
+declaration appends ` = <text>`; (5) THE CTOR RENDER: the matching
+leading stores suppressed (the SAME detection re-runs inside the
+ctor's render -- deterministic, no cross-decode pointer sharing);
+the ctor's stores render via the ILAstToCSharp analysis (a
+promotedFields set passed through DecompileMethodToString's
+params). THE ORDER NOTE: the fields render BEFORE the ctors in the
+member loop -- the pre-pass (1) computes the promotions from the
+RAW ILAst independently, so no render-order dependency.
+
+THE RECORD RE-SYNTHESIS (the user's batch #3, queued after): the
+net10 file's records render lowered (class + <Clone>() +
+[PreserveBaseOverrides] x163) vs the oracle's `record
+BaseArithPattern` -- the evidence at /tmp/ilspy-cmp/{oracle,cpp}_
+net10code.cs -- the record pass (the C# RecordDecompiler) joins
+the queue.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
