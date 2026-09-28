@@ -3337,6 +3337,28 @@ value-type flag) tripping a hidden/skip check; the field loop's
 backing-field/name filtering; the type-kind declaration arm. THE
 FIXTURE IS THE RED (the dll rebuilt with the structs).
 
+## THE RECORD STRUCTS -- LANDED (the stale-dll lesson)
+
+THE FINDING FIRST: the "top-level structs vanish" was a STALE-DLL
+ARTIFACT -- the fixture's csproj pinned LangVersion 9, the record
+structs need C# 10, the build FAILED SILENTLY, and the old dll
+(Point+Named only) mimicked a render gap. THE LESSON: verify the
+fixture's build actually rebuilt (the strings-on-the-binary check
+for the expected type names) BEFORE diagnosing the render. THE FIX
+(committed): the record-struct detection (PrintMembers + the
+synthesized op_Equality, no <Clone>$ -- the struct copies by value
+so the class marker cannot fire), the `struct X` -> `record struct
+X` rewrite (the readonly variant intact), the positional needle's
+struct form, and the member strip (the same kNames). THE
+MEASUREMENT: the fixture renders the exact oracle forms
+(`public record struct Coord(int X, int Y);` and `public readonly
+record struct ReadOnly(string Name);`); the PlainStruct control
+unchanged. THE GATES: dnlib 80,187 / net10 99,610 / cui 2,354 /
+pin ebf9b6e9... / hello 3 / sweep 15 -- all unchanged (no record
+structs in those corpora). THE QUEUE: the label-merged regions,
+the switch case-range fall-through, the remaining ~123 ?. shapes,
+the static-ctor field initializers.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
