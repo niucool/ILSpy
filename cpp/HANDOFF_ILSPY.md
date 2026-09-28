@@ -3703,6 +3703,40 @@ one chain: the exact FalseInst types at each level), THEN THE
 GATE RELAXATION. THE STATE: the probes reverted (the pin, the
 dnlib 80,185).
 
+## THE ELSE-ARM RECURSION -- LANDED + THE POISONING BUG FOUND
+
+LANDED (the commit): AnalyzeNestedBlock (the else-armed chains'
+nested-Block descent) + the test seed
+RunReconstructsElseArmedIfChainAsSwitch (RED first: the no-else gate
+rejected the fixture; GREEN after). THE GATES: the connid pin, the
+suite (the SwitchDetection 12/12; the 188 mass failures are the
+PRE-EXISTING env drift -- the control run on the clean tree: 188 =
+188), the corpus UNCHANGED (dnlib 80,185 / gotos 1,263 -- no
+regression, no payoff yet).
+
+THE POISONING BUG (the next slice's target): the corpus payoff is
+blocked by a STATE-MUTATION defect -- **a SECOND
+UseCSharpSwitch() call on the same analysis ACCEPTS what the first
+call REJECTS**: the instrumented binary (the [SD] stage print
+calling UseCSharpSwitch before the real gate) forms 47 switches
+(gotos 1,263 -> 1,216); the clean single-call binary forms ZERO.
+The first call poisons some node state the second call reads.
+ISOLATED: IsSingleCondition self-resets (the final
+node->Visited=false loop) -- the poisoner is elsewhere: the
+suspects = IsShortCircuit, LoopContext::MatchContinue (the
+loopContext_ rebuild vs the cached controlFlowGraph_), or the
+ControlFlowGraph's node caches. THE NEXT PROBE: the diff of the
+graph node flags/caches before vs after the first call (dump
+Visited + the LoopContext's internal sets at the UseCSharpSwitch
+entry, twice). THE REJECTED-CALL GATES: the named [SD4] probe on
+the (18,16) chains fired NOTHING (all 7 gates pass!) yet use=0 on
+the first call -- the exit is via a path the gates do not cover,
+consistent with the state read. THE RAW-TREE NOTE: the
+TryGetCpuArch raw dump is the FLAT brtrue chain (no switch
+opcode) -- the oracle reconstructs it from the ifs through the
+SAME analysis, so the fix belongs in the port's walk state, not
+the chain detection.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
