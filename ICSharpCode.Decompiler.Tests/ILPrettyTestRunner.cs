@@ -51,6 +51,24 @@ namespace ICSharpCode.Decompiler.Tests
 			}
 		}
 
+		[Test]
+		public async Task Issue3320()
+		{
+			await Run();
+		}
+
+		[Test]
+		public async Task ConditionalChain()
+		{
+			await Run();
+		}
+
+		[Test]
+		public async Task AnonymousMethodEdgeCases()
+		{
+			await Run();
+		}
+
 		[Test, Ignore("Need to decide how to represent virtual methods without 'newslot' flag")]
 		public async Task Issue379()
 		{
@@ -298,6 +316,12 @@ namespace ICSharpCode.Decompiler.Tests
 		}
 
 		[Test]
+		public async Task SpanConversionOperatorMismatch()
+		{
+			await Run(settings: new DecompilerSettings { FileScopedNamespaces = false, FirstClassSpanTypes = true });
+		}
+
+		[Test]
 		public async Task ConstantBlobs()
 		{
 			await Run();
@@ -328,6 +352,12 @@ namespace ICSharpCode.Decompiler.Tests
 		}
 
 		[Test]
+		public async Task InstanceOperatorCall()
+		{
+			await Run();
+		}
+
+		[Test]
 		public async Task FSharpLoops_Debug()
 		{
 			CopyFSharpCoreDll();
@@ -348,7 +378,19 @@ namespace ICSharpCode.Decompiler.Tests
 		}
 
 		[Test]
+		public async Task EnumArithmeticOutOfRange()
+		{
+			await Run();
+		}
+
+		[Test]
 		public async Task GuessAccessors()
+		{
+			await Run();
+		}
+
+		[Test]
+		public async Task InaccessibleParameterTypes()
 		{
 			await Run();
 		}
@@ -391,6 +433,48 @@ namespace ICSharpCode.Decompiler.Tests
 		public async Task SortSwitchSections()
 		{
 			await Run(settings: new DecompilerSettings { SortSwitchSections = true, FileScopedNamespaces = false });
+		}
+
+		[Test]
+		public async Task Issue3729()
+		{
+			await Run();
+		}
+
+		[Test]
+		public async Task Issue4180()
+		{
+			await Run();
+		}
+
+		[Test]
+		public async Task ParamsPropertySetter()
+		{
+			await Run();
+		}
+
+		[Test]
+		public async Task ParameterizedPropertyInitializer()
+		{
+			await Run();
+		}
+
+		[Test]
+		public async Task IndexerAccessorParameterNames()
+		{
+			await Run();
+		}
+
+		[Test]
+		public async Task ParameterizedPropertySetterCall()
+		{
+			await Run();
+		}
+
+		[Test]
+		public async Task PropertyBackingFieldWithoutCompilerGeneratedAttribute()
+		{
+			await Run();
 		}
 
 		async Task Run([CallerMemberName] string testName = null, DecompilerSettings settings = null,

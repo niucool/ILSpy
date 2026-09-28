@@ -174,7 +174,7 @@ public class OptionsTabTests
 	public void Reinvoking_ShowOptionsCommand_Focuses_Existing_Tab_Without_Spawning_A_Second()
 	{
 		// Single-instance behaviour — re-firing the command while Options is already open
-		// just reactivates the existing tab. Mirrors WPF's modal-stack uniqueness.
+		// just reactivates the existing tab.
 		var window = AppComposition.Current.GetExport<MainWindow>();
 		window.Show();
 		var vm = (MainWindowViewModel)window.DataContext!;
@@ -331,8 +331,7 @@ public class OptionsTabTests
 		// Toggle a re-decompile display setting.
 		var display = AppComposition.Current.GetExport<SettingsService>().DisplaySettings;
 		display.DecodeCustomAttributeBlobs = !display.DecodeCustomAttributeBlobs;
-		for (int i = 0; i < 12; i++)
-			Dispatcher.UIThread.RunJobs();
+		await Waiters.WaitForIdleAsync();
 
 		documents.ActiveDockable.Should().BeSameAs(optionsTab,
 			"an output display setting must re-decompile in place, not switch the user off the focused tab");

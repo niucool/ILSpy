@@ -69,6 +69,22 @@ namespace ICSharpCode.Decompiler.Tests
 			CompilerOptions.Optimize | CompilerOptions.UseRoslynLatest,
 		});
 
+		// the field keyword requires a C# 14 compiler
+		static readonly CompilerOptions[] roslynLatestOnlyOptions = Tester.SupportedOnCurrentPlatform(new[]
+		{
+			CompilerOptions.UseRoslynLatest,
+			CompilerOptions.Optimize | CompilerOptions.UseRoslynLatest,
+		});
+
+		// init accessors require C# 9 and the IsExternalInit marker, which .NET Framework 4.0 lacks
+		static readonly CompilerOptions[] initAccessorOptions = Tester.SupportedOnCurrentPlatform(new[]
+		{
+			CompilerOptions.UseRoslyn4_14_0,
+			CompilerOptions.Optimize | CompilerOptions.UseRoslyn4_14_0,
+			CompilerOptions.UseRoslynLatest,
+			CompilerOptions.Optimize | CompilerOptions.UseRoslynLatest,
+		});
+
 		// top-level statements require C# 9 and cannot target .NET Framework 4.0
 		static readonly CompilerOptions[] topLevelProgramOptions = Tester.SupportedOnCurrentPlatform(new[]
 		{
@@ -113,6 +129,36 @@ namespace ICSharpCode.Decompiler.Tests
 		}
 
 		[Test]
+		public async Task NoAutomaticProperties([ValueSource(nameof(roslynLatestOnlyOptions))] CompilerOptions cscOptions)
+		{
+			await RunForLibrary(cscOptions: cscOptions, decompilerSettings: new DecompilerSettings {
+				AutomaticProperties = false
+			});
+		}
+
+		[Test]
+		public async Task NoGetterOnlyAutomaticProperties([ValueSource(nameof(roslynLatestOnlyOptions))] CompilerOptions cscOptions)
+		{
+			await RunForLibrary(cscOptions: cscOptions, decompilerSettings: new DecompilerSettings {
+				GetterOnlyAutomaticProperties = false
+			});
+		}
+
+		[Test]
+		public async Task NoFieldKeyword([ValueSource(nameof(roslynLatestOnlyOptions))] CompilerOptions cscOptions)
+		{
+			await RunForLibrary(cscOptions: cscOptions, decompilerSettings: new DecompilerSettings {
+				FieldKeyword = false
+			});
+		}
+
+		[Test]
+		public async Task NoInitAccessors([ValueSource(nameof(initAccessorOptions))] CompilerOptions cscOptions)
+		{
+			await RunForLibrary(cscOptions: cscOptions, decompilerSettings: new DecompilerSettings(CSharp.LanguageVersion.CSharp8_0));
+		}
+
+		[Test]
 		public async Task NoForEachStatement([ValueSource(nameof(defaultOptions))] CompilerOptions cscOptions)
 		{
 			await RunForLibrary(cscOptions: cscOptions, decompilerSettings: new DecompilerSettings(CSharp.LanguageVersion.CSharp1) {
@@ -145,6 +191,12 @@ namespace ICSharpCode.Decompiler.Tests
 		}
 
 		[Test]
+		public async Task NoUnsignedRightShift([ValueSource(nameof(roslynOnlyOptions))] CompilerOptions cscOptions)
+		{
+			await RunForLibrary(cscOptions: cscOptions, decompilerSettings: new DecompilerSettings(CSharp.LanguageVersion.CSharp6));
+		}
+
+		[Test]
 		public async Task NoNewOfT([ValueSource(nameof(defaultOptions))] CompilerOptions cscOptions)
 		{
 			await RunForLibrary(cscOptions: cscOptions, decompilerSettings: new DecompilerSettings(CSharp.LanguageVersion.CSharp1));
@@ -164,6 +216,24 @@ namespace ICSharpCode.Decompiler.Tests
 		public async Task TopLevelProgramAsync([ValueSource(nameof(topLevelProgramOptions))] CompilerOptions cscOptions)
 		{
 			await Run(cscOptions: cscOptions);
+		}
+
+		// AlwaysQualifyMemberReferences is turned on for the WinForms InitializeComponent method,
+		// which is also decompiled with implicit method group conversion off - so the method group
+		// has to be qualified like every other member reference.
+		[Test]
+		public async Task QualifiedMethodGroup([ValueSource(nameof(roslynOnlyOptions))] CompilerOptions cscOptions)
+		{
+			await RunForLibrary(cscOptions: cscOptions, decompilerSettings: new DecompilerSettings {
+				AlwaysQualifyMemberReferences = true,
+				UseImplicitMethodGroupConversion = false
+			});
+		}
+
+		[Test]
+		public async Task BaseQualifier([ValueSource(nameof(roslynOnlyOptions))] CompilerOptions cscOptions)
+		{
+			await RunForLibrary(cscOptions: cscOptions);
 		}
 
 		async Task RunForLibrary([CallerMemberName] string testName = null, CompilerOptions cscOptions = CompilerOptions.None, DecompilerSettings decompilerSettings = null)

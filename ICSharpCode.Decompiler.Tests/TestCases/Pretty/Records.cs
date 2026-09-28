@@ -88,6 +88,15 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 			}
 		}
 
+#if CS110
+		public record WithRequiredMembers
+		{
+			public required Type ServiceType { get; init; }
+
+			public required object ServiceKey { get; init; }
+		}
+#endif
+
 		[AttributeUsage(AttributeTargets.All)]
 		public class RecordTestAttribute : Attribute
 		{
@@ -243,6 +252,40 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 
 			private string? WebValue2;
 		}
+
+		public record FieldBeforeProperty(int ID, string Text)
+		{
+			public int Field;
+
+			public int Property { get; set; }
+		}
+
+		public record FieldsAndPropertiesInterleaved(int ID)
+		{
+			public int First;
+
+			public int Middle { get; set; }
+
+			public int Last;
+		}
+
+		public record PrivateFieldAndComputedProperty(int ID)
+		{
+			public int PublicField;
+
+			private int privateField;
+
+			public int Computed => privateField + PublicField;
+
+			public int Auto { get; set; }
+		}
+
+		public record DerivedWithInterleavedMembers(int B) : Base(B.ToString())
+		{
+			public int Field;
+
+			public int Property { get; set; }
+		}
 	}
 
 #if CS100
@@ -284,6 +327,10 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 		}
 
 		public record struct PairWithPrimaryCtor<A, B>(A First, B Second);
+
+		public readonly record struct BoundsInfo(int Profile, Bounds Bounds);
+
+		public readonly record struct Bounds(ulong Small, ulong Large);
 
 		public record struct PrimaryCtor(int A, string B);
 
@@ -446,6 +493,19 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 			{
 				C = 1.41;
 			}
+		}
+
+		private static BoundsInfo GetInfo()
+		{
+			return new BoundsInfo(1, new Bounds(2uL, 3uL));
+		}
+
+		public static void NestedDeconstruction()
+		{
+			var (value, (value2, value3)) = GetInfo();
+			Console.WriteLine(value);
+			Console.WriteLine(value2);
+			Console.WriteLine(value3);
 		}
 	}
 

@@ -20,7 +20,6 @@ using System;
 
 using Avalonia;
 using Avalonia.Controls;
-using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
@@ -52,7 +51,9 @@ namespace ICSharpCode.ILSpy
 			// The fold span is counted in WriteLine() calls, not in the '\n' characters embedded in a
 			// single Write(). Emit the trace one line per WriteLine() so the fold genuinely spans
 			// multiple lines; otherwise it collapses to a single line and is dropped as noise.
-			var lines = ex.ToString().Split('\n');
+			// Trailing newlines would put the fold's end past the last frame, so the collapsed
+			// section would swallow the line after it.
+			var lines = ex.ToString().TrimEnd().Split('\n');
 			for (int i = 0; i < lines.Length; i++)
 			{
 				if (i > 0)
@@ -90,7 +91,6 @@ namespace ICSharpCode.ILSpy
 
 			output.AddUIElement(() => {
 				var button = new Button {
-					Cursor = new Cursor(StandardCursorType.Arrow),
 					Margin = new Thickness(2),
 					Padding = new Thickness(9, 1, 9, 1),
 					MinWidth = 73,

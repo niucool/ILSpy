@@ -16,13 +16,17 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Headless;
 using Avalonia.Headless.NUnit;
 using Avalonia.Input;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 
 using AwesomeAssertions;
 
@@ -150,5 +154,280 @@ public class SharpTreeViewTests
 		Dispatcher.UIThread.RunJobs();
 		c.IsSelected.Should().BeTrue();
 		a.IsSelected.Should().BeFalse("moving the selection clears the old node's flag");
+	}
+
+	[AvaloniaTest]
+	public void Removing_Selected_Subtree_Prunes_Selection_In_One_Observable_State()
+	{
+		var (_, tree, root) = Host();
+		var b = (TestNode)root.Children[1];
+		var b1 = (TestNode)b.Children[0];
+		b.IsExpanded = true;
+		Dispatcher.UIThread.RunJobs();
+		tree.SelectedItems!.Add(b);
+		tree.SelectedItems.Add(b1);
+		Dispatcher.UIThread.RunJobs();
+
+		var observedSelections = new List<TestNode[]>();
+		tree.SelectionChanged += (_, _) => observedSelections.Add(
+			tree.SelectedItems!.OfType<TestNode>().ToArray());
+
+		root.Children.Remove(b);
+		Dispatcher.UIThread.RunJobs();
+
+		observedSelections.Should().ContainSingle();
+		observedSelections[0].Should().BeEmpty("removed rows must not leak as intermediate tree selections");
+		tree.SelectedItems!.Cast<object>().Should().BeEmpty();
+		b.IsSelected.Should().BeFalse();
+		b1.IsSelected.Should().BeFalse();
+	}
+
+	/// <summary>The number of rows the flattener should expose for a tree rooted in
+	/// <paramref name="root"/> when the root itself is not shown.</summary>
+	static int VisibleRowCount(SharpTreeNode root)
+	{
+		int count = 0;
+		void Walk(SharpTreeNode node)
+		{
+			foreach (SharpTreeNode child in node.Children)
+			{
+				if (child.IsHidden)
+					continue;
+				count++;
+				if (child.IsExpanded)
+					Walk(child);
+			}
+		}
+		Walk(root);
+		return count;
+	}
+
+	static void AssertEveryRowResolves(SharpTreeView tree, SharpTreeNode root, string because)
+	{
+		tree.UpdateLayout();
+		Dispatcher.UIThread.RunJobs();
+		int expected = VisibleRowCount(root);
+		tree.ItemCount.Should().Be(expected, because);
+		for (int i = 0; i < expected; i++)
+			tree.ItemsView[i].Should().NotBeNull($"row {i} must resolve after {because}");
+	}
+
+	/// <summary>
+	/// Collapsing and removing nodes above a scrolled viewport shrinks the flattened list under
+	/// the virtualizing panel's realized index range. The panel must not be left indexing rows
+	/// that no longer exist.
+	/// </summary>
+	[AvaloniaTest]
+	public void Shrinking_The_Tree_Above_A_Scrolled_Viewport_Keeps_Every_Row_Resolvable()
+	{
+		var groups = Enumerable.Range(0, 200)
+			.Select(i => new TestNode($"g{i}", Enumerable.Range(0, 5)
+				.Select(j => new TestNode($"g{i}_{j}")).ToArray()))
+			.ToArray();
+		var root = new TestNode("root", groups);
+		var tree = new SharpTreeView { ShowRoot = false, Root = root };
+		var window = new Window { Content = tree, Width = 300, Height = 400 };
+		window.Show();
+		Dispatcher.UIThread.RunJobs();
+
+		foreach (var group in groups)
+			group.IsExpanded = true;
+		AssertEveryRowResolves(tree, root, "expanding every group");
+		tree.GetRealizedContainers().Count().Should()
+			.BeLessThan(tree.ItemCount, "the panel must be virtualizing, or this test proves nothing");
+
+		// Park the realized range far from index 0, with a live selection inside it.
+		tree.SelectedItem = groups[^1].Children[^1];
+		tree.ScrollIntoView(tree.ItemCount - 1);
+		AssertEveryRowResolves(tree, root, "scrolling to the last row");
+
+		for (int i = 0; i < 190; i++)
+			groups[i].IsExpanded = false;
+		AssertEveryRowResolves(tree, root, "collapsing 190 groups above the viewport");
+
+		for (int i = 0; i < 150; i++)
+			root.Children.RemoveAt(0);
+		AssertEveryRowResolves(tree, root, "removing 150 groups above the viewport");
+
+		tree.ScrollIntoView(0);
+		AssertEveryRowResolves(tree, root, "scrolling back to the top");
+	}
+
+	/// <summary>
+	/// A lazily loaded node replaces its placeholder with real children while the tree is
+	/// scrolled: the row count grows and shrinks in the same gesture.
+	/// </summary>
+	[AvaloniaTest]
+	public void Lazy_Loading_Under_A_Scrolled_Viewport_Keeps_Every_Row_Resolvable()
+	{
+		var lazy = Enumerable.Range(0, 100).Select(i => new LazyNode($"l{i}", 7)).ToArray();
+		var root = new TestNode("root");
+		foreach (var node in lazy)
+			root.Children.Add(node);
+		var tree = new SharpTreeView { ShowRoot = false, Root = root };
+		var window = new Window { Content = tree, Width = 300, Height = 400 };
+		window.Show();
+		Dispatcher.UIThread.RunJobs();
+
+		AssertEveryRowResolves(tree, root, "the initial collapsed list");
+
+		tree.ScrollIntoView(tree.ItemCount - 1);
+		AssertEveryRowResolves(tree, root, "scrolling to the last row");
+
+		foreach (var node in lazy)
+		{
+			node.IsExpanded = true;
+			AssertEveryRowResolves(tree, root, $"lazily expanding {node.Text}");
+		}
+
+		foreach (var node in lazy)
+			node.ReloadChildren();
+		AssertEveryRowResolves(tree, root, "reloading every lazy subtree in place");
+	}
+
+	sealed class LazyNode : SharpTreeNode
+	{
+		readonly string text;
+		readonly int childCount;
+		public LazyNode(string text, int childCount)
+		{
+			this.text = text;
+			this.childCount = childCount;
+			LazyLoading = true;
+		}
+		public override object Text => text;
+		protected override void LoadChildren()
+		{
+			for (int i = 0; i < childCount; i++)
+				Children.Add(new TestNode($"{text}_{i}"));
+		}
+	}
+
+	[AvaloniaTest]
+	public void Moving_An_Expanded_Node_Reorders_The_Rendered_Rows()
+	{
+		var (_, tree, root) = Host();
+		var b = (TestNode)root.Children[1];
+		b.IsExpanded = true;
+		Dispatcher.UIThread.RunJobs();
+		RenderedRows(tree).Should().Equal("A", "B", "B1", "C");
+
+		// B carries B1 with it: the run [B, B1] moves past C.
+		root.Children.Move(1, 2);
+		Dispatcher.UIThread.RunJobs();
+
+		RenderedRows(tree).Should().Equal("A", "C", "B", "B1");
+	}
+
+	/// <summary>Builds <paramref name="rootCount"/> top-level rows in a viewport too short to show
+	/// them all, with one expandable node, so an expansion has somewhere to scroll.</summary>
+	static (Window window, SharpTreeView tree, ScrollViewer scrollViewer, TestNode[] nodes) ShortViewport(
+		int rootCount, int expandableIndex, int childCount)
+	{
+		var nodes = Enumerable.Range(0, rootCount)
+			.Select(i => i == expandableIndex
+				? new TestNode($"N{i}", Enumerable.Range(0, childCount)
+					.Select(c => new TestNode($"N{i}.{c}")).ToArray())
+				: new TestNode($"N{i}"))
+			.ToArray();
+		var root = new TestNode("root", nodes);
+		var tree = new SharpTreeView { ShowRoot = false, Root = root };
+		var window = new Window { Content = tree, Width = 300, Height = 180 };
+		window.Show();
+		Dispatcher.UIThread.RunJobs();
+		return (window, tree, tree.GetVisualDescendants().OfType<ScrollViewer>().First(), nodes);
+	}
+
+	/// <summary>Expands a node the way a user does, with Right on its focused row.</summary>
+	static void PressRightOn(Window window, SharpTreeView tree, SharpTreeNode node)
+	{
+		tree.SelectedItem = node;
+		Dispatcher.UIThread.RunJobs();
+		tree.ContainerFromItem(node)?.Focus();
+		Dispatcher.UIThread.RunJobs();
+		window.KeyPress(Key.Right, RawInputModifiers.None, PhysicalKey.ArrowRight, null);
+		Dispatcher.UIThread.RunJobs();
+	}
+
+	[AvaloniaTest]
+	public void Expanding_A_Node_Scrolls_Children_That_Do_Not_Fit_Into_View()
+	{
+		var (window, tree, scrollViewer, nodes) = ShortViewport(rootCount: 15, expandableIndex: 5, childCount: 5);
+		var parent = nodes[5];
+		scrollViewer.Offset.Y.Should().Be(0, "nothing has moved the viewport yet");
+
+		PressRightOn(window, tree, parent);
+
+		tree.IsNodeFullyVisible(parent.Children[^1])
+			.Should().BeTrue("the expansion reveals children below the viewport, so the view scrolls to show them");
+		tree.IsNodeFullyVisible(parent)
+			.Should().BeTrue("the scroll is bounded by the expanded node: it never leaves the viewport");
+	}
+
+	[AvaloniaTest]
+	public void Expanding_A_Node_Whose_Children_Already_Fit_Leaves_The_Viewport_Alone()
+	{
+		var (window, tree, scrollViewer, nodes) = ShortViewport(rootCount: 15, expandableIndex: 1, childCount: 2);
+		var parent = nodes[1];
+
+		PressRightOn(window, tree, parent);
+
+		scrollViewer.Offset.Y.Should().Be(0, "the children fit below the node, so there is nothing to scroll to");
+		tree.IsNodeFullyVisible(parent.Children[^1]).Should().BeTrue();
+	}
+
+	[AvaloniaTest]
+	public void Expanding_A_Node_With_More_Children_Than_Fit_Keeps_The_Node_Visible()
+	{
+		var (window, tree, _, nodes) = ShortViewport(rootCount: 15, expandableIndex: 5, childCount: 30);
+		var parent = nodes[5];
+
+		PressRightOn(window, tree, parent);
+
+		tree.IsNodeFullyVisible(parent)
+			.Should().BeTrue("showing every child would push the node off the top, so the scroll stops at the node");
+		tree.IsNodeFullyVisible(parent.Children[0])
+			.Should().BeTrue("as many children as fit are shown below it");
+	}
+
+	[AvaloniaTest]
+	public async Task Clicking_The_Expander_Scrolls_The_Children_Into_View()
+	{
+		// The mouse path never passes through SharpTreeView: the row template's toggle writes
+		// IsExpanded straight to the node, so the reveal hangs off the toggle's Click.
+		var (window, tree, _, nodes) = ShortViewport(rootCount: 15, expandableIndex: 5, childCount: 5);
+		var parent = nodes[5];
+
+		await window.ClickAsync(() => tree.ContainerFromItem(parent)?.GetVisualDescendants()
+			.OfType<ToggleButton>().FirstOrDefault(b => b.Name == "PART_Expander"));
+		Dispatcher.UIThread.RunJobs();
+
+		parent.IsExpanded.Should().BeTrue("precondition: the click toggled the node open");
+		tree.IsNodeFullyVisible(parent.Children[^1])
+			.Should().BeTrue("a click on the expander reveals the children, just as the keyboard does");
+	}
+
+	[AvaloniaTest]
+	public void Expanding_A_Node_In_Code_Does_Not_Move_The_Viewport()
+	{
+		// Revealing a node expands its ancestors first (ScrollIntoNodeView, TreeSelectionBinder)
+		// and positions the viewport itself afterwards; a scroll per ancestor would fight that.
+		var (_, _, scrollViewer, nodes) = ShortViewport(rootCount: 15, expandableIndex: 5, childCount: 5);
+
+		nodes[5].IsExpanded = true;
+		Dispatcher.UIThread.RunJobs();
+
+		scrollViewer.Offset.Y.Should().Be(0, "only a user gesture reveals the children");
+	}
+
+	static List<string> RenderedRows(SharpTreeView tree)
+	{
+		var rows = new List<string>();
+		for (int i = 0; i < tree.ItemCount; i++)
+		{
+			var container = tree.ContainerFromIndex(i);
+			rows.Add((container?.DataContext as SharpTreeNode)?.Text?.ToString() ?? "<unrealized>");
+		}
+		return rows;
 	}
 }

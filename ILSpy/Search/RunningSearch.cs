@@ -27,6 +27,8 @@ using System.Threading.Tasks;
 
 using Avalonia.Threading;
 
+using System.Runtime.CompilerServices;
+
 using ICSharpCode.Decompiler;
 using ICSharpCode.Decompiler.Metadata;
 using ICSharpCode.ILSpyX;
@@ -42,7 +44,7 @@ namespace ICSharpCode.ILSpy.Search
 	/// Orchestrates one search across the loaded <see cref="AssemblyList"/>. Walks
 	/// the assemblies serially on a background <see cref="Task"/>, pushes results into
 	/// a thread-safe queue, and the UI thread drains that queue once per render frame
-	/// with a wall-clock budget — the same shape as the WPF SearchPane.
+	/// with a wall-clock budget.
 	/// </summary>
 	internal sealed class RunningSearch
 	{
@@ -53,7 +55,7 @@ namespace ICSharpCode.ILSpy.Search
 		// when the queue is jammed with thousands of late-arriving hits.
 		const int RefreshTimeBudgetMs = 10;
 
-		readonly IReadOnlyList<LoadedAssembly> assemblies;
+		readonly AssemblyList assemblyList;
 		readonly SearchMode mode;
 		readonly string searchTerm;
 		readonly Language language;
@@ -61,6 +63,8 @@ namespace ICSharpCode.ILSpy.Search
 		readonly ISearchResultFactory resultFactory;
 		readonly ObservableCollection<SearchResult> sink;
 		readonly IComparer<SearchResult> sortComparer;
+		/// <summary>When set, only these assemblies are walked instead of the whole list.</summary>
+		readonly IReadOnlyList<LoadedAssembly>? onlyTheseAssemblies;
 		readonly ConcurrentQueue<SearchResult> queue = new();
 		readonly CancellationTokenSource cts = new();
 		DispatcherTimer? drainTimer;
@@ -70,16 +74,18 @@ namespace ICSharpCode.ILSpy.Search
 		bool completedRaised;
 
 		public RunningSearch(
-			IReadOnlyList<LoadedAssembly> assemblies,
+			AssemblyList assemblyList,
 			string searchTerm,
 			SearchMode mode,
 			Language language,
 			ApiVisibility apiVisibility,
 			ISearchResultFactory resultFactory,
 			ObservableCollection<SearchResult> sink,
-			IComparer<SearchResult> sortComparer)
+			IComparer<SearchResult> sortComparer,
+			IReadOnlyList<LoadedAssembly>? onlyTheseAssemblies = null)
 		{
-			this.assemblies = assemblies;
+			this.onlyTheseAssemblies = onlyTheseAssemblies;
+			this.assemblyList = assemblyList;
 			this.searchTerm = searchTerm;
 			this.mode = mode;
 			this.language = language;
@@ -123,7 +129,28 @@ namespace ICSharpCode.ILSpy.Search
 			RaiseCompletedIfFirst();
 		}
 
-		void RunSearch(CancellationToken ct)
+		/// <summary>
+		/// The assemblies to walk: the whole list, or only the ones this run was given. Results
+		/// already in the sink stay, so a run over newly added assemblies extends the list rather
+		/// than rebuilding it.
+		/// </summary>
+		async IAsyncEnumerable<LoadedAssembly> EnumerateAssemblies(
+			[EnumeratorCancellation] CancellationToken ct)
+		{
+			if (onlyTheseAssemblies != null)
+			{
+				foreach (var assembly in onlyTheseAssemblies)
+				{
+					ct.ThrowIfCancellationRequested();
+					yield return assembly;
+				}
+				yield break;
+			}
+			await foreach (var assembly in assemblyList.EnumerateAllAssemblies(ct).ConfigureAwait(false))
+				yield return assembly;
+		}
+
+		async Task RunSearch(CancellationToken ct)
 		{
 			try
 			{
@@ -131,20 +158,17 @@ namespace ICSharpCode.ILSpy.Search
 				var strategy = GetStrategy(request);
 				if (strategy == null)
 					return;
-				// Serial walk: per-assembly metadata walk is allocation-dominated, and 4
-				// parallel producers fighting for the ConcurrentQueue + the resulting UI
-				// batching jitter end up slower than serial in practice.
-				foreach (var assembly in assemblies)
+				// The per-assembly metadata walk is allocation-dominated, and 4 parallel
+				// producers fighting for the ConcurrentQueue + the resulting UI batching
+				// jitter end up slower than walking the assemblies one at a time.
+				await foreach (var assembly in EnumerateAssemblies(ct).ConfigureAwait(false))
 				{
 					if (ct.IsCancellationRequested)
 						break;
 					MetadataFile? module;
 					try
 					{
-						// Block here — we're already on a worker thread (Task.Run) and
-						// this matches the WPF call shape. ConfigureAwait in an async
-						// state machine would just add overhead for the same effect.
-						module = assembly.GetMetadataFileAsync().GetAwaiter().GetResult();
+						module = await assembly.GetMetadataFileAsync().ConfigureAwait(false);
 					}
 					catch (OperationCanceledException)
 					{

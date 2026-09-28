@@ -60,6 +60,25 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 			}
 		}
 
+		// A comparison against a class-constrained type parameter is legal C#, and reference
+		// comparison is exactly what the tree asks for, so these round-trip as lambdas.
+		private class ClassConstrainedGeneric<T> where T : class
+		{
+			public void ReferenceComparisons()
+			{
+				ToCode(X(), (T t) => t == null);
+				ToCode(X(), (T t) => t != null);
+				ToCode(X(), (T a, T b) => a == b);
+				ToCode(X(), (T t) => t != null && t.ToString().Length > 0);
+				ToCode(X(), (T t) => Check(t == null));
+			}
+
+			private static bool Check(bool b)
+			{
+				return b;
+			}
+		}
+
 		private class AssertTest
 		{
 			private struct DataStruct
@@ -416,6 +435,27 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 			ToCode(X(), () => "abc"[1] == 'b');
 		}
 
+		public void ConditionalWithNarrowConstant(string s)
+		{
+			ToCode(X(), () => (s.Length < 1) ? '\0' : s[0]);
+			ToCode(X(), () => (s.Length < 1) ? ((byte)0) : ((byte)s[0]));
+			ToCode(X(), () => (s.Length < 1) ? ((short)0) : ((short)s[0]));
+		}
+
+		public void CallArgumentConditionalWithExplicitResultType()
+		{
+			ParameterExpression parameterExpression = Expression.Parameter(typeof(bool), "condition");
+			Expression.Lambda<Func<bool, bool>>(Expression.Call(new Func<object, bool>(AcceptObject).Method, Expression.Condition(parameterExpression, Expression.Constant(1), Expression.Constant("text"), typeof(object))), new ParameterExpression[1] { parameterExpression });
+		}
+
+		public void CallArgumentConditionalWithReferenceConversion(bool condition)
+		{
+			ToCode(X(), (bool b) => AcceptObject(b ? ((Exception)new ArgumentException()) : ((Exception)new InvalidOperationException())));
+			ToCode(X(), (bool b) => AcceptObject(b ? ((Exception)new InvalidOperationException()) : ((Exception)new ArgumentException())));
+			ToCode(X(), () => AcceptObject(condition ? ((object)new ArgumentException()) : ((object)new InvalidOperationException())));
+			ToCode(X(), () => AcceptObject(condition ? ((object)new InvalidOperationException()) : ((object)new ArgumentException())));
+		}
+
 		public void StringsImplicitCast()
 		{
 			int i = 1;
@@ -463,6 +503,11 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 		private bool MyEquals(ExpressionTrees other)
 		{
 			throw new NotImplementedException();
+		}
+
+		private static bool AcceptObject(object value)
+		{
+			return value != null;
 		}
 
 		public void MethodGroupAsExtensionMethod()
@@ -818,15 +863,15 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 			Test<Func<int, string>>((int a) => a.ToString(), (int a) => a.ToString());
 			Test<Func<string, char[]>>((string a) => a.ToArray(), (string a) => a.ToArray());
 			Test<Func<bool>>(() => 'a'.CompareTo('b') < 0, () => 'a'.CompareTo('b') < 0);
-			Test<Action<object, bool>>(delegate (object lockObj, bool lockTaken) {
+			Test<Action<object, bool>>((object lockObj, bool lockTaken) => {
 				Monitor.Enter(lockObj, ref lockTaken);
 			}, (object lockObj, bool lockTaken) => Monitor.Enter(lockObj, ref lockTaken));
 			Test<Func<string, int, bool>>((string str, int num) => int.TryParse(str, out num), (string str, int num) => int.TryParse(str, out num));
 			Test<Func<string, SimpleType, bool>>((string str, SimpleType t) => int.TryParse(str, out t.Field), (string str, SimpleType t) => int.TryParse(str, out t.Field));
-			Test<Action<object>>(delegate (object o) {
+			Test<Action<object>>((object o) => {
 				TestCall(o);
 			}, (object o) => TestCall(o));
-			Test<Action<object>>(delegate (object o) {
+			Test<Action<object>>((object o) => {
 				TestCall(ref o);
 			}, (object o) => TestCall(ref o));
 		}
@@ -966,7 +1011,11 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 
 		public static DateTime ParseDateTime(this object str)
 		{
+#if CS71
+			return default;
+#else
 			return default(DateTime);
+#endif
 		}
 	}
 }

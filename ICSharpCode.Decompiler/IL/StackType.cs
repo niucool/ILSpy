@@ -65,11 +65,16 @@ namespace ICSharpCode.Decompiler.IL
 		/// Used for C# <c>double</c>.
 		/// </remarks>
 		F8,
-		/// <summary>Another stack type. Includes objects, value types, ...</summary>
-		O,
-		/// <summary>A managed pointer</summary>
+		/// <summary>Reference type: class type, boxed value type, etc.</summary>
+		Obj,
+		/// <summary>
+		/// A value type other than the primitive types listed above.
+		/// This includes unconstrained generic types which might be value types at runtime.
+		/// </summary>
+		VT,
+		/// <summary>A managed pointer (C# `ref T`, C++/CLI `interior_ptr&lt;T&gt;`)</summary>
 		Ref,
 		/// <summary>Represents the lack of a stack slot</summary>
-		Void
+		Void,
 	}
 }

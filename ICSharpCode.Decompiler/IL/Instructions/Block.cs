@@ -103,9 +103,29 @@ namespace ICSharpCode.Decompiler.IL
 			return clone;
 		}
 
-		internal override void CheckInvariant(ILPhase phase)
+		/// <summary>
+		/// The load of the initializer target an ArrayInitializer block evaluates to. The block
+		/// may end in the implicit conversion of that array to Span&lt;T&gt;/ReadOnlySpan&lt;T&gt;,
+		/// which is returned in <paramref name="conversion"/>; everything else about the block is
+		/// the same in both shapes.
+		/// </summary>
+		internal static LdLoc? MatchArrayInitializerFinal(ILInstruction finalInstruction, out IMethod? conversion)
 		{
-			base.CheckInvariant(phase);
+			conversion = null;
+			if (finalInstruction is CallInstruction { Arguments.Count: 1 } call
+				&& call.Method.IsOperator && call.Method.Name == "op_Implicit"
+				&& (call.Method.ReturnType.IsKnownType(KnownTypeCode.SpanOfT)
+					|| call.Method.ReturnType.IsKnownType(KnownTypeCode.ReadOnlySpanOfT)))
+			{
+				conversion = call.Method;
+				finalInstruction = call.Arguments[0];
+			}
+			return finalInstruction as LdLoc;
+		}
+
+		internal override void CheckInvariant(ILPhase phase, ICompilation compilation)
+		{
+			base.CheckInvariant(phase, compilation);
 			for (int i = 0; i < Instructions.Count - 1; i++)
 			{
 				// only the last instruction may have an unreachable endpoint
@@ -138,7 +158,7 @@ namespace ICSharpCode.Decompiler.IL
 					}
 					break;
 				case BlockKind.ArrayInitializer:
-					var final = finalInstruction as LdLoc;
+					var final = MatchArrayInitializerFinal(finalInstruction, out _);
 					Debug.Assert(final != null && final.Variable.IsSingleDefinition && final.Variable.Kind == VariableKind.InitializerTarget);
 					IType? type = null;
 					Debug.Assert(Instructions[0].MatchStLoc(final!.Variable, out var init) && init.MatchNewArr(out type));
@@ -233,6 +253,11 @@ namespace ICSharpCode.Decompiler.IL
 			get {
 				return finalInstruction.ResultType;
 			}
+		}
+
+		public override IType InferType(ICompilation compilation)
+		{
+			return finalInstruction.InferType(compilation);
 		}
 
 		internal override bool CanInlineIntoSlot(int childIndex, ILInstruction expressionBeingMoved)
@@ -358,14 +383,14 @@ namespace ICSharpCode.Decompiler.IL
 		/// </summary>
 		public void RunTransforms(IEnumerable<IBlockTransform> transforms, BlockTransformContext context)
 		{
-			this.CheckInvariant(ILPhase.Normal);
+			this.CheckInvariant(ILPhase.Normal, context.TypeSystem);
 			foreach (var transform in transforms)
 			{
 				context.CancellationToken.ThrowIfCancellationRequested();
 				Debug.Assert(context.IndexOfFirstAlreadyTransformedInstruction <= this.Instructions.Count);
 				context.StepStartGroup(transform.GetType().Name);
 				transform.Run(this, context);
-				this.CheckInvariant(ILPhase.Normal);
+				this.CheckInvariant(ILPhase.Normal, context.TypeSystem);
 				context.StepEndGroup();
 			}
 		}

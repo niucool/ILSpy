@@ -634,11 +634,7 @@ public class AssemblyTreeTests
 
 		vm.AssemblyTreeModel.SelectNode(enumerable);
 		await Waiters.WaitForAsync(() => ReferenceEquals(vm.AssemblyTreeModel.SelectedItem, enumerable));
-		for (int i = 0; i < 8; i++)
-		{
-			Dispatcher.UIThread.RunJobs();
-			await Task.Delay(25);
-		}
+		await Waiters.WaitForIdleAsync();
 		grid.UpdateLayout();
 
 		var scrollViewer = await grid.WaitForComponent<ScrollViewer>();
@@ -665,19 +661,13 @@ public class AssemblyTreeTests
 		var offsetBefore = scrollViewer.Offset.Y;
 
 		// Act — real pointer click. Setting SelectedItem programmatically would fire DataGrid's
-		// internal ScrollIntoView too, which a real user click does not.
-		var rowCentre = candidateRow!.TranslatePoint(
-			new Point(candidateRow.Bounds.Width / 2, candidateRow.Bounds.Height / 2),
-			window)!.Value;
-		global::Avalonia.Headless.HeadlessWindowExtensions.MouseDown(window, rowCentre, global::Avalonia.Input.MouseButton.Left);
-		global::Avalonia.Headless.HeadlessWindowExtensions.MouseUp(window, rowCentre, global::Avalonia.Input.MouseButton.Left);
+		// internal ScrollIntoView too, which a real user click does not. Tree rows stretch to
+		// content width, so clamp X to the visible grid viewport.
+		await window.ClickAsync(() => candidateRow,
+			pointInTarget: r => new Point(System.Math.Min(r.Bounds.Width, grid.Bounds.Width) / 2, r.Bounds.Height / 2));
 		TestCapture.Step("visible-row-clicked");
 
-		for (int i = 0; i < 8; i++)
-		{
-			Dispatcher.UIThread.RunJobs();
-			await Task.Delay(25);
-		}
+		await Waiters.WaitForIdleAsync();
 
 		// Assert — viewport offset is unchanged (within 1px tolerance for layout jitter).
 		scrollViewer.Offset.Y.Should().BeApproximately(offsetBefore, 1.0,
@@ -711,11 +701,7 @@ public class AssemblyTreeTests
 
 		vm.AssemblyTreeModel.SelectNode(enumerable);
 		await Waiters.WaitForAsync(() => ReferenceEquals(vm.AssemblyTreeModel.SelectedItem, enumerable));
-		for (int i = 0; i < 8; i++)
-		{
-			Dispatcher.UIThread.RunJobs();
-			await Task.Delay(25);
-		}
+		await Waiters.WaitForIdleAsync();
 		grid.UpdateLayout();
 
 		var scrollViewer = await grid.WaitForComponent<ScrollViewer>();
@@ -742,11 +728,7 @@ public class AssemblyTreeTests
 
 		// Act — model-driven selection (the open-in-new-tab path), NOT a mouse click.
 		vm.AssemblyTreeModel.SelectNode(candidateNode);
-		for (int i = 0; i < 8; i++)
-		{
-			Dispatcher.UIThread.RunJobs();
-			await Task.Delay(25);
-		}
+		await Waiters.WaitForIdleAsync();
 
 		scrollViewer.Offset.Y.Should().BeApproximately(offsetBefore, 1.0,
 			"selecting an already-visible row via the model (e.g. Decompile to new tab) must not move the viewport");
@@ -780,11 +762,7 @@ public class AssemblyTreeTests
 		// Select + reveal the type, then let it settle on screen.
 		vm.AssemblyTreeModel.SelectNode(enumerable);
 		await Waiters.WaitForAsync(() => ReferenceEquals(vm.AssemblyTreeModel.SelectedItem, enumerable));
-		for (int i = 0; i < 8; i++)
-		{
-			Dispatcher.UIThread.RunJobs();
-			await Task.Delay(25);
-		}
+		await Waiters.WaitForIdleAsync();
 		grid.UpdateLayout();
 
 		(scrollViewer.Extent.Height - scrollViewer.Viewport.Height).Should().BeGreaterThan(50,
@@ -795,11 +773,7 @@ public class AssemblyTreeTests
 		// rows above the selection and pushing it off-screen.
 		var coreLib = vm.AssemblyTreeModel.FindNode<AssemblyTreeNode>(typeof(object).Assembly.GetName().Name!);
 		coreLib.IsExpanded = true;
-		for (int i = 0; i < 8; i++)
-		{
-			Dispatcher.UIThread.RunJobs();
-			await Task.Delay(25);
-		}
+		await Waiters.WaitForIdleAsync();
 		grid.UpdateLayout();
 
 		// Assert: the app did not chase the selection. The expand reveals the opened node's children;
@@ -1540,6 +1514,35 @@ public class AssemblyTreeTests
 	}
 
 	[AvaloniaTest]
+	public async Task Derived_Type_Entries_Stay_Visible_When_The_DerivedTypes_Node_Is_Expanded()
+	{
+		// The filter cascade runs for children added under a visible parent. A derived-type
+		// entry must report FilterResult.Match there: the Recurse handling force-loads the
+		// entry's own (lazy) children and hides the entry when all of them are hidden -- a
+		// leaf derived type has none, so every entry under "Derived Types" ended up hidden.
+
+		var (_, vm) = await TestHarness.BootAsync(3);
+
+		var coreLibName = typeof(object).Assembly.GetName().Name!;
+		var typeNode = vm.AssemblyTreeModel.FindNode<TypeTreeNode>(
+			coreLibName, "System", "System.Exception");
+		// Expand the full ancestor chain so the type node is IsVisible -- the cascade only
+		// fires for children of visible parents, which is the state the real tree is in.
+		foreach (var ancestor in typeNode.Ancestors())
+			ancestor.IsExpanded = true;
+		typeNode.IsExpanded = true;
+
+		var derived = typeNode.Children.OfType<DerivedTypesTreeNode>().Single();
+		derived.IsExpanded = true;
+
+		var entries = derived.Children.OfType<DerivedTypesEntryNode>().ToList();
+		entries.Should().NotBeEmpty(
+			"the loaded assembly list contains several Exception subclasses");
+		entries.Should().OnlyContain(e => e.IsVisible,
+			"public derived-type entries must show under the expanded Derived Types node");
+	}
+
+	[AvaloniaTest]
 	public async Task Sealed_Class_Has_No_DerivedTypes_Node()
 	{
 		// Sealed types can't be derived from, so the DerivedTypes sub-tree must not appear.
@@ -1575,7 +1578,7 @@ public class AssemblyTreeTests
 	public void ExitCommand_Is_Exported_To_File_Menu_With_Resources_E_xit_Header()
 	{
 		// File → Exit must be MEF-discovered and parented to the File menu at MenuOrder=99999
-		// (last entry, mirrors WPF). Headless app lifetime isn't IClassicDesktopStyleApplicationLifetime,
+		// (last entry). Headless app lifetime isn't IClassicDesktopStyleApplicationLifetime,
 		// so Execute() is a safe no-op under tests — we don't actually shut down the test runner,
 		// but the metadata + CanExecute path is the regression-worthy surface.
 
@@ -1604,12 +1607,10 @@ public class AssemblyTreeTests
 	[AvaloniaTest]
 	public async Task Active_Search_Term_Does_Not_Hide_Member_Tree_Nodes()
 	{
-		// Pre-existing port misstep: commit 45461ddde wired the search-pane's term into
-		// LanguageSettings.SearchTerm and made SearchTermMatches gate visibility on it.
-		// WPF intentionally makes SearchTermMatches a no-op (returns true) so the assembly
-		// tree stays independent of the search pane. After fixing parity, FieldTreeNode.Filter
-		// must NOT return Hidden purely because the field's name doesn't contain the active
-		// SearchTerm — only ShowApiLevel + ShowMember remain valid hiding criteria.
+		// SearchTermMatches is deliberately a no-op (returns true) so the assembly tree stays
+		// independent of the search pane. FieldTreeNode.Filter must therefore NOT return
+		// Hidden purely because the field's name doesn't contain the active SearchTerm —
+		// only ShowApiLevel + ShowMember remain valid hiding criteria.
 
 		var (_, vm) = await TestHarness.BootAsync();
 
@@ -1747,14 +1748,9 @@ public class AssemblyTreeTests
 		Assert.That(targetNode, Is.Not.Null, "the clicked row must wrap a tree node");
 		// Tree rows stretch to content width (with horizontal scroll), so a row can be wider than
 		// the grid viewport. Click within the visible viewport, not at the (off-screen) row centre.
-		var clickX = System.Math.Min(targetRow.Bounds.Width, grid.Bounds.Width) / 2;
-		var rowCentre = targetRow.TranslatePoint(
-			new Point(clickX, targetRow.Bounds.Height / 2), window)!.Value;
-		HeadlessWindowExtensions.MouseDown(window, rowCentre, MouseButton.Left);
-		HeadlessWindowExtensions.MouseUp(window, rowCentre, MouseButton.Left);
-		Dispatcher.UIThread.RunJobs();
-		await Task.Delay(50);
-		Dispatcher.UIThread.RunJobs();
+		await window.ClickAsync(() => targetRow,
+			pointInTarget: r => new Point(System.Math.Min(r.Bounds.Width, grid.Bounds.Width) / 2, r.Bounds.Height / 2));
+		await Waiters.WaitForIdleAsync();
 		TestCapture.Step("plain-click-collapsed-selection");
 
 		// Assert — selection collapsed to exactly the clicked row, in both grid and model.
@@ -1795,11 +1791,14 @@ public class AssemblyTreeTests
 
 		// Act -- run Load Dependencies on the System.Net.Http node.
 		await vm.AssemblyTreeModel.LoadDependenciesAsync(new SharpTreeNode[] { httpNode });
-		for (int i = 0; i < 8; i++)
-		{
-			Dispatcher.UIThread.RunJobs();
-			await Task.Delay(25);
-		}
+		// Wait for the resolved dependencies to show up in the list, not for the application to go
+		// idle. The command ends with RefreshDecompiledView, so waiting for the dispatcher queue to
+		// drain means waiting for a decompilation whose duration is a property of the machine; on a
+		// loaded agent that outlasts the idle deadline. What this test asserts - and the refresh
+		// regression it guards against - is visible in the assembly list itself.
+		await Waiters.WaitForAsync(
+			() => vm.AssemblyTreeModel.AssemblyList!.GetAssemblies().Any(a => !before.Contains(a.FileName)),
+			description: "the resolved dependencies to appear in the assembly list");
 
 		// Assert -- references were resolved AND survive in the list as auto-loaded entries.
 		var added = vm.AssemblyTreeModel.AssemblyList!.GetAssemblies()

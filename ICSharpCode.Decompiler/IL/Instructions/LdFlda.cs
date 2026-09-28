@@ -19,17 +19,19 @@
 
 using System.Diagnostics;
 
+using ICSharpCode.Decompiler.TypeSystem;
+
 namespace ICSharpCode.Decompiler.IL
 {
 	public sealed partial class LdFlda
 	{
-		internal override void CheckInvariant(ILPhase phase)
+		internal override void CheckInvariant(ILPhase phase, ICompilation compilation)
 		{
-			base.CheckInvariant(phase);
+			base.CheckInvariant(phase, compilation);
 			switch (field.DeclaringType.IsReferenceType)
 			{
 				case true:
-					Debug.Assert(target.ResultType == StackType.O,
+					Debug.Assert(target.ResultType == StackType.Obj,
 						"Class fields can only be accessed with an object on the stack");
 					break;
 				case false:
@@ -38,8 +40,7 @@ namespace ICSharpCode.Decompiler.IL
 					break;
 				case null:
 					// field of unresolved type
-					Debug.Assert(target.ResultType == StackType.O || target.ResultType == StackType.I
-						|| target.ResultType == StackType.Ref || target.ResultType == StackType.Unknown,
+					Debug.Assert(target.ResultType is StackType.Obj or StackType.VT or StackType.I or StackType.Ref or StackType.Unknown,
 						"Field of unresolved type with invalid target");
 					break;
 			}

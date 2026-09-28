@@ -10,13 +10,11 @@ Decompiler Frontends
 Aside from the cross-platform desktop UI ILSpy (downloadable via Releases, see also [plugins](https://github.com/icsharpcode/ILSpy/wiki/Plugins)), the following other frontends are available:
 
 * Visual Studio 2022/2026 ship with decompilation support for F12 enabled by default (using our engines v8.2 and v9.1 respectively).
-* Our Visual Studio 2022 extension [marketplace](https://marketplace.visualstudio.com/items?itemName=SharpDevelopTeam.ILSpy2022) (works with VS 2026 as well)
+* Our Visual Studio 2022/2026 extension [marketplace](https://marketplace.visualstudio.com/items?itemName=SharpDevelopTeam.ILSpy2022)
 * Our Visual Studio Code Extension [repository](https://github.com/icsharpcode/ilspy-vscode) | [marketplace](https://marketplace.visualstudio.com/items?itemName=icsharpcode.ilspy-vscode) | [open-vsx](https://open-vsx.org/extension/icsharpcode/ilspy-vscode)
 * Our dotnet tool for Linux/Mac/Windows - check out [ILSpyCmd](ICSharpCode.ILSpyCmd) in this repository | [dotnet tool install](https://www.nuget.org/packages/ilspycmd/)
 * [C# for Visual Studio Code](https://marketplace.visualstudio.com/items?itemName=ms-dotnettools.csharp) ships with decompilation support as well. To enable, activate the setting "Enable Decompilation Support".
-* In Visual Studio 2019, you have to manually enable F12 support. Go to Tools / Options / Text Editor / C# / Advanced and check "Enable navigation to decompiled source"
-* Our Visual Studio 2017/2019 extension [marketplace](https://marketplace.visualstudio.com/items?itemName=SharpDevelopTeam.ILSpy)
-* Our [ICSharpCode.Decompiler](https://www.nuget.org/packages/ICSharpCode.Decompiler/) NuGet for your own projects
+* Our [ICSharpCode.Decompiler](https://www.nuget.org/packages/ICSharpCode.Decompiler/) and [ILSpyX](https://www.nuget.org/packages/ICSharpCode.ILSpyX/) NuGet packages for your own projects
 * Our Linux/Mac/Windows [PowerShell cmdlets](ICSharpCode.Decompiler.PowerShell) in this repository
 
 Features
@@ -24,11 +22,12 @@ Features
 
  * Decompilation to C# (check out the [language support status](https://github.com/icsharpcode/ILSpy/issues/829))
  * Whole-project decompilation
+ * Open from NuGet feed, open from running process in addition to disk and GAC (Windows-only)
  * Search for types/methods/properties (learn about the [options](https://github.com/icsharpcode/ILSpy/wiki/Search-Options))
- * Hyperlink-based type/method/property navigation
+ * Hyperlink-based type/method/property navigation, bookmarks
  * Base/Derived types navigation, history
  * Assembly metadata explorer ([feature walkthrough](https://github.com/icsharpcode/ILSpy/wiki/Metadata-Explorer))
- * BAML to XAML decompiler
+ * BAML to XAML decompiler, !AvaloniaResources support
  * ReadyToRun binary support for .NET Core (see the [tutorial](https://github.com/icsharpcode/ILSpy/wiki/ILSpy.ReadyToRun))
  * Extensible via [plugins](https://github.com/icsharpcode/ILSpy/wiki/Plugins)
  * Additional features in DEBUG builds ([for the devs](https://github.com/icsharpcode/ILSpy/wiki/Additional-Features-in-DEBUG-Builds))
@@ -44,7 +43,7 @@ How to build
 
 #### Windows:
 
-- Make sure Windows PowerShell (at least version) 5.0 or [PowerShell](https://github.com/PowerShell/PowerShell) 7+ is installed.
+- Make sure [PowerShell](https://github.com/PowerShell/PowerShell) 7+ is installed (Windows PowerShell at least version 5.0 works as well)
 - Clone the ILSpy repository using git.
 - Execute `git submodule update --init --recursive` to download the ILSpy-Tests submodule (used by some test cases).
 - Install Visual Studio (documented version: 18.0/2026). You need the following workload components:
@@ -67,12 +66,14 @@ If this problem occurs, please manually install the .NET 11.0 SDK from [here](ht
 
 #### Unix / Mac:
 
-- Make sure [.NET 10.0 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) (for run) and [.NET 11.0 SDK](https://dotnet.microsoft.com/download/dotnet/11.0) (for tests) is installed.
+- Make sure [.NET 10.0 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) (for run) and [.NET 11.0 SDK](https://dotnet.microsoft.com/download/dotnet/11.0) (for tests) is installed. Better yet, use [dotnetup](https://github.com/dotnet/sdk/tree/release/dnup/documentation/general/dotnetup) with SDK channel preview.
 - Make sure [PowerShell](https://github.com/PowerShell/PowerShell) is installed (formerly known as PowerShell Core)
 - Clone the repository using git.
 - Execute `git submodule update --init --recursive` to download the ILSpy-Tests submodule (used by some test cases).
 - Use `dotnet build ILSpy.Desktop.slnf` to build the cross-platform Avalonia desktop UI; run it with `dotnet run --project ILSpy`.
 - Use `dotnet build ILSpy.XPlat.slnf` to build only the CLI tool (ilspycmd) and PowerShell cmdlets.
+
+We recommend [Visual Studio Code](https://code.visualstudio.com/) or derivatives together with [DotRush](https://github.com/JaneySprings/DotRush), which is also available for derivatives of VS Code.
 
 How to contribute
 -----------------

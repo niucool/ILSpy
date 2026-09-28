@@ -196,6 +196,29 @@ namespace ICSharpCode.Decompiler.Tests.Semantics
 		}
 
 		[Test]
+		public void ExplicitTupleConversionClassifiesElementsAsCasts()
+		{
+			// Every element of this tuple also converts implicitly, so an implicit tuple conversion
+			// exists...
+			var implicitConversion = ImplicitConversion(typeof((DateTime, int)), typeof((DateTimeOffset, long)));
+			Assert.That(implicitConversion.IsTupleConversion);
+			Assert.That(implicitConversion.IsImplicit);
+			Assert.That(implicitConversion.ElementConversions[0].IsUserDefined);
+			Assert.That(implicitConversion.ElementConversions[0].IsImplicit);
+
+			// ...but a cast must not use it: Roslyn's ClassifyConversionFromTypeForCast discards an
+			// ImplicitTuple result (ExplicitConversionMayDifferFromImplicit lists that kind) and
+			// re-classifies the elements as cast conversions, so the DateTime element becomes a
+			// user-defined explicit conversion.
+			var explicitConversion = ExplicitConversion(typeof((DateTime, int)), typeof((DateTimeOffset, long)));
+			Assert.That(explicitConversion.IsTupleConversion);
+			Assert.That(explicitConversion.IsExplicit);
+			Assert.That(explicitConversion.ElementConversions[0].IsUserDefined);
+			Assert.That(explicitConversion.ElementConversions[0].IsExplicit);
+			Assert.That(explicitConversion.ElementConversions[1], Is.EqualTo(C.ImplicitNumericConversion));
+		}
+
+		[Test]
 		public void PrimitiveConversions()
 		{
 			Assert.That(ImplicitConversion(typeof(char), typeof(ushort)), Is.EqualTo(C.ImplicitNumericConversion));
@@ -1615,14 +1638,20 @@ namespace ICSharpCode.Decompiler.Tests.Semantics
 			Assert.That(c.Method.DeclaringType.Name, Is.EqualTo("OperatorInBaseClass"));
 		}
 
-		[Test, Ignore("C# standard 10.2.16 is not implemented: CSharpConversions.ImplicitConversion has a TODO for default literal conversions, and no ResolveResult represents a typeless default literal")]
+		[Test]
 		public void DefaultLiteralConversions()
 		{
-			// C# standard 10.2.16: an implicit conversion exists from a default_literal to
-			// any type, producing the default value of the inferred type. Once the semantic
-			// model gains a typeless default-literal ResolveResult, this test should assert
-			// that it converts to int, string, int? and type parameters.
-			Assert.Fail("Default literal conversions are not implemented.");
+			// C# standard 10.2.16: an implicit conversion exists from a default_literal to any type
+			var defaultLiteral = new DefaultLiteralResolveResult();
+			// a default_value_expression is a constant expression (C# standard 12.8.21)
+			Assert.That(defaultLiteral.IsCompileTimeConstant);
+			Assert.That(conversions.ImplicitConversion(defaultLiteral, compilation.FindType(KnownTypeCode.Int32)), Is.EqualTo(C.DefaultLiteralConversion));
+			Assert.That(conversions.ImplicitConversion(defaultLiteral, compilation.FindType(KnownTypeCode.String)), Is.EqualTo(C.DefaultLiteralConversion));
+			Assert.That(conversions.ImplicitConversion(defaultLiteral, compilation.FindType(typeof(int?))), Is.EqualTo(C.DefaultLiteralConversion));
+			ITypeParameter t = new DefaultTypeParameter(compilation, SymbolKind.Method, 0, "T");
+			Assert.That(conversions.ImplicitConversion(defaultLiteral, t), Is.EqualTo(C.DefaultLiteralConversion));
+			// explicit conversions include all implicit conversions, so (T)default is also valid
+			Assert.That(conversions.ExplicitConversion(defaultLiteral, compilation.FindType(KnownTypeCode.Int32)), Is.EqualTo(C.DefaultLiteralConversion));
 		}
 
 		[Test, Ignore("C# standard 10.2.18 is not implemented: no ResolveResult represents a switch expression; the decompiler converts each arm separately in ILAst")]
@@ -1764,5 +1793,74 @@ namespace ICSharpCode.Decompiler.Tests.Semantics
 				return conversions.ImplicitConversion(bodyReturnType, returnType);
 			}
 		}
+
+		#region First-class span conversions
+		Conversion SpanConversion(Type from, Type to)
+		{
+			var c = RefAssemblyCompilation.Instance;
+			return CSharpConversions.Get(c).ImplicitConversion(c.FindType(from), c.FindType(to));
+		}
+
+		[Test]
+		public void ImplicitSpanConversions()
+		{
+			Assert.That(SpanConversion(typeof(string), typeof(ReadOnlySpan<char>)), Is.EqualTo(C.ImplicitSpanConversion),
+				"the span conversion must win over String's own op_Implicit: user-defined conversions are not considered between span-convertible types");
+			Assert.That(SpanConversion(typeof(string[]), typeof(Span<string>)), Is.EqualTo(C.ImplicitSpanConversion));
+			Assert.That(SpanConversion(typeof(string[]), typeof(ReadOnlySpan<object>)), Is.EqualTo(C.ImplicitSpanConversion));
+			Assert.That(SpanConversion(typeof(Span<string>), typeof(ReadOnlySpan<object>)), Is.EqualTo(C.ImplicitSpanConversion));
+			Assert.That(SpanConversion(typeof(ReadOnlySpan<string>), typeof(ReadOnlySpan<object>)), Is.EqualTo(C.ImplicitSpanConversion));
+		}
+
+		[Test]
+		public void NoImplicitSpanConversionWithoutElementCovariance()
+		{
+			// Roslyn: CS0029 - no conversion at all relates these.
+			Assert.That(SpanConversion(typeof(int[]), typeof(ReadOnlySpan<long>)), Is.EqualTo(C.None));
+
+			// Roslyn: CS0266 - only an EXPLICIT (span) conversion exists. In particular the
+			// user-defined route via Span<object>.op_Implicit(object[]) plus array covariance
+			// must not be considered, because a span conversion exists for the pair.
+			Assert.That(SpanConversion(typeof(string[]), typeof(Span<object>)), Is.EqualTo(C.None));
+		}
+
+		Conversion SpanMethodGroupConversion(ResolveResult target, Type delegateType)
+		{
+			var c = RefAssemblyCompilation.Instance;
+			var extensionMethod = c.FindType(typeof(SpanReceiverExtensionTestCase))
+				.GetMethods(m => m.Name == "M").Single();
+			var mgrr = new MethodGroupResolveResult(
+				target, "M",
+				new[] { new MethodListWithDeclaringType(target.Type, target.Type.GetMethods(m => m.Name == "M")) },
+				typeArguments: null);
+			mgrr.extensionMethods = new List<List<IMethod>> { new List<IMethod> { extensionMethod } };
+			return CSharpConversions.Get(c).ImplicitConversion(mgrr, c.FindType(delegateType));
+		}
+
+		[Test]
+		public void MethodGroupConversion_SpanConversionOnTheReceiverIsNotConsidered()
+		{
+			// C# 14 first-class spans: "span conversion is not considered when overload
+			// resolution is performed for a method group conversion". For 'str.M' with M being
+			// an extension on ReadOnlySpan<char>, Roslyn reports CS0123, even though the
+			// invocation 'str.M()' is legal.
+			var c = RefAssemblyCompilation.Instance;
+			var conversion = SpanMethodGroupConversion(
+				new ResolveResult(c.FindType(KnownTypeCode.String)), typeof(Action));
+			Assert.That(conversion, Is.EqualTo(C.None));
+		}
+
+		[Test]
+		public void MethodGroupConversion_IdentityReceiverOnSpanExtensionStillConverts()
+		{
+			// Guard for the rule above: with an identity-typed receiver the method group
+			// conversion stays legal.
+			var c = RefAssemblyCompilation.Instance;
+			var conversion = SpanMethodGroupConversion(
+				new ResolveResult(c.FindType(typeof(ReadOnlySpan<char>))), typeof(Action));
+			Assert.That(conversion.IsMethodGroupConversion);
+			Assert.That(conversion.IsValid);
+		}
+		#endregion
 	}
 }

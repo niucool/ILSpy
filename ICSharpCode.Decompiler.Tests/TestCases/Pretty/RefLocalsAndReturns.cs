@@ -282,6 +282,19 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 			return ref DefaultInt;
 		}
 
+		public static ref int SwitchRefReturn(int index)
+		{
+			switch (index)
+			{
+				case 0:
+					return ref numbers[0];
+				case 1:
+					return ref numbers[1];
+				default:
+					throw new InvalidOperationException();
+			}
+		}
+
 		public static ref int LastOrDefault()
 		{
 			if (numbers.Length != 0)
@@ -328,6 +341,13 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 				reference = ref GetRef<NormalStruct>();
 			}
 			RefReassignment(ref reference.GetHashCode() == 4 ? ref reference : ref s);
+		}
+
+		public static void ConditionalRefAssignment(bool c, ref int a, ref int b)
+		{
+			(c ? ref a : ref b) = 3;
+			(c ? ref a : ref b) += 10;
+			(c ? ref b : ref a)++;
 		}
 
 		public static void Main(string[] args)

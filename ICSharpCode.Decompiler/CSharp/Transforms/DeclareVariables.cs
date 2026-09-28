@@ -472,8 +472,11 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 			{
 				// We can only insert variable declarations in blocks, but FindInsertionPoints() didn't
 				// guarantee that it finds only blocks.
-				// Fix that up now.
-				while (!(v.InsertionPoint.nextNode.Parent is BlockStatement or LambdaExpression))
+				// Fix that up now. A lambda is a valid stop only for its expression body (insertion
+				// will convert that body to a block); a point at a statement-bodied lambda's block
+				// itself must keep moving up into the enclosing scope.
+				while (!(v.InsertionPoint.nextNode.Parent is BlockStatement
+					|| (v.InsertionPoint.nextNode.Parent is LambdaExpression && v.InsertionPoint.nextNode is Expression)))
 				{
 					if (v.InsertionPoint.nextNode.Parent is ForStatement f && v.InsertionPoint.nextNode == f.Initializers.FirstOrDefault() && IsMatchingAssignment(v, out _))
 					{
@@ -593,6 +596,14 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 			if (v.Type.IsByRefLike)
 				return true; // by-ref-like variables always must be initialized at their declaration.
 
+			if (v.InsertionPoint.nextNode.Parent is LambdaExpression)
+			{
+				// The insertion point is an expression-bodied lambda's body. Combining would put a
+				// declaration statement in expression position ("x => int num = x;"); the separate
+				// declaration path turns the body into a block first, which stays valid C#.
+				return false;
+			}
+
 			if (v.InsertionPoint.nextNode.Slot?.Kind == Slots.ForInitializer)
 				return true; // for-statement initializers always should combine declaration and initialization.
 
@@ -637,6 +648,10 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 							{
 								init.AddAnnotation(annotation);
 							}
+						}
+						if (context.Settings.ScopedRef && v.ILVariable.IsScoped)
+						{
+							vds.Modifiers |= Modifiers.Scoped;
 						}
 						return vds;
 					}, "Combine variable declaration with initializer"));
@@ -693,9 +708,17 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 					AstType type = context.TypeSystemAstBuilder.ConvertType(v.Type);
 					if (v.DefaultInitialization == VariableInitKind.NeedsDefaultValue)
 					{
-						initializer = new DefaultValueExpression(type.Clone());
+						// The declaration always spells out the type, so the default literal is
+						// equivalent to default(T).
+						initializer = context.Settings.DefaultLiterals
+							? new DefaultValueExpression()
+							: new DefaultValueExpression(type.Clone());
 					}
 					var vds = new VariableDeclarationStatement(type, v.Name, initializer);
+					if (context.Settings.ScopedRef && v.ILVariable.IsScopedWithoutInitializer)
+					{
+						vds.Modifiers |= Modifiers.Scoped;
+					}
 					vds.Variables.Single().AddAnnotation(new ILVariableResolveResult(ilVariable));
 					context.Step("Insert variable declaration", v.InsertionPoint.nextNode);
 					if (v.InsertionPoint.nextNode.Parent is LambdaExpression lambda)

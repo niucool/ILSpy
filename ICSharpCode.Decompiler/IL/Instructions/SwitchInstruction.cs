@@ -143,18 +143,19 @@ namespace ICSharpCode.Decompiler.IL
 			return clone;
 		}
 
-		StackType resultType = StackType.Void;
+		IType? resultType = null;
 
-		public override StackType ResultType => resultType;
+		public override StackType ResultType => resultType?.GetStackType() ?? StackType.Void;
+		public override IType InferType(ICompilation compilation) => resultType ?? compilation.FindType(KnownTypeCode.Void);
 
-		public void SetResultType(StackType resultType)
+		public void SetResultType(IType resultType)
 		{
 			this.resultType = resultType;
 		}
 
-		internal override void CheckInvariant(ILPhase phase)
+		internal override void CheckInvariant(ILPhase phase, ICompilation compilation)
 		{
-			base.CheckInvariant(phase);
+			base.CheckInvariant(phase, compilation);
 			bool expectNullSection = this.IsLifted;
 			LongSet sets = LongSet.Empty;
 			foreach (var section in Sections)
@@ -166,12 +167,12 @@ namespace ICSharpCode.Decompiler.IL
 				}
 				Debug.Assert(!section.Labels.IsEmpty || section.HasNullLabel);
 				Debug.Assert(!section.Labels.Overlaps(sets));
-				Debug.Assert(section.Body.ResultType == this.ResultType);
+				Debug.Assert(section.Body.ResultType == this.ResultType || section.Body.HasDirectFlag(InstructionFlags.EndPointUnreachable));
 				sets = sets.UnionWith(section.Labels);
 			}
 			Debug.Assert(sets.SetEquals(LongSet.Universe), "switch does not handle all possible cases");
 			Debug.Assert(!expectNullSection, "Lifted switch is missing 'case null'");
-			Debug.Assert(this.IsLifted ? (value.ResultType == StackType.O) : (value.ResultType == StackType.I4 || value.ResultType == StackType.I8));
+			Debug.Assert(this.IsLifted ? (value.ResultType == StackType.VT) : (value.ResultType == StackType.I4 || value.ResultType == StackType.I8));
 		}
 
 		public SwitchSection GetDefaultSection()

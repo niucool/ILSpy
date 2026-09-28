@@ -25,6 +25,7 @@ using System.Linq;
 
 using ICSharpCode.Decompiler.CSharp.Syntax;
 using ICSharpCode.Decompiler.IL;
+using ICSharpCode.Decompiler.Semantics;
 
 namespace ICSharpCode.Decompiler.CSharp.Transforms
 {
@@ -140,6 +141,8 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 				return null;
 			MemberReferenceExpression? mre = invocation.Target as MemberReferenceExpression;
 			if (mre == null || IsNullConditional(mre.Target))
+				return null;
+			if (mre.TypeArguments.Count > 0)
 				return null;
 			switch (mre.MemberName)
 			{
@@ -345,7 +348,7 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 
 		static bool IsComplexQuery(MemberReferenceExpression mre)
 		{
-			return ((mre.Target is InvocationExpression && mre.Parent is InvocationExpression) || mre.Parent?.Parent is QueryClause);
+			return (mre.Target is InvocationExpression && mre.Parent is InvocationExpression) || mre.Parent?.Parent is QueryClause;
 		}
 
 		QueryFromClause MakeFromClause(ParameterDeclaration parameter, Expression body)
@@ -377,10 +380,13 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 			}
 		}
 
-		bool IsNullConditional(Expression target)
-		{
-			return target is UnaryOperatorExpression uoe && uoe.Operator == UnaryOperatorType.NullConditional;
-		}
+		bool IsNullConditional(Expression target) => target switch {
+			UnaryOperatorExpression { Operator: UnaryOperatorType.NullConditional } => true,
+			MemberReferenceExpression member => IsNullConditional(member.Target),
+			InvocationExpression invocation => IsNullConditional(invocation.Target),
+			IndexerExpression { Target: { } indexerTarget } => IsNullConditional(indexerTarget),
+			_ => false
+		};
 
 		/// <summary>
 		/// This fixes #437: Decompilation of query expression loses material parentheses
@@ -408,6 +414,8 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 				return false;
 			if (parameter.Name != expectedParameterName)
 				return false;
+			if (mre.TypeArguments.Count > 0)
+				return false;
 
 			if (mre.MemberName == "OrderBy" || mre.MemberName == "OrderByDescending")
 				return !IsNullConditional(mre.Target);
@@ -422,6 +430,12 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 		{
 			if (expr is LambdaExpression lambda && lambda.Parameters.Count == 1 && lambda.Body is Expression)
 			{
+				if (lambda.GetResolveResult() is DecompiledLambdaResolveResult { AttemptedConversionWithTypeMismatch: true })
+				{
+					parameter = null;
+					body = null;
+					return false;
+				}
 				ParameterDeclaration p = lambda.Parameters.Single();
 				if (ValidateParameter(p))
 				{

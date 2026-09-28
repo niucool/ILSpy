@@ -43,6 +43,14 @@ using ICSharpCode.ILSpy.ViewModels;
 
 namespace ICSharpCode.ILSpy.TextView
 {
+	public sealed class NavigateRequestedEventArgs(ReferenceSegment segment, object? source = null, bool inNewTabPage = false) : EventArgs
+	{
+		public ReferenceSegment Segment { get; } = segment ?? throw new ArgumentNullException(nameof(segment));
+		public object Reference { get; } = segment.Reference ?? throw new ArgumentException("The reference segment must have a reference.", nameof(segment));
+		public object? Source { get; } = source;
+		public bool InNewTabPage { get; } = inNewTabPage;
+	}
+
 	/// <summary>
 	/// A document tab that hosts decompiled output for a single tree node. Re-decompiles when
 	/// <see cref="CurrentNode"/> changes; previous in-flight decompilations are cancelled so a
@@ -103,6 +111,7 @@ namespace ICSharpCode.ILSpy.TextView
 		/// in the header while this is set.
 		/// </summary>
 		[ObservableProperty]
+		[NotifyPropertyChangedFor(nameof(ProgressBarIsIndeterminate))]
 		private bool isDecompiling;
 
 		/// <summary>
@@ -120,7 +129,16 @@ namespace ICSharpCode.ILSpy.TextView
 		/// off so the bar becomes determinate; an in-place decompile leaves it on.
 		/// </summary>
 		[ObservableProperty]
+		[NotifyPropertyChangedFor(nameof(ProgressBarIsIndeterminate))]
 		private bool progressIsIndeterminate = true;
+
+		/// <summary>
+		/// What the progress bar binds its IsIndeterminate to: indeterminate mode, but only while a
+		/// decompilation is running. The indeterminate indicator is an infinite animation, and it
+		/// keeps running - and keeps the view alive through the render clock - for as long as the
+		/// pseudo-class is set, whether the bar is visible or not.
+		/// </summary>
+		public bool ProgressBarIsIndeterminate => IsDecompiling && ProgressIsIndeterminate;
 
 		/// <summary>Total units to process (the project's file count) for the determinate bar.</summary>
 		[ObservableProperty]
@@ -264,10 +282,10 @@ namespace ICSharpCode.ILSpy.TextView
 		/// Fired when the user clicks a cross-document reference. The host (DockWorkspace)
 		/// resolves the target on the assembly tree side.
 		/// </summary>
-		public event System.Action<ReferenceSegment>? NavigateRequested;
+		public event EventHandler<NavigateRequestedEventArgs>? NavigateRequested;
 
-		internal void RaiseNavigateRequested(ReferenceSegment segment)
-			=> NavigateRequested?.Invoke(segment);
+		internal void RaiseNavigateRequested(ReferenceSegment segment, bool inNewTabPage = false)
+			=> NavigateRequested?.Invoke(this, new NavigateRequestedEventArgs(segment, inNewTabPage: inNewTabPage));
 
 		/// <summary>
 		/// Fired when the user activates an AvaloniaEdit hyperlink. Subscribers return
@@ -336,6 +354,14 @@ namespace ICSharpCode.ILSpy.TextView
 					n.PropertyChanged -= OnCurrentNodePropertyChanged;
 				currentNodes = value.ToArray();
 				cachedBaseTitle = ComposeBaseTitle();
+				if (currentNodes.Count == 0)
+				{
+					// Emptying the tab has to take the title with it. Nothing below assigns one
+					// for an empty tab - StartDecompile has nothing to decompile and returns -
+					// so the tab would keep naming the member it no longer shows. ComposeBaseTitle
+					// already names the empty case.
+					Title = cachedBaseTitle;
+				}
 				foreach (var n in currentNodes)
 					n.PropertyChanged += OnCurrentNodePropertyChanged;
 				// Let host chrome (the omnibar breadcrumb) react to the tab re-targeting a node.
@@ -384,6 +410,7 @@ namespace ICSharpCode.ILSpy.TextView
 		int pendingStepLimit = int.MaxValue;
 		int? pendingHighlightStep;
 		bool pendingIsDebug;
+
 
 		/// <summary>
 		/// Output-length safety limits (characters): a decompile that produces more than the active
@@ -549,6 +576,10 @@ namespace ICSharpCode.ILSpy.TextView
 				var stepLimit = pendingStepLimit;
 				var highlightStep = pendingHighlightStep;
 				var isDebug = pendingIsDebug;
+				// Unlike the per-run overrides above, this is not reset: it describes the tab, and
+				// every run has to record the same way or a step index picked from one tree would
+				// select a different step on replay.
+				var recordSteps = AppEnv.AppComposition.TryGetExport<Docking.DockWorkspace>()?.RecordSteps ?? false;
 				pendingStepLimit = int.MaxValue;
 				pendingHighlightStep = null;
 				pendingIsDebug = false;
@@ -570,6 +601,7 @@ namespace ICSharpCode.ILSpy.TextView
 							StepLimit = stepLimit,
 							HighlightStep = highlightStep,
 							IsDebug = isDebug,
+							RecordSteps = recordSteps,
 						};
 						try
 						{
@@ -595,8 +627,10 @@ namespace ICSharpCode.ILSpy.TextView
 						catch (Exception ex)
 						{
 							output.WriteLine();
-							output.WriteLine("/* Decompilation failed:");
-							output.WriteLine(ex.ToString());
+							output.WriteLine("/* Decompilation failed: " + ex.Message);
+							// The trace goes in a collapsed fold: what the reader needs is the message,
+							// and the frames only when they go looking for them.
+							output.WriteExceptionDetails(ex);
 							output.WriteLine("*/");
 						}
 						return (output, cts.Token);
@@ -615,6 +649,13 @@ namespace ICSharpCode.ILSpy.TextView
 				ICSharpCode.ILSpy.AppEnv.AppLog.Mark($"DecompileAsync #{callNumber}: {rendered.Length} chars, {(output.Foldings?.Count ?? 0)} foldings, {(output.References?.Count ?? 0)} refs");
 				using (ICSharpCode.ILSpy.AppEnv.AppLog.Phase($"DecompileAsync #{callNumber}: Dispatcher.InvokeAsync (apply Text + props, triggers ApplyDocument)"))
 					await Dispatcher.UIThread.InvokeAsync(() => {
+						// Re-check on the UI thread, not just before rendering: collecting the text
+						// and waiting for this callback both take time, and a cancel that lands in
+						// that window (the assembly was removed from the list, the user selected
+						// something else) must not let the finished output overwrite whatever state
+						// the tab has been put into since.
+						if (cts.Token.IsCancellationRequested)
+							return;
 						Title = cachedBaseTitle;
 						ApplyOutput(output, effectiveSyntaxExtension, rendered);
 					});

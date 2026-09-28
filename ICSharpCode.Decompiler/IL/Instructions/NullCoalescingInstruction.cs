@@ -17,7 +17,10 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+using System;
 using System.Diagnostics;
+
+using ICSharpCode.Decompiler.TypeSystem;
 
 namespace ICSharpCode.Decompiler.IL
 {
@@ -54,28 +57,49 @@ namespace ICSharpCode.Decompiler.IL
 	partial class NullCoalescingInstruction
 	{
 		public readonly NullCoalescingKind Kind;
-		public StackType UnderlyingResultType = StackType.O;
+		public IType Type { get; }
+		public StackType UnderlyingResultType => Kind switch {
+			NullCoalescingKind.Ref => StackType.Obj,
+			NullCoalescingKind.Nullable => NullableType.GetUnderlyingType(Type).GetStackType(),
+			NullCoalescingKind.NullableWithValueFallback => ResultType,
+			_ => throw new InvalidOperationException()
+		};
 
-		public NullCoalescingInstruction(NullCoalescingKind kind, ILInstruction valueInst, ILInstruction fallbackInst) : base(OpCode.NullCoalescingInstruction)
+		public NullCoalescingInstruction(IType type, NullCoalescingKind kind, ILInstruction valueInst, ILInstruction fallbackInst) : base(OpCode.NullCoalescingInstruction)
 		{
+			this.Type = type;
 			this.Kind = kind;
 			this.ValueInst = valueInst;
 			this.FallbackInst = fallbackInst;
+			Debug.Assert(type.GetStackType() == fallbackInst.ResultType || fallbackInst.HasDirectFlag(InstructionFlags.EndPointUnreachable));
 		}
 
-		internal override void CheckInvariant(ILPhase phase)
+		internal override void CheckInvariant(ILPhase phase, ICompilation compilation)
 		{
-			base.CheckInvariant(phase);
-			Debug.Assert(valueInst.ResultType == StackType.O); // lhs is reference type or nullable type
-			Debug.Assert(fallbackInst.ResultType == StackType.O || Kind == NullCoalescingKind.NullableWithValueFallback);
-			Debug.Assert(ResultType == UnderlyingResultType || Kind == NullCoalescingKind.Nullable);
-		}
-
-		public override StackType ResultType {
-			get {
-				return fallbackInst.ResultType;
+			base.CheckInvariant(phase, compilation);
+			switch (Kind)
+			{
+				case NullCoalescingKind.Ref:
+					Debug.Assert(ResultType == StackType.Obj);
+					Debug.Assert(valueInst.ResultType == StackType.Obj);
+					Debug.Assert(fallbackInst.ResultType == StackType.Obj || fallbackInst.HasDirectFlag(InstructionFlags.EndPointUnreachable));
+					break;
+				case NullCoalescingKind.Nullable:
+					Debug.Assert(NullableType.IsNullable(Type));
+					Debug.Assert(ResultType == StackType.VT);
+					Debug.Assert(valueInst.ResultType == StackType.VT);
+					Debug.Assert(fallbackInst.ResultType == StackType.VT || fallbackInst.HasDirectFlag(InstructionFlags.EndPointUnreachable));
+					break;
+				case NullCoalescingKind.NullableWithValueFallback:
+					Debug.Assert(NullableType.IsNonNullableValueType(Type));
+					Debug.Assert(valueInst.ResultType == StackType.VT);
+					Debug.Assert(fallbackInst.ResultType == ResultType || fallbackInst.HasDirectFlag(InstructionFlags.EndPointUnreachable));
+					break;
 			}
 		}
+
+		public override StackType ResultType => Type.GetStackType();
+		public override IType InferType(ICompilation compilation) => Type;
 
 		public override InstructionFlags DirectFlags {
 			get {

@@ -32,6 +32,11 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Correctness
 			Generics();
 			ConstructorTest();
 			TestIndexer();
+			TestIndexerWithNamedArguments();
+			TestRedeclaredDefaultValues();
+#if !MCS2
+			TestNamedWithOmittedOptional();
+#endif
 			Issue1281();
 			Issue1747();
 			CallAmbiguousOutParam();
@@ -43,7 +48,81 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Correctness
 			Issue2444.M2();
 			Issue2741.B.Test(new Issue2741.C());
 			ExtensionMethodDemo.Issue2165.Test();
+#if CS71
+			DefaultLiteralTests();
+#endif
 		}
+
+#if CS71
+		static void DefaultLiteralTests()
+		{
+			// The decompiled output may shorten default(T) to a default literal;
+			// re-compilation must still pick the same overloads and operators.
+			DefaultOverload(default(DataStruct));
+			DefaultOverload(default(OtherStruct));
+			DefaultNullableOverload(default(DataStruct));
+			Console.WriteLine(default(DataStruct) == new DataStruct());
+			Console.WriteLine(GenericDefault("x", default));
+			Console.WriteLine(GenericDefault(42, default));
+		}
+
+		struct DataStruct
+		{
+			public int Field;
+
+			public static bool operator ==(DataStruct a, DataStruct b)
+			{
+				Console.WriteLine("DataStruct operator ==");
+				return a.Field == b.Field;
+			}
+
+			public static bool operator !=(DataStruct a, DataStruct b)
+			{
+				return a.Field != b.Field;
+			}
+
+			public override bool Equals(object obj)
+			{
+				return obj is DataStruct other && Field == other.Field;
+			}
+
+			public override int GetHashCode()
+			{
+				return Field;
+			}
+		}
+
+		struct OtherStruct
+		{
+			public int Field;
+		}
+
+		static void DefaultOverload(DataStruct data)
+		{
+			Console.WriteLine("DefaultOverload(DataStruct)");
+		}
+
+		static void DefaultOverload(OtherStruct data)
+		{
+			Console.WriteLine("DefaultOverload(OtherStruct)");
+		}
+
+		static void DefaultNullableOverload(DataStruct data)
+		{
+			Console.WriteLine("DefaultNullableOverload(DataStruct)");
+		}
+
+		static void DefaultNullableOverload(DataStruct? data)
+		{
+			Console.WriteLine("DefaultNullableOverload(DataStruct?)");
+		}
+
+		static T GenericDefault<T>(T a, T b)
+		{
+			Console.WriteLine("GenericDefault: " + typeof(T).Name);
+			return b;
+		}
+#endif
 
 		#region ConstructorTest
 		static void ConstructorTest()
@@ -253,6 +332,87 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Correctness
 			obj[(object)5] = null;
 			Console.WriteLine(obj[5]);
 			obj[5] = null;
+		}
+		#endregion
+
+		#region Named arguments with omitted optional arguments
+		// mcs 2.6.4 crashes while emitting a call that names its arguments and leaves an optional
+		// one out.
+#if !MCS2
+		static void TestNamedWithOmittedOptional()
+		{
+			var obj = new NamedOptionalTests();
+			obj.M(b: Trace(2), a: Trace(1));
+			obj.N(y: Trace(1), x: Trace(2));
+			obj.N(z: Trace(1), x: Trace(2));
+		}
+
+		class NamedOptionalTests
+		{
+			public void M(int a, int b, int c = 3)
+			{
+				Console.WriteLine("M(" + a + ", " + b + ", " + c + ")");
+			}
+
+			public void N(int x, int y = 10, int z = 20)
+			{
+				Console.WriteLine("N(" + x + ", " + y + ", " + z + ")");
+			}
+		}
+#endif
+		#endregion
+
+		#region Redeclared default values
+		static void TestRedeclaredDefaultValues()
+		{
+			var derived = new DerivedDefaultValue();
+			Console.WriteLine(derived[1, 10]);
+			Console.WriteLine(derived.Method(1, 10));
+		}
+
+		class BaseDefaultValue
+		{
+			public virtual int this[int x, int y = 10] {
+				get {
+					return x + y;
+				}
+			}
+
+			public virtual int Method(int x, int y = 10)
+			{
+				return x + y;
+			}
+		}
+
+		class DerivedDefaultValue : BaseDefaultValue
+		{
+			public override int this[int x, int y = 20] {
+				get {
+					return x + y + 1;
+				}
+			}
+
+			public override int Method(int x, int y = 20)
+			{
+				return x + y + 1;
+			}
+		}
+		#endregion
+
+		#region Indexer with named arguments
+		static void TestIndexerWithNamedArguments()
+		{
+			var obj = new NamedArgumentIndexerTests();
+			Console.WriteLine(obj[y: Trace(1), x: Trace(2)]);
+			obj[y: Trace(3), x: Trace(4)] = Trace(5);
+			Console.WriteLine(obj[y: Trace(6), x: Trace(7)] = Trace(8));
+			obj[y: Trace(9), x: Trace(10)] += 5;
+		}
+
+		static int Trace(int i)
+		{
+			Console.WriteLine("Trace(" + i + ")");
+			return i;
 		}
 		#endregion
 
@@ -526,6 +686,19 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Correctness
 			}
 		}
 		#endregion
+	}
+
+	class NamedArgumentIndexerTests
+	{
+		public int this[int x, int y] {
+			get {
+				Console.WriteLine("get_Item(" + x + ", " + y + ")");
+				return x;
+			}
+			set {
+				Console.WriteLine("set_Item(" + x + ", " + y + ", " + value + ")");
+			}
+		}
 	}
 
 	class IndexerTests

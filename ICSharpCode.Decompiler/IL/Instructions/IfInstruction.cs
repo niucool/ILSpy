@@ -19,6 +19,8 @@
 
 using System.Diagnostics;
 
+using ICSharpCode.Decompiler.TypeSystem;
+
 namespace ICSharpCode.Decompiler.IL
 {
 	/// <summary>If statement / conditional expression. <c>if (condition) trueExpr else falseExpr</c></summary>
@@ -36,46 +38,68 @@ namespace ICSharpCode.Decompiler.IL
 	/// </remarks>
 	partial class IfInstruction : ILInstruction
 	{
-		public IfInstruction(ILInstruction condition, ILInstruction trueInst, ILInstruction? falseInst = null) : base(OpCode.IfInstruction)
+		// null means void
+		IType? csharpType;
+
+		public IType? CSharpType {
+			get => csharpType;
+			set {
+				Debug.Assert(this.ResultType == (value?.GetStackType() ?? StackType.Void));
+				csharpType = value;
+			}
+		}
+
+		public IfInstruction(ILInstruction condition, ILInstruction trueInst,
+			ILInstruction? falseInst = null, IType? resultType = null) : base(OpCode.IfInstruction)
 		{
 			this.Condition = condition;
 			this.TrueInst = trueInst;
-			this.FalseInst = falseInst ?? new Nop();
-		}
-
-		public static IfInstruction LogicAnd(ILInstruction lhs, ILInstruction rhs)
-		{
-			return new IfInstruction(lhs, rhs, new LdcI4(0));
-		}
-
-		public static IfInstruction LogicOr(ILInstruction lhs, ILInstruction? rhs)
-		{
-			return new IfInstruction(lhs, new LdcI4(1), rhs);
-		}
-
-		internal override void CheckInvariant(ILPhase phase)
-		{
-			base.CheckInvariant(phase);
+			falseInst ??= new Nop();
+			this.FalseInst = falseInst;
+			this.csharpType = resultType;
 			Debug.Assert(condition.ResultType == StackType.I4);
-			Debug.Assert(trueInst.ResultType == falseInst.ResultType
-				|| trueInst.HasDirectFlag(InstructionFlags.EndPointUnreachable)
+			Debug.Assert(trueInst.ResultType == this.ResultType
+				|| trueInst.HasDirectFlag(InstructionFlags.EndPointUnreachable));
+			Debug.Assert(falseInst.ResultType == this.ResultType
+				|| falseInst.HasDirectFlag(InstructionFlags.EndPointUnreachable));
+		}
+
+		public static IfInstruction LogicAnd(ILInstruction lhs, ILInstruction rhs, ICompilation compilation)
+		{
+			Debug.Assert(lhs.ResultType == StackType.I4);
+			Debug.Assert(rhs.ResultType == StackType.I4);
+			return new IfInstruction(lhs, rhs, new LdcI4(0), rhs.InferType(compilation));
+		}
+
+		public static IfInstruction LogicOr(ILInstruction lhs, ILInstruction rhs, ICompilation compilation)
+		{
+			return new IfInstruction(lhs, new LdcI4(1), rhs, rhs.InferType(compilation));
+		}
+
+		internal override void CheckInvariant(ILPhase phase, ICompilation compilation)
+		{
+			base.CheckInvariant(phase, compilation);
+			Debug.Assert(condition.ResultType == StackType.I4);
+			Debug.Assert(trueInst.ResultType == this.ResultType
+				|| trueInst.HasDirectFlag(InstructionFlags.EndPointUnreachable));
+			Debug.Assert(falseInst.ResultType == this.ResultType
 				|| falseInst.HasDirectFlag(InstructionFlags.EndPointUnreachable));
 		}
 
 		public override StackType ResultType {
 			get {
-				if (trueInst.HasDirectFlag(InstructionFlags.EndPointUnreachable))
-					return falseInst.ResultType;
-				else
-					return trueInst.ResultType;
+				if (csharpType != null)
+					return csharpType.GetStackType();
+				return StackType.Void;
 			}
 		}
-
-		public override InstructionFlags DirectFlags {
-			get {
-				return InstructionFlags.ControlFlow;
-			}
+		public override IType InferType(ICompilation compilation)
+		{
+			if (csharpType != null)
+				return csharpType;
+			return compilation.FindType(KnownTypeCode.Void);
 		}
+		public override InstructionFlags DirectFlags => InstructionFlags.ControlFlow;
 
 		protected override InstructionFlags ComputeFlags()
 		{
@@ -85,7 +109,8 @@ namespace ICSharpCode.Decompiler.IL
 		protected override void WriteToCore(ITextOutput output, ILAstWritingOptions options)
 		{
 			WriteILRange(output, options);
-			if (options.UseLogicOperationSugar)
+			if (options.UseLogicOperationSugar
+				&& csharpType != null && csharpType.IsKnownType(KnownTypeCode.Boolean))
 			{
 				if (MatchLogicAnd(out var lhs, out var rhs))
 				{
@@ -107,6 +132,12 @@ namespace ICSharpCode.Decompiler.IL
 				}
 			}
 			output.Write(OpCode);
+			if (csharpType != null)
+			{
+				output.Write(" [");
+				output.Write(csharpType.ReflectionName);
+				output.Write(']');
+			}
 			output.Write(" (");
 			condition.WriteTo(output, options);
 			output.Write(") ");

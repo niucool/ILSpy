@@ -139,6 +139,46 @@ namespace ICSharpCode.Decompiler.Tests.Pretty
 			}
 		}
 
+		internal class OverridingParent : Parent
+		{
+#if LEGACY_CSC
+			public virtual int Prop {
+				get {
+					return 1;
+				}
+			}
+#else
+			public virtual int Prop => 1;
+#endif
+
+			public override void Virtual()
+			{
+			}
+		}
+
+		internal class OverridingChild : OverridingParent
+		{
+#if LEGACY_CSC
+			public override int Prop {
+				get {
+					return 2;
+				}
+			}
+#else
+			public override int Prop => 2;
+#endif
+
+			// Neither member is overridden here, so the unqualified spelling would bind to the
+			// same one and the qualifier looks redundant - but Virtual is an override and Prop is
+			// overridden further down, so dropping it would dispatch to this type's member
+			// instead of the one the base call names.
+			public void BaseQualifiersOnOverriddenMembers()
+			{
+				base.Virtual();
+				base.Prop.ToString();
+			}
+		}
+
 #pragma warning disable CS8981
 		private class i
 		{
@@ -280,7 +320,7 @@ namespace ICSharpCode.Decompiler.Tests.Pretty
 		{
 			int fieldConflict = 5;
 			Capturer(() => this.fieldConflict + fieldConflict);
-			Capturer(delegate {
+			Capturer(() => {
 				int innerConflict = 5;
 				return this.fieldConflict + fieldConflict + Capturer2(() => this.innerConflict + innerConflict + this.fieldConflict + fieldConflict);
 			});

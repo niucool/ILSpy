@@ -274,21 +274,12 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 		// rather than be reconstructed as 'stackalloc int[4] { 1, v, 3 }' (too few elements).
 		public unsafe string PartialReinterpret(int v)
 		{
-#if OPT
-			byte* num = stackalloc byte[16];
-			*(int*)num = 1;
-			((int*)num)[1] = v;
-			((int*)num)[2] = 3;
-			long num2 = 0L;
-			return UseBytePointer(num, &num2);
-#else
 			byte* ptr = stackalloc byte[16];
 			*(int*)ptr = 1;
 			((int*)ptr)[1] = v;
 			((int*)ptr)[2] = 3;
 			long num = 0L;
 			return UseBytePointer(ptr, &num);
-#endif
 		}
 
 		public unsafe static string UseBytePointer(byte* ptr, long* length)
@@ -298,15 +289,6 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 
 		public unsafe string NegativeOffsets(int a, int b, int c)
 		{
-#if OPT
-			byte* num = stackalloc byte[12];
-			*(int*)num = 1;
-			*((int*)num - 1) = 2;
-			*((int*)num - 2) = 3;
-			int* ptr = (int*)num;
-			Console.WriteLine(*ptr);
-			return UsePointer((byte*)ptr);
-#else
 			byte* ptr = stackalloc byte[12];
 			*(int*)ptr = 1;
 			*((int*)ptr - 1) = 2;
@@ -314,7 +296,6 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 			int* ptr2 = (int*)ptr;
 			Console.WriteLine(*ptr2);
 			return UsePointer((byte*)ptr2);
-#endif
 		}
 
 		public unsafe string UsePointer(byte* ptr)
@@ -351,6 +332,12 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 			return UseSpan(span);
 		}
 
+		public string GetSpan5()
+		{
+			Span<char> span = stackalloc char[4] { '1', '2', '3', '4' };
+			return UseSpan(span);
+		}
+
 		public void Issue2103a()
 		{
 			Span<byte> span = stackalloc byte[3] { 1, 2, 3 };
@@ -373,12 +360,7 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 			Console.WriteLine((stackalloc byte[3])[1]);
 		}
 
-		public string UseSpan(Span<int> span)
-		{
-			throw new NotImplementedException();
-		}
-
-		public string UseSpan(Span<decimal> span)
+		public string UseSpan<T>(Span<T> span)
 		{
 			throw new NotImplementedException();
 		}

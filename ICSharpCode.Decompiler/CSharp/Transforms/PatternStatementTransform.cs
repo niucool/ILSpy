@@ -111,7 +111,13 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 
 		public override AstNode VisitPropertyDeclaration(PropertyDeclaration propertyDeclaration)
 		{
-			if (context.Settings.AutomaticProperties
+			// Same rule as CSharpDecompiler.MemberIsHidden applies to the backing field: either
+			// setting on its own allows the field declaration to disappear, and
+			// GetterOnlyAutomaticProperties vetoes the getter-only case for both. Asking only
+			// about AutomaticProperties would skip the transform for a field-backed property
+			// while ExpressionBuilder.ConvertField has already printed "field" in its accessors,
+			// leaving the declaration and the keyword in the same output.
+			if ((context.Settings.AutomaticProperties || context.Settings.FieldKeyword)
 				&& (propertyDeclaration.Setter is not null || context.Settings.GetterOnlyAutomaticProperties))
 			{
 				AstNode? result = TransformAutomaticProperty(propertyDeclaration);
@@ -191,7 +197,7 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 			if (!m1.Success)
 				return null;
 			var variable = m1.Get<IdentifierExpression>("variable").Single().GetILVariable();
-			AstNode? next = node.NextSibling;
+			AstNode? next = node.GetNextNonEmptyStatement();
 			if (next == null)
 				return null;
 			if (next is ForStatement forStatement && ForStatementUsesVariable(forStatement, variable))
@@ -592,7 +598,7 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 			Match m = default(Match);
 			while (i < upperBounds.Length && MatchLowerBound(i, out var indexVariable, collection, stmt))
 			{
-				m = forOnArrayMultiDimPattern.Match(stmt.GetNextStatement());
+				m = forOnArrayMultiDimPattern.Match(stmt.GetNextNonEmptyStatement());
 				if (!m.Success)
 					return false;
 				var upperBound = m.Get<IdentifierExpression>("upperBoundVariable").Single().GetILVariable();
@@ -648,7 +654,7 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 				if (!int.TryParse(m.Get<PrimitiveExpression>("index").Single().Value?.ToString() ?? "", out int index) || index != i)
 					break;
 				upperBounds[i] = m.Get<IdentifierExpression>("variable").Single().GetILVariable()!;
-				stmt = stmt.GetNextStatement();
+				stmt = stmt.GetNextNonEmptyStatement();
 				i++;
 			} while (stmt != null && upperBounds != null && i < upperBounds.Length);
 
@@ -658,7 +664,7 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 				return null;
 			statementsToDelete.Add(stmt);
 			// The matched multi-dimensional foreach pattern guarantees a statement after stmt.
-			statementsToDelete.Add(stmt.GetNextStatement()!);
+			statementsToDelete.Add(stmt.GetNextNonEmptyStatement()!);
 			var itemVariable = foreachVariable.GetILVariable();
 			if (itemVariable == null || !itemVariable.IsSingleDefinition
 				|| (itemVariable.Kind != IL.VariableKind.Local && itemVariable.Kind != IL.VariableKind.StackSlot)
@@ -755,7 +761,9 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 			IProperty? property = propertyDeclaration.GetSymbol() as IProperty;
 			if (property == null)
 				return null;
-			if (!CanTransformToAutomaticProperty(property, !(property.DeclaringTypeDefinition?.Fields.Any(f => f.Name == "_" + property.Name && f.IsCompilerGenerated()) ?? false)))
+			if (context.Settings.FieldKeyword)
+				return TransformFieldBackedProperty(propertyDeclaration, property);
+			if (!CanTransformToAutomaticProperty(property, accessorsMustBeCompilerGenerated: false))
 				return null;
 			IField? field = null;
 			Match m = automaticPropertyPattern.Match(propertyDeclaration);
@@ -773,9 +781,12 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 			}
 			if (field == null || !NameCouldBeBackingFieldOfAutomaticProperty(field.Name, out _))
 				return null;
+			// In generic types the accessor bodies reference the field specialized by the
+			// type's own type parameters; the field declaration's symbol is the definition.
+			field = (IField)field.MemberDefinition;
 			if (propertyDeclaration.Setter?.HasModifier(Modifiers.Readonly) == true || (propertyDeclaration.HasModifier(Modifiers.Readonly) && propertyDeclaration.Setter is not null))
 				return null;
-			if (field.IsCompilerGenerated() && field.DeclaringTypeDefinition == property.DeclaringTypeDefinition)
+			if (IsPropertyBackingField(property, field))
 			{
 				context.Step("Convert property to auto-property", propertyDeclaration);
 				// Clearing the accessor body turns it into an auto-property accessor.
@@ -814,6 +825,247 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 			return null;
 		}
 
+		static readonly BlockStatement trivialFieldGetterBody = new BlockStatement {
+			new ReturnStatement {
+				Expression = new NamedNode("fieldReference", new IdentifierExpression("field"))
+			}
+		};
+
+		static readonly BlockStatement trivialFieldSetterBody = new BlockStatement {
+			new AssignmentExpression {
+				Left = new NamedNode("fieldReference", new IdentifierExpression("field")),
+				Right = new IdentifierExpression("value")
+			}
+		};
+
+		/// <summary>
+		/// Handles all field-backed properties when the C# 14 "field" keyword is available:
+		/// accessor bodies already refer to the backing field as "field" (see
+		/// ExpressionBuilder.ConvertField), so compiler-generated trivial accessors collapse
+		/// individually to "get;"/"set;" and the backing-field declaration disappears, with its
+		/// attributes re-hosted as "field:" sections on the property.
+		/// </summary>
+		PropertyDeclaration? TransformFieldBackedProperty(PropertyDeclaration propertyDeclaration, IProperty property)
+		{
+			if (!TryGetBackingField(property, out var field))
+				return null;
+			if (!OutsideReferencesAreExpressible(propertyDeclaration, field))
+			{
+				// The field stays declared, so the "field" keyword references emitted by
+				// ExpressionBuilder.ConvertField have to become ordinary field references again.
+				foreach (var identifierExpression in propertyDeclaration.Descendants.OfType<IdentifierExpression>())
+				{
+					if (identifierExpression.Identifier == "field"
+						&& identifierExpression.GetSymbol() is IField referencedField
+						&& field.Equals(referencedField.MemberDefinition))
+					{
+						identifierExpression.Identifier = field.Name;
+					}
+				}
+				return null;
+			}
+			context.Step("Transform field-backed property", propertyDeclaration);
+			var getter = propertyDeclaration.Getter;
+			var setter = propertyDeclaration.Setter;
+			if (context.Settings.AutomaticProperties)
+			{
+				// VB auto-properties do not mark their accessors [CompilerGenerated]; the
+				// pre-C# 14 transform recognizes them by their "_<PropertyName>" backing field
+				// instead. Keep that rule, or a VB auto-property grows explicit "field"
+				// accessors where every other compiler's collapses to "{ get; set; }".
+				bool accessorsMustBeCompilerGenerated = field.Name != "_" + property.Name;
+				CollapseTrivialAccessor(getter, trivialFieldGetterBody, field, accessorsMustBeCompilerGenerated);
+				// A readonly setter cannot become an auto-accessor (same rule as the pre-C# 14
+				// transform); readonly getters collapse fine because auto-getters are
+				// implicitly readonly.
+				if (setter?.HasModifier(Modifiers.Readonly) != true
+					&& !(propertyDeclaration.HasModifier(Modifiers.Readonly) && setter is not null))
+				{
+					CollapseTrivialAccessor(setter, trivialFieldSetterBody, field, accessorsMustBeCompilerGenerated);
+				}
+			}
+			if (getter?.Body == null && setter?.Body == null)
+			{
+				// The property became a full auto-property; readonly is implied like before.
+				propertyDeclaration.Modifiers &= ~Modifiers.Readonly;
+				if (getter is not null)
+					getter.Modifiers &= ~Modifiers.Readonly;
+			}
+			var fieldDecl = propertyDeclaration.Parent?.Children.OfType<FieldDeclaration>()
+				.FirstOrDefault(fd => field.Equals(fd.GetSymbol()));
+			if (fieldDecl != null)
+			{
+				fieldDecl.Remove();
+				CSharpDecompiler.RemoveAttribute(fieldDecl, KnownAttribute.CompilerGenerated);
+				CSharpDecompiler.RemoveAttribute(fieldDecl, KnownAttribute.DebuggerBrowsable);
+				foreach (var section in fieldDecl.Attributes)
+				{
+					section.AttributeTarget = "field";
+					propertyDeclaration.Attributes.Add(section.Detach());
+				}
+			}
+			return null;
+		}
+
+		void CollapseTrivialAccessor(Accessor? accessor, BlockStatement pattern, IField field,
+			bool accessorMustBeCompilerGenerated)
+		{
+			if (accessor?.Body is null)
+				return;
+			if (accessorMustBeCompilerGenerated
+				&& (accessor.GetSymbol() is not IMethod method || !method.IsCompilerGenerated()))
+			{
+				return;
+			}
+			Match m = pattern.Match(accessor.Body);
+			if (!m.Success)
+				return;
+			if (m.Get<AstNode>("fieldReference").Single().GetSymbol() is not IField referencedField
+				|| !field.Equals(referencedField.MemberDefinition))
+			{
+				return;
+			}
+			RemoveCompilerGeneratedAttribute(accessor.Attributes);
+			// Auto-accessors are implicitly readonly.
+			accessor.Modifiers &= ~Modifiers.Readonly;
+			// Clearing the accessor body turns it into an auto-property accessor.
+			accessor.Body = null;
+		}
+
+		internal static bool TryGetBackingField(IProperty property, [NotNullWhen(true)] out IField? field)
+		{
+			field = null;
+			if (property.Parameters.Count > 0 || property.DeclaringTypeDefinition == null)
+				return false;
+			// A type definition's fields are unspecialized, so compare against the property
+			// definition's return type; a specialized property in a generic type would
+			// otherwise never match its own backing field.
+			var propertyType = ((IProperty)property.MemberDefinition).ReturnType;
+			foreach (var candidate in property.DeclaringTypeDefinition.Fields)
+			{
+				if (candidate.IsStatic != property.IsStatic)
+					continue;
+				if (!NormalizeTypeVisitor.IgnoreNullability.EquivalentTypes(candidate.ReturnType, propertyType))
+					continue;
+				if (!NameCouldBeBackingFieldOfAutomaticProperty(candidate.Name, out var propertyName) || propertyName != property.Name)
+					continue;
+				if (!candidate.IsCompilerGenerated() && !IsMetadataPropertyBackingField(property, candidate))
+					continue;
+				field = candidate;
+				return true;
+			}
+			return false;
+		}
+
+		static bool IsPropertyBackingField(IProperty property, IField field)
+		{
+			return field.DeclaringTypeDefinition == property.DeclaringTypeDefinition
+				&& field.IsStatic == property.IsStatic
+				&& (field.IsCompilerGenerated() || IsMetadataPropertyBackingField(property, field));
+		}
+
+		static bool IsMetadataPropertyBackingField(IProperty property, IField field)
+		{
+			if (property.MetadataToken.IsNil || field.MetadataToken.IsNil)
+				return false;
+			if (field.ParentModule is not MetadataModule module)
+				return false;
+			return module.MetadataFile.PropertyAndEventBackingFieldLookup.IsPropertyBackingField((FieldDefinitionHandle)field.MetadataToken, out var propertyHandle)
+				&& property.MetadataToken == propertyHandle;
+		}
+
+		/// <summary>
+		/// The "field" keyword cannot express backing-field accesses outside the owning
+		/// property's accessors. The only shapes C# can express are stores in a constructor of
+		/// the declaring type (property initializers, or assignments to setter-less
+		/// properties); anything else means the field declaration has to be kept.
+		/// </summary>
+		bool OutsideReferencesAreExpressible(AstNode nodeInTree, IField field)
+		{
+			var root = nodeInTree.Ancestors.LastOrDefault() ?? nodeInTree;
+			if (outsideReferenceRoot != root)
+			{
+				outsideReferenceRoot = root;
+				outsideReferenceVerdicts = BuildOutsideReferenceIndex(root);
+			}
+			// Absent means no reference to this field was found outside its own property.
+			return !outsideReferenceVerdicts!.TryGetValue((IField)field.MemberDefinition, out bool expressible)
+				|| expressible;
+		}
+
+		// The verdict per backing field for one syntax tree. Answering each property with its
+		// own full walk made whole-module output quadratic in the number of properties, which
+		// a property-heavy assembly feels as minutes instead of seconds. Later transforms only
+		// ever REMOVE references to the field of the property they are rewriting, so a verdict
+		// computed up front stays valid for every other property in the tree.
+		AstNode? outsideReferenceRoot;
+		Dictionary<IField, bool>? outsideReferenceVerdicts;
+
+		/// <summary>
+		/// Whether a constructor store to <paramref name="field"/> still has a home once the
+		/// field declaration is gone. Something has to turn it into an initializer or a
+		/// property assignment, and not every store qualifies.
+		/// </summary>
+		bool StoreSurvivesAsInitializer(IField field)
+		{
+			// A setter-less property's store is rewritten to a property assignment by
+			// ReplaceBackingFieldUsage, in this same transform - no later transform involved.
+			if (IsBackingFieldOfAutomaticProperty(field, out var property) && !property.CanSet)
+				return true;
+			// Everything else waits for TransformFieldAndConstructorInitializers, which runs
+			// after this transform and declines to move non-constant stores out of an EXPLICIT
+			// static constructor (see its `onlyMoveConstants`). Removing the declaration here
+			// would leave that store referencing a field that no longer exists.
+			if (field.IsStatic && !context.Settings.AlwaysMoveInitializer
+				&& !IsBeforeFieldInit(field.DeclaringTypeDefinition))
+			{
+				return false;
+			}
+			return true;
+		}
+
+		bool IsBeforeFieldInit(ITypeDefinition? typeDefinition)
+		{
+			if (typeDefinition?.MetadataToken.IsNil != false)
+				return false;
+			var metadata = context.TypeSystem.MainModule.MetadataFile.Metadata;
+			var td = metadata.GetTypeDefinition((TypeDefinitionHandle)typeDefinition.MetadataToken);
+			return td.HasFlag(System.Reflection.TypeAttributes.BeforeFieldInit);
+		}
+
+		/// <summary>
+		/// Maps each backing field to whether its references outside the owning property's
+		/// accessors can still be expressed once the field declaration is gone: <c>true</c> for
+		/// rescuable constructor stores only, <c>false</c> for anything else. A field absent from
+		/// the map has no outside references at all and is therefore also expressible.
+		/// </summary>
+		Dictionary<IField, bool> BuildOutsideReferenceIndex(AstNode root)
+		{
+			var verdicts = new Dictionary<IField, bool>();
+			foreach (var node in root.Descendants)
+			{
+				if (node is not (IdentifierExpression or MemberReferenceExpression))
+					continue;
+				if (node.GetSymbol() is not IField referencedField)
+					continue;
+				var definition = (IField)referencedField.MemberDefinition;
+				// A reference inside the accessors of the field's own property is exactly what
+				// the "field" keyword expresses; anything else is an outside reference.
+				if (node.Ancestors.OfType<PropertyDeclaration>().FirstOrDefault()?.GetSymbol() is IProperty owner
+					&& TryGetBackingField(owner, out var ownerField)
+					&& definition.Equals(ownerField.MemberDefinition))
+				{
+					continue;
+				}
+				var enclosingMethod = node.Ancestors.OfType<EntityDeclaration>().FirstOrDefault()?.GetSymbol() as IMethod;
+				if (!IsConstructorStore(node, definition, enclosingMethod) || !StoreSurvivesAsInitializer(definition))
+					verdicts[definition] = false;
+				else if (!verdicts.ContainsKey(definition))
+					verdicts[definition] = true;
+			}
+			return verdicts;
+		}
+
 		static void RemoveCompilerGeneratedAttribute(AstNodeCollection<AttributeSection> attributeSections)
 		{
 			RemoveCompilerGeneratedAttribute(attributeSections, "System.Runtime.CompilerServices.CompilerGeneratedAttribute");
@@ -839,7 +1091,7 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 
 		public override AstNode VisitIdentifier(Identifier identifier)
 		{
-			if (context.Settings.AutomaticProperties)
+			if (context.Settings.AutomaticProperties || context.Settings.FieldKeyword)
 			{
 				var newIdentifier = ReplaceBackingFieldUsage(identifier);
 				if (newIdentifier != null)
@@ -857,12 +1109,20 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 			property = null;
 			if (!NameCouldBeBackingFieldOfAutomaticProperty(field.Name, out var propertyName))
 				return false;
-			if (!field.IsCompilerGenerated())
-				return false;
-			property = field.DeclaringTypeDefinition?
+			var candidate = field.DeclaringTypeDefinition?
 				.GetProperties(p => p.Name == propertyName, GetMemberOptions.IgnoreInheritedMembers)
 				.FirstOrDefault();
-			return property != null;
+			// Answering through TryGetBackingField keeps the two directions of the same question
+			// from disagreeing: it is the predicate every transform consults before removing a
+			// declaration, and it checks more than the name (compiler-generated, staticness and
+			// field type all have to match the property).
+			if (candidate == null || !TryGetBackingField(candidate, out var backingField)
+				|| !field.MemberDefinition.Equals(backingField.MemberDefinition))
+			{
+				return false;
+			}
+			property = candidate;
+			return true;
 		}
 
 		/// <summary>
@@ -875,7 +1135,7 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 		static readonly System.Text.RegularExpressions.Regex automaticPropertyBackingFieldNameRegex
 			= new System.Text.RegularExpressions.Regex(@"^(<(?<name>.+)>k__BackingField|_(?<name>.+))$");
 
-		static bool NameCouldBeBackingFieldOfAutomaticProperty(string name, [NotNullWhen(true)] out string? propertyName)
+		internal static bool NameCouldBeBackingFieldOfAutomaticProperty(string name, [NotNullWhen(true)] out string? propertyName)
 		{
 			propertyName = null;
 			var m = automaticPropertyBackingFieldNameRegex.Match(name);
@@ -887,25 +1147,111 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 
 		Identifier? ReplaceBackingFieldUsage(Identifier identifier)
 		{
-			if (NameCouldBeBackingFieldOfAutomaticProperty(identifier.Name, out _))
+			// The resolve result, not the spelling, identifies the member: after
+			// ExpressionBuilder.ConvertField the same backing field appears both as the C# 14 "field"
+			// keyword and under its metadata name, carrying the same annotation either way.
+			var parent = identifier.Parent;
+			if (parent == null)
+				return null;
+			var mrr = parent.Annotation<MemberResolveResult>();
+			if (mrr?.Member is not IField field || !IsBackingFieldOfAutomaticProperty(field, out var property)
+				|| currentMethod?.AccessorOwner == property)
 			{
-				var parent = identifier.Parent;
-				if (parent == null)
-					return null;
-				var mrr = parent.Annotation<MemberResolveResult>();
-				if (mrr?.Member is IField field && IsBackingFieldOfAutomaticProperty(field, out var property)
-					&& CanTransformToAutomaticProperty(property, !(field.IsCompilerGenerated() && field.Name == "_" + property.Name))
-					&& currentMethod?.AccessorOwner != property)
-				{
-					if (!property.CanSet && !context.Settings.GetterOnlyAutomaticProperties)
-						return null;
-					context.Step("Replace backing field use with property", identifier);
-					parent.RemoveAnnotations<MemberResolveResult>();
-					parent.AddAnnotation(new MemberResolveResult(mrr.TargetResult, property));
-					return Identifier.Create(property.Name);
-				}
+				return null;
 			}
-			return null;
+			// With the keyword available TransformAutomaticProperty routes every property through
+			// TransformFieldBackedProperty, so its verdict on the declaration is the only one that
+			// counts: while the field stays declared, a field reference remains the correct - and
+			// only compilable - rendering.
+			if (context.Settings.FieldKeyword && !BackingFieldWillBeRemoved(property, field, parent))
+				return null;
+			if (context.Settings.AutomaticProperties
+				&& CanTransformToAutomaticProperty(property, !(field.IsCompilerGenerated() && field.Name == "_" + property.Name)))
+			{
+				if (!property.CanSet && !context.Settings.GetterOnlyAutomaticProperties)
+					return null;
+			}
+			else if (context.Settings.FieldKeyword && !property.CanSet && IsConstructorStoreTarget(parent, field))
+			{
+				// A setter-less field-backed property keeping explicit accessors is still assignable
+				// by name inside a constructor of its declaring type, and that is the only form the
+				// store has left once the declaration is gone.
+			}
+			else
+			{
+				// The property keeps explicit accessors and a setter, so its name would invoke that
+				// setter. The store stays a field reference and TransformFieldAndConstructorInitializers
+				// lifts it into the property initializer, which is what field-backed storage means.
+				return null;
+			}
+			context.Step("Replace backing field use with property", identifier);
+			parent.RemoveAnnotations<MemberResolveResult>();
+			parent.AddAnnotation(new MemberResolveResult(mrr.TargetResult, property));
+			return Identifier.Create(property.Name);
+		}
+
+		bool IsConstructorStoreTarget(AstNode node, IField field)
+			=> IsConstructorStore(node, field, currentMethod);
+
+		/// <summary>
+		/// Whether <see cref="TransformFieldBackedProperty"/> will remove this field's
+		/// declaration. Rewriting a store before knowing that produces an assignment to a
+		/// property that keeps explicit, setter-less accessors.
+		/// </summary>
+		bool BackingFieldWillBeRemoved(IProperty property, IField field, AstNode nodeInTree)
+		{
+			return context.Settings.FieldKeyword
+				// The same gate VisitPropertyDeclaration applies: a setter-less property is only
+				// transformed where getter-only auto-properties are allowed.
+				&& (property.CanSet || context.Settings.GetterOnlyAutomaticProperties)
+				&& TryGetBackingField(property, out var backingField)
+				&& field.MemberDefinition.Equals(backingField.MemberDefinition)
+				&& OutsideReferencesAreExpressible(nodeInTree, backingField);
+		}
+
+		/// <summary>
+		/// True when <paramref name="node"/> is a target of a plain assignment to
+		/// <paramref name="field"/> inside a constructor of the field's declaring type - the
+		/// only outside reference the "field" keyword can still express (as a property
+		/// initializer, or an assignment to a setter-less property). A deconstruction target
+		/// counts only in the second form: it assigns several members at once, so it can never
+		/// move into an initializer, and a property that kept a setter would invoke it.
+		/// </summary>
+		/// <remarks>
+		/// Shared by <see cref="OutsideReferencesAreExpressible"/>, which decides whether the
+		/// field declaration may be removed, and <see cref="ReplaceBackingFieldUsage"/>, which
+		/// rewrites the store. The two must agree: if only one of them accepts a store, the
+		/// output either references a removed field or assigns a property that stayed
+		/// field-backed. They differ only in how the enclosing method is known, which is why
+		/// it is a parameter here.
+		/// </remarks>
+		static bool IsConstructorStore(AstNode node, IField field, IMethod? enclosingMethod)
+		{
+			AstNode currentNode = node;
+			bool viaDeconstruction = false;
+			while (true)
+			{
+				if (currentNode.Parent is AssignmentExpression { Operator: AssignmentOperatorType.Assign }
+					&& currentNode.Slot == AssignmentExpression.LeftSlot)
+				{
+					break;
+				}
+				if (currentNode.Parent is TupleExpression)
+				{
+					viaDeconstruction = true;
+					currentNode = currentNode.Parent;
+					continue;
+				}
+				return false;
+			}
+			if (viaDeconstruction
+				&& (!IsBackingFieldOfAutomaticProperty(field, out var property) || property.CanSet))
+			{
+				return false;
+			}
+			return enclosingMethod is { IsConstructor: true } ctor
+				&& ctor.IsStatic == field.IsStatic
+				&& ctor.DeclaringTypeDefinition == field.DeclaringTypeDefinition;
 		}
 
 		#region Automatic Events
@@ -929,34 +1275,79 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 		#endregion
 
 		#region Destructor
-		static readonly BlockStatement destructorBodyPattern = new BlockStatement {
-			new TryCatchStatement {
-				TryBlock = new AnyNode("body"),
-				FinallyBlock = new BlockStatement {
-					new InvocationExpression(new MemberReferenceExpression(new BaseReferenceExpression(), "Finalize"))
-				}
-			}
+		static readonly TryCatchStatement destructorTryFinallyPattern = new TryCatchStatement {
+			TryBlock = new AnyNode("body"),
+			FinallyBlock = new AnyNode("finallyBlock")
 		};
+
+		static readonly Statement baseFinalizeCallPattern = new ExpressionStatement(
+			new InvocationExpression(new MemberReferenceExpression(new BaseReferenceExpression(), "Finalize")));
 
 		static readonly MethodDeclaration destructorPattern = new MethodDeclaration {
 			Attributes = { new Repeat(new AnyNode()) },
 			Modifiers = Modifiers.Any,
 			ReturnType = new PrimitiveType("void"),
 			Name = "Finalize",
-			Body = destructorBodyPattern
+			Body = new AnyNode()
 		};
+
+		/// <summary>
+		/// Matches the body a compiler emits for a destructor - a single try statement whose
+		/// finally block does nothing but call <c>base.Finalize()</c> - and returns the try block
+		/// holding the user-written code, or <c>null</c> if <paramref name="body"/> has another
+		/// shape. Comment placeholders around the two statements are skipped: leaving the method
+		/// in its "override Finalize" shape over a decompiler warning produces output that does
+		/// not compile (CS0249).
+		/// </summary>
+		static BlockStatement? MatchDestructorBody(BlockStatement body)
+		{
+			var statement = body.Statements.GetFirstNonEmptyStatementOrDefault();
+			if (statement is not TryCatchStatement || statement.GetNextNonEmptyStatement() != null)
+				return null;
+			Match m = destructorTryFinallyPattern.Match(statement);
+			if (!m.Success)
+				return null;
+			var finalizeCall = m.Get<BlockStatement>("finallyBlock").Single()
+				.Statements.GetFirstNonEmptyStatementOrDefault();
+			if (finalizeCall == null || finalizeCall.GetNextNonEmptyStatement() != null
+				|| !baseFinalizeCallPattern.IsMatch(finalizeCall))
+			{
+				return null;
+			}
+			return m.Get<BlockStatement>("body").Single();
+		}
+
+		/// <summary>
+		/// Moves the comment placeholders of <paramref name="oldBody"/> to the front of
+		/// <paramref name="newBody"/>, which replaces it. They describe the member, so dropping
+		/// them with the body they happen to sit in would lose a decompiler warning.
+		/// </summary>
+		static void MovePlaceholderComments(BlockStatement oldBody, BlockStatement newBody)
+		{
+			var anchor = newBody.Statements.FirstOrNull();
+			foreach (var placeholder in oldBody.Statements.OfType<EmptyStatement>().ToList())
+			{
+				placeholder.Detach();
+				if (anchor != null)
+					newBody.Statements.InsertBefore(anchor, placeholder);
+				else
+					newBody.Statements.Add(placeholder);
+			}
+		}
 
 		DestructorDeclaration? TransformDestructor(MethodDeclaration methodDef)
 		{
 			Match m = destructorPattern.Match(methodDef);
-			if (m.Success)
+			if (m.Success && methodDef.Body is BlockStatement oldBody
+				&& MatchDestructorBody(oldBody) is BlockStatement tryBlock)
 			{
 				context.Step("Convert Finalize method to destructor", methodDef);
 				DestructorDeclaration dd = new DestructorDeclaration();
 				methodDef.Attributes.MoveTo(dd.Attributes);
 				dd.CopyAnnotationsFrom(methodDef);
 				dd.Modifiers = methodDef.Modifiers & ~(Modifiers.Protected | Modifiers.Override);
-				dd.Body = m.Get<BlockStatement>("body").Single().Detach();
+				MovePlaceholderComments(oldBody, tryBlock);
+				dd.Body = tryBlock.Detach();
 				// A destructor only appears inside a type declaration, so the context tracker
 				// has an enclosing type at this point.
 				dd.Name = currentTypeDefinition!.Name;
@@ -969,11 +1360,12 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 
 		DestructorDeclaration? TransformDestructorBody(DestructorDeclaration dtorDef)
 		{
-			Match m = destructorBodyPattern.Match(dtorDef.Body);
-			if (m.Success)
+			if (dtorDef.Body is BlockStatement oldBody
+				&& MatchDestructorBody(oldBody) is BlockStatement tryBlock)
 			{
 				context.Step("Simplify destructor body", dtorDef);
-				dtorDef.Body = m.Get<BlockStatement>("body").Single().Detach();
+				MovePlaceholderComments(oldBody, tryBlock);
+				dtorDef.Body = tryBlock.Detach();
 				return dtorDef;
 			}
 			return null;
@@ -1123,7 +1515,7 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 			if (!context.Settings.UseEnhancedUsing)
 				return usingStatement;
 
-			if (usingStatement.GetNextStatement() != null || !(usingStatement.Parent is BlockStatement))
+			if (usingStatement.GetNextNonEmptyStatement() != null || !(usingStatement.Parent is BlockStatement))
 				return usingStatement;
 
 			if (!(usingStatement.ResourceAcquisition is VariableDeclarationStatement))

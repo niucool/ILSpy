@@ -53,6 +53,7 @@ namespace ICSharpCode.Decompiler.PowerShell
 				}
 
 				WriteObject(output.ToString());
+				this.WriteDecompilationErrors(Decompiler.Errors);
 			}
 			catch (Exception e)
 			{

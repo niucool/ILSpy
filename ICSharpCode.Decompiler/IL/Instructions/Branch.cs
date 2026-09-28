@@ -20,6 +20,8 @@
 using System;
 using System.Diagnostics;
 
+using ICSharpCode.Decompiler.TypeSystem;
+
 namespace ICSharpCode.Decompiler.IL
 {
 	/// <summary>
@@ -27,6 +29,7 @@ namespace ICSharpCode.Decompiler.IL
 	/// </summary>
 	/// <remarks>
 	/// When jumping to the entrypoint of the current block container, the branch represents a <c>continue</c> statement.
+	/// Will implicitly execute finally blocks when jumping out of a try-block.
 	/// </remarks>
 	partial class Branch : SimpleInstruction, IBranchOrLeaveInstruction
 	{
@@ -107,9 +110,9 @@ namespace ICSharpCode.Decompiler.IL
 			return false;
 		}
 
-		internal override void CheckInvariant(ILPhase phase)
+		internal override void CheckInvariant(ILPhase phase, ICompilation compilation)
 		{
-			base.CheckInvariant(phase);
+			base.CheckInvariant(phase, compilation);
 			if (phase > ILPhase.InILReader)
 			{
 				Debug.Assert(targetBlock?.Parent is BlockContainer);
@@ -129,6 +132,14 @@ namespace ICSharpCode.Decompiler.IL
 
 	interface IBranchOrLeaveInstruction
 	{
+		/// <summary>
+		/// The block container that directly contains the jump target.
+		/// </summary>
 		BlockContainer TargetContainer { get; }
+
+		/// <summary>
+		/// Gets whether this branch executes at least one finally block before reaching the jump target.
+		/// </summary>
+		bool TriggersFinallyBlock { get; }
 	}
 }

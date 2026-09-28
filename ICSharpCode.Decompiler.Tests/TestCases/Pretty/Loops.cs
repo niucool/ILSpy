@@ -515,7 +515,11 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 
 		public static T LastOrDefault<T>(IEnumerable<T> items)
 		{
+#if CS71
+			T result = default;
+#else
 			T result = default(T);
+#endif
 			foreach (T item in items)
 			{
 				result = item;
@@ -643,19 +647,11 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 
 		public unsafe void ForEachOverMultiDimArray3(int*[,] items)
 		{
-#if ROSLYN && OPT
-			foreach (int* intPtr in items)
-			{
-				Console.WriteLine(*intPtr);
-				Console.WriteLine(*intPtr);
-			}
-#else
 			foreach (int* ptr in items)
 			{
 				Console.WriteLine(*ptr);
 				Console.WriteLine(*ptr);
 			}
-#endif
 		}
 #endif
 

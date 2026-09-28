@@ -84,6 +84,15 @@ namespace ICSharpCode.ILSpy.Docking
 		/// behaviour (e.g. ShowOptionsCommand).</summary>
 		public IDocumentDock? Documents => factory.Documents;
 
+		/// <summary>
+		/// Whether decompiles started in this workspace record their transform steps. Set on the UI
+		/// thread by whoever displays them and copied into each run's <see cref="DecompilationOptions"/>,
+		/// so a background decompile never samples live view state - and every tab, including ones
+		/// opened later, records the same way. A step index only means anything against a run
+		/// recorded like the one the index was taken from.
+		/// </summary>
+		public bool RecordSteps { get; set; }
+
 		public IRelayCommand NavigateBackCommand { get; }
 		public IRelayCommand NavigateForwardCommand { get; }
 		public IRelayCommand<NavigationEntry> NavigateToHistoryCommand { get; }
@@ -224,7 +233,7 @@ namespace ICSharpCode.ILSpy.Docking
 				documentsNotify.PropertyChanged += OnDocumentsPropertyChanged;
 			// Close orphaned carve-out tabs when their assembly is removed. The persistent
 			// MainTab slot is left alone — its content will swap to whatever the user selects
-			// next via the assembly tree. Mirrors WPF's DockWorkspace.CurrentAssemblyList_Changed.
+			// next via the assembly tree.
 			ICSharpCode.ILSpy.Util.MessageBus<ICSharpCode.ILSpy.Util.CurrentAssemblyListChangedEventArgs>.Subscribers
 				+= OnAssemblyListChanged;
 			ICSharpCode.ILSpy.AppEnv.AppLog.Mark("DockWorkspace ctor exited");
@@ -234,20 +243,22 @@ namespace ICSharpCode.ILSpy.Docking
 		{
 			var inner = e.Inner;
 
-			// On Reset (assembly list wholesale-cleared), drop ALL history — every entry is
-			// stale by definition. Mirrors WPF's assemblyList_CollectionChanged.
-			if (inner.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Reset)
-			{
-				PruneHistoryAfterAssemblyListChange(removed: null);
+			// A Move carries the moved entry in OldItems, but the list only got reordered.
+			if (inner.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Move)
 				return;
-			}
 
-			if (inner.OldItems is not { Count: > 0 } oldItems)
-				return;
-			var removed = new HashSet<ICSharpCode.ILSpyX.LoadedAssembly>(
-				oldItems.OfType<ICSharpCode.ILSpyX.LoadedAssembly>());
-			if (removed.Count == 0)
-				return;
+			// On Reset the list was cleared wholesale: every entry is stale by definition, and
+			// `removed == null` below stands for "all of them".
+			HashSet<ICSharpCode.ILSpyX.LoadedAssembly>? removed = null;
+			if (inner.Action != System.Collections.Specialized.NotifyCollectionChangedAction.Reset)
+			{
+				if (inner.OldItems is not { Count: > 0 } oldItems)
+					return;
+				removed = new HashSet<ICSharpCode.ILSpyX.LoadedAssembly>(
+					oldItems.OfType<ICSharpCode.ILSpyX.LoadedAssembly>());
+				if (removed.Count == 0)
+					return;
+			}
 
 			PruneHistoryAfterAssemblyListChange(removed);
 
@@ -268,7 +279,7 @@ namespace ICSharpCode.ILSpy.Docking
 					var owner = n.AncestorsAndSelf().OfType<TreeNodes.AssemblyTreeNode>().LastOrDefault();
 					if (owner is null)
 						continue;
-					if (removed.Contains(owner.LoadedAssembly))
+					if (removed == null || removed.Contains(owner.LoadedAssembly))
 						anyTouchesRemoved = true;
 					else
 						anyAlive = true;
@@ -596,7 +607,11 @@ namespace ICSharpCode.ILSpy.Docking
 			suppressHistoryRecording = true;
 			try
 			{
-				if (factory.Documents?.VisibleDockables is { } docs && docs.Contains(target.Tab))
+				// Only activate a tab that is not already active: Dock's ActiveDockable setter re-runs
+				// InitActiveDockable -> SetFocusedDockable even for an unchanged value, which would
+				// move the active pane to the document on every navigation.
+				if (factory.Documents is { VisibleDockables: { } docs } documents
+					&& docs.Contains(target.Tab) && !ReferenceEquals(documents.ActiveDockable, target.Tab))
 					factory.SetActiveDockable(target.Tab);
 				if (target is TreeNodeEntry treeNode)
 				{
@@ -645,17 +660,15 @@ namespace ICSharpCode.ILSpy.Docking
 			}
 		}
 
-		void OnNavigateRequested(ReferenceSegment segment)
+		void OnNavigateRequested(object? sender, NavigateRequestedEventArgs e)
 		{
 			// Hyperlink click in the decompiler view: resolve the segment's reference to a tree
 			// node and select it. Falls through silently when we don't know how to model the
 			// reference (only types/members/EntityReferences are supported today).
-			if (segment.Reference == null)
-				return;
 			// EntityReferences with a non-"decompile" protocol (e.g. metadata://) get a first
 			// pass through registered IProtocolHandler exports. The first handler returning a
 			// non-null node wins; if none match we fall through to the default resolver.
-			if (segment.Reference is ICSharpCode.ILSpy.EntityReference entity
+			if (e.Reference is ICSharpCode.ILSpy.EntityReference entity
 				&& entity.Protocol != "decompile")
 			{
 				var module = entity.ResolveAssembly(assemblyTreeModel.AssemblyList!);
@@ -666,15 +679,23 @@ namespace ICSharpCode.ILSpy.Docking
 						var resolved = handler.Resolve(entity.Protocol, module, entity.Handle, out _);
 						if (resolved != null)
 						{
-							assemblyTreeModel.SelectedItem = resolved;
+							if (e.InNewTabPage)
+								OpenNodeInNewTab(resolved);
+							else
+								assemblyTreeModel.SelectedItem = resolved;
 							return;
 						}
 					}
 				}
 			}
-			var node = assemblyTreeModel.FindTreeNode(segment.Reference);
+			var node = assemblyTreeModel.FindTreeNode(e.Reference);
 			if (node != null)
-				assemblyTreeModel.SelectedItem = node;
+			{
+				if (e.InNewTabPage)
+					OpenNodeInNewTab(node);
+				else
+					assemblyTreeModel.SelectedItem = node;
+			}
 		}
 
 		static IEnumerable<Commands.IProtocolHandler> TryGetProtocolHandlers()
@@ -712,8 +733,7 @@ namespace ICSharpCode.ILSpy.Docking
 		/// the tree isn't rebuilt and the SelectedItem reference is preserved, so the
 		/// normal selection-change cascade would no-op and the editor would keep stale
 		/// decompiled text. Resetting <c>lastShownNodes</c> defeats the
-		/// dedup short-circuit inside <see cref="ShowSelectedNode"/>. Mirrors WPF's
-		/// <c>RefreshDecompiledView()</c> call.
+		/// dedup short-circuit inside <see cref="ShowSelectedNode"/>.
 		/// </summary>
 		public void ForceRefreshActiveTab()
 		{

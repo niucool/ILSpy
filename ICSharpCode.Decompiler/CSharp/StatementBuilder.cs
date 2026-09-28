@@ -90,7 +90,18 @@ namespace ICSharpCode.Decompiler.CSharp
 
 		protected override TranslatedStatement Default(ILInstruction inst)
 		{
-			return new ExpressionStatement(exprBuilder.Translate(inst))
+			Expression expr = exprBuilder.Translate(inst);
+			if (!settings.UseRefLocalsForAccurateOrderOfEvaluation
+				&& expr is DirectionExpression dir)
+			{
+				// Top-level "ref" (e.g. result if ldelema is unused)
+				// would get turned into ref-local by DeclareVariables.
+				// If ref locals aren't supported; remove the "ref",
+				// introducing a load. This way we create compilable code
+				// while preserving the bounds check of the ldelema.
+				expr = dir.Expression.Detach();
+			}
+			return new ExpressionStatement(expr)
 				.WithILInstruction(inst);
 		}
 
@@ -423,7 +434,8 @@ namespace ICSharpCode.Decompiler.CSharp
 
 		protected internal override TranslatedStatement VisitThrow(Throw inst)
 		{
-			return new ThrowStatement(exprBuilder.Translate(inst.Argument)).WithILInstruction(inst);
+			var ex = exprBuilder.Translate(inst.Argument, typeHint: typeSystem.FindType(KnownTypeCode.Exception));
+			return new ThrowStatement(ex).WithILInstruction(inst);
 		}
 
 		protected internal override TranslatedStatement VisitRethrow(Rethrow inst)
@@ -532,11 +544,11 @@ namespace ICSharpCode.Decompiler.CSharp
 
 		protected internal override TranslatedStatement VisitUsingInstruction(UsingInstruction inst)
 		{
-			var resource = exprBuilder.Translate(inst.ResourceExpression).Expression;
+			var resource = exprBuilder.Translate(inst.ResourceExpression);
 			var transformed = TransformToForeach(inst, resource);
 			if (transformed != null)
 				return transformed.WithILInstruction(inst);
-			AstNode usingInit = resource;
+			AstNode usingInit = resource.Expression;
 			var var = inst.Variable;
 			KnownTypeCode knownTypeCode;
 			IType disposeType;
@@ -567,7 +579,7 @@ namespace ICSharpCode.Decompiler.CSharp
 					disposeInvocation = new UnaryOperatorExpression { Expression = disposeInvocation, Operator = UnaryOperatorType.Await };
 				}
 				return new BlockStatement {
-					new ExpressionStatement(new AssignmentExpression(exprBuilder.ConvertVariable(var).Expression, resource.Detach())),
+					new ExpressionStatement(new AssignmentExpression(exprBuilder.ConvertVariable(var).Expression, resource.Expression.Detach())),
 					new TryCatchStatement {
 						TryBlock = ConvertAsBlock(inst.Body),
 						FinallyBlock = new BlockStatement() {
@@ -585,6 +597,12 @@ namespace ICSharpCode.Decompiler.CSharp
 				if (var.LoadCount > 0 || var.AddressCount > 0)
 				{
 					var type = settings.AnonymousTypes && var.Type.ContainsAnonymousType() ? new SimpleType("var") : exprBuilder.ConvertType(var.Type);
+					if (!type.IsVar())
+					{
+						// Unlike "using (expr)", the declaration spells out the type, so the
+						// resource may leave conversions to it implicit.
+						resource = resource.ConvertTo(var.Type, exprBuilder, allowImplicitConversion: true);
+					}
 					var vds = new VariableDeclarationStatement(type, var.Name!, resource);
 					vds.Variables.Single().AddAnnotation(new ILVariableResolveResult(var, var.Type));
 					usingInit = vds;

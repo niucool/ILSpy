@@ -91,6 +91,7 @@ namespace ICSharpCode.Decompiler.TypeSystem
 			var customAttrs = metadata.GetModuleDefinition().GetCustomAttributes();
 			this.NullableContext = customAttrs.GetNullableContext(metadata) ?? Nullability.Oblivious;
 			this.minAccessibilityForNRT = FindMinimumAccessibilityForNRT(metadata, customAttrs);
+			this.UseUpdatedEscapeRules = HasRefSafetyRulesVersion(customAttrs, 11);
 			this.rootNamespace = new MetadataNamespace(this, null, string.Empty, metadata.GetNamespaceDefinitionRoot());
 
 			if (!options.HasFlag(TypeSystemOptions.Uncached))
@@ -111,6 +112,43 @@ namespace ICSharpCode.Decompiler.TypeSystem
 		}
 
 		public TypeSystemOptions TypeSystemOptions => options;
+
+		/// <summary>
+		/// Gets whether the module declares the C# 11 ref-safety rules.
+		/// </summary>
+		internal bool UseUpdatedEscapeRules { get; }
+
+		bool HasRefSafetyRulesVersion(CustomAttributeHandleCollection attributes, int expectedVersion)
+		{
+			foreach (var attributeHandle in attributes)
+			{
+				var attribute = metadata.GetCustomAttribute(attributeHandle);
+				if (!attribute.IsKnownAttribute(metadata, KnownAttribute.RefSafetyRules))
+					continue;
+
+				CustomAttributeValue<IType> value;
+				try
+				{
+					value = attribute.DecodeValue(Metadata.MetadataExtensions.MinimalAttributeTypeProvider);
+				}
+				catch (BadImageFormatException)
+				{
+					continue;
+				}
+				catch (Metadata.EnumUnderlyingTypeResolveException)
+				{
+					continue;
+				}
+				if (value.FixedArguments.Length == 1
+					&& value.FixedArguments[0].Value is int version)
+				{
+					// Roslyn recognizes exactly version 11; missing and unknown versions use legacy rules.
+					return version == expectedVersion;
+				}
+			}
+
+			return false;
+		}
 
 		#region IModule interface
 		public MetadataFile MetadataFile { get; }
@@ -328,7 +366,7 @@ namespace ICSharpCode.Decompiler.TypeSystem
 
 		IModule ResolveModuleUncached(AssemblyReferenceHandle handle)
 		{
-			var asmRef = new Metadata.AssemblyReference(metadata, handle);
+			var asmRef = new Metadata.AssemblyReference(MetadataFile, handle);
 			return Compilation.FindModuleByReference(asmRef);
 		}
 
@@ -499,55 +537,7 @@ namespace ICSharpCode.Decompiler.TypeSystem
 				string name = metadata.GetString(memberRef.Name);
 				signature = memberRef.DecodeMethodSignature(TypeProvider,
 					new GenericContext(declaringTypeDefinition?.TypeParameters));
-				if (declaringTypeDefinition != null)
-				{
-					// Find the set of overloads to search:
-					IEnumerable<IMethod> methods;
-					if (name == ".ctor")
-					{
-						methods = declaringTypeDefinition.GetConstructors();
-					}
-					else if (name == ".cctor")
-					{
-						methods = declaringTypeDefinition.Methods.Where(m => m.IsConstructor && m.IsStatic);
-					}
-					else
-					{
-						methods = declaringTypeDefinition.GetMethods(m => m.Name == name, GetMemberOptions.IgnoreInheritedMembers)
-							.Concat(declaringTypeDefinition.GetAccessors(m => m.Name == name, GetMemberOptions.IgnoreInheritedMembers));
-					}
-					// Determine the expected parameters from the signature:
-					ImmutableArray<IType> parameterTypes;
-					if (signature.Header.CallingConvention == SignatureCallingConvention.VarArgs)
-					{
-						parameterTypes = signature.ParameterTypes
-							.Take(signature.RequiredParameterCount)
-							.Concat(new[] { SpecialType.ArgList })
-							.ToImmutableArray();
-					}
-					else
-					{
-						parameterTypes = signature.ParameterTypes;
-					}
-					// Search for the matching method:
-					method = null;
-					foreach (var m in methods)
-					{
-						if (m.TypeParameters.Count != signature.GenericParameterCount)
-							continue;
-						if (signature.Header.IsInstance != !m.IsStatic)
-							continue;
-						if (CompareSignatures(m.Parameters, parameterTypes) && CompareTypes(m.ReturnType, signature.ReturnType))
-						{
-							method = m;
-							break;
-						}
-					}
-				}
-				else
-				{
-					method = null;
-				}
+				method = declaringTypeDefinition != null ? FindMethod(declaringTypeDefinition, name, signature) : null;
 				if (method == null)
 				{
 					method = CreateFakeMethod(declaringType, name, signature);
@@ -562,6 +552,81 @@ namespace ICSharpCode.Decompiler.TypeSystem
 				method = new VarArgInstanceMethod(method, signature.ParameterTypes.Skip(signature.RequiredParameterCount));
 			}
 			return method;
+		}
+
+		/// <summary>
+		/// Resolves a method on <paramref name="declaringType"/> by name and signature.
+		/// If the type declares no such method - because the reference is missing, or the
+		/// method does not exist on the version at hand - a fake method carrying the requested
+		/// signature is returned, as for a method reference that cannot be resolved.
+		/// </summary>
+		/// <remarks>
+		/// The signature is matched against the members of <paramref name="declaringType"/> as
+		/// they are seen from the outside, so for a parameterized type it is written in terms of
+		/// the type arguments, not the type parameters. This is the lookup a decompiler step
+		/// needs when it has to name a specific method - a conversion operator, say - rather
+		/// than one it read from metadata.
+		/// </remarks>
+		public IMethod ResolveMethod(IType declaringType, string name, MethodSignature<IType> signature)
+		{
+			if (declaringType == null)
+				throw new ArgumentNullException(nameof(declaringType));
+			if (name == null)
+				throw new ArgumentNullException(nameof(name));
+			return FindMethod(declaringType, name, signature)
+				?? CreateFakeMethod(declaringType, name, signature);
+		}
+
+		/// <summary>
+		/// The single method on <paramref name="declaringType"/> that matches the name and the
+		/// signature, or null. Only the methods the type itself declares are candidates, because
+		/// a signature always names the type that declares the method.
+		/// </summary>
+		static IMethod FindMethod(IType declaringType, string name, MethodSignature<IType> signature)
+		{
+			// Find the set of overloads to search:
+			IEnumerable<IMethod> candidates;
+			if (name == ".ctor")
+			{
+				candidates = declaringType.GetConstructors();
+			}
+			else if (name == ".cctor")
+			{
+				// GetConstructors() only returns instance constructors.
+				candidates = declaringType.GetDefinition()?.Methods.Where(m => m.IsConstructor && m.IsStatic) ?? [];
+			}
+			else
+			{
+				candidates = declaringType.GetMethods(m => m.Name == name, GetMemberOptions.IgnoreInheritedMembers)
+					.Concat(declaringType.GetAccessors(m => m.Name == name, GetMemberOptions.IgnoreInheritedMembers));
+			}
+			// Determine the expected parameters from the signature: a vararg signature is matched
+			// against its required parameters plus __arglist.
+			ImmutableArray<IType> parameterTypes;
+			if (signature.Header.CallingConvention == SignatureCallingConvention.VarArgs)
+			{
+				parameterTypes = signature.ParameterTypes
+					.Take(signature.RequiredParameterCount)
+					.Concat(new[] { SpecialType.ArgList })
+					.ToImmutableArray();
+			}
+			else
+			{
+				parameterTypes = signature.ParameterTypes;
+			}
+			// Search for the matching method:
+			foreach (var method in candidates)
+			{
+				if (method.TypeParameters.Count != signature.GenericParameterCount)
+					continue;
+				if (signature.Header.IsInstance != !method.IsStatic)
+					continue;
+				if (CompareSignatures(method.Parameters, parameterTypes) && CompareTypes(method.ReturnType, signature.ReturnType))
+				{
+					return method;
+				}
+			}
+			return null;
 		}
 
 		static readonly NormalizeTypeVisitor normalizeTypeVisitor = new NormalizeTypeVisitor {
@@ -902,6 +967,16 @@ namespace ICSharpCode.Decompiler.TypeSystem
 					{
 						return td;
 					}
+				}
+				else
+				{
+					// The chain of forwarders came back to this module, so nothing in it defines the
+					// type and the assemblies involved disagree about where it lives - mismatched
+					// facades from two frameworks, typically. Recorded once per reference: a facade
+					// forwards hundreds of types, and they all fail together.
+					(Compilation as DecompilerTypeSystem)?.ReferenceLoadInfo?.AddMessageOnce(
+						module.FullAssemblyName, MessageKind.Warning,
+						$"Could not follow the type forwarders for {typeName.ReflectionName}: they lead back to {AssemblyName}.");
 				}
 			}
 			return new UnknownType(typeName);

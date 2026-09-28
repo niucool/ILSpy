@@ -29,7 +29,6 @@ using ICSharpCode.Decompiler.CSharp.Syntax;
 #if STEP
 using ICSharpCode.Decompiler.CSharp.Syntax.PatternMatching;
 #endif
-using ICSharpCode.Decompiler.CSharp.TypeSystem;
 using ICSharpCode.Decompiler.IL;
 using ICSharpCode.Decompiler.Semantics;
 using ICSharpCode.Decompiler.TypeSystem;
@@ -397,8 +396,8 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 				if (astBuilder.NameLookupMode == NameLookupMode.Type)
 				{
 					AstType outermostType = simpleType;
-					while (outermostType.Parent is AstType)
-						outermostType = (AstType)outermostType.Parent;
+					while (outermostType.Parent is AstType parent)
+						outermostType = parent;
 					if (outermostType.Parent is TypeReferenceExpression)
 					{
 						// ILSpy uses TypeReferenceExpression in expression context even when the C# parser

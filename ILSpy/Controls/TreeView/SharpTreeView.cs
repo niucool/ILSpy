@@ -20,6 +20,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Linq;
+using System.Threading;
 
 using Avalonia;
 using Avalonia.Controls;
@@ -58,9 +59,10 @@ namespace ICSharpCode.ILSpy.Controls.TreeView
 			AvaloniaProperty.Register<SharpTreeView, bool>(nameof(ShowLines), defaultValue: true);
 
 		TreeFlattener? flattener;
-		bool doNotScrollOnExpanding;
 		string searchBuffer = string.Empty;
 		DispatcherTimer? searchResetTimer;
+		bool pruningRemovedRowsFromSelection;
+		List<object>? prunedRemovedRows;
 
 		static SharpTreeView()
 		{
@@ -91,6 +93,12 @@ namespace ICSharpCode.ILSpy.Controls.TreeView
 			AddHandler(DragDrop.DragOverEvent, OnDragOver);
 			AddHandler(DragDrop.DropEvent, OnDrop);
 			AddHandler(DragDrop.DragLeaveEvent, (_, _) => HideInsertMarker());
+			// The row template's expander writes IsExpanded straight to the node, so an expansion
+			// made with the mouse never passes through this control; its Click is what identifies
+			// one. Only a gesture scrolls: code that expands nodes to reveal a selection (see
+			// ScrollIntoNodeView) or to open every match of a filter positions the viewport itself,
+			// and a scroll per expanded node would fight it.
+			AddHandler(Button.ClickEvent, OnExpanderClick, RoutingStrategies.Bubble, handledEventsToo: true);
 		}
 
 		public SharpTreeNode? Root {
@@ -124,22 +132,73 @@ namespace ICSharpCode.ILSpy.Controls.TreeView
 		{
 			if (flattener != null)
 			{
+				flattener.CollectionChanged -= OnFlattenerCollectionChanged;
 				flattener.Stop();
 				flattener = null;
 			}
 			if (Root != null)
 			{
+				// The tree becomes reachable from the UI here, so this is where the UI thread takes
+				// ownership of it. Avalonia raises property changes on the UI thread, so the calling
+				// thread is the right owner. Every SharpTreeView in the app routes through Reload,
+				// so this single call claims every displayed tree.
+				//
+				// The dispatcher invoke goes with it: EnsureLazyChildren uses it to get back onto
+				// this thread when a background decompile realizes a node's children, which the
+				// tree model cannot do for itself - it must not name a UI framework.
+				Root.SetOwner(Thread.CurrentThread, action => Dispatcher.UIThread.Invoke(action));
 				if (!(ShowRoot && ShowRootExpander))
 					Root.IsExpanded = true;
 				flattener = new TreeFlattener(Root, ShowRoot);
+				flattener.CollectionChanged += OnFlattenerCollectionChanged;
 				ItemsSource = flattener;
 			}
 			else
 			{
 				ItemsSource = null;
 			}
-			// Avalonia's ListBox removes items from the selection automatically when they leave the
-			// source (a collapsed ancestor hides them), so no manual deselect-on-hide is needed.
+		}
+
+		void OnFlattenerCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+		{
+			if (SelectedItems == null)
+				return;
+
+			SharpTreeNode[] removedRows = e.Action switch {
+				NotifyCollectionChangedAction.Remove when e.OldItems != null => e.OldItems
+					.OfType<SharpTreeNode>()
+					.Where(SelectedItems.Contains)
+					.ToArray(),
+				NotifyCollectionChangedAction.Reset => SelectedItems
+					.OfType<SharpTreeNode>()
+					.Where(node => flattener?.Contains(node) != true)
+					.ToArray(),
+				_ => []
+			};
+			if (removedRows.Length == 0)
+				return;
+
+			prunedRemovedRows = [];
+			pruningRemovedRowsFromSelection = true;
+			try
+			{
+				foreach (var node in removedRows)
+					SelectedItems.Remove(node);
+			}
+			finally
+			{
+				pruningRemovedRowsFromSelection = false;
+			}
+
+			var removedSelection = prunedRemovedRows;
+			prunedRemovedRows = null;
+			if (removedSelection is { Count: > 0 })
+			{
+				RaiseEvent(new SelectionChangedEventArgs(
+					SelectionChangedEvent,
+					removedSelection,
+					Array.Empty<object>()) { Source = this });
+			}
 		}
 
 		protected override Control CreateContainerForItemOverride(object? item, int index, object? recycleKey)
@@ -157,6 +216,14 @@ namespace ICSharpCode.ILSpy.Controls.TreeView
 
 		void OnSelectionChanged(object? sender, SelectionChangedEventArgs e)
 		{
+			if (pruningRemovedRowsFromSelection)
+			{
+				foreach (var item in e.RemovedItems)
+					prunedRemovedRows!.Add(item);
+				e.Handled = true;
+				return;
+			}
+
 			foreach (SharpTreeNode node in e.RemovedItems)
 				node.IsSelected = false;
 			foreach (SharpTreeNode node in e.AddedItems)
@@ -174,32 +241,47 @@ namespace ICSharpCode.ILSpy.Controls.TreeView
 			node.ActivateItem(args);
 			if (!e.Handled && node.ShowExpander)
 			{
-				node.IsExpanded = !node.IsExpanded;
+				SetExpanded(node, !node.IsExpanded);
 				e.Handled = true;
 			}
 		}
 
-		/// <summary>
-		/// Called when a visible node expands so its newly shown children are scrolled into view
-		/// (without scrolling the node itself off the top).
-		/// </summary>
-		internal void HandleExpanding(SharpTreeNode node)
+		void OnExpanderClick(object? sender, RoutedEventArgs e)
 		{
-			if (doNotScrollOnExpanding)
+			if (e.Source is ToggleButton { Name: "PART_Expander" } expander
+				&& expander.DataContext is SharpTreeNode { IsExpanded: true } node)
+			{
+				HandleExpanding(node);
+			}
+		}
+
+		/// <summary>Expands or collapses <paramref name="node"/> as a user gesture, so an expansion
+		/// reveals its children the way <see cref="HandleExpanding"/> describes.</summary>
+		void SetExpanded(SharpTreeNode node, bool expanded)
+		{
+			if (node.IsExpanded == expanded)
 				return;
+			node.IsExpanded = expanded;
+			if (expanded)
+				HandleExpanding(node);
+		}
+
+		/// <summary>
+		/// Scrolls the rows a just-expanded node revealed into view, the way the native Windows
+		/// tree control does: far enough to show the new children, but never so far that the
+		/// expanded node itself leaves the viewport. Both steps only move the viewport when their
+		/// row lies outside it, so expanding a node whose children already fit below it does not
+		/// scroll at all.
+		/// </summary>
+		void HandleExpanding(SharpTreeNode node)
+		{
 			SharpTreeNode lastVisibleChild = node;
-			while (true)
-			{
-				var child = lastVisibleChild.Children.LastOrDefault(c => c.IsVisible);
-				if (child == null)
-					break;
+			while (lastVisibleChild.Children.LastOrDefault(c => c.IsVisible) is { } child)
 				lastVisibleChild = child;
-			}
-			if (lastVisibleChild != node)
-			{
-				ScrollIntoView(lastVisibleChild);
-				Dispatcher.UIThread.Post(() => ScrollIntoView(node), DispatcherPriority.Loaded);
-			}
+			if (lastVisibleChild == node)
+				return;
+			ScrollRowIntoView(lastVisibleChild, centre: false);
+			ScrollRowIntoView(node, centre: false);
 		}
 
 		/// <summary>Scrolls the node into view (unless <paramref name="scroll"/> is false) and gives it
@@ -242,57 +324,128 @@ namespace ICSharpCode.ILSpy.Controls.TreeView
 		public void ScrollIntoNodeView(SharpTreeNode node)
 		{
 			ArgumentNullException.ThrowIfNull(node);
-			doNotScrollOnExpanding = true;
 			foreach (var ancestor in node.Ancestors())
 				ancestor.IsExpanded = true;
-			doNotScrollOnExpanding = false;
 			CenterNodeInView(node);
 		}
 
 		/// <summary>
 		/// Reveals <paramref name="node"/> centred in the viewport so the user's eye lands on a
-		/// newly selected row, rather than at the nearest edge (where <see cref="ListBox.ScrollIntoView"/>
-		/// leaves it). Skips the move when the row is already fully visible, so clicking a visible
-		/// row -- or selecting a freshly-loaded top-level entry that's already on screen -- never
-		/// yanks the viewport.
+		/// newly selected row, rather than at the nearest edge. Skips the move when the row is
+		/// already roughly centred, so re-selecting it never twitches the viewport. We
+		/// deliberately do NOT skip a merely-visible row sitting at an edge: the ListBox's
+		/// AutoScrollToSelectedItem drags the selected row to the nearest edge first, and a
+		/// reveal should still pull it to the centre from there. (Skipping an already-visible
+		/// row is decided one level up, before AutoScroll runs, in the model-&gt;tree sync --
+		/// see TreeSelectionBinder.SyncModelToTree.)
 		/// </summary>
-		void CenterNodeInView(SharpTreeNode node)
+		void CenterNodeInView(SharpTreeNode node) => ScrollRowIntoView(node, centre: true);
+
+		/// <summary>
+		/// Hides <see cref="ItemsControl.ScrollIntoView(object)"/> so the obvious way to reveal a
+		/// row is also the safe one -- see <see cref="ScrollRowIntoView"/> for what the base
+		/// method does to a container it realises. Hiding is not enforcement: a call through an
+		/// <see cref="ItemsControl"/>-typed reference still reaches the base method. It is here
+		/// so that code written later, on a SharpTreeView-typed variable, lands on the safe path
+		/// without its author having to know any of this.
+		/// </summary>
+		public new void ScrollIntoView(object item)
 		{
-			var scrollViewer = this.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault();
-			if (scrollViewer is null)
-			{
-				ScrollIntoView(node);
+			if (item is SharpTreeNode node)
+				ScrollRowIntoView(node, centre: false);
+		}
+
+		/// <inheritdoc cref="ScrollIntoView(object)"/>
+		public new void ScrollIntoView(int index)
+		{
+			if (flattener is { } rows && (uint)index < (uint)rows.Count)
+				ScrollIntoView(rows[index]);
+		}
+
+		/// <summary>
+		/// Scrolls to a row by setting the offset the row's index implies, rather than calling
+		/// <see cref="ListBox.ScrollIntoView(object)"/>.
+		///
+		/// That method realises a container for the target, arranges it at its own desired
+		/// width, parks it aside for the duration of a few layout passes and then drops the
+		/// reference. A container the passes do not adopt back into the realized range is left
+		/// a visible child of the panel that nothing arranges again -- it keeps painting its
+		/// old item at its old position, over whatever row now occupies that spot. Rows here
+		/// are a uniform height, so the arithmetic below reaches the same place without ever
+		/// entering that code path.
+		/// </summary>
+		void ScrollRowIntoView(SharpTreeNode node, bool centre)
+		{
+			if (this.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault() is not { } scrollViewer)
 				return;
-			}
+			if (flattener is null || flattener.IndexOf(node) is not (>= 0 and var index))
+				return;
 
-			// If the row is already realised and roughly centred, leave the viewport alone -- this
-			// keeps a re-selection of an already-centred row from twitching. We deliberately do NOT
-			// skip a merely-visible row sitting at an edge: the ListBox's AutoScrollToSelectedItem
-			// drags the selected row to the nearest edge first, and a reveal should still pull it to
-			// the centre from there. (Skipping an already-visible row is decided one level up, before
-			// AutoScroll runs, in the model->tree sync -- see TreeSelectionBinder.SyncModelToTree.)
-			if (ContainerFromItem(node) is Control visible && visible.IsVisible
-				&& visible.TranslatePoint(new Point(0, 0), scrollViewer) is { } top)
-			{
-				var rowMid = top.Y + visible.Bounds.Height / 2;
-				var viewportMid = scrollViewer.Viewport.Height / 2;
-				if (Math.Abs(rowMid - viewportMid) <= visible.Bounds.Height)
-					return;
-			}
-
-			// Bring it on screen (edge), force layout so the container realises, then offset so the
-			// row sits at the vertical centre.
-			ScrollIntoView(node);
+			// An expansion has just changed how many rows there are; the extent has to catch up
+			// before an offset can be clamped against it.
 			UpdateLayout();
-			if (ContainerFromItem(node) is not Control row)
+
+			double rowHeight = RowHeight();
+			double viewport = scrollViewer.Viewport.Height;
+			double rowTop = index * rowHeight;
+			double offset = scrollViewer.Offset.Y;
+
+			if (centre)
+			{
+				double rowMidInViewport = rowTop - offset + rowHeight / 2;
+				if (Math.Abs(rowMidInViewport - viewport / 2) <= rowHeight)
+					return;
+				offset = rowTop - (viewport - rowHeight) / 2;
+			}
+			else if (rowTop < offset)
+			{
+				offset = rowTop;
+			}
+			else if (rowTop + rowHeight > offset + viewport)
+			{
+				offset = rowTop + rowHeight - viewport;
+			}
+			else
+			{
 				return;
-			if (row.TranslatePoint(new Point(0, 0), scrollViewer) is not { } rowTop)
-				return;
-			var desiredTop = (scrollViewer.Viewport.Height - row.Bounds.Height) / 2;
-			var newOffsetY = scrollViewer.Offset.Y + (rowTop.Y - desiredTop);
-			var maxOffset = Math.Max(0, scrollViewer.Extent.Height - scrollViewer.Viewport.Height);
-			newOffsetY = Math.Clamp(newOffsetY, 0, maxOffset);
-			scrollViewer.Offset = new Vector(scrollViewer.Offset.X, newOffsetY);
+			}
+
+			double maxOffset = Math.Max(0, scrollViewer.Extent.Height - viewport);
+			scrollViewer.Offset = new Vector(scrollViewer.Offset.X, Math.Clamp(offset, 0, maxOffset));
+		}
+
+		/// <summary>The height of a row, taken from one that exists rather than assumed. The
+		/// fallback matches the item template, for the moment before the first row is
+		/// realised.</summary>
+		double RowHeight()
+		{
+			foreach (var container in GetRealizedContainers())
+			{
+				if (container.Bounds.Height > 0)
+					return container.Bounds.Height;
+			}
+			return 20;
+		}
+
+		/// <summary>
+		/// Avalonia's default key selection triggers treat plain Enter/Space as selection input:
+		/// the ListBoxItem container marks the KeyDown handled before it bubbles here, so the
+		/// activation handling in <see cref="OnKeyDown"/> would never see those keys. Suppress the
+		/// selection trigger exactly for the case OnKeyDown activates instead -- a single selected
+		/// row that is the row the key landed on. Multi-row selections keep the default behaviour
+		/// (Enter/Space collapses the selection to the focused row).
+		/// </summary>
+		protected override bool ShouldTriggerSelection(Visual selectable, KeyEventArgs eventArgs)
+		{
+			if (eventArgs.KeyModifiers == KeyModifiers.None
+				&& eventArgs.Key is Key.Enter or Key.Space
+				&& selectable is SharpTreeViewItem { Node: { } node }
+				&& SelectedItems?.Count == 1
+				&& ReferenceEquals(SelectedItem, node))
+			{
+				return false;
+			}
+			return base.ShouldTriggerSelection(selectable, eventArgs);
 		}
 
 		protected override void OnKeyDown(KeyEventArgs e)
@@ -307,6 +460,11 @@ namespace ICSharpCode.ILSpy.Controls.TreeView
 				e.Handled = true;
 				return;
 			}
+			if (e.Key == Key.Delete && e.KeyModifiers == KeyModifiers.None && DeleteSelection())
+			{
+				e.Handled = true;
+				return;
+			}
 			var node = (e.Source as Visual)?.FindAncestorOfType<SharpTreeViewItem>(includeSelf: true)?.Node
 				?? SelectedItem as SharpTreeNode;
 			if (node != null && e.KeyModifiers == KeyModifiers.None)
@@ -315,7 +473,7 @@ namespace ICSharpCode.ILSpy.Controls.TreeView
 				{
 					case Key.Left:
 						if (node.IsExpanded)
-							node.IsExpanded = false;
+							SetExpanded(node, false);
 						else if (node.Parent != null && !node.Parent.IsRoot)
 							SelectAndFocus(node.Parent);
 						else
@@ -324,7 +482,7 @@ namespace ICSharpCode.ILSpy.Controls.TreeView
 						break;
 					case Key.Right:
 						if (!node.IsExpanded && node.ShowExpander)
-							node.IsExpanded = true;
+							SetExpanded(node, true);
 						else if (node.Children.Count > 0)
 							SelectAndFocus(node.Children.First(c => c.IsVisible));
 						else
@@ -332,16 +490,18 @@ namespace ICSharpCode.ILSpy.Controls.TreeView
 						e.Handled = true;
 						break;
 					case Key.Add:
-						node.IsExpanded = true;
+						SetExpanded(node, true);
 						e.Handled = true;
 						break;
 					case Key.Subtract:
-						node.IsExpanded = false;
+						SetExpanded(node, false);
 						e.Handled = true;
 						break;
 					case Key.Multiply:
 						node.IsExpanded = true;
 						ExpandRecursively(node);
+						// The whole subtree is open now, so this reveals as much of it as fits.
+						HandleExpanding(node);
 						e.Handled = true;
 						break;
 					case Key.Enter:
@@ -359,6 +519,28 @@ namespace ICSharpCode.ILSpy.Controls.TreeView
 			}
 			if (!e.Handled)
 				base.OnKeyDown(e);
+		}
+
+		/// <summary>
+		/// Deletes the top-level selection (see <see cref="GetTopLevelSelection"/>) when every node in it
+		/// supports deletion, then selects the row that takes the first deleted node's place so a
+		/// repeated Delete keeps working. Returns false without touching anything otherwise, e.g. for
+		/// a selection that mixes deletable and non-deletable rows.
+		/// </summary>
+		bool DeleteSelection()
+		{
+			if (flattener is null)
+				return false;
+			var nodes = GetTopLevelSelection().ToArray();
+			if (nodes.Length == 0 || !nodes.All(n => n.CanDelete()))
+				return false;
+			int index = nodes.Min(flattener.IndexOf);
+			foreach (var node in nodes)
+				node.Delete();
+			// The deleted rows leave the selection with the source; pick the nearest survivor.
+			if (SelectedItems!.Count == 0 && flattener.Count > 0)
+				SelectAndFocus((SharpTreeNode)flattener[Math.Clamp(index, 0, flattener.Count - 1)]!);
+			return true;
 		}
 
 		static void ExpandRecursively(SharpTreeNode node)
@@ -426,7 +608,7 @@ namespace ICSharpCode.ILSpy.Controls.TreeView
 			searchBuffer = string.Empty;
 		}
 
-		/// <summary>Selected items with no selected ancestor (used by Delete).</summary>
+		/// <summary>Selected items with no selected ancestor.</summary>
 		public IEnumerable<SharpTreeNode> GetTopLevelSelection()
 		{
 			var selection = SelectedItems!.OfType<SharpTreeNode>().ToHashSet();

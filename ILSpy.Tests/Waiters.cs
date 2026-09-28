@@ -22,9 +22,11 @@ using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 
 using Avalonia;
+using Avalonia.Headless;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 
+using ICSharpCode.ILSpy.AppEnv;
 using ICSharpCode.ILSpy.AssemblyTree;
 using ICSharpCode.ILSpy.Docking;
 using ICSharpCode.ILSpy.TextView;
@@ -51,11 +53,63 @@ public static class Waiters
 		{
 			if (predicate())
 				return;
-			Dispatcher.UIThread.RunJobs();
+			PumpUI();
 			await Task.Delay(PollInterval);
 		}
 		throw new TimeoutException(
 			$"Timed out after {(timeout ?? DefaultTimeout).TotalSeconds:0.#}s waiting for: {description}");
+	}
+
+	/// <summary>
+	/// Advances the UI by one step: runs the queued dispatcher jobs and renders a frame.
+	/// </summary>
+	/// <remarks>
+	/// Both halves matter. Hit testing for synthesized input is answered from the rendered scene,
+	/// not from the visual tree, so a loop that only runs dispatcher jobs leaves input routing a
+	/// frame behind: a click can still be delivered to a control the last frame shows but the tree
+	/// no longer has - a closed popup's light-dismiss overlay, for one - and never reach what is
+	/// underneath. Avalonia's own headless input helpers pump both for exactly this reason.
+	/// </remarks>
+	public static void PumpUI()
+	{
+		Dispatcher.UIThread.RunJobs();
+		AvaloniaHeadlessPlatform.ForceRenderTimerTick();
+	}
+
+	/// <summary>
+	/// Waits until the application has nothing left to do: no dispatcher job queued at Background
+	/// priority or above, no assembly still loading in the background sweep, layout up to date and
+	/// a frame rendered - and until that holds on two consecutive polls, so work that a
+	/// thread-pool continuation is about to post back to the UI thread is caught as well.
+	/// </summary>
+	/// <remarks>
+	/// This is the synchronization point to use between an action and the assertions or input
+	/// that follow it. Pumping a fixed number of frames instead encodes how fast the machine that
+	/// wrote the test was, and comes apart on a loaded CI agent; "nothing pending" is the actual
+	/// precondition, whatever number of frames it takes.
+	/// </remarks>
+	public static async Task WaitForIdleAsync(TimeSpan? timeout = null)
+	{
+		var deadline = DateTime.UtcNow + (timeout ?? DefaultTimeout);
+		int consecutiveIdlePolls = 0;
+		while (DateTime.UtcNow < deadline)
+		{
+			PumpUI();
+			consecutiveIdlePolls = IsIdle() ? consecutiveIdlePolls + 1 : 0;
+			if (consecutiveIdlePolls >= 2)
+				return;
+			await Task.Delay(PollInterval);
+		}
+		throw new TimeoutException(
+			$"Timed out after {(timeout ?? DefaultTimeout).TotalSeconds:0.#}s waiting for the UI to become idle");
+
+		static bool IsIdle()
+		{
+			if (Dispatcher.UIThread.HasJobsWithPriority(DispatcherPriority.Background))
+				return false;
+			var assemblies = AppComposition.TryGetExport<AssemblyTreeModel>()?.AssemblyList?.GetAssemblies();
+			return assemblies == null || Array.TrueForAll(assemblies, a => a.IsLoaded);
+		}
 	}
 
 	public static async Task WaitForAssembliesAsync(

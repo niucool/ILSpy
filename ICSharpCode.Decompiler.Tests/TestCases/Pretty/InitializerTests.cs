@@ -73,7 +73,11 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty.InitializerTests
 
 			public S this[int index] {
 				get {
+#if CS71
+					return default;
+#else
 					return default(S);
+#endif
 				}
 				set {
 				}
@@ -81,7 +85,11 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty.InitializerTests
 
 			public S this[object key] {
 				get {
+#if CS71
+					return default;
+#else
 					return default(S);
+#endif
 				}
 				set {
 				}
@@ -158,7 +166,11 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty.InitializerTests
 
 			public StructData(int initialValue)
 			{
+#if CS71
+				this = default;
+#else
 				this = default(StructData);
+#endif
 				Field = initialValue;
 				Property = initialValue;
 			}
@@ -916,7 +928,11 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty.InitializerTests
 		public static void NotAnObjectInitializerWithEvent()
 		{
 			Data data = new Data();
-			data.TestEvent += delegate {
+#if NET50
+			data.TestEvent += (object? obj, EventArgs e) => {
+#else
+			data.TestEvent += (object obj, EventArgs e) => {
+#endif
 				Console.WriteLine();
 			};
 			X(Y(), data);

@@ -26,7 +26,6 @@ using System.Linq;
 using System.Reflection;
 using System.Reflection.Metadata.Ecma335;
 
-using ICSharpCode.Decompiler.CSharp.Resolver;
 using ICSharpCode.Decompiler.CSharp.Syntax;
 using ICSharpCode.Decompiler.CSharp.Syntax.PatternMatching;
 using ICSharpCode.Decompiler.IL;
@@ -131,7 +130,7 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 				bool skippedStmts = false;
 
 				Statement? stmt;
-				for (stmt = ctor.Body?.Statements.FirstOrDefault(); stmt != null; stmt = stmt.GetNextStatement())
+				for (stmt = ctor.Body?.Statements.GetFirstNonEmptyStatementOrDefault(); stmt != null; stmt = stmt.GetNextNonEmptyStatement())
 				{
 					var m = memberInitializerPattern.Match(stmt);
 					if (!m.Success)
@@ -179,12 +178,36 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 							: ThisCallClassPattern.Match(stmt);
 						if (m.Success)
 						{
-							sequence.CoversFullBody = stmt.GetNextStatement() == null;
+							sequence.CoversFullBody = stmt.GetNextNonEmptyStatement() == null;
 						}
 					}
 				}
 
 				return sequence;
+			}
+
+			internal static bool IsDefaultValueInitializer(Expression initializer)
+			{
+				if (initializer is DefaultValueExpression)
+					return true;
+				var rr = initializer.GetResolveResult();
+				if (!rr.IsCompileTimeConstant)
+					return false;
+				return rr.ConstantValue switch {
+					null or false or '\0'
+						or (sbyte)0 or (byte)0 or (short)0 or (ushort)0
+						or 0 or 0u or 0L or 0uL => true,
+					// Equality is not identity for these: -0.0 equals 0.0, and 0.00m equals 0m
+					// while carrying a different scale. Both differences are observable
+					// (1.0 / -0.0 is negative infinity; 0.00m prints as "0.00"), so dropping
+					// such an initializer as a redundant default would change behaviour on
+					// recompile. Compare the representation rather than the value.
+					// (GetBytes rather than SingleToInt32Bits: netstandard2.0 lacks the latter.)
+					float f => BitConverter.ToInt32(BitConverter.GetBytes(f), 0) == 0,
+					double d => BitConverter.DoubleToInt64Bits(d) == 0,
+					decimal m => m == 0m && decimal.GetBits(m)[3] == 0,
+					_ => false,
+				};
 			}
 
 			private static bool CanHaveInitializer(IMember member, ConstructorInitializerAnalyzer context)
@@ -195,7 +218,9 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 					return true;
 				return declaringSyntaxNode is FieldDeclaration
 					or PropertyDeclaration { IsAutomaticProperty: true }
-					or EventDeclaration;
+					or EventDeclaration
+					// backing-field store of a field-backed property (initializers bypass the setter)
+					|| (declaringSyntaxNode is PropertyDeclaration && member is IField);
 			}
 
 			public bool IsMatch(ConstructorDeclaration ctor)
@@ -203,7 +228,7 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 				if (ctor.Body is null)
 					return false;
 				var stmts = ctor.Body.Statements;
-				var otherStmt = stmts.FirstOrDefault();
+				var otherStmt = stmts.GetFirstNonEmptyStatementOrDefault();
 				foreach (var (stmt, member, initializer, _) in Statements)
 				{
 					var m = memberInitializerPattern.Match(otherStmt);
@@ -224,7 +249,7 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 						StatementToOtherCtorsMap[stmt] = list;
 					}
 					list.Add((otherStmt, otherInitializer));
-					otherStmt = otherStmt.GetNextStatement();
+					otherStmt = otherStmt.GetNextNonEmptyStatement();
 				}
 				return true;
 			}
@@ -286,6 +311,22 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 					.Where(_ => _.symbol is IMember)
 					.ToDictionary(_ => (IMember)_.symbol!, _ => _.entity);
 
+				if (context.Settings.FieldKeyword)
+				{
+					// Constructor stores to the backing field of a field-backed property become
+					// the property's initializer. The field only keeps its own declaration (and
+					// mapping) when the property could not be transformed.
+					foreach (var pd in members.OfType<PropertyDeclaration>())
+					{
+						if (pd.GetSymbol() is IProperty property
+							&& PatternStatementTransform.TryGetBackingField(property, out var backingField)
+							&& !MemberToDeclaringSyntaxNodeMap.ContainsKey(backingField))
+						{
+							MemberToDeclaringSyntaxNodeMap.Add(backingField, pd);
+						}
+					}
+				}
+
 				List<ConstructorDeclaration> constructorsNotChainedWithThis = [];
 				List<ConstructorDeclaration> allCtors = [];
 
@@ -328,7 +369,7 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 					else
 					{
 						// find this-ctor call
-						var stmt = ctor.Body?.Statements.FirstOrDefault();
+						var stmt = ctor.Body?.Statements.GetFirstNonEmptyStatementOrDefault();
 						var m = ctorMethod.DeclaringType.Kind == TypeKind.Struct
 							? ThisCallStructPattern.Match(stmt)
 							: ThisCallClassPattern.Match(stmt);
@@ -356,6 +397,7 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 					var initializer = InitializerSequence.Analyze(this, ctor, ctorMethod);
 
 					if (initializer is { CoversFullBody: true, HasDuplicateAssignments: false, Statements.Count: > 0 }
+						&& !initializer.Statements.Any(statement => ReferencesInstanceMember(statement.Initializer))
 						&& ctorMethod.Accessibility == expectedCtorAccessibility)
 					{
 						bool transformToPrimaryConstructor = MetadataTokens.GetRowNumber(ctorMethod.MetadataToken) == firstMethodRowNumber;
@@ -401,6 +443,24 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 							PrimaryConstructorInitializers = initializer;
 						}
 					}
+				}
+
+				bool ReferencesInstanceMember(Expression expression)
+				{
+					foreach (var node in expression.DescendantsAndSelf.OfType<Expression>())
+					{
+						switch (node.GetResolveResult())
+						{
+							case ThisResolveResult:
+								return true;
+							case MemberResolveResult {
+								TargetResult: ThisResolveResult,
+								Member: { IsStatic: false } member
+							} when member is not IField field || !IsGeneratedPrimaryConstructorBackingField(field):
+								return true;
+						}
+					}
+					return false;
 				}
 
 				if (StaticConstructor != null)
@@ -467,7 +527,7 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 			{
 				if (constructorDeclaration.Body is null)
 					return false;
-				Statement stmt = constructorDeclaration.Body.Statements.FirstOrDefault()!;
+				Statement stmt = constructorDeclaration.Body.Statements.GetFirstNonEmptyStatementOrDefault()!;
 				var isValueType = ctorMethod.DeclaringType.Kind == TypeKind.Struct;
 
 				// value types may omit the constructor initializer completely
@@ -567,8 +627,16 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 							}
 							break;
 						case PropertyDeclaration pd:
-							Debug.Assert(pd.IsAutomaticProperty);
-							if (pd.Initializer is null)
+							Debug.Assert(pd.IsAutomaticProperty || member is IField);
+							if (member is IField { DeclaringTypeDefinition.Kind: TypeKind.Struct }
+								&& InitializerSequence.IsDefaultValueInitializer(initializer))
+							{
+								// Struct constructors zero-initialize backing fields the constructor
+								// does not assign (auto-default structs); recompilation regenerates
+								// these stores, so they are dropped instead of becoming initializers.
+								context.Step("Drop implicit struct default initialization", stmt);
+							}
+							else if (pd.Initializer is null)
 							{
 								context.Step("Move assignment to property initializer", stmt);
 								var movedInitializer = initializer.Detach();
