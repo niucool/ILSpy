@@ -3527,6 +3527,25 @@ whole-module's FIRST method -- the [EP] line 1) -- the render path
 localizes in one run. THE STATE: the fold reverted (inert); the
 dump tool + all gates standing.
 
+## THE EARLY-RETURN FOLD -- THE [EB]/[EB-F] STATE (reverted, inert)
+
+THE PROBES' FINDINGS (this session): (1) the guard-shaped blocks
+ENTER EmitBlock with map=1 (the fill present in the SAME emitter);
+(2) THE FINAL SECTION RUNS for the if-final blocks with map=1 and
+dropFinal=0 ([EB-F]) -- the custom arm's lookup conditions are
+satisfied -- yet the custom arm provably does not fire (the output
+unchanged; the fold renders nothing). THE MISSING DATUM (the next
+session's ONE print): the fill's BLOCK ADDRESS (`[FI] fill
+bK=%p` -- print &bK at the earlyReturnFolds_[iff] fill) correlated
+against the [EB-F] lines: if the fill's block NEVER appears in
+[EB-F], the render's block list differs from the analysis's scan
+list (the container mismatch); if it APPEARS, the lookup itself
+fails (the iff identity -- the pointer forensics again). THE STATE:
+the fold + the probes reverted clean (the pin ebf9b6e9..., the
+dnlib 80,185 verified); the dump tool standing. THE CAMPAIGN'S
+STANDING RESULTS: dnlib 80,185 / net10 99,578 / cui 2,354 / the
+perf 2.45s & 147MB.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
