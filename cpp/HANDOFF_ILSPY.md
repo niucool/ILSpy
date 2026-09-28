@@ -3875,6 +3875,38 @@ ref-argument rendering family, pre-existing); the TryGetCpuArch
 enum chains (the accept-side + the enum member names in the case
 labels -- the queued bonus).
 
+## THE ACCEPT-SIDE GATE COMPARISON -- THE CFG PARITY CONFIRMED, THE ET-CHAIN GATE UNFOUND
+
+THE [UG] PROBE (the clone tree, the net10 chains): flowNodes 2-3
+(the mixed flat/nested inner sets), caseNodes 2-4, ug=0/1 mixed,
+**breakBlock ALWAYS nil** -- the port accepts every chain that
+reaches the tail (`breakBlock == nullptr -> return true`). THE
+DIVERGENT CHAINS (the net10 +12): the `et != 17/18`-style NE-CHAINS
+(the 2-value + empty-fall-through-case shapes, e.g.
+info.proxyCreatorType) -- the oracle renders the IF-ELSE form, the
+port (with the generic clone) forms the switch.
+
+THE REFERENCE SIDE-BY-SIDE (ControlFlowGraph.cs CreateEdges vs the
+port's): **THE LEAVE-EDGE PARITY CONFIRMED** -- the C# also creates
+NO CFG edges for leave-exiting blocks ("Leave instructions (like
+other exits out of the container) are ignored for the CFG and
+dominance") -- the port's bb=nil behavior MATCHES the reference.
+THE C#'s REJECT FOR THE ET-CHAINS IS IN THE ANALYSIS LEVEL (the
+exact gate unfound): the sections {17}, {18}, the complement -- the
+C#'s veto candidates: the AnalyzeCondition on the ne-chains with
+the empty fall-through case body, the section construction for the
+implicit fall-through arm, or a flat-vs-nested inner-set difference
+affecting ifCount. THE NEXT SESSION: dump the C# oracle's actual
+verdict path -- decompile the et-chain method with the REFERENCE
+ILSpy (the oracle's --ilast or the debug prints) OR run the
+reference's SwitchDetection under a debugger on the same method to
+see WHICH gate rejects; then mirror it.
+
+THE STATE: the committed tree (the switch expression landed; the
+clone re-land still reverted -- gated on this comparison); the pin,
+the dnlib 79,855, the net10 99,476, the cui 2,354, the
+SwitchDetection 13/13.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
