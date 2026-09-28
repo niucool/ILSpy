@@ -4082,6 +4082,37 @@ corpus parity (dnlib/net10/cui), the sweep, hello, the bennu
 canary, AND the new upstream tests where the port carries them
 (the ILPretty/Correctness fixtures: Issue4180, Issue3568, ...).
 
+## THE UPSTREAM PORT -- THE FIRST TRIAGE RESULTS (A1 started)
+
+**#4180 (d99de57d3, the negated-negative-constant parens): NOT
+APPLICABLE.** The port has no unary-minus AST node: the reader
+turns `neg` into `BinaryNumericInstruction(Sub, LdcI4(0), v)` (the
+`0 - x` form) and the binary render emits spaced operators, so
+`0 - -729399378` is legal C# with no adjacent-minus hazard. The
+upstream fix protects its output visitor's UnaryOperatorExpression
+-- a structure this port does not carry. VERIFIED: the fixture
+build (/home/jim/ilspy-test-fixtures/neg_parens/) folded the
+constants away in both configs (the shape only exists in
+obfuscated/hand-written IL -- the upstream shipped an .il fixture;
+no ilasm on this box), and the corpus carries zero `- -` shapes.
+
+**0879e35c0 (the hex form of negative ldc.i4/i8): DEFERRED.** The
+fix targets the IL-BODY disassembler (MethodBodyDisassembler.cs --
+the `--il` view's ldc operand printing); the port's body
+disassembler does not yet print ldc operands (the ILDisassembler
+is a 79-line stub; the ReflectionDisassembler carries the CLI).
+The fix lands when the port's disassembler surface grows the ldc
+operand printing.
+
+**THE NEXT A1 CANDIDATES (the applicability triage)**: the negated
+floating-point special constants family (b209b3972, 59361d9de,
+b3035687f -- likely composes with the port's Math.PI/E fraction
+approximation in ILAstToCSharp.cpp ~line 4049); 5be91a123 (the
+ref-conditional assignment target); 0ef295947 (the lambda
+parameter attribute parens); 3e45005eb (the params/default values
+on lambda parameter lists); 85399bfc0 (the `new (string,int)[]`
+space); e243786e2 (the init-only marker position).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
