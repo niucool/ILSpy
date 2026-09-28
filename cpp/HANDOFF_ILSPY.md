@@ -3737,6 +3737,16 @@ opcode) -- the oracle reconstructs it from the ifs through the
 SAME analysis, so the fix belongs in the port's walk state, not
 the chain detection.
 
+## THE POISONING BUG -- RESOLVED AS A LAYOUT-SENSITIVE UB (the next slice)
+
+THE PHASE BISECT (all clean, correctly-braced probes): AnalyzeControlFlow alone -- no flip; + IsSingleCondition -- no flip; + SwitchUsesGoto -- no flip; the FULL double-call -- no flip. THE "POISONING" THEORY IS DEAD: the 1216-era results were artifacts of the mangled-gate binaries (the multiBig wrap was ALSO mangled -- an unconditional return false -- so ALL the [SD4] gate data was garbage and the 1216 was that binary's different render, not the synthesis).
+
+THE REAL PHENOMENON (the flip test): the tree with the 7 correctly-braced [SD5] gate wraps forms **46 switches (gotos 1,263 -> 1,217)**; the pristine tree forms 0; an env-gated empty if alone does NOT flip it. THE WRAPS ARE SEMANTICALLY INERT (getenv-gated prints + the identical returns) -- **THE OUTCOME DEPENDS ON THE BINARY/STACK LAYOUT: A LAYOUT-SENSITIVE UB IN THE SWITCH-ANALYSIS PATH** (the candidate classes: an uninitialized read in the ControlFlowGraph/LoopContext/dominator tree, a use-after-free on a recycled stack/heap slot, a stale reference into a moved-from vector -- the SwitchAnalysis sections/InnerBlocks vectors are moved-from in the arms).
+
+THE CLEAN GATE DATA (from the [SD5] run, the only trustworthy one): noInnerBlocks 1,543 (the single-if noise floor), singleCondition 55, multiBig 49, ifShorter 7, usesGoto 0, breakOffset 0 -- **the big restructured chains PASS ALL GATES and should form switches** -- consistent with the UB hypothesis (the accept path reads garbage that differs by layout).
+
+THE NEXT SESSION: (1) the ASAN/UBSAN build -- the configure needs -DCMAKE_PREFIX_PATH=<build>/linux-ninja/vcpkg_installed/x64-linux (the VCPKG_INSTALLED_DIR alone did not satisfy find_package; the vcpkg checkout at /home/jim/source/vcpkg has no installed dir, the main build's vcpkg_installed is the source); the sanitizer NAMES the UB; (2) the suspect list for a manual read: the LongSet moves (AnalyzeArm's trueValues/remainingValues moves -- a moved-from LongSet read later?), the Section bodies' Branch pointers (the ownedBodies_ lifetime), the graph node Visited flags' initialization. THE STATE: the pristine tree (the pin, the dnlib 80,185, gotos 1,263, the SwitchDetection 12/12).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
