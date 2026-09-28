@@ -3219,6 +3219,37 @@ BaseArithPattern` -- the evidence at /tmp/ilspy-cmp/{oracle,cpp}_
 net10code.cs -- the record pass (the C# RecordDecompiler) joins
 the queue.
 
+## THE FIELD-INITIALIZER PASS -- THE IMPLEMENTATION ATTEMPT (reverted; the debug state)
+
+THE IMPLEMENTATION (preserved in the turn history): the
+FieldInitializerPromoter class in CSharpDecompiler.cpp -- the raw
+ctor ILAst scan (the leading StObj(LdFlda(this->field), pureValue)
+stores before the base-ctor call; the ReadIL raw shape matches the
+--ilast-all dump), the agreement gate, the text pass (the rendered
+ctor bodies' leading `\t\tname = expr;` lines matched against the
+raw names, stripped, the exprs recorded), and the field-declaration
+rewrite (` name;\n` -> ` name = expr;\n`). The call site: the free
+DecompileTypeToStringBody's tail, BEFORE the namespace indent (the
+promoted lines carry the flat two-tab form). THE COUNTERS' FINDINGS
+(the [FI] probes): the raw scan WORKS (the CommandLineParser: 1
+ctor, 5 names; the DotNetFileLoader: 2; the FilesDeobfuscator: 1);
+the text pass's FIRST bug (the signature needle " TypeName("
+matched the DOC-COMMENT crefs -- fixed with the line-based scan: a
+tab-led modifiers+name+paren line); the SECOND bug (the current
+blocker): the line-based scan finds NO ctor line (ctorsFound=0 --
+no diagnostic lines printed even for lines containing the type
+name; the failure is in the line-iteration or the compare, not the
+matching logic). THE NEXT DEBUG: print the FIRST 5 lines the scan
+iterates for the CommandLineParser (the scan-from-search state) --
+suspect the `search` initialization or the lineEnd/scan advance.
+THE DISCIPLINE: the whole attempt reverted clean (the pin
+ebf9b6e9..., the dnlib 80,454 standing, the cui output identical to
+the pre-attempt baseline). NOTE: the earlier "1332" cui number was
+a stale-baseline mismeasurement (the /tmp artifacts rotated); the
+current true cui oracle-diff with the standing build = 2377 --
+REBASE the cui RED before the next attempt (the oracle_cui_try1.cs
+vs a fresh cpp render).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
