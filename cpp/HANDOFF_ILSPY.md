@@ -3380,6 +3380,23 @@ gated slice. THE NEW FAMILY EXPOSED (the next candidate): the uint
 hex literal forms (`0x80000000u` vs `-2147483648`, `0x7FFFFFFF`
 vs `2147483647`) -- the folded sites' remaining diff lines.
 
+## THE NAMED CONSTANTS -- LANDED (the uint-hex family, slice 1)
+
+THE C# RULE (TypeSystemAstBuilder's IsSpecialConstant): the
+boundary constants render as the named forms. THE PORT (committed):
+the LdcI4/LdcI8's Expr arms -- int.MaxValue/MinValue,
+long.MaxValue/MinValue. THE MEASUREMENT: dnlib 80,195 -> 80,189;
+net10 99,612 -> 99,580 (the forms fire broadly); 41 named sites.
+THE REMAINING (the family's slice 2): the bitwise-and context's
+mask constants -- the oracle's `0x80000000u` (9 sites) /
+`0x7FFFFFFF` / the 2^k-1 masks (13x 0xFFFFFF etc.) -- the
+type-context-driven hex forms (the uint-typed `&` operands render
+the unsigned hex + u; the mask-shaped positives render hex). THE
+RULE SOURCE: the C#'s ConvertConstant with the expected type (the
+uint context) + the enum-flags hex sites. THE QUEUE: the AND-hex
+slice, then the label-region generalization (the multi-block
+regions), the switch case-range, the remaining ~123 ?. shapes.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
