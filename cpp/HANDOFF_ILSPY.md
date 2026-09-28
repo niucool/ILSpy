@@ -3666,6 +3666,43 @@ SwitchDetection.UseCSharpSwitch side by side) + the enum member
 names (the queued bonus). THE STATE: the probes reverted (the pin,
 the dnlib 80,185).
 
+## THE SWITCH -- THE DIVERGENCE ISOLATED (the root cause found)
+
+THE [SD4] NAMED-GATE PROBE (the fixed instrumentation, the prints
+inside the condition braces): **noInnerBlocks = 1,545 of 1,583
+rejections** (multiBig only 9; NO other gate fired). THE ANALYSIS
+SUCCEEDS (the sections build: 3-13 per chain) BUT RECORDS ZERO
+INNER BLOCKS -- every recursion fails at the first level.
+
+THE ROOT CAUSE (the C# side-by-side, SwitchAnalysis.cs lines
+135-181): the C#'s flattened block model has the if as
+Instructions[Count-2] and the FALSE ARM as the block's LAST
+instruction (an explicit Branch) -- **the C# NEVER SEES AN
+ELSE-ARMED IF**. The port's model nests the else (iff->FalseInst
+is an instruction: the Block / the Branch / the case body) -- and
+the port's recursion gate `iff && !iff->FalseInst` REJECTS every
+else-armed intermediate block -- the transformed tree's chains
+(the [NP3]/[ER] forensics: the restructured chains carry else
+arms) all have else-armed intermediates -- so the recursion adds a
+SECTION per level (never InnerBlocks) -- the analysis "succeeds"
+with sections-only -- UseCSharpSwitch's noInnerBlocks veto
+rejects 1,545 chains.
+
+THE FIX (the next slice -- the else-arm recursion in
+AnalyzeBlockImpl): when the iff HAS a FalseInst, the false
+continuation = the FalseInst itself: (a) a Branch -> the target
+block (the standard path); (b) a nested Block (the port's
+else-block wrapping) -> the recursion's Parent/IncomingEdgeCount
+gates must handle the nested shape (the Block is an instruction,
+not a container sibling -- either walk into the Block's final as
+the level's if, or relax the gates for the owned Block arms).
+THE C# EQUIVALENT: the C#'s model makes the else the fall-through
+branch of the SIBLING block; the port's fix must synthesize that
+walk from the nested shape. DESIGN FIRST (the transformed dump on
+one chain: the exact FalseInst types at each level), THEN THE
+GATE RELAXATION. THE STATE: the probes reverted (the pin, the
+dnlib 80,185).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
