@@ -2547,19 +2547,194 @@ public:
                            " record " + typeName);
         std::string equatableNeedle = ", IEquatable<" + typeName + ">";
         std::size_t eq = result.find(equatableNeedle);
-        if (eq != std::string::npos)
+        if (eq != std::string::npos) {
             result.erase(eq, equatableNeedle.size());
+        } else {
+            // The sole-interface form: `record X : IEquatable<X>` (no
+            // comma); the whole base clause drops.
+            std::string soleNeedle = " : IEquatable<" + typeName + ">";
+            std::size_t sole = result.find(soleNeedle);
+            if (sole != std::string::npos)
+                result.erase(sole, soleNeedle.size());
+        }
+        // (3) The positional synthesis: the primary ctor (whose body is
+        // only the parameter backing-field stores and the base call)
+        // moves its parameters into the declaration's parens, and the
+        // implied auto-properties drop.
+        TrySynthesizePositional(result, typeName);
         out = std::move(result);
     }
 
 private:
+    // The positional-parameter synthesis: the record's primary ctor
+    // (a ctor whose body stores each parameter to its backing field and
+    // calls the base ctor) contributes its parameter list to the record
+    // declaration; the implied auto-properties drop.
+    static void TrySynthesizePositional(std::string& result,
+                                         const std::string& typeName) {
+        // The primary ctor signature line: `TypeName(params)`.
+        std::vector<std::string> lines;
+        {
+            std::size_t start = 0;
+            while (start < result.size()) {
+                std::size_t nl = result.find("\n", start);
+                std::size_t end =
+                    nl == std::string::npos ? result.size() : nl + 1;
+                lines.emplace_back(result.substr(start, end - start));
+                start = end;
+            }
+        }
+        std::size_t ctorLine = std::string::npos;
+        std::string params;
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            std::string t = lines[i];
+            while (!t.empty() && (t.back() == '\n' || t.back() == '\r'))
+                t.pop_back();
+            std::string nt = t;
+            while (!nt.empty() && nt.front() == '\t') nt.erase(0, 1);
+            if (nt.find(typeName + "(") == std::string::npos) continue;
+            // A ctor line: the name directly followed by the parens (a
+            // method returning the type would carry a return type
+            // before the name; the ctor does not).
+            auto open = nt.find(typeName + "(");
+            if (open == std::string::npos) continue;
+            bool modifiersOnly = true;
+            for (std::size_t k = 0; k + 1 < open; ++k) {
+                char c = nt[k];
+                if (c != ' ' && !std::isalnum((unsigned char)c) &&
+                    c != '_')
+                    modifiersOnly = false;
+            }
+            if (!modifiersOnly) continue;
+            if (nt.substr(0, 6) == "static") continue;
+            auto closeParen = nt.rfind(')');
+            if (closeParen == std::string::npos) continue;
+            if (nt.find(')', closeParen - 1) != closeParen) continue;
+            params = nt.substr(open + typeName.size() + 1,
+                               closeParen - open - typeName.size() - 1);
+            ctorLine = i;
+            break;
+        }
+        if (ctorLine == std::string::npos || params.empty()) return;
+        // The parameter names (the declared types carry through to the
+        // record's parens verbatim).
+        std::vector<std::string> paramNames;
+        {
+            std::size_t at = 0;
+            while (at < params.size()) {
+                std::size_t comma = params.find(", ", at);
+                std::string one = params.substr(
+                    at, comma == std::string::npos
+                            ? std::string::npos
+                            : comma - at);
+                std::size_t sp = one.rfind(' ');
+                if (sp == std::string::npos) return;
+                paramNames.push_back(one.substr(sp + 1));
+                if (comma == std::string::npos) break;
+                at = comma + 2;
+            }
+        }
+        // The ctor body check: each line is `<P>k__BackingField = P;`
+        // or the base call, through the closing brace.
+        std::size_t k = ctorLine + 1;
+        if (k >= lines.size() ||
+            lines[k].find("{") == std::string::npos)
+            return;
+        ++k;
+        std::vector<bool> stored(paramNames.size(), false);
+        for (std::size_t bi = k; bi < lines.size(); ++bi) {
+            const std::string& line = lines[bi];
+            std::string t = line;
+            while (!t.empty() && (t.back() == '\n' || t.back() == '\r'))
+                t.pop_back();
+            std::string nt = t;
+            while (!nt.empty() && nt.front() == '\t') nt.erase(0, 1);
+            if (nt.empty()) continue;
+            bool isStore = false;
+            for (std::size_t pi = 0; pi < paramNames.size(); ++pi) {
+                if (nt == "<" + paramNames[pi] + ">k__BackingField = " +
+                              paramNames[pi] + ";") {
+                    stored[pi] = true;
+                    isStore = true;
+                    break;
+                }
+            }
+            if (isStore) continue;
+            if (nt == "base..ctor();") continue;
+            break;  // any other statement disqualifies the primary ctor
+        }
+        for (bool b : stored)
+            if (!b) return;
+        // The strip: the ctor block (the signature through the closing
+        // brace + the trailing blank), the implied auto-properties.
+        std::size_t end = ctorLine;
+        int depth = 0;
+        bool sawBrace = false;
+        while (end < lines.size()) {
+            for (char c : lines[end]) {
+                if (c == '{') {
+                    depth++;
+                    sawBrace = true;
+                } else if (c == '}') {
+                    depth--;
+                }
+            }
+            ++end;
+            if (sawBrace && depth <= 0) break;
+        }
+        if (end < lines.size()) {
+            std::string t = lines[end];
+            while (!t.empty() && (t.back() == '\n' || t.back() == '\r'))
+                t.pop_back();
+            std::string nt = t;
+            while (!nt.empty() && nt.front() == '\t') nt.erase(0, 1);
+            if (nt.empty()) ++end;
+        }
+        std::vector<std::string> kept;
+        kept.reserve(lines.size());
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            if (i >= ctorLine && i < end) continue;
+            std::string t = lines[i];
+            while (!t.empty() && (t.back() == '\n' || t.back() == '\r'))
+                t.pop_back();
+            std::string nt = t;
+            while (!nt.empty() && nt.front() == '\t') nt.erase(0, 1);
+            bool impliedProperty = false;
+            if (nt.find("{ get; set; }") != std::string::npos) {
+                for (const std::string& pn : paramNames) {
+                    if (nt.find(" " + pn + " { get; set; }") !=
+                        std::string::npos) {
+                        impliedProperty = true;
+                        break;
+                    }
+                }
+            }
+            if (impliedProperty) continue;
+            kept.push_back(lines[i]);
+        }
+        std::string rebuilt;
+        rebuilt.reserve(result.size());
+        for (const auto& line : kept) rebuilt += line;
+        // The declaration gains the parameter list.
+        std::string declNeedle = " record " + typeName + "\n";
+        std::size_t at = rebuilt.find(declNeedle);
+        if (at == std::string::npos) return;
+        rebuilt.insert(at + 8 + typeName.size(), "(" + params + ")");
+        // The empty record body collapses to the semicolon form (the C#
+        // renders `record X(...);` when no member remains).
+        std::size_t emptyBody = rebuilt.find("\n{\n}\n", at);
+        if (emptyBody != std::string::npos)
+            rebuilt.replace(emptyBody, 5, ";\n");
+        result = std::move(rebuilt);
+    }
+
     // The signature line names one of the compiler-synthesized record
     // members (or the copy constructor).
     static bool IsRecordMemberSignature(const std::string& line,
                                         const std::string& typeName) {
         static const char* kNames[] = {
             "EqualityContract", "ToString(", "PrintMembers(",
-            "GetHashCode(", "Equals(", "op_Equality(", "op_Inequality(",
+            "GetHashCode(", "Equals(", "operator ==(", "operator !=(",
             "<Clone>$(", "Deconstruct("};
         std::string trimmed = line;
         while (!trimmed.empty() &&
