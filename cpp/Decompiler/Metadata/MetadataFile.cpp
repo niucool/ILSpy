@@ -103,6 +103,15 @@ struct MetadataFile::Impl {
     mutable std::vector<MetadataFile::ExportedTypeInfo>
         exportedTypesCache_;
     mutable bool exportedTypesBuilt_ = false;
+    // The CustomAttribute table's parent-key index, built once: the
+    // per-entity attribute lookup scans the whole table per call (the
+    // attribute-heavy modules call it per entity and per render pass),
+    // so the rows group by their Parent column's coded value up front
+    // and the per-token query becomes a hash lookup.
+    mutable std::unordered_map<std::uint32_t,
+                               std::vector<std::uint32_t>>
+        customAttributeIndex_;
+    mutable bool customAttributeIndexBuilt_ = false;
 
     // The GetTypeDefinition / GetTypeForwarder reverse-lookup caches (the
     // C# LazyInit dictionaries, built on first use -- the port is
@@ -1908,18 +1917,28 @@ std::vector<std::uint32_t> MetadataFile::GetCustomAttributeTokens(
         default: return result;
     }
     std::uint32_t want = (row << 5) | tag;
-    try {
-        std::uint32_t count = static_cast<std::uint32_t>(
-            impl_->db->CustomAttribute.size());
-        for (std::uint32_t i = 0; i < count; i++) {
-            if (impl_->db->CustomAttribute.get_value<std::uint32_t>(i, 0)
-                != want)
-                continue;
-            result.push_back((0x0Cu << 24) | ((i + 1) & 0x00FFFFFFu));
+    if (!impl_->customAttributeIndexBuilt_) {
+        try {
+            std::uint32_t count = static_cast<std::uint32_t>(
+                impl_->db->CustomAttribute.size());
+            impl_->customAttributeIndex_.reserve(count);
+            for (std::uint32_t i = 0; i < count; i++) {
+                std::uint32_t parent =
+                    impl_->db->CustomAttribute.get_value<std::uint32_t>(
+                        i, 0);
+                impl_->customAttributeIndex_[parent].push_back(
+                    (0x0Cu << 24) | ((i + 1) & 0x00FFFFFFu));
+            }
+        } catch (const std::exception&) {
+            // Best-effort: a malformed table walk degrades to the rows
+            // read before the failure (the rows already indexed stay
+            // queryable).
         }
-    } catch (const std::exception&) {
-        // Best-effort: a malformed table walk degrades to the partial result.
+        impl_->customAttributeIndexBuilt_ = true;
     }
+    auto it = impl_->customAttributeIndex_.find(want);
+    if (it != impl_->customAttributeIndex_.end())
+        return it->second;
     return result;
 }
 
