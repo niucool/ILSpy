@@ -3839,6 +3839,42 @@ the generic CloneBody + the accept-side gates. THE STATE: the
 committed tree (the pin, the dnlib 80,185, the gotos 1,263, the
 SwitchDetection 13/13).
 
+## THE SWITCH EXPRESSION -- LANDED (the family's first slice green)
+
+THE RENDER (committed 490546e36): TryEmitSwitchExpression in the
+ILAstToCSharp's emitter class -- when every section of a
+SwitchInstruction resolves to a value arm (a direct leave's value,
+a throw, or a thunk target's single `tmp = expr; return tmp` fold)
+and no section falls through (plan.defaultFallsToExit false), emit
+`return <value> switch { <label> => <arm>, ... };` with the labeled
+arms ascending and the `_` default last. THE GATES: dnlib 80,185 ->
+**79,855** (-330!), net10 99,578 -> **99,476** (-102), cui 2,354
+unchanged, the connid pin, the SwitchDetection 13/13. THE DEBUG
+NOTES: the render-hook edit was lost to a failed script's early
+assert (the function never called -- ZERO [SE] traces); the probe
+insertion mangled the single-line ifs AGAIN (the same
+unconditional-return trap -- every call bailed at the first line;
+the [SE5] pointer data showed identical pointers, the tell). THE
+ARM ORDER: the default `_` LAST, the others ascending (the
+stable_sort by (isDefault, sortKey)) -- the section order from the
+SwitchDetection puts the complement first.
+
+THE GENERIC-CLONE RE-LAND (attempted, reverted AGAIN): dnlib
+improved (-3 more, 79,852) but **net10 REGRESSED +12 (99,488)**
+-- the newly-unblocked net10 chains render forms the oracle does
+not (the accept-side verdicts diverge there). REVERTED per the
+discipline (a5535534d); the C#-parity clone stays gated behind the
+accept-side gate work (the UseCSharpSwitch verdicts for those
+chains -- the oracle keeps them as if-chains; the port accepts --
+a gate-by-gate comparison against the reference UseCSharpSwitch on
+THE NET10 chains is the follow-up).
+
+THE REMAINING GAPS (the switch family): the `ref reader` arm
+argument (the oracle `ref reader`, the port `reader` -- the
+ref-argument rendering family, pre-existing); the TryGetCpuArch
+enum chains (the accept-side + the enum member names in the case
+labels -- the queued bonus).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
