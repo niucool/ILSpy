@@ -733,6 +733,61 @@ TEST(UsingTransform, InlinesSinglePredecessorLabelBlock) {
 // two statements, the guard `if (a) goto L (else Nop)` as the block's
 // FINAL, then `[b = alt, branch L]` in the next block -- folds to the
 // composed NullCoalescingInstruction: `b = (expr ?? alt);`.
+// The null-propagation fold's seed (the [NP3]-probed shape): the store
+// and the inline-leave guard skip; the use block's leave-call renders the
+// value expression with the null-conditional.
+TEST(UsingTransform, FoldsNullPropagation)
+{
+    auto obj = MakeParam("obj", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto dup = std::make_shared<ILVariable>();
+    dup->Kind = VariableKind::Local;
+    dup->Type = std::make_shared<KnownType>(KnownTypeCode::Object);
+    dup->Name = "dup_0";
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Variables.push_back(obj);
+    fn->Variables.push_back(dup);
+
+    // block0: [dup_0 = obj] + the final `if (dup_0 == 0) leave null` --
+    // the INLINE null return as the true arm, no false arm.
+    // block1: the fall-through use -- `leave Find(dup_0, obj)` with the
+    // dup's own load as the call's receiver.
+    auto* b1raw = new Block();
+    {
+        auto call = std::make_unique<Call>("Ns.T::Find");
+        call->Arguments.push_back(std::make_unique<LdLoc>(dup));
+        call->Arguments.push_back(std::make_unique<LdLoc>(obj));
+        call->IsInstanceCall = true;
+        b1raw->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                                std::move(call)));
+    }
+
+    auto b0 = std::make_unique<Block>();
+    b0->Add(std::make_unique<StLoc>(dup, std::make_unique<LdLoc>(obj)));
+    b0->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(dup),
+                               std::make_unique<LdcI4>(0),
+                               ComparisonKind::Equality),
+        std::make_unique<Leave>(fn->Body.get(),
+                                std::make_unique<LdNull>()),
+        nullptr));
+
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::unique_ptr<Block>(b1raw));
+
+    std::string text = ILAstToCSharp(*fn, "object", "M", "object obj");
+    EXPECT_NE(text.find("return obj?.Find(obj);"), std::string::npos)
+        << "the use renders the value expression with the "
+           "null-conditional: "
+        << text;
+    EXPECT_EQ(text.find("dup_0"), std::string::npos)
+        << "the guard's store drops: " << text;
+    EXPECT_EQ(text.find("if ("), std::string::npos)
+        << "the null guard folds away: " << text;
+}
+
 TEST(UsingTransform, FoldsNullCoalescingChain)
 {
     auto obj = MakeParam("obj", std::make_shared<KnownType>(KnownTypeCode::Object));
