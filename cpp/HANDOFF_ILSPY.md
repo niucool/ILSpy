@@ -3779,6 +3779,35 @@ correctly-braced named-gate probe on THE DETERMINISTIC binary ->
 the big chains' actual reject; then the fix -> the legitimate
 switch formation (the corpus payoff).
 
+## THE FLIPPER ISOLATED -- THE USESGOTO WRAP (an MSAN-class UB)
+
+THE WRAP-BY-WRAP BISECT (the deterministic binary, one wrap at a
+time): multiBig alone -- no flip (1263); + noInnerBlocks/noDefault/
+ifShorter -- no flip; **+ the usesGoto wrap (an inert `{ if
+(getenv) fprintf; return false; }` block around the return) -- THE
+FLIP (1217)**; the singleCondition/breakOffset wraps -- not the
+flipper. THE MECHANISM: the wrap changes the compilation of the
+UseCSharpSwitch/SwitchUsesGoto path (the inlining/layout of the
+locals) and the verdict flips -- **A LAYOUT-SENSITIVE UNINIT/STALE
+READ INSIDE THE SwitchUsesGoto CALL CHAIN** (GetBreakTargets /
+FindContinue / MatchContinue / the dominator machinery). ASAN+UBSAN
+CLEAN there (named only the render-side downcasts, all fixed) --
+the remaining UB is the MSAN class (uninitialized/stale stack or
+field reads). valgrind NOT INSTALLED on this box; the MSAN build
+needs everything instrumented (the vcpkg libs too -- painful).
+
+THE NEXT SESSION'S HUNTS (in order of cost): (1) the code-read of
+ComputeDominators (Decompiler/FlowAnalysis/Dominance.cpp) -- the
+post-order walk starts at entryPoint and follows Successors; any
+node the walk misses keeps its PostOrderNumber UNINITIALIZED (an
+int member, no default init) -- if a nested/restructured edge
+structure leaves a node unvisited-but-read (FindCommonDominator /
+the LoopContext's post-order sort), that is the flip; (2) the
+valgrind install (the apt needs the user) or the MSAN attempt; (3)
+the manual local-by-local read of SwitchUsesGoto's callees. THE
+STATE: the pristine tree (the pin, the dnlib 80,185, the gotos
+1,263, the SwitchDetection 13/13) -- all deterministic.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
