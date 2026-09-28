@@ -3546,6 +3546,25 @@ dnlib 80,185 verified); the dump tool standing. THE CAMPAIGN'S
 STANDING RESULTS: dnlib 80,185 / net10 99,578 / cui 2,354 / the
 perf 2.45s & 147MB.
 
+## THE EARLY-RETURN FOLD -- THE RENDER PATH FOUND (the fix site named)
+
+THE BINARY-DECISION PROBE (the [FILL] bK address + the [EB-F]
+correlation): the fill's bK renders ONLY BEFORE the fill (6x,
+map=0 -- earlier methods' renders at the recycled address) and
+NEVER AFTER (the post-fill map=1 [EB-F]s are DIFFERENT blocks) --
+**THE GUARD IF RENDERS AS A STATEMENT VIA EmitStatement's
+IfInstruction CASE (ILAstToCSharp.cpp ~line 3200: the `if (cond)` +
+`EmitBraced(*iff.TrueInst)` form), NEVER THROUGH THE bK's FINAL
+SECTION** -- the final-section custom arm can never intercept it.
+THE FIX (the next session, mechanical): the interception moves to
+the EmitStatement's IfInstruction case -- at its entry,
+`earlyReturnFolds_.find(&iff)` -- the hit renders the
+EmitEarlyReturnIf (the target block's statements + its leave) and
+returns; the fold's analysis (the [FILL] machinery, verified
+filling) stays as-is. THE STATE: the fold + the probes reverted
+(the pin ebf9b6e9..., the dnlib 80,185); all campaign results
+standing.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
