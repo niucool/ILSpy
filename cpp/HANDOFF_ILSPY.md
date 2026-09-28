@@ -3089,6 +3089,29 @@ construction if taken): GetCustomAttributeTokens (106k calls), the
 string interning. THE STANDING GATES: the pin ebf9b6e9..., hello 3,
 the sweep 15, the dnlib output identical.
 
+## THE VERIFICATION PROTOCOL RESULTS (the cache confirmed)
+
+(1) THE RELEASE 3-RUN TIMING (the cached build): 9.06 / 9.01 / 8.99
+(~9.02s avg vs the 9.58s pre-cache baseline -- the ~0.5s = the
+double-visit fix + the cache + the band; the cache's release-wall
+share is modest, the churn-removal note stands).
+(2) THE RE-PROFILE (the cached -pg build, /tmp/ilspy-cmp/pg_flat2.txt):
+GetExportedTypes COLLAPSED off the top (only the single-row
+GetExportedType remains at 2.34%). THE NEW #1:
+**GetCustomAttributeTokens -- 16.41% self, 106,105 calls** (the
+user's predicted next). #2: _init 11.72% (the link/startup artifact,
+not actionable). #3: OrdinalIgnoreCaseStringComparer::Equals --
+7.03%, 1.57M calls. Then the long tail: the ChildCount/GetChild
+virtuals (69M/9.5M calls), TypeNameStr (31.7M), MakeTypeRef (2.7M),
+the control-flow vector appends.
+(3) THE NEXT SLICE: the GetCustomAttributeTokens cache (106k calls --
+the per-call CustomAttribute table scan; the same once-per-file
+treatment if the per-token form is derivable, or a per-entity memo
+keyed by the parent token). THE ONE AFTER: the string-compare
+interning (1.57M OrdinalIgnoreCase Equals -- the TypeNameStr/
+MakeTypeRef chains build fresh strings per call; a per-module
+string arena or the interned type-name table).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
