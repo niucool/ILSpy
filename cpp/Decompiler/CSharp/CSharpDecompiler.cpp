@@ -2438,11 +2438,24 @@ public:
                               const std::string& typeName,
                               std::string& out) {
         bool isRecord = false;
+        bool isRecordStruct = false;
+        bool hasPrintMembers = false;
+        bool hasOpEquality = false;
         for (const auto& m : file.GetMethods(typeToken)) {
             if (m.Name == "<Clone>$") {
                 isRecord = true;
                 break;
             }
+            if (m.Name == "PrintMembers") hasPrintMembers = true;
+            if (m.Name == "op_Equality") hasOpEquality = true;
+        }
+        if (!isRecord && hasPrintMembers && hasOpEquality) {
+            // The record STRUCT (the C# 10 form): no <Clone>$ (the struct
+            // copies by value) -- the composite marker is PrintMembers
+            // plus the synthesized equality operator (a user type with
+            // either alone never carries both).
+            isRecord = true;
+            isRecordStruct = true;
         }
         if (!isRecord) return;
         // The line pass: strip the synthesized member blocks (the
@@ -2540,11 +2553,21 @@ public:
         for (const auto& line : kept) result += line;
         // The declaration rewrite: `class X` -> `record X` and the
         // implied IEquatable<X> interface drops.
-        std::string classNeedle = " class " + typeName;
-        std::size_t at = result.find(classNeedle);
-        if (at != std::string::npos)
-            result.replace(at, classNeedle.size(),
-                           " record " + typeName);
+        if (isRecordStruct) {
+            // The record struct: `struct X` -> `record struct X` (the
+            // readonly variant keeps its modifier -- the `readonly`
+            // prefix precedes the struct keyword in the flat render).
+            std::string structNeedle = " struct " + typeName;
+            std::size_t at = result.find(structNeedle);
+            if (at != std::string::npos)
+                result.insert(at + 1, "record ");
+        } else {
+            std::string classNeedle = " class " + typeName;
+            std::size_t at = result.find(classNeedle);
+            if (at != std::string::npos)
+                result.replace(at, classNeedle.size(),
+                               " record " + typeName);
+        }
         std::string equatableNeedle = ", IEquatable<" + typeName + ">";
         std::size_t eq = result.find(equatableNeedle);
         if (eq != std::string::npos) {
@@ -2715,11 +2738,20 @@ private:
         std::string rebuilt;
         rebuilt.reserve(result.size());
         for (const auto& line : kept) rebuilt += line;
-        // The declaration gains the parameter list.
+        // The declaration gains the parameter list (the record struct's
+        // declaration carries the `struct` keyword between `record` and
+        // the name).
         std::string declNeedle = " record " + typeName + "\n";
         std::size_t at = rebuilt.find(declNeedle);
+        size_t nameOffset = 8;
+        if (at == std::string::npos) {
+            declNeedle = " record struct " + typeName + "\n";
+            at = rebuilt.find(declNeedle);
+            nameOffset = 15;
+        }
         if (at == std::string::npos) return;
-        rebuilt.insert(at + 8 + typeName.size(), "(" + params + ")");
+        rebuilt.insert(at + nameOffset + typeName.size(),
+                      "(" + params + ")");
         // The empty record body collapses to the semicolon form (the C#
         // renders `record X(...);` when no member remains).
         std::size_t emptyBody = rebuilt.find("\n{\n}\n", at);
