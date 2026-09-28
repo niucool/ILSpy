@@ -34,6 +34,7 @@
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
@@ -631,6 +632,63 @@ TEST(SwitchDetection, RunReconstructsElseArmedIfChainAsSwitch) {
     EXPECT_TRUE(foundA);
     EXPECT_TRUE(foundB);
     EXPECT_TRUE(foundDef);
+    fx.fn->CheckInvariant(ILPhase::Normal);
+}
+
+// A statement-carrying case body (the restructured chain's inverted root:
+// `if (V == 0) { <the case body> } else { <the rest of the chain> }`) becomes
+// a section whose body is the Block itself, not a Branch. The switch forms
+// only when CloneBody can deep-clone such a Block body.
+TEST(SwitchDetection, RunClonesBlockBodiedSection) {
+    IfChainSwitch fx;
+    fx.fn = std::make_unique<ILFunction>();
+    fx.fn->Body = std::make_unique<BlockContainer>();
+    fx.fn->Body->Parent = fx.fn.get();
+    fx.fn->Body->ChildIndex = 0;
+    fx.V = MakeTypedLocal("V", KnownTypeCode::Int32);
+    fx.fn->Variables.push_back(fx.V);
+    for (int i = 0; i < 3; ++i) fx.fn->Body->AddBlock(std::make_unique<Block>());
+    fx.root = fx.fn->Body->Blocks[0].get();
+    fx.def = fx.fn->Body->Blocks[1].get();
+    fx.caseB = fx.fn->Body->Blocks[2].get();
+    // innermost: Block { br def }
+    auto innermost = std::make_unique<Block>();
+    innermost->SetFinal(std::make_unique<Branch>(fx.def));
+    // the else chain: if (V == 1) br caseB else Block { br def }
+    auto chain = std::make_unique<Block>();
+    chain->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(fx.V), std::make_unique<LdcI4>(1),
+                               ComparisonKind::Equality),
+        std::make_unique<Branch>(fx.caseB), std::move(innermost)));
+    // the {0} case body: a statement-carrying Block (not a branch target)
+    auto caseBody = std::make_unique<Block>();
+    caseBody->Add(std::make_unique<Nop>());
+    // root: if (V == 0) Block { nop } else Block { ... }
+    fx.root->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(fx.V), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Equality),
+        std::move(caseBody), std::move(chain)));
+    fx.def->SetFinal(std::make_unique<Leave>(fx.fn->Body.get()));
+    fx.caseB->SetFinal(std::make_unique<Leave>(fx.fn->Body.get()));
+    RecomputeIncomingEdgeCounts(*fx.fn);
+
+    ILTransformContext ctx;
+    SwitchDetection().Run(*fx.fn, ctx);
+
+    ASSERT_TRUE(fx.root->FinalInstruction);
+    ASSERT_EQ(fx.root->FinalInstruction->Op, OpCode::SwitchInstruction);
+    auto* sw = static_cast<SwitchInstruction*>(fx.root->FinalInstruction.get());
+    ASSERT_EQ(sw->Sections.size(), 3u);
+    // The {0} section's body is a cloned Block carrying the statement.
+    bool foundBlockBody = false;
+    for (const auto& s : sw->Sections) {
+        if (auto* b = dynamic_cast<const Block*>(s->Body.get())) {
+            foundBlockBody = true;
+            EXPECT_EQ(b->Instructions.size(), 1u);
+            EXPECT_TRUE(s->Labels.Contains(0));
+        }
+    }
+    EXPECT_TRUE(foundBlockBody);
     fx.fn->CheckInvariant(ILPhase::Normal);
 }
 

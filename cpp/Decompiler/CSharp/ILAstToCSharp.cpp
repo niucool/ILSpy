@@ -2126,8 +2126,8 @@ private:
         // body block.
         std::unordered_map<const Block*, const Branch*> okBranchFor;
         for (const auto& section : sw.Sections)
-            okBranchFor[static_cast<const Branch*>(section->Body.get())->TargetBlock] =
-                static_cast<const Branch*>(section->Body.get());
+            if (auto* b = dynamic_cast<const Branch*>(section->Body.get()))
+                okBranchFor[b->TargetBlock] = b;
         bool foreign = false;
         std::function<void(const ILInstruction*)> check = [&](const ILInstruction* inst) {
             if (!inst || foreign) return;
@@ -2145,7 +2145,8 @@ private:
         plan.exit = exit;
         inlinedBodyBlocks_.insert(tgtSet.begin(), tgtSet.end());
         for (const auto& section : sw.Sections)
-            breakBranches_.insert(static_cast<const Branch*>(section->Body.get()));
+            if (auto* b = dynamic_cast<const Branch*>(section->Body.get()))
+                breakBranches_.insert(b);
         for (const Branch* fb : bodyExit) breakBranches_.insert(fb);
         // Any `br exit` inside a body block's instruction list becomes
         // `break` too.
@@ -2763,8 +2764,10 @@ private:
             // regions (the branch target's block as the true arm, the
             // fall-through block as the else arm).
             auto fold = labelRegionFolds_.find(
-                static_cast<const IfInstruction*>(
-                    block.FinalInstruction.get()));
+                block.FinalInstruction->Op == OpCode::IfInstruction
+                    ? static_cast<const IfInstruction*>(
+                          block.FinalInstruction.get())
+                    : nullptr);
             if (fold != labelRegionFolds_.end() &&
                 fold->first != nullptr) {
                 Block* r1 = fold->second.first;
