@@ -4598,6 +4598,45 @@ private:
                     case BinaryNumericOperator::ShiftRight: op = ">>"; break;
                     default: op = "?"; break;
                 }
+                // The bitwise context's mask constants render as the
+                // hexadecimal forms (the C#'s type-context literal
+                // rendering): a high-bit mask (the negative LdcI4 over the
+                // unsigned range) renders as the unsigned hex with the u
+                // suffix; the 2^k-1 masks (the value one below a power of
+                // two, five or more hex digits) render as the hex form --
+                // including int.MaxValue, whose named form the bitwise
+                // context does not take.
+                if (op[0] == '&' || op[0] == '|' || op[0] == '^') {
+                    auto maskHex = [](const ILInstruction* operand)
+                        -> std::string {
+                        if (operand == nullptr ||
+                            operand->Op != OpCode::LdcI4)
+                            return std::string();
+                        std::int32_t v =
+                            static_cast<const LdcI4*>(operand)->Value;
+                        if (v < 0) {
+                            char buf[16];
+                            std::snprintf(buf, sizeof buf, "0x%Xu",
+                                          static_cast<std::uint32_t>(v));
+                            return std::string(buf);
+                        }
+                        std::uint32_t u = static_cast<std::uint32_t>(v);
+                        if (u > 0xFFFF && (u & (u + 1)) == 0) {
+                            char buf[16];
+                            std::snprintf(buf, sizeof buf, "0x%X", u);
+                            return std::string(buf);
+                        }
+                        return std::string();
+                    };
+                    std::string leftMask = maskHex(bin.Left.get());
+                    std::string rightMask = maskHex(bin.Right.get());
+                    if (!rightMask.empty())
+                        return "(" + Expr(*bin.Left) + " " + op + " " +
+                               rightMask + ")";
+                    if (!leftMask.empty())
+                        return "(" + leftMask + " " + op + " " +
+                               Expr(*bin.Right) + ")";
+                }
                 std::string text = (bin.Left ? Expr(*bin.Left) : "(default)") + " " + op + " " +
                                    (bin.Right ? Expr(*bin.Right) : "(default)");
                 if (bin.CheckForOverflow) text = "checked(" + text + ")";
