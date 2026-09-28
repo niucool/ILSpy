@@ -3565,6 +3565,28 @@ filling) stays as-is. THE STATE: the fold + the probes reverted
 (the pin ebf9b6e9..., the dnlib 80,185); all campaign results
 standing.
 
+## THE EARLY-RETURN FOLD -- IT FIRES (52 sites) BUT THE FAMILY IS THE SWITCH
+
+THE MECHANICAL FIX (verified): the analysis gate relaxed (the
+else-armed guards -- the restructured chains -- the raw no-else
+shape is rare) + the interception at the EmitStatement's
+IfInstruction case (the true arm = the inlined target return + the
+else renders after). **THE FOLD FIRES: the gotos 1,263 -> 1,211
+(52 sites!)** -- but the ORACLE'S FORM IS THE SWITCH: the
+machine-range chains (TryGetCpuArch et al.) are switch-on-enum
+shapes (the C# SwitchDetection restructures the chains into
+`switch (machine) { case Machine.I386: ... }`) -- the fold's
+if/else tree regresses the oracle-diff (+44: 80,185 -> 80,229).
+REVERTED per the RED discipline. THE FAMILY DECOMPOSITION (the
+52 sites): (a) the SWITCH-ON-ENUM sites (the TryGetCpuArch style:
+the constant-comparison chains over one local -- the switch
+synthesis needed); (b) the true if/else sites (the fold correct --
+unmeasured, masked by (a)). THE NEXT SLICE: the switch synthesis
+(the C#'s SwitchDetection over the constant-comparison chains --
+the enum-case table form) -- the fold lands AFTER (restricted to
+the non-switch sites) or COMPOSED with it. THE STATE: reverted
+clean (the pin, the dnlib 80,185); the campaign results standing.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
