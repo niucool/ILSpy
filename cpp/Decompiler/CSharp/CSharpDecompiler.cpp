@@ -2422,6 +2422,161 @@ private:
     }
 };
 
+// The record re-synthesis (the C# RecordDecompiler): a type carrying the
+// compiler-generated record members (the <Clone>$ marker) renders as a
+// record declaration -- the synthesized members (the EqualityContract,
+// the ToString/PrintMembers/Equals/GetHashCode family, the operators,
+// the <Clone>$, the copy constructor) drop and the declaration swaps
+// `class` for `record` (the IEquatable<T> interface the record syntax
+// implies). The pass works over the assembled type text (the render is
+// deterministic); the detection is metadata-level (the <Clone>$ method
+// row).
+class RecordSynthesizer {
+public:
+    static void TrySynthesize(const Metadata::MetadataFile& file,
+                              std::uint32_t typeToken,
+                              const std::string& typeName,
+                              std::string& out) {
+        bool isRecord = false;
+        for (const auto& m : file.GetMethods(typeToken)) {
+            if (m.Name == "<Clone>$") {
+                isRecord = true;
+                break;
+            }
+        }
+        if (!isRecord) return;
+        // The line pass: strip the synthesized member blocks (the
+        // attribute-led groups whose signature names a record member)
+        // and rewrite the declaration.
+        std::vector<std::string> lines;
+        {
+            std::size_t start = 0;
+            while (start < out.size()) {
+                std::size_t nl = out.find("\n", start);
+                std::size_t end =
+                    nl == std::string::npos ? out.size() : nl + 1;
+                lines.emplace_back(out.substr(start, end - start));
+                start = end;
+            }
+        }
+        std::vector<std::string> kept;
+        kept.reserve(lines.size());
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            std::string trimmed = lines[i];
+            while (!trimmed.empty() &&
+                   (trimmed.back() == '\n' || trimmed.back() == '\r'))
+                trimmed.pop_back();
+            std::string noTab = trimmed;
+            while (!noTab.empty() && (noTab.front() == '\t'))
+                noTab.erase(0, 1);
+            bool isAttr =
+                noTab == "[CompilerGenerated]" ||
+                noTab == "[PreserveBaseOverrides]";
+            if (!isAttr) {
+                kept.push_back(lines[i]);
+                continue;
+            }
+            // The attribute-led block: collect the attributes then the
+            // signature; a record member strips through its brace-matched
+            // body.
+            std::size_t j = i;
+            while (j < lines.size()) {
+                std::string t = lines[j];
+                while (!t.empty() && (t.back() == '\n' || t.back() == '\r'))
+                    t.pop_back();
+                std::string nt = t;
+                while (!nt.empty() && nt.front() == '\t') nt.erase(0, 1);
+                if (nt == "[CompilerGenerated]" ||
+                    nt == "[PreserveBaseOverrides]") {
+                    ++j;
+                    continue;
+                }
+                break;
+            }
+            if (j < lines.size() && IsRecordMemberSignature(
+                                        lines[j], typeName)) {
+                // Strip: the attributes + the signature + the body.
+                std::size_t k = j;
+                int depth = 0;
+                bool sawBrace = false;
+                while (k < lines.size()) {
+                    std::string t = lines[k];
+                    while (!t.empty() &&
+                           (t.back() == '\n' || t.back() == '\r'))
+                        t.pop_back();
+                    for (char c : t) {
+                        if (c == '{') {
+                            depth++;
+                            sawBrace = true;
+                        } else if (c == '}') {
+                            depth--;
+                        }
+                    }
+                    ++k;
+                    if (sawBrace && depth <= 0) break;
+                    if (!sawBrace &&
+                        (t.empty() ||
+                         (!t.empty() && t.back() == ';' && depth == 0)))
+                        break;
+                }
+                // The trailing blank separator drops with the member.
+                if (k < lines.size()) {
+                    std::string t = lines[k];
+                    while (!t.empty() && (t.back() == '\n' ||
+                                          t.back() == '\r'))
+                        t.pop_back();
+                    std::string nt = t;
+                    while (!nt.empty() && nt.front() == '\t')
+                        nt.erase(0, 1);
+                    if (nt.empty()) ++k;
+                }
+                i = k - 1;
+                continue;
+            }
+            kept.push_back(lines[i]);
+        }
+        std::string result;
+        result.reserve(out.size());
+        for (const auto& line : kept) result += line;
+        // The declaration rewrite: `class X` -> `record X` and the
+        // implied IEquatable<X> interface drops.
+        std::string classNeedle = " class " + typeName;
+        std::size_t at = result.find(classNeedle);
+        if (at != std::string::npos)
+            result.replace(at, classNeedle.size(),
+                           " record " + typeName);
+        std::string equatableNeedle = ", IEquatable<" + typeName + ">";
+        std::size_t eq = result.find(equatableNeedle);
+        if (eq != std::string::npos)
+            result.erase(eq, equatableNeedle.size());
+        out = std::move(result);
+    }
+
+private:
+    // The signature line names one of the compiler-synthesized record
+    // members (or the copy constructor).
+    static bool IsRecordMemberSignature(const std::string& line,
+                                        const std::string& typeName) {
+        static const char* kNames[] = {
+            "EqualityContract", "ToString(", "PrintMembers(",
+            "GetHashCode(", "Equals(", "op_Equality(", "op_Inequality(",
+            "<Clone>$(", "Deconstruct("};
+        std::string trimmed = line;
+        while (!trimmed.empty() &&
+               (trimmed.back() == '\n' || trimmed.back() == '\r'))
+            trimmed.pop_back();
+        while (!trimmed.empty() && trimmed.front() == '\t')
+            trimmed.erase(0, 1);
+        for (const char* name : kNames)
+            if (trimmed.find(name) != std::string::npos) return true;
+        // The copy constructor: `protected TypeName(TypeName original)`.
+        if (trimmed.find("protected " + typeName + "(" +
+                         typeName + " original)") != std::string::npos)
+            return true;
+        return false;
+    }
+};
+
 bool DecompileTypeToStringBody(
     const Metadata::MetadataFile& file, TS::DecompilerTypeSystem* typeSystem,
     TS::MetadataModule& module,
@@ -4124,8 +4279,10 @@ bool DecompileTypeToStringBody(
     // the field declarations when every ctor agrees) -- after the member
     // indent, so the ctor signature carries its tab-led member form and
     // the body statements the two-tab statement form.
-    if (rendered && !typeName.empty())
+    if (rendered && !typeName.empty()) {
         FieldInitializerPromoter::TryPromote(file, typeToken, typeName, out);
+        RecordSynthesizer::TrySynthesize(file, typeToken, typeName, out);
+    }
     return rendered;
 }
 
