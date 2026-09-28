@@ -3129,6 +3129,23 @@ build fresh strings per call; a per-module type-name table (the
 interned strings keyed once) collapses both the allocations and the
 1.57M OrdinalIgnoreCase compares.
 
+## THE STRING-INTERNING SLICE -- MEASURED, REVERTED (the -pg skew rule)
+
+THE MEMO (the ResolveTokenToString (token,owner)-keyed cache): the
+output byte-identical, the wall UNCHANGED (2.45s vs 2.46s), the RSS
++6MB (the cache's own cost) -- REVERTED per the no-win discipline.
+THE LESSON (now twice-confirmed): the -pg build WITHOUT -O2 profiles
+unoptimized code -- TypeNameStr's 31.5M calls and the OrdinalIgnoreCase
+1.57M Equals are the UNOPTIMIZED-build inflation (the inlined
+fast paths vanish, the outlined helpers dominate); the release build's
+owners are NOT those functions. THE STANDING PERF STATE: dnlib 2.45s
+release (3.7x the pre-index speed, ~4x the oracle), 147MB RSS (2.6x
+less than the oracle). THE NEXT PERF PROBE (if the thread resumes):
+the RELEASE-side sampling (the poor-man's profiler: a gdb/pstack
+sampling loop over the release binary, or the perf events if the
+env ever allows) -- the -pg flat profile is DISQUALIFIED as a
+release-wall oracle (recorded).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
