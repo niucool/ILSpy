@@ -104,20 +104,28 @@ bool SwitchAnalysis::AnalyzeBlockImpl(Block* block, Util::LongSet inputValues, b
     // `if (cond) br X` case-test shape.
     Util::LongSet trueValues;
     auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get());
-    if (iff && !iff->FalseInst && AnalyzeCondition(iff->Condition.get(), trueValues)) {
+    if (iff && AnalyzeCondition(iff->Condition.get(), trueValues)) {
         if (!(tailOnly || block->Instructions.empty()))
             return false;
         trueValues = trueValues.IntersectWith(inputValues);
         if (trueValues.SetEquals(inputValues) || trueValues.IsEmpty())
             return false;
         // The if's true arm: a Branch to a block (recurse) or another exit
-        // instruction (create a section for it).
-        auto* trueBr = dynamic_cast<Branch*>(iff->TrueInst.get());
-        Block* trueBlock = (trueBr && trueBr->TargetBlock) ? trueBr->TargetBlock : nullptr;
-        if (trueBlock && AnalyzeBlockImpl(trueBlock, trueValues)) {
-            InnerBlocks.push_back(trueBlock);
+        // instruction (create a section for it). A nested Block (the
+        // restructured chain's range split) descends as the next level, or,
+        // when it carries statements, is the case body itself.
+        if (auto* trueNested = dynamic_cast<Block*>(iff->TrueInst.get())) {
+            if (!AnalyzeNestedBlock(trueNested, trueValues))
+                AddSection(trueValues, trueNested);
         } else {
-            AddSection(trueValues, iff->TrueInst.get());
+            auto* trueBr = dynamic_cast<Branch*>(iff->TrueInst.get());
+            Block* trueBlock =
+                (trueBr && trueBr->TargetBlock) ? trueBr->TargetBlock : nullptr;
+            if (trueBlock && AnalyzeBlockImpl(trueBlock, trueValues)) {
+                InnerBlocks.push_back(trueBlock);
+            } else {
+                AddSection(trueValues, iff->TrueInst.get());
+            }
         }
     } else if (block->FinalInstruction && block->FinalInstruction->Op == OpCode::SwitchInstruction) {
         auto* switchInst = static_cast<SwitchInstruction*>(block->FinalInstruction.get());
@@ -137,6 +145,21 @@ bool SwitchAnalysis::AnalyzeBlockImpl(Block* block, Util::LongSet inputValues, b
     // fall-through is implicit here, so synthesize a Branch to the next block
     // as the section body and keep it alive in ownedBodies_.
     auto remainingValues = inputValues.ExceptWith(trueValues);
+    // The false arm: when the if carries an else, the chain continues (or
+    // terminates) in the FalseInst -- a nested Block wrapping the next
+    // level, or (innermost) a lone Branch to the default block. Only the
+    // else-less if uses the container fall-through (the C#'s flat model).
+    if (iff->FalseInst) {
+        if (auto* falseNested = dynamic_cast<Block*>(iff->FalseInst.get())) {
+            if (!AnalyzeNestedBlock(falseNested, std::move(remainingValues))) {
+                // The else-block carries statements: it is the case body.
+                AddSection(std::move(remainingValues), falseNested);
+            }
+            return true;
+        }
+        AddSection(std::move(remainingValues), iff->FalseInst.get());
+        return true;
+    }
     Block* falseBlock = NextBlockInContainer(block);
     if (falseBlock && AnalyzeBlockImpl(falseBlock, remainingValues)) {
         InnerBlocks.push_back(falseBlock);
@@ -150,6 +173,57 @@ bool SwitchAnalysis::AnalyzeBlockImpl(Block* block, Util::LongSet inputValues, b
         // container, so the block does not form a switch.
         return false;
     }
+    return true;
+}
+
+bool SwitchAnalysis::AnalyzeNestedBlock(Block* block, Util::LongSet inputValues) {
+    // A nested Block wrapping the chain's continuation: the wrapper carries
+    // no instructions; its final is either the next level's if or (at the
+    // chain's end) a lone Branch to the default block. A block with
+    // statements is a case body, not a chain level -- the caller falls back
+    // to making it a section.
+    if (!block->Instructions.empty()) return false;
+    if (!block->FinalInstruction) return false;
+    if (auto* br = dynamic_cast<Branch*>(block->FinalInstruction.get())) {
+        InnerBlocks.push_back(block);
+        AddSection(std::move(inputValues), br);
+        return true;
+    }
+    auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get());
+    if (!iff) return false;
+    InnerBlocks.push_back(block);
+    Util::LongSet trueValues;
+    if (!AnalyzeCondition(iff->Condition.get(), trueValues)) return false;
+    trueValues = trueValues.IntersectWith(inputValues);
+    if (trueValues.SetEquals(inputValues) || trueValues.IsEmpty()) return false;
+    auto remainingValues = inputValues.ExceptWith(trueValues);
+    if (auto* trueNested = dynamic_cast<Block*>(iff->TrueInst.get())) {
+        if (!AnalyzeNestedBlock(trueNested, std::move(trueValues)))
+            AddSection(std::move(trueValues), trueNested);
+    } else {
+        auto* trueBr = dynamic_cast<Branch*>(iff->TrueInst.get());
+        Block* trueBlock =
+            (trueBr && trueBr->TargetBlock) ? trueBr->TargetBlock : nullptr;
+        if (trueBlock && AnalyzeBlockImpl(trueBlock, trueValues)) {
+            InnerBlocks.push_back(trueBlock);
+        } else {
+            AddSection(std::move(trueValues), iff->TrueInst.get());
+        }
+    }
+    if (iff->FalseInst) {
+        if (auto* falseNested = dynamic_cast<Block*>(iff->FalseInst.get())) {
+            if (!AnalyzeNestedBlock(falseNested, std::move(remainingValues))) {
+                AddSection(std::move(remainingValues), falseNested);
+            }
+            return true;
+        }
+        AddSection(std::move(remainingValues), iff->FalseInst.get());
+        return true;
+    }
+    // The else-less nested if: the chain continues via the branch true arm
+    // only; treat the wrapper's parent fall-through as unreachable (a
+    // nested wrapper has no container sibling to fall through to).
+    AddSection(std::move(remainingValues), iff->TrueInst.get());
     return true;
 }
 

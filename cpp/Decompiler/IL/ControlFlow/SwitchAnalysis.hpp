@@ -105,6 +105,12 @@ private:
 
     bool AnalyzeBlockImpl(Block* block, Util::LongSet inputValues, bool tailOnly = false);
     bool AnalyzeSwitch(SwitchInstruction* inst, const Util::LongSet& inputValues);
+    // The else-armed chain levels: the CFS restructured trees nest the chain
+    // continuation in the if's false arm as a Block (instead of the C#'s
+    // fall-through sibling block). AnalyzeNestedBlock descends into such a
+    // wrapper: its final is the next level's if, or (innermost) a lone
+    // Branch to the default block.
+    bool AnalyzeNestedBlock(Block* block, Util::LongSet inputValues);
     void AddSection(Util::LongSet values, ILInstruction* inst);
     bool MatchSwitchVar(ILInstruction* inst);
     bool MatchSwitchVar(ILInstruction* inst, long long& sub);

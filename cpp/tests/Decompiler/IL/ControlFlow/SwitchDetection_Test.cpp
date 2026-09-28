@@ -568,6 +568,72 @@ TEST(SwitchDetection, RunReconstructsIfChainAsSwitch) {
     fx.fn->CheckInvariant(ILPhase::Normal);
 }
 
+// The else-armed if-chain (the nested-Block false arms, the shape the
+// transformed pipeline produces when the CFS restructures the chains):
+// `if (V == 0) br caseA else Block { if (V == 1) br caseB else Block {
+// br def } }`. The chain is reconstructed as a SwitchInstruction just like
+// the fall-through form: the false arms' nested blocks are the chain's
+// continuation, the innermost lone branch the default section.
+TEST(SwitchDetection, RunReconstructsElseArmedIfChainAsSwitch) {
+    IfChainSwitch fx;
+    fx.fn = std::make_unique<ILFunction>();
+    fx.fn->Body = std::make_unique<BlockContainer>();
+    fx.fn->Body->Parent = fx.fn.get();
+    fx.fn->Body->ChildIndex = 0;
+    fx.V = MakeTypedLocal("V", KnownTypeCode::Int32);
+    fx.fn->Variables.push_back(fx.V);
+    for (int i = 0; i < 4; ++i) fx.fn->Body->AddBlock(std::make_unique<Block>());
+    fx.root = fx.fn->Body->Blocks[0].get();
+    fx.def = fx.fn->Body->Blocks[1].get();
+    fx.caseA = fx.fn->Body->Blocks[2].get();
+    fx.caseB = fx.fn->Body->Blocks[3].get();
+    // innermost: Block { br def }
+    auto innermost = std::make_unique<Block>();
+    innermost->SetFinal(std::make_unique<Branch>(fx.def));
+    // inner: if (V == 1) br caseB else Block { br def }
+    auto inner = std::make_unique<Block>();
+    inner->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(fx.V), std::make_unique<LdcI4>(1),
+                               ComparisonKind::Equality),
+        std::make_unique<Branch>(fx.caseB), std::move(innermost)));
+    // root: if (V == 0) br caseA else Block { ... }
+    fx.root->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(fx.V), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Equality),
+        std::make_unique<Branch>(fx.caseA), std::move(inner)));
+    fx.def->SetFinal(std::make_unique<Leave>(fx.fn->Body.get()));
+    fx.caseA->SetFinal(std::make_unique<Leave>(fx.fn->Body.get()));
+    fx.caseB->SetFinal(std::make_unique<Leave>(fx.fn->Body.get()));
+    RecomputeIncomingEdgeCounts(*fx.fn);
+
+    ILTransformContext ctx;
+    SwitchDetection().Run(*fx.fn, ctx);
+
+    ASSERT_TRUE(fx.root->FinalInstruction);
+    ASSERT_EQ(fx.root->FinalInstruction->Op, OpCode::SwitchInstruction);
+    auto* sw = static_cast<SwitchInstruction*>(fx.root->FinalInstruction.get());
+    ASSERT_EQ(sw->Sections.size(), 3u);
+    bool foundA = false, foundB = false, foundDef = false;
+    for (const auto& s : sw->Sections) {
+        Block* t = SectionTarget(*s);
+        if (t == fx.caseA) {
+            foundA = true;
+            EXPECT_TRUE(s->Labels.Contains(0));
+        } else if (t == fx.caseB) {
+            foundB = true;
+            EXPECT_TRUE(s->Labels.Contains(1));
+        } else if (t == fx.def) {
+            foundDef = true;
+            EXPECT_FALSE(s->Labels.Contains(0));
+            EXPECT_FALSE(s->Labels.Contains(1));
+        }
+    }
+    EXPECT_TRUE(foundA);
+    EXPECT_TRUE(foundB);
+    EXPECT_TRUE(foundDef);
+    fx.fn->CheckInvariant(ILPhase::Normal);
+}
+
 // When SparseIntegerSwitch is off, Run is a no-op: the if-chain stays as ifs.
 TEST(SwitchDetection, RunIsNoOpWhenSparseIntegerSwitchOff) {
     auto fx = BuildIfChainSwitch();
