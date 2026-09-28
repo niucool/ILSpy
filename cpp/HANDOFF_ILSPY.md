@@ -3293,6 +3293,28 @@ IPattern` renders ✓); (3) the `record struct` variants. THE QUEUE:
 the label-merged regions, the switch case-range fall-through, the
 remaining ~123 ?. shapes, the static-ctor field initializers.
 
+## THE POSITIONAL RECORDS -- LANDED (the fixture-first slice)
+
+THE CORPUS GAP: no positional record existed in any gated corpus --
+the slice built its own fixture first
+(/home/jim/ilspy-test-fixtures/positional_record/, the net8.0
+`Positional.dll`: `record Point(int X, int Y)` + `record
+Named(string Name, int Value) { Extra }`). THE FIX (committed): the
+TrySynthesizePositional helper -- the primary ctor detection (the
+body = the parameter backing-field stores + the base call), the
+parameter list into the declaration's parens, the implied
+auto-properties and the ctor drop, the empty body -> the semicolon
+form. PLUS the two parameterless-record fixes the work exposed: the
+operators' SYMBOL names (the rendered `operator ==` vs the metadata
+op_Equality -- the strip was missing them) and the sole-interface
+IEquatable drop. THE MEASUREMENT: the fixture renders the exact
+oracle forms; the net10 oracle-diff 102,016 -> 99,610 (the operator
++ interface fixes across the 163 records). THE GATES: dnlib 80,187
+/ cui 2,354 / pin / hello 3 / sweep 15 all unchanged. THE QUEUE:
+the record struct variants, the label-merged regions, the switch
+case-range fall-through, the remaining ~123 ?. shapes, the
+static-ctor field initializers.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
