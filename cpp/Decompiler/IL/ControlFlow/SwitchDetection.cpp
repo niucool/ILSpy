@@ -132,6 +132,9 @@ std::unique_ptr<ILInstruction> CloneBody(ILInstruction* body) {
         }
         return std::make_unique<Leave>(leave->TargetContainer, std::move(valueClone));
     }
+    // A restructured chain's case body can be a whole Block (the inverted
+    // root's statement-carrying arm): the generic deep clone covers it.
+    if (body->Op == OpCode::Block) return body->Clone();
     return nullptr;  // uncloneable body kind
 }
 

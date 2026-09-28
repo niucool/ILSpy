@@ -3747,6 +3747,38 @@ THE CLEAN GATE DATA (from the [SD5] run, the only trustworthy one): noInnerBlock
 
 THE NEXT SESSION: (1) the ASAN/UBSAN build -- the configure needs -DCMAKE_PREFIX_PATH=<build>/linux-ninja/vcpkg_installed/x64-linux (the VCPKG_INSTALLED_DIR alone did not satisfy find_package; the vcpkg checkout at /home/jim/source/vcpkg has no installed dir, the main build's vcpkg_installed is the source); the sanitizer NAMES the UB; (2) the suspect list for a manual read: the LongSet moves (AnalyzeArm's trueValues/remainingValues moves -- a moved-from LongSet read later?), the Section bodies' Branch pointers (the ownedBodies_ lifetime), the graph node Visited flags' initialization. THE STATE: the pristine tree (the pin, the dnlib 80,185, gotos 1,263, the SwitchDetection 12/12).
 
+## THE UB FIXED -- THE SWITCH RENDER DETERMINISTIC (the corpus formation still gated)
+
+THE SANITIZER HUNT (the ASAN+UBSAN build at /tmp/asan-build -- the
+configure needs BOTH -DCMAKE_TOOLCHAIN_FILE=vcpkg AND
+-DCMAKE_PREFIX_PATH=<main-build>/vcpkg_installed/x64-linux; the
+/tmp quota: freed by removing /tmp/pg-build + the probe_cs* dirs):
+UBSAN NAMED the UB: ILAstToCSharp.cpp 2129/2130/2148 -- the
+inline-plan machinery static_cast<Branch*>(section->Body.get())
+and read TargetBlock from the WRONG OBJECT (the restructured
+chains' Block-bodied sections) -- the garbage reads = the layout
+flip. THE FIXES (committed): (1) the three casts -> dynamic_cast +
+the conservative skip (the non-Branch sections bail the inline
+plan); (2) the label-region fold's find key checked for the opcode
+first (the every-final downcast); (3) CloneBody's Block case via
+the generic ILInstruction::Clone deep clone (the Block-bodied
+sections clone; the new test RunClonesBlockBodiedSection RED ->
+GREEN). THE PRE-EXISTING (not mine, separate bugs, out of scope):
+DelegateConstruction.cpp:62 (LdVirtFtn downcast), IType.hpp:984
+(NullabilityAnnotatedType member access), the winmd_reader
+misaligned loads (the vendored lib's by-design packed reads).
+
+THE STATE: deterministic on both builds (the main + the ASAN):
+gotos 1,263, dnlib 80,185, the pin, the SwitchDetection 13/13.
+THE CLEAN [SD6] DATA (the deterministic binary): 104 use=1 (the
+ContainsILSwitch chains -- the real switch opcodes); the big
+restructured chains (sections=18 inner=16 etc.) STILL use=0 -- the
+TRUE gate unknown (the [SD5] "passes all gates" data came from the
+flipped binaries -- VOID). THE NEXT SESSION'S FIRST MOVE: the
+correctly-braced named-gate probe on THE DETERMINISTIC binary ->
+the big chains' actual reject; then the fix -> the legitimate
+switch formation (the corpus payoff).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
