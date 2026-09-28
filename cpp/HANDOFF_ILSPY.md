@@ -3112,6 +3112,23 @@ interning (1.57M OrdinalIgnoreCase Equals -- the TypeNameStr/
 MakeTypeRef chains build fresh strings per call; a per-module
 string arena or the interned type-name table).
 
+## THE CUSTOM-ATTRIBUTE INDEX -- THE BIG WIN (committed)
+
+THE FIX: the CustomAttribute table grouped by the Parent column's
+coded value in a once-per-file hash index (the per-entity lookup
+was a FULL TABLE SCAN per call -- 106,105 calls on dnlib). THE
+MEASUREMENT: the wall 9.02s -> **2.46s (3.7x, 3 runs consistent)**
+-- THE PORT IS NOW ~4x FASTER THAN THE ORACLE (~9.9s); the output
+byte-identical; the RSS 146MB (the index +6MB). THE GATES: the pin,
+hello 3, the sweep 15 -- all standing. THE RE-PROFILE (the new top):
+the string chains (OrdinalIgnoreCase Equals 8.51% / 1.57M,
+TypeNameStr 4.26% / 31.5M, MakeTypeRef 4.26% / 2.7M) and the
+ChildCount/GetChild virtuals (11.5M/9.2M). THE NEXT SLICE (the
+user's queued #2): the string interning -- TypeNameStr/MakeTypeRef
+build fresh strings per call; a per-module type-name table (the
+interned strings keyed once) collapses both the allocations and the
+1.57M OrdinalIgnoreCase compares.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
