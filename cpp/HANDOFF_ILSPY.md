@@ -3273,6 +3273,26 @@ re-synthesis (the net10 evidence), the label-merged regions, the
 switch case-range fall-through, the remaining ~123 ?. shapes, the
 STATIC ctor's field-initializer promotion (the .cctor arm).
 
+## THE RECORD RE-SYNTHESIS -- LANDED
+
+THE FIX (committed): the RecordSynthesizer in CSharpDecompiler.cpp
+-- the metadata detection (the <Clone>$ method row), the line-based
+strip (the attribute-led blocks whose signatures name a record
+member: EqualityContract/ToString/PrintMembers/Equals/GetHashCode/
+op_Equality/op_Inequality/<Clone>$/Deconstruct/the copy ctor), the
+brace-matched body strip, and the declaration rewrite (`class` ->
+`record`, the IEquatable<T> drop). THE MEASUREMENT: the net10
+oracle-diff 113,758 -> 102,016 (-11,742 lines, the 163 records);
+the dnlib 80,187 / cui 2,354 / pin / hello 3 / sweep 15 all
+UNCHANGED (no records in those corpora). THE REMAINING RECORD GAP
+(the next slices): (1) the POSITIONAL records (the record's
+positional parameters -- `record X(int A)` -- the ctor-param
+synthesis from the primary ctor + the property set); (2) the
+`sealed`/`abstract` modifier fidelity (the `abstract record
+IPattern` renders ✓); (3) the `record struct` variants. THE QUEUE:
+the label-merged regions, the switch case-range fall-through, the
+remaining ~123 ?. shapes, the static-ctor field initializers.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
