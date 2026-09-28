@@ -3414,6 +3414,31 @@ generalization (the multi-block regions, the arbitrary distances,
 the loop back-edges -- the 1,263 remaining gotos vs the oracle's
 21), the switch case-range, the remaining ~123 ?. shapes.
 
+## THE LABEL-REGION GENERALIZATION -- THE CRITICAL FINDING (reverted)
+
+THE ATTEMPT (the early-return fold: the goto-to-a-single-return-
+block at any distance -- `if (cond) { return X; }`, the raw
+condition, no else): implemented with the shared-target relaxation
+(the guard inlines the return; the target stays labeled for the
+other paths), but ZERO SITES FIRED. THE [LR] COUNTERS' ANSWER: the
+guards' targets in the render's tree have finalOp 15 (IfInstruction)
+and 13 (Branch) -- NOT the Leave (14) the raw dump shows. **THE
+--ilast-all DUMP IS THE RAW READER TREE; THE RENDER WORKS ON THE
+POST-TRANSFORM TREE** -- the pipeline restructured the raw
+goto-to-return shapes into the structured regions, and the remaining
+1,263 gotos' guards target the TRANSFORMED shapes (the continuation
+blocks with if/branch finals). THE NEXT SESSION: (1) add the
+TRANSFORMED-tree dump (an env-gated dump of fn_ at the
+ILAstToCSharp entry -- one fprintf of the tree -- the
+--ilast-all-style text form of the POST-pipeline ILAst); (2) re-
+design the folds against THAT dump (the raw-dump designs cannot
+match -- the dump-first rule needs the RIGHT tree). THE FAMILY
+DECOMPOSITION (from the render sampling): the dispose chains (the
+using/finally synthesis -- the C# DisposeAnalysis), the loop
+back-edges, the structured-region remnants -- each needs its own
+transformed-tree shape first. THE GATES ALL STANDING (the pin, the
+dnlib 80,185).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
