@@ -2945,6 +2945,103 @@ private:
         return result;
     }
 
+    // The switch expression: when every section reduces to a value arm (a
+    // direct leave's value, a throw, or a thunk target's single
+    // `tmp = expr; return tmp` fold) and no section falls through to the
+    // after-switch code, render the C# 8 form
+    // `return <value> switch { <label> => <arm>, ... };` -- the shape the
+    // Roslyn switch-expressions compile to (the IL switch with the case
+    // bodies each a single value construction).
+    bool TryEmitSwitchExpression(const SwitchInstruction& sw,
+                                 const SwitchInlinePlan& plan, int indent) {
+        if (plan.defaultFallsToExit) return false;
+        struct Arm {
+            std::string label;
+            std::string expr;
+            long long sortKey = 0;
+            bool isDefault = false;
+        };
+        std::vector<Arm> arms;
+        std::size_t thunkIdx = 0;
+        for (std::size_t k = 0; k < sw.Sections.size(); ++k) {
+            const auto& section = sw.Sections[k];
+            if (!section || !section->Body) return false;
+            std::string arm;
+            if (auto it = plan.directLeaveSections.find(k);
+                it != plan.directLeaveSections.end()) {
+                if (!it->second->Value) return false;  // a void leave: no value arm
+                arm = Expr(*it->second->Value);
+            } else if (auto it2 = plan.directThrowSections.find(k);
+                       it2 != plan.directThrowSections.end()) {
+                auto* th = dynamic_cast<const Throw*>(it2->second);
+                if (!th || !th->Argument) return false;
+                arm = "throw " + Expr(*th->Argument);
+            } else {
+                if (thunkIdx >= plan.targets.size()) return false;
+                const Block* target = plan.targets[thunkIdx++];
+                if (!target) return false;
+                if (target->Instructions.size() == 1 && target->FinalInstruction) {
+                    // `tmp = expr; return tmp` folds to the expr arm.
+                    auto* st = dynamic_cast<const StLoc*>(
+                        target->Instructions[0].get());
+                    auto* lv = dynamic_cast<const Leave*>(
+                        target->FinalInstruction.get());
+                    auto* ld = lv && lv->Value
+                                   ? dynamic_cast<const LdLoc*>(lv->Value.get())
+                                   : nullptr;
+                    if (!st || !lv || !ld || st->Variable != ld->Variable)
+                        return false;
+                    arm = Expr(*st->Value);
+                } else if (target->Instructions.empty() && target->FinalInstruction &&
+                           target->FinalInstruction->Op == OpCode::Throw) {
+                    auto* th = static_cast<const Throw*>(
+                        target->FinalInstruction.get());
+                    if (!th->Argument) return false;
+                     (void)0;
+                    arm = "throw " + Expr(*th->Argument);
+                } else {
+                    return false;
+                }
+            }
+            // The label: the huge-complement section (the switch's default
+            // domain) renders `_`; a single interval renders `X` (a point)
+            // or `X..Y`; anything else keeps the statement form.
+            std::string label;
+            const auto& ivs = section->Labels.Intervals();
+            bool isDefault = false;
+            if (section->Labels.Count() > 100) {
+                label = "_";
+                isDefault = true;
+            } else if (ivs.size() == 1) {
+                if (ivs[0].Start == ivs[0].InclusiveEnd())
+                    label = std::to_string(ivs[0].Start);
+                else
+                    label = std::to_string(ivs[0].Start) + ".." +
+                            std::to_string(ivs[0].InclusiveEnd());
+            } else {
+                return false;
+            }
+            long long sortKey =
+                ivs.empty() ? 0 : static_cast<long long>(ivs[0].Start);
+            arms.push_back(
+                Arm{std::move(label), std::move(arm), sortKey, isDefault});
+        }
+        // The arms in source order: the labeled cases ascending, the `_`
+        // default last (the C# emits the sections sorted by label value
+        // with the default arm at the end).
+        std::stable_sort(arms.begin(), arms.end(), [](const Arm& a, const Arm& b) {
+            if (a.isDefault != b.isDefault) return b.isDefault;
+            return a.sortKey < b.sortKey;
+        });
+        Line(indent,
+             "return " + (sw.Value ? Expr(*sw.Value) : std::string()) + " switch");
+        Line(indent, "{");
+        for (const auto& a : arms)
+            Line(indent + 1, a.label + " => " + a.expr + ", ");
+        Line(indent, "};");
+        return true;
+    }
+
     void EmitStatement(const ILInstruction& inst, int indent) {
         if (DepthAtLimit()) {
             Line(indent, "/* max rendering depth: possible ILAst cycle */");
@@ -3168,6 +3265,8 @@ private:
                     if (pit != switchInlinePlans_.end() && pit->second.eligible)
                         plan = &pit->second;
                 }
+                if (plan && TryEmitSwitchExpression(sw, *plan, indent))
+                    break;
                 Line(indent, "switch (" + (sw.Value ? Expr(*sw.Value) : std::string("(default)")) + ")");
                 Line(indent, "{");
                 for (std::size_t k = 0; k < sw.Sections.size(); ++k) {
