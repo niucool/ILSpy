@@ -3951,6 +3951,137 @@ de4dot.code.dll's proxyCreatorType chain; the read: which gate the
 reference rejects through. THE STATE: unchanged (the C# tree
 clean, the cpp tree at the committed handoff).
 
+## THE UPSTREAM SYNC INVENTORY (fdc4c7c16..7434b07f8, the port plan)
+
+THE DELTA: 454 commits total, **192 non-merge in
+ICSharpCode.Decompiler/** (178 files, +10,262/-5,631). THE ZERO-
+CONFLICT FINDING: **SwitchDetection.cs / SwitchAnalysis.cs are
+UNCHANGED upstream** -- our switch family (the else-arm recursion,
+the switch-expression render) has no conflicts. The other conflict
+surfaces are listed in class D.
+
+### CLASS A -- the correctness fixes (the port-worthy behaviors)
+
+**A1. The render/output fixes (small, isolated, the immediate
+diff wins)**: d99de57d3 (#4180 the negated-negative-constant
+parenthesization, InsertParenthesesVisitor +18); the negated
+floating-point special constants family (b209b3972, 59361d9de,
+b3035687f); 0879e35c0 (the HEX form of negative ldc.i4/i8 --
+COMPOSES with our AND-context hex family); 5be91a123 (the
+ref-conditional assignment target parens); 0ef295947 (lambda
+parameter attributes parens); 3e45005eb (params/default values on
+lambda parameter lists); 85399bfc0 (`new (string,int)[]` space);
+e243786e2 (the init-only marker position); e7bed9c78.
+
+**A2. The TransformExpressionTrees campaign (~20 commits)**:
+d0987646b (null call arguments), 193e493cc (lifted result types),
+7df4072d1 (built-in comparisons with value types), 03410c445,
+bfa3f1898, 9947ad528, 486cdcd4b, e3c445b9a, 34cceea42, 14aecbaf1,
+154d60e2a, 49b7257e9, d9b502aa2, a3b06e79f, 80b901ee2, d797d4abb,
+5c26625df -- the ILAst-shape normalization series (the same ILAst
+as an equivalent lambda etc.).
+
+**A3. The span/array-initializer campaign (the C# 14 span
+conversions)**: 6de4c1d5b, 3a3a79e88, 7112ef952, 2100d53fa,
+5347b03ad, d1b8cd646, 63900bb38 (the spec alignment), cd181b3f0,
+67ef99999.
+
+**A4. The switch-expression/type-inference family (COMPOSES with
+our synthesis)**: 1a784e2fa (throw switch-expr typeHint),
+ca24b8f3a (#3683 the switch-expression casts for the best common
+type), b54a073ef (BestCommonType object/dynamic), 01895fbab
+(tuple element names), 979f5c9f0 (nullability merging).
+
+**A5. The property/backing-field family (see D1)**: 8b183ab20
+(metadata property backing fields), 3da129632 (#3624 the C# 14
+field keyword), 1e8ec6068, bdf48e5a4, e423cfb9c, 46d21ed9a,
+ebb8697e1 -- the PatternStatementTransform campaign.
+
+**A6. The record family (see D2)**: 0e6b9a7e2 (#3568 the record
+member order off the generated members), 22ce4c442 (required
+members on record copy constructors).
+
+**A7. The misc correctness fixes (per-commit corpus triage)**:
+c760a1d62 (redundant comp != 0), e678321e0 (enum vs 0 cast),
+63d03f1b4 (#1142 enum out-of-range constants), fb9ff796d
+(stackalloc char->short), f007528af (#3008 the display-class
+scope), e0aee1baa (#3714 the innermost capture scope), 8ab3f93f5
+(#3704 dynamic static type), 124d9116d (the v?. assertion),
+af941339c (#2054 type-forwarder cycles), 85198271c (#3320 pre-
+Roslyn dynamic await), 4e2f28109 (#2823 async catch offsets),
+99613cc79/26f2a2236 (the LINQ type arguments), 30c6b70d9 (#3352
+query expressions), b1e516387 (#3894 lambda parameter typing),
+e16a5523e (#3729), aab8b9b28 (#3853 scoped locals), 6be02a2e0
+(#3962 nested designations), d04cc4aed (#3453/#3208), 2efd871ab
+(#3451), 2d2e9c15e (instance-dependent ctor assignments),
+13c6cc674, 60c08fcb7, 4a2afbb72, 3a8e7dee2, f2b80df14, e530b1c1b,
+d730ec0a2, 7bf102f3b, 9238c3b63, fe9f6db3e, c1ac674b0,
+9b3e33472, bdb4ffaa5, feee85dc6, e475e2644, 73c3283ef,
+c6aa9510b, a9c4f6c6b, 997d2f2db, 3160485f1, e85d2ba00, 4a0918cbe,
+c9010c712, fb780dcbc, 259e51382, 21189fdc9.
+
+**A8. The diagnostics/infra fixes**: fff1b2f09 (XML doc ref-pack
+missing runtime files), 453028f50 (the decompilation-error member
+context), 3cb27b0dc (#3510).
+
+### CLASS B -- the refactors (port after, or skip)
+The StackType.O split (3f76bd97f, c4e181505, 38f54008d, 790f4f60e,
+4b040c1bb -- a major invariant churn; LAST or skip); InferType
+everywhere (5526400b1, cf4dba701); the qualifier/lookup sharing
+(16196731d, 10e76635e, a7f2a98f8); the ResolveResult
+reorganization (471c3b177, 69e281329, 48fcf0313, e63d30606); the
+invariant relaxations (60efa214b, 530a214b2, **8fa1fd76d -- the
+SwitchInstruction throw-arm invariant, RELATES to our
+switch-expression throw arms**); 76f67f3fc, 40b90766a, 5670bfc13,
+5d9cdce94, 4bc51e608, 437d8fe2d, cd212ea05, 9aa3911f3, 2115bd902,
+26145d6f1; the nullable-enables; d22d4301e (the nested conditionals
+-> if-else -- a behavior-adjacent refactor).
+
+### CLASS C -- the test/infra-only (skip/defer)
+The test-only commits, the NuGet bumps, the style, f226592bd
+(CLAUDE->AGENTS), the 262 commits outside ICSharpCode.Decompiler
+(the ILSpy UI + the WPF/project-export campaign #3315 -- the
+ILSpyX/UI surface, out of the cpp port's current scope).
+
+### CLASS D -- the conflicts (the conscious resolutions)
+**D1. 8b183ab20 vs our PropertyAndEventBackingFieldLookup**: the
+same feature -- upstream relaxes the CompilerGeneratedAttribute
+requirement (the naming pattern + the accessor shape suffice).
+RESOLUTION: port the relaxation into our lookup (a gate change,
+not a rewrite).
+**D2. 0e6b9a7e2 + 22ce4c442 vs our RecordSynthesizer**: the member
+ORDER (read off Equals/GetHashCode/PrintMembers/copy-ctor) and
+the required members on the copy constructor. RESOLUTION: compare
+the upstream's order-read vs ours; port the ordering rule + the
+required-members decoration.
+**D3. The PatternStatementTransform campaign (A5)**: extends the
+file our FieldInitializerPass work touched (different regions --
+the backing-field/semi-auto paths); port per-commit with the
+corpus gates.
+**D4. e674361fb + d31bea210 (the indexer argument writing)**: the
+argument-emission machinery -- moderate overlap with our render;
+port carefully.
+**D5. NO conflicts in SwitchDetection/SwitchAnalysis** (zero
+upstream changes).
+
+### THE PORTING ORDER
+1. A1 (the quick render fixes -- the immediate diff wins)
+2. A8 (the diagnostics)
+3. A7 (the misc -- per-commit corpus triage)
+4. A4 (the switch-expression family -- composes with our synthesis)
+5. D1+D2+A5+A6 (the conscious merges)
+6. A2 (the expression-tree campaign)
+7. A3 (the span campaign)
+8. B (the refactors; the StackType split last or skipped)
+
+THE GUARDS PER SLICE: the connid pin (NOTE: the upstream fixes may
+LEGITIMATELY change the oracle's renders -- re-generate the
+reference renders per changed surface, the pin re-based only with
+a fresh-oracle diff comparison, the D58-style discipline), the
+corpus parity (dnlib/net10/cui), the sweep, hello, the bennu
+canary, AND the new upstream tests where the port carries them
+(the ILPretty/Correctness fixtures: Issue4180, Issue3568, ...).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
