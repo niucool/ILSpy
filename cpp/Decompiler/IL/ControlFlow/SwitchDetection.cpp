@@ -132,10 +132,13 @@ std::unique_ptr<ILInstruction> CloneBody(ILInstruction* body) {
         }
         return std::make_unique<Leave>(leave->TargetContainer, std::move(valueClone));
     }
-    // A restructured chain's case body can be a whole Block (the inverted
-    // root's statement-carrying arm): the generic deep clone covers it.
-    if (body->Op == OpCode::Block) return body->Clone();
-    return nullptr;  // uncloneable body kind
+    // The C# clones every section body with ILInstruction.Clone(); the
+    // generic deep clone covers all kinds (the restructured chains'
+    // statement-carrying Blocks, the Leave values beyond the simple
+    // loads, ...). The Branch/Leave special cases above keep the
+    // TargetOffset/HasOffset fields the generic clone also copies, so
+    // this is the single fallback.
+    return body->Clone();
 }
 
 // MaxValuesPerSection: the C# threshold (100) above which a section is treated
