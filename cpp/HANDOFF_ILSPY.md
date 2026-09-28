@@ -3505,6 +3505,28 @@ right long-term shape (the C# renders ONCE and records
 simultaneously). THE STATE: the probes reverted; the dump tool
 standing; all gates green.
 
+## THE EARLY-RETURN FOLD -- THE RENDER-PATH UNKNOWN (the state)
+
+THE DECISIVE RUN: the fold fills IN-EMITTER for TryGetCpuArch (the
+[EP] count print after EmitMethod: folds=1 -- the analysis and the
+render in the SAME emitter instance, the map non-empty) -- yet the
+render arm NEVER ENTERS (zero [ER] rendering prints; the output
+unchanged). THE ELIMINATED SUSPECTS: the multi-render theory (the
+[EP] same-address lines were DIFFERENT methods -- the heap
+recycling; each render decodes its OWN fn -- the snapshot is
+already the case); the two-emitter split (the fill and the render
+verified in one emitter). THE REMAINING UNKNOWN: the guard's
+block's RENDER PATH -- the final-section custom arm provably never
+runs for it (the lookup by the same iff pointer cannot miss) --
+suspect a SECOND emit path for the nested-container blocks (the
+guard sits inside the outer if's true arm) or the final section's
+earlier conditions (dropFinal / the exited flag). THE NEXT
+SESSION'S ONE PROBE: print at the EmitBlock ENTRY (the block
+address + the final op + the map size) for the TryGetCpuArch (the
+whole-module's FIRST method -- the [EP] line 1) -- the render path
+localizes in one run. THE STATE: the fold reverted (inert); the
+dump tool + all gates standing.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
