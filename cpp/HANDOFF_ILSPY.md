@@ -3907,6 +3907,29 @@ clone re-land still reverted -- gated on this comparison); the pin,
 the dnlib 79,855, the net10 99,476, the cui 2,354, the
 SwitchDetection 13/13.
 
+## THE REFERENCE-SIDE PROBE -- THE DEFINITIVE PATH SCOPED
+
+THE ORACLE BINARY: /home/jim/.dotnet/tools/ilspycmd (the reference
+ilspycmd). ITS OUTPUT = the final render only (the if-form for the
+et-chains) -- the gate traces are NOT exposed by the CLI. THE
+DEFINITIVE PATH (the next session): the C# SOURCE IS THE REPO
+(../ICSharpCode.Decompiler/IL/ControlFlow/SwitchDetection.cs) --
+build the reference ILSpyCmd with a debug print in UseCSharpSwitch
+(the gate name at each return) -- `dotnet build` the
+ICSharpCode.ILSpyCmd project, run it on the et-chain method (the
+de4dot.code.dll's proxyCreatorType chain), read WHICH gate the
+reference rejects through. THEN mirror the gate in the port.
+
+THE ANALYSIS SO FAR (the et-chain ne-family): the port's flow
+(flow=2 case=3 ug=0 bb=nil -> accept) vs the reference's reject;
+the leave-edge parity confirmed; the remaining suspect surface =
+the analysis-level differences (the flat-vs-nested inner sets,
+the fall-through section construction, the caseNodes membership
+`target->Parent == currentContainer_` -- the nested
+instruction-Blocks are not container members). THE STATE: the
+committed tree unchanged (the pin, the dnlib 79,855, the net10
+99,476, the SwitchDetection 13/13).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
