@@ -3458,6 +3458,29 @@ chains, the loop back-edges). NOTE: the dump's methodName is the
 SHORT form (the accessors render as "get"/"set") -- correlate with
 the render by the content (the ILAst text), not the header.
 
+## THE EARLY-RETURN FOLD -- THE TWO-EMITTER FINDING (reverted, inert)
+
+THE DEBUG ([ER] counters, both sides): the ANALYSIS FILLS (one
+fold: `filled for iff=...`) but the RENDER LOOKUP NEVER MATCHES
+(zero `[ER] rendering` prints; the final-section probes show the
+fired iff's address hitting with map=0 BOTH before AND after the
+fill). THE STRUCTURE: TWO ILAstToCSharp CALL SITES in
+CSharpDecompiler.cpp -- the output render (line ~395,
+DecompileMethodToString) and the helper (line ~127, used by the
+accessor-body PROBES at 3394/3653 -- the null-sink recording
+scopes) -- plus the required-imports two-pass machinery; the
+address-recycling across the freed method trees makes the pointer
+forensics ambiguous. THE NEXT SESSION'S CLEAN PROBE: instrument
+the ILAstToCSharp FREE FUNCTION's entry (the emitter `this` + the
+fn pointer + the methodName) -- correlate the fill's emitter with
+the emitter whose output lands in the file -- one run, unambiguous.
+THE LIKELY FIX: the analysis runs per-emitter (deterministic on
+the same fn) so the output emitter should fill its own map -- find
+why it does not (the probe emitters' fills polluting? the output
+emitter's analysis failing on a subtle difference?). THE STATE:
+the fold reverted (inert); the transformed-dump tool STANDING
+(committed); all gates green.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
