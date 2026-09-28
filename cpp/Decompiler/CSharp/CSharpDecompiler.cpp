@@ -17,6 +17,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include <cstdio>
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/CSharpDecompiler.hpp"
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
@@ -2244,6 +2245,183 @@ std::string DocumentationCommentLines(const std::string& documentation) {
     return out;
 }
 
+// The field-initializer promotion (the C#
+// TransformFieldAndConstructorInitializers): the ctor's leading field
+// stores before the base-ctor call are the compiler-lowered field
+// initializers -- the stores move back to the field declarations. The
+// detection scans the RAW ctor ILAst (the stobj shapes are
+// pre-transform); the expression texts come from the rendered ctor body;
+// the promotion only applies when every instance constructor of the type
+// carries the identical leading initializer sequence (a field initializer
+// runs in every ctor -- the C#'s agreement gate).
+class FieldInitializerPromoter {
+public:
+    static void TryPromote(const Metadata::MetadataFile& file,
+                           std::uint32_t typeToken,
+                           const std::string& typeName, std::string& out) {
+        std::vector<Metadata::MethodInfo> ctors;
+        for (const auto& m : file.GetMethods(typeToken)) {
+            if (m.Name == ".ctor" && m.RVA != 0)
+                ctors.push_back(m);
+        }
+        if (ctors.empty()) return;
+        std::set<std::string> fieldNames;
+        for (const auto& f : file.GetFields(typeToken))
+            fieldNames.insert(f.Name);
+        // The raw scan: each ctor's leading promoted store names.
+        std::vector<std::vector<std::string>> perCtor;
+        for (const auto& ctor : ctors) {
+            auto fn = IL::ReadIL(file, ctor.Token, ctor.RVA);
+            std::vector<std::string> names;
+            auto* cont = fn ? dynamic_cast<IL::BlockContainer*>(
+                                  fn->Body.get())
+                            : nullptr;
+            if (cont != nullptr && !cont->Blocks.empty() &&
+                cont->Blocks[0] != nullptr) {
+                for (const auto& inst : cont->Blocks[0]->Instructions) {
+                    auto* st = dynamic_cast<IL::StObj*>(inst.get());
+                    if (st == nullptr) break;
+                    auto* addr =
+                        dynamic_cast<IL::LdFlda*>(st->Target.get());
+                    if (addr == nullptr) break;
+                    auto sep = addr->FieldName.rfind("::");
+                    std::string fld =
+                        sep == std::string::npos
+                            ? addr->FieldName
+                            : addr->FieldName.substr(sep + 2);
+                    if (!fieldNames.count(fld)) break;
+                    if (!PureInitializerValue(st->Value.get())) break;
+                    names.push_back(fld);
+                }
+            }
+            perCtor.push_back(std::move(names));
+        }
+        // The agreement gate: every ctor identical and non-empty.
+        for (const auto& names : perCtor) {
+            if (names != perCtor[0]) return;
+        }
+        if (perCtor[0].empty()) return;
+        // The text pass: the rendered ctor bodies' leading stores must
+        // match the raw scan's names in order (the render is
+        // deterministic). The ctor signature is a tab-led
+        // modifiers+name+paren line -- the doc-comment crefs and the
+        // field types never match that shape.
+        std::map<std::string, std::string> promoted;
+        bool allMatched = true;
+        int ctorsFound = 0;
+        std::size_t search = 0;
+        while (allMatched) {
+            std::size_t sig = std::string::npos;
+            std::size_t scan = search;
+            while (scan < out.size()) {
+                std::size_t lineEnd = out.find("\n", scan);
+                if (lineEnd == std::string::npos) lineEnd = out.size();
+                std::size_t lineStart = scan;
+                scan = lineEnd + 1;
+                if (out.compare(lineStart, 1, "\t") != 0) continue;
+                std::string_view line(out.data() + lineStart + 1,
+                                      lineEnd - lineStart - 1);
+                std::size_t nameAt = line.find(typeName + "(");
+                if (nameAt == std::string_view::npos) continue;
+                bool modifiersOnly = true;
+                for (std::size_t i = 0; i + 1 < nameAt; ++i) {
+                    char c = line[i];
+                    if (c != ' ' && !std::isalnum((unsigned char)c) &&
+                        c != '_')
+                        modifiersOnly = false;
+                }
+                if (!modifiersOnly) continue;
+                // The static ctor (a .cctor rendered `static Type()`)
+                // is a separate promotion (the raw scan collects the
+                // instance ctors only); skip its signature.
+                if (line.substr(0, nameAt).find("static ") !=
+                    std::string_view::npos)
+                    continue;
+                sig = lineStart;
+                break;
+            }
+            if (sig == std::string::npos) break;
+            ctorsFound++;
+            std::size_t brace = out.find("{\n", sig);
+            if (brace == std::string::npos) break;
+            std::size_t body = brace + 2;
+            std::size_t pos = body;
+            std::map<std::string, std::string> thisCtor;
+            bool matched = true;
+            for (const std::string& want : perCtor[0]) {
+                if (out.compare(pos, 2, "\t\t") != 0) {
+                    matched = false;
+                    break;
+                }
+                std::size_t lineEnd = out.find("\n", pos);
+                if (lineEnd == std::string::npos) {
+                    matched = false;
+                    break;
+                }
+                std::string line = out.substr(pos + 2, lineEnd - pos - 2);
+                std::size_t eq = line.find(" = ");
+                std::size_t semi = line.rfind(';');
+                if (eq == std::string::npos || semi == std::string::npos ||
+                    semi + 1 != line.size() ||
+                    line.substr(0, eq) != want) {
+                    matched = false;
+                    break;
+                }
+                thisCtor[want] = line.substr(eq + 3, semi - eq - 3);
+                pos = lineEnd + 1;
+            }
+            if (!matched) {
+                allMatched = false;
+                break;
+            }
+            if (ctorsFound == 1) {
+                promoted = thisCtor;
+            } else if (promoted != thisCtor) {
+                allMatched = false;
+                break;
+            }
+            // Strip the promoted leading lines from this ctor body.
+            out.erase(body, pos - body);
+            search = body;
+        }
+        if (!allMatched || ctorsFound == 0 || promoted.empty()) return;
+        // The field declarations gain the initializers.
+        for (const auto& nameAndExpr : promoted) {
+            const std::string& name = nameAndExpr.first;
+            const std::string& expr = nameAndExpr.second;
+            std::string declNeedle = " " + name + ";\n";
+            std::size_t at = out.find(declNeedle);
+            if (at == std::string::npos) return;
+            out.insert(at + 1 + name.size(), " = " + expr);
+        }
+    }
+
+private:
+    // The hoistable initializer values: the constants and the
+    // side-effect-free call forms (the newobj and the pure getters). A
+    // local, parameter, or instance reference rejects the store -- the
+    // initializer must be evaluable in the declaration context.
+    static bool PureInitializerValue(const IL::ILInstruction* v) {
+        if (v == nullptr) return false;
+        switch (v->Op) {
+            case IL::OpCode::LdcI4:
+            case IL::OpCode::LdcI8:
+            case IL::OpCode::LdcF4:
+            case IL::OpCode::LdStr:
+            case IL::OpCode::LdNull:
+                return true;
+            case IL::OpCode::Call: {
+                auto* call = static_cast<const IL::Call*>(v);
+                for (const auto& arg : call->Arguments)
+                    if (!PureInitializerValue(arg.get())) return false;
+                return true;
+            }
+            default:
+                return false;
+        }
+    }
+};
+
 bool DecompileTypeToStringBody(
     const Metadata::MetadataFile& file, TS::DecompilerTypeSystem* typeSystem,
     TS::MetadataModule& module,
@@ -3942,6 +4120,12 @@ bool DecompileTypeToStringBody(
         }
         out = std::move(indented);
     }
+    // The field-initializer promotion (the ctor's leading stores move to
+    // the field declarations when every ctor agrees) -- after the member
+    // indent, so the ctor signature carries its tab-led member form and
+    // the body statements the two-tab statement form.
+    if (rendered && !typeName.empty())
+        FieldInitializerPromoter::TryPromote(file, typeToken, typeName, out);
     return rendered;
 }
 
