@@ -3315,6 +3315,28 @@ the record struct variants, the label-merged regions, the switch
 case-range fall-through, the remaining ~123 ?. shapes, the
 static-ctor field initializers.
 
+## THE RECORD-STRUCT SLICE -- BLOCKED BY A DEEPER BUG (the finding)
+
+THE FIXTURE (extended): the record structs (Coord, ReadOnly) added
+to /home/jim/ilspy-test-fixtures/positional_record/Positional.cs
+(+ a PlainStruct control). THE FINDING: **ALL THREE STRUCTS VANISH
+from the whole-module render** (and the -t filter reports "no
+members found") -- the port drops the TOP-LEVEL STRUCT TYPES
+entirely; the dnlib corpus's surviving structs (Enumerator,
+UserValue, DataReader) are all NESTED, so the gap hid. THE TYPE
+MATCHES in the loop (the typeMatch for -t); the DecompileTypeToString
+returns FALSE for them (the -t path bypasses the whole-module
+loop's filters and still fails). THE NEXT SESSION'S PROBE (the
+[DBG]-style): (1) a print at the whole-module loop's skips
+(TypeIsHiddenFromRender / the nestedInfo check) for
+PosFixture.PlainStruct; (2) if not skipped there, the print at
+DecompileTypeToStringBody's member arms (the field arm's conditions
+for `public int A;`) -- the `rendered` flag never sets for the
+struct. THE SUSPECTS: the struct's metadata shape (the ClassSemantics
+value-type flag) tripping a hidden/skip check; the field loop's
+backing-field/name filtering; the type-kind declaration arm. THE
+FIXTURE IS THE RED (the dll rebuilt with the structs).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
