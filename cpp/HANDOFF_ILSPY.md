@@ -3146,6 +3146,32 @@ sampling loop over the release binary, or the perf events if the
 env ever allows) -- the -pg flat profile is DISQUALIFIED as a
 release-wall oracle (recorded).
 
+## THE PERF THREAD: PAUSED-PENDING-TOOLS (the state)
+
+THE RELEASE-SIDE SAMPLING: UNAVAILABLE in this environment -- no
+gdb, no lldb, no eu-stack/pstack, and /proc/self/stack is
+permission-denied (the kernel stacks only; the user-space stacks
+need a debugger or the perf events, both blocked). THE THREAD'S
+STANDING RESULT: dnlib 2.45s release (~4x the oracle's ~9.9s),
+147MB RSS (2.6x less) -- the arc closed from the debug-build
+discovery through the duplicate-load fix (the 28x CoreLib), the
+CustomAttribute index (the 3.7x), and the honest reverts (the
+output-accumulation exonerated, the keepalive cleared, the memo
+measured, the interning measured). THE REMAINING QUESTION (open,
+tool-blocked): the release wall's true owner breakdown (the -pg
+flat profile disqualified; the sampling needs gdb or the perf
+events). THE RESUME PROCEDURE: when a debugger or the perf events
+become available, sample the release binary's dnlib render and
+re-rank; the string-chain hypothesis (TypeNameStr/MakeTypeRef/
+OrdinalIgnoreCase) is UNVALIDATED either way.
+
+THE FIDELITY QUEUE (the next thread, in order): (1) the null-
+propagation seed test + the remaining ~123 `?.` shapes; (2) the
+FieldInitializerPass (the 35 cui sites: the oracle's field-level
+initializers vs the port's ctor placements); (3) the label-merged
+regions (the cross-container analysis); (4) the switch case-range
+fall-through.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
