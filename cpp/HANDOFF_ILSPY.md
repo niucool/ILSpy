@@ -3481,6 +3481,30 @@ emitter's analysis failing on a subtle difference?). THE STATE:
 the fold reverted (inert); the transformed-dump tool STANDING
 (committed); all gates green.
 
+## THE MULTI-RENDER FINDING -- THE DECISIVE ANSWER
+
+THE [EP] PROBE (the emitter + fn + methodName at the ILAstToCSharp
+entry): 10,804 emitter constructions on dnlib; **the get_Item
+method renders 4 TIMES on the SAME shared fn pointer** (the same
+emitter STACK address, the same tree) -- the required-imports
+recording machinery re-renders the bodies (the null-sink probes +
+the block-emission re-renders). THE MECHANISM (the answer to the
+two-emitter puzzle): the FIRST render's analyses MUTATE the shared
+tree (the coalesce folds' NullCoalescingInstruction composition --
+the released expressions restructured); the LATER renders' early-
+return analyses see the mutated shape and do not fill -- and the
+OUTPUT comes from a later render (the fill fired once, in the
+first; the output emitter's map empty). THE FIX DIRECTIONS (the
+next session, in order): (a) THE IDEMPOTENCY: the analyses must
+not mutate the tree (the folds compose at the RENDER level -- the
+maps only -- never the tree restructure); (b) THE ORDERING: the
+output render FIRST, the recording probes after; (c) THE SNAPSHOT:
+a fresh decode per render (the fn rebuilt -- the cost ~0.1s per
+the profile). (c) is the safest and cheapest to land; (a) is the
+right long-term shape (the C# renders ONCE and records
+simultaneously). THE STATE: the probes reverted; the dump tool
+standing; all gates green.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
