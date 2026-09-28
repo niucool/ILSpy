@@ -3397,6 +3397,23 @@ uint context) + the enum-flags hex sites. THE QUEUE: the AND-hex
 slice, then the label-region generalization (the multi-block
 regions), the switch case-range, the remaining ~123 ?. shapes.
 
+## THE AND-CONTEXT HEX -- LANDED (the uint-hex family, slice 2)
+
+THE RULE (committed): the bitwise and/or/xor context's LdcI4
+constants -- the high-bit masks (v < 0) render the unsigned hex +
+u (0x80000000u); the 2^k-1 masks with >= 5 hex digits render the
+bare hex (0xFFFFFF, 0x7FFFFFFF -- int.MaxValue in the bitwise
+context does NOT take the named form). THE MEASUREMENT: 23 sites on
+dnlib; the dnlib 80,189 -> 80,185; the net10 99,580 -> 99,578; all
+gates standing. THE FAMILY'S RESIDUE (recorded, deferred): the
+small mask forms (0x10/0x80/0x400 -- the single-bit and short
+masks, largely the enum-flag contexts) and the small-mask decimal
+boundary (1/3/7/8 stay decimal) -- the rule archaeology is thin;
+take it only with a corpus-driven RED. THE NEXT: the label-region
+generalization (the multi-block regions, the arbitrary distances,
+the loop back-edges -- the 1,263 remaining gotos vs the oracle's
+21), the switch case-range, the remaining ~123 ?. shapes.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
