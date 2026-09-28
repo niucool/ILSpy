@@ -3587,6 +3587,32 @@ the enum-case table form) -- the fold lands AFTER (restricted to
 the non-switch sites) or COMPOSED with it. THE STATE: reverted
 clean (the pin, the dnlib 80,185); the campaign results standing.
 
+## THE SWITCH SYNTHESIS -- THE EXISTING MACHINERY DISCOVERED (reverted)
+
+THE IMPLEMENTATION (this session): the DetectSwitchChain (the comp
+chain over one local: the le/gt splits + the eq/ne leaves; the Block
+wrappers descended; the ne = the inverted eq with the case body in
+the false arm's block) + the EmitSynthesizedSwitch (the case groups
+by target). THREE GATES FIXED ITERATIVELY: the hook before the
+entry gates (the chain root's true arm is a Block, not a Branch);
+the Block case in the walk; the ne leaves. THE RESULT: 5 chains
+FIRE (the gotos 1,263 -> 1,258) BUT THE DIFF REGRESSED (+3):
+**THE PORT ALREADY HAS A SWITCH MACHINERY** (the diff samples show
+the range cases `case -9223372036854775808..-1:` -- an EXISTING
+renderer produces those, not the new synthesis) -- the 5 fired
+chains OVERRODE the existing machinery's better renders (the range
+cases; the oracle's `return num switch` expression forms). AND the
+TryGetCpuArch's enum chains STILL did not fire (a remaining gate in
+the walk -- the next probe: the [SW] fill counters on the
+TryGetCpuArch specifically). THE NEXT SLICE: (1) find the EXISTING
+switch machinery (grep the range-case renderer -- the `..` case
+forms -- likely the SwitchInstruction or the switch-statement
+rendering path) and understand WHICH chains it handles; (2) the
+new detection must YIELD (skip) when the existing machinery would
+render (or extend IT instead of the parallel synthesis); (3) the
+enum-chain gate (the TryGetCpuArch) probed. THE STATE: reverted
+clean (the pin, the dnlib 80,185).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
