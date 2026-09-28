@@ -96,6 +96,13 @@ struct MetadataFile::Impl {
     std::unique_ptr<winmd::reader::database> db;
     std::shared_ptr<const std::vector<std::uint8_t>> image;  // for method bodies
     std::unique_ptr<MethodBodyReader> bodyReader;
+    // The ExportedType table's derived vector, built once (the metadata
+    // is immutable after load; the reference-loading queue asks for the
+    // table per resolution and the per-call rebuild dominated the
+    // profile).
+    mutable std::vector<MetadataFile::ExportedTypeInfo>
+        exportedTypesCache_;
+    mutable bool exportedTypesBuilt_ = false;
 
     // The GetTypeDefinition / GetTypeForwarder reverse-lookup caches (the
     // C# LazyInit dictionaries, built on first use -- the port is
@@ -2666,12 +2673,16 @@ MetadataFile::GetModuleReferences() const {
 // TypeNamespace, Implementation (the coded index over File/AssemblyRef/
 // ExportedType; winmd's composite_index_size(File, AssemblyRef,
 // ExportedType) fixes the tag order 0/1/2).
-std::vector<MetadataFile::ExportedTypeInfo>
+const std::vector<MetadataFile::ExportedTypeInfo>&
 MetadataFile::GetExportedTypes() const {
-    std::vector<ExportedTypeInfo> result;
-    if (!IsValid()) return result;
+    static const std::vector<ExportedTypeInfo> kEmpty;
+    if (!IsValid()) return kEmpty;
+    if (impl_->exportedTypesBuilt_)
+        return impl_->exportedTypesCache_;
+    std::vector<ExportedTypeInfo>& result = impl_->exportedTypesCache_;
     std::uint32_t count = static_cast<std::uint32_t>(
         impl_->db->ExportedType.size());
+    result.reserve(count);
     for (std::uint32_t row = 1; row <= count; row++) {
         try {
             ExportedTypeInfo info;
@@ -2705,6 +2716,7 @@ MetadataFile::GetExportedTypes() const {
             break;
         }
     }
+    impl_->exportedTypesBuilt_ = true;
     return result;
 }
 

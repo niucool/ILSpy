@@ -1105,7 +1105,7 @@ public:
         bool NamespaceNil = false;
         std::uint32_t ImplementationToken = 0;  // File/AssemblyRef/ExportedType; 0 = nil
     };
-    std::vector<ExportedTypeInfo> GetExportedTypes() const;
+    const std::vector<ExportedTypeInfo>& GetExportedTypes() const;
     // One ExportedType row by its own token (the C#
     // `metadata.GetExportedType(handle)` the nested-implementation chain
     // walk reads). Nullopt for an invalid file, an out-of-range row, a nil
