@@ -3613,6 +3613,36 @@ render (or extend IT instead of the parallel synthesis); (3) the
 enum-chain gate (the TryGetCpuArch) probed. THE STATE: reverted
 clean (the pin, the dnlib 80,185).
 
+## THE SWITCH MACHINERY -- THE FULL MAP (the integration-first path)
+
+(1) THE RENDER: the SwitchInstruction case in ILAstToCSharp.cpp
+(~line 3160) -- the full sections/intervals/inline-plans machinery
+(the range cases `case X..Y:`, the null labels, the direct-leave/
+throw sections, the switch-inline plans).
+(2) THE TRANSFORM: SwitchDetection (Decompiler/IL/ControlFlow/
+SwitchDetection.cpp, 680 lines) -- runs in the pipeline (after the
+second CFS, before LoopDetection, per GetILTransforms.hpp); the
+chain analysis (analysis_/InnerBlocks/Sections), the
+UseCSharpSwitch() heuristics (the default-section rule, the
+MaxValuesPerSection, the ifCount-vs-intervalCount preference, the
+single-condition veto, the breakBlock checks), then the
+SimplifySwitchInstruction 2nd pass.
+(3) THE GATE TO FIND: the TryGetCpuArch's machine chains (the
+enum-typed local!) are REJECTED somewhere in the transform -- the
+`num` chains (the int local) convert fine. THE SUSPECTS: the
+chain analysis's local/type handling (the enum's underlying type),
+the UseCSharpSwitch heuristics (the interval counts), or the
+sections' construction. THE NEXT PROBE (the [SD] counters): the
+print at the SwitchDetection::Run's per-chain stages (the chain
+found / the sections built / the UseCSharpSwitch verdict) for the
+TryGetCpuArch -- one run localizes the rejection. THE FIX: extend
+the TRANSFORM's gate (NOT the render-level parallel synthesis --
+the reverted attempt's lesson). THE BONUS GAP (after the transform
+fix): the ENUM MEMBER NAMES in the case labels (`case 332:` vs the
+oracle's `case Machine.I386:`) -- the render's to_string needs the
+enum-member lookup (the local's type -> the fields' constant
+values).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
