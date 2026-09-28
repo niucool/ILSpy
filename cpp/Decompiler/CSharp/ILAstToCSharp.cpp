@@ -4378,10 +4378,22 @@ private:
                 // (the IL form).
                 return "ref " + (ld.Variable ? ld.Variable->Name : std::string("?"));
             }
-            case OpCode::LdcI4:
-                return std::to_string(static_cast<const LdcI4&>(inst).Value);
-            case OpCode::LdcI8:
-                return std::to_string(static_cast<const LdcI8&>(inst).Value);
+            case OpCode::LdcI4: {
+                // The C# IsSpecialConstant: the recognizable boundary
+                // constants render as their named forms.
+                std::int32_t v = static_cast<const LdcI4&>(inst).Value;
+                if (v == 2147483647) return "int.MaxValue";
+                if (v == -2147483648) return "int.MinValue";
+                return std::to_string(v);
+            }
+            case OpCode::LdcI8: {
+                // The long boundary constants (the same IsSpecialConstant
+                // arm over the 64-bit values).
+                std::int64_t v = static_cast<const LdcI8&>(inst).Value;
+                if (v == 9223372036854775807LL) return "long.MaxValue";
+                if (v == -9223372036854775807LL - 1) return "long.MinValue";
+                return std::to_string(v);
+            }
             case OpCode::LdcDecimal:
                 // The C# decimal literal form (`1m`, `0m`, `-1m`, `1.5m`),
                 // faithful to the real back end's VisitLdcDecimal
