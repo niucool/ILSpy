@@ -3359,6 +3359,27 @@ structs in those corpora). THE QUEUE: the label-merged regions,
 the switch case-range fall-through, the remaining ~123 ?. shapes,
 the static-ctor field initializers.
 
+## THE LABEL-REGION FOLD -- THE MINIMAL SUB-CASE LANDED
+
+THE MEASURED FAMILY: the port renders 1,266 `goto` statements on
+dnlib vs the oracle's 21 -- THE biggest remaining structural
+family. THE MINIMAL SUB-CASE (committed): the if-final's branch to
+the block two later + the one-block fall-through + the one-block
+target, both regions exiting to the shared continuation (the
+block after the target) -- the AnalyzeLabelRegions/labelRegionFolds_
+machinery in ILAstToCSharp (the same seam as the coalesce/null-prop
+folds) + the EmitFoldedIf render (the fall-through region as the
+true arm under the INVERTED condition, the target as the else; the
+Comp kinds negate, the value conditions wrap `(...) == 0` -- the
+precedence parens). THE MEASUREMENT: 3 sites fold on dnlib (the
+gotos 1,266 -> 1,263), including the ReadWin32Resources site
+matching the oracle's if/else form. THE REMAINING (the
+generalization, multi-session): the multi-block regions, the
+arbitrary branch distances, the loop back-edges -- each its own
+gated slice. THE NEW FAMILY EXPOSED (the next candidate): the uint
+hex literal forms (`0x80000000u` vs `-2147483648`, `0x7FFFFFFF`
+vs `2147483647`) -- the folded sites' remaining diff lines.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
