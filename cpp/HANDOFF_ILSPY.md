@@ -3250,6 +3250,29 @@ current true cui oracle-diff with the standing build = 2377 --
 REBASE the cui RED before the next attempt (the oracle_cui_try1.cs
 vs a fresh cpp render).
 
+## THE FIELD-INITIALIZER PASS -- LANDED
+
+THE FIX (committed): the FieldInitializerPromoter in
+CSharpDecompiler.cpp -- the raw ctor ILAst scan (the leading
+StObj(LdFlda(this->field), pure) stores before the base-ctor
+call), the every-ctor agreement gate, the line-based ctor signature
+scan (the tab-led modifiers+name+paren form -- the doc-comment
+crefs and the static ctor rejected), the leading-statement match +
+strip, and the field-declaration rewrite. THE MEASUREMENT: the cui
+oracle-diff 2,377 -> 2,354; the dnlib 80,454 -> 80,187; the pin
+ebf9b6e9..., hello 3, the sweep 15 -- all standing. THE DEBUG
+LESSONS (recorded): (1) the promotion runs AFTER the member-indent
+block (the flat pre-indent out carries no member tabs); (2) the
+static ctor (`.cctor` rendered `static Type()`) needs the explicit
+skip (its promotion is a separate slice); (3) the `"{\n"` find
+gives body = brace+2 (the 2-char sequence -- brace+3 skipped the
+statement's first tab); (4) the debug-print removal took the
+compare gate and the ctorsFound++ with it (the no-assert replace
+no-op hazard -- double-check every removal). THE QUEUE: the record
+re-synthesis (the net10 evidence), the label-merged regions, the
+switch case-range fall-through, the remaining ~123 ?. shapes, the
+STATIC ctor's field-initializer promotion (the .cctor arm).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
