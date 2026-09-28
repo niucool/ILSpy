@@ -3930,6 +3930,27 @@ instruction-Blocks are not container members). THE STATE: the
 committed tree unchanged (the pin, the dnlib 79,855, the net10
 99,476, the SwitchDetection 13/13).
 
+## THE REFERENCE INSTRUMENTATION -- BLOCKED ON THE SDK PIN
+
+THE ATTEMPT: the UseCSharpSwitch instrumentation (the [CSGATE]
+prints at every return) applied cleanly to the reference source
+(ICSharpCode.Decompiler/IL/ControlFlow/SwitchDetection.cs --
+REVERTED, never committed). THE BUILD BLOCKED: the repo's
+global.json pins SDK 11.0.0; the installed SDKs are 8.0.425 and
+10.0.401 (dotnet at /home/jim/.dotnet with DOTNET_ROOT set; the
+restore refuses with "Requested SDK version: 11.0.0"). THE
+UNBLOCK OPTIONS (the user's call): (a) install the 11.0.0 SDK
+(~200MB via dotnet-install); (b) a scratch override -- copy the
+decompiler source set into a temp project with its own
+global.json/the SDK 10 (the API surface risk); (c) accept the
+code-read path (the flat-vs-nested analysis of the et-chain's
+section construction). THE INSTRUMENTATION PATCH (the re-apply
+recipe): the print at every `return false/true` in UseCSharpSwitch
+with the inner/section counts; the run target: the
+de4dot.code.dll's proxyCreatorType chain; the read: which gate the
+reference rejects through. THE STATE: unchanged (the C# tree
+clean, the cpp tree at the committed handoff).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
