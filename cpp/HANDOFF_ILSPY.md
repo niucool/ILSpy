@@ -3643,6 +3643,29 @@ oracle's `case Machine.I386:`) -- the render's to_string needs the
 enum-member lookup (the local's type -> the fields' constant
 values).
 
+## THE SWITCH -- THE [SD] STAGE DATA (the rejection mass localized)
+
+THE STAGES (measured on dnlib): 29,818 ProcessBlock calls; **1,687
+chains analyze successfully** (sections 1-13+); **only 104 get the
+switch** (UseCSharpSwitch = true) -- **1,583 REJECTED by the
+UseCSharpSwitch heuristics**. THE ORACLE renders the TryGetCpuArch
+chain as a switch -- so the C#'s heuristic ACCEPTS what the port's
+port rejects: A DIVERGENCE in the heuristic's implementation (the
+default-section rule / MaxValuesPerSection / the ifCount-vs-
+intervalCount preference / the single-condition veto / the
+breakBlock checks -- the specific gate NOT yet isolated). THE
+INSTRUMENTATION BUG (recorded): the [SD3] prints were appended
+AFTER the `return false;` lines -- dead code that somehow printed
+(the line-number mapping unreliable); THE FIXED PROBE (the next
+session): restructure each `return false` as `if (cond) { [SD3]
+print; return false; }` (the print BEFORE the return, in the
+condition's branch) -- one run gives the per-gate rejection counts
+and the TryGetCpuArch's specific gate. THEN: the divergence fix
+(the port's heuristic vs the C#'s -- read the C#
+SwitchDetection.UseCSharpSwitch side by side) + the enum member
+names (the queued bonus). THE STATE: the probes reverted (the pin,
+the dnlib 80,185).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
