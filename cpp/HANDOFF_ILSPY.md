@@ -3808,6 +3808,37 @@ the manual local-by-local read of SwitchUsesGoto's callees. THE
 STATE: the pristine tree (the pin, the dnlib 80,185, the gotos
 1,263, the SwitchDetection 13/13) -- all deterministic.
 
+## THE UNINIT HUNT -- THE FORMATION BLOCKER CHAIN (the switch-expression gap exposed)
+
+THE HUNTS: PostOrderNumber/ImmediateDominator/Dominates ALL
+properly initialized (the MSAN-class theory weakened); the [SUG]
+differential probe (SwitchUsesGoto's internals, on the perturbed
+binary): ext/bt distributions -- 63 chains reach bt=0 (pass
+SwitchUsesGoto, breakBlock null -> UseCSharpSwitch returns TRUE).
+
+THE GENERIC-CLONE EXPERIMENT (CloneBody delegating everything to
+ILInstruction::Clone, the C# parity -- the C# clones every section
+body with ILInstruction.Clone()): +1 switch (211), -1 goto, **+3
+DIFF (80,185 -> 80,188)** -- REVERTED per the discipline. THE ONE
+newly-unblocked chain's oracle form: **THE SWITCH EXPRESSION**
+(`return num switch { ... }`, the C# 8 arms) -- the port's
+switch-STATEMENT render is 3 lines worse than its prior if-chain
+vs the oracle's expression. THE FINDING: the 63-bt=0 chains'
+unblock lands ONLY WITH the switch-expression synthesis (the
+oracle's form for that family); the generic CloneBody is the right
+parity fix but its corpus payoff is gated behind the expression
+render. THE OTHER 62: still blocked (their ProcessBlock aborts
+elsewhere -- the next blocker after allCloneable -- unprobed).
+
+THE NEXT FAMILY (the switch-expression synthesis): the oracle's
+`return <expr> switch { <labels> => <value>, ... }` forms -- the
+SwitchInstruction over the method's tail (the leave-value context)
+-- the render family on top of the existing SwitchInstruction
+machinery (the sections' values as the arms). AFTER it: re-land
+the generic CloneBody + the accept-side gates. THE STATE: the
+committed tree (the pin, the dnlib 80,185, the gotos 1,263, the
+SwitchDetection 13/13).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
