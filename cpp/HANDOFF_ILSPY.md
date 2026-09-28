@@ -3439,6 +3439,25 @@ back-edges, the structured-region remnants -- each needs its own
 transformed-tree shape first. THE GATES ALL STANDING (the pin, the
 dnlib 80,185).
 
+## THE TRANSFORMED-TREE DUMP -- BUILT (the prerequisite landed)
+
+THE TOOL (committed): ILSPY_DUMP_TF -- the post-pipeline ILAst dump
+to stderr (the --ilast-all text form) at the ILAstToCSharp entry;
+the cycle-check gated; the render unaffected (the pin/dnlib
+verified). THE VERIFICATION: the SimpleLazyList2::get_Item dump
+shows the guard `if (comp(ne, elements[index], ldnull)) br
+IL_0061` with the target = `leave ldobj(...)` -- THE EARLY-RETURN
+FOLD'S SHAPE EXISTS in the transformed tree (the [LR] counters: 4
+guards with Leave targets, ONE fold fired (fwd=1) -- but the RENDER
+ARM did not show it (the output unchanged) -- the render-side bug,
+one [ER] counter from localization). THE NEXT SESSION: (1) the
+[ER] counter at the EmitEarlyReturnIf call site (the
+earlyReturnFolds_ map's render lookup); (2) once the render works,
+the family decomposition per the transformed dumps (the dispose
+chains, the loop back-edges). NOTE: the dump's methodName is the
+SHORT form (the accessors render as "get"/"set") -- correlate with
+the render by the content (the ILAst text), not the header.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
