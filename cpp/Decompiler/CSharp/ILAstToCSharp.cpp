@@ -320,6 +320,7 @@ public:
             AnalyzeNullCoalescingChains(fn.Body.get());
             AnalyzeSingleUseLocals();
             AnalyzeNullPropagation();
+            AnalyzeLabelRegions();
             HoistForInitializers(fn.Body.get());
             EmitContainer(*fn.Body, 1);
         }
@@ -361,6 +362,14 @@ private:
     // M(ldloc dup, ...)]. The [stloc, if] skip; b1 renders
     // `return expr?.Member(args);` through the map.
     std::map<const Call*, ILInstruction*> nullPropagation_;
+    // The label-region fold (the goto-to-later-sibling restructure): a
+    // block's if-final branching to bK+2, with the one-block fall-through
+    // (bK+1) and the one-block target (bT=bK+2) both exiting to the same
+    // continuation (the fall-through after bT), merges into an if/else
+    // over the two regions -- the goto disappears.
+    std::map<const IfInstruction*,
+             std::pair<Block*, Block*>> labelRegionFolds_;
+    std::set<const Block*> labelRegionSuppressed_;
     std::set<const ILInstruction*> singleUseSkipped_;
     std::set<const ILInstruction*> coalesceSkipped_;
     std::set<const Block*> coalesceSuppressed_;
@@ -1203,6 +1212,117 @@ private:
                 nullPropagation_[useCall] = storeDup->Value.get();
                 coalesceSkipped_.insert(storeDup);
                 coalesceSkipped_.insert(iff);
+            }
+            std::function<void(const ILInstruction*)> descend =
+                [&](const ILInstruction* i) {
+                if (i == nullptr) return;
+                if (auto* nested =
+                        dynamic_cast<const BlockContainer*>(i))
+                    scan(const_cast<BlockContainer*>(nested));
+                for (int ci = 0; ci < i->ChildCount(); ++ci)
+                    descend(i->GetChild(ci));
+            };
+            for (const auto& bi : c->Blocks) {
+                if (!bi) continue;
+                for (const auto& si : bi->Instructions) descend(si.get());
+                if (bi->FinalInstruction)
+                    descend(bi->FinalInstruction.get());
+            }
+        };
+        scan(dynamic_cast<BlockContainer*>(fn_->Body.get()));
+    }
+
+    // The merged-region if/else render: `if (cond) { r2's statements }
+    // else { r1's statements }` (the branch target is the true arm).
+    void EmitFoldedIf(const IfInstruction& iff, Block* r1, Block* r2,
+                      int indent) {
+        // The oracle's orientation: the fall-through region is the true
+        // arm under the INVERTED condition (the branch guard's `br` is
+        // the negative path), the branch target the else. A Comp
+        // condition negates through its kind; a value condition wraps
+        // parenthesized (the `==` binds tighter than the bitwise `&`).
+        std::string condText =
+            dynamic_cast<const Comp*>(iff.Condition.get()) != nullptr
+                ? NegateCondText(*iff.Condition)
+                : "(" + Expr(*iff.Condition) + ") == 0";
+        Line(indent, "if (" + condText + ")");
+        Line(indent, "{");
+        if (r1 != nullptr)
+            for (const auto& st : r1->Instructions)
+                EmitStatement(*st, indent + 1);
+        Line(indent, "}");
+        Line(indent, "else");
+        Line(indent, "{");
+        if (r2 != nullptr)
+            for (const auto& st : r2->Instructions)
+                EmitStatement(*st, indent + 1);
+        Line(indent, "}");
+    }
+
+    // The label-region fold: the if-final's branch to a later sibling
+    // whose region is one block, with the one-block fall-through region,
+    // both exiting to the shared continuation.
+    void AnalyzeLabelRegions() {
+        if (fn_ == nullptr || fn_->Body == nullptr)
+            return;
+        std::function<void(BlockContainer*)> scan = [&](BlockContainer* c) {
+            if (c == nullptr) return;
+            for (std::size_t k = 0; k + 2 < c->Blocks.size(); ++k) {
+                Block* bK = c->Blocks[k].get();
+                Block* bR1 = c->Blocks[k + 1].get();
+                Block* bT = c->Blocks[k + 2].get();
+                if (bK == nullptr || bR1 == nullptr || bT == nullptr)
+                    continue;
+                if (bK->FinalInstruction == nullptr ||
+                    bK->FinalInstruction->Op != OpCode::IfInstruction)
+                    continue;
+                auto* iff = static_cast<IfInstruction*>(
+                    bK->FinalInstruction.get());
+                if (iff->Condition == nullptr ||
+                    iff->TrueInst == nullptr ||
+                    iff->TrueInst->Op != OpCode::Branch ||
+                    iff->FalseInst != nullptr)
+                    continue;
+                auto* guardBr = static_cast<Branch*>(iff->TrueInst.get());
+                if (guardBr->TargetBlock != bT)
+                    continue;
+                // The target's only predecessor: the guard's branch.
+                int preds = 0;
+                std::function<void(const ILInstruction*)> count =
+                    [&](const ILInstruction* i) {
+                    if (i == nullptr) return;
+                    if (i->Op == OpCode::Branch) {
+                        auto* b = static_cast<const Branch*>(i);
+                        if (b->TargetBlock == bT) preds++;
+                    }
+                    for (int ci = 0; ci < i->ChildCount(); ++ci)
+                        count(i->GetChild(ci));
+                };
+                count(fn_->Body.get());
+                if (preds != 1) continue;
+                // The two regions' exits: the identical continuation
+                // (both branch/leave the same target block, the one after
+                // bT in order -- the fall-through equivalence).
+                auto exitOf = [](Block* b) -> Block* {
+                    if (b == nullptr || b->FinalInstruction == nullptr)
+                        return (Block*)nullptr;
+                    if (b->FinalInstruction->Op == OpCode::Branch)
+                        return static_cast<Branch*>(
+                                   b->FinalInstruction.get())
+                            ->TargetBlock;
+                    return (Block*)nullptr;
+                };
+                if (k + 3 >= c->Blocks.size()) continue;
+                Block* after = c->Blocks[k + 3].get();
+                if (exitOf(bR1) != after || exitOf(bT) != after)
+                    continue;
+                // Both regions must be single-block straight-line bodies
+                // (statements + the exit branch).
+                if (!bR1->Instructions.empty() && !bT->Instructions.empty()) {
+                }
+                labelRegionFolds_[iff] = std::make_pair(bR1, bT);
+                labelRegionSuppressed_.insert(bR1);
+                labelRegionSuppressed_.insert(bT);
             }
             std::function<void(const ILInstruction*)> descend =
                 [&](const ILInstruction* i) {
@@ -2579,6 +2699,10 @@ private:
         // The coalesce fold's alternative block: its store folded into the
         // declaration (the AnalyzeNullCoalescingChains note).
         if (coalesceSuppressed_.count(&block)) return;
+        // The label-region fold's merged blocks (the fall-through and
+        // the branch target -- their statements render inside the
+        // folded if/else).
+        if (labelRegionSuppressed_.count(&block)) return;
         auto label = labels_.find(&block);
         if (label != labels_.end() && !emittedHeaderLabels_.count(&block)) {
             // C# labels start in column 0 by convention. A block whose label
@@ -2634,8 +2758,22 @@ private:
         if (block.FinalInstruction && !dropFinal &&
             !(exited && block.FinalInstruction->Op == OpCode::Leave) &&
             coalesceSkipped_.find(block.FinalInstruction.get()) ==
-                coalesceSkipped_.end())
-            EmitStatement(*block.FinalInstruction, indent);
+                coalesceSkipped_.end()) {
+            // The label-region fold: the if-final renders the merged
+            // regions (the branch target's block as the true arm, the
+            // fall-through block as the else arm).
+            auto fold = labelRegionFolds_.find(
+                static_cast<const IfInstruction*>(
+                    block.FinalInstruction.get()));
+            if (fold != labelRegionFolds_.end() &&
+                fold->first != nullptr) {
+                Block* r1 = fold->second.first;
+                Block* r2 = fold->second.second;
+                EmitFoldedIf(*fold->first, r1, r2, indent);
+            } else {
+                EmitStatement(*block.FinalInstruction, indent);
+            }
+        }
     }
 
     // Render a Block(InterpolatedString) as a C# `$"..."` interpolation.
