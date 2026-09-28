@@ -3068,6 +3068,27 @@ properties' types, the methods' signatures -- the C#
 FindRequiredImports runs over the BUILT tree for exactly this
 reason). THE GATES (all standing): the pin, hello 3, the sweep 15.
 
+## THE GPROF DATA + THE CACHES (the honest release measurements)
+
+THE USER'S GPROF FLAT PROFILE (/tmp/ilspy-cmp/pg_flat.txt, the -pg
+build at /tmp/pg-build): GetExportedTypes 39.12% self (74,446
+calls) + its vector-append realloc 16.06% (858k appends);
+GetCustomAttributeTokens 6.48% (106k); OrdinalIgnoreCase equals
+2.85%; the ChildCount virtuals. THE EXPORTED-TYPES CACHE (committed):
+the table built once per file (reserved capacity, the const-ref
+return -- every call site was a range-for); the output byte-identical,
+the RELEASE wall UNCHANGED (9.24s), the RSS flat. THE DISCREPANCY
+(the recorded hypothesis): a -pg build without -O2 profiles
+UNOPTIMIZED code -- the call-heavy functions inflate and the inlined
+work vanishes; the release build's true hot spots differ. THE NEXT
+PROBE (before more cache work): rebuild the -pg build WITH -O2 (or
+sample the release build with the poor-man's profiler: gdb's thread
+apply all bt in a loop, or the /proc/PID/stack sampling) and re-rank.
+THE QUEUED CACHES (from the old profile, still correct-by-
+construction if taken): GetCustomAttributeTokens (106k calls), the
+string interning. THE STANDING GATES: the pin ebf9b6e9..., hello 3,
+the sweep 15, the dnlib output identical.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
