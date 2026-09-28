@@ -5387,6 +5387,16 @@ std::string ILAstToCSharp(const ILFunction& fn,
                           std::string_view paramDecl,
                           bool isConstructor,
                           std::string_view methodConstraints) {
+    // The transformed-tree dump (ILSPY_DUMP_TF): the POST-pipeline ILAst
+    // in the --ilast-all text form -- the raw reader dump and the render's
+    // tree differ (the pipeline restructures the shapes), so the fold
+    // designs must come from THIS tree. The dump goes to stderr; the
+    // render stays on stdout.
+    if (std::getenv("ILSPY_DUMP_TF") != nullptr && !fn.HasCycle()) {
+        std::fprintf(stderr, ".method %.*s  (ILAst, TRANSFORMED)\n%s\n\n",
+                     static_cast<int>(methodName.size()),
+                     methodName.data(), fn.ToString().c_str());
+    }
     std::string out;
     CEmitter emitter(out);
     emitter.EmitMethod(fn, returnType, methodName, paramDecl, isConstructor,
