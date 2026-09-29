@@ -289,6 +289,48 @@ TEST(ILAstToCSharp, MultiArgAccessorRendersAsIndexer) {
         << "the accessor name must not appear in the index syntax";
 }
 
+TEST(ILAstToCSharp, NegatedShortCircuitPushesDeMorganIntoComparisons) {
+    // The C# ExpressionBuilder.TranslateCondition(condition, negate): the
+    // negation pushes into the condition tree instead of wrapping it. The
+    // ConditionDetection output `if (!(a != 5 || b < 3)) { ... }` (the
+    // combined guard chain over a while loop, where the guard-continue fold
+    // does not apply) renders the de Morgan form with the comparison
+    // operators flipped: `if (a == 5 && b >= 3) { ... }` -- the oracle's
+    // while-guard form (FindNewarr: `if (Code == Newarr && i >= 1)`).
+    auto a = MakeVar(VariableKind::Local, "a", 0);
+    auto b = MakeVar(VariableKind::Local, "b", 1);
+
+    // LogicOr(comp(ne, a, 5), comp(lt, b, 3)): if ((a != 5)) 1 else (b < 3)
+    auto orTree = std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(a), std::make_unique<LdcI4>(5),
+                               ComparisonKind::Inequality),
+        std::make_unique<LdcI4>(1),
+        std::make_unique<Comp>(std::make_unique<LdLoc>(b), std::make_unique<LdcI4>(3),
+                               ComparisonKind::LessThan));
+    // The guard: if (orTree == 0) { work }
+    auto work = std::make_unique<Block>();
+    work->Add(std::make_unique<StLoc>(a, std::make_unique<LdcI4>(7)));
+
+    auto b0 = std::make_unique<Block>();
+    auto b1 = std::make_unique<Block>();
+    auto fn = MakeFunction({});
+    Block* b1Ptr = b1.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::move(orTree), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Equality),
+        std::move(work)));
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<Branch>(b1Ptr));  // unreachable-safe final
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("if (a == 5 && b >= 3)"), std::string::npos)
+        << "the negation distributes (de Morgan) with flipped comparison operators";
+    EXPECT_EQ(text.find("!("), std::string::npos)
+        << "no wrapping negation survives over a short-circuit tree";
+}
+
 TEST(ILAstToCSharp, ConstructorCallEmitsNewExpression) {
     auto call = std::make_unique<Call>("System.Text.StringBuilder::.ctor");
     call->ReturnType = StackType::Void;

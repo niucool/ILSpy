@@ -4917,10 +4917,158 @@ private:
         return e.substr(1, e.size() - 2);
     }
 
+    // Whether `inst` is Boolean-valued: a comparison, a short-circuit
+    // tree, a Boolean local or a Boolean-returning call. The logic-not
+    // shapes (comp(eq, X, 0) over these) can push their negation inside.
+    static bool IsBooleanValued(const ILInstruction* inst) {
+        if (!inst) return false;
+        if (inst->Op == OpCode::Comp) return true;
+        if (inst->Op == OpCode::IfInstruction) {
+            auto* iff = static_cast<const IfInstruction*>(inst);
+            auto isLdc = [](const ILInstruction* a, int v) -> bool {
+                if (!a || a->Op != OpCode::LdcI4) return false;
+                return static_cast<const LdcI4*>(a)->Value == v;
+            };
+            return (isLdc(iff->TrueInst.get(), 1) && iff->FalseInst && iff->Condition) ||
+                   (isLdc(iff->FalseInst.get(), 0) && iff->TrueInst && iff->Condition);
+        }
+        if (inst->Op == OpCode::LdLoc) {
+            auto* ld = static_cast<const LdLoc*>(inst);
+            return ld->Variable && ld->Variable->Type &&
+                   IsBooleanType(ld->Variable->Type.get());
+        }
+        if (inst->Op == OpCode::Call) {
+            auto* call = static_cast<const Call*>(inst);
+            return call->ReturnIType && IsBooleanType(call->ReturnIType.get());
+        }
+        return false;
+    }
+
+    static bool IsBooleanType(const TypeSystem::IType* type) {
+        auto* k = dynamic_cast<const TypeSystem::KnownType*>(type);
+        return k && k->Code() == TypeSystem::KnownTypeCode::Boolean;
+    }
+
+    // A comparison rendered bare (no grouping parens -- the C# condition
+    // render keeps comparisons unparenthesized inside short-circuit
+    // chains), with the operator flipped under a negation and the zero
+    // constant typed as `null` for a reference-typed left (the same
+    // null-literal rule the parenthesized Comp value render applies).
+    std::string ComparisonTextBare(const Comp& comp, bool negate) {
+        if (comp.Right && comp.Right->Op == OpCode::LdcI4 &&
+            static_cast<const LdcI4*>(comp.Right.get())->Value == 0 && comp.Left) {
+            const TypeSystem::IType* leftType = nullptr;
+            if (comp.Left->Op == OpCode::LdLoc) {
+                auto* ld = static_cast<const LdLoc*>(comp.Left.get());
+                if (ld->Variable) leftType = ld->Variable->Type.get();
+            } else if (comp.Left->Op == OpCode::Call) {
+                leftType = static_cast<const Call*>(comp.Left.get())->ReturnIType.get();
+            }
+            if (leftType != nullptr) {
+                auto* k = dynamic_cast<const TypeSystem::KnownType*>(leftType);
+                bool isRefLeft = k == nullptr || [&] {
+                    switch (k->Code()) {
+                        case TypeSystem::KnownTypeCode::Boolean:
+                        case TypeSystem::KnownTypeCode::Char:
+                        case TypeSystem::KnownTypeCode::SByte:
+                        case TypeSystem::KnownTypeCode::Byte:
+                        case TypeSystem::KnownTypeCode::Int16:
+                        case TypeSystem::KnownTypeCode::UInt16:
+                        case TypeSystem::KnownTypeCode::Int32:
+                        case TypeSystem::KnownTypeCode::UInt32:
+                        case TypeSystem::KnownTypeCode::Int64:
+                        case TypeSystem::KnownTypeCode::UInt64:
+                        case TypeSystem::KnownTypeCode::Single:
+                        case TypeSystem::KnownTypeCode::Double:
+                            return false;
+                        default:
+                            return true;
+                    }
+                }();
+                if (isRefLeft) {
+                    bool eq = (comp.Kind == ComparisonKind::Equality) ^ negate;
+                    return (comp.Left ? Expr(*comp.Left) : std::string("(default)")) +
+                           (eq ? " == null" : " != null");
+                }
+            }
+        }
+        ComparisonKind kind = negate ? NegateComparison(comp.Kind) : comp.Kind;
+        const char* op = "==";
+        switch (kind) {
+            case ComparisonKind::Equality: op = "=="; break;
+            case ComparisonKind::Inequality: op = "!="; break;
+            case ComparisonKind::LessThan: op = "<"; break;
+            case ComparisonKind::LessThanOrEqual: op = "<="; break;
+            case ComparisonKind::GreaterThan: op = ">"; break;
+            case ComparisonKind::GreaterThanOrEqual: op = ">="; break;
+        }
+        return (comp.Left ? Expr(*comp.Left) : std::string("(default)")) + " " + op +
+               " " + (comp.Right ? Expr(*comp.Right) : std::string("(default)"));
+    }
+
+    // The C# ExpressionBuilder.TranslateCondition(condition, negate): a
+    // negation pushes into the condition tree instead of wrapping it.
+    // `!(a || b)` renders `!a && !b` (de Morgan -- the connective flips,
+    // the operands keep the flag), `!(x < y)` renders `x >= y`, a logic-not
+    // over a Boolean value collapses (`!!x` is `x`), and a non-negatable
+    // leaf keeps the `!` prefix. Short-circuit chains of the same effective
+    // connective render flat (both operators associative); an `||` operand
+    // under a `&&` connective keeps grouping parens (precedence).
+    std::string ConditionText(const ILInstruction& cond, bool negate) {
+        if (auto* comp = dynamic_cast<const Comp*>(&cond)) {
+            // The logic-not over a Boolean value: comp(eq, X, 0) is !X,
+            // comp(ne, X, 0) is X.
+            if (comp->Right && comp->Right->Op == OpCode::LdcI4 &&
+                static_cast<const LdcI4*>(comp->Right.get())->Value == 0 && comp->Left &&
+                IsBooleanValued(comp->Left.get())) {
+                bool notFlag = comp->Kind == ComparisonKind::Equality;
+                return ConditionText(*comp->Left, negate ^ notFlag);
+            }
+            return ComparisonTextBare(*comp, negate);
+        }
+        if (auto* iff = dynamic_cast<const IfInstruction*>(&cond)) {
+            auto isLdc = [](const ILInstruction* a, int v) -> bool {
+                if (!a || a->Op != OpCode::LdcI4) return false;
+                return static_cast<const LdcI4*>(a)->Value == v;
+            };
+            // LogicOr(a, b) = if (a) 1 else b ; LogicAnd(a, b) = if (a) b else 0.
+            bool shapeIsOr = isLdc(iff->TrueInst.get(), 1) && iff->FalseInst && iff->Condition;
+            bool shapeIsAnd = isLdc(iff->FalseInst.get(), 0) && iff->TrueInst && iff->Condition;
+            if (shapeIsOr || shapeIsAnd) {
+                const char* conn = (shapeIsOr ^ negate) ? " || " : " && ";
+                bool parentEffIsOr = shapeIsOr ^ negate;
+                auto operand = [&](const ILInstruction* arm) -> std::string {
+                    if (auto* inner = dynamic_cast<const IfInstruction*>(arm)) {
+                        bool innerOr = isLdc(inner->TrueInst.get(), 1) && inner->FalseInst;
+                        if (innerOr || (isLdc(inner->FalseInst.get(), 0) && inner->TrueInst)) {
+                            // An `||` operand under a `&&` connective needs
+                            // grouping parens; a same-connective operand
+                            // flattens.
+                            if (!parentEffIsOr && (innerOr ^ negate))
+                                return "(" + ConditionText(*arm, negate) + ")";
+                            return ConditionText(*arm, negate);
+                        }
+                    }
+                    return ConditionText(*arm, negate);
+                };
+                if (shapeIsOr)
+                    return operand(iff->Condition.get()) + conn + operand(iff->FalseInst.get());
+                return operand(iff->Condition.get()) + conn + operand(iff->TrueInst.get());
+            }
+        }
+        // Leaves: a Boolean leaf takes the `!` prefix; anything else keeps
+        // the existing conversion (integer leaves render `x != 0` / `x == 0`).
+        if (negate && IsBooleanValued(&cond))
+            return "!" + Expr(cond);
+        if (negate)
+            return StripOuterParens(ConvertConditionText(cond, true));
+        return StripOuterParens(ConvertConditionText(cond, false));
+    }
+
     // The condition expression for an `if`/`while`: strip redundant outer
     // parens so `if ((cond))` becomes `if (cond)`.
     std::string CondExpr(const ILInstruction& inst) {
-        return StripOuterParens(ConvertConditionText(inst, false));
+        return StripOuterParens(ConditionText(inst, false));
     }
 
     // The C# ExpressionBuilder.TranslateCondition ->
