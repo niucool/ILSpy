@@ -5192,3 +5192,90 @@ oracle forms switches where the port renders nested ifs), the
 switch-inline section-order relaxation, the 303 not-found/adjacent goto
 split, the 97 span-escapes, the `?.` shapes, the `.override` forwarders,
 the net10 foreach-collapse gap (the Find method's enumerator pattern).
+
+---
+
+## Session record: the de Morgan pushdown, the switch formation (c37e6cd1b..678854f11)
+
+Corpus across the session: net10 89286 -> **88136** (-1150), dnlib 73675 ->
+**72663** (-1012), gotos 1030 -> 929. The pin is re-recorded as
+0f20d63ad310ae59 (the switch-render family changed the connid fixture).
+cui, hello, the suite control 268 and the bennu canary hold throughout.
+
+### c37e6cd1b "Push condition negations into the tree (de Morgan at render)"
+
+The C# ExpressionBuilder.TranslateCondition(condition, negate) pushes a
+negation into the condition tree instead of wrapping it. The renderer's
+CondExpr now goes through ConditionText, the negate-flag recursion:
+`!(a || b)` flips the connective and keeps the flag on the operands, `!(x
+< y)` flips the comparison operator, a logic-not over a Boolean value
+collapses, and a non-negatable leaf keeps the `!` prefix. Comparisons
+render bare inside the chains with the existing null-literal typing;
+same-connective chains flatten; an `||` operand under a `&&` connective
+keeps grouping parens. RED:
+ILAstToCSharp.NegatedShortCircuitPushesDeMorganIntoComparisons. Corpus:
+dnlib -128, net10 -166 (the `if (!(` count 486 -> 185).
+
+### 9f42c0c5d "Merge switch sections by resolved exit identity; render the default"
+
+The switch-on-int/enum formation was blocked for every method whose
+default paths the CFS branch-to-return fold had materialized per site
+(the TryGetCpuArch family -- binary-search false arms running through
+empty passthrough blocks into different single-return blocks that all
+leave with the same value). AddSection merged by the branch's target
+block, so every false arm became its own section and UseCSharpSwitch
+rejected on "non-default with tons of keys". Three pieces:
+
+- AddSection merges by the resolved exit identity (SectionExitKey):
+  through branch-only passthrough blocks (this port's reader splits the
+  C#'s in-block `if` + `br` pair), and -- when the resolution ends in a
+  valued single return reached through a passthrough -- by the returned
+  value (the per-site materialization is this port's artifact; the C#
+  tree keeps one shared default block). A leave-ended target reached
+  directly keeps the block identity (two case bodies returning the same
+  value stay separate -- the C# merge semantics).
+- The IL switch reader's default section carries the complement of the
+  table's index range as its labels (the C# DecodeSwitch), not an empty
+  set.
+- The render picks the default as the C# StatementBuilder does (the
+  GetDefaultSection most-labeled pick), guarded to the huge complement
+  (a small most-labeled section is an ordinary case); a no-label section
+  remains this port's explicit default marker and wins.
+
+RED: SwitchDetection.MergesPerSiteReturnBlocksIntoOneDefault (through
+three iterations: the block wiring must be positional, the value-key
+only applies through a passthrough, and the most-labeled pick needs the
+>100 guard or the hand-built fixtures' equal-size sections collide).
+Corpus: dnlib -884, net10 -984, gotos -101 -- the biggest single-slice
+move of the campaign; TryGetCpuArch renders `switch` with the merged case
+groups.
+
+### 678854f11 "Remove the switch-formation debug traces"
+
+The ILSPY_SWDBG dumps and the ILSPY_DUMP_PREHLL hook slipped into the
+two commits above (env-gated stderr prints). Print-only; every guard
+re-verified unchanged.
+
+### The switch-render polish queue (the follow-up family)
+
+- The enum widening: the switch value renders `switch ((long)(machine))`
+  -- the LdLoc's ResultType for an enum-typed variable is not I4, so the
+  formation wraps a Conv I8; the C# keeps `switch (machine)` (the enum's
+  stack type is I4).
+- The case labels render the raw numbers (`case 332:`); the oracle uses
+  the enum member names (`case Machine.I386:`) -- the C#
+  CreateTypedCaseLabel's enum lookup.
+- The default section renders first; the oracle sorts it last (the
+  section-order sort's default placement).
+- The pin regression to chase: the connid Connect method's default now
+  emits `default: goto IL_0018;` where the inline plan used to emit the
+  fall-through `break` -- the inline-plan's default handling interacts
+  with the complement-labeled def section.
+
+### The standing queue
+
+The while-guard de Morgan residue (the 185 remaining `if (!(` sites are
+negations over non-tree leaves), the switch-render polish above, the
+switch-inline section-order relaxation, the 303 not-found/adjacent goto
+split, the 97 span-escapes, the `?.` shapes, the `.override` forwarders,
+the net10 foreach-collapse gap (the Find method's enumerator pattern).
