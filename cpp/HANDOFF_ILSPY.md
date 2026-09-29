@@ -5093,3 +5093,102 @@ The standing queue after that: the switch-tree methods' switch formation
 renders nested ifs), the switch-inline section-order relaxation, the 303
 not-found/adjacent goto split, the 97 span-escapes, the `?.` shapes, the
 `.override` forwarders, the net10 foreach-collapse gap.
+
+---
+
+## Session record: the for-promotion, the guard-continue, the indexer (b1fc862c1..ee6227422)
+
+Corpus across the three commits: net10 90284 -> **89286** (-998), dnlib
+74708 -> **73675** (-1033), gotos 1049 -> 1030. The pin, cui, hello, the
+suite control 268 and the bennu canary hold throughout.
+
+### b1fc862c1 "Count for-loop edges by origin; find the pre-header by control flow"
+
+The roslyn lowering family (GetFixIndexs2) missed the for promotion: the
+loop detection places the container at the header block's IL position, so
+the pre-header and the holder need not be positionally adjacent (the
+reader's block order puts the after-the-loop blocks between them). Two
+gates read the positional relationship and rejected the for:
+
+- The edge gate now counts Branch edges INTO the entry by origin: exactly
+  one inside (the single back-edge from the increment; a second would be a
+  continue-to-head the C# count of 2 rejects) and at most one outside (the
+  materialized container connection -- the C# BlockContainer contributes
+  its connection edge on Connected(); the port's reader materializes it as
+  the pre-header's `br entry` whenever the fall is not positional). A
+  second outside branch is a real goto into the loop (reject).
+- CollectInitStores also follows the control flow: the block outside the
+  loop whose final branches to the entry is the pre-header (the holder's
+  positional predecessor may be an unrelated after-loop block).
+
+RED: HighLevelLoopTransform.RunMatchForWhenLoopHolderIsNotAdjacent (the
+pre-header, an unrelated middle block, the holder, the exit -- wired
+pre-header -> middle -> exit). The oracle now matches
+`for (int i = 0; i < instructions.Count; i++)` on the family's home method.
+Corpus: net10 -643, dnlib -218, gotos -19.
+
+### a8c1197da "Render the for-loop guard-continue form; flatten same-operator chains"
+
+- The C# ReduceNestingTransform's guard form at the emission layer: the
+  combined guard `if (!(guards)) { <the body> }` with the if as the for
+  body's final (the false path runs straight into the for's update) emits
+  `if (<guards>) { continue; } <the body flat>`. The C# ILAst keeps the if
+  as a non-terminal with the body statements after it and inverts on the
+  tree; the port's block-final model cannot express statements after an
+  if, so the inversion happens in the emitter (TryEmitGuardContinue in
+  ILAstToCSharp.cpp). The gates: no else, the condition the negation
+  wrapper comp(eq, X, 0), the then a Block with content, the if a block
+  final inside a For container whose successor IS the container's last
+  block (the update -- the emitted continue must land exactly where the
+  fall-through went), and the C# maxDepth >= 2 heuristic (ThenNestingDepth
+  -- one level per nested if-then arm; the C# ComputeStats tally).
+- The short-circuit operators flatten same-operator chains (the C#
+  left-associative render): `a || (b || c)` -> `a || b || c` (both
+  associative; a mixed-operator operand keeps its parens). net10's
+  `|| (` count: 394 -> 102 (the oracle's 26 are the required
+  mixed-precedence ones).
+
+Corpus: net10 -25, dnlib +1 -- the guard text now matches the oracle
+line-for-line on GetFixIndexs2, but the diff count was masked by the
+collection-indexer gap on the same lines (the next slice).
+
+### ee6227422 "Render multi-argument accessors as indexer accesses"
+
+The instance-call render treated get_X/set_X uniformly as a property
+access and DROPPED the arguments beyond the receiver: `call
+get_Item(list, i)` rendered `list.Item` (the index lost). An accessor
+taking arguments beyond the receiver is an indexer access (C# has no
+parameterized properties besides indexers): `list[i]` /
+`list[i] = v`; the accessor's name does not appear in the index syntax.
+The receiver stays Arguments[0] in both shapes (a this-receiver call
+carries the this load as its first argument -- getting argBase wrong
+rendered `if ([this])` for get_HasId(this)).
+
+RED: ILAstToCSharp.MultiArgAccessorRendersAsIndexer (verified red on the
+pre-change tree). Corpus: dnlib -816 (the entire excess .Item count),
+net10 -330 (the guard-continue lines' mask lifted). The for count is 676
+vs the oracle's 724.
+
+### The extension re-measured and re-held
+
+The held /tmp/extendloop_held.patch no longer applies (the target files
+moved on); the extension body was re-implemented from the design (the
+dominator-tree preorder from the head, skipping the exit point's subtree)
+and measured WITH the guard-chain combination landed: dnlib 73675 ->
+73860 (+185), net10 89286 -> 89749 (+463). The extension changes which
+blocks the CDD sees, and the combined guard chains inside the extended
+loops render deeper/nested where the un-extended loops already match
+(the sample regression: `if (ptr != this.num) continue;` ->
+brace-nested + goto). The extension stays HELD; the design is recorded at
+/tmp/extendloop_held2.patch.
+
+### The standing queue
+
+The while-guard de Morgan pushdown (the FindNewarr family: the port
+renders `if (!(A || B))` where the oracle renders `if (!A' && B')` -- the
+negation pushed into the comparisons; ~486 `if (!(` sites on net10), the
+switch-tree methods' switch formation (the TryGetCpuArch family -- the
+oracle forms switches where the port renders nested ifs), the
+switch-inline section-order relaxation, the 303 not-found/adjacent goto
+split, the 97 span-escapes, the `?.` shapes, the `.override` forwarders,
+the net10 foreach-collapse gap (the Find method's enumerator pattern).
