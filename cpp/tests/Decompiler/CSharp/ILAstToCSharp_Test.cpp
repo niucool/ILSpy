@@ -2750,3 +2750,41 @@ TEST(ILAstToCSharp, GuardRegionFoldsTerminalFallThrough) {
     EXPECT_NE(text.find("	var a = 1;\n"), std::string::npos) << text;
     EXPECT_EQ(text.find("goto "), std::string::npos) << "no goto survives: " << text;
 }
+
+TEST(ILAstToCSharp, ReferenceTypedConditionLeafRendersNullComparison) {
+    // A reference-typed truthiness leaf in a condition slot renders the
+    // null comparison, not the bare expression: `if (listener)` is not C#
+    // for a class-typed local; the oracle renders `if (listener != null)`
+    // (the LazyList.Set_NoLock family). The C# reader materializes the
+    // brtrue/brfalse null comparisons itself; this port's reader keeps the
+    // bare load, so the condition render supplies the comparison.
+    auto listener = MakeVar(VariableKind::Local, "listener", 0,
+        std::make_shared<ILSpy::Decompiler::TypeSystem::SimpleType>(
+            ILSpy::Decompiler::TypeSystem::TopLevelTypeName(
+                "dnlib.Utils", "ILazyListener")));
+    auto b0 = std::make_unique<Block>();
+    auto body = std::make_unique<Block>();
+    auto cont = std::make_unique<Block>();
+    auto fn = MakeFunction({});
+    Block* contPtr = cont.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(body));
+    fn->Body->AddBlock(std::move(cont));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(listener), std::make_unique<Branch>(contPtr)));
+    fn->Body->Blocks[1]->Add(std::make_unique<StLoc>(
+        MakeVar(VariableKind::Local, "num", 1), std::make_unique<LdcI4>(7)));
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<Branch>(contPtr));
+    fn->Body->Blocks[2]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    // The guard's fall-through region (num = 7) runs on the NULL path, so
+    // the folded region renders under the null comparison.
+    EXPECT_NE(text.find("if (listener == null)"), std::string::npos)
+        << "the reference-typed condition leaf renders the null comparison:\n" << text;
+    EXPECT_EQ(text.find("if (listener)\n"), std::string::npos)
+        << "not the bare truthiness form:\n" << text;
+    EXPECT_EQ(text.find("listener) == 0"), std::string::npos)
+        << "not the zero comparison on a class-typed leaf:\n" << text;
+}

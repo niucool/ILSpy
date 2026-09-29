@@ -1357,10 +1357,7 @@ private:
         // the negative path), the branch target the else. A Comp
         // condition negates through its kind; a value condition wraps
         // parenthesized (the `==` binds tighter than the bitwise `&`).
-        std::string condText =
-            dynamic_cast<const Comp*>(iff.Condition.get()) != nullptr
-                ? NegateCondText(*iff.Condition)
-                : "(" + Expr(*iff.Condition) + ") == 0";
+        std::string condText = NegateCondText(*iff.Condition);
         Line(indent, "if (" + condText + ")");
         Line(indent, "{");
         if (r1 != nullptr)
@@ -3096,11 +3093,8 @@ private:
                     const IfInstruction* giff = guardFold->first;
                     const GuardRegion& g = guardFold->second;
                     std::string condText =
-                        dynamic_cast<const Comp*>(
-                            giff->Condition.get()) != nullptr
-                            ? StripOuterParens(
-                                  NegateCondText(*giff->Condition))
-                            : "(" + Expr(*giff->Condition) + ") == 0";
+                        StripOuterParens(
+                            NegateCondText(*giff->Condition));
                     Line(indent, "if (" + condText + ")");
                     Line(indent, "{");
                     const IfInstruction* prev = activeGuardRegion_;
@@ -4944,6 +4938,24 @@ private:
             }
             return "(" + left + " " + op + " " + right + ")";
         }
+        // A Boolean-valued leaf negates as !x; a reference-typed leaf as the
+        // null comparison; a numeric-stack leaf as the zero comparison. The
+        // C# reader materializes the brtrue/brfalse null/zero comparisons
+        // itself, so its render never sees a bare non-boolean in a condition
+        // slot; this port's reader keeps the bare load, so the negation
+        // supplies the comparison (the `(ownerModule) == 0` family -- not
+        // valid C# for a class-typed condition).
+        if (IsBooleanValued(&cond)) {
+            if (cond.Op == OpCode::MatchInstruction)
+                return "!(" + Expr(cond) + ")";
+            return "!" + Expr(cond);
+        }
+        StackType st = cond.ResultType();
+        if (st == StackType::O)
+            return Expr(cond) + " == null";
+        if (st == StackType::I4 || st == StackType::I8 || st == StackType::I ||
+            st == StackType::F4 || st == StackType::F8)
+            return Expr(cond) + " == 0";
         return "!(" + Expr(cond) + ")";
     }
 
@@ -4966,6 +4978,9 @@ private:
     static bool IsBooleanValued(const ILInstruction* inst) {
         if (!inst) return false;
         if (inst->Op == OpCode::Comp) return true;
+        // A pattern test (`x is T t`) is Boolean by construction (its
+        // ResultType is I4 like a comparison's).
+        if (inst->Op == OpCode::MatchInstruction) return true;
         if (inst->Op == OpCode::IfInstruction) {
             auto* iff = static_cast<const IfInstruction*>(inst);
             auto isLdc = [](const ILInstruction* a, int v) -> bool {
@@ -4983,6 +4998,12 @@ private:
         if (inst->Op == OpCode::Call) {
             auto* call = static_cast<const Call*>(inst);
             return call->ReturnIType && IsBooleanType(call->ReturnIType.get());
+        }
+        // A field load (the reader models ldfld/ldsfld as ldobj over the
+        // field address): Boolean-typed fields are truthiness leaves.
+        if (inst->Op == OpCode::LdObj) {
+            auto* ld = static_cast<const LdObj*>(inst);
+            return ld->Type && IsBooleanType(ld->Type.get());
         }
         return false;
     }
@@ -5099,10 +5120,15 @@ private:
                 return operand(iff->Condition.get()) + conn + operand(iff->TrueInst.get());
             }
         }
-        // Leaves: a Boolean leaf takes the `!` prefix; anything else keeps
-        // the existing conversion (integer leaves render `x != 0` / `x == 0`).
-        if (negate && IsBooleanValued(&cond))
-            return "!" + Expr(cond);
+        // Leaves: a Boolean leaf takes the `!` prefix (parenthesized when
+        // the leaf expression is not atomic -- a pattern test's `x is T t`
+        // binds looser than `!`); anything else keeps the existing
+        // conversion (integer leaves render `x != 0` / `x == 0`).
+        if (negate && IsBooleanValued(&cond)) {
+            std::string leaf = Expr(cond);
+            if (cond.Op == OpCode::MatchInstruction) return "!(" + leaf + ")";
+            return "!" + leaf;
+        }
         if (negate)
             return StripOuterParens(ConvertConditionText(cond, true));
         return StripOuterParens(ConvertConditionText(cond, false));
@@ -5158,10 +5184,10 @@ private:
                         case TypeSystem::KnownTypeCode::Char:
                             return Expr(cond) + (negate ? " == 0" : " != 0");
                         default:
-                            return Expr(cond);
+                            break;  // the type-aware tail below
                     }
                 }
-                return Expr(cond);
+                break;  // the type-aware tail below
             }
             case OpCode::Call: {
                 const auto* call = static_cast<const Call*>(&cond);
@@ -5170,10 +5196,9 @@ private:
                         ? dynamic_cast<const TypeSystem::KnownType*>(
                               call->ReturnIType.get())
                         : nullptr;
-                if (k != nullptr &&
-                    k->Code() == TypeSystem::KnownTypeCode::Boolean)
-                    return Expr(cond);
                 if (k != nullptr) {
+                    if (k->Code() == TypeSystem::KnownTypeCode::Boolean)
+                        return Expr(cond);
                     switch (k->Code()) {
                         case TypeSystem::KnownTypeCode::SByte:
                         case TypeSystem::KnownTypeCode::Byte:
@@ -5185,14 +5210,32 @@ private:
                         case TypeSystem::KnownTypeCode::UInt64:
                             return Expr(cond) + (negate ? " == 0" : " != 0");
                         default:
-                            return Expr(cond);
+                            break;  // the type-aware tail below
                     }
                 }
-                return Expr(cond);
+                break;  // the type-aware tail below
             }
             default:
-                return Expr(cond);
+                break;  // the type-aware tail below
         }
+        // The type-aware tail: the C# reader materializes the
+        // brtrue/brfalse null/zero comparisons itself, so its condition
+        // render never sees a bare non-boolean leaf; this port's reader
+        // keeps the bare load, so the render supplies the comparison -- a
+        // reference-stack leaf the null comparison (the LazyList
+        // `if (listener)` family: `if (listener)` is not valid C#), a
+        // numeric-stack leaf the zero comparison. A Boolean-valued leaf
+        // the switch arms did not cover (the Boolean-typed field loads)
+        // renders bare; an Unknown stack type (the untyped dup slots)
+        // keeps the bare form -- the C#'s own TypeKind.Unknown arm.
+        if (IsBooleanValued(&cond)) return Expr(cond);
+        StackType st = cond.ResultType();
+        if (st == StackType::O)
+            return Expr(cond) + (negate ? " == null" : " != null");
+        if (st == StackType::I4 || st == StackType::I8 || st == StackType::I ||
+            st == StackType::F4 || st == StackType::F8)
+            return Expr(cond) + (negate ? " == 0" : " != 0");
+        return Expr(cond);
     }
 
     std::string Expr(const ILInstruction& inst) {
