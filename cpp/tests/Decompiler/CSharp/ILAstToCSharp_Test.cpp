@@ -27,6 +27,8 @@
 #include "Decompiler/IL/VariableKind.hpp"
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
+#include <map>
+
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
@@ -519,6 +521,45 @@ TEST(ILAstToCSharp, SwitchSectionWithLeaveBodyInlinesReturn) {
     EXPECT_NE(text.find("return 5;"), std::string::npos) << text;
     EXPECT_NE(text.find("default:"), std::string::npos) << text;
     EXPECT_NE(text.find("V_0 = 7"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, SwitchCaseLabelsUseEnumMemberNames) {
+    // The C# CreateTypedCaseLabel's enum lookup: a switch over an
+    // enum-typed variable renders the case labels as the enum member names
+    // (`case Machine.I386:`), not the raw values (`case 332:`).
+    namespace TS = ILSpy::Decompiler::TypeSystem;
+    std::map<long long, std::string> members;
+    members[332] = "I386";
+    members[34404] = "AMD64";
+    auto enumType = std::make_shared<TS::EnumMembersType>(
+        TS::TopLevelTypeName("dnlib.PE", "Machine", 0), std::move(members));
+    auto v = std::make_shared<ILVariable>(VariableKind::Parameter, enumType, 0);
+    v->Name = "machine";
+
+    auto b0 = std::make_unique<Block>();
+    auto b2 = std::make_unique<Block>(); Block* b2Ptr = b2.get();
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b2));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v));
+    auto caseSection = std::make_unique<SwitchSection>(
+        ILSpy::Decompiler::Util::LongSet(static_cast<long long>(332)));
+    caseSection->SetBody(std::make_unique<Leave>(fn->Body.get(),
+                                                 std::make_unique<LdcI4>(1)));
+    auto defaultSection = std::make_unique<SwitchSection>();
+    defaultSection->SetBody(std::make_unique<Leave>(fn->Body.get(),
+                                                    std::make_unique<LdcI4>(0)));
+    sw->AddSection(std::move(caseSection));
+    sw->AddSection(std::move(defaultSection));
+    fn->Body->Blocks[0]->SetFinal(std::move(sw));
+    b2Ptr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "int", "M", "Machine machine");
+    EXPECT_NE(text.find("case Machine.I386:"), std::string::npos) << text;
+    EXPECT_EQ(text.find("case 332:"), std::string::npos)
+        << "the enum switch renders the member name, not the raw value";
 }
 
 TEST(ILAstToCSharp, SwitchSectionWithThrowBodyInlinesThrow) {

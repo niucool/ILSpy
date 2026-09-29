@@ -3455,7 +3455,22 @@ private:
         return best;
     }
 
-    // Emit `if (<guards>) { continue; } <the body>` for the for-loop guard
+    // The enum member name for a switch case label value, when the switch
+    // value is a load of an enum-typed variable whose type carries the
+    // members (the signature decoder's EnumMembersType). Returns empty for
+    // a non-enum switch value or a value with no member.
+    static std::string EnumCaseLabelText(const SwitchInstruction& sw, long long value) {
+        auto* ld = dynamic_cast<const LdLoc*>(sw.Value.get());
+        if (ld == nullptr || !ld->Variable || !ld->Variable->Type) return {};
+        auto* enumType = dynamic_cast<const TypeSystem::EnumMembersType*>(
+            ld->Variable->Type.get());
+        if (enumType == nullptr) return {};
+        auto it = enumType->Members().find(value);
+        if (it == enumType->Members().end()) return {};
+        return enumType->Name() + "." + it->second;
+    }
+
+    // Emit `if (<guards>) { continue; } <the body>` for the for-loop guard    // Emit `if (<guards>) { continue; } <the body>` for the for-loop guard
     // shape (see the IfInstruction statement case). Returns false when any
     // gate rejects and the caller falls through to the plain emission.
     bool TryEmitGuardContinue(const IfInstruction& iff, int indent) {
@@ -3812,11 +3827,20 @@ private:
                                     continue;
                                 }
                             }
-                            if (iv.Start == iv.InclusiveEnd())
+                            // The C# CreateTypedCaseLabel's enum lookup:
+                            // a switch over an enum-typed variable renders
+                            // the label as the enum member name.
+                            std::string valueLabel;
+                            if (iv.Start == iv.InclusiveEnd() && s2i == nullptr)
+                                valueLabel = EnumCaseLabelText(sw, iv.Start);
+                            if (!valueLabel.empty()) {
+                                Line(indent, "case " + valueLabel + ":");
+                            } else if (iv.Start == iv.InclusiveEnd()) {
                                 Line(indent, "case " + std::to_string(iv.Start) + ":");
-                            else
+                            } else {
                                 Line(indent, "case " + std::to_string(iv.Start) +
                                       ".." + std::to_string(iv.InclusiveEnd()) + ":");
+                            }
                         }
                     }
                     if (!plan) {
