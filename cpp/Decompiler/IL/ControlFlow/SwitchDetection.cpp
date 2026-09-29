@@ -265,14 +265,18 @@ void SwitchDetection::SortSwitchSections(SwitchInstruction* sw, ILTransformConte
         // first, as in C# OrderBy over int?). This port does not carry
         // per-instruction ILRange, so a Leave body uses offset 0 as a
         // fallback (the CFS first pass only sees Branch bodies, so this does
-        // not affect output today). Secondary key: the first label value.
+        // the first label value.
         auto keyOf = [&](SwitchSection* s) -> std::tuple<bool, long long, long long> {
             long long lf = labelFirst(s);
             if (auto* br = dynamic_cast<Branch*>(s ? s->Body.get() : nullptr)) {
                 return {true, static_cast<long long>(br->TargetOffset), lf};
             }
-            if (dynamic_cast<Leave*>(s ? s->Body.get() : nullptr)) {
-                return {true, 0, lf};
+            if (auto* leave = dynamic_cast<Leave*>(s ? s->Body.get() : nullptr)) {
+                // The C# Leave body keys on its ILRange.Start; the section
+                // bodies the string-switch arm clones carry their original
+                // offsets (the case heads' true arms and the merged default),
+                // which is what orders the values ahead of the default.
+                return {true, static_cast<long long>(leave->StartILOffset), lf};
             }
             return {false, 0, lf};
         };

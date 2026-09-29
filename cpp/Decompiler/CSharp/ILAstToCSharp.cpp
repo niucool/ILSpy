@@ -3685,13 +3685,13 @@ private:
                         k == plan->defaultSectionIdx)
                         continue;
                     if (section->HasNullLabel) {
-                        Line(indent + 1, "case null:");
+                        Line(indent, "case null:");
                     }
                     if (stringDefaultSection == section.get()) {
-                        Line(indent + 1, "default:");
+                        Line(indent, "default:");
                     } else if (section->Labels.IsEmpty() &&
                                !section->HasNullLabel) {
-                        Line(indent + 1, "default:");
+                        Line(indent, "default:");
                     } else {
                         for (const auto& iv : section->Labels.Intervals()) {
                             if (s2i && iv.Start == iv.InclusiveEnd()) {
@@ -3699,19 +3699,19 @@ private:
                                 if (const std::string* key =
                                         StringCaseLabel(*s2i, iv.Start,
                                                          &nullKey)) {
-                                    Line(indent + 1,
+                                    Line(indent,
                                          "case \"" + *key + "\":");
                                     continue;
                                 }
                                 if (nullKey) {
-                                    Line(indent + 1, "case null:");
+                                    Line(indent, "case null:");
                                     continue;
                                 }
                             }
                             if (iv.Start == iv.InclusiveEnd())
-                                Line(indent + 1, "case " + std::to_string(iv.Start) + ":");
+                                Line(indent, "case " + std::to_string(iv.Start) + ":");
                             else
-                                Line(indent + 1, "case " + std::to_string(iv.Start) +
+                                Line(indent, "case " + std::to_string(iv.Start) +
                                       ".." + std::to_string(iv.InclusiveEnd()) + ":");
                         }
                     }

@@ -1091,8 +1091,24 @@ bool MatchRoslynSwitchOnString(Block& block, int& i, ILTransformContext& context
     }
     if (portNullHead) {
         // The port's null-head form: the null case's body is the folded
-        // local leave under the null-check if's true arm.
-        stringValues.push_back({std::nullopt, nullCaseLeave});
+        // local leave under the null-check if's true arm. The C# skips the
+        // null case when the null branch targets the default's exit block
+        // (the null falls into the default); the fold's equivalent is the
+        // same return value.
+        bool nullIsDefault = false;
+        if (auto* leave = dynamic_cast<Leave*>(nullCaseLeave)) {
+            if (leave->Value != nullptr &&
+                defaultSection != nullptr && defaultSection->Body != nullptr) {
+                auto defaultValue =
+                    PureLeaveValueString(defaultSection->Body.get());
+                if (defaultValue.has_value() &&
+                    *defaultValue == leave->Value->ToString()) {
+                    nullIsDefault = true;
+                }
+            }
+        }
+        if (!nullIsDefault)
+            stringValues.push_back({std::nullopt, nullCaseLeave});
     }
     // In newer Roslyn versions (>= 3.7) the null check appears in the default
     // case, not prior to the switch.
@@ -1158,9 +1174,22 @@ bool MatchRoslynSwitchOnString(Block& block, int& i, ILTransformContext& context
                     MakeSection(Util::LongSet(static_cast<long long>(idx)),
                                 std::make_unique<Branch>(b)));
             } else if (body != nullptr) {
+                auto cloned = body->Clone();
+                // The C# orders the arm's sections by the body brs' target
+                // offsets (the case heads' IL region, ascending with the
+                // case order). This port's CFS fold replaced those brs with
+                // per-site leaves carrying the shared return's offset, so
+                // the clone is stamped with the owning case-head block's
+                // offset -- the same order the C# sort derives from the br
+                // targets.
+                ILInstruction* p = body->Parent;
+                while (p != nullptr && dynamic_cast<Block*>(p) == nullptr)
+                    p = p->Parent;
+                if (p != nullptr)
+                    cloned->StartILOffset = p->StartILOffset;
                 newSwitch->AddSection(
                     MakeSection(Util::LongSet(static_cast<long long>(idx)),
-                                body->Clone()));
+                                std::move(cloned)));
             } else {
                 return nullptr;
             }
@@ -1172,6 +1201,13 @@ bool MatchRoslynSwitchOnString(Block& block, int& i, ILTransformContext& context
                                    defaultSection->Body != nullptr
                                        ? defaultSection->Body->Clone()
                                        : nullptr);
+            // The C# default section keys on the default block's offset
+            // (the method's exit region, after every case body); this port's
+            // fold consumed that block into the merged leave, so the clone
+            // is stamped past every case-body offset to keep the default
+            // last under the offset-keyed section sort.
+            if (def != nullptr && def->Body != nullptr)
+                def->Body->StartILOffset = 0x7FFFFFFE;
             newSwitch->AddSection(std::move(def));
         }
         return newSwitch;
