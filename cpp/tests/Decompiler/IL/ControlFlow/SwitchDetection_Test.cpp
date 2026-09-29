@@ -573,6 +573,91 @@ TEST(SwitchDetection, RunReconstructsIfChainAsSwitch) {
     fx.fn->CheckInvariant(ILPhase::Normal);
 }
 
+TEST(SwitchDetection, MergesPerSiteReturnBlocksIntoOneDefault) {
+    // The CFS branch-to-return fold materializes the shared default return
+    // PER SITE: the false paths of the switch tree run into different
+    // single-return blocks that all leave with the same value (the corpus
+    // shape -- TryGetCpuArch's binary-search false arms). The C# tree keeps
+    // one shared target block, so its AddSection merges them by target;
+    // this port must merge by the resolved exit identity (the returned
+    // value through the passthrough blocks), or every false arm becomes
+    // its own section and the switch rejects on "non-default with tons of
+    // keys". Shape: root: if (V < 2) br left; right: if (V == 2) br caseA;
+    // left: if (V == 0) br caseB; the false paths run through empty
+    // passthrough blocks into ret1/ret2, both `leave ldc.i4(0)`.
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto V = MakeTypedLocal("V", KnownTypeCode::Int32);
+    fn->Variables.push_back(V);
+    for (int i = 0; i < 9; ++i) fn->Body->AddBlock(std::make_unique<Block>());
+    // Layout: each if's false path is the positional fall-through (the
+    // next block in the container), as the reader produces.
+    Block* root = fn->Body->Blocks[0].get();
+    Block* right = fn->Body->Blocks[1].get();
+    Block* pass1 = fn->Body->Blocks[2].get();
+    Block* ret1 = fn->Body->Blocks[3].get();
+    Block* left = fn->Body->Blocks[4].get();
+    Block* pass2 = fn->Body->Blocks[5].get();
+    Block* ret2 = fn->Body->Blocks[6].get();
+    Block* caseA = fn->Body->Blocks[7].get();
+    Block* caseB = fn->Body->Blocks[8].get();
+
+    // root: if (V < 2) br left ; fall-through right
+    root->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(V), std::make_unique<LdcI4>(2),
+                               ComparisonKind::LessThan),
+        std::make_unique<Branch>(left), nullptr));
+    // right: if (V == 2) br caseA ; fall-through pass1
+    right->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(V), std::make_unique<LdcI4>(2),
+                               ComparisonKind::Equality),
+        std::make_unique<Branch>(caseA), nullptr));
+    // left: if (V == 0) br caseB ; fall-through pass2
+    left->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(V), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Equality),
+        std::make_unique<Branch>(caseB), nullptr));
+    // the passthroughs: empty blocks whose final branches to the returns
+    pass1->SetFinal(std::make_unique<Branch>(ret1));
+    pass2->SetFinal(std::make_unique<Branch>(ret2));
+    // the per-site materialized returns: a valued leave each, same value
+    ret1->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                           std::make_unique<LdcI4>(0)));
+    ret2->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                           std::make_unique<LdcI4>(0)));
+    caseA->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                            std::make_unique<LdcI4>(1)));
+    caseB->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                            std::make_unique<LdcI4>(1)));
+    (void)caseA; (void)caseB;
+    RecomputeIncomingEdgeCounts(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ILTransformContext ctx;
+    SwitchDetection().Run(*fn, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ASSERT_TRUE(root->FinalInstruction);
+    ASSERT_EQ(root->FinalInstruction->Op, OpCode::SwitchInstruction)
+        << "the per-site return blocks must not block the switch formation";
+    auto* sw = static_cast<SwitchInstruction*>(root->FinalInstruction.get());
+    // Three sections: {0}, {2}, and the merged default ({1} union {V>2}).
+    ASSERT_EQ(sw->Sections.size(), 3u);
+    bool foundZero = false, foundTwo = false, foundDef = false;
+    for (const auto& s : sw->Sections) {
+        if (s->Labels.Contains(0) && s->Labels.Count() == 1u) foundZero = true;
+        if (s->Labels.Contains(2) && s->Labels.Count() == 1u) foundTwo = true;
+        if (!s->Labels.Contains(0) && !s->Labels.Contains(2) &&
+            s->Labels.Count() > 100u)
+            foundDef = true;
+    }
+    EXPECT_TRUE(foundZero);
+    EXPECT_TRUE(foundTwo);
+    EXPECT_TRUE(foundDef) << "the per-site returns merge into one default section";
+}
+
 // The else-armed if-chain (the nested-Block false arms, the shape the
 // transformed pipeline produces when the CFS restructures the chains):
 // `if (V == 0) br caseA else Block { if (V == 1) br caseB else Block {

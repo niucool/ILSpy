@@ -46,6 +46,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -104,8 +105,7 @@ private:
     // De-duplication maps: a Branch target block -> section index, and a Leave
     // target container -> section index, so two arms that jump to the same
     // place merge into one section.
-    std::unordered_map<Block*, int> targetBlockToSectionIndex_;
-    std::unordered_map<BlockContainer*, int> targetContainerToSectionIndex_;
+    std::unordered_map<std::string, int> sectionKeyToSectionIndex_;
     // Synthesized fall-through Branches (not in the tree) kept alive so the
     // section bodies point at valid memory until SwitchDetection consumes them.
     std::vector<std::unique_ptr<ILInstruction>> ownedBodies_;
@@ -125,6 +125,7 @@ private:
     // Branch to the default block.
     bool AnalyzeNestedBlock(Block* block, Util::LongSet inputValues);
     void AddSection(Util::LongSet values, ILInstruction* inst);
+    std::string SectionExitKey(ILInstruction* inst);
     bool MatchSwitchVar(ILInstruction* inst);
     bool MatchSwitchVar(ILInstruction* inst, long long& sub);
     bool AnalyzeCondition(ILInstruction* condition, Util::LongSet& trueValues);

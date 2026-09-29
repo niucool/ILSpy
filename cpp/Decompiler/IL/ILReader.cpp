@@ -1137,8 +1137,14 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
                 sec->SetBody(std::make_unique<Branch>(targets[i]));
                 sw->AddSection(std::move(sec));
             }
-            // Default section: fall through to the instruction after the switch.
+            // Default section: fall through to the instruction after the
+            // switch. The labels are the complement of the table's index
+            // range (the C# DecodeSwitch: LongSet(new LongInterval(0,
+            // targets.Length)).Invert()) -- every value the table does not
+            // cover. GetDefaultSection (the section with the most labels)
+            // relies on this being the huge complement, not an empty set.
             auto def = std::make_unique<SwitchSection>();
+            def->Labels = Util::LongSet(Util::LongInterval(0, static_cast<long long>(n))).Invert();
             def->SetBody(std::make_unique<Branch>(static_cast<std::uint32_t>(pos)));
             sw->AddSection(std::move(def));
             block->SetFinal(std::move(sw));

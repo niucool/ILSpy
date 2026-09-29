@@ -3754,12 +3754,31 @@ private:
                          ")");
                 Line(indent, "{");
                 // The C# GetDefaultSection: the section with the most labels
-                // is the default (a string switch's complement interval).
-                // GetDefaultSection is a non-const lookup; the const cast
-                // mirrors the C# reader (the method mutates nothing).
+                // is the default -- for every switch, not just the string
+                // ones (the StatementBuilder's TranslateSwitch reads it
+                // unconditionally). The reconstructed switches carry their
+                // default as the huge complement of the case labels, so the
+                // most-labeled section is the default. GetDefaultSection is
+                // a non-const lookup; the const cast mirrors the C# reader
+                // (the method mutates nothing).
                 const SwitchSection* stringDefaultSection =
-                    s2i ? const_cast<SwitchInstruction&>(sw).GetDefaultSection()
-                        : nullptr;
+                    const_cast<SwitchInstruction&>(sw).GetDefaultSection();
+                // The most-labeled pick is only meaningful when the winner is
+                // the huge complement the analysis builds as the default
+                // (the C# switches always carry one); a small most-labeled
+                // section is an ordinary case (the hand-built fixtures with
+                // equal-size sections). A section with no labels at all is
+                // this port's explicit default marker (the fixtures and the
+                // pre-complement reader shapes); it wins over the pick.
+                if (stringDefaultSection != nullptr &&
+                    stringDefaultSection->Labels.Count() <= 100)
+                    stringDefaultSection = nullptr;
+                for (const auto& sec : sw.Sections) {
+                    if (sec && sec->Labels.IsEmpty() && !sec->HasNullLabel) {
+                        stringDefaultSection = sec.get();
+                        break;
+                    }
+                }
                 for (std::size_t k = 0; k < sw.Sections.size(); ++k) {
                     const auto& section = sw.Sections[k];
                     if (!section) continue;

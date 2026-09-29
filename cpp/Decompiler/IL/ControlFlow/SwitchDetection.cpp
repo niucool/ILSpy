@@ -475,7 +475,24 @@ void SwitchDetection::ProcessBlock(Block* block, bool& needsCleanup,
                                    std::vector<Block*>& clearedBlocks) {
     bool analysisSuccess = analysis_.AnalyzeBlock(block);
     bool formedSwitch = false;
+    if (std::getenv("ILSPY_SWDBG") && analysisSuccess && analysis_.Sections.size() > 8) {
+        std::fprintf(stderr, "[SW] candidate root=%x: sections=%zu inner=%zu containsILSwitch=%d\n",
+                     block->StartILOffset, analysis_.Sections.size(), analysis_.InnerBlocks.size(),
+                     (int)analysis_.ContainsILSwitch);
+    }
+    if (std::getenv("ILSPY_SWDBG4") && analysisSuccess && analysis_.Sections.size() > 8) {
+        for (std::size_t si = 0; si < analysis_.Sections.size(); ++si) {
+            auto& sec = analysis_.Sections[si];
+            std::string ivs;
+            for (auto& iv : sec.Labels.Intervals()) { ivs += "[" + std::to_string(iv.Start) + ".." + std::to_string(iv.InclusiveEnd()) + "]"; if (ivs.size() > 90) { ivs += "..."; break; } }
+            auto* sbr = dynamic_cast<Branch*>(sec.Body);
+            std::fprintf(stderr, "[SW4] root=%x sec[%zu] body=%s tgt=%x labels=%s\n", block->StartILOffset, si,
+                         sec.Body ? std::to_string((int)sec.Body->Op).c_str() : "?",
+                         sbr && sbr->TargetBlock ? sbr->TargetBlock->StartILOffset : 0xffff, ivs.c_str());
+        }
+    }
     if (analysisSuccess && UseCSharpSwitch()) {
+        if (std::getenv("ILSPY_SWDBG")) std::fprintf(stderr, "[SW] FORMING root=%x (sections=%zu)\n", analysis_.RootBlock ? analysis_.RootBlock->StartILOffset : 0, analysis_.Sections.size());
         // Clone each section body so the SwitchInstruction owns its sections
         // outright. This port has no GC: the originals (the if-chain's Branches)
         // are destroyed when the inner blocks are cleared below, so the sections
@@ -542,7 +559,7 @@ void SwitchDetection::ProcessBlock(Block* block, bool& needsCleanup,
 }
 
 bool SwitchDetection::UseCSharpSwitch() {
-    if (analysis_.InnerBlocks.empty()) return false;
+    if (analysis_.InnerBlocks.empty()) { if (std::getenv("ILSPY_SWDBG") && analysis_.Sections.size() > 8) std::fprintf(stderr, "[SW] reject: no inner\n"); return false; }
     // The default section is the one with > MaxValuesPerSection values (the
     // complement of the finite case labels, which is huge).
     int defaultIdx = -1;
@@ -552,14 +569,16 @@ bool SwitchDetection::UseCSharpSwitch() {
             break;
         }
     }
-    if (defaultIdx < 0) return false;  // no default section
+    if (defaultIdx < 0) { if (std::getenv("ILSPY_SWDBG") && analysis_.Sections.size() > 8) std::fprintf(stderr, "[SW] reject: no default\n"); return false; }  // no default section
     const auto& defaultKey = analysis_.Sections[static_cast<std::size_t>(defaultIdx)].Labels;
     // Only the default may have tons of keys (C# has no `case 1 to 100000000`).
     for (int i = 0; i < static_cast<int>(analysis_.Sections.size()); ++i) {
         if (i == defaultIdx) continue;
         const auto& key = analysis_.Sections[static_cast<std::size_t>(i)].Labels;
-        if (!key.SetEquals(defaultKey) && key.Count() > MaxValuesPerSection)
+        if (!key.SetEquals(defaultKey) && key.Count() > MaxValuesPerSection) {
+            if (std::getenv("ILSPY_SWDBG")) std::fprintf(stderr, "[SW] reject root=%x: non-default with tons of keys\n", analysis_.RootBlock ? analysis_.RootBlock->StartILOffset : 0);
             return false;
+        }
     }
     // An existing IL switch (or a Roslyn switch-on-string) is a strong signal
     // the surrounding code is a switch.
@@ -588,7 +607,8 @@ bool SwitchDetection::UseCSharpSwitch() {
         intervalCount += static_cast<int>(
             analysis_.Sections[static_cast<std::size_t>(i)].Labels.Intervals().size());
     }
-    if (ifCount < intervalCount) return false;
+    if (std::getenv("ILSPY_SWDBG")) std::fprintf(stderr, "[SW] ifCount root=%x: %d intervals=%d\n", analysis_.RootBlock ? analysis_.RootBlock->StartILOffset : 0, ifCount, intervalCount);
+    if (ifCount < intervalCount) { if (std::getenv("ILSPY_SWDBG")) std::fprintf(stderr, "[SW] reject: ifCount < intervals\n"); return false; }
 
     std::vector<FlowAnalysis::ControlFlowNode*> flowNodes, caseNodes;
     AnalyzeControlFlow(flowNodes, caseNodes);
@@ -597,7 +617,7 @@ bool SwitchDetection::UseCSharpSwitch() {
     if (analysis_.Sections.size() == 2 && IsSingleCondition(flowNodes, caseNodes))
         return false;
     Block* breakBlock = nullptr;
-    if (SwitchUsesGoto(flowNodes, caseNodes, breakBlock)) return false;
+    if (SwitchUsesGoto(flowNodes, caseNodes, breakBlock)) { if (std::getenv("ILSPY_SWDBG")) std::fprintf(stderr, "[SW] reject: uses-goto (sections=%zu)\n", analysis_.Sections.size()); return false; }
     if (breakBlock == nullptr) return true;
     // The break target should have the highest IL offset of all the switch
     // targets, so it can be the fall-through after the switch.
@@ -608,6 +628,10 @@ bool SwitchDetection::UseCSharpSwitch() {
             maxTargetOffset = std::max(maxTargetOffset,
                                        static_cast<long long>(br->TargetBlock->StartILOffset));
     }
+    if (std::getenv("ILSPY_SWDBG") && analysis_.Sections.size() > 8)
+        std::fprintf(stderr, "[SW] break-offset gate: breakBlock=%x maxTarget=%lld -> %d\n",
+                     breakBlock->StartILOffset, maxTargetOffset,
+                     (int)(static_cast<long long>(breakBlock->StartILOffset) >= maxTargetOffset));
     return static_cast<long long>(breakBlock->StartILOffset) >= maxTargetOffset;
 }
 
@@ -652,6 +676,7 @@ bool SwitchDetection::SwitchUsesGoto(
             }
         }
     }
+    if (std::getenv("ILSPY_SWDBG") && analysis_.Sections.size() > 8) std::fprintf(stderr, "[SW] externalCases=%zu caseNodes=%zu\n", externalCases.size(), caseNodes.size());
     if (externalCases.size() > 1) return true;
     // Break targets: successors leaving the case-node subtrees that are not
     // depth-1 continues, excluding the external cases.
@@ -662,6 +687,7 @@ bool SwitchDetection::SwitchUsesGoto(
         if (externalSet.count(n)) continue;
         for (auto* bt : loopContext_->GetBreakTargets(n)) breakTargets.insert(bt);
     }
+    if (std::getenv("ILSPY_SWDBG") && analysis_.Sections.size() > 8) std::fprintf(stderr, "[SW] breakTargets=%zu\n", breakTargets.size());
     if (breakTargets.size() != 1) return breakTargets.size() > 1;
     breakBlock = static_cast<Block*>((*breakTargets.begin())->UserData);
     if (externalCases.size() == 1)
