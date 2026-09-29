@@ -1776,14 +1776,19 @@ private:
                     for (int c = 0; c < i->ChildCount(); ++c)
                         usesVar(i->GetChild(c));
                 };
+            // The C# TransformFor's ForStatementUsesVariable: the variable
+            // must be used in the for's condition or iterators. A variable
+            // used only in the body (e.g. an accumulator stack) keeps its
+            // declaration before the loop -- the oracle renders
+            // `T v = init; for (; cond; incr)` for those, not
+            // `for (T v = init; cond; incr)`.
             const Block* header = h.container->Blocks.front().get();
             if (header && header->FinalInstruction)
                 usesVar(header->FinalInstruction.get());
-            for (const auto& b : h.container->Blocks) {
-                if (!b || b.get() == header) continue;
-                for (const auto& i2 : b->Instructions)
+            const Block* increment = h.container->Blocks.back().get();
+            if (increment != nullptr && increment != header)
+                for (const auto& i2 : increment->Instructions)
                     if (i2) usesVar(i2.get());
-            }
             if (!loopUsesV) continue;
             hoistedForInits_[h.container] = ForHoist{
                 CSharpTypeName(v->Type) + " " + CSharp::OutputVisitor::EscapeIdentifier(v->Name) + " = " +

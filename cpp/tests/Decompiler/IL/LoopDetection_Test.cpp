@@ -271,15 +271,19 @@ TEST(LoopDetection, MscorlibSweepPreservesInvariant) {
 TEST(LoopDetection, PicksEarliestOutOfLoopExitDeterministically) {
     // Nondeterminism regression guard (the LoopDetection determinism fix). A loop
     // with TWO out-of-loop successor blocks -- b4 at a lower StartILOffset and b5
-    // at a higher one -- must exit to the earliest block (b4):
+    // at a higher one -- must exit deterministically. Both successors are
+    // function returns (no reachable exit), so the C# PickExitPoint source-order
+    // heuristic applies: the HIGHEST-IL-offset qualifying block (b5) is the
+    // loop's exit -- the loop-completion continuation -- and the earlier return
+    // (b4) belongs inside the loop:
     //   b1 (header): if (c) br b4 else br b2
     //   b2 (body):   if (c) br b5 else br b3
     //   b3 (body):   br b1        (back edge; b1 dominates b2/b3)
     //   b4, b5: leave (function)  (both loop exits)
     // FindExitPoint/ConstructLoop used to iterate a std::set<ControlFlowNode*> in
     // pointer-address order, so a multi-exit loop got a run-to-run-varying exit
-    // (and member block order), breaking output determinism. Now the earliest
-    // out-of-loop successor is chosen and members keep their container order.
+    // (and member block order), breaking output determinism. The pick is now
+    // the deterministic C# rule (the highest qualifying offset).
     auto fn = WrapBlocks({});
     for (int i = 0; i < 6; ++i) fn->Body->AddBlock(std::make_unique<Block>());
     auto cd = [] {
@@ -329,11 +333,13 @@ TEST(LoopDetection, PicksEarliestOutOfLoopExitDeterministically) {
     ASSERT_EQ(preHeader->FinalInstruction->Op, OpCode::Branch)
         << "pre-header final is the synthesized loop-exit branch";
     auto* exitBr = static_cast<Branch*>(preHeader->FinalInstruction.get());
-    EXPECT_EQ(exitBr->TargetBlock, b4)
-        << "the exit branch must target the earliest out-of-loop successor (b4, "
-           "offset 0x40), not the later b5 (offset 0x50): the exit pick must be "
-           "deterministic, not pointer-order-dependent";
-    EXPECT_NE(exitBr->TargetBlock, b5) << "the later exit b5 must not be chosen";
+    EXPECT_EQ(exitBr->TargetBlock, b5)
+        << "the exit branch must target the highest-offset qualifying "
+           "out-of-loop successor (b5, offset 0x50) -- the C# source-order "
+           "heuristic -- deterministically, not pointer-order-dependent";
+    EXPECT_NE(exitBr->TargetBlock, b4)
+        << "the earlier return b4 belongs inside the loop (the extension "
+           "includes head-dominated no-reachable-exit blocks)";
 }
 
 TEST(LoopDetection, PrefersConvergenceExitOverEarlyBreakPath) {
@@ -395,4 +401,86 @@ TEST(LoopDetection, PrefersConvergenceExitOverEarlyBreakPath) {
         << "exit must be the loop convergence b5 (0x27); b2 reaches b5, so b5 is the "
            "post-dominating exit, not the lower-offset break path b2 (0x15)";
     EXPECT_NE(exitBr->TargetBlock, b2) << "must not exit into the early break/match path";
+}
+
+// The C# ExtendLoop (LoopDetection.cs): a loop's container must include the
+// early-return blocks dominated by the loop head, keeping only the chosen
+// exit point outside. The natural loop alone leaves the match-return block
+// out of the container, which misroutes the if's false path (the positional
+// next) onto the increment block -- the structure behind the empty-guard
+// renders (`if (cond) { }` + a wrong trailing return).
+//   b0(0x00): [i = 0] br b4                       (init, pretest jump)
+//   b1(0x04): if (i != item) br b3                (match test; false = fall-through)
+//   b2(0x23): leave ldloc(i)                      (match -> return i)
+//   b3(0x25): [i++] br b4                         (increment; back edge b3->b4)
+//   b4(0x29): if (i < Count) br b1                (loop head/condition)
+//   b5(0x37): leave ldc.i4(-1)                    (loop completion -> return -1)
+// The natural loop of b3->b4 is {b4, b1, b3}; b2 and b5 are both dominated by
+// b4. The C# picks the exit point by source order (the highest-offset
+// no-continuation block: b5) and extends the loop with every other
+// head-dominated block (b2), so the container is {b4, b1, b2, b3} and the
+// if's false path (the positional next) lands on b2 -- the early return.
+TEST(LoopDetection, ExtendsLoopWithEarlyReturnBlocks) {
+    auto fn = WrapBlocks({});
+    for (int i = 0; i < 6; ++i) fn->Body->AddBlock(std::make_unique<Block>());
+    const std::uint32_t offs[6] = { 0x00, 0x04, 0x23, 0x25, 0x29, 0x37 };
+    for (int i = 0; i < 6; ++i) fn->Body->Blocks[i]->StartILOffset = offs[i];
+    auto cond = [] {
+        return std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                                      ComparisonKind::Inequality);
+    };
+    Block* b0 = fn->Body->Blocks[0].get();
+    Block* b1 = fn->Body->Blocks[1].get();
+    Block* b2 = fn->Body->Blocks[2].get();
+    Block* b3 = fn->Body->Blocks[3].get();
+    Block* b4 = fn->Body->Blocks[4].get();
+    Block* b5 = fn->Body->Blocks[5].get();
+
+    auto i0 = std::make_shared<ILVariable>();
+    b0->Add(std::make_unique<StLoc>(i0, std::make_unique<LdcI4>(0)));
+    b0->SetFinal(std::make_unique<Branch>(b4));
+    // b1: if (i != item) br b3 (the no-match path -> the increment); the
+    // false path (the match) falls through to b2 (the early return).
+    b1->SetFinal(std::make_unique<IfInstruction>(cond(), std::make_unique<Branch>(b3)));
+    b2->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                         std::make_unique<LdLoc>(i0)));
+    b3->Add(std::make_unique<StLoc>(i0, std::make_unique<LdcI4>(1)));
+    b3->SetFinal(std::make_unique<Branch>(b4));
+    b4->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(i0), std::make_unique<LdcI4>(10),
+                               ComparisonKind::LessThan),
+        std::make_unique<Branch>(b1)));
+    b5->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                         std::make_unique<LdcI4>(-1)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    LoopDetection().Run(*fn, Ctx());
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // The loop container: the head's parent owns a Loop-kind container.
+    BlockContainer* loop = nullptr;
+    Walk(fn->Body.get(), [&](ILInstruction* i2) {
+        auto* c = dynamic_cast<BlockContainer*>(i2);
+        if (c && c->Kind == ContainerKind::Loop) loop = c;
+    });
+    ASSERT_NE(loop, nullptr) << "the loop must be detected and wrapped";
+    // The synthesized loop-exit branch targets b5 (the loop completion), the
+    // highest-offset no-reachable-exit block -- not b2 (the earliest): the
+    // C# PickExitPoint source-order heuristic. (The C# ExtendLoop would also
+    // pull b2 into the container; this port holds that until the guard-chain
+    // condition combining lands -- see HANDOFF_ILSPY.md.)
+    Block* preHeader = nullptr;
+    Walk(fn->Body.get(), [&](ILInstruction* i2) {
+        auto* blk = dynamic_cast<Block*>(i2);
+        if (!blk) return;
+        for (const auto& inst : blk->Instructions)
+            if (auto* c = dynamic_cast<BlockContainer*>(inst.get()))
+                if (c->Kind == ContainerKind::Loop) preHeader = blk;
+    });
+    ASSERT_NE(preHeader, nullptr);
+    ASSERT_TRUE(preHeader->FinalInstruction);
+    ASSERT_EQ(preHeader->FinalInstruction->Op, OpCode::Branch);
+    EXPECT_EQ(static_cast<Branch*>(preHeader->FinalInstruction.get())->TargetBlock, b5)
+        << "the exit must be the loop-completion return (b5, source order), "
+           "not the early return (b2)";
 }
