@@ -4908,3 +4908,107 @@ Next in the queue after the empty-guard family: the switch-inline
 section-order relaxation (the remaining goto rejections), the 303
 not-found/adjacent goto split, the 97 span-escapes, the `?.` shapes, the
 `.override` forwarders, the net10 foreach-collapse gap.
+
+---
+
+## Session record: the loop exit-point pick lands (856fb34ce); the ExtendLoop held
+
+Corpus: dnlib 74731 -> 74651, net10 94066 -> **93530** (the biggest net10
+move since the guard-region fold), cui/hello/gotos unchanged, the pin
+4e1ed917a09392be, the suite control 268, the bennu canary 4/4.
+
+### 856fb34ce "Pick loop exit by source order over no-exit candidates"
+
+The C# LoopDetection.FindExitPoint -> PickExitPoint: the loop's exit point
+= the highest-IL-offset node with no reachable exit ("we can find the real
+exit point by simply picking the block with the highest IL offset" -- the
+source-order heuristic). A function return is NOT a reachable exit
+(ControlFlowGraph.CreateEdges skips IsLeavingFunction leaves), so the
+loop-completion return qualifies and an earlier return at a lower offset
+belongs inside the loop. The port now ports HasReachableExit (a successor
+DFS: a path to a node the candidate does not dominate, or a branch/leave
+out of the container except function returns) and picks the
+highest-offset qualifying candidate among the out-of-loop successors; the
+convergence check stays ahead of it (the case-2 post-dominator proxy,
+mscorlib's GetCVTypeFromClass shape). Tests:
+LoopDetection.ExtendsLoopWithEarlyReturnBlocks (the exit-pick half) and
+PicksEarliestOutOfLoopExitDeterministically updated to the C#-faithful
+highest rule (the C# preorder: b2 is disqualified by reaching the head,
+the descent reaches b5 at 0x50 which qualifies, b4's 0x40 never
+overwrites).
+
+### THE HELD EXTENSION (designed, measured, NOT shipped)
+
+The C# ExtendLoop right after the natural loop: add every block
+dominated by the loop head except the exit point's subtree (the
+dominator-tree preorder from the head, excluding the exit point), so the
+loop keeps ONE exit and the early-return blocks render as plain returns
+inside. The port's version was implemented and measured:
+
+- dnlib: 74651 -> 74574 (-77), the empty-guard family 485 -> 364,
+  gotos 1021 -> 997 (-24).
+- net10: 93530 -> 94698 (**+1168**): the extended loops whose guards the
+  C# COMBINES render as nested if-chains instead. The C# AFTER tree
+  (captured in /tmp/sos_cflow.txt, CflowDecrypter.GetFixIndexs2):
+  `if (if (IsLdcI4) if (Count > V_3+5) comp(Code == 141) else 0 else 0)
+  Block IL_0064 { ... }` -- the guard chain &&-combined into the if
+  condition with the body as a labeled block, which the renderer emits as
+  `if (!A || B || C) { continue; } <body>`. The port's tree after the
+  extension: the guards stay SEPARATE sibling blocks
+  (`[stloc, if (comp(eq, IsLdcI4, 0)) br CONTINUE else nop]` chains),
+  rendered as the nested if-chain with `!= 0` conditions.
+  GetFixIndexs2 measured: 73 diff lines (the old broken-but-short
+  empty-guard render) -> 127 (the correct structure, uncombined style).
+
+The extension code + its container-membership test are in
+/tmp/extendloop_held.patch (the working-tree diff against 856fb34ce's
+parent, including the extension body in ExtendLoop and the full
+ExtendsLoopWithEarlyReturnBlocks assertions). Re-apply, then land the
+guard-chain combination, then the extension ships.
+
+### The guard-chain combination (the next slice, steps 2+3)
+
+The C# mechanism (ConditionDetection.HandleIfInstruction, lines 85-96 of
+the C# ConditionDetection.cs): per-block fixpoint
+`while (InlineTrueBranch || InlineExitBranch) { PickBetterBlockExit;
+MergeCommonBranches; SwapEmptyThen; IntroduceShortCircuit; }`. For the
+guard blocks `[.., if (cond) br CONTINUE, br nextGuard]`:
+- InlineTrueBranch: the true target (the continue block) is multi-pred
+  (every guard branches there) -> cannot inline; the fallback ("use empty
+  block as then-branch" when the false arm is Nop and the exits are
+  compatible) applies.
+- InlineExitBranch: the block's exit `br nextGuard` -- the next guard is
+  single-pred -> INLINE its content into this block. The chain merges
+  into one block, and IntroduceShortCircuit then combines the nested ifs
+  into the if-expression form (`if (A) if (B) C else 0 else 0`).
+The port's TryInlineIfFallThrough is blocked on these guards by the
+`else nop` (the ReduceNestingTransform.ExtractElseBlock artifact -- the
+C# sets `ifInst.FalseInst = new Nop()` too, and the C# IsEmpty(nop) is
+true): the port's gate `if (iff->FalseInst) return false` must treat a
+Nop else as empty (IsEmptyArm already does). The port's iteration is
+per-container, not per-block-in-post-order; the C# guarantees the inlined
+blocks are already processed ("Because this is a post-order block
+transform... the blocks being embedded are already fully processed").
+
+Also measured on the way: the for-initializer hoist gate (the port's
+HoistForInitializers checked the whole loop body for uses; the C#
+TransformFor's ForStatementUsesVariable checks the condition and
+iterators only -- a body-only variable like an accumulator stack keeps
+its declaration before the loop). That fix is IN 856fb34ce's parent
+state (it landed with the pick measurement round; it changes little
+alone: net10 -9).
+
+### Where the numbers stand
+
+dnlib 74651, net10 93530, cui 1332, gotos 1021, hello 3-line residue,
+the suite control 268, the bennu canary 4/4, string case labels 24.
+
+Next: (a) the guard-chain combination (the HandleIfInstruction fixpoint
+port over the port's [if, br] model -- the else-nop empty check, the
+exit-branch inline that merges the guard chain, then the
+IntroduceShortCircuit over the merged shape), measured against
+/tmp/sos_cflow.txt and /tmp/sos_lazy2.txt; (b) re-apply
+/tmp/extendloop_held.patch and ship the extension; (c) the remaining
+queue: the switch-inline section-order relaxation, the 303
+not-found/adjacent goto split, the 97 span-escapes, the `?.` shapes, the
+`.override` forwarders, the net10 foreach-collapse gap.
