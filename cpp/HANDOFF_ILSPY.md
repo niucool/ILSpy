@@ -4261,6 +4261,30 @@ THE STATE: the wiring committed (no behavior change, no
 regression: dnlib 80,219 / the pin / the tests 35/35); the
 family's -80 opportunity intact.
 
+## THE BASE-QUALIFICATION -- THE SEPARATOR BUG FOUND, THE RULE ARCHAELOGY QUEUED
+
+THE TRACE (this session): the [ST] probe with the out_ length +
+the currentTypeName_ revealed the ROOT BUG: **the flattened field
+name is DOT-SEPARATED ("NS.Type.field"), the helper's rfind("::")
+found nothing and bailed empty** -- the prefix never fired. THE FIX
+LANDED AND OVERFIRED: with the dot separator, the naive
+declType != self gate fired 1,709 times (the oracle's 138 -- the
+nested/enclosing types, the display classes); the base-chain gate
+(GetAllBaseTypes) reduced it to 764 -- **still 5x the oracle** (the
+diff +78). THE DATA: 648 port-only `base.` lines vs 22 oracle-only
+-- **THE ORACLE'S RULE IS SELECTIVE, NOT every-base-declared-field**:
+the oracle renders `characteristics = reader.ReadUInt32()` bare (a
+base-declared field in a derived ctor!) while `base.version = ...`
+qualifies. THE C# RULE ARCHAEOLOGY (the next session): the C#
+emits base. for the HIDING/AMBIGUITY cases (a same-name member in
+the derived type shadows the base's) and possibly only in the ctor
+contexts -- read the reference's MemberResolveResult/IsPossible-
+ReferenceToThis handling and the base-reference emission conditions
+in the C# TypeSystemAstBuilder/OutputVisitor; mirror the exact
+rule. THE STATE: reverted to the committed no-fire wiring (dnlib
+80,219 / the pin / the tests 35/35 -- no regression); the family's
+-80 opportunity intact behind the rule.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
