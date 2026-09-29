@@ -98,3 +98,23 @@ TEST(KeywordIdentifierEscapeTest, EscapesBodyUses)
     // identifier).
     EXPECT_EQ(text.find("@this"), std::string::npos) << text;
 }
+
+TEST(KeywordIdentifierEscapeTest, ThisReceiverRuleForShadowedAndBaseMembers)
+{
+    std::string text;
+    if (!RenderKeywordNames(text))
+        GTEST_SKIP() << "the keyword-names fixture is not provisioned";
+    // The own-type field store behind a same-named parameter keeps the
+    // explicit receiver (the C# RequiresQualifier shadow rule) -- the
+    // bare form would be a self-assignment.
+    EXPECT_NE(text.find("this.@namespace = @namespace"), std::string::npos)
+        << text;
+    EXPECT_NE(text.find("this.@class = @class"), std::string::npos) << text;
+    // A base-declared virtual method invoked with the `call` opcode (the
+    // `base.M()` source form) renders the base reference.
+    EXPECT_NE(text.find("base.Suffix()"), std::string::npos) << text;
+    // The this-targeted callvirt elides the receiver.
+    EXPECT_NE(text.find("GetNamespace() + Suffix()"), std::string::npos)
+        << text;
+    EXPECT_EQ(text.find("this.GetNamespace()"), std::string::npos) << text;
+}

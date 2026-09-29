@@ -232,7 +232,12 @@ TEST(ILAstToCSharp, InstanceCallRendersAsReceiverDotMethod) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "int arg_1");
-    EXPECT_NE(text.find("	this.ToString(arg_1);\n"), std::string::npos) << text;
+    // The C# requireTarget rule: a this-receiver instance call ELIDES the
+    // receiver (the ThisReferenceExpression target renders bare) -- not
+    // `this.ToString(arg_1)` and never the static-style form.
+    EXPECT_NE(text.find("\tToString(arg_1);\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("this.ToString("), std::string::npos)
+        << "the this-receiver elides (the C# requireTarget rule)";
     EXPECT_EQ(text.find("System.Object.ToString("), std::string::npos) << "not a static-style call";
 }
 

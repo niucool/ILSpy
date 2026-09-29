@@ -635,6 +635,9 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             call->ReturnIType = callSig->ReturnType;
             call->ParameterIType = callSig->ParameterTypes;
             call->IsInstanceCall = callSig->IsInstance && op != ILOpCode::Newobj;
+            call->IsVirtualCall = (op == ILOpCode::Callvirt);
+            call->IsVirtualMethod =
+                (file.GetMethodAttributes(tok) & 0x40) != 0;
             call->IsNewObj = (op == ILOpCode::Newobj);
             call->MethodToken = tok;
             call->DeclaringType = file.ResolveMethodDeclaringType(tok, s.ownerMethodToken);

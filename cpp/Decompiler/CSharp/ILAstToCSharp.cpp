@@ -4110,16 +4110,55 @@ private:
     // An instance call (call/callvirt, not newobj) renders as
     // `receiver.Method(restArgs)`; the receiver is Arguments[0]. A ref/deref
     // receiver (`&V`, `*(&V)`) is parenthesized so the member access binds.
+    // The implicit `this` parameter load: the receiver the this-targeted
+    // member rule keys on (the C# MatchLdThis).
+    static bool IsThisLoad(const ILInstruction* inst) {
+        if (inst == nullptr || inst->Op != OpCode::LdLoc) return false;
+        const auto* ld = static_cast<const LdLoc*>(inst);
+        return ld->Variable != nullptr &&
+               ld->Variable->Kind == VariableKind::Parameter &&
+               ld->Variable->Name == "this";
+    }
+
     // Static calls and newobj go through CallText. A property accessor
     // (get_X with 0 extra args / set_X with 1 extra arg) renders as
     // `receiver.X` / `receiver.X = value`.
     std::string InstanceCallText(const Call& call) {
         if (call.Arguments.empty() || !call.Arguments[0])
             return CallText(call);
+        // The this-targeted receiver rule (the C# TranslateTarget /
+        // requireTarget): a this-receiver member access elides the
+        // receiver unless the name is hidden (a shadowing local or
+        // parameter), and a `call`-opcode invocation of a base-declared
+        // virtual method renders the base reference.
+        const bool thisReceiver = IsThisLoad(call.Arguments[0].get());
+        std::string thisPrefix;
+        if (thisReceiver) {
+            std::string flattened =
+                FlattenMetadataName(std::string(call.MethodName));
+            auto sep = flattened.rfind('.');
+            if (sep != std::string::npos)
+                thisPrefix = ThisReceiverPrefixParts(
+                    flattened.substr(0, sep),
+                    ShortMethodName(call.MethodName),
+                    /*callOpcode=*/!call.IsVirtualCall, call.IsVirtualMethod);
+        }
         // Property accessor: get_X(receiver) -> receiver.X ;
         // set_X(receiver, value) -> receiver.X = value.
         std::string prop = AccessorPropertyName(call.MethodName);
         if (!prop.empty()) {
+            if (thisReceiver) {
+                std::string target = thisPrefix + prop;
+                if (call.MethodName.size() >= 4) {
+                    auto pos = call.MethodName.rfind("::");
+                    std::string_view member = (pos != std::string_view::npos)
+                        ? std::string_view(call.MethodName).substr(pos + 2) : std::string_view(call.MethodName);
+                    if (member.substr(0, 4) == "set_" && call.Arguments.size() >= 2) {
+                        return target + " = " + (call.Arguments[1] ? Expr(*call.Arguments[1]) : std::string("(default)"));
+                    }
+                }
+                return target;
+            }
             std::string recv = Expr(*call.Arguments[0]);
             bool needsParens = !recv.empty() && (recv[0] == '&' || recv[0] == '*');
             if (IsCastInstruction(call.Arguments[0].get()))
@@ -4134,6 +4173,17 @@ private:
                 }
             }
             return target;
+        }
+        if (thisReceiver) {
+            std::string text =
+                thisPrefix + ShortMethodName(call.MethodName) + "(";
+            for (std::size_t i = 1; i < call.Arguments.size(); ++i) {
+                if (i > 1) text += ", ";
+                text += call.Arguments[i] ? Expr(*call.Arguments[i])
+                                         : "(default)";
+            }
+            text += ')';
+            return text;
         }
         std::string recv = Expr(*call.Arguments[0]);
         // A ref/deref receiver renders with a leading `ref `/`&`/`*`, which
@@ -4286,25 +4336,55 @@ private:
         return std::string{};
     }
 
-    // The base-member qualification: a this-targeted access to a field
-    // declared on a strict base type renders `base.field` (the C#
-    // qualifies inherited members; own-type members elide the receiver).
-    std::string MaybeBasePrefix(const std::string& flattened) {
-        // The current type: the this-parameter's variable (a Parameter-kind
-        // variable with the negative index the reader assigns it).
-        if (currentTypeName_.empty() || currentType_ == nullptr)
-            return std::string();
-        // The flattened field name is dot-separated ("NS.Type.field");
-        // the declaring type is everything before the final segment.
+    // The C# TranslateTarget + RequiresQualifier/requireTarget receiver
+    // rule for a this-targeted member access, unified over fields and
+    // methods:
+    //  * the bare member name renders whenever nothing hides it;
+    //  * a same-named local or parameter (the C# HidesVariableWithName)
+    //    forces the explicit receiver -- `this.name = name` for an
+    //    own-type member, `base.name = name` for a base-declared one
+    //    (the ctor stores behind same-named parameters);
+    //  * a NON-VIRTUAL invocation (`call` opcode; a field access always)
+    //    of a base-declared VIRTUAL method renders the base reference
+    //    (`base.M(...)` -- the C# CallBuilder's requireTarget =
+    //    `CallOpCode != CallVirt && method.IsVirtual`); a base-declared
+    //    non-virtual method called with `call`, and every `callvirt`, keep
+    //    the this reference (elided, or `this.` when hidden);
+    //  * members of types outside the current type's chain (the display
+    //    classes, the enclosing captures) keep the receiver-elided form.
+    std::string ThisReceiverPrefix(const std::string& flattened,
+                                    bool callOpcode, bool memberIsVirtual) {
         auto sep = flattened.rfind('.');
         if (sep == std::string::npos) return std::string();
-        std::string fieldName = flattened.substr(sep + 1);
-        std::string declType = flattened.substr(0, sep);
-        if (declType == currentTypeName_) return std::string();
-        // The `base.` qualifier applies only to a field declared on a
-        // strict base type of the current type: a nested or enclosing
-        // type's fields (the display classes, the outer captures) keep
-        // the receiver-elided form.
+        return ThisReceiverPrefixParts(flattened.substr(0, sep),
+                                        flattened.substr(sep + 1),
+                                        callOpcode, memberIsVirtual);
+    }
+
+    std::string ThisReceiverPrefixParts(const std::string& declType,
+                                         const std::string& memberName,
+                                         bool callOpcode, bool memberIsVirtual) {
+        if (currentTypeName_.empty() || currentType_ == nullptr)
+            return std::string();
+        bool shadow = false;
+        if (fn_ != nullptr) {
+            for (const auto& v : fn_->Variables) {
+                if (v && v->Index >= 0 && v->Name == memberName) {
+                    shadow = true;
+                    break;
+                }
+            }
+            if (!shadow) {
+                for (const auto* p : fn_->Parameters) {
+                    if (p != nullptr && p->Name() == memberName) {
+                        shadow = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (declType == currentTypeName_)
+            return shadow ? "this." : std::string();
         bool onBase = false;
         for (const auto* base : TypeSystem::GetAllBaseTypes(currentType_.get())) {
             if (base == nullptr) continue;
@@ -4314,21 +4394,8 @@ private:
             }
         }
         if (!onBase) return std::string();
-        // The C#'s RequiresQualifier: the bare field name renders only
-        // when it still resolves to this field from the current scope;
-        // a same-named local or parameter shadows it and the access
-        // must keep the `base.` qualifier (the ctor stores of the
-        // base fields behind same-named parameters).
-        if (fn_ != nullptr) {
-            for (const auto& v : fn_->Variables) {
-                if (v && v->Index >= 0 && v->Name == fieldName)
-                    return "base.";
-            }
-            for (const auto* p : fn_->Parameters) {
-                if (p != nullptr && p->Name() == fieldName)
-                    return "base.";
-            }
-        }
+        if (shadow) return "base.";
+        if (callOpcode && memberIsVirtual) return "base.";
         return std::string();
     }
 
@@ -4338,7 +4405,9 @@ private:
             std::string field = FlattenMetadataName(f.FieldName);
             std::string obj = f.Target ? Expr(*f.Target) : "(default)";
             return obj == "this"
-                       ? MaybeBasePrefix(field) + SimpleName(field)
+                       ? ThisReceiverPrefix(field, /*callOpcode=*/true,
+                                            /*memberIsVirtual=*/false) +
+                             SimpleName(field)
                        : obj + "." + SimpleName(field);
         }
         if (target.Op == OpCode::LdsFlda) {
@@ -4923,7 +4992,9 @@ private:
                 std::string field = FlattenMetadataName(f.FieldName);
                 std::string obj = f.Target ? Expr(*f.Target) : "(default)";
                 return obj == "this"
-                           ? MaybeBasePrefix(field) + SimpleName(field)
+                           ? ThisReceiverPrefix(field, /*callOpcode=*/true,
+                                                /*memberIsVirtual=*/false) +
+                                 SimpleName(field)
                            : obj + "." + SimpleName(field);
             }
             case OpCode::LdsFlda: {
