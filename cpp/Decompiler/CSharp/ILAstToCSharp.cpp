@@ -3428,6 +3428,69 @@ private:
         return true;
     }
 
+    // The nesting depth of an if's then-arm, mirroring the C#
+    // ReduceNestingTransform's ComputeStats depth tally: one level per nested
+    // if-then arm (and per nested container), blocks themselves do not add
+    // depth. The C# guard-continue heuristic requires maxDepth >= 2.
+    static int ThenNestingDepth(const ILInstruction* inst, int depth) {
+        if (!inst) return depth;
+        int best = depth;
+        if (auto* b = dynamic_cast<const Block*>(inst)) {
+            for (const auto& s : b->Instructions)
+                best = std::max(best, ThenNestingDepth(s.get(), depth));
+            if (b->FinalInstruction)
+                best = std::max(best, ThenNestingDepth(b->FinalInstruction.get(), depth));
+            return best;
+        }
+        if (auto* c = dynamic_cast<const BlockContainer*>(inst)) {
+            for (const auto& b : c->Blocks)
+                best = std::max(best, ThenNestingDepth(b.get(), depth + 1));
+            return best;
+        }
+        if (auto* i = dynamic_cast<const IfInstruction*>(inst)) {
+            best = std::max(best, ThenNestingDepth(i->TrueInst.get(), depth + 1));
+            best = std::max(best, ThenNestingDepth(i->FalseInst.get(), depth + 1));
+            return best;
+        }
+        return best;
+    }
+
+    // Emit `if (<guards>) { continue; } <the body>` for the for-loop guard
+    // shape (see the IfInstruction statement case). Returns false when any
+    // gate rejects and the caller falls through to the plain emission.
+    bool TryEmitGuardContinue(const IfInstruction& iff, int indent) {
+        // No else (the false path is the fall-through into the update).
+        if (iff.FalseInst && iff.FalseInst->Op != OpCode::Nop) return false;
+        // The condition is the negation wrapper `comp(eq, X, 0)`.
+        auto* c = dynamic_cast<const Comp*>(iff.Condition.get());
+        if (!c || c->Kind != ComparisonKind::Equality) return false;
+        auto* zero = dynamic_cast<const LdcI4*>(c->Right.get());
+        if (!zero || zero->Value != 0 || !c->Left) return false;
+        // The then is a block with real content.
+        auto* t = dynamic_cast<const Block*>(iff.TrueInst.get());
+        if (!t || (t->Instructions.empty() && !t->FinalInstruction)) return false;
+        // The if is a block final inside a for container, and the block's
+        // positional successor is the container's last block (the update).
+        auto* block = dynamic_cast<const Block*>(iff.Parent);
+        if (!block || block->FinalInstruction.get() != &iff) return false;
+        auto* container = dynamic_cast<const BlockContainer*>(block->Parent);
+        if (!container || container->Kind != ContainerKind::For || container->Blocks.size() < 2)
+            return false;
+        const Block* next = nullptr;
+        for (std::size_t i = 0; i + 1 < container->Blocks.size(); ++i)
+            if (container->Blocks[i].get() == block) { next = container->Blocks[i + 1].get(); break; }
+        if (next == nullptr || next != container->Blocks.back().get()) return false;
+        // The C# maxDepth >= 2 gate.
+        if (ThenNestingDepth(t, 0) < 2) return false;
+        Line(indent, "if (" + StripOuterParens(CondExpr(*c->Left)) + ")");
+        Line(indent, "{");
+        Line(indent + 1, "continue;");
+        Line(indent, "}");
+        for (const auto& s : t->Instructions) EmitStatement(*s, indent);
+        if (t->FinalInstruction) EmitStatement(*t->FinalInstruction, indent);
+        return true;
+    }
+
     void EmitStatement(const ILInstruction& inst, int indent) {
         if (DepthAtLimit()) {
             Line(indent, "/* max rendering depth: possible ILAst cycle */");
@@ -3593,6 +3656,23 @@ private:
             }
             case OpCode::IfInstruction: {
                 const auto& iff = static_cast<const IfInstruction&>(inst);
+                // The C# ReduceNestingTransform's guard-continue form, at the
+                // emission layer. The ConditionDetection output for a combined
+                // guard chain inside a for loop is `if (!(guards)) { <the
+                // body> }` with the if as the loop body's final: its false path
+                // runs straight into the for's update block. The C# ILAst keeps
+                // the if as a non-terminal with the body statements after it in
+                // the same block and the ReduceNestingTransform inverts it on
+                // the tree (`if (!cond) continue; <the body>`); this port's
+                // block-final model cannot express statements after an if, so
+                // the inversion happens here. The continue is only correct
+                // when the if's false path IS the for's update block (the
+                // container's last block -- the continue target): the if must
+                // be the body's final and the next block the increment, so the
+                // emitted continue lands exactly where the fall-through went.
+                // The depth gate is the C# `maxDepth < 2` heuristic: a shallow
+                // then reads better nested than as a guard-continue.
+                if (TryEmitGuardContinue(iff, indent)) return;
                 std::string cond = iff.Condition ? CondExpr(*iff.Condition) : "(default)";
                 if (!iff.FalseInst && iff.TrueInst && iff.TrueInst->Op == OpCode::Branch) {
                     std::string gotoText = GotoText(*static_cast<const Branch*>(iff.TrueInst.get()));
@@ -5433,13 +5513,31 @@ private:
                     if (!a || a->Op != OpCode::LdcI4) return false;
                     return static_cast<const LdcI4*>(a)->Value == v;
                 };
+                // Flatten same-operator chains (the C# renders the
+                // short-circuit operators left-associatively without grouping
+                // parens): `a || (b || c)` -> `a || b || c`. Both operators
+                // are associative, so the inner grouping parens are noise.
+                // A mixed-operator operand keeps its parens (precedence).
+                auto flattenSameOp = [&](const std::unique_ptr<ILInstruction>& arm,
+                                         const char* opText) -> std::string {
+                    std::string text = Expr(*arm);
+                    if (arm->Op != OpCode::IfInstruction) return text;
+                    const auto& armIf = static_cast<const IfInstruction&>(*arm);
+                    bool isSameOp = opText[0] == '|'
+                        ? isLdcI4(armIf.TrueInst.get(), 1) && armIf.FalseInst
+                        : isLdcI4(armIf.FalseInst.get(), 0) && armIf.TrueInst;
+                    if (!isSameOp) return text;
+                    return StripOuterParens(std::move(text));
+                };
                 if (isLdcI4(iff.FalseInst.get(), 0) && iff.TrueInst && iff.Condition) {
                     // LogicAnd(a, b) = if (a) b else 0  ->  a && b
-                    return "(" + Expr(*iff.Condition) + " && " + Expr(*iff.TrueInst) + ")";
+                    return "(" + flattenSameOp(iff.Condition, "&&") + " && " +
+                           flattenSameOp(iff.TrueInst, "&&") + ")";
                 }
                 if (isLdcI4(iff.TrueInst.get(), 1) && iff.FalseInst && iff.Condition) {
                     // LogicOr(a, b) = if (a) 1 else b  ->  a || b
-                    return "(" + Expr(*iff.Condition) + " || " + Expr(*iff.FalseInst) + ")";
+                    return "(" + flattenSameOp(iff.Condition, "||") + " || " +
+                           flattenSameOp(iff.FalseInst, "||") + ")";
                 }
                 // Otherwise the conditional operator `cond ? true : false`.
                 auto ArmExpr = [&](const std::unique_ptr<ILInstruction>& arm) -> std::string {
