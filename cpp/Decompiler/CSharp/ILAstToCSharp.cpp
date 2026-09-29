@@ -294,11 +294,18 @@ public:
     void EmitMethod(const ILFunction& fn, std::string_view returnType,
                     std::string_view methodName, std::string_view paramDecl,
                     bool isConstructor = false,
-                    std::string_view methodConstraints = std::string_view()) {
+                    std::string_view methodConstraints = std::string_view(),
+                    std::string_view typeName = std::string_view()) {
         fn_ = &fn;
         SetCurrentTypeName(fn);
         returnTypeName_ = std::string(returnType);
         methodName_ = std::string(methodName);
+        SetCurrentTypeName(fn);
+        // The metadata-wired method entity is often absent (the reader's
+        // seed fn->Method); the caller's type name covers the base-member
+        // qualification then.
+        if (currentTypeName_.empty() && !typeName.empty())
+            currentTypeName_ = std::string(typeName);
         // A constructor header carries no return type: the methodName holds
         // the TYPE name (the C# `TypeName(...)` header; the flat renderer
         // carries no modifiers).
@@ -4271,12 +4278,35 @@ private:
         return std::string{};
     }
 
+    // The base-member qualification: a this-targeted access to a field
+    // declared on a strict base type renders `base.field` (the C#
+    // qualifies inherited members; own-type members elide the receiver).
+    std::string MaybeBasePrefix(const std::string& flattened) {
+        // The current type: the this-parameter's variable (a Parameter-kind
+        // variable with the negative index the reader assigns it).
+        if (currentTypeName_.empty()) return std::string();
+        std::string self = currentTypeName_;
+        auto sep = flattened.rfind("::");
+        if (sep == std::string::npos) return std::string();
+        std::string declType = flattened.substr(0, sep);
+        if (declType == self) return std::string();
+        // The generic arity's spelling can differ ("List`1[[T]]" forms);
+        // fall back to the plain name comparison.
+        auto lastDot = declType.rfind('.');
+        if (lastDot != std::string::npos &&
+            self.substr(self.rfind('.') + 1) == declType.substr(lastDot + 1))
+            return std::string();
+        return "base.";
+    }
+
     std::string StoreTargetText(const ILInstruction& target) {
         if (target.Op == OpCode::LdFlda) {
             const auto& f = static_cast<const LdFlda&>(target);
             std::string field = FlattenMetadataName(f.FieldName);
             std::string obj = f.Target ? Expr(*f.Target) : "(default)";
-            return obj == "this" ? SimpleName(field) : obj + "." + SimpleName(field);
+            return obj == "this"
+                       ? MaybeBasePrefix(field) + SimpleName(field)
+                       : obj + "." + SimpleName(field);
         }
         if (target.Op == OpCode::LdsFlda) {
             std::string flattened = FlattenMetadataName(
@@ -4850,7 +4880,9 @@ private:
                 const auto& f = static_cast<const LdFlda&>(inst);
                 std::string field = FlattenMetadataName(f.FieldName);
                 std::string obj = f.Target ? Expr(*f.Target) : "(default)";
-                return obj == "this" ? SimpleName(field) : obj + "." + SimpleName(field);
+                return obj == "this"
+                           ? MaybeBasePrefix(field) + SimpleName(field)
+                           : obj + "." + SimpleName(field);
             }
             case OpCode::LdsFlda: {
                 std::string flattened = FlattenMetadataName(
@@ -5495,7 +5527,8 @@ std::string ILAstToCSharp(const ILFunction& fn,
                           std::string_view methodName,
                           std::string_view paramDecl,
                           bool isConstructor,
-                          std::string_view methodConstraints) {
+                          std::string_view methodConstraints,
+                          std::string_view typeName) {
     // The transformed-tree dump (ILSPY_DUMP_TF): the POST-pipeline ILAst
     // in the --ilast-all text form -- the raw reader dump and the render's
     // tree differ (the pipeline restructures the shapes), so the fold
