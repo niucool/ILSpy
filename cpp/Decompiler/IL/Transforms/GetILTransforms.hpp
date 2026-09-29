@@ -355,9 +355,6 @@ inline void RunGetILTransforms(ILFunction& function, ILTransformContext& context
     // structure LoopDetection+ConditionDetection produced into a
     // `while (cond)` container. Runs after the StatementTransform
     // (per GetILTransforms()).
-    if (std::getenv("ILSPY_DUMP_PREHLL") != nullptr && !function.HasCycle()) {
-        std::fprintf(stderr, ".method (ILAst, PRE-HLL)\n%s\n\n", function.ToString().c_str());
-    }
     HighLevelLoopTransform::Run(function, context);
     // ProxyCallReplacer: rewrite compiler-generated pass-through calls to
     // the methods they forward to (the C# slot after the last per-block

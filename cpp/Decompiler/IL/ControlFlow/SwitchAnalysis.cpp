@@ -79,20 +79,7 @@ bool SwitchAnalysis::AnalyzeBlock(Block* block) {
     ownedBodies_.clear();
     ContainsILSwitch = false;
     if (!block) return false;
-    bool result = AnalyzeBlockImpl(block, Util::LongSet::Universe(), /*tailOnly*/ true);
-    if (std::getenv("ILSPY_SWDBG3")) {
-        std::string sig;
-        if (auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get()))
-            sig = iff->Condition ? iff->Condition->ToString() : "(no cond)";
-        else if (block->FinalInstruction)
-            sig = std::string("final:") + std::to_string((int)block->FinalInstruction->Op);
-        else sig = "(no final)";
-        if (sig.size() > 70) sig.resize(70);
-        for (char& ch : sig) if (ch == '\n') ch = ' ';
-        std::fprintf(stderr, "[SA3] root off=%x -> %d (sections=%zu) %s\n",
-                     block->StartILOffset, (int)result, Sections.size(), sig.c_str());
-    }
-    return result;
+    return AnalyzeBlockImpl(block, Util::LongSet::Universe(), /*tailOnly*/ true);
 }
 
 // A block whose final is a valued leave and whose only incoming edge is the
@@ -112,21 +99,16 @@ bool SwitchAnalysis::IsSoleOwnerValuedReturn(Block* block) const {
 bool SwitchAnalysis::AnalyzeBlockImpl(Block* block, Util::LongSet inputValues, bool tailOnly) {
     if (block->Instructions.empty() && !block->FinalInstruction) {
         // might happen if the block was already marked for deletion in SwitchDetection
-        if (std::getenv("ILSPY_SWDBG2")) std::fprintf(stderr, "[SA] reject: deleted block\n");
         return false;
     }
     if (tailOnly) {
         // root block: analyze the tail (the final instruction)
     } else {
         // switchVar should always be determined by the top-level call.
-        if (block->IncomingEdgeCount != 1 || block == RootBlock) {
-            if (std::getenv("ILSPY_SWDBG2")) std::fprintf(stderr, "[SA] reject: multi-pred/root block (off=%x)\n", block->StartILOffset);
+        if (block->IncomingEdgeCount != 1 || block == RootBlock)
             return false;  // only consider if-structures that form a tree
-        }
-        if (block->Parent != RootBlock->Parent) {
-            if (std::getenv("ILSPY_SWDBG2")) std::fprintf(stderr, "[SA] reject: parent mismatch (off=%x)\n", block->StartILOffset);
+        if (block->Parent != RootBlock->Parent)
             return false;  // all blocks should belong to the same container
-        }
     }
 
     // In this port's block model the IfInstruction is the block's final with an
@@ -136,18 +118,11 @@ bool SwitchAnalysis::AnalyzeBlockImpl(Block* block, Util::LongSet inputValues, b
     // `if (cond) br X` case-test shape.
     Util::LongSet trueValues;
     auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get());
-    if (iff && !AnalyzeCondition(iff->Condition.get(), trueValues) && std::getenv("ILSPY_SWDBG2"))
-        std::fprintf(stderr, "[SA] reject: condition unanalyzable (off=%x): %s\n",
-                     block->StartILOffset,
-                     iff->Condition ? iff->Condition->ToString().substr(0, 60).c_str() : "(null)");
     if (iff && AnalyzeCondition(iff->Condition.get(), trueValues)) {
-        if (!(tailOnly || block->Instructions.empty())) {
-            if (std::getenv("ILSPY_SWDBG2")) std::fprintf(stderr, "[SA] reject: non-empty block (off=%x)\n", block->StartILOffset);
+        if (!(tailOnly || block->Instructions.empty()))
             return false;
-        }
         trueValues = trueValues.IntersectWith(inputValues);
         if (trueValues.SetEquals(inputValues) || trueValues.IsEmpty()) {
-            if (std::getenv("ILSPY_SWDBG2")) std::fprintf(stderr, "[SA] reject: full/empty values (off=%x)\n", block->StartILOffset);
             return false;
         }
         // The if's true arm: a Branch to a block (recurse) or another exit
@@ -175,11 +150,8 @@ bool SwitchAnalysis::AnalyzeBlockImpl(Block* block, Util::LongSet inputValues, b
             ContainsILSwitch = true;  // OK
             return true;
         }
-        if (std::getenv("ILSPY_SWDBG2")) std::fprintf(stderr, "[SA] reject: IL switch analysis failed\n");
         return false;  // switch analysis failed (e.g. switchVar mismatch)
     } else {
-        if (std::getenv("ILSPY_SWDBG2")) std::fprintf(stderr, "[SA] reject: unknown final (%d off=%x)\n",
-                     (int)(block->FinalInstruction ? block->FinalInstruction->Op : OpCode::Nop), block->StartILOffset);
         return false;  // unknown final instruction
     }
 
@@ -231,7 +203,6 @@ bool SwitchAnalysis::AnalyzeBlockImpl(Block* block, Util::LongSet inputValues, b
     } else {
         // No fall-through target: the if's false arm has nowhere to go in this
         // container, so the block does not form a switch.
-        if (std::getenv("ILSPY_SWDBG2")) std::fprintf(stderr, "[SA] reject: no fall-through target\n");
         return false;
     }
     return true;
@@ -243,7 +214,7 @@ bool SwitchAnalysis::AnalyzeNestedBlock(Block* block, Util::LongSet inputValues)
     // chain's end) a lone Branch to the default block. A block with
     // statements is a case body, not a chain level -- the caller falls back
     // to making it a section.
-    if (!block->Instructions.empty()) { if (std::getenv("ILSPY_SWDBG2")) std::fprintf(stderr, "[SAN] reject: nested block has statements\n"); return false; }
+    if (!block->Instructions.empty()) return false;
     if (!block->FinalInstruction) return false;
     if (auto* br = dynamic_cast<Branch*>(block->FinalInstruction.get())) {
         InnerBlocks.push_back(block);
@@ -251,12 +222,12 @@ bool SwitchAnalysis::AnalyzeNestedBlock(Block* block, Util::LongSet inputValues)
         return true;
     }
     auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get());
-    if (!iff) { if (std::getenv("ILSPY_SWDBG2")) std::fprintf(stderr, "[SAN] reject: nested final not if (%d)\n", (int)block->FinalInstruction->Op); return false; }
+    if (!iff) return false;
     InnerBlocks.push_back(block);
     Util::LongSet trueValues;
-    if (!AnalyzeCondition(iff->Condition.get(), trueValues)) { if (std::getenv("ILSPY_SWDBG2")) std::fprintf(stderr, "[SAN] reject: nested condition unanalyzable: %s\n", iff->Condition ? iff->Condition->ToString().substr(0, 70).c_str() : "?"); return false; }
+    if (!AnalyzeCondition(iff->Condition.get(), trueValues)) return false;
     trueValues = trueValues.IntersectWith(inputValues);
-    if (trueValues.SetEquals(inputValues) || trueValues.IsEmpty()) { if (std::getenv("ILSPY_SWDBG2")) std::fprintf(stderr, "[SAN] reject: nested full/empty values\n"); return false; }
+    if (trueValues.SetEquals(inputValues) || trueValues.IsEmpty()) return false;
     auto remainingValues = inputValues.ExceptWith(trueValues);
     if (auto* trueNested = dynamic_cast<Block*>(iff->TrueInst.get())) {
         if (!AnalyzeNestedBlock(trueNested, std::move(trueValues)))
