@@ -4309,6 +4309,104 @@ over-matches); the net diff is the gate and it improved.
 THE SESSION'S TOTAL (the ?? throw + the base-qualification): dnlib
 v2 80,369 -> 79,991 (-378 since the v2 baseline).
 
+# ============================================================
+# THE CURRENT POSITION (the controlled handoff -- ready for /new)
+# ============================================================
+
+## THE STANDING GATES (all green at the handoff)
+
+- **The connid pin**: `ebf9b6e9fd29112f` (the /tmp/connid_res.dll render).
+- **The corpus parity (the V2 ORACLES -- the v11.1.0.9782 upgrade)**:
+  dnlib **79,991** (`diff /tmp/ilspy-cmp/oracle_dnlib_v2.cs <render>`),
+  net10 **99,525** (oracle_net10_v2.cs, the dll at
+  /home/jim/source/de4dot/Release/net10.0/de4dot.code.dll),
+  cui **2,354** (oracle_cui_try1.cs / oracle_cui_v2.cs identical there).
+- **The goto count**: 1,263; **the `?.` count**: 100; the switches: 210.
+- **The suite**: the SwitchDetection/CSharpDecompiler filters 35/35;
+  the FULL suite has ~188 pre-existing failures (the environment
+  drift -- the mscorlib fixture paths; a control run confirmed
+  188 = 188 on the pristine tree; NOT a regression).
+- **The fixtures**: /home/jim/ilspy-test-fixtures/neg_constants/
+  (the negated-constant + fraction forms, byte-exact vs the v2
+  oracle), positional_record/, net48/, and the others.
+- **The build**: cd cpp && export TMPDIR=/home/jim/tmp-build && export
+  PATH=/home/jim/cpp-tools/cmake/bin:/home/jim/cpp-tools/ninja-bin:
+  /usr/bin:/bin:$PATH && ninja -C build/linux-ninja ilspy_cli
+  ilspy_tests. The ASAN/UBSAN build at /tmp/asan-build (the
+  configure needs -DCMAKE_TOOLCHAIN_FILE + -DCMAKE_PREFIX_PATH to
+  the main build's vcpkg_installed/x64-linux; the /tmp quota is
+  tight -- the pg-build and probe dirs were removed).
+
+## THE CAMPAIGN TOTALS (the position)
+
+- **THE UPSTREAM SYNC** (fdc4c7c16..7434b07f8, 192 non-merge commits
+  in ICSharpCode.Decompiler/): the inventory CATEGORIZED (classes A1-
+  A8/B/C/D, the porting order, the conflicts); the oracle UPGRADED
+  to v11.1.0.9782 (the upstream fixes IN) with the v2 baselines; the
+  A1 items landed: the negated-constants + the preferred machine-
+  scale fractions (byte-exact on the fixture), the field-constant
+  double/float ROUND-TRIP fix (the shortest form that parses back
+  exactly, the capital-E marker), #4180 NOT APPLICABLE (the port's
+  `0 - x` neg model), the hex-negative fix DEFERRED (the disassembler
+  surface gap). THE DNLIB V2 JOURNEY: 80,369 (the v2 baseline) ->
+  **79,991** via: the `?? throw` coalesce (43/43 sites, -150: the
+  30 clean + the 11 int-zero-gate + the 2 base-qualification) and
+  the base-member qualification (the C# rule mirrored: the base-
+  chain + the shadow gate, -228).
+- **THE PERF/MEMORY THREAD**: CLOSED at the outstanding state (the
+  duplicate-load fix 1,095MB -> 142MB; the custom-attribute index
+  3.7x wall; the port ~4x faster than the oracle with 2.6x less
+  memory; byte-identical outputs). One open question (the release-
+  side sampling) stays unvalidated (no gdb/lldb/eu-stack).
+- **THE SWITCH FAMILY**: the switch-expression render LANDED (-330
+  dnlib, -102 net10); the else-arm recursion LANDED (the analysis);
+  the switch formation still gated (the big restructured chains
+  reject in UseCSharpSwitch on a not-yet-isolated gate -- the
+  reference-instrumentation path designed but blocked on the SDK
+  pin 11.0.0, now UNBLOCKED via the v11.1.0.9782 oracle -- the C#
+  source instrumentation + the fresh-oracle comparison can proceed).
+
+## THE QUEUE (the next slices, in order)
+
+1. **The base-qualification residue**: the port renders 200 `base.`
+   vs the oracle's 138 (62 extra -- the shadow sites the oracle
+   resolves differently; the net diff already improved so these are
+   the fine-tuning: compare the 62 sites' shapes vs the oracle's
+   RequiresQualifier resolution -- likely the field-name lookup the
+   simple name comparison over-matches, e.g. the closure fields).
+2. **The label-merged regions** (the label-region generalization:
+   the multi-block regions, the arbitrary distances, the loop back-
+   edges -- the 1,263 remaining gotos vs the oracle's 21; the
+   ILSPY_DUMP_TF shapes are the design source).
+3. **The switch formation** (the big restructured chains: the
+   reference-side verdict probe now UNBLOCKED -- instrument the C#
+   source's UseCSharpSwitch, run the v11.1.0.9782 oracle on the
+   et-chain, read which gate the reference rejects through, mirror
+   it; then the generic CloneBody re-land + the accept-side gates).
+4. **The remaining `?.` shapes** (100 vs the oracle's ~123): the
+   coalesce/elision variants per the original handoff list.
+5. **The record re-synthesis follow-ups** (upstream 0e6b9a7e2 the
+   record member order, 22ce4c442 the copy-ctor required members --
+   the D2 conflicts; our RecordSynthesizer's equivalents).
+6. **The A2/A3 campaigns** (the expression trees ~20 commits, the
+   span conversions -- per the inventory's porting order).
+7. **The small-mask hex residue** (the 0x10/0x80/0x400 forms --
+   corpus-driven only).
+
+## THE CRITICAL CONVENTIONS (carried)
+
+- RED per slice; the guards hold; commit per green; push per green;
+  the `Assisted-by: GLM:glm-5.3-flash:pi` trailer.
+- The corpus-first rule (the fixture-first when no corpus evidence).
+- The dump-first rule (ILSPY_DUMP_TF, the transformed tree).
+- The hazards: the python s.replace without assert; the heredoc
+  escaping; the single-line-if probe mangles (the print becomes the
+  if's body, the return unconditional -- hit THREE times); the
+  multi-render (each ILAstToCSharp call decodes its own fn);
+  the /tmp quota; the stale-dll lesson.
+- THE V2 ORACLES ARE THE GATES NOW (the old _try1 files remain for
+  archaeology only).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
