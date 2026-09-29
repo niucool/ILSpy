@@ -4676,3 +4676,61 @@ PRACTICE by the fold claiming those guards; the residual population
 (the propagation's non-guard inlinings with Branch finals) is unprobed
 -- a [PR]-style dump of the inlined-final drops is the check if the
 corpus shows residue.
+
+## THE STRING-SWITCH CASCADE (commit 9611036e8, the follow-up slice)
+
+The dispatched sub-slice (the 184 single-entry rejections) PIVOTED on
+diagnosis: the dominant shape was not diamonds but string-comparison
+dispatch chains (the oracle renders them as switch statements, the port
+as raw if-goto chains; 0 of the oracle's 45 `case "..."` sites on
+dnlib). ROOT CAUSE: a reader-model divergence -- the C# reader keeps
+the brtrue fall-through in the same block (chains are `[if (cond) br
+handler, br nextCase]` pairs, what the cascade matchers scan); the
+port's reader ends a block at every conditional branch. The ported
+cascade only ever fired on seeded RoslynFixture trees.
+
+THE SLICE: the CoalesceGuardChains bridge rewrites the fragmented
+guards into the instruction-list form before the matchers, gated to the
+string-switch family and pre-counted (>= 3 unique values) so rejected
+chains keep their fragmented render. The cascade pieces it needed
+end-to-end: the StringToInt switch value (cloned, not wrapped -- the
+matched instruction stays in the tree until the ReplaceAt), the
+AddSection Parent links (a Sections.push_back bypass broke the render
+invariants), the SortBlocks(deleteUnreachableBlocks: true) cleanup
+(the consumed guards render as garbage if left), the section-body thunk
+resolution (the reader's fall-through blocks), the null-final
+terminator rule in TopologicalSort's reachability walk, and the render
+side (the StringToInt value, `case "..."` labels, `case null:`, the
+default via GetDefaultSection).
+
+THE KEY LESSONS (recorded for the next bridge pieces): (1) the nested
+two-store extraction MUST check the stored variable matches the loaded
+one (the C# MatchStLoc overload; a parameter was picking up an unrelated
+`int x = 0` and rendering `switch (0)`); (2) RecomputeIncomingEdgeCounts
+must NOT count the container-entry edge (the D59 convention -- counting
+it broke every D59-tuned matcher: the using transform rendered
+try/finally across the corpus); instead the Run's visit gate exempts
+container entries explicitly; (3) the C# cascade tail's
+SimplifySwitchInstruction runs BEFORE the container SortBlocks -- keep
+that order; (4) the C# StatementBuilder inlines every section's target
+block into the section (ConvertSwitchSectionBody) -- the port's
+switch-inline plan approximates this with an order requirement the C#
+does not have.
+
+THE MEASURE: dnlib 75,206 -> 75,168; net10 94,313 -> 94,225; cui
+2,292 -> 2,274; string cases 0 -> 10 of 45; the pin byte-identical;
+hello 3; the canary identical to HEAD; the sweep 268 (control-matched,
+no new failures). The gotos 1,021 -> 1,026 (+5): the 5 converted sites
+whose section bodies the inline analysis rejects on the SECTION-ORDER
+requirement render per-case gotos (InitializeInternal class).
+
+THE NEXT SUB-SLICES (measured): (1) MatchRoslynSwitchOnString (the
+ComputeStringHash shape) needs its own bridge entry -- the null-head
+guard + the case blocks inside the numeric hash switch (the oracle's
+other 35 sites); (2) the switch-inline analysis's section-order
+requirement -- relaxing it with the C#'s break-append rule (a reachable
+body-end section renders `break;` after its content) also clears the +5
+gotos; (3) the switch case-label indentation (the port renders cases
+one level deeper than the oracle on EVERY switch -- a global style
+family); (4) then the standing queue (the single-entry/diamond family,
+the 303 split, the 97 span-escapes).
