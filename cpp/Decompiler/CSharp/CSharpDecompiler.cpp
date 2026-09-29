@@ -1099,19 +1099,41 @@ std::string ConstantValueText(const std::any& value,
         if (auto* u64 = std::any_cast<std::uint64_t>(&value))
             return std::to_string(*u64) + "uL";
         if (auto* f = std::any_cast<float>(&value)) {
+            // The shortest form that round-trips: the C# float literal
+            // (up to 9 significant digits, `float.IsFinite`-style "R").
             char buffer[64];
-            std::snprintf(buffer, sizeof(buffer), "%g", *f);
-            return std::string(buffer) + "f";
+            for (int prec = 1; prec <= 9; ++prec) {
+                std::snprintf(buffer, sizeof(buffer), "%.*g", prec, *f);
+                float parsed = std::strtof(buffer, nullptr);
+                if (parsed == *f || (std::isnan(parsed) && std::isnan(*f)))
+                    break;
+            }
+            std::string ftext = buffer;
+            for (char& ch : ftext)
+                if (ch == 'e') ch = 'E';
+            return ftext + "f";
         }
         if (auto* d = std::any_cast<double>(&value)) {
+            // The shortest form that round-trips: the C# double literal
+            // (up to 17 significant digits, "R"-style). A plain %g loses
+            // precision and the value no longer round-trips.
             char buffer[64];
-            std::snprintf(buffer, sizeof(buffer), "%g", *d);
+            for (int prec = 1; prec <= 17; ++prec) {
+                std::snprintf(buffer, sizeof(buffer), "%.*g", prec, *d);
+                double parsed = std::strtod(buffer, nullptr);
+                if (parsed == *d || (std::isnan(parsed) && std::isnan(*d)))
+                    break;
+            }
             std::string text = buffer;
+            // The C# literal's exponent marker is capital (`5E-324`,
+            // the PrimitiveExpression's double format).
+            for (char& ch : text)
+                if (ch == 'e') ch = 'E';
             // The C# double literal always carries the decimal point
             // (`5.0`, not `5` -- the PrimitiveExpression's double
             // format).
             if (text.find('.') == std::string::npos &&
-                text.find('e') == std::string::npos &&
+                text.find('E') == std::string::npos &&
                 text.find("inf") == std::string::npos &&
                 text.find("nan") == std::string::npos)
                 text += ".0";
