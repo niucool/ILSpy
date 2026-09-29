@@ -4734,3 +4734,72 @@ gotos; (3) the switch case-label indentation (the port renders cases
 one level deeper than the oracle on EVERY switch -- a global style
 family); (4) then the standing queue (the single-entry/diamond family,
 the 303 split, the 97 span-escapes).
+
+## THE FLAT HASH-SWITCH SLICE (commit 329c5bcfc)
+
+The dispatched next sub-slice (the MatchRoslynSwitchOnString bridge, the
+other 35 sites) PIVOTED on diagnosis: the Roslyn switch-on-string compiles
+to a BINARY-SEARCH IF-TREE over ComputeStringHash values with string-eq
+case heads at the leaves -- NO IL switch opcodes. The C#'s SwitchDetection
+flattens that tree into one SwitchInstruction via TWO pieces the port
+lacked, now ported:
+
+(1) UseCSharpSwitch's MatchRoslynSwitchOnString gate: the root's
+ComputeStringHash store forces the flat switch past the if-count heuristic
+(the port had deferred it with a note; the matcher was already linkable).
+(2) The false-path remainders must merge into one default section. The C#
+false paths br to the SHARED default block (AddSection merges by target);
+this port's CFS folds branch-to-valued-return into LOCAL leave blocks, so
+the analysis now recognizes the fold-materialized local return (a
+sole-owner valued-leave block) and uses the leave as the section body
+(merging by target container, the C# AddSection leave arm). Void leaves
+keep the branch form (the C# folds those in CFS itself).
+
+THE MEASURE: dnlib 75,168 -> 74,930 (-238), net10 94,225 -> 94,201 (-24);
+pin/hello/canary/sweep all hold. THE SWITCHES FORM AT THE SUB-ROOTS (the
+leaf-cluster positions), not the method root: the root's analysis
+produces the right 15 sections (14 cases + 1 merged default) but
+UseCSharpSwitch still rejects it -- see the next-session entry.
+
+## THE REMAINING ROOT-LEVEL BLOCKERS (measured, for the next session)
+
+(A) THE EMPTY-SET PARTITION ANOMALY: the root's walk (dnlib.DotNet.
+Extensions.IsPrimitive and the GetSystemTypeName-family methods) hits
+`bail empty-set` -- a comparison `eq V_1 C` reached with an inputValues
+partition that does NOT contain C (e.g. input = the universe minus
+[-1583721377..-1], then `eq V_1 -1583721377`). The walk descended into a
+block on the WRONG SIDE of a partition: some false path follows the
+POSITIONAL next (the port's model) where the C# follows the explicit br
+target. The bail makes the caller add the whole partition as a section
+(the 543,980,045-value intervals) -> the multi-big-section gate rejects.
+Debug recipe: the [SDA] instrumentation (env ILSPY_SDA) in SwitchAnalysis
++ a per-method dump at SwitchDetection entry (env ILSPY_SDD); compare
+against the C# sosdump harness (/tmp/sosdump -- the C# sosdbg harness at
+DOTNET_ROOT=/home/jim/.dotnet, `~/.dotnet/dotnet bin/Release/net10.0/
+sosdump.dll <asm> <type> <method> [param-substring]` dumps the C# tree
+before/after any named transform). The suspicious difference so far: the
+C# case heads are the INVERTED form (`if (comp(op_eq == 0)) br default;
+br retTrue`) while the port's are positive (`if (op_eq) leave 1`) -- the
+C# reader/early-transforms invert brtrue-chains; the port's CFS fold also
+replaced the case heads' true arms (br to the shared ret-true block) with
+direct `leave ldc.1` (the ClonePureLoad extension -- the C# only folds
+NOP-valued leaves in default mode).
+
+(B) THE ARM ITSELF (MatchRoslynSwitchOnString in SwitchOnStringTransform):
+needs the root-level `[stloc hash, switch]` block (blocked on A), the
+null-head (the port's is a block-final `if (comp==null) leave 0`, the C#
+form is `[if (comp==null) br nullCase, br switchBlock]` in the list with a
+BR true arm), and the case-head bridge (the port's `if (op_eq) leave 1`
+vs the C#'s two-instruction case heads). The port's arm (line ~844 of
+SwitchOnStringTransform.cpp) is otherwise complete.
+
+(C) THE DEAD-RETURN GARBAGE TAIL: the formed sub-switches render the case
+heads' true-arm local [leave 1] blocks as trailing `return true;` lines
+(~7 per method, the "remaining blocks" render). The arm (B) consumes the
+whole structure and moots this; a fallback fix is the switch-inline plan
+inlining br-to-pure-return arms.
+
+THE C# HARNESS for tree comparisons: /tmp/sosdump (a net10 console app
+against the w2-trace-built ICSharpCode.Decompiler.dll); it prints the C#
+ILAst before/after any transform by name match -- the reader-model diffs
+are found fastest by dumping both sides at the same pipeline stage.
