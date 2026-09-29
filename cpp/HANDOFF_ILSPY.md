@@ -5345,3 +5345,77 @@ over non-tree leaves), the switch-inline section-order relaxation, the
 303 not-found/adjacent goto split, the 97 span-escapes, the `?.` shapes,
 the `.override` forwarders, the net10 foreach-collapse gap (the Find
 method's enumerator pattern).
+
+---
+
+## Session record: the inline-plan default (attempted, held; the dangling-goto find)
+
+No landed commits this session: the inline-plan default slice turned out
+to be a four-way refactor and was reverted clean (the working tree at
+6f055927a). The findings, so the next attempt starts from the design:
+
+### The pin regression's full anatomy (default: goto IL_0018 vs break)
+
+The connid Connect method's default section now renders
+`default: goto IL_0018;` where the inline plan used to emit the
+fall-through `break`. Three mechanisms interlock:
+
+1. The plan's target collection treats the default section's body branch
+   like a case body's (collected as a target). For the Connect shape (the
+   case bodies are direct Leaves, so the targets list holds ONLY the
+   default's exit branch), the exit determination ("the block after the
+   last target") finds no block after the default's own target -> exit
+   null -> no defaultFallsToExit -> the default renders as a labeled
+   section with its body branch -> `goto IL_0018` + the label.
+
+2. Recording the default's branch instead of collecting it (the fix
+   attempt) fixes (1) but breaks the default-with-work shapes (the
+   `default: <body>; break;` form, the SwitchBodyThunks* fixtures): the
+   default's body block is a legitimate target there. The distinguishing
+   rule: the default's branch target == the exit (the case bodies'
+   convergence, or the block after the last CASE target) -> the
+   fall-through form; else -> the inlined-thunk form. The exit rule must
+   exclude the default's own target from the "last target" computation
+   only when the case bodies contribute no convergence.
+
+3. The goto-to-return propagation (AnalyzeReturnPropagation) fires on the
+   default's exit branch (a return-only exit block, one pred) and
+   suppresses the exit block -- but the defaultFallsToExit skip removes
+   the propagation's only render site. The propagation must skip switch
+   section body branches (they are the plan's domain): `for (p = src; p;
+   p = p->Parent) if (p->Op == SwitchSection || SwitchInstruction) skip`.
+
+4. The render's thunk-index arithmetic (section k -> plan->targets index)
+   must skip the recorded default section (it consumes no target) both
+   when it falls to the exit and when it renders as a statement.
+
+The red test for the whole shape is written (kept in the test file of the
+reverted attempt; rewrite as): a switch whose case {0} body is a direct
+Leave, whose default section carries complement labels and branches to
+the post-switch block with work in it -- expect no `default:` label, no
+goto, the post-switch code rendered after the switch. The existing
+`SwitchInlinesLeaveFinalBodies` expectation (`default:` present) must
+flip to absent: the C# renders the default-to-exit form with NO label
+(the after-switch code is the default path; the Connect oracle confirms).
+
+### The dangling-goto correctness bug (2 sites, dnlib)
+
+Two gotos reference labels that are never emitted (broken output):
+`MetadataBase.Load(nint, CLRRuntimeReaderKind)` line ~77948 (the catch's
+trailing `goto IL_0023` -- the post-try block dropped as dead but the
+goto kept) and `OptimizeMacros` line ~85437 (the switch default's
+`goto IL_0038` -- the exit block dropped/skipped, the label never
+emitted). The C# eliminates both (the dead-code pass drops the block AND
+the goto that targets it). The fix needs: a goto whose target block is
+dropped as unreachable must either drop with it (when the fall-through
+reaches the same place) or the label must emit at the dropped block's
+position (an empty labeled statement). Goto classification on the current
+dnlib render: 880 total = 15 adjacent (label on the next line) + 537
+forward-near + 310 far + 18 backward + 2 dangling.
+
+### The standing queue (unchanged)
+
+The while-guard de Morgan residue (185 `if (!(` sites, negations over
+non-tree leaves), the switch-inline section-order relaxation, the goto
+families above, the span-escapes, the `?.` shapes, the `.override`
+forwarders, the net10 foreach-collapse gap.
