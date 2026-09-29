@@ -5684,3 +5684,81 @@ leave-key extension was re-landed and REVERTED again (dnlib 72111 ->
 4. The `?.` shapes + the pdbState sites.
 5. The `.override` forwarders (the 17 sites).
 6. The net10 foreach-collapse gap.
+
+## Session record: the .override forwarder gate (6bd94f8e2)
+
+Corpus: dnlib 72111 -> **72052** (-59), net10 88805 -> **88804** (-1),
+cui 2271 -> **2258** (-13), hello 3, the pin b38babc5465c9861
+unchanged, the forwarders 0 on all three corpora (matching the oracle),
+the suite control 268, the canary renders 8859 lines.
+
+### THE ORACLE REFERENCE FACT (the decisive session discovery)
+
+The oracle files are BYTE-IDENTICAL to the ilspycmd 11.1.0.9782 (the
+globally installed tool) run with `-r
+/home/jim/.dotnet/shared/Microsoft.NETCore.App/10.0.12` -- verified
+diff = 0 lines on dnlib. The oracle's reference environment = the tool +
+the 10.0.12 runtime dir on the reference path. Without -r the tool's
+output differs by exactly 55 lines (the dnlib.Threading.Lock
+qualification family). The pinned tree (9e3559b7d, version 11.0.0-rc)
+is OLDER than the tool (11.1.0.9782): the newer release changed the
+forwarder behavior this session chased.
+
+### 6bd94f8e2 "Gate .override forwarders on the scoped-module resolution"
+
+The port rendered forwarders for the cross-assembly .override rows the
+tool leaves out (17 dnlib + 5 net10 + 3 cui). THE EMPIRICAL GATE, pinned
+with a three-fixture set (the MetadataBuilder recipe at
+/home/jim/tmp-build/crossoverprobe/ -- two IShapeLib variants: the
+direct real interface and the facade forwarding to ShapeImpl; the
+fixture dir /home/jim/ilspy-test-fixtures/cross_override_fixture/
+{direct,fwd}/):
+- EMITS when the MethodDeclaration's interface resolves to the module
+  its TypeRef is SCOPED to (the same-module OverrideSynth shape; the
+  direct cross-assembly direct/CrossOverride shape -- the tool emits
+  both).
+- DOES NOT EMIT when a TYPE FORWARDER sits between the scope and the
+  definition (fwd/CrossFwd over a facade IShapeLib; the netstandard ->
+  System.Runtime chain is the same shape).
+The port's gate: in renderOverrideForwarders (CSharpDecompiler.cpp),
+the resolved interface method's ParentModule() must equal the scope's
+module (`module.GetDeclaringModule` over the MethodImpl row's
+declaration MemberRef parent TypeRef); a null scope (the same-module
+ModuleRef, whose name never matches the module-name scan -- the C#
+falls back to the compilation scan there) accepts the main module.
+
+THE WRONG-LAYER LESSON: the first cut gated
+MetadataMethod::ExplicitlyImplementedInterfaceMembers itself; that also
+starved the dotted-name split (the net10 `IEnumerator<MethodDef>.Current`
+members rendered fully qualified, +13 lines) -- the members must stay
+resolvable for the name decision; the gate belongs in the render where
+the tool's synthesis lives.
+
+The port's facade resolution currently yields the UnknownType (the
+fwd/CrossFwd fixture probes showed kind=7) where the tool's resolves-
+then-gates -- the OUTCOME matches (no forwarder) either way; a future
+slice could chase the resolution parity (the port's
+ResolveForwardedType chain over the referenced facades) if a corpus
+family needs it.
+
+### The standing gates (all verified on the committed tree)
+
+- The connid pin b38babc5465c9861; dnlib 72052; net10 88804; cui 2258;
+  hello 3; the forwarders 0/0/0; the suite control 268 (the
+  XmlDocumentationCommentsRenderOnMembers failure is a pre-existing
+  member of the 268 baseline, NOT a regression of this session); the
+  canary renders 8859 lines.
+
+### The queue (updated, in order)
+
+1. The label-merged regions (the cross-container analysis; the
+   block-model assessment first).
+2. The switch-inline section-order relaxation.
+3. The goto families (the not-found/adjacent split, the span-escapes,
+   the 2 dangling gotos).
+4. The `?.` shapes + the pdbState sites.
+5. The net10 foreach-collapse gap.
+6. The net10 iterator-decompile gap (the oracle decompiles
+   DeobUtils.GetInitCcts into the yield-return form; the port leaves
+   the raw state machine -- found while measuring this slice; a big
+   family if it lands).
