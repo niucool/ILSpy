@@ -4803,3 +4803,108 @@ THE C# HARNESS for tree comparisons: /tmp/sosdump (a net10 console app
 against the w2-trace-built ICSharpCode.Decompiler.dll); it prints the C#
 ILAst before/after any transform by name match -- the reader-model diffs
 are found fastest by dumping both sides at the same pipeline stage.
+
+---
+
+## Session record: the string-switch arc lands (fbb33de39, dd3535d76)
+
+Corpus: dnlib 74930 -> 74731, net10 94201 -> 94066, cui 2274 -> **1332**
+(the string-switch cascade over cui's many string switches), gotos 1023 ->
+1021, string `case "..."` labels 10 -> 24. The connid pin re-recorded for
+the deliberate label-indent change: `4e1ed917a09392be`.
+
+### fbb33de39 "Fix unsigned LTE boundary; flat hash switch converts to strings"
+
+1. **The empty-set partition off-by-one (the root blocker)**:
+   `MakeLessThanOrEqualSet`'s negative-unsigned branch built the tail with
+   the end-exclusive two-arg `LongInterval(Min, val)` where the C# uses
+   `Inclusive(Min, val)`. Every unsigned greater-than over a negative
+   boundary behaved as greater-or-equal, the false-path partitions dropped
+   the boundary a later eq leaf needed, the hash-search walk bailed on an
+   empty set, and the caller added the whole input partition as a section
+   (the multi-big-section gate then rejected the root flat switch). Unit
+   test: `SwitchAnalysis.MakeSetWhereComparisonIsTrueUnsigned` (the boundary
+   memberships asserted for both GT and LTE over negative values).
+
+2. **The arm's reader-model bridges** (MatchRoslynSwitchOnString): the null
+   head as `[stloc V_0, if (V_0 == null) leave]`-FINAL with the switch block
+   positionally next; the flat switch as the block FINAL; the case heads as
+   if-finals in BOTH polarities -- the positive `if (op_eq) leave 1` (true
+   arm = the body leave, false path = the local default block) and the
+   negated `if (comp(eq, op_eq, 0)) leave 0` (true arm = the default leave,
+   false path = the local body block); exit identity compared by return
+   value (PureLeaveValueString) instead of the shared target block (the CFS
+   fold materializes the shared default per site). The null case is skipped
+   when its folded return equals the default's (the C# gate on the null
+   branch targeting the default's block). Test:
+   `SwitchOnStringTransformTest.ReaderShapeRoslynSwitchConvertsToSwitch`
+   (build the reader shape: the head/switch-final, the interleaved case
+   heads + local defaults, the merged-leave default).
+
+### dd3535d76 "Case labels sit at switch indent; sections sort by source"
+
+1. **The case-label indentation**: the oracle keeps switch section labels
+   at the switch statement's own indent (only the case bodies indent); the
+   port emitted both one level deeper. Fixed in ILAstToCSharp's
+   SwitchInstruction render (all seven `Line(indent + 1, "case ...")` sites
+   -> `Line(indent, ...)`).
+2. **The section order**: the C# SortSwitchSections keys a Leave body on
+   its StartILOffset; the port's fallback of 0 sorted every leave-bodied
+   section first (the arm's default before the cases). The arm now stamps
+   its value-section clones with the owning case-head block's offset, and
+   the default's clone past every case body (0x7FFFFFFE -- the C# default
+   block sits in the exit region; the port's fold consumed that block into
+   the merged leave). The port's `Branch(Block*)` ctor already carries the
+   target's offset (the C# convention), so the negated-form case-head bodies
+   (branches to the local [leave 1] blocks) sort in the case region.
+
+### The empty-guard family (OPEN -- the next big dnlib family)
+
+485 instances in dnlib (`if (cond) { }` with the content flattened after).
+The set_Root and IndexOf_NoLock case studies, root-caused:
+
+**set_Root (dnlib.W32Resources.Win32ResourcesPE)**: the IL
+`A; brfalse SET; B; bne.un SET; ret; SET: set_Value; ret` -- the guard
+`if (!A || B != value) set_Value`. The port's CDD fixpoint runs
+InlineIfFallThrough@1, InlineIfFallThrough@0 (the fall-throughs become
+else-arms), InvertIfExit@0, then **IntroduceShortCircuit** -- which matches
+`if (C1) Block { FINAL: if (C2) br X else { exit } }` and takes
+`nestedIf->TrueInst` as the combined true arm, **dropping the nested if's
+else (the early-exit region)**. The C# requires the nested if to be a bare
+`[if, br]` pair (`trueBlock.FinalInstruction is Nop`) -- no else. Adding the
+`nestedIf->FalseInst != nullptr` rejection is semantically right but
+REGRESSES the corpus +1174: the broken combine was load-bearing for
+flattening, and the un-combined guards render worse because of a second bug
+(below). The fix must land together with the or-guard rendering.
+
+**IndexOf_NoLock (dnlib.Utils.LazyList`1)**: the C#'s loop container
+includes the `[leave V_0]` block (the return-i leave) INSIDE the while
+container; the if's false arm is an explicit `br IL_0023` to it. The port's
+loop detection lifts only the cycle blocks [guard, if, increment] into the
+container and leaves the [leave V_0] block outside (before the loop), so
+the if-final's false path (the positional next) lands on the INCREMENT --
+the early return is misrouted, the loop's exit then flows through the
+container's trailing `br IL_0023` into the [leave V_0], and the render
+becomes `if (cond) { } ... return i` (the -1 leave unreachable). The C#
+reference trees are captured in /tmp/sos_lazy2.txt (before/after
+ConditionDetection, via the sosdump harness patched to ConditionDetection
+-- the Win32ResourcesPE type does not resolve in the harness's C#
+DecompilerTypeSystem for set_Root; LazyList does).
+
+The likely correct sequence: (1) the loop-detection/reader model must keep
+the exit-target leave blocks inside the loop container (or the if's false
+arm must carry the explicit br), (2) then IntroduceShortCircuit gets the
+C#'s no-else guard, (3) then the or-chains render like the C#'s (the C#
+keeps them as separate if-guards with leave true arms -- see the AFTER tree
+in /tmp/sos_lazy2.txt).
+
+### Where the numbers stand
+
+dnlib 74731, net10 94066, cui 1332, gotos 1021, hello 3-line residue, the
+suite control 268, the bennu canary 4/4. The connid pin
+4e1ed917a09392be (re-recorded with dd3535d76 for the label indent).
+
+Next in the queue after the empty-guard family: the switch-inline
+section-order relaxation (the remaining goto rejections), the 303
+not-found/adjacent goto split, the 97 span-escapes, the `?.` shapes, the
+`.override` forwarders, the net10 foreach-collapse gap.
