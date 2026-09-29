@@ -5419,3 +5419,115 @@ The while-guard de Morgan residue (185 `if (!(` sites, negations over
 non-tree leaves), the switch-inline section-order relaxation, the goto
 families above, the span-escapes, the `?.` shapes, the `.override`
 forwarders, the net10 foreach-collapse gap.
+
+## Session record: the cui-gate artifact found; the InvertIf soundness gate (0decb762d)
+
+### THE CUI GATE WAS SILNTLY BROKEN SINCE 11:15 SEP 29 (the record correction)
+
+Every saved cui render from 11:15 Sep 29 onward is a 61-byte CLI usage
+error ("Specify --help for a list of available options and commands.")
+or a 0-byte disk-quota file. The diff of the oracle against the usage
+error is EXACTLY 1332 (all 1331 oracle lines + the one error line) and
+against the empty file exactly 1331 -- so the recorded "cui 2274 ->
+1332" (the string-switch arc) and "cui 1332 -> 1331" (the switch-render
+polish) were artifacts of the broken invocation, not measurements. The
+coincidence (1332 = the real number after the string-switch cascade at
+12:05, from the last good full renders cui_h/cui_i -- which are
+themselves usage errors, so even that reading is suspect) masked the
+breakage. THE TRUE CUI NUMBER at 128fce7e2: **2259** (the last
+trustworthy full render is cui_tc2.cs at 03:37 = 2326; the string-switch
+arc and later slices improved it to 2259). All future cui gates: verify
+the render is non-empty and larger than 10 lines before diffing.
+
+### 0decb762d "Gate InvertIf on the false-path block exiting"
+
+A CORRECTNESS BUG fixed: the C# InvertIf reads the code after the if
+from the SAME block (GetExit asserts the last instruction has an
+unreachable end point); the port's reader ends a block at every
+conditional branch, so the port's next block's FinalInstruction can be a
+fall-through if. Moving such a final into the new TRUE arm re-routed its
+fall-through to the old-then position, orphaning the following blocks.
+TWO manifestations: de4dot.code SigCreator::IsNonObfuscatedAssembly
+returned true for every non-null input (the return-false leave dropped
+as unreachable after RemoveUnreachableBlocks), and the dnlib SigComparer
+Equals family TRUNCATED whole method bodies after the null guards
+(HEAD's 71548-state render of Equals(IType, IType) was 14 lines; the
+full body is ~40). The diagnosis path: the per-stage dump (a temporary
+ILSPY_DUMP_STAGES probe on RunGetILTransforms) localized the mangling to
+ReduceNestingTransform's ImproveILOrdering -> InvertIf; the RED
+(ConditionDetection.GuardChainFallThroughReturnSurvives) needed the
+seeded leaves to carry IL offsets (the LdcI4 values' StartILOffset --
+without them GetStartILOffset reports empty and the IL-order gate bails,
+so the first seed attempts passed vacuously).
+
+InvertIf now returns bool; TryPickBetterBlockExit propagates the bail --
+reporting a change that did not happen made the CDD fixpoint restart on
+a no-op forever (the net10 whole-module render HUNG in
+InitAssemblyClient; the per-transform probe showed TryPickBetterBlockExit
+firing 77+ times unchanged). The ReduceNestingTransform callers ignore
+the return (their folds just no-op).
+
+THE CORPUS RE-BASE (deliberate, the correctness price): dnlib 71548 ->
+73171, net10 87917 -> 90580, gotos 880 -> 1177, cui unchanged at 2259.
+The per-side split: dnlib oracle-only 34200 -> 33014 (the truncated
+bodies now render -- the correctness face improved by 1186 lines) and
+mine-only 37348 -> 40403 (the un-combined flat guard forms). The blocked
+inversions were load-bearing for the diff metric: the sites render as
+flat early-exit guard chains (`if (a == null) return false; if (b ==
+null) return false;`) where the oracle renders the COMBINED form
+(`if (a == null || b == null) return false;`). A refined-gate variant
+(allow the inversion when the old then's trailing Branch targets the
+next block's positional successor -- the routing-equivalence case)
+measured WORSE (dnlib 73417) and was dropped; the pure bail is simpler
+and better.
+
+THE RECOVERY PATH (the next slice, the highest leverage now): the
+guard-chain combination by LEAVE-VALUE identity -- the port's CFS folds
+the guards' shared branch target (br RET_TRUE) into per-site inline
+leaves BEFORE the CDD runs, destroying the same-target information the
+C#'s IntroduceShortCircuit combines over. The section-exit-identity
+merge (9f42c0c5d) solved the same problem for switches by merging
+through the folded returns by VALUE; the guard combination needs the
+same trick: `if (!A) leave V` + `if (!B) leave V` (the same leave VALUE
+V, positionally chained, single-pred) -> `if (!A || !B) leave V`.
+
+### THE DE MORGAN RESIDUE RE-MEASURED (the finding that opened the bug)
+
+The oracle ITSELF renders 187 `if (!(` lines on net10 (the port: 186) --
+the remaining divergence is not the `!(` count but the SITES: the
+oracle's `!(` forms are LogicNot-wrapped boolean leaves (the C#
+ConvertToBoolean's LogicNot -- `!(x is T y)`, `!(a != b)` KEPT un-flipped
+in operand position), while the port's are the un-combined guard chains.
+The C# NEVER pushes negations into the tree at the expression level
+(ConvertToBoolean wraps with LogicNot; the flips happen at the
+BRANCH-POLARITY level in ConditionDetection) -- the port's landed de
+Morgan pushdown (c37e6cd1b) was a compensation for the port's branch
+polarity, correct where it fires; the residue family IS the guard-chain
+combination above, not more pushdown.
+
+### The standing gates (all verified on the committed tree)
+
+- The connid pin: b38babc5465c9861 (byte-identical through the change).
+- dnlib 73171 / net10 90580 / cui 2259 / hello 3 / gotos 1177.
+- The suite control: 268 (two fresh runs identical; one intervening 269
+  run was a flake).
+- The bennu canary fixture renders deterministically (8871 lines); the
+  899-line delta vs the 09:16 Sep 29 render is the same guard family
+  (including the ReadExistingAssembly method -- BOTH renders are the
+  known empty-guard breakage there, differently wrong). NOTE: the bennu
+  submodule pins third_party/ilspy at 9e3559b7d (older than this tree);
+  the canary harness (tests/dotnet_golden.sh) tests the SUBMODULE's
+  build -- a submodule bump is its own operation per the bennu TODO.
+
+### The queue (updated, in order)
+
+1. The guard-chain combination by leave-value identity (the corpus
+   recovery: the flat chains -> the oracle's `||` forms; the +3055
+   mine-only mass).
+2. The label-merged regions (the cross-container analysis).
+3. The switch-inline section-order relaxation.
+4. The goto families (the 303 not-found/adjacent split, the 97
+   span-escapes, the 2 dangling gotos).
+5. The `?.` shapes (100 vs ~123) + the pdbState sites.
+6. The `.override` forwarders (the 17 sites).
+7. The net10 foreach-collapse gap.
