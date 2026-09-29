@@ -321,6 +321,7 @@ public:
             AnalyzeNullCoalescingChains(fn.Body.get());
             AnalyzeSingleUseLocals();
             AnalyzeNullPropagation();
+            AnalyzeThrowCoalesce();
             AnalyzeLabelRegions();
             HoistForInitializers(fn.Body.get());
             EmitContainer(*fn.Body, 1);
@@ -374,6 +375,12 @@ private:
     std::set<const ILInstruction*> singleUseSkipped_;
     std::set<const ILInstruction*> coalesceSkipped_;
     std::set<const Block*> coalesceSuppressed_;
+    // The `?? throw` coalesce: a statements-free guard block
+    // (`if (param == null) throw new ArgumentNullException("param")`)
+    // followed by the next block's first store of the same parameter
+    // folds into `<target> = param ?? throw new ...;` (the C#
+    // NullCoalescingInstruction with a Throw fallback).
+    std::map<const ILInstruction*, const Throw*> throwCoalesce_;
     std::vector<std::unique_ptr<NullCoalescingInstruction>> coalesceKeepAlive_;
     // The foreach substitution: the for-shape whose body's only uses of
     // the counter are the array element accesses renders as
@@ -1131,6 +1138,67 @@ private:
     // leave-null true arm (the `if (dup == 0) return null;` guard) and the
     // fall-through use. The dup's uses counted from the tree (the reader
     // does not track the dup slots' counts).
+    // The `?? throw` coalesce analysis: the guard block (an empty
+    // block whose final is `if (local == null)` with the throw arm)
+    // followed by the next block's first store of the same local folds
+    // the guard into the store's value (`param ?? throw new ...`). The
+    // throw's argument must be a single object construction (the
+    // ArgumentNullException form); anything else keeps the statement
+    // form.
+    void AnalyzeThrowCoalesce() {
+        if (fn_ == nullptr || fn_->Body == nullptr)
+            return;
+        std::function<void(BlockContainer*)> scan = [&](BlockContainer* c) {
+            if (c == nullptr) return;
+            for (std::size_t k = 0; k + 1 < c->Blocks.size(); ++k) {
+                Block* guard = c->Blocks[k].get();
+                if (!guard->FinalInstruction)
+                    continue;
+                auto* iff = dynamic_cast<IfInstruction*>(
+                    guard->FinalInstruction.get());
+                if (!iff || iff->FalseInst) continue;
+                auto* comp = dynamic_cast<const Comp*>(iff->Condition.get());
+                if (!comp || comp->Kind != ComparisonKind::Equality) continue;
+                auto* ld = dynamic_cast<const LdLoc*>(comp->Left.get());
+                if (!ld || !ld->Variable) continue;
+                if (!comp->Right || comp->Right->Op != OpCode::LdNull) continue;
+                // The throw arm: a block holding only the throw.
+                auto* arm = dynamic_cast<const Block*>(iff->TrueInst.get());
+                if (!arm) continue;
+                const Throw* th = nullptr;
+                if (arm->Instructions.empty() && arm->FinalInstruction &&
+                    arm->FinalInstruction->Op == OpCode::Throw)
+                    th = static_cast<const Throw*>(arm->FinalInstruction.get());
+                else if (arm->Instructions.size() == 1 &&
+                         arm->Instructions[0]->Op == OpCode::Throw)
+                    th = static_cast<const Throw*>(arm->Instructions[0].get());
+                if (!th || !th->Argument) continue;
+                // The next block's first statement: a store of the same
+                // local (the field or local store the guard protects).
+                Block* next = c->Blocks[k + 1].get();
+                if (next->Instructions.empty()) continue;
+                auto* st = dynamic_cast<const StObj*>(
+                    next->Instructions[0].get());
+                if (!st) continue;
+                auto* value = dynamic_cast<const LdLoc*>(st->Value.get());
+                if (!value || value->Variable.get() != ld->Variable.get())
+                    continue;
+                throwCoalesce_[st] = th;
+                // The guard's if-final joins the skipped finals (the
+                // block's preceding statements still render).
+                coalesceSkipped_.insert(guard->FinalInstruction.get());
+            }
+            for (auto& b : c->Blocks) {
+                if (!b) continue;
+                for (int ci = 0; ci < b->ChildCount(); ++ci)
+                    if (auto* nested =
+                            dynamic_cast<BlockContainer*>(b->GetChild(ci)))
+                        scan(nested);
+            }
+        };
+        scan(fn_->Body.get());
+    }
+
     void AnalyzeNullPropagation() {
         if (fn_ == nullptr || fn_->Body == nullptr)
             return;
@@ -3081,6 +3149,17 @@ private:
             }
             case OpCode::StObj: {
                 const auto& st = static_cast<const StObj&>(inst);
+                // The `?? throw` coalesce: the guard's throw renders as
+                // the null-coalescing fallback.
+                if (auto tc = throwCoalesce_.find(&st);
+                    tc != throwCoalesce_.end()) {
+                    Line(indent, StoreTargetText(*st.Target) + " = " +
+                                     Expr(*static_cast<const LdLoc*>(
+                                              st.Value.get())) +
+                                     " ?? throw " + Expr(*tc->second->Argument) +
+                                     ";");
+                    return;
+                }
                 std::string valueText = Expr(*st.Value);
                 // The C# stores a boolean through the boolean literal
                 // (the CSharpPrimitiveCast over the target type): an int
