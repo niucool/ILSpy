@@ -332,6 +332,7 @@ public:
             AnalyzeNullPropagation();
             AnalyzeThrowCoalesce();
             AnalyzeLabelRegions();
+            AnalyzeGuardRegions();
             HoistForInitializers(fn.Body.get());
             EmitContainer(*fn.Body, 1);
         }
@@ -382,6 +383,27 @@ private:
     std::map<const IfInstruction*,
              std::pair<Block*, Block*>> labelRegionFolds_;
     std::set<const Block*> labelRegionSuppressed_;
+    // The guard-region fold (the C# ConditionDetection's else-embedding
+    // plus the ReduceNestingTransform/ImproveILOrdering inversion): a
+    // block's if-final branching FORWARD to a later sibling restructures
+    // to the INVERTED if nesting the fall-through region, the target
+    // continuing after the if -- the goto form disappears. The C#
+    // produces this shape when the target is the shared continuation
+    // (the region re-joins at it, or exits through it); a TERMINAL
+    // target (a Leave/Throw final) is the early-exit form the
+    // return-propagation renders as `if (cond) { return/throw; }`.
+    struct GuardRegion {
+        BlockContainer* container = nullptr;
+        std::size_t first = 0;  // the region's first block index
+        std::size_t last = 0;   // the region's last block index (inclusive)
+    };
+    std::map<const IfInstruction*, GuardRegion> guardRegionFolds_;
+    // Every region block -> the INNERMOST fold owning it (the linear
+    // render skips owned blocks; a fold's region render skips the blocks
+    // a nested fold owns -- they render at the nested guard's site).
+    std::map<const Block*, const IfInstruction*> guardRegionOwner_;
+    // The fold whose region is currently rendering (the ownership bypass).
+    const IfInstruction* activeGuardRegion_ = nullptr;
     std::set<const ILInstruction*> singleUseSkipped_;
     std::set<const ILInstruction*> coalesceSkipped_;
     std::set<const Block*> coalesceSuppressed_;
@@ -1434,6 +1456,183 @@ private:
             }
         };
         scan(dynamic_cast<BlockContainer*>(fn_->Body.get()));
+    }
+
+    // The guard-region analysis (the AnalyzeGuardRegions fold): scan a
+    // container's block range [from, limit) for if-finals branching
+    // forward to a later sibling; claim the fall-through region when it
+    // is single-entry and the target is non-terminal, then recurse into
+    // the region (nested guards -- their targets must stay within the
+    // outer fold's span) and resume the linear scan after the target.
+    void ScanGuardRange(BlockContainer* c, std::size_t from, std::size_t limit,
+                        const std::map<const Block*,
+                                       std::vector<const Branch*>>& incoming) {
+        for (std::size_t k = from; k < limit; ++k) {
+            Block* bK = c->Blocks[k].get();
+            if (bK == nullptr || bK->FinalInstruction == nullptr ||
+                bK->FinalInstruction->Op != OpCode::IfInstruction)
+                continue;
+            auto* iff = static_cast<IfInstruction*>(
+                bK->FinalInstruction.get());
+            // The minimal label-region fold owns its guards.
+            if (labelRegionFolds_.count(iff) != 0) continue;
+            if (iff->Condition == nullptr || iff->TrueInst == nullptr ||
+                iff->TrueInst->Op != OpCode::Branch)
+                continue;
+            if (iff->FalseInst != nullptr &&
+                iff->FalseInst->Op != OpCode::Nop)
+                continue;
+            auto* guardBr = static_cast<Branch*>(iff->TrueInst.get());
+            Block* bT = guardBr->TargetBlock;
+            if (bT == nullptr || bT->Parent != c) continue;
+            std::size_t t = 0;
+            bool found = false;
+            for (std::size_t j = k + 1; j < c->Blocks.size(); ++j)
+                if (c->Blocks[j].get() == bT) { t = j; found = true; break; }
+            if (!found || t <= k + 1 || t >= limit) continue;
+            // A TERMINAL target with a SINGLE predecessor is the
+            // early-exit form -- the return-propagation renders
+            // `if (cond) { return/throw; }`. A multi-pred terminal target
+            // (the shared epilogue) folds like any other.
+            if (bT->FinalInstruction != nullptr &&
+                (bT->FinalInstruction->Op == OpCode::Leave ||
+                 bT->FinalInstruction->Op == OpCode::Throw)) {
+                auto pit = incoming.find(bT);
+                if (pit == incoming.end() || pit->second.size() == 1)
+                    continue;
+            }
+            // Single-entry region: every branch into a region block comes
+            // from inside the region itself (the walk up to this
+            // container's block list stays within the range).
+            auto insideRegion = [&](const Branch* b) {
+                for (const ILInstruction* p = b->Parent; p != nullptr;
+                     p = p->Parent) {
+                    if (auto* blk = dynamic_cast<const Block*>(p)) {
+                        if (blk->Parent == c) {
+                            for (std::size_t j = k + 1; j < t; ++j)
+                                if (c->Blocks[j].get() == blk)
+                                    return true;
+                        }
+                    }
+                }
+                return false;
+            };
+            bool singleEntry = true;
+            for (std::size_t j = k + 1; j < t && singleEntry; ++j) {
+                auto it = incoming.find(c->Blocks[j].get());
+                if (it == incoming.end()) continue;
+                for (const Branch* b : it->second) {
+                    if (!insideRegion(b)) { singleEntry = false; break; }
+                }
+            }
+            if (!singleEntry) continue;
+            // No other fold may own the region blocks. The
+            // return-propagation's claims are exempt: an entry whose
+            // branch sits inside the region renders inside it (the
+            // single-entry gate already rejected the external-entry
+            // cases), and a nested guard fold re-claims its target. The
+            // guard-region ownership itself needs no check: the linear
+            // scan resumes after each target and the recursion is nested
+            // by construction.
+            bool overlap = false;
+            for (std::size_t j = k + 1; j < t && !overlap; ++j) {
+                Block* rj = c->Blocks[j].get();
+                if (rj == nullptr) continue;
+                if (labelRegionSuppressed_.count(rj) != 0 ||
+                    coalesceSuppressed_.count(rj) != 0)
+                    overlap = true;
+            }
+            if (overlap) continue;
+            // Claim.
+            GuardRegion g;
+            g.container = c;
+            g.first = k + 1;
+            g.last = t - 1;
+            // The return-propagation may have claimed the guard's branch
+            // (the single-pred target): the fold replaces the guard's
+            // render, so the propagation's entry dies and the target
+            // renders after the fold's if (un-suppress it).
+            returnPropagation_.erase(guardBr);
+            suppressedReturnBlocks_.erase(bT);
+            guardRegionFolds_[iff] = g;
+            for (std::size_t j = k + 1; j < t; ++j)
+                if (c->Blocks[j] != nullptr)
+                    guardRegionOwner_[c->Blocks[j].get()] = iff;
+            // Nested guards inside the region (their targets may extend
+            // to the outer target), then the linear scan resumes at t.
+            ScanGuardRange(c, k + 1, t + 1, incoming);
+            k = t - 1;
+        }
+    }
+
+    void AnalyzeGuardRegions() {
+        if (fn_ == nullptr || fn_->Body == nullptr) return;
+        // Every branch per target block (the single-entry gate).
+        std::map<const Block*, std::vector<const Branch*>> incoming;
+        std::function<void(const ILInstruction*)> collect =
+            [&](const ILInstruction* i) {
+            if (i == nullptr) return;
+            if (i->Op == OpCode::Branch) {
+                auto* b = static_cast<const Branch*>(i);
+                if (b->TargetBlock != nullptr)
+                    incoming[b->TargetBlock].push_back(b);
+            }
+            for (int ci = 0; ci < i->ChildCount(); ++ci)
+                collect(i->GetChild(ci));
+        };
+        collect(fn_->Body.get());
+        std::function<void(BlockContainer*)> scan = [&](BlockContainer* c) {
+            if (c == nullptr) return;
+            ScanGuardRange(c, 0, c->Blocks.size(), incoming);
+            std::function<void(const ILInstruction*)> descend =
+                [&](const ILInstruction* i) {
+                if (i == nullptr) return;
+                if (auto* nested = dynamic_cast<const BlockContainer*>(i))
+                    scan(const_cast<BlockContainer*>(nested));
+                for (int ci = 0; ci < i->ChildCount(); ++ci)
+                    descend(i->GetChild(ci));
+            };
+            for (const auto& bi : c->Blocks) {
+                if (!bi) continue;
+                for (const auto& si : bi->Instructions) descend(si.get());
+                if (bi->FinalInstruction)
+                    descend(bi->FinalInstruction.get());
+            }
+        };
+        scan(dynamic_cast<BlockContainer*>(fn_->Body.get()));
+        // The folded guards' branches no longer render as gotos: a target
+        // whose every incoming branch is a folded guard's true-arm, a
+        // fall-through drop, or a loop continue carries a dead label --
+        // drop it (the label collection ran before the fold analysis).
+        for (const auto& entry : guardRegionFolds_) {
+            const auto* gbr =
+                static_cast<const Branch*>(entry.first->TrueInst.get());
+            Block* target = gbr->TargetBlock;
+            auto it = incoming.find(target);
+            if (it == incoming.end()) {
+                labels_.erase(target);
+                continue;
+            }
+            bool anyLive = false;
+            for (const Branch* b : it->second) {
+                bool foldedArm = false;
+                for (const auto& f2 : guardRegionFolds_) {
+                    if (static_cast<const Branch*>(f2.first->TrueInst.get()) == b) {
+                        foldedArm = true;
+                        break;
+                    }
+                }
+                if (foldedArm) continue;
+                if (IsFallThroughGoto(b) || IsLoopEntryFallThrough(b))
+                    continue;
+                if (b->TargetBlock != nullptr &&
+                    loopHeaders_.count(b->TargetBlock) != 0)
+                    continue;  // renders as `continue;`
+                anyLive = true;
+                break;
+            }
+            if (!anyLive) labels_.erase(target);
+        }
     }
 
     // Every branch-target block gets an IL_XXXX label; walk the whole tree so
@@ -2799,6 +2998,16 @@ private:
         // the branch target -- their statements render inside the
         // folded if/else).
         if (labelRegionSuppressed_.count(&block)) return;
+        // The guard-region fold's region blocks: the linear render skips
+        // them (they render inside their fold's if); the OWNING fold's
+        // region render bypasses the skip (a nested fold's blocks render
+        // at the nested guard's site, not here).
+        {
+            auto owned = guardRegionOwner_.find(&block);
+            if (owned != guardRegionOwner_.end() &&
+                owned->second != activeGuardRegion_)
+                return;
+        }
         auto label = labels_.find(&block);
         if (label != labels_.end() && !emittedHeaderLabels_.count(&block)) {
             // C# labels start in column 0 by convention. A block whose label
@@ -2869,7 +3078,43 @@ private:
                 Block* r2 = fold->second.second;
                 EmitFoldedIf(*fold->first, r1, r2, indent);
             } else {
-                EmitStatement(*block.FinalInstruction, indent);
+                // The guard-region fold: the INVERTED if nesting the
+                // fall-through region, the target continuing after.
+                auto guardFold = guardRegionFolds_.find(
+                    block.FinalInstruction->Op == OpCode::IfInstruction
+                        ? static_cast<const IfInstruction*>(
+                              block.FinalInstruction.get())
+                        : nullptr);
+                if (guardFold != guardRegionFolds_.end() &&
+                    guardFold->first != nullptr) {
+                    const IfInstruction* giff = guardFold->first;
+                    const GuardRegion& g = guardFold->second;
+                    std::string condText =
+                        dynamic_cast<const Comp*>(
+                            giff->Condition.get()) != nullptr
+                            ? StripOuterParens(
+                                  NegateCondText(*giff->Condition))
+                            : "(" + Expr(*giff->Condition) + ") == 0";
+                    Line(indent, "if (" + condText + ")");
+                    Line(indent, "{");
+                    const IfInstruction* prev = activeGuardRegion_;
+                    activeGuardRegion_ = giff;
+                    for (std::size_t j = g.first; j <= g.last; ++j) {
+                        Block* rb = g.container->Blocks[j].get();
+                        if (rb == nullptr) continue;
+                        // Blocks a nested fold owns render at the nested
+                        // guard's site inside this loop.
+                        auto nested = guardRegionOwner_.find(rb);
+                        if (nested != guardRegionOwner_.end() &&
+                            nested->second != giff)
+                            continue;
+                        EmitBlock(*rb, indent + 1);
+                    }
+                    activeGuardRegion_ = prev;
+                    Line(indent, "}");
+                } else {
+                    EmitStatement(*block.FinalInstruction, indent);
+                }
             }
         }
     }

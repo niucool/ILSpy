@@ -165,7 +165,11 @@ TEST(ILAstToCSharp, ArithmeticAndComparisonExpressions) {
 
 TEST(ILAstToCSharp, ConditionalBranchEmitsIfGotoAndLabel) {
     // b0: if (1 == 1) goto b2;  b1: stloc (body);  b2: return.
-    // b2 is NOT the next block (b1 is), so the goto is non-redundant.
+    // b2 is NOT the next block (b1 is), so the branch is non-redundant --
+    // but the guard-region fold restructures it: the fall-through region
+    // nests under the INVERTED condition, the target continues after (the
+    // C# ConditionDetection/ReduceNestingTransform shape; the goto form
+    // survives only for the shapes the fold's gates reject).
     auto b0 = std::make_unique<Block>();
     b0->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
                                     std::make_unique<LdcI4>(0)));
@@ -192,9 +196,11 @@ TEST(ILAstToCSharp, ConditionalBranchEmitsIfGotoAndLabel) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "");
-    EXPECT_NE(text.find("	if (1 == 1) goto IL_0020;\n"), std::string::npos) << text;
-    EXPECT_NE(text.find("\nIL_0020:\n"), std::string::npos) << text;
-}
+    EXPECT_NE(text.find("if (1 != 1)\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	var V_1 = 1;\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("goto "), std::string::npos)
+        << "the guard-region fold removes the goto: " << text;
+    }
 
 TEST(ILAstToCSharp, VoidCallStatementAndStringEscapes) {
     auto call = std::make_unique<Call>("System.Console::WriteLine");
@@ -2521,4 +2527,101 @@ TEST(ILAstToCSharp, SwitchAllBodiesExitOrFallThroughNoConvergenceExit) {
     EXPECT_NE(text.find("num = 42"), std::string::npos) << text;
     // No break: no body branches to a shared exit.
     EXPECT_EQ(text.find("break;"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, GuardRegionFoldsMultiBlockFallThrough) {
+    // The guard-region fold (the C# ConditionDetection / MergeCommonBranches
+    // shape): `if (cond) br bT else nop` with the multi-block fall-through
+    // region between the guard and the target restructures to the INVERTED
+    // if nesting the region, the target continuing after -- the goto form
+    // disappears:
+    //   b0: if (num == 0) br b3 else nop
+    //   b1: a = 1;                 <- the region (multi-block)
+    //   b2: b = 2;
+    //   b3: c = 3;                 <- the target (non-terminal)
+    //   b4: return;
+    auto num = MakeVar(VariableKind::Parameter, "num", 0);
+    auto a = MakeVar(VariableKind::Local, "a", 1);
+    auto b = MakeVar(VariableKind::Local, "b", 2);
+    auto c = MakeVar(VariableKind::Local, "c", 3);
+
+    auto b0 = std::make_unique<Block>();
+    auto b1 = std::make_unique<Block>();
+    auto b2 = std::make_unique<Block>();
+    auto b3 = std::make_unique<Block>();
+    auto b4 = std::make_unique<Block>();
+    b1->Add(std::make_unique<StLoc>(a, std::make_unique<LdcI4>(1)));
+    b2->Add(std::make_unique<StLoc>(b, std::make_unique<LdcI4>(2)));
+    b3->Add(std::make_unique<StLoc>(c, std::make_unique<LdcI4>(3)));
+
+    auto fn = MakeFunction({});
+    Block* b3Ptr = b3.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(b3));
+    fn->Body->AddBlock(std::move(b4));
+
+    auto br = std::make_unique<Branch>(static_cast<std::uint32_t>(0x30));
+    br->TargetBlock = b3Ptr;
+    br->HasOffset = false;
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(num),
+                               std::make_unique<LdcI4>(0),
+                               ComparisonKind::Equality),
+        std::move(br), std::make_unique<Nop>()));
+    fn->Body->Blocks[4]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "int num");
+    // The region nests under the INVERTED condition; the target continues
+    // after the if (the oracle's structure, not the goto form).
+    EXPECT_NE(text.find("if (num != 0)\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	var a = 1;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	var b = 2;\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("goto "), std::string::npos) << "no goto survives: " << text;
+}
+
+TEST(ILAstToCSharp, GuardRegionFoldsTerminalFallThrough) {
+    // The terminal-region variant (the ReadArrayArgument shape): the
+    // fall-through region is a throw, the target is the normal path. The
+    // inverted form nests the throw in the if's arm -- the linear form
+    // would render the throw as UNCONDITIONALLY reached (a semantic bug).
+    //   b0: if (num >= 0) br b2 else nop
+    //   b1: throw ...               <- the region (terminal)
+    //   b2: a = 1;                  <- the target (non-terminal)
+    //   b3: return;
+    auto num = MakeVar(VariableKind::Parameter, "num", 0);
+    auto a = MakeVar(VariableKind::Local, "a", 1);
+
+    auto b0 = std::make_unique<Block>();
+    auto b1 = std::make_unique<Block>();
+    auto b2 = std::make_unique<Block>();
+    auto b3 = std::make_unique<Block>();
+    b1->Add(std::make_unique<Throw>(std::make_unique<LdStr>("boom")));
+    b2->Add(std::make_unique<StLoc>(a, std::make_unique<LdcI4>(1)));
+
+    auto fn = MakeFunction({});
+    Block* b2Ptr = b2.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(b3));
+
+    auto br = std::make_unique<Branch>(static_cast<std::uint32_t>(0x20));
+    br->TargetBlock = b2Ptr;
+    br->HasOffset = false;
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(num),
+                               std::make_unique<LdcI4>(0),
+                               ComparisonKind::GreaterThanOrEqual),
+        std::move(br), std::make_unique<Nop>()));
+    fn->Body->Blocks[3]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "int num");
+    EXPECT_NE(text.find("if (num < 0)\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	throw \"boom\";\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	var a = 1;\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("goto "), std::string::npos) << "no goto survives: " << text;
 }
