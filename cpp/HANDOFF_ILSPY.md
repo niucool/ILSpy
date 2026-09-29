@@ -4200,6 +4200,22 @@ them). THE A1 QUEUE otherwise: the four small items (the lambda
 parameter parens etc.) show no corpus evidence -- the corpus-driven
 families (like this one) come first per the discipline.
 
+## THE `?? throw` COALESSE -- 41 OF 43 (the int-zero gate landed)
+
+THE VARIANT RESOLVED: the "finally-region int-zero" sites were
+mostly NOT finally-shapes -- the CollectionDebugView-style ctors
+carry the SAME clean shape but with the NULL AS THE INT ZERO
+(comp(eq, ldloc list, ldc.i4(0)) -- the unnormalized reference
+comparison; the pipeline's null-literal normalization missed
+these). THE GATE: accept LdNull OR LdcI4(0) as the null gate.
+**41 of 43 sites** now fold (was 30); dnlib v2 80,249 -> **80,219**
+(the family's total: 80,369 -> 80,219, -150). THE GATES: net10/cui/
+the pin/the tests unchanged.
+
+THE REMAINING 2 SITES: unprobed (likely a genuinely different
+shape -- the leave-arm in a finally or a non-ArgumentNullException
+construction); the diff impact is ~10 lines.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
