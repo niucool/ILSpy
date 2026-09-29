@@ -728,8 +728,7 @@ bool TryPickBetterBlockExit(BlockContainer* container, std::size_t blockIndex) {
     // fall-through) so the move is semantics-preserving; InvertIf re-checks
     // this via CountBranchPredecessors and bails if multi-pred.
     if (CountBranchPredecessors(FunctionOf(block), nextBlock) != 0) return false;
-    ConditionDetection::InvertIf(block, iff);
-    return true;
+    return ConditionDetection::InvertIf(block, iff);
 }
 
 } // namespace
@@ -776,20 +775,20 @@ int ConditionDetection::GetStartILOffset(ILInstruction* inst, bool& isEmpty) {
 // the container. The next block must be single-predecessor (only this block's
 // fall-through) so moving its content into the if's TrueInst and the old then
 // into the next block is semantics-preserving.
-void ConditionDetection::InvertIf(Block* block, IfInstruction* ifInst) {
-    if (!block || !ifInst) return;
+bool ConditionDetection::InvertIf(Block* block, IfInstruction* ifInst) {
+    if (!block || !ifInst) return false;
     // `ifInst` must be the block's FinalInstruction (the C# `ifInst.Parent == block`).
-    if (block->FinalInstruction.get() != ifInst) return;
+    if (block->FinalInstruction.get() != ifInst) return false;
     // No else (the C# `IsEmpty(ifInst.FalseInst)` -- a null FalseInst is this
     // port's "no else", since the reader emits a void if with a null FalseInst
     // rather than a Nop FalseInst).
-    if (ifInst->FalseInst) return;
+    if (ifInst->FalseInst) return false;
     // The then must exit (the C# `ifInst.TrueInst.HasFlag(EndPointUnreachable)`).
-    if (!ifInst->TrueInst) return;
-    if (!HasFlag(ifInst->TrueInst->Flags(), InstructionFlags::EndPointUnreachable)) return;
+    if (!ifInst->TrueInst) return false;
+    if (!HasFlag(ifInst->TrueInst->Flags(), InstructionFlags::EndPointUnreachable)) return false;
 
     Block* nextBlock = NextBlockInContainer(block);
-    if (!nextBlock) return;  // no falseCode; degenerate
+    if (!nextBlock) return false;  // no falseCode; degenerate
 
     // The next block must be single-predecessor (only this block's fall-through)
     // so the move is semantics-preserving. The C# has the falseCode in the same
@@ -804,7 +803,23 @@ void ConditionDetection::InvertIf(Block* block, IfInstruction* ifInst) {
     // ReduceNestingTransform/HighLevelLoopTransform the count is fresh, and
     // `CountBranchPredecessors == 0` is equivalent to `IncomingEdgeCount == 1`
     // for a fall-through next block).
-    if (CountBranchPredecessors(FunctionOf(block), nextBlock) != 0) return;
+    if (CountBranchPredecessors(FunctionOf(block), nextBlock) != 0) return false;
+
+    // The false-path continuation must exit: the C#'s InvertIf reads the
+    // instructions following the if out of the SAME block, whose last
+    // instruction is guaranteed to have an unreachable end point (GetExit's
+    // assert -- a C# Block always ends in a terminator or an if whose both
+    // arms exit). This port's next block carries its own FinalInstruction,
+    // which may instead be a fall-through if (the reader ends a block at
+    // every conditional branch): moving such a final into the new TRUE arm
+    // re-routes its fall-through to the old-then position, orphaning the
+    // blocks that followed it (the truncated-body render the Equals family
+    // carried). Require the next block's final to have an unreachable end
+    // point before the move.
+    if (!nextBlock->FinalInstruction ||
+        !HasFlag(nextBlock->FinalInstruction->Flags(),
+                 InstructionFlags::EndPointUnreachable))
+        return false;
 
     // Save the old TrueInst (then). Detach it before the slot is reassigned.
     auto thenOwned = std::move(ifInst->TrueInst);
@@ -847,6 +862,7 @@ void ConditionDetection::InvertIf(Block* block, IfInstruction* ifInst) {
     // ImproveILOrdering/ReduceNesting folds handle the re-visit if needed).
     ifInst->Condition = NegateCondition(std::move(ifInst->Condition));
     if (ifInst->Condition) { ifInst->Condition->Parent = ifInst; ifInst->Condition->ChildIndex = 0; }
+    return true;
 }
 
 void ConditionDetection::Run(ILFunction& function, ILTransformContext& context) {

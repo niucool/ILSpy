@@ -26,6 +26,7 @@
 #include "Decompiler/IL/ControlFlow/ControlFlowSimplification.hpp"
 #include "Decompiler/IL/ControlFlow/LoopDetection.hpp"
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
+#include "Decompiler/IL/Transforms/GetILTransforms.hpp"
 #include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
@@ -36,6 +37,7 @@
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
@@ -1205,4 +1207,68 @@ TEST(ConditionDetection, CombinesGuardChainWithoutDroppingBody) {
     });
     EXPECT_GE(combined, 1)
         << "the guard chain must combine into one condition tree";
+}
+
+TEST(ConditionDetection, GuardChainFallThroughReturnSurvives) {
+    // The SigCreator::IsNonObfuscatedAssembly shape (de4dot.code.dll): two
+    // guards `if (!X) br RET_TRUE` whose fall-through chain ends at
+    // RET_FALSE, both branching to the shared RET_TRUE:
+    //   b0: if (asm) br b2       b1: leave 0 (the null check's fall-through)
+    //   b2: if (!A) br b5        b3: if (!B) br b5
+    //   b4: leave 0              b5: leave 1 (IL_002B)
+    // The guards may combine into one condition, but the fall-through
+    // return-false must stay reachable: dropping it makes the method return
+    // true for every non-null input.
+    auto asmVar = std::make_shared<ILVariable>(VariableKind::Parameter, nullptr, 0);
+    asmVar->Name = "asm";
+    auto fn = WrapBlocks({});
+    for (int i = 0; i < 6; ++i) fn->Body->AddBlock(std::make_unique<Block>());
+    const std::uint32_t offs[6] = { 0x00, 0x03, 0x05, 0x1A, 0x29, 0x2B };
+    for (int i = 0; i < 6; ++i) fn->Body->Blocks[i]->StartILOffset = offs[i];
+    Block* b0 = fn->Body->Blocks[0].get();
+    Block* b1 = fn->Body->Blocks[1].get();
+    Block* b2 = fn->Body->Blocks[2].get();
+    Block* b3 = fn->Body->Blocks[3].get();
+    Block* b4 = fn->Body->Blocks[4].get();
+    Block* b5 = fn->Body->Blocks[5].get();
+    b0->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(asmVar), std::make_unique<Branch>(b2)));
+    auto ldNullRet = std::make_unique<LdcI4>(0);
+    ldNullRet->StartILOffset = 3; ldNullRet->EndILOffset = 4;
+    b1->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::move(ldNullRet)));
+    auto guard = [&](const char* s) {
+        auto name = std::make_unique<Call>("dnlib.DotNet.IFullName::get_Name");
+        name->ReturnType = StackType::O;
+        name->AddArg(std::make_unique<LdLoc>(asmVar));
+        auto call = std::make_unique<Call>("dnlib.DotNet.UTF8String::op_Inequality");
+        call->ReturnType = StackType::I4;
+        call->AddArg(std::move(name));
+        call->AddArg(std::make_unique<LdStr>(s));
+        return std::make_unique<Comp>(std::move(call), std::make_unique<LdcI4>(0),
+                                       ComparisonKind::Equality);
+    };
+    b2->SetFinal(std::make_unique<IfInstruction>(guard("mscorlib"), std::make_unique<Branch>(b5)));
+    b3->SetFinal(std::make_unique<IfInstruction>(guard("System"), std::make_unique<Branch>(b5)));
+    auto ldFalse = std::make_unique<LdcI4>(0);
+    ldFalse->StartILOffset = 0x29; ldFalse->EndILOffset = 0x2A;
+    b4->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::move(ldFalse)));
+    auto ldTrue = std::make_unique<LdcI4>(1);
+    ldTrue->StartILOffset = 0x2C; ldTrue->EndILOffset = 0x2D;
+    b5->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::move(ldTrue)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ILTransformContext ctx;
+    RunGetILTransforms(*fn, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    int leaveFalse = 0;
+    Walk(fn->Body.get(), [&](ILInstruction* i) {
+        auto* leave = dynamic_cast<Leave*>(i);
+        if (!leave) return;
+        auto* ldc = dynamic_cast<LdcI4*>(leave->Value.get());
+        if (ldc && ldc->Value == 0) ++leaveFalse;
+    });
+    EXPECT_GE(leaveFalse, 2)
+        << "the guards' fall-through return-false must survive the pipeline:\n"
+        << fn->ToString();
 }
