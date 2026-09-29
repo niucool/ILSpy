@@ -5279,3 +5279,69 @@ negations over non-tree leaves), the switch-render polish above, the
 switch-inline section-order relaxation, the 303 not-found/adjacent goto
 split, the 97 span-escapes, the `?.` shapes, the `.override` forwarders,
 the net10 foreach-collapse gap (the Find method's enumerator pattern).
+
+---
+
+## Session record: the switch-render polish (bc91874f1..0bc64fc9e)
+
+Corpus across the session: dnlib 72663 -> **71548** (-1115), net10 88136
+-> **87917** (-219), gotos 929 -> 880, cui 1332 -> 1331. The pin is
+re-recorded as b38babc5465c9861 (the default-last repositioning moved the
+connid fixture's default section; the `default: goto IL_0018` shape itself
+is the inline-plan follow-up below). The suite control 268, hello and the
+bennu canary hold throughout.
+
+### bc91874f1 "Map enum types to their underlying stack type"
+
+An enum's evaluation-stack type is its underlying primitive. The port's
+signature model keeps a non-known in-module type as a name-only
+SimpleType whose Kind() is derived but whose underlying is not carried,
+so StackTypeOf answered O for every enum and the switch formation
+wrapped every enum switch value (`switch ((long)(machine))`). StackTypeOf
+now answers the underlying (from a resolved definition when it carries
+one, else I4 -- the widening accepts any of I4/I8, matching the C#'s
+underlying read for every enum underlying). RED:
+ILAst.StackTypeOfEnumIsItsUnderlyingType. Corpus: dnlib -107, net10 -39.
+
+### 32278a660 "Render enum switch case labels as the member names"
+
+The C# CreateTypedCaseLabel's enum lookup. The enum now rides an
+EnumMembersType (a SimpleType subclass) whose member map the signature
+decoder collects from the TypeDef's static literal fields (the flags
+Static 0x10 | Literal 0x40 -- NOT 0x60, which is InitOnly|Literal and
+skipped every member; found by tracing the per-field flags). A malformed
+row degrades to the member-less form. The case-label emission resolves
+the value through the switch value's variable's type:
+`case Machine.I386:`. RED:
+ILAstToCSharp.SwitchCaseLabelsUseEnumMemberNames. Corpus: dnlib -274,
+net10 -14 -- TryGetCpuArch renders the oracle's exact case groups.
+
+### 0bc64fc9e "Sort the switch default section last"
+
+The C#'s default orders last because its body branches to the one
+shared post-switch block (the highest offset); this port's per-site
+materializations carry small offsets and sorted the default first. The
+offset sort keys the huge-complement section (> MaxValuesPerSection
+labels, the analysis' default) to the maximum. RED:
+SwitchDetection.SortsMergedDefaultSectionLast. Corpus: dnlib -734, net10
+-166, gotos -47, cui -1 -- the largest slice of the polish queue.
+
+### The remaining polish
+
+- The pin's Connect method still renders `default: goto IL_0018;` where
+  the inline plan used to emit the fall-through `break` -- the
+  switch-inline plan's default handling interacts with the
+  complement-labeled def section (the plan's defaultFallsToExit check
+  reads the body's branch target; the complement section's body is the
+  per-site branch).
+- The switch value for a SIMPLE-typed enum still resolves I4 via the
+  pragmatic default; a resolved MetadataTypeDefinition would carry the
+  real underlying (the type-system resolution plumbing remains).
+
+### The standing queue
+
+The while-guard de Morgan residue (the 185 `if (!(` sites are negations
+over non-tree leaves), the switch-inline section-order relaxation, the
+303 not-found/adjacent goto split, the 97 span-escapes, the `?.` shapes,
+the `.override` forwarders, the net10 foreach-collapse gap (the Find
+method's enumerator pattern).
