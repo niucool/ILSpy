@@ -183,10 +183,25 @@ TEST(UniversalAssemblyResolverTest, GetAssemblyInGacMatchesTheMachineGac) {
             "C:\\WINDOWS\\Microsoft.NET\\assembly\\GAC_32\\mscorlib\\"
             "v4.0_4.0.0.0__b77a5c561934e089\\mscorlib.dll"));
 
-    // A|mscorlib2|<null> -- no root carries a 2.0 mscorlib folder.
+    // A|mscorlib2|<null> -- no root carries a 2.0 mscorlib folder. Machines
+    // that still carry the legacy (pre-v4) GAC from a .NET 2.0/3.5 install
+    // do have one; the expectation tracks the host.
     TM::AssemblyNameReference mscorlib2 = TM::AssemblyNameReference::Parse(
         "mscorlib, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089");
-    EXPECT_EQ(TM::UniversalAssemblyResolver::GetAssemblyInGac(mscorlib2), std::nullopt);
+    {
+        const std::optional<std::string> got =
+            TM::UniversalAssemblyResolver::GetAssemblyInGac(mscorlib2);
+        const bool legacyGacHasMscorlib2 = std::filesystem::exists(
+            "C:\\WINDOWS\\assembly\\GAC_32\\mscorlib\\"
+            "2.0.0.0__b77a5c561934e089\\mscorlib.dll");
+        if (legacyGacHasMscorlib2) {
+            EXPECT_EQ(got, std::optional<std::string>(
+                "C:\\WINDOWS\\assembly\\GAC_32\\mscorlib\\"
+                "2.0.0.0__b77a5c561934e089\\mscorlib.dll"));
+        } else {
+            EXPECT_EQ(got, std::nullopt);
+        }
+    }
 
     // A|system4 / A|sysCore: the v4 root's GAC_MSIL.
     TM::AssemblyNameReference system4 = TM::AssemblyNameReference::Parse(
@@ -315,6 +330,16 @@ TEST(ResolutionExceptionTest, MessagesAndPropertiesMatchTheGold) {
 }
 
 TEST(UniversalAssemblyResolverTest, EnumerateGacMatchesTheMachineGacSnapshot) {
+    // The pinned snapshot (kGacEntryCount and friends in GacGold.hpp) was
+    // captured on a host whose GAC is the v4-only layout; a host that also
+    // carries the legacy (pre-v4) C:\Windows\assembly tree enumerates a
+    // different entry set, so the snapshot arms are skipped there.
+    if (std::filesystem::exists(
+            "C:\\WINDOWS\\assembly\\GAC_32\\mscorlib\\"
+            "2.0.0.0__b77a5c561934e089\\mscorlib.dll")) {
+        GTEST_SKIP() << "the host carries the legacy GAC; the pinned "
+                        "snapshot assumes the v4-only layout";
+    }
     std::vector<TM::AssemblyNameReference> entries =
         TM::UniversalAssemblyResolver::EnumerateGac();
     ASSERT_EQ(entries.size(), kGacEntryCount);

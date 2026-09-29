@@ -58,6 +58,8 @@
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 
 #include <gtest/gtest.h>
+#include <cstdio>
+#include <limits>
 
 #include <cstdint>
 #include <filesystem>
@@ -800,7 +802,40 @@ TEST(ILAstToCSharp, RethrowEmitsBareThrow) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "");
-    EXPECT_NE(text.find("	throw;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("\tthrow;\n"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, NonFiniteDoubleLiteralsRenderAsTheSpecialForms) {
+    // The C# TextWriterTokenWriter.WritePrimitiveValue renders a non-finite
+    // double as `double.NaN` / `double.PositiveInfinity` /
+    // `double.NegativeInfinity` (any NaN sign normalized). The port's
+    // fraction path must not see a NaN: its continued-fraction loop's
+    // magnitude guards are comparisons, which a NaN passes, and the
+    // (long)NaN conversion is undefined -- the mscorlib Double.TryParse
+    // NaN store hung the render before the guard landed.
+    const double kNaN = std::numeric_limits<double>::quiet_NaN();
+    const double kNegNaN = -kNaN;  // the sign bit set (the -nan(ind) form)
+    const double kPosInf = std::numeric_limits<double>::infinity();
+    const double kNegInf = -kPosInf;
+
+    auto render = [](double value) {
+        auto block = std::make_unique<Block>();
+        auto fn = MakeFunction({});
+        fn->Body->AddBlock(std::move(block));
+        fn->Body->Blocks[0]->SetFinal(
+            std::make_unique<Leave>(fn->Body.get(),
+                std::make_unique<LdcF8>(value)));
+        fn->CheckInvariant(ILPhase::Normal);
+        return ILAstToCSharp(*fn, "double", "M", "");
+    };
+    EXPECT_NE(render(kNaN).find("return double.NaN;"), std::string::npos);
+    EXPECT_NE(render(kNegNaN).find("return double.NaN;"), std::string::npos);
+    EXPECT_NE(render(kPosInf).find("return double.PositiveInfinity;"),
+              std::string::npos);
+    EXPECT_NE(render(kNegInf).find("return double.NegativeInfinity;"),
+              std::string::npos);
+    // A finite literal keeps the numeric form (no special-casing creep).
+    EXPECT_NE(render(3.14).find("return 3"), std::string::npos);
 }
 
 TEST(ILAstToCSharp, EmptyBodyEmitsEmptyMethod) {
@@ -854,7 +889,11 @@ TEST(ILAstToCSharp, TranslatesEveryDecodableMscorlibMethodWithoutCrashing) {
         if (t.Name == "<Module>") continue;
         for (const auto& m : f.GetMethods(t.Token)) {
             if (m.RVA == 0) continue;
+            if (const char* trace = std::getenv("ILSPY_SWEEP_TRACE"))
+                std::fprintf(stderr, "%s.%s\n", t.Name.c_str(), m.Name.c_str());
             auto fn = ReadIL(f, m.Token, m.RVA);
+            if (const char* trace = std::getenv("ILSPY_SWEEP_TRACE"))
+                if (fn) std::fprintf(stderr, "  +read\n");
             if (!fn) continue;
             std::string text = ILAstToCSharp(*fn, "void", m.Name, "");
             EXPECT_FALSE(text.empty());

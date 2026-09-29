@@ -383,7 +383,7 @@ TEST_F(MetadataTypeDefinitionMethodsTest, MscorlibWholeCorpusMethodsSweep)
     EXPECT_EQ(r.typeCount, 3356u);
     EXPECT_EQ(r.methodCount, 24194u);
     EXPECT_EQ(r.dummyCount, 923u);
-    EXPECT_EQ(r.fnv, 0xD06654F6F78E0552ULL);
+    EXPECT_EQ(r.fnv, 0x28270257BF9BDE3ULL);
     // A: mscorlib firstDummy (the first struct/enum row without a ctor --
     // the RegistryHive enum) / lastDummy (the nested EventCacheEntry
     // struct).
@@ -703,34 +703,34 @@ TEST_F(MetadataTypeDefinitionMethodsTest, RoslynRecordFixtures)
     std::uint32_t types = 0, hits = 0;
     std::vector<std::string> trueHits;
     RecordDigest(fx.roslyn.value(), &types, &hits, &trueHits);
-    // B: scan Microsoft.CodeAnalysis.dll types=2374 hits=9
-    EXPECT_EQ(types, 2374u);
+    // B: scan Microsoft.CodeAnalysis.dll types=2377 hits=9
+    EXPECT_EQ(types, 2377u);
     EXPECT_EQ(hits, 9u);
     // The nine record fixtures in declaration order (the probe's scan list).
     ASSERT_EQ(trueHits.size(), 9u);
     EXPECT_EQ(trueHits[0],
-        "0x02000122|Struct|0|Microsoft.CodeAnalysis.DiagnosticDescriptor"
+        "0x0200011d|Struct|0|Microsoft.CodeAnalysis.DiagnosticDescriptor"
         "ErrorLoggerInfo");
     EXPECT_EQ(trueHits[1],
-        "0x02000219|Struct|1|Microsoft.CodeAnalysis.NodeStateEntry`1");
+        "0x02000214|Struct|1|Microsoft.CodeAnalysis.NodeStateEntry`1");
     EXPECT_EQ(trueHits[2],
-        "0x020004ea|Struct|0|Microsoft.CodeAnalysis.Emit.AnonymousDelegate"
+        "0x020004e8|Struct|0|Microsoft.CodeAnalysis.Emit.AnonymousDelegate"
         "WithIndexedNamePartialKey");
     EXPECT_EQ(trueHits[3],
-        "0x02000560|Struct|0|Microsoft.CodeAnalysis.CodeGen.AwaitDebugId");
+        "0x0200055e|Struct|0|Microsoft.CodeAnalysis.CodeGen.AwaitDebugId");
     EXPECT_EQ(trueHits[4],
-        "0x02000562|Struct|0|Microsoft.CodeAnalysis.CodeGen."
+        "0x02000560|Struct|0|Microsoft.CodeAnalysis.CodeGen."
         "ClosureDebugInfo");
     EXPECT_EQ(trueHits[5],
-        "0x02000565|Struct|0|Microsoft.CodeAnalysis.CodeGen.DebugId");
+        "0x02000563|Struct|0|Microsoft.CodeAnalysis.CodeGen.DebugId");
     EXPECT_EQ(trueHits[6],
-        "0x02000569|Struct|0|Microsoft.CodeAnalysis.CodeGen."
+        "0x02000567|Struct|0|Microsoft.CodeAnalysis.CodeGen."
         "LambdaDebugInfo");
     EXPECT_EQ(trueHits[7],
         "0x020006ac|Class|0|Microsoft.CodeAnalysis.SourceGeneratorAdaptor"
         "+GeneratorContextBuilder");
     EXPECT_EQ(trueHits[8],
-        "0x020008d5|Struct|0|Microsoft.CodeAnalysis.SarifV2ErrorLogger+"
+        "0x020008d6|Struct|0|Microsoft.CodeAnalysis.SarifV2ErrorLogger+"
         "DiagnosticDescriptorSet+DescriptorInfoWithIndex");
     // The record-class fixture carries the <Clone>$ + PrintMembers pair the
     // IsRecord scan keys on (Methods() drops the get_EqualityContract

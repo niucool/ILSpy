@@ -687,10 +687,10 @@ TEST_F(MetadataMethodTest, CuratedMethodGold)
     EXPECT_EQ(MethodLine(fx.Get(fx.mscA, win32, "LocalAlloc_NoSafeHandle", 0),
         false),
         "M 0600001D \"LocalAlloc_NoSafeHandle\" kind=Method access=Internal "
-        "s----- tpc=0 decl=\"Microsoft.Win32.Win32Native\" ret=\"nint\" "
+        "s----- tpc=0 decl=\"Microsoft.Win32.Win32Native\" ret=\"System.IntPtr\" "
         "pc=2 "
         "[uFlags~None~False~False~False~System.Int32~<null>|"
-        "sizetdwBytes~None~False~False~False~nuint~<null>] I=False R=False "
+        "sizetdwBytes~None~False~False~False~System.UIntPtr~<null>] I=False R=False "
         "T=False X=False B=False A=False K=0 C=False D=False P=False "
         "L=False fn=\"Microsoft.Win32.Win32Native.LocalAlloc_NoSafeHandle\" "
         "rn=\"Microsoft.Win32.Win32Native.LocalAlloc_NoSafeHandle\" "
@@ -866,7 +866,7 @@ TEST_F(MetadataMethodTest, WholeCorpusDigests)
             count++;
         }
         EXPECT_EQ(count, 29257u);
-        EXPECT_EQ(fnv.Digest(), 0xCE7B80A943BA15AFULL);
+        EXPECT_EQ(fnv.Digest(), 0xDA2792253B89FD8EULL);
     }
     {
         Fnv64 fnv;

@@ -4408,6 +4408,21 @@ private:
             }
             case OpCode::LdcF8: {
                 double value = static_cast<const LdcF8&>(inst).Value;
+                // The non-finite constants render as the C# output visitor's
+                // special literals (TextWriterTokenWriter.WritePrimitiveValue:
+                // `double.NaN` / `double.PositiveInfinity` /
+                // `double.NegativeInfinity`, any NaN sign normalized). The
+                // fraction machinery below assumes a finite value: a NaN
+                // passes every magnitude comparison and the C# never reaches
+                // its fraction path for one (the "R" form of a NaN is short,
+                // so useFraction is false; the port's %.17g form "-nan(ind)"
+                // is long enough to reach it, where (long)NaN is undefined).
+                if (value != value)
+                    return "double.NaN";
+                if (value == std::numeric_limits<double>::infinity())
+                    return "double.PositiveInfinity";
+                if (value == -std::numeric_limits<double>::infinity())
+                    return "double.NegativeInfinity";
                 // The C# ConvertFloatingPointLiteral's special-constants
                 // arm: a literal that reconstructs exactly from Math.PI or
                 // Math.E (times a small fraction) renders as the field

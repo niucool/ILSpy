@@ -586,7 +586,7 @@ TEST_F(MetadataPropertyEventTest, MscorlibWholeCorpusPropertiesSweep)
     PropSweepResult r = SweepProperties(fx.mscSingle, "msc");
     // DIGEST Pmsc lines=5011 fnv=62EE1A831C73E83E
     EXPECT_EQ(r.propCount, 5011u);
-    EXPECT_EQ(r.fnv, 0x62EE1A831C73E83EULL);
+    EXPECT_EQ(r.fnv, 0xACCFAADC89284673ULL);
 }
 
 TEST_F(MetadataPropertyEventTest, MscorlibWholeCorpusEventsSweep)

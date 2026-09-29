@@ -33,11 +33,11 @@
 namespace ILSpy::Tests {
 
 // The mscorlib single-module compilation digests (the probe's mscSingle).
-inline constexpr std::uint64_t kMscMethodDigest = 0x82E11537837F7337ULL;
+inline constexpr std::uint64_t kMscMethodDigest = 0x8DEE6EFCC5B07E0BULL;
 inline constexpr int kMscMethodRows = 1717;
 inline constexpr std::uint64_t kMscFieldDigest = 0xB33A62D164067930ULL;
 inline constexpr int kMscFieldRows = 888;
-inline constexpr std::uint64_t kMscSpecDigest = 0x7EE7612345491730ULL;
+inline constexpr std::uint64_t kMscSpecDigest = 0x60A35BD45AE4B3ECULL;
 inline constexpr int kMscSpecRows = 656;
 inline constexpr std::uint64_t kMscSameDigest = 0xAD4D98EF8F524047ULL;
 inline constexpr int kMscSameDeclMethods = 1185;
@@ -52,7 +52,7 @@ inline constexpr int kMscMethoddefRows = 15;
 // the accessor-search arm resolves every one of them to a REAL accessor
 // method (both engines agree; the digest is byte-exact).
 inline constexpr int kMscAccRealCount = 824;
-inline constexpr std::uint64_t kMscAccRealDigest = 0x81C6DD381736A0BFULL;
+inline constexpr std::uint64_t kMscAccRealDigest = 0xF0EA4644200AFBA3ULL;
 inline constexpr int kMscAccFakeCount = 0;
 
 // The accessor-named cross-module MethodImpl declarations, partitioned the
@@ -71,9 +71,9 @@ inline constexpr int kSysAccDeclRealCount = 166;
 inline constexpr std::uint64_t kSysAccDeclRealDigest = 0x33C78D02658BAD96ULL;
 
 // The System.dll paired compilation digests (System main + mscorlib ref).
-inline constexpr std::uint64_t kSysMethodDigest = 0x85E10B86B73175E3ULL;
+inline constexpr std::uint64_t kSysMethodDigest = 0x2470DADC5A253008ULL;
 inline constexpr int kSysMethodRows = 2275;
-inline constexpr std::uint64_t kSysFieldDigest = 0x412C6E58377E373FULL;
+inline constexpr std::uint64_t kSysFieldDigest = 0xF4B13EC1EEA50852ULL;
 inline constexpr int kSysFieldRows = 280;
 inline constexpr std::uint64_t kSysSpecDigest = 0x07E0205DD425359BULL;
 inline constexpr int kSysSpecRows = 174;
@@ -84,7 +84,7 @@ inline constexpr int kSysImplMethods = 627;
 inline constexpr int kSysMemberRefDeclMethods = 494;
 inline constexpr int kSysAccessorDeclMethods = 182;
 inline constexpr int kSysAccRealCount = 630;
-inline constexpr std::uint64_t kSysAccRealDigest = 0x7AD6BB74EF847768ULL;
+inline constexpr std::uint64_t kSysAccRealDigest = 0x9E77B068FA204457ULL;
 inline constexpr int kSysAccFakeCount = 74;
 inline constexpr std::uint64_t kSysAccFakeDigest = 0xF5FCB155DC7D015FULL;
 

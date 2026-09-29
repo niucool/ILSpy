@@ -81,7 +81,12 @@ endif()
 # Plan decision D6: no -Werror until Phase 11 (no C++ analogue of the C#
 # `nullable` WarningsAsErrors). Keep warnings informative, not fatal.
 if(MSVC)
-    target_compile_options(ilspy PRIVATE /W3 /utf-8)
+    # /utf-8 is PUBLIC: the sources are UTF-8 (decision D2) and every
+    # consumer (the tests carry UTF-8 fixture raw strings) must compile
+    # them as UTF-8 too -- MSVC's default source charset is the system
+    # codepage, which mangles multi-byte literals into '?' bytes.
+    target_compile_options(ilspy PUBLIC /utf-8)
+    target_compile_options(ilspy PRIVATE /W3)
 else()
     target_compile_options(ilspy PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endif()

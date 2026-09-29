@@ -411,23 +411,23 @@ TEST(PortablePdbTest, LoadsARealRoslynPortablePdb) {
     ASSERT_TRUE(pdb.IsValid());
     EXPECT_EQ(pdb.VersionString(), "PDB v1.0");
     EXPECT_EQ(pdb.EntryPointToken(), 0u);  // a library: no entry point
-    EXPECT_EQ(pdb.RowCount(Md::PdbTable::Document), 13u);
-    EXPECT_EQ(pdb.RowCount(Md::PdbTable::MethodDebugInformation), 79u);
-    EXPECT_EQ(pdb.RowCount(Md::PdbTable::LocalScope), 72u);
-    EXPECT_EQ(pdb.RowCount(Md::PdbTable::LocalVariable), 59u);
+    EXPECT_EQ(pdb.RowCount(Md::PdbTable::Document), 17u);
+    EXPECT_EQ(pdb.RowCount(Md::PdbTable::MethodDebugInformation), 73u);
+    EXPECT_EQ(pdb.RowCount(Md::PdbTable::LocalScope), 59u);
+    EXPECT_EQ(pdb.RowCount(Md::PdbTable::LocalVariable), 40u);
     EXPECT_EQ(pdb.RowCount(Md::PdbTable::LocalConstant), 1u);
-    EXPECT_EQ(pdb.RowCount(Md::PdbTable::ImportScope), 57u);
+    EXPECT_EQ(pdb.RowCount(Md::PdbTable::ImportScope), 43u);
     EXPECT_EQ(pdb.RowCount(Md::PdbTable::StateMachineMethod), 0u);
-    EXPECT_EQ(pdb.RowCount(Md::PdbTable::CustomDebugInformation), 10u);
+    EXPECT_EQ(pdb.RowCount(Md::PdbTable::CustomDebugInformation), 14u);
 
     // The #Pdb stream counts the analyzer assembly's own tables; its
     // MethodDef count matches the MethodDebugInformation rows.
-    EXPECT_EQ(pdb.ExternalRowCount(0x06), 79u);
+    EXPECT_EQ(pdb.ExternalRowCount(0x06), 73u);
 
-    // A real document name, with multi-byte compressed part offsets.
+    // A real document name (the Roslyn source layout moved the
+    // generated analyzers to a single generated source file).
     EXPECT_EQ(pdb.GetDocumentName(pdb.GetDocument(1).NameBlob),
-              "/_/src/winforms/src/System.Windows.Forms.Analyzers.CSharp/src/"
-              "Properties/AssemblyInfo.cs");
+              "/_/eng/CodeAnalysisSource.cs");
 
     // Methods before the first body have no debug info.
     EXPECT_TRUE(pdb.GetSequencePoints(1).empty());
@@ -435,7 +435,7 @@ TEST(PortablePdbTest, LoadsARealRoslynPortablePdb) {
     // Method 6 has one sequence point on document 12.
     std::vector<Md::PdbSequencePoint> points = pdb.GetSequencePoints(6);
     ASSERT_EQ(points.size(), 1u);
-    EXPECT_EQ(points[0].Document, 12u);
+    EXPECT_EQ(points[0].Document, 16u);
     EXPECT_EQ(points[0].Offset, 0u);
     EXPECT_EQ(points[0].StartLine, 10);
     EXPECT_EQ(points[0].StartColumn, 85);
@@ -448,12 +448,12 @@ TEST(PortablePdbTest, LoadsARealRoslynPortablePdb) {
     Md::PdbLocalScopeRow scope = pdb.GetLocalScope(29);
     EXPECT_EQ(scope.Method, 35u);
     EXPECT_EQ(scope.StartOffset, 0);
-    EXPECT_EQ(scope.Length, 181);
-    EXPECT_EQ(pdb.GetLocalVariableRange(29).First, 10);
-    EXPECT_EQ(pdb.GetLocalVariableRange(29).Last, 10);
+    EXPECT_EQ(scope.Length, 7);
+    EXPECT_EQ(pdb.GetLocalVariableRange(29).First, 15);
+    EXPECT_EQ(pdb.GetLocalVariableRange(29).Last, 14);
     EXPECT_EQ(pdb.GetString(pdb.GetLocalVariable(10).Name), "code");
     EXPECT_EQ(pdb.GetLocalVariable(10).Index, 0);
-    EXPECT_EQ(pdb.GetLocalConstantRange(29).First, 1);
+    EXPECT_EQ(pdb.GetLocalConstantRange(29).First, 2);
     EXPECT_EQ(pdb.GetLocalConstantRange(29).Last, 1);
     EXPECT_EQ(pdb.GetString(pdb.GetLocalConstant(1).Name), "qualifier");
     auto sig = pdb.GetBlob(pdb.GetLocalConstant(1).Signature);

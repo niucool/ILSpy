@@ -300,25 +300,26 @@ TEST(PortableDebugInfoProviderTest, LoadsARealRoslynPortablePdb) {
     EXPECT_EQ(points[0].EndLine, 10);
     EXPECT_EQ(points[0].EndColumn, 184);
     EXPECT_EQ(points[0].DocumentUrl,
-              "/_/src/winforms/artifacts/obj/System.Windows.Forms.Analyzers.CSharp/"
-              "Release/netstandard2.0/System.Windows.Forms.Analyzers.CSharp.Resources.SR.cs");
+              "/_/artifacts/obj/System.Windows.Forms.Analyzers.CSharp/"
+              "Release/netstandard2.0/System.SR.cs");
 
-    // Method 35's outer scope holds the "code" local.
-    std::vector<DI::Variable> variables = provider.GetVariables(0x06000023);
+    // Method 19's outer scope holds the "code" local (the probe's
+    // locals census for the current fixture: M19:[0]code).
+    std::vector<DI::Variable> variables = provider.GetVariables(0x06000013);
     ASSERT_EQ(JoinVariables(variables), "{index=0,name='code'}");
     std::string name;
-    ASSERT_TRUE(provider.TryGetName(0x06000023, 0, name));
+    ASSERT_TRUE(provider.TryGetName(0x06000013, 0, name));
     EXPECT_EQ(name, "code");
 
     // The analyzer PDB carries no tuple/dynamic rows: every local reports
     // no extra type info.
     DI::PdbExtraTypeInfo extra;
-    EXPECT_FALSE(provider.TryGetExtraTypeInfo(0x06000023, 0, extra));
+    EXPECT_FALSE(provider.TryGetExtraTypeInfo(0x06000013, 0, extra));
 
     // A full no-throw sweep over every method: the provider's sequence
     // points agree with the raw reader's decode, and every variable the
     // provider reports is found by a name lookup.
-    for (std::uint32_t methodRow = 1; methodRow <= 79; ++methodRow) {
+    for (std::uint32_t methodRow = 1; methodRow <= 73; ++methodRow) {
         std::uint32_t token = 0x06000000u | methodRow;
         std::vector<DI::SequencePoint> got = provider.GetSequencePoints(token);
         std::vector<ILSpy::Decompiler::Metadata::PdbSequencePoint> raw =

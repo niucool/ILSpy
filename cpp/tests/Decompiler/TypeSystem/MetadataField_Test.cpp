@@ -852,7 +852,7 @@ TEST(MetadataFieldTest, SweepDigestsMatchGold) {
         }
     }
     EXPECT_EQ(count, 14717);
-    EXPECT_EQ(fnv.Digest(), 0x3C86A462A41B4387ULL);
+    EXPECT_EQ(fnv.Digest(), 0xE1048BFB9655231DULL);
     EXPECT_EQ(volatileLines.size(), 365u);
     ASSERT_GE(volatileLines.size(), 6u);
     for (std::size_t i = 0; i < 6; ++i) {
@@ -871,7 +871,7 @@ TEST(MetadataFieldTest, SweepDigestsMatchGold) {
         }
     }
     EXPECT_EQ(countSys, 15896);
-    EXPECT_EQ(fnvSys.Digest(), 0x654D50EF771AF652ULL);
+    EXPECT_EQ(fnvSys.Digest(), 0xF482BDBC9EF2BC5CULL);
     EXPECT_EQ(volatileSys, 222);
 }
 

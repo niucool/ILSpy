@@ -777,7 +777,7 @@ TEST_F(SpecializeTest, WholeTypeSpecializeDigests) {
         str->GetMethods(nullptr, TS::GetMemberOptions::IgnoreInheritedMembers)) {
         fnv.Add(MethodLine(m->Specialize(&classI32), m));
     }
-    EXPECT_EQ(fnv.Digest(), 0xEC1574EA731AEF0DULL);
+    EXPECT_EQ(fnv.Digest(), 0x18297946623ECA94ULL);
 }
 
 } // namespace

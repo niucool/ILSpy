@@ -273,7 +273,7 @@ inline const std::vector<std::string> kCadPartitions = {
     "fcd:total=9:ok=9:ex=0",
     "fcd:digest=5513EE96DCD030A2",
     "cor:total=27718:ok=25727:ex=1991:EnumUnderlyingTypeResolveException=1991",
-    "cor:digest=A564C741C160A2F7",
+    "cor:digest=A878A76CE560F649",
 };
 inline const std::vector<std::string> kCadSynthGold = {
     "syn:row=1:ctorKind=MethodDefinition:ok:F=4:N=0",

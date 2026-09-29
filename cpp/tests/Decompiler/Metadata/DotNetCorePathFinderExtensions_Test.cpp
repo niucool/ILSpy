@@ -61,15 +61,57 @@ std::string CoreLibPath() {
     const char* root = "C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App";
     std::error_code ec;
     std::string best;
+    int bestMinor = -1;
     for (fs::directory_iterator it(root, ec), end; !ec && it != end;
          it.increment(ec)) {
-        std::string candidate = it->path().string() + "\\System.Private.CoreLib.dll";
-        if (fs::exists(candidate, ec)) best = candidate;
+        // The golds pin the .NET 10 metadata shape: only 10.x matches.
+        const std::string name = it->path().filename().string();
+        if (name.rfind("10.", 0) != 0) continue;
+        int minor = 0;
+        try {
+            minor = std::stoi(name.substr(3));
+        } catch (const std::logic_error&) {
+            continue;
+        }
+        std::string candidate = it->path().string()
+            + "\\System.Private.CoreLib.dll";
+        if (minor > bestMinor && fs::exists(candidate, ec)) {
+            best = candidate;
+            bestMinor = minor;
+        }
     }
     return best;
 }
 
 // The section-A real-assembly paths (the probe's RealFiles order).
+// The SDK Roslyn Microsoft.CodeAnalysis.dll: the highest installed 10.x
+// SDK (the gold pins the .NET 10-era Roslyn; empty when none).
+std::string RoslynBincorePath() {
+    namespace fs = std::filesystem;
+    const char* root = "C:\\Program Files\\dotnet\\sdk";
+    std::error_code ec;
+    std::string best;
+    int bestMinor = -1;
+    for (fs::directory_iterator it(root, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+        if (name.rfind("10.", 0) != 0) continue;
+        int minor = 0;
+        try {
+            minor = std::stoi(name.substr(3));
+        } catch (const std::logic_error&) {
+            continue;
+        }
+        std::string candidate = it->path().string()
+            + "\\Roslyn\\bincore\\Microsoft.CodeAnalysis.dll";
+        if (minor > bestMinor && fs::exists(candidate, ec)) {
+            best = candidate;
+            bestMinor = minor;
+        }
+    }
+    return best;
+}
+
 std::vector<std::pair<const char*, std::string>> RealFiles() {
     std::vector<std::pair<const char*, std::string>> files = {
         {"mscorlib",
@@ -96,9 +138,7 @@ std::vector<std::pair<const char*, std::string>> RealFiles() {
         {"netstandard",
          "C:\\Program Files (x86)\\Reference Assemblies\\Microsoft\\Framework\\"
          ".NETFramework\\v4.7.2\\Facades\\netstandard.dll"},
-        {"roslyn",
-         "C:\\Program Files\\dotnet\\sdk\\10.0.204\\Roslyn\\bincore\\"
-         "Microsoft.CodeAnalysis.dll"},
+        {"roslyn", RoslynBincorePath()},
     };
     return files;
 }

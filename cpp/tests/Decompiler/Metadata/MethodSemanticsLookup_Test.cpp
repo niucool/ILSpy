@@ -85,7 +85,32 @@ const char* SystemPath() {
 
 const char* CoreLibPath() {
 #if defined(_WIN32)
-    return "C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App\\10.0.8\\System.Private.CoreLib.dll";
+    // The gold corpus pins the .NET 10 metadata shape, so the locator
+    // takes the highest installed 10.x Microsoft.NETCore.App (""
+    // when none is installed -- the caller skips the CoreLib entry).
+    namespace fs = std::filesystem;
+    const char* root = "C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App";
+    std::error_code ec;
+    std::string best;
+    int bestMinor = -1;
+    for (fs::directory_iterator it(root, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+        if (name.rfind("10.", 0) != 0) continue;
+        int minor = 0;
+        try {
+            minor = std::stoi(name.substr(3));
+        } catch (const std::logic_error&) {
+            continue;
+        }
+        std::string candidate = it->path().string() + "\\System.Private.CoreLib.dll";
+        if (minor > bestMinor && fs::exists(candidate, ec)) {
+            best = candidate;
+            bestMinor = minor;
+        }
+    }
+    static const std::string bestPath = best;
+    return bestPath.c_str();
 #else
     return "";
 #endif
@@ -326,14 +351,15 @@ const RealFileGold kRealGold[] = {
         "sem:Getter row:11 assoc:0x17000003", "sem:Getter row:12 assoc:0x17000004" },
       { "sem:Getter row:18153 assoc:0x17000ff6", "sem:Getter row:18154 assoc:0x17000ff7",
         "sem:Getter row:18167 assoc:0x17000ff8", "sem:Getter row:18169 assoc:0x17000ff9" } },
-    // .NET 10 CoreLib: 6134 entries over 42371 methods.
-    { "System.Private.CoreLib.dll", 0x6C7BFBBED09F397BULL, 0xB7CF1681861504CBULL,
-      6134, 42371, 36237, "Adder=32,Getter=5577,Remover=32,Setter=493",
+    // .NET 10 CoreLib (re-pinned at 10.0.10: 2 more MethodDef rows and 2
+    // more property tail rows than 10.0.8; entry census unchanged).
+    { "System.Private.CoreLib.dll", 0x5B305D678A3AAAB1ULL, 0x90F87A723F0E94B2ULL,
+      6134, 42373, 36239, "Adder=32,Getter=5577,Remover=32,Setter=493",
       "prop:6070,event:64",
       { "sem:Getter row:1 assoc:0x17000001", "sem:Getter row:2 assoc:0x17000002",
         "sem:Getter row:348 assoc:0x17000003", "sem:Getter row:445 assoc:0x17000004" },
-      { "sem:Setter row:42307 assoc:0x170015cb", "sem:Getter row:42308 assoc:0x170015cc",
-        "sem:Setter row:42309 assoc:0x170015cc", "sem:Getter row:42336 assoc:0x170015cd" } },
+      { "sem:Setter row:42309 assoc:0x170015cb", "sem:Getter row:42310 assoc:0x170015cc",
+        "sem:Setter row:42311 assoc:0x170015cc", "sem:Getter row:42338 assoc:0x170015cd" } },
     // The GAC System.Runtime facade: the empty lookup (no properties, no
     // methods -- a pure forwarder facade).
     { "System.Runtime.dll", 0xCBF29CE484222325ULL, 0xCBF29CE484222325ULL, 0, 0,
@@ -359,6 +385,13 @@ TEST(MethodSemanticsLookupTest, RealFileCorpusMatchesGold) {
         else
             path = WriteTinyNetModule();
         if (!FileAvailable(path.c_str())) {
+            if (std::string(gold.path) == "System.Private.CoreLib.dll") {
+                // The CoreLib fixture is version-floating (the locator
+                // takes the highest installed 10.x); without one the
+                // entry cannot run.
+                GTEST_SKIP() << "no .NET 10 runtime installed; skipped "
+                                "the System.Private.CoreLib gold";
+            }
             ADD_FAILURE() << "fixture not available: " << path;
             continue;
         }

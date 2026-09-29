@@ -185,23 +185,25 @@ TEST(DebugDirectoryTest, CoreLibDebugDirectory) {
     ASSERT_EQ(entries.size(), 4u);
 
     // Entry 0: the native CodeView entry (the ni.pdb, not portable).
-    EXPECT_EQ(entries[0].Stamp, 0x4E0CBF57u);
+    // Re-pinned at 10.0.10 (the build stamp and RVAs move with every
+    // CoreLib rebuild).
+    EXPECT_EQ(entries[0].Stamp, 0xBDDB53A0u);
     EXPECT_EQ(entries[0].MajorVersion, 0x0100u);
     EXPECT_EQ(entries[0].MinorVersion, 0u);
     EXPECT_EQ(entries[0].Type, DebugDirectoryEntryType::CodeView);
     EXPECT_EQ(entries[0].DataSize, 284);
-    EXPECT_EQ(entries[0].DataRelativeVirtualAddress, 0x25EC0);
-    EXPECT_EQ(entries[0].DataPointer, 0x25EC0);
+    EXPECT_EQ(entries[0].DataRelativeVirtualAddress, 0x24498);
+    EXPECT_EQ(entries[0].DataPointer, 0x24498);
     EXPECT_FALSE(entries[0].IsPortableCodeView());
 
     // Entry 1: the Roslyn portable CodeView entry (MinorVersion 0x504D).
-    EXPECT_EQ(entries[1].Stamp, 0x4E0CBF57u);
+    EXPECT_EQ(entries[1].Stamp, 0xBDDB53A0u);
     EXPECT_EQ(entries[1].MajorVersion, 0x0100u);
     EXPECT_EQ(entries[1].MinorVersion, 0x504Du);
     EXPECT_EQ(entries[1].Type, DebugDirectoryEntryType::CodeView);
-    EXPECT_EQ(entries[1].DataSize, 131);
-    EXPECT_EQ(entries[1].DataRelativeVirtualAddress, 0x25E10);
-    EXPECT_EQ(entries[1].DataPointer, 0x25E10);
+    EXPECT_EQ(entries[1].DataSize, 119);
+    EXPECT_EQ(entries[1].DataRelativeVirtualAddress, 0x243F8);
+    EXPECT_EQ(entries[1].DataPointer, 0x243F8);
     EXPECT_TRUE(entries[1].IsPortableCodeView());
 
     // Entry 2: the PDB checksum; entry 3: the Reproducible marker (all-zero
@@ -226,13 +228,13 @@ TEST(DebugDirectoryTest, CoreLibDebugDirectory) {
     auto cv1 = file.GetCodeViewDebugDirectoryData(entries[1]);
     ASSERT_TRUE(cv1.has_value());
     const std::array<std::uint8_t, 16> guid1 = {
-        0xf3, 0xe6, 0x5a, 0xb1, 0x3a, 0x4d, 0x7e, 0xe1,
-        0x51, 0x2b, 0x8a, 0xac, 0x5a, 0x1f, 0x72, 0xbb,
+        0x2b, 0x95, 0x9a, 0xb2, 0x40, 0xfe, 0xd6, 0x81,
+        0xa5, 0x73, 0x7f, 0x04, 0x4b, 0x92, 0xeb, 0xde,
     };
     EXPECT_EQ(cv1->Guid, guid1);
     EXPECT_EQ(cv1->Age, 1);
     EXPECT_EQ(cv1->Path,
-        "/_/src/runtime/artifacts/obj/coreclr/System.Private.CoreLib/"
+        "/_/artifacts/obj/coreclr/System.Private.CoreLib/"
         "windows.x64.Release/System.Private.CoreLib.pdb");
 }
 

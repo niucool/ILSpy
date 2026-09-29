@@ -3139,7 +3139,7 @@ inline const char* kDtfGoldReal[] = {
     "A|PresentationCore|tfm=[.NETFramework,Version=v4.0]|refAsm=False|pack=Microsoft.WindowsDesktop.App|mdVer=v4.0.30319",
     "A|System.Xaml|tfm=[.NETFramework,Version=v4.0]|refAsm=False|pack=Microsoft.NETCore.App|mdVer=v4.0.30319",
     "A|netstandard|tfm=[.NETStandard,Version=v2.0]|refAsm=True|pack=Microsoft.NETCore.App|mdVer=v4.0.30319",
-    "A|roslyn|tfm=[.NETCoreApp,Version=v9.0]|refAsm=False|pack=Microsoft.NETCore.App|mdVer=v4.0.30319",
+    "A|roslyn|tfm=[.NETCoreApp,Version=v10.0]|refAsm=False|pack=Microsoft.NETCore.App|mdVer=v4.0.30319",
 };
 
 inline const char* kDtfGoldManifests[] = {

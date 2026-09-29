@@ -163,12 +163,12 @@ TEST(AssociatedPortablePdbTest, AnalyzerPair) {
     const std::uint8_t* id = pdb.PdbId();
     ASSERT_NE(id, nullptr);
     const std::array<std::uint8_t, 20> kId = {
-        0xf0, 0x60, 0x08, 0xe1, 0x13, 0x24, 0xdc, 0x42,
-        0x85, 0x58, 0xda, 0x74, 0x25, 0x03, 0x5c, 0x62,
-        0xde, 0x47, 0xc2, 0xd7,
+        0xfa, 0x36, 0xe6, 0xe6, 0x2a, 0x87, 0xa3, 0x4a,
+        0xb6, 0xef, 0x70, 0x90, 0x9c, 0x65, 0x16, 0x3a,
+        0xd2, 0x84, 0xb0, 0xad,
     };
     EXPECT_EQ(std::memcmp(id, kId.data(), 20), 0);
-    EXPECT_EQ(pdb.RowCount(PdbTable::MethodDebugInformation), 79u);
+    EXPECT_EQ(pdb.RowCount(PdbTable::MethodDebugInformation), 73u);
     // The provider was asked for the resolved path.
     ASSERT_EQ(state.requested.size(), 1u);
     EXPECT_EQ(state.requested[0], expected);

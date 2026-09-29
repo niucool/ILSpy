@@ -49,6 +49,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <optional>
 #include <stdexcept>
@@ -90,17 +91,32 @@ const char* FacadePath() {
 }
 
 #if defined(_WIN32)
-// The .NET 10 shared-runtime CoreLib (the newest installed
-// Microsoft.NETCore.App -- the standing glob pattern).
+// The .NET 10 shared-runtime CoreLib: the highest installed 10.x
+// Microsoft.NETCore.App (the golds pin the .NET 10 metadata shape; a
+// newer major has a different type layout, so only 10.x matches).
 std::string CoreLibPath() {
     namespace fs = std::filesystem;
     const char* root = "C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App";
     std::error_code ec;
     std::string best;
+    int bestMinor = -1;
     for (fs::directory_iterator it(root, ec), end; !ec && it != end;
          it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+        // "10.M.N" -- take the highest 10.x; other majors do not match
+        // the pinned golds.
+        if (name.rfind("10.", 0) != 0) continue;
+        int minor = 0;
+        try {
+            minor = std::stoi(name.substr(3));
+        } catch (const std::logic_error&) {
+            continue;
+        }
         std::string candidate = it->path().string() + "\\System.Private.CoreLib.dll";
-        if (fs::exists(candidate, ec)) best = candidate;
+        if (minor > bestMinor && fs::exists(candidate, ec)) {
+            best = candidate;
+            bestMinor = minor;
+        }
     }
     return best;
 }
@@ -216,14 +232,36 @@ TEST(AssemblyIdentityTest, GetPublicKeyTokenOverTheCultureSatellite)
     if (path.empty()) GTEST_SKIP() << "no .NET SDK Roslyn satellite installed";
     MetadataFile satellite(path);
     ASSERT_TRUE(satellite.IsValid());
+    const std::string full = GetFullAssemblyName(satellite);
     EXPECT_EQ(GetPublicKeyToken(satellite), "31bf3856ad364e35");
-    EXPECT_EQ(GetFullAssemblyName(satellite),
-              "Microsoft.Build.Tasks.CodeAnalysis.resources, "
-              "Version=5.3.14.23114, Culture=cs, PublicKeyToken=31bf3856ad364e35");
-    // The satellite's single AssemblyRef: System.Runtime 9.0.0.0.
+    // The Roslyn version moves with the installed SDK (5.3.x in the SDK
+    // 10.0.2xx packs, 5.6.x in the 10.0.3xx packs); the identity is
+    // re-derived from the file's own Assembly row so the rendering-form
+    // assertion stays exact while the fixture version floats.
+    const auto ver = satellite.CorTableVersionValue(CorTableIndex::Assembly, 0);
+    const std::uint32_t nameOffset = satellite.CorTableColumnValue(
+        CorTableIndex::Assembly, 0, 4);
+    char version[32];
+    std::snprintf(version, sizeof(version), "%u.%u.%u.%u",
+        ver.MajorVersion, ver.MinorVersion, ver.BuildNumber,
+        ver.RevisionNumber);
+    EXPECT_EQ(full,
+        satellite.CorString(nameOffset) + std::string(", Version=") + version
+            + ", Culture=cs, PublicKeyToken=31bf3856ad364e35");
+    // The satellite's single AssemblyRef: System.Runtime (the version the
+    // compiling Roslyn targeted -- likewise derived from the file).
+    const auto refVer = satellite.CorTableVersionValue(
+        CorTableIndex::AssemblyRef, 0);
+    const std::uint32_t refNameOffset = satellite.CorTableColumnValue(
+        CorTableIndex::AssemblyRef, 0, 3);
+    char refVersion[32];
+    std::snprintf(refVersion, sizeof(refVersion), "%u.%u.%u.%u",
+        refVer.MajorVersion, refVer.MinorVersion, refVer.BuildNumber,
+        refVer.RevisionNumber);
     EXPECT_EQ(GetFullAssemblyName(satellite, 0x23000001),
-              "System.Runtime, Version=9.0.0.0, Culture=neutral, "
-              "PublicKeyToken=b03f5f7f11d50a3a");
+        satellite.CorString(refNameOffset) + std::string(", Version=")
+            + refVersion + ", Culture=neutral, "
+            "PublicKeyToken=b03f5f7f11d50a3a");
 }
 #endif
 

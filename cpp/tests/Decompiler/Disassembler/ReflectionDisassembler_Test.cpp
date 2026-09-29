@@ -1092,10 +1092,23 @@ std::string CoreLibPath() {
     const char* root = "C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App";
     std::error_code ec;
     std::string best;
+    int bestMinor = -1;
     for (fs::directory_iterator it(root, ec), end; !ec && it != end;
          it.increment(ec)) {
+        // The golds pin the .NET 10 metadata shape: only 10.x matches.
+        const std::string name = it->path().filename().string();
+        if (name.rfind("10.", 0) != 0) continue;
+        int minor = 0;
+        try {
+            minor = std::stoi(name.substr(3));
+        } catch (const std::logic_error&) {
+            continue;
+        }
         std::string candidate = it->path().string() + "\\System.Private.CoreLib.dll";
-        if (fs::exists(candidate, ec)) best = candidate;
+        if (minor > bestMinor && fs::exists(candidate, ec)) {
+            best = candidate;
+            bestMinor = minor;
+        }
     }
     return best;
 }
@@ -1254,8 +1267,8 @@ TEST(ReflectionDisassemblerTest, WriteAttributesDecodeBlobsFlagAndInvalidToken) 
     {
         // With the flag off (the default) the blob is the raw hex dump
         // (pinned by the other tests); with DecodeCustomAttributeBlobs on,
-        // the unported WriteDecodedCustomAttributeBlob path is loud rather
-        // than wrong.
+        // the no-argument attribute decodes to the empty brace form the C#
+        // WriteDecodedCustomAttributeBlob renders for it.
         OUT::PlainTextOutput output;
         DA::ReflectionDisassembler rd(output);
         rd.WriteAttributes(f, tokens);
@@ -1263,7 +1276,13 @@ TEST(ReflectionDisassemblerTest, WriteAttributesDecodeBlobsFlagAndInvalidToken) 
             CustomLine("instance void __DynamicallyInvokableAttribute::.ctor()",
                 Bytes({0x01, 0x00, 0x00, 0x00})));
         rd.DecodeCustomAttributeBlobs = true;
-        EXPECT_THROW(rd.WriteAttributes(f, tokens), std::logic_error);
+        OUT::PlainTextOutput decodedOutput;
+        DA::ReflectionDisassembler decodedRd(decodedOutput);
+        decodedRd.DecodeCustomAttributeBlobs = true;
+        decodedRd.WriteAttributes(f, tokens);
+        EXPECT_EQ(decodedOutput.ToString(),
+            ".custom instance void __DynamicallyInvokableAttribute::.ctor()"
+            " = {\r\n}\r\n");
     }
     {
         // An out-of-range attribute token (the C#

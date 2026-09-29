@@ -627,4 +627,12 @@ target_link_libraries(ilspy_tests PRIVATE
     GTest::gtest_main
 )
 
+# The deep-recursion tests (the DepthGuard suite builds a 150-deep tree)
+# recurse ~3 frames per level; MSVC debug frames are large enough that the
+# default 1 MiB main-thread stack overflows before the 300-deep rendering
+# guard fires. The PE stack reserve applies to the main thread.
+if(MSVC)
+    target_link_options(ilspy_tests PRIVATE "/STACK:16777216,4194304")
+endif()
+
 gtest_discover_tests(ilspy_tests)

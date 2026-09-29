@@ -79,8 +79,36 @@ const char* SystemPath() {
 
 const char* CoreLibPath() {
 #if defined(_WIN32)
-    return "C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App\\10.0.8\\"
-           "System.Private.CoreLib.dll";
+    // The golds pin the .NET 10 metadata shape: the highest installed
+    // 10.x Microsoft.NETCore.App (empty when none -- the sweeps assert
+    // on the result and skip).
+    namespace fs = std::filesystem;
+    const char* root =
+        "C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App";
+    static const std::string best = [root] {
+        std::error_code ec;
+        std::string result;
+        int bestMinor = -1;
+        for (fs::directory_iterator it(root, ec), end; !ec && it != end;
+             it.increment(ec)) {
+            const std::string name = it->path().filename().string();
+            if (name.rfind("10.", 0) != 0) continue;
+            int minor = 0;
+            try {
+                minor = std::stoi(name.substr(3));
+            } catch (const std::logic_error&) {
+                continue;
+            }
+            std::string candidate = it->path().string()
+                + "\\System.Private.CoreLib.dll";
+            if (minor > bestMinor && fs::exists(candidate, ec)) {
+                result = candidate;
+                bestMinor = minor;
+            }
+        }
+        return result;
+    }();
+    return best.c_str();
 #else
     return "";
 #endif
@@ -348,7 +376,7 @@ TEST(StandaloneSignatureTest, MscorlibLocalSignatureSweep)
     EXPECT_EQ(local, 3895);
     EXPECT_EQ(other, 13);
     EXPECT_EQ(err, 0);
-    EXPECT_EQ(fnv.Digest(), 0x57D922DA3032FBF4ULL);
+    EXPECT_EQ(fnv.Digest(), 0x615A1D6523870596ULL);
 }
 
 // The System.dll sweep (DIGEST|SYS|fnv=2556DC198237BD10).
@@ -425,7 +453,7 @@ TEST(StandaloneSignatureTest, CoreLibMethodSignatureSweep)
     EXPECT_EQ(rows, 24);
     EXPECT_EQ(ok, 24);
     EXPECT_EQ(err, 0);
-    EXPECT_EQ(fnv.Digest(), 0xF1A521A25AD45A09ULL);
+    EXPECT_EQ(fnv.Digest(), 0x7A324ABAC0BD60FEULL);
 }
 
 // The crafted-manifest drives: all 19 rows through both entries, every

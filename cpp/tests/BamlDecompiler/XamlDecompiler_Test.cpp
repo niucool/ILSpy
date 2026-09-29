@@ -452,18 +452,13 @@ TEST(XamlDecompilerCtorFamily, TypeSystemCtorDecompilesTheGoldStreams)
 TEST(XamlDecompilerCtorFamily, MissingFileThrowsFileNotFoundException)
 {
     // F6: the parent directory exists, the file does not. The .NET message
-    // names the path as given, and whether the parent exists is a property
-    // of the host's real file system -- so the drive uses a Windows path on
-    // Windows and a POSIX temp-directory path elsewhere (the probe's C:\
-    // fixture only has an existing parent on a Windows host).
-#if defined(_WIN32)
-    const std::string missing =
-        "C:\\temp-probe\\XamlDecompilerProbe\\definitely_missing_xamldec.dll";
-#else
-    const std::string missing = (std::filesystem::temp_directory_path()
-            / "definitely_missing_xamldec.dll")
-        .string();
-#endif
+    // names the path as given; the parent directory is created in the
+    // temp tree so the premise holds on every host (a missing PARENT
+    // yields the .NET "part of the path" error instead).
+    const std::filesystem::path dir = std::filesystem::temp_directory_path()
+        / "ilspy_xamldec_probe";
+    std::filesystem::create_directories(dir);
+    const std::string missing = (dir / "definitely_missing_xamldec.dll").string();
     try {
         BamlDecompilerSettings settings;
         BDT::XamlDecompiler decompiler(missing, settings);

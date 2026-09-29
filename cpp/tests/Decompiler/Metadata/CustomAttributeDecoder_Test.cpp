@@ -96,10 +96,23 @@ std::string CoreLibPath() {
     const char* root = "C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App";
     std::error_code ec;
     std::string best;
+    int bestMinor = -1;
     for (fs::directory_iterator it(root, ec), end; !ec && it != end;
          it.increment(ec)) {
+        // The golds pin the .NET 10 metadata shape: only 10.x matches.
+        const std::string name = it->path().filename().string();
+        if (name.rfind("10.", 0) != 0) continue;
+        int minor = 0;
+        try {
+            minor = std::stoi(name.substr(3));
+        } catch (const std::logic_error&) {
+            continue;
+        }
         std::string candidate = it->path().string() + "\\System.Private.CoreLib.dll";
-        if (fs::exists(candidate, ec)) best = candidate;
+        if (minor > bestMinor && fs::exists(candidate, ec)) {
+            best = candidate;
+            bestMinor = minor;
+        }
     }
     return best;
 }
