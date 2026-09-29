@@ -249,6 +249,7 @@ public:
     void SetCurrentTypeName(const ILFunction& fn) {
         if (fn.Method == nullptr || fn.Method->DeclaringType() == nullptr)
             return;
+        currentType_ = fn.Method->DeclaringType();
         std::string name = fn.Method->DeclaringType()->ReflectionName();
         for (char& c : name) {
             if (c == '+') c = '.';
@@ -340,6 +341,7 @@ private:
     std::string& out_;
     const ILFunction* fn_ = nullptr;
     std::string currentTypeName_;
+    TypeSystem::ITypePtr currentType_;
     std::string returnTypeName_;  // the C# name of the function's return type
     std::string methodName_;  // the method's display name (for diagnostics)
     std::set<std::string> declared_;          // locals already introduced with `var`
@@ -4284,19 +4286,44 @@ private:
     std::string MaybeBasePrefix(const std::string& flattened) {
         // The current type: the this-parameter's variable (a Parameter-kind
         // variable with the negative index the reader assigns it).
-        if (currentTypeName_.empty()) return std::string();
-        std::string self = currentTypeName_;
-        auto sep = flattened.rfind("::");
-        if (sep == std::string::npos) return std::string();
-        std::string declType = flattened.substr(0, sep);
-        if (declType == self) return std::string();
-        // The generic arity's spelling can differ ("List`1[[T]]" forms);
-        // fall back to the plain name comparison.
-        auto lastDot = declType.rfind('.');
-        if (lastDot != std::string::npos &&
-            self.substr(self.rfind('.') + 1) == declType.substr(lastDot + 1))
+        if (currentTypeName_.empty() || currentType_ == nullptr)
             return std::string();
-        return "base.";
+        // The flattened field name is dot-separated ("NS.Type.field");
+        // the declaring type is everything before the final segment.
+        auto sep = flattened.rfind('.');
+        if (sep == std::string::npos) return std::string();
+        std::string fieldName = flattened.substr(sep + 1);
+        std::string declType = flattened.substr(0, sep);
+        if (declType == currentTypeName_) return std::string();
+        // The `base.` qualifier applies only to a field declared on a
+        // strict base type of the current type: a nested or enclosing
+        // type's fields (the display classes, the outer captures) keep
+        // the receiver-elided form.
+        bool onBase = false;
+        for (const auto* base : TypeSystem::GetAllBaseTypes(currentType_.get())) {
+            if (base == nullptr) continue;
+            if (base->ReflectionName() == declType) {
+                onBase = true;
+                break;
+            }
+        }
+        if (!onBase) return std::string();
+        // The C#'s RequiresQualifier: the bare field name renders only
+        // when it still resolves to this field from the current scope;
+        // a same-named local or parameter shadows it and the access
+        // must keep the `base.` qualifier (the ctor stores of the
+        // base fields behind same-named parameters).
+        if (fn_ != nullptr) {
+            for (const auto& v : fn_->Variables) {
+                if (v && v->Index >= 0 && v->Name == fieldName)
+                    return "base.";
+            }
+            for (const auto* p : fn_->Parameters) {
+                if (p != nullptr && p->Name() == fieldName)
+                    return "base.";
+            }
+        }
+        return std::string();
     }
 
     std::string StoreTargetText(const ILInstruction& target) {
