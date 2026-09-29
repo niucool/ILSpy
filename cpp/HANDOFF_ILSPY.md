@@ -4216,6 +4216,22 @@ THE REMAINING 2 SITES: unprobed (likely a genuinely different
 shape -- the leave-arm in a finally or a non-ArgumentNullException
 construction); the diff impact is ~10 lines.
 
+## THE `?? throw` FAMILY -- COMPLETE (43/43 structural)
+
+THE REMAINING-2 PROBE (cheap): the comm diff's "missing" lines are
+`base.version = version ?? throw ...` -- the port folds them all but
+renders `version = version ?? ...` WITHOUT the `base.` prefix (the
+oracle qualifies the base-class field stores as `base.name = ...`,
+`base.version = ...`). **THE FOLD IS 43/43; THE RESIDUAL IS THE
+BASE-MEMBER QUALIFICATION FAMILY** (the port's field-store render
+never qualifies a base-class field access -- a separate,
+measurable family: the oracle's `base.` occurrences vs the port's).
+THE NEXT QUEUE: (1) the base-member qualification (the `base.name =
+name`-style field stores -- grep the oracle's `base\.` count vs
+the port's for the size); (2) the net10 finally-variant sites
+(net10's 4 `?? throw` sites are the real finally/leave shapes);
+(3) the label-merged regions per the earlier handoff.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
