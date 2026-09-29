@@ -527,6 +527,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/ILAstToCSharpAsyncDynamicArms_Test.cpp
     Decompiler/CSharp/FacadeMemberModifiers_Test.cpp
     Decompiler/CSharp/ForeachVariableName_Test.cpp
+    Decompiler/CSharp/KeywordIdentifierEscape_Test.cpp
     Decompiler/CSharp/CSharpDecompiler_Test.cpp
     Decompiler/CSharp/Transforms/CustomPatterns_Test.cpp
     Decompiler/CSharp/Transforms/CombineQueryExpressions_Test.cpp

@@ -312,9 +312,11 @@ std::string AssignVariableNames::SuggestForeachElementName(
     if (baseName.empty() && collection != nullptr &&
         collection->Op == OpCode::LdLoc) {
         // The C#'s parameter arm: a collection held in a parameter keeps
-        // the parameter's name.
+        // the parameter's name -- but never the implicit `this` (a keyword,
+        // not a name source; the item fallback takes over).
         ILVariable* v = static_cast<LdLoc*>(collection)->Variable.get();
-        if (v != nullptr && v->Kind == VariableKind::Parameter)
+        if (v != nullptr && v->Kind == VariableKind::Parameter &&
+            v->Name != "this")
             baseName = v->Name;
     }
     std::string proposedName = "item";

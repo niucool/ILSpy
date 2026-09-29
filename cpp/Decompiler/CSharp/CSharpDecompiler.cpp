@@ -60,6 +60,7 @@
 #include "Decompiler/CSharp/OutputVisitor/FormattingOptionsFactory.hpp"
 #include "Decompiler/CSharp/OutputVisitor/InsertParenthesesVisitor.hpp"
 #include "Decompiler/CSharp/OutputVisitor/GenericGrammarAmbiguityVisitor.hpp"
+#include "Decompiler/CSharp/OutputVisitor/CSharpKeywordCheck.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/PartialTypeInfo.hpp"
 #include "Decompiler/Metadata/UniversalAssemblyResolver.hpp"
@@ -194,7 +195,8 @@ std::string CSharpDecompiler::MethodDeclString(
             paramDecl += "object";
         paramDecl += ' ';
         if (i < parameterNames.size() && !parameterNames[i].empty())
-            paramDecl += parameterNames[i];
+            paramDecl +=
+                OutputVisitor::EscapeIdentifier(parameterNames[i]);
         else
             paramDecl += "arg_" + std::to_string(base + static_cast<int>(i));
     }
@@ -251,7 +253,8 @@ std::string CSharpDecompiler::MethodDeclString(
                                         scopeResolver);
         paramDecl += ' ';
         if (i < parameterNames.size() && !parameterNames[i].empty())
-            paramDecl += parameterNames[i];
+            paramDecl +=
+                OutputVisitor::EscapeIdentifier(parameterNames[i]);
         else
             paramDecl += "arg_" + std::to_string(base + static_cast<int>(i));
         // The C# IsDefaultValueAssignmentAllowed: an optional parameter
@@ -3970,7 +3973,7 @@ bool DecompileTypeToStringBody(
                 if (!documentation.empty())
                     out += DocumentationCommentLines(documentation);
             }
-            out += f.Name;
+            out += OutputVisitor::EscapeIdentifier(f.Name);
             bool withInitializer =
                 displayMode == EnumValueDisplayMode::All ||
                 displayMode == EnumValueDisplayMode::AllHex ||
@@ -4166,7 +4169,7 @@ bool DecompileTypeToStringBody(
         out += MemberModifiersText(fieldEntity);
         out += fieldTypeName;
         out += ' ';
-        out += f.Name;
+        out += OutputVisitor::EscapeIdentifier(f.Name);
         if (fieldEntity != nullptr && fieldEntity->IsConst()) {
             std::string literal = ConstantFieldLiteral(*fieldEntity);
             // The enum-typed const fields render the qualified member

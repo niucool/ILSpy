@@ -28,6 +28,7 @@
 #include "Decompiler/CSharp/FractionApprox.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/CSharp/RequiredImportsRecorder.hpp"
+#include "Decompiler/CSharp/OutputVisitor/CSharpKeywordCheck.hpp"
 #include <algorithm>
 #include <functional>
 #include <cmath>
@@ -565,7 +566,7 @@ private:
                                       const Call& getEnumerator,
                                       int indent, std::string& result) {
         const std::string enumName =
-            us.Variable ? us.Variable->Name : std::string();
+            us.Variable ? CSharp::OutputVisitor::EscapeIdentifier(us.Variable->Name) : std::string();
         if (enumName.empty() || us.Body == nullptr)
             return false;
         // The collection: the GetEnumerator call's receiver.
@@ -616,6 +617,9 @@ private:
             for (int n = 2; declared_.count(elemName); ++n)
                 elemName = base + std::to_string(n);
         }
+        // A keyword-named element escapes (the singularization can
+        // propose one: `inList` -> `@in`, `Overrides` -> `@override`).
+        elemName = CSharp::OutputVisitor::EscapeIdentifier(elemName);
         declared_.insert(elemName);
         // The element type: the hoisted `T v = ref ENUM.Current;` first
         // statement, else the collection type's first argument.
@@ -1582,7 +1586,7 @@ private:
             }
             if (!loopUsesV) continue;
             hoistedForInits_[h.container] = ForHoist{
-                CSharpTypeName(v->Type) + " " + v->Name + " = " +
+                CSharpTypeName(v->Type) + " " + CSharp::OutputVisitor::EscapeIdentifier(v->Name) + " = " +
                     (h.st->Value ? Expr(*h.st->Value)
                                  : std::string("(default)")),
                 v->Name};
@@ -2388,7 +2392,7 @@ private:
                     std::string part;
                     if (inst->Op == OpCode::StLoc) {
                         const auto& st = static_cast<const StLoc&>(*inst);
-                        std::string name = st.Variable ? st.Variable->Name : "?";
+                        std::string name = st.Variable ? CSharp::OutputVisitor::EscapeIdentifier(st.Variable->Name) : "?";
                         part = name + AssignmentText(st, name);
                     } else if (inst->Op == OpCode::StObj) {
                         const auto& st = static_cast<const StObj&>(*inst);
@@ -2592,13 +2596,15 @@ private:
                         std::string elemName = base;
                         for (int n = 2; declared_.count(elemName); ++n)
                             elemName = base + std::to_string(n);
+                        elemName =
+                            CSharp::OutputVisitor::EscapeIdentifier(elemName);
                         declared_.insert(elemName);
                         foreachSubst_.insert(accesses.begin(),
                                              accesses.end());
                         foreachElementName_ = elemName;
                         Line(indent, "foreach (" + elemType + " " +
                                         elemName + " in " +
-                                        av->Name + ")");
+                                        CSharp::OutputVisitor::EscapeIdentifier(av->Name) + ")");
                         Line(indent, "{");
                         emitForBody();
                         Line(indent, "}");
@@ -2823,7 +2829,7 @@ private:
                     static_cast<StLoc*>(inst.get()));
                 if (fold != coalesceFolds_.end()) {
                     Line(indent,
-                         "var " + fold->first->Variable->Name + " = " +
+                         "var " + CSharp::OutputVisitor::EscapeIdentifier(fold->first->Variable->Name) + " = " +
                              Expr(*fold->second) + ";");
                     continue;
                 }
@@ -3140,7 +3146,7 @@ private:
         switch (inst.Op) {
             case OpCode::StLoc: {
                 const auto& st = static_cast<const StLoc&>(inst);
-                std::string name = st.Variable ? st.Variable->Name : "?";
+                std::string name = st.Variable ? CSharp::OutputVisitor::EscapeIdentifier(st.Variable->Name) : "?";
                 bool declare = st.Variable && st.Variable->Kind != VariableKind::Parameter &&
                                declared_.insert(name).second;
                 // `V = V op expr` -> `V op= expr` (or `V++`/`V--` for +/- 1) when
@@ -3471,7 +3477,7 @@ private:
                         head += " (" + (handler->Variable->Type
                                         ? handler->Variable->Type->ReflectionName()
                                         : std::string("System.Exception")) +
-                                " " + handler->Variable->Name + ")";
+                                " " + CSharp::OutputVisitor::EscapeIdentifier(handler->Variable->Name) + ")";
                         // A plain catch carries the constant filter ldc.i4(1);
                         // don't print it as a `when` clause.
                         bool isAlwaysTrue = false;
@@ -3545,7 +3551,7 @@ private:
                 const auto& pr = static_cast<const PinnedRegion&>(inst);
                 std::string varType = pr.Variable && pr.Variable->Type
                     ? CSharpTypeName(pr.Variable->Type) : std::string("var");
-                std::string varName = pr.Variable ? pr.Variable->Name : std::string("pinned");
+                std::string varName = pr.Variable ? CSharp::OutputVisitor::EscapeIdentifier(pr.Variable->Name) : std::string("pinned");
                 Line(indent, "fixed (" + varType + " " + varName + " = " +
                              (pr.Init ? Expr(*pr.Init) : std::string("null")) + ")");
                 if (pr.Body) EmitBraced(*pr.Body, indent); else Line(indent, "{ }");
@@ -3572,7 +3578,7 @@ private:
                     const LdLoc* final =
                         dynamic_cast<const LdLoc*>(blk.FinalInstruction.get());
                     std::string var = final != nullptr && final->Variable
-                        ? final->Variable->Name
+                        ? CSharp::OutputVisitor::EscapeIdentifier(final->Variable->Name)
                         : std::string();
                     if (!var.empty() && !blk.Instructions.empty()) {
                         // The outer store's variable (the block's parent
@@ -4276,7 +4282,7 @@ private:
             return "this";
         if (!ld->Variable->Type) return std::string{};
         if (dynamic_cast<const TypeSystem::ByReferenceType*>(ld->Variable->Type.get()))
-            return ld->Variable->Name;
+            return CSharp::OutputVisitor::EscapeIdentifier(ld->Variable->Name);
         return std::string{};
     }
 
@@ -4350,14 +4356,16 @@ private:
         if (auto* ld = dynamic_cast<const LdLoc*>(&target))
             if (ld->Variable && ld->Variable->Type &&
                 dynamic_cast<const TypeSystem::PointerType*>(ld->Variable->Type.get()))
-                return "*" + ld->Variable->Name;
+                return "*" + CSharp::OutputVisitor::EscapeIdentifier(ld->Variable->Name);
         return "*(" + Expr(target) + ")";
     }
 
     // "Namespace.Type::name" -> "name" (the field/member segment).
     static std::string SimpleName(const std::string& flattened) {
         auto dot = flattened.rfind('.');
-        return dot == std::string::npos ? flattened : flattened.substr(dot + 1);
+        return CSharp::OutputVisitor::EscapeIdentifier(dot == std::string::npos
+                         ? flattened
+                         : flattened.substr(dot + 1));
     }
 
     std::string ElementAccess(const LdElema& elema) {
@@ -4525,7 +4533,14 @@ private:
                 auto su = singleUseElisions_.find(&ld);
                 if (su != singleUseElisions_.end())
                     return Expr(*su->second);
-                return ld.Variable ? ld.Variable->Name : "?";
+                // The implicit `this` parameter (the reader's negative-index
+                // convention) renders as the `this` KEYWORD TOKEN, never an
+                // identifier -- the C# models it as a ThisReferenceExpression,
+                // which WriteIdentifier never sees.
+                if (ld.Variable && ld.Variable->Kind == VariableKind::Parameter &&
+                    ld.Variable->Name == "this")
+                    return "this";
+                return ld.Variable ? CSharp::OutputVisitor::EscapeIdentifier(ld.Variable->Name) : "?";
             }
             case OpCode::StLoc: {
                 // An inline assignment used as an expression value:
@@ -4533,7 +4548,7 @@ private:
                 // `outer = inner = value`. Chained assignment is right-
                 // associative, so no parentheses are needed around the inner.
                 const auto& st = static_cast<const StLoc&>(inst);
-                std::string name = st.Variable ? st.Variable->Name : std::string("?");
+                std::string name = st.Variable ? CSharp::OutputVisitor::EscapeIdentifier(st.Variable->Name) : std::string("?");
                 std::string val = st.Value ? Expr(*st.Value) : std::string("(default)");
                 return name + " = " + val;
             }
@@ -4542,7 +4557,7 @@ private:
                 // `ldloca V` is the IL idiom for `ref V` (a byref argument or
                 // an address-of). Render as `ref V` (the C# form), not `&V`
                 // (the IL form).
-                return "ref " + (ld.Variable ? ld.Variable->Name : std::string("?"));
+                return "ref " + (ld.Variable ? CSharp::OutputVisitor::EscapeIdentifier(ld.Variable->Name) : std::string("?"));
             }
             case OpCode::LdcI4: {
                 // The C# IsSpecialConstant: the recognizable boundary
@@ -4644,7 +4659,7 @@ private:
                             static_cast<const TypeSystem::KnownType*>(ld->Variable->Type.get())->Code() ==
                                 TypeSystem::KnownTypeCode::Boolean) {
                             isBoolLeft = true;
-                            leftExpr = ld->Variable->Name;
+                            leftExpr = CSharp::OutputVisitor::EscapeIdentifier(ld->Variable->Name);
                         }
                     } else if (comp.Left->Op == OpCode::Call) {
                         auto* call = static_cast<const Call*>(comp.Left.get());
@@ -4986,7 +5001,7 @@ private:
                 // patterns) and deconstruct patterns are deferred.
                 const auto& m = static_cast<const MatchInstruction&>(inst);
                 std::string lhs = m.TestedOperand ? Expr(*m.TestedOperand) : std::string("(default)");
-                std::string varName = m.Variable ? m.Variable->Name : std::string("_");
+                std::string varName = m.Variable ? CSharp::OutputVisitor::EscapeIdentifier(m.Variable->Name) : std::string("_");
                 std::string pattern;
                 if (m.IsVar()) {
                     // `expr is var x`
@@ -5139,7 +5154,7 @@ private:
                 if (ca.TargetKind == CompoundTargetKind::Address &&
                     ca.Target && ca.Target->Op == OpCode::LdLoca) {
                     const auto& lda = static_cast<const LdLoca&>(*ca.Target);
-                    target = lda.Variable ? lda.Variable->Name : std::string("?");
+                    target = lda.Variable ? CSharp::OutputVisitor::EscapeIdentifier(lda.Variable->Name) : std::string("?");
                 } else {
                     target = ca.Target ? Expr(*ca.Target) : std::string("(default)");
                 }
@@ -5187,7 +5202,7 @@ private:
                 if (ca.TargetKind == CompoundTargetKind::Address &&
                     ca.Target && ca.Target->Op == OpCode::LdLoca) {
                     const auto& lda = static_cast<const LdLoca&>(*ca.Target);
-                    target = lda.Variable ? lda.Variable->Name : std::string("?");
+                    target = lda.Variable ? CSharp::OutputVisitor::EscapeIdentifier(lda.Variable->Name) : std::string("?");
                 } else {
                     target = ca.Target ? Expr(*ca.Target) : std::string("(default)");
                 }
@@ -5446,7 +5461,7 @@ private:
         if (auto* ld = dynamic_cast<const LdLoc*>(&target))
             if (ld->Variable && ld->Variable->Type &&
                 dynamic_cast<const TypeSystem::PointerType*>(ld->Variable->Type.get()))
-                return "*" + ld->Variable->Name;
+                return "*" + CSharp::OutputVisitor::EscapeIdentifier(ld->Variable->Name);
         return "*(" + Expr(target) + ")";
     }
 };
