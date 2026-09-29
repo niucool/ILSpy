@@ -247,6 +247,48 @@ TEST(ILAstToCSharp, InstanceCallRendersAsReceiverDotMethod) {
     EXPECT_EQ(text.find("System.Object.ToString("), std::string::npos) << "not a static-style call";
 }
 
+TEST(ILAstToCSharp, MultiArgAccessorRendersAsIndexer) {
+    // A property accessor taking arguments beyond the receiver is an
+    // indexer access (C# has no parameterized properties besides indexers):
+    // `call IList::get_Item(list, i)` renders `list[i]`, not `list.Item`
+    // (the index argument must not be dropped); `call IList::set_Item(list,
+    // i, v)` renders `list[i] = v`. A plain accessor without extra arguments
+    // stays a property access (`list.Count`).
+    auto list = MakeVar(VariableKind::Local, "list", 0);
+    auto i = MakeVar(VariableKind::Local, "i", 1);
+
+    auto getCall = std::make_unique<Call>(
+        "System.Collections.Generic.IList`1[[System.Object]]::get_Item");
+    getCall->IsInstanceCall = true;
+    getCall->ReturnType = StackType::O;
+    getCall->AddArg(std::make_unique<LdLoc>(list));
+    getCall->AddArg(std::make_unique<LdLoc>(i));
+
+    auto setCall = std::make_unique<Call>(
+        "System.Collections.Generic.IList`1[[System.Object]]::set_Item");
+    setCall->IsInstanceCall = true;
+    setCall->ReturnType = StackType::Void;
+    setCall->AddArg(std::make_unique<LdLoc>(list));
+    setCall->AddArg(std::make_unique<LdLoc>(i));
+    setCall->AddArg(std::make_unique<LdLoc>(list));
+
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(list, std::move(getCall)));
+    block->Add(std::move(setCall));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("= list[i];"), std::string::npos)
+        << "an indexer getter renders the index, not a property";
+    EXPECT_NE(text.find("list[i] = list;"), std::string::npos)
+        << "an indexer setter renders the index and the value";
+    EXPECT_EQ(text.find(".Item"), std::string::npos)
+        << "the accessor name must not appear in the index syntax";
+}
+
 TEST(ILAstToCSharp, ConstructorCallEmitsNewExpression) {
     auto call = std::make_unique<Call>("System.Text.StringBuilder::.ctor");
     call->ReturnType = StackType::Void;

@@ -4546,18 +4546,53 @@ private:
                     /*callOpcode=*/!call.IsVirtualCall, call.IsVirtualMethod);
         }
         // Property accessor: get_X(receiver) -> receiver.X ;
-        // set_X(receiver, value) -> receiver.X = value.
+        // set_X(receiver, value) -> receiver.X = value. An accessor taking
+        // arguments beyond the receiver is an indexer access (C# has no
+        // parameterized properties besides indexers): get_X(recv, k...) ->
+        // recv[k...]; set_X(recv, k..., value) -> recv[k...] = value. The
+        // property's own name does not appear in the index syntax.
         std::string prop = AccessorPropertyName(call.MethodName);
         if (!prop.empty()) {
+            bool isSetter = false;
+            if (call.MethodName.size() >= 4) {
+                auto pos = call.MethodName.rfind("::");
+                std::string_view member = (pos != std::string_view::npos)
+                    ? std::string_view(call.MethodName).substr(pos + 2) : std::string_view(call.MethodName);
+                isSetter = member.substr(0, 4) == "set_";
+            }
+            // Arguments[0] is the receiver in both shapes (a this-receiver
+            // call carries the this load as its first argument).
+            std::size_t argBase = 1;
+            std::size_t indexCount = call.Arguments.size() - argBase - (isSetter ? 1 : 0);
+            if (indexCount > 0) {
+                std::string recv;
+                if (thisReceiver) {
+                    recv = thisPrefix;
+                } else {
+                    std::string r = Expr(*call.Arguments[0]);
+                    bool parens = !r.empty() && (r[0] == '&' || r[0] == '*');
+                    if (IsCastInstruction(call.Arguments[0].get()))
+                        parens = true;
+                    recv = parens ? "(" + r + ")" : r;
+                }
+                std::string indices;
+                for (std::size_t i = 0; i < indexCount; ++i) {
+                    if (i > 0) indices += ", ";
+                    indices += call.Arguments[argBase + i]
+                        ? Expr(*call.Arguments[argBase + i])
+                        : std::string("(default)");
+                }
+                std::string target = recv + "[" + indices + "]";
+                if (isSetter) {
+                    ILInstruction* value = call.Arguments[argBase + indexCount].get();
+                    return target + " = " + (value ? Expr(*value) : std::string("(default)"));
+                }
+                return target;
+            }
             if (thisReceiver) {
                 std::string target = thisPrefix + prop;
-                if (call.MethodName.size() >= 4) {
-                    auto pos = call.MethodName.rfind("::");
-                    std::string_view member = (pos != std::string_view::npos)
-                        ? std::string_view(call.MethodName).substr(pos + 2) : std::string_view(call.MethodName);
-                    if (member.substr(0, 4) == "set_" && call.Arguments.size() >= 2) {
-                        return target + " = " + (call.Arguments[1] ? Expr(*call.Arguments[1]) : std::string("(default)"));
-                    }
+                if (isSetter && call.Arguments.size() >= 2) {
+                    return target + " = " + (call.Arguments[1] ? Expr(*call.Arguments[1]) : std::string("(default)"));
                 }
                 return target;
             }
@@ -4566,13 +4601,8 @@ private:
             if (IsCastInstruction(call.Arguments[0].get()))
                 needsParens = true;
             std::string target = (needsParens ? "(" + recv + ")" : recv) + "." + prop;
-            if (call.MethodName.size() >= 4) {
-                auto pos = call.MethodName.rfind("::");
-                std::string_view member = (pos != std::string_view::npos)
-                    ? std::string_view(call.MethodName).substr(pos + 2) : std::string_view(call.MethodName);
-                if (member.substr(0, 4) == "set_" && call.Arguments.size() >= 2) {
-                    return target + " = " + (call.Arguments[1] ? Expr(*call.Arguments[1]) : std::string("(default)"));
-                }
+            if (isSetter && call.Arguments.size() >= 2) {
+                return target + " = " + (call.Arguments[1] ? Expr(*call.Arguments[1]) : std::string("(default)"));
             }
             return target;
         }
