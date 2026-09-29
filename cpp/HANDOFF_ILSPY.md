@@ -4285,6 +4285,30 @@ rule. THE STATE: reverted to the committed no-fire wiring (dnlib
 80,219 / the pin / the tests 35/35 -- no regression); the family's
 -80 opportunity intact behind the rule.
 
+## THE BASE-QUALIFICATION FAMILY -- LANDED (the C# rule mirrored)
+
+THE RULE ARCHAEOLOGY (the reference reads): the C# ExpressionBuilder's
+TranslateTarget (line 2734): the base-reference target for a
+this-targeted, non-virtual-invocation member whose declaring type
+!= the current type (the field accesses pass nonVirtualInvocation:
+true); **the RequiresQualifier check then ELIDES the qualifier unless
+the bare name resolves to something else** -- the shadowing rule.
+THE MIRRORED GATES: (1) the dot separator (the flattened name is
+"NS.Type.field" -- the earlier rfind("::") never fired); (2) the
+declaring type in the current type's base chain (GetAllBaseTypes --
+the nested/enclosing types and display classes excluded); (3) the
+shadow gate: a local or parameter in scope carrying the field's
+name (the ctor stores behind same-named parameters -- the oracle's
+dominant form). THE RESULT: dnlib v2 80,219 -> **79,991 (-228)**;
+net10 99,529 -> 99,525 (-4); cui unchanged; the pin; the tests
+35/35. THE RESIDUE: the port renders 200 base. vs the oracle's 138
+(62 extra -- some shadow sites the oracle resolves differently,
+likely the field-name lookups the port's simple name comparison
+over-matches); the net diff is the gate and it improved.
+
+THE SESSION'S TOTAL (the ?? throw + the base-qualification): dnlib
+v2 80,369 -> 79,991 (-378 since the v2 baseline).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
