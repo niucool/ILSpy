@@ -5531,3 +5531,74 @@ combination above, not more pushdown.
 5. The `?.` shapes (100 vs ~123) + the pdbState sites.
 6. The `.override` forwarders (the 17 sites).
 7. The net10 foreach-collapse gap.
+
+## Session record: the guard-chain combination lands (c6f3d94ec)
+
+Corpus: dnlib 73171 -> **72235** (-936), net10 90580 -> **88923** (-1657),
+cui 2259 -> 2271 (+12, the combined-form churn, semantically verified),
+gotos 1177 unchanged. The connid pin b38babc5465c9861 unchanged; hello 3;
+the suite control 268; the canary renders 8859 lines (the delta in the
+expected guard family).
+
+### c6f3d94ec "Combine same-exit guards by leave-value identity"
+
+THE CDD STEP TryCombineSameExitGuards (wired after
+TryCombineSameTargetGuards in the fixpoint): two positionally adjacent
+no-else guards whose TRUE arms resolve to the same leave identity (the
+target container + the value's ToString -- the SectionExitKey
+convention; the arm a bare Leave or a Block wrapping nothing but the
+leave) become `if (C1 || C2) leave V`, the second guard block consumed.
+THE ROOT: the C# merges the flat chains through MergeCommonBranches
+(the WillShortCircuit form) because its reader keeps both guards in one
+block branching to one shared exit; the port's CFS folds branch-to-
+return into per-site leaves, so the shared identity survives only as
+the leave VALUE. VARIANT 2: the first guard's true arm still a Branch
+to the second guard's fall-through block (the multi-pred exit the CFS
+does not fold) -> `if (!C1 && C2) br CONT` with the shared exit as the
+fall-through (the C#'s pre-InvertIf `a != null && b != null` form).
+
+THE RED: ConditionDetection.CombinesSameExitGuardsByLeaveValue (the
+SigComparer::Equals shape, seeded over the FULL pipeline -- the raw
+branch form lets the CFS fold reproduce the real folded state).
+GuardChainFallThroughReturnSurvives now gates on the RENDERED
+`return false;` (the combine legitimately folds the null check into the
+combined condition, merging the return-false leaves into one shared
+exit -- the leave-count assertion was stale the moment the combine
+became correct).
+
+THE 3-WAY NUANCE (the recorded follow-up, ~119 dnlib sites x 2 lines):
+the port renders `if (a == null || b == null || !Increment())` where
+the oracle splits the Increment guard off (`if (a == null || b ==
+null) return false; if (!Increment()) return false;`). The C# merges
+only same-RAW-target guards; the Increment guard's raw true arm was
+`br CONT` (a different target), but by the time the port's variant 1
+sees the chain, an earlier step has inverted the Increment guard to the
+exit-armed form -- the polarity distinction is lost. Fixing it needs the
+merge to happen before that inversion (the fixpoint ordering) or a
+polarity marker. Semantically equivalent either way (the short-circuit
+preserves the evaluation order).
+
+THE REVERTED EXTENSION (the shape ledger): a leave-key variant 3
+(matching the first guard's folded leave against the second guard's
+fall-through block's leave) fired on mixed-polarity pairs the oracle
+keeps separate and produced BARE-TRUTHINESS conditions
+(`if (imageDataDirectory.VirtualAddress)`) through the negation chain
+-- +117/+550 on the corpora. REVERTED; the render's handling of
+NegateCondition over null-comparisons is the blocker to revisit it.
+
+### The standing gates (all verified on the committed tree)
+
+- The connid pin b38babc5465c9861; dnlib 72235; net10 89223; cui 2271;
+  hello 3; gotos 1177; the suite control 268 (two runs); the canary
+  8859 lines.
+
+### The queue (updated, in order)
+
+1. The 3-way guard split (the Increment-guard exclusion, ~119 sites).
+2. The label-merged regions (the cross-container analysis).
+3. The switch-inline section-order relaxation.
+4. The goto families (the 303 not-found/adjacent split, the 97
+   span-escapes, the 2 dangling gotos).
+5. The `?.` shapes (100 vs ~123) + the pdbState sites.
+6. The `.override` forwarders (the 17 sites).
+7. The net10 foreach-collapse gap.
