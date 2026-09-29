@@ -248,7 +248,7 @@ TEST(LoadedAssemblyTest, GetMetadataFileThrowsTheLoadFailureMessage) {
 
 TEST(LoadedAssemblyTest, StatusPollingDoesNotTriggerTheLoad) {
     AssemblyList list;
-    std::string file = fs::temp_directory_path() / "ilspy_la_missing.dll";
+    std::string file = (fs::temp_directory_path() / "ilspy_la_missing.dll").string();
     std::error_code ec;
     fs::remove(fs::path(file), ec);
     LoadedAssembly& asm_ = list.OpenAssembly(file);

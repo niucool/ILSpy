@@ -93,7 +93,7 @@ TEST(GuessFileTypeTest, TruncatedUtf8SequenceIsBinary)
     // cut short by an ASCII char while state == UTF8Sequence -> Error.
     EXPECT_EQ(Detect("\xE2\x82x"), FileType::Binary);
     // A continuation byte with no lead.
-    EXPECT_EQ(Detect("\x80abc"), FileType::Binary);
+    EXPECT_EQ(Detect("\x80" "abc"), FileType::Binary);
 }
 
 // ---- The UTF-8 BOM arm.
@@ -119,7 +119,7 @@ TEST(GuessFileTypeTest, Utf8BomWithInvalidUtf8PayloadIsTextNotBinary)
     // StreamReader decodes invalid bytes to U+FFFD (it never throws), so
     // the payload reaches the XML stage and classifies as Text.
     const std::string bom = "\xEF\xBB\xBF";
-    EXPECT_EQ(Detect(bom + "junk\xFF\xFEbytes"), FileType::Text);
+    EXPECT_EQ(Detect(bom + "junk\xFF\xFE" "bytes"), FileType::Text);
 }
 
 TEST(GuessFileTypeTest, TwoByteBomAloneDecodesToEmptyTextAndIsText)

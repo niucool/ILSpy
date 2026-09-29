@@ -63,9 +63,9 @@ TEST(DynamicInstructions, BinaryOperatorNodeInvariantAndDump) {
     ILInstruction* leftPtr = left.get();
     DynamicBinaryOperatorInstruction inst(
         CSharpBinderFlags::CheckedContext, ExpressionType::Add,
-        nullptr, CSharpArgumentInfo{.Name = "", .Flags = CSharpArgumentInfoFlags::UseCompileTimeType},
+        nullptr, CSharpArgumentInfo{"", CSharpArgumentInfoFlags::UseCompileTimeType},
         std::move(left),
-        CSharpArgumentInfo{.Name = "rhs", .Flags = CSharpArgumentInfoFlags::NamedArgument},
+        CSharpArgumentInfo{"rhs", CSharpArgumentInfoFlags::NamedArgument},
         std::move(right));
     EXPECT_EQ(inst.Op, OpCode::DynamicBinaryOperatorInstruction);
     EXPECT_EQ(inst.ChildCount(), 2);
@@ -112,7 +112,7 @@ TEST(DynamicInstructions, UnaryOperatorNodeInvariantAndDump) {
     ILInstruction* operandPtr = operand.get();
     DynamicUnaryOperatorInstruction inst(
         CSharpBinderFlags::None, ExpressionType::Negate, nullptr,
-        CSharpArgumentInfo{.Name = "", .Flags = CSharpArgumentInfoFlags::Constant},
+        CSharpArgumentInfo{"", CSharpArgumentInfoFlags::Constant},
         std::move(operand));
     EXPECT_EQ(inst.ChildCount(), 1);
     EXPECT_EQ(inst.GetChild(0), operandPtr);
@@ -150,7 +150,7 @@ TEST(DynamicInstructions, GetMemberNodeInvariantAndDump) {
     auto target = MakeLdLoc("d");
     DynamicGetMemberInstruction inst(
         CSharpBinderFlags::InvokeSimpleName, "Foo", nullptr,
-        CSharpArgumentInfo{.Name = "", .Flags = CSharpArgumentInfoFlags::UseCompileTimeType},
+        CSharpArgumentInfo{"", CSharpArgumentInfoFlags::UseCompileTimeType},
         std::move(target));
     EXPECT_EQ(inst.ResultType(), StackType::O);
     EXPECT_EQ(inst.GetArgumentInfoOfChild(0).Flags,
@@ -201,8 +201,8 @@ TEST(DynamicInstructions, InvokeNodeArgumentsAndDump) {
     args.push_back(std::move(a0));
     args.push_back(std::move(a1));
     std::vector<CSharpArgumentInfo> infos{
-        CSharpArgumentInfo{.Name = "", .Flags = CSharpArgumentInfoFlags::IsStaticType},
-        CSharpArgumentInfo{.Name = "p", .Flags = CSharpArgumentInfoFlags::NamedArgument}};
+        CSharpArgumentInfo{"", CSharpArgumentInfoFlags::IsStaticType},
+        CSharpArgumentInfo{"p", CSharpArgumentInfoFlags::NamedArgument}};
     DynamicInvokeInstruction inst(CSharpBinderFlags::None, nullptr, infos,
                                   std::move(args));
     EXPECT_EQ(inst.ChildCount(), 2);
@@ -285,7 +285,7 @@ TEST(DynamicInstructions, DeepCloneCarriesMetadataAndOperands) {
     DynamicGetMemberInstruction inst(
         CSharpBinderFlags::InvokeSimpleName, "Foo",
         std::make_shared<TS::KnownType>(TS::KnownTypeCode::String),
-        CSharpArgumentInfo{.Name = "", .Flags = CSharpArgumentInfoFlags::Constant},
+        CSharpArgumentInfo{"", CSharpArgumentInfoFlags::Constant},
         std::move(target));
     inst.StartILOffset = 0x10;
     inst.EndILOffset = 0x20;
@@ -312,7 +312,7 @@ TEST(DynamicInstructions, DeepCloneInvokeArguments) {
     DynamicInvokeInstruction inst(
         CSharpBinderFlags::None, nullptr,
         std::vector<CSharpArgumentInfo>{CSharpArgumentInfo{},
-                                        CSharpArgumentInfo{.Name = "p"}},
+                                        CSharpArgumentInfo{"p"}},
         std::move(args));
     auto clonePtr = inst.Clone();
     auto* clone = dynamic_cast<DynamicInvokeInstruction*>(clonePtr.get());

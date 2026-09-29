@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 
 namespace ILSpy::Decompiler::CSharp::Resolver {
 class CSharpResolver;

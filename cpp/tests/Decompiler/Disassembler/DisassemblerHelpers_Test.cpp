@@ -268,8 +268,8 @@ TEST(DisassemblerHelpersEscapeTest, EscapeQuotesNamesWithNonAsciiNonLetters) {
 	// control) + U+00CA (E with circumflex, a letter) + "A", as UTF-8: the
 	// punctuation and the control unit each invalidate the name, and the
 	// quoted render escapes the control unit.
-	EXPECT_EQ(Escape("v\xc2\xbf\xc2\x88\xc3\x8aA"),
-		"'v\xc2\xbf\\u0088\xc3\x8aA'");
+	EXPECT_EQ(Escape("v\xc2\xbf\xc2\x88\xc3\x8a" "A"),
+		"'v\xc2\xbf\\u0088\xc3\x8a" "A'");
 	// U+00B5 (micro sign) and U+00E9 (e with acute) are letters (Ll): a
 	// letters-only non-ASCII name stays a valid identifier.
 	EXPECT_EQ(Escape("\xc2\xb5\xc3\xa9"), "\xc2\xb5\xc3\xa9");

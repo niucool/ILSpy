@@ -772,8 +772,8 @@ TEST(WebCilFileLoaderTest, LoadsAValidContainerAsThePeShape)
     std::vector<std::uint8_t> metadata = ExtractMetadataFromConnIdRes();
     std::vector<std::uint8_t> container =
         BuildWebCilContainerOver(metadata);
-    std::string path = fs::temp_directory_path() /
-        ("ilspy_webcil_loader_" + std::to_string(std::rand()) + ".wasm");
+    std::string path = (fs::temp_directory_path() /
+        ("ilspy_webcil_loader_" + std::to_string(std::rand()) + ".wasm")).string();
     {
         std::ofstream out(path, std::ios::binary);
         out.write(reinterpret_cast<const char*>(container.data()),
@@ -828,8 +828,8 @@ TEST(WebCilFileLoaderTest, FullPipelineOverAFaithfulContainer)
 
     std::vector<std::uint8_t> container =
         BuildWebCilContainerOverPe(pe);
-    std::string containerPath = fs::temp_directory_path() /
-        "ilspy_webcil_connid_full.wasm";
+    std::string containerPath = (fs::temp_directory_path() /
+        "ilspy_webcil_connid_full.wasm").string();
     {
         std::ofstream out(containerPath, std::ios::binary);
         out.write(reinterpret_cast<const char*>(container.data()),
@@ -892,8 +892,8 @@ TEST(WebCilFileLoaderTest, CorpuMscorlibBodiesDecodeThroughWebCil) {
 
     std::vector<std::uint8_t> container =
         BuildWebCilContainerOverPe(pe);
-    std::string containerPath = fs::temp_directory_path() /
-        "ilspy_webcil_mscorlib.wasm";
+    std::string containerPath = (fs::temp_directory_path() /
+        "ilspy_webcil_mscorlib.wasm").string();
     {
         std::ofstream out(containerPath, std::ios::binary);
         out.write(reinterpret_cast<const char*>(container.data()),
@@ -941,8 +941,8 @@ TEST(WebCilFileLoaderTest, CorpuMscorlibBodiesDecodeThroughWebCil) {
 TEST(MetadataFileLoaderTest, LoadsTheMetadataStreamAsTheMetadataOnlyShape)
 {
     std::vector<std::uint8_t> metadata = ExtractMetadataFromConnIdRes();
-    std::string path = fs::temp_directory_path() /
-        "ilspy_metadata_only.dll";
+    std::string path = (fs::temp_directory_path() /
+        "ilspy_metadata_only.dll").string();
     {
         std::ofstream out(path, std::ios::binary);
         out.write(reinterpret_cast<const char*>(metadata.data()),
@@ -977,8 +977,8 @@ TEST(MetadataFileLoaderTest, LoadsTheMetadataStreamAsTheMetadataOnlyShape)
 TEST(MetadataFileLoaderTest, PdbExtensionSelectsTheProgramDebugDatabaseKind)
 {
     std::vector<std::uint8_t> metadata = ExtractMetadataFromConnIdRes();
-    std::string path = fs::temp_directory_path() /
-        "ilspy_metadata_only.PDB";
+    std::string path = (fs::temp_directory_path() /
+        "ilspy_metadata_only.PDB").string();
     {
         std::ofstream out(path, std::ios::binary);
         out.write(reinterpret_cast<const char*>(metadata.data()),
