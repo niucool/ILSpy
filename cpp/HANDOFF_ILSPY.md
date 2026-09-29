@@ -5602,3 +5602,85 @@ NegateCondition over null-comparisons is the blocker to revisit it.
 5. The `?.` shapes (100 vs ~123) + the pdbState sites.
 6. The `.override` forwarders (the 17 sites).
 7. The net10 foreach-collapse gap.
+
+## Session record: the MemberRef field sigs + the condition-leaf render (f54e16a81)
+
+Corpus: dnlib 72235 -> **72111** (-124), net10 88923 -> **88805** (-118),
+cui 2271 unchanged, gotos 1177 -> 1159, hello 3, the pin
+b38babc5465c9861 unchanged, the suite control 268, the canary renders.
+
+### f54e16a81 "Decode MemberRef field sigs; type-aware condition leaf render"
+
+TWO interlocking correctness fixes, found through the `if (listener)`
+family (the LazyList.Set_NoLock render: `if (listener)` -- not valid C#
+for a class-typed field where the oracle renders `if (listener !=
+null)`):
+
+(1) THE METADATA BUG: GetFieldSignature masked ANY token's rid into the
+Field table, so a MemberRef field reference (`ldfld` through a
+fieldref -- the relinked same-module assemblies carry them; the raw
+body bytes of Set_NoLock show 0x0A tokens) read some unrelated field's
+signature: the LazyList`1 fields decoded as System.UInt32 /
+dnlib.PE.Subsystem / System.Byte[]. The MemberRef path now decodes the
+row's own signature blob with the VAR scope of the parent type's
+definition (a TypeSpec parent's GENERICINST blob `15 12 <coded> <args>`
+names it; a TypeDef parent is the definition itself; anything else the
+positional fallback). The probe path: GetFieldSignature(0x0A0000B9)
+correctly gives IListListener`1[[TValue]] -- the raw ILAst keeps the
+scrambled forms (the reader threads the same call). RED:
+MemberRefFieldSignature.DecodesTheMemberRefBlobWithTheParentVarScope.
+
+(2) THE RENDER BUG: a bare truthiness leaf in a condition slot rendered
+the expression itself whatever its type. The C# reader materializes the
+brtrue/brfalse null/zero comparisons itself; this port's reader keeps
+the bare load, so the render supplies the comparison: the
+reference-stack leaf the null comparison, the numeric-stack leaf the
+zero comparison, the Boolean-valued leaf the bare form, the Unknown
+stack type (the untyped dup slots) the bare form (the C#'s
+TypeKind.Unknown arm). THREE follow-on gates the corpus exposed: the
+Boolean-typed FIELD loads (IsBooleanValued now handles LdObj -- the
+`if (is64bit != 0)` regression was the bool fields falling to the
+numeric arm); the pattern tests (MatchInstruction is I4-by-construction
+-- `x is T t != 0` became the bare `x is T t`); and the pattern
+negation parens (`!(x is T t)` -- the `!` binds tighter). The folded-
+guard and empty-arm negation paths share the dispatch (NegateCondText).
+RED: ILAstToCSharp.ReferenceTypedConditionLeafRendersNullComparison.
+
+### THE 3-WAY GUARD SPLIT: BLOCKED BY THE BLOCK MODEL (the finding)
+
+The Increment-guard exclusion (~119 dnlib sites, the oracle renders
+`if (a == null || b == null) return false; if (!Increment()) return
+false;` where the port renders the 3-way `if (a == null || b == null ||
+!recursionCounter.Increment()) return false;`) is NOT reachable by the
+guard-combine path: the seeded mixed-polarity pair combines fine (the
+variant-3 leave-key extension fired), but the real Equals chain
+re-merges the Increment guard downstream regardless. THE MECHANISM:
+the C#'s IntroduceShortCircuit requires the arm to contain ONLY the
+nested if (`trueBlock.Instructions.Count == 1 && FinalInstruction is
+Nop`) -- after the C# inlines the recursion block into the guard's
+arm, the arm carries [if (Increment) br CONT, br FAIL] -- TWO
+instructions -- and the merge is REJECTED. This port's block model
+cannot express content after an if inside an arm (the recorded
+"statements after an if" limitation -- the same blocker as the
+label-merged regions), so the port's arm always looks
+single-instruction and the ISC absorbs the Increment guard. The fix
+needs the reader-level restructure (the C#'s in-block if+br pairs) --
+the deepest model change, out of scope for a slice. The variant-3
+leave-key extension was re-landed and REVERTED again (dnlib 72111 ->
+72200, +89: the churn without the Equals payoff).
+
+### The standing gates (all verified on the committed tree)
+
+- The connid pin b38babc5465c9861; dnlib 72111; net10 88805; cui 2271;
+  hello 3; gotos 1159; the suite control 268; the canary 8859 lines.
+
+### The queue (updated, in order)
+
+1. The label-merged regions (the cross-container analysis; NOTE: the
+   same block-model blocker may apply -- assess first).
+2. The switch-inline section-order relaxation.
+3. The goto families (the not-found/adjacent split, the span-escapes,
+   the 2 dangling gotos).
+4. The `?.` shapes + the pdbState sites.
+5. The `.override` forwarders (the 17 sites).
+6. The net10 foreach-collapse gap.
