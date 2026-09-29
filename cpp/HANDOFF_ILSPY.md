@@ -4581,3 +4581,98 @@ renders `this.@namespace = @namespace;`, `base.Suffix()`, and bare
 5. **The net10 foreach-collapse gap** (the try-wrapped enumerator shape).
 6. The record follow-ups, the A2/A3 campaigns, the small-mask hex residue
    (all per the earlier queue).
+
+# ============================================================
+# THE SESSION RECORD (the guard-region fold: the label-merged
+# regions arc's multi-block sub-slice, dnlib -803)
+# ============================================================
+
+## THE STANDING GATES (all green at this session's end)
+
+- **The connid pin**: `ebf9b6e9fd29112f` (byte-identical through the slice).
+- **The corpus parity**: dnlib **75,206** (76,009 -> 75,206), net10
+  **94,313** (96,041 -> 94,313), cui **2,292** (2,312 -> 2,292), hello 3
+  (the recorded residue), the canary's diff all in the restructure family.
+- **The goto count**: 1,263 -> **1,021**.
+- **The suite**: the full env-excluded run's failure set IDENTICAL to the
+  pristine-tree control (the [GRD] instrumentation measured on a scratch
+  build; the committed tree is clean).
+
+## THE SLICE (65269ad0a) -- THE GUARD-REGION FOLD
+
+THE SHAPE (the ILSPY_DUMP_TF dump over ReadArrayArgument, the design
+reference): `bK: if (cond) br bT else nop` + the multi-block fall-through
+region + bT. The port rendered the guard's goto AND inlined single-pred
+targets into the true arm (the returnPropagation machinery) -- which
+INVERTS the region order: a terminal fall-through block (the throw)
+rendered after the if as if unconditionally reached, and the target's
+fall-through continuation rendered unreachable. THE C# RULE (the
+reference archaeology): ConditionDetection (a basic-block transform)
+inlines single-pred targets into the arms, merges common branches (the
+"Embed else-block for goto removal": ExtractBlock moves the fall-through
+blocks into the else), and ReduceNestingTransform (a later ILAst
+transform) hoists else blocks after the if when the exit can be
+duplicated, plus ImproveILOrdering's inversion when the true arm ends
+unreachable. The oracle's form for the multi-statement shared epilogue
+(the ReadArrayArgument family): `if (!cond) { <region> } <epilogue>`.
+
+THE FOLD: AnalyzeGuardRegions + the EmitBlock final interception -- the
+region nests under the INVERTED condition (NegateCondText, the outer
+parens stripped) and renders through the FULL nested block machinery
+(EmitBlock, so labels, nested guards, and loops inside the region work);
+the target continues after the if. THE GATES (each measured):
+- a same-container forward branch (t > k+1, t < the claimable span) with
+  a Nop/null false arm;
+- the target non-terminal OR multi-pred (a single-pred TERMINAL target
+  is the early-exit form -- the return-propagation renders
+  `if (cond) { return/throw; }`; a multi-pred terminal target, the shared
+  epilogue, FOLDS);
+- single-entry region: no branch from outside enters any region block
+  (the parent-chain walk to the container's block list);
+- no label-region/coalesce overlap; nested folds confined to the outer
+  fold's span (the recursive ScanGuardRange with the target limit);
+- the fold ERASES its guard's returnPropagation_ entry (the target
+  un-suppresses and renders after the if).
+
+THE DEBUG ARC (the honest record): (1) restricting the
+return-propagation to terminal targets alone REGRESSED +459 gotos (the
+non-terminal inlinings were removing gotos) -- reverted; the surgical
+interaction (the fold erases the entries of the guards it claims) is the
+right seam; (2) the overlap gate on suppressedReturnBlocks_ rejected the
+OUTER folds whose inner region blocks the propagation had claimed --
+dropped (the single-entry gate already covers the external sources);
+(3) the guardRegionOwner_ overlap rejected the NESTED folds (the outer
+fold's ownership of its own region) -- dropped (the scan structure
+prevents same-level overlaps by construction); (4) the dead labels on
+unreferenced fold targets drop (the label-erasure pass: every incoming
+branch is a folded guard's arm, a fall-through drop, or a continue).
+
+THE MEASURE: gotos 1,263 -> 1,021 (-242); dnlib 76,009 -> 75,206;
+net10 96,041 -> 94,313; cui 2,312 -> 2,292; the pin byte-identical;
+hello 3. ReadArrayArgument now renders the oracle's exact structure
+(the `if (num != -1) { if (num < 0) { throw; } ... }` nesting, the
+epilogue after).
+
+## THE REMAINING GOTO PROFILE (the [GRD] instrumentation, dnlib)
+
+The 1,021 remaining gotos' guards reject at: 303 not-found/adjacent
+(the target not in the container's later blocks -- the backward branches
+and the cross-container targets; needs the finer split), 97 span-escapes
+(the nested guard's target beyond the outer fold's span), 184
+single-entry rejections (the diamond patterns -- multiple paths enter
+the region; the C# handles these via the structured arm inlining), 16
+overlaps, 14 single-pred terminal targets (the propagation's form,
+correct). THE NEXT SUB-SLICES (in measured order): (1) the
+single-entry/diamond family (the C# inline-true-branch path); (2) the
+backward/cross-container targets (the split of the 303); (3) the
+span-escapes.
+
+## THE OTHER FAMILIES THIS SESSION NOTED (unchanged queue)
+
+The propagation's displaced-fall-through semantic bug (the inlined
+non-terminal target's exit branch dropped by the CONTAINER order while
+the EMIT order differs -- the ReadArrayArgument b4 case) is FIXED IN
+PRACTICE by the fold claiming those guards; the residual population
+(the propagation's non-guard inlinings with Branch finals) is unprobed
+-- a [PR]-style dump of the inlined-final drops is the check if the
+corpus shows residue.
