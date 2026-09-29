@@ -4449,3 +4449,135 @@ flat render). The C# comparison: the oracle's whole run is ~9.4s, so
 the port's per-unit work is ~2x -- the caches are the lever, gated on
 the fixture regression.
 
+
+# ============================================================
+# THE SESSION RECORD (the naming-fidelity arc: three slices, -3,982 dnlib)
+# ============================================================
+
+## THE STANDING GATES (all green at this session's end)
+
+- **The connid pin**: `ebf9b6e9fd29112f` (byte-identical through all three
+  slices).
+- **The corpus parity**: dnlib **76,009** (the arc this session: 79,991 ->
+  79,601 -> 79,535 -> 76,009), net10 **96,041** (99,525 -> 99,481 ->
+  99,471 -> 96,041), cui **2,312** (2,354 -> unchanged -> 2,312), hello 3
+  (the recorded residue), the bennu canary verified before/after per slice.
+- **The suite**: the full env-excluded run's failure set IDENTICAL to the
+  pristine-tree control (268 = 269 - 1, the committed RED test; the handoff's
+  older "188" baseline was recorded under a different fixture environment --
+  the CONTROL RUN is the gate, not the absolute number).
+- **The guards held per slice**: the pin, all four corpora, hello, the
+  canary, the sweep control, the seeded suites (the one stale expectation
+  updated with its slice).
+
+## SLICE 1 -- THE currentLowerCaseTypeOrMemberNames FILTER (468faebb1)
+
+THE ROOT: the C# AssignVariableNames' root VariableScope filters every
+naming proposal through currentLowerCaseTypeOrMemberNames -- the lower-case
+member names of the declaring type (`GetMembers()` INCLUDES the inherited
+members -- the non-interface base chain), plus the lower-case type names
+of the declaring type's namespace and nesting chain (both the filter AND
+the reserved set). The port lacked the filter, so a local stored from
+`ldfld this->field` was named after the field; the shadow then tripped the
+base-qualification gate and every access rendered `base.field` where the
+oracle keeps the bare name (the measured 22 over-fired `base.` sites were
+mostly THIS bug, not a qualification bug). The port mirrors the filter at
+the store/load proposals (the address/newobj arms stay deferred with the
+recorded deferrals; the using-scope type-name arm deferred -- the IL
+pipeline context carries no using scope; the primary-ctor `<name>P` arm
+deferred -- no corpus evidence). THE MEASURE: dnlib 79,991 -> 79,601 (-390),
+net10 -> 99,481 (-44), the base. residue 22 -> 8 over-fires (the rest:
+3 `?.` sites + 5 keyword-escaping sites). THE RED: the seeded
+RejectsProposalThatShadowInheritedMemberName (LookupStubs' base-chain
+fixture).
+
+## SLICE 2 -- THE KEYWORD-IDENTIFIER ESCAPE (a69955282)
+
+THE BUG: the C# TextWriterTokenWriter.WriteIdentifier prepends `@` to every
+keyword-named identifier; the port rendered them RAW -- invalid C# at most
+sites (`private string namespace = "ns";`, `KeywordNames(string namespace,
+int class)`). 76 oracle `@`-identifiers on dnlib vs the port's 1. THE FIX:
+`EscapeIdentifier` (CSharpKeywordCheck.hpp, beside IsKeyword) applied at
+the identifier render sites: the facade's field-declaration + signature
+parameter names, the body emitter's variable/member-segment/foreach-element
+renders (SimpleName, the LdLoc/StLoc/LdLoca arms, the declarations, the
+catch/pinned/match variables, the compound-assign targets). THREE
+corrections found under the corpus gates: (1) the QUERY-CONTEXTUAL keywords
+and `await` must NOT escape (the flat render never emits query expressions
+-- the null-context IsKeyword rule over-fired 100 `@group` sites on net10;
+EscapeIdentifier uses the new IsUnconditionalKeyword -- the unconditional
+table factored out of IsKeyword); (2) the implicit `this` parameter renders
+as the KEYWORD TOKEN (never `@this` -- the C# ThisReferenceExpression,
+which WriteIdentifier never sees); (3) the foreach-element parameter arm no
+longer proposes `this` as a name (`foreach (CustomAttribute @this in this)`
+-> the item fallback). THE MEASURE: dnlib 79,601 -> 79,535 (-66), net10 ->
+99,471 (-10), the canary byte-identical (no keyword names in that
+fixture). THE RED: the keyword_names fixture
+(/home/jim/ilspy-test-fixtures/keyword_names/, KeywordNames.cs with its
+build recipe; the oracle render beside it) + 4 gtests.
+
+## SLICE 3 -- THE THIS-RECEIVER ELISION (41ee272ac) -- THE BIGGEST SINGLE
+## SLICE OF THE CAMPAIGN (-3,526)
+
+THE BUG (two faces): (a) the port rendered the explicit receiver on every
+this-targeted call -- 2,831 `this.M(...)` sites against the oracle's 8;
+(b) the shadowed own-type field stores degraded to SELF-ASSIGNMENTS
+(`name = name;` assigns the parameter to itself; the field is never set --
+a correctness bug, not cosmetics). THE C# RULE (the CallBuilder's
+GetRequiredTransformationsForCall + ConvertField's RequiresQualifier,
+unified): a this-targeted member access renders the BARE name whenever
+nothing hides it; a same-named local/parameter (HidesVariableWithName)
+forces the receiver (`this.name = name` for own-type, `base.name = name`
+for base-declared); a `call`-opcode invocation of a base-declared VIRTUAL
+method renders `base.M(...)` (requireTarget = CallOpCode != CallVirt &&
+method.IsVirtual); a callvirt, an own-type call, and a non-virtual base
+method called with `call` all elide. THE IMPLEMENTATION: the Call
+instruction gains IsVirtualCall (the callvirt opcode) and IsVirtualMethod
+(the token's MethodAttributes.Virtual bit -- MethodDef tokens only, the
+reader sets both); MaybeBasePrefix generalized into ThisReceiverPrefix /
+ThisReceiverPrefixParts (the shadow scan + the own/base/foreign decision
+tree); InstanceCallText intercepts the this-receiver argument (IsThisLoad)
+before the receiver render, in both the plain-call and the
+property-accessor arms. THE MEASURE: dnlib 79,535 -> 76,009 (-3,526!), the
+`this.` count 3,882 -> 762 (the oracle's 603; the residue: 17 port-only
+`.override` forwarder `this.MoveNext()` renders -- the oracle emits NO
+forwarders for those, a separate family -- plus duplicated-line count
+artifacts, the unique-form gap is 1 display-class line), net10 99,471 ->
+96,041 (-430), cui -> 2,312 (-42), the pin byte-identical, the canary 474
+lines all in the expected family. THE RED: the keyword_names fixture
+extended (KeywordNamesBase + the override + Describe) -- the port now
+renders `this.@namespace = @namespace;`, `base.Suffix()`, and bare
+`GetNamespace() + Suffix()` exactly. ONE stale seeded expectation updated
+(ILAstToCSharp.InstanceCallRendersAsReceiverDotMethod expected the old
+`this.ToString(arg_1)` approximation; the C# form is the bare
+`ToString(arg_1)`).
+
+## THE RESIDUES THIS SESSION EXPOSED (the queue additions)
+
+1. **The `.override` forwarder family**: the port synthesizes explicit-impl
+   forwarders (`bool IEnumerator.MoveNext() { return this.MoveNext(); }`)
+   at ~17 dnlib sites where the oracle renders NONE (the oracle's handling
+   of the iterator MethodImpls differs -- the state-machine hiding may
+   absorb them). Measured, unprobed.
+2. **The foreach-collapse gap on net10**: 33 `@interface` oracle sites
+   (`foreach (TypeInfo @interface in type.interfaces)`) where the port
+   renders the UNCOLLAPSED GetEnumerator form (the try-wrapped enumerator
+   pattern the collapse misses).
+3. **The `this.` forwarder + display-class receiver residue** (159 raw
+   lines, mostly duplicated-line artifacts).
+4. The known arcs stand: the label-merged regions (~2k goto/label lines),
+   the display-class forms (~450), the dup_/S_ slot chains (~2,070).
+
+## THE QUEUE (updated, in order)
+
+1. **The label-merged regions** (the cross-container analysis; the
+   ILSPY_DUMP_TF shapes are the design source; ~2k lines).
+2. **The switch formation** (the reference-side verdict probe unblocked;
+   the C# source instrumentation path).
+3. **The remaining `?.` shapes** (100 vs ~123) + the `?.`-folded pdbState
+   sites.
+4. **The .override forwarder family** (the 17 sites; probe why the oracle
+   emits none).
+5. **The net10 foreach-collapse gap** (the try-wrapped enumerator shape).
+6. The record follow-ups, the A2/A3 campaigns, the small-mask hex residue
+   (all per the earlier queue).
