@@ -744,3 +744,107 @@ TEST(SwitchOnStringTransformTest, LegacyDictionarySwitchFolds)
 }
 
 } // namespace
+// The reader-model bridge: the port's reader ends a block at every
+// conditional branch (each guard is a block FINAL with the fall-through in
+// the NEXT block); the C# reader keeps the brtrue fall-through in the same
+// block, so its cascading chains are `[if (cond) br handler, br nextCase]`
+// instruction pairs -- the shape the ported cascade matchers expect. The
+// bridge coalesces the fragmented form before the matchers run. This test
+// builds the fragmented form (the reader's output) and asserts the switch
+// synthesis fires on it.
+TEST(SwitchOnStringTransformTest, FragmentedCascadingChainConvertsToSwitch)
+{
+    auto stringType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
+    auto fn = std::make_unique<IL::ILFunction>();
+    auto s = MakeLocal("s", stringType);
+    fn->Variables.push_back(s);
+
+    auto container = std::make_unique<IL::BlockContainer>();
+    // The handler bodies + the default exit (referenced by the chain, no
+    // flow meaning in the order).
+    std::vector<IL::Block*> bodies;
+    std::vector<std::unique_ptr<IL::Block>> bodyOwners;
+    auto exit = std::make_unique<IL::Block>();
+    exit->Kind = IL::BlockKind::ControlFlow;
+    exit->Add(std::make_unique<IL::Leave>(container.get()));
+    IL::Block* exitPtr = exit.get();
+    for (int i = 0; i < 3; i++) {
+        auto body = std::make_unique<IL::Block>();
+        body->Kind = IL::BlockKind::ControlFlow;
+        body->Add(std::make_unique<IL::Leave>(container.get()));
+        bodies.push_back(body.get());
+        bodyOwners.push_back(std::move(body));
+    }
+    // The fragmented chain leads the container (the head is the
+    // method-body entry, the container's first block): each guard is its
+    // own block's FINAL (the port's reader form); the fall-through
+    // continues to the next guard block.
+    IL::Block* headPtr = nullptr;
+    const char* values[3] = {"aa", "bb", "cc"};
+    for (int i = 0; i < 3; i++) {
+        auto guard = std::make_unique<IL::Block>();
+        guard->Kind = IL::BlockKind::ControlFlow;
+        if (i == 0) headPtr = guard.get();
+        auto eqCall = std::make_unique<IL::Call>("System.String::op_Equality");
+        eqCall->DeclaringType =
+            std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
+        eqCall->Arguments.push_back(std::make_unique<IL::LdLoc>(s));
+        eqCall->Arguments.push_back(
+            std::make_unique<IL::LdStr>(values[i]));
+        auto ifInst = std::make_unique<IL::IfInstruction>(
+            std::move(eqCall),
+            std::make_unique<IL::Branch>(bodies[i]));
+        guard->SetFinal(std::move(ifInst));
+        container->AddBlock(std::move(guard));
+    }
+    // The chain's tail: the unconditional branch to the default exit.
+    auto tail = std::make_unique<IL::Block>();
+    tail->Kind = IL::BlockKind::ControlFlow;
+    tail->SetFinal(std::make_unique<IL::Branch>(exitPtr));
+    container->AddBlock(std::move(tail));
+    for (auto& b : bodyOwners)
+        container->AddBlock(std::move(b));
+    container->AddBlock(std::move(exit));
+
+    fn->Body = std::move(container);
+    IL::RecomputeIncomingEdgeCounts(*fn);
+    IL::ComputeVariableUsage(*fn);
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.SwitchStatementOnString = true;
+    IL::SwitchOnStringTransform transform;
+    transform.Run(*fn, ctx);
+
+    // The chain synthesized into a SwitchInstruction over the string.
+    ASSERT_NE(headPtr, nullptr);
+    auto* sw = dynamic_cast<IL::SwitchInstruction*>(
+        headPtr->Instructions.empty()
+            ? nullptr
+            : dynamic_cast<IL::SwitchInstruction*>(
+                  headPtr->Instructions[0].get()));
+    ASSERT_NE(sw, nullptr) << "the fragmented chain converts to a switch";
+    auto* stringToInt = dynamic_cast<IL::StringToInt*>(sw->Value.get());
+    ASSERT_NE(stringToInt, nullptr);
+    EXPECT_EQ(stringToInt->Map.size(), 3u);
+
+    // The C# Run tail (container.SortBlocks(deleteUnreachableBlocks:
+    // true)) deletes the consumed guard blocks: only the head and the
+    // handler blocks remain -- no dead [if, br] pairs render as gotos.
+    auto* body = dynamic_cast<IL::BlockContainer*>(fn->Body.get());
+    ASSERT_NE(body, nullptr);
+    EXPECT_EQ(body->Blocks.size(), 5u)
+        << "head + three handlers + exit; the guards and the default's "
+           "thunk block are gone";
+    std::function<bool(const IL::ILInstruction*)> hasOpEquality =
+        [&](const IL::ILInstruction* i) {
+        if (i == nullptr) return false;
+        if (auto* call = dynamic_cast<const IL::Call*>(i))
+            if (call->MethodName.find("op_Equality") != std::string::npos)
+                return true;
+        for (int ci = 0; ci < i->ChildCount(); ++ci)
+            if (hasOpEquality(i->GetChild(ci))) return true;
+        return false;
+    };
+    EXPECT_FALSE(hasOpEquality(body))
+        << "no guard conditions survive the switch synthesis";
+}

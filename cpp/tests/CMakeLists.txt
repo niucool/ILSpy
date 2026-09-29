@@ -518,6 +518,7 @@ add_executable(ilspy_tests
     Decompiler/IL/Transforms/LocalFunctionDecompiler_Test.cpp
     Decompiler/IL/Transforms/SwitchOnStringHashtable_Test.cpp
     Decompiler/IL/Transforms/SwitchOnStringLengthChar_Test.cpp
+    Decompiler/IL/Transforms/SwitchOnStringTransform_Test.cpp
     Decompiler/IL/Transforms/TransformArrayInitializers_Test.cpp
     Decompiler/CSharp/Transforms/PatternStatementTransform_Test.cpp
     Decompiler/CSharp/Transforms/PrettifyAssignments_Test.cpp

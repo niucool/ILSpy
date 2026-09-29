@@ -71,6 +71,7 @@
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
+#include "Decompiler/IL/Instructions/StringToInt.hpp"
 #include "Decompiler/IL/Instructions/UsingInstruction.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
@@ -3292,6 +3293,30 @@ private:
     // `return <value> switch { <label> => <arm>, ... };` -- the shape the
     // Roslyn switch-expressions compile to (the IL switch with the case
     // bodies each a single value construction).
+    // A string switch: the value is a StringToInt wrapper over the string
+    // expression the switch dispatches on (the C# StatementBuilder's
+    // TranslateSwitchValue unwraps it the same way).
+    const StringToInt* StringSwitchOf(const SwitchInstruction& sw) const {
+        return sw.Value
+                   ? dynamic_cast<const StringToInt*>(sw.Value.get())
+                   : nullptr;
+    }
+
+    // The string constant a string switch's label value maps to; a null
+    // return with *isNull set marks the null-key entry (the C#
+    // CreateTypedCaseLabel lookup over strToInt.Map, `case null:`).
+    const std::string* StringCaseLabel(const StringToInt& s2i, long long v,
+                                       bool* isNull = nullptr) const {
+        if (isNull) *isNull = false;
+        for (const auto& e : s2i.Map) {
+            if (e.second != static_cast<int>(v)) continue;
+            if (e.first.has_value()) return &*e.first;
+            if (isNull) *isNull = true;
+            return nullptr;
+        }
+        return nullptr;
+    }
+
     bool TryEmitSwitchExpression(const SwitchInstruction& sw,
                                  const SwitchInlinePlan& plan, int indent) {
         if (plan.defaultFallsToExit) return false;
@@ -3353,11 +3378,22 @@ private:
                 label = "_";
                 isDefault = true;
             } else if (ivs.size() == 1) {
-                if (ivs[0].Start == ivs[0].InclusiveEnd())
-                    label = std::to_string(ivs[0].Start);
-                else
+                if (ivs[0].Start == ivs[0].InclusiveEnd()) {
+                    if (const StringToInt* s2i = StringSwitchOf(sw)) {
+                        bool nullKey = false;
+                        if (const std::string* key =
+                                StringCaseLabel(*s2i, ivs[0].Start,
+                                                &nullKey))
+                            label = "\"" + *key + "\"";
+                        else if (nullKey)
+                            label = "null";
+                    }
+                    if (label.empty())
+                        label = std::to_string(ivs[0].Start);
+                } else {
                     label = std::to_string(ivs[0].Start) + ".." +
                             std::to_string(ivs[0].InclusiveEnd());
+                }
             } else {
                 return false;
             }
@@ -3373,8 +3409,13 @@ private:
             if (a.isDefault != b.isDefault) return b.isDefault;
             return a.sortKey < b.sortKey;
         });
+        const StringToInt* s2iExpr = StringSwitchOf(sw);
         Line(indent,
-             "return " + (sw.Value ? Expr(*sw.Value) : std::string()) + " switch");
+             "return " +
+                 (s2iExpr && s2iExpr->Argument
+                      ? Expr(*s2iExpr->Argument)
+                      : (sw.Value ? Expr(*sw.Value) : std::string())) +
+                 " switch");
         Line(indent, "{");
         for (const auto& a : arms)
             Line(indent + 1, a.label + " => " + a.expr + ", ");
@@ -3618,8 +3659,22 @@ private:
                 }
                 if (plan && TryEmitSwitchExpression(sw, *plan, indent))
                     break;
-                Line(indent, "switch (" + (sw.Value ? Expr(*sw.Value) : std::string("(default)")) + ")");
+                const StringToInt* s2i = StringSwitchOf(sw);
+                Line(indent,
+                     "switch (" +
+                         (s2i && s2i->Argument
+                              ? Expr(*s2i->Argument)
+                              : (sw.Value ? Expr(*sw.Value)
+                                          : std::string("(default)"))) +
+                         ")");
                 Line(indent, "{");
+                // The C# GetDefaultSection: the section with the most labels
+                // is the default (a string switch's complement interval).
+                // GetDefaultSection is a non-const lookup; the const cast
+                // mirrors the C# reader (the method mutates nothing).
+                const SwitchSection* stringDefaultSection =
+                    s2i ? const_cast<SwitchInstruction&>(sw).GetDefaultSection()
+                        : nullptr;
                 for (std::size_t k = 0; k < sw.Sections.size(); ++k) {
                     const auto& section = sw.Sections[k];
                     if (!section) continue;
@@ -3632,10 +3687,27 @@ private:
                     if (section->HasNullLabel) {
                         Line(indent + 1, "case null:");
                     }
-                    if (section->Labels.IsEmpty() && !section->HasNullLabel) {
+                    if (stringDefaultSection == section.get()) {
+                        Line(indent + 1, "default:");
+                    } else if (section->Labels.IsEmpty() &&
+                               !section->HasNullLabel) {
                         Line(indent + 1, "default:");
                     } else {
                         for (const auto& iv : section->Labels.Intervals()) {
+                            if (s2i && iv.Start == iv.InclusiveEnd()) {
+                                bool nullKey = false;
+                                if (const std::string* key =
+                                        StringCaseLabel(*s2i, iv.Start,
+                                                         &nullKey)) {
+                                    Line(indent + 1,
+                                         "case \"" + *key + "\":");
+                                    continue;
+                                }
+                                if (nullKey) {
+                                    Line(indent + 1, "case null:");
+                                    continue;
+                                }
+                            }
                             if (iv.Start == iv.InclusiveEnd())
                                 Line(indent + 1, "case " + std::to_string(iv.Start) + ":");
                             else

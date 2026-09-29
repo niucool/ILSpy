@@ -119,12 +119,26 @@ static void CollectBranchTargetsIn(const Block* block,
     // FinalInstruction slot. A block whose final is absent or conditional
     // falls through to the next block in its container, so that edge is a
     // successor too (appended last, matching the position the C#'s explicit
-    // fall-through branch would occupy).
+    // fall-through branch would occupy). A null-final block whose LAST
+    // instruction is itself an unconditional terminator (the [if, br]
+    // convention, or a switch the cascade synthesized into the list) does
+    // NOT fall through -- the terminator's target provides the edge.
     if (block->Parent == container) {
         const int idx = block->ChildIndex;
         const ILInstruction* fin = block->FinalInstruction.get();
-        bool fallsThrough = fin == nullptr ||
-                            fin->Op == OpCode::IfInstruction;
+        bool fallsThrough;
+        if (fin == nullptr) {
+            const ILInstruction* last =
+                block->Instructions.empty()
+                    ? nullptr
+                    : block->Instructions.back().get();
+            fallsThrough =
+                last == nullptr ||
+                !HasFlag(last->Flags(),
+                         InstructionFlags::EndPointUnreachable);
+        } else {
+            fallsThrough = fin->Op == OpCode::IfInstruction;
+        }
         if (fallsThrough && idx >= 0 &&
             static_cast<std::size_t>(idx) + 1 < container->Blocks.size()) {
             successors.push_back(
