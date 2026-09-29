@@ -246,16 +246,28 @@ void LoadedAssembly::RunLoad(
         listeners = std::move(loadedListeners_);
         loadedListeners_.clear();
     }
+    // Fired with every lock released (a listener may re-enter the status
+    // surface), on the worker thread -- the C# continuation's pool thread.
+    // BEFORE the promise is satisfied: the C# `Loaded` fires when the load
+    // completes, and a waiter released by the promise must observe the
+    // listeners' side effects (the set_value is the happens-before edge;
+    // firing after it makes a synchronous demand read a stale listener
+    // state, which the LoadedListenerFiresOnceWhenTheLoadCompletes test
+    // pins). A listener throwing is its own failure: the load result is
+    // already published and the remaining listeners still deserve their
+    // turn, matching the C# event-loop semantics where one handler's
+    // exception does not stop the raise.
+    for (auto& listener : listeners) {
+        try {
+            listener();
+        } catch (...) {
+        }
+    }
     // Always satisfy the promise (bennu rule 3): the failure was already
     // recorded in the fault slots, so the future carries completion, not
-    // the exception. A waiter waking here observes the landed state.
+    // the exception. A waiter waking here observes the landed state and
+    // the fired listeners.
     done->set_value();
-    // Fired with every lock released (a listener may re-enter the status
-    // surface), on the worker thread -- the C# continuation's pool
-    // thread.
-    for (auto& listener : listeners) {
-        listener();
-    }
 }
 
 FileLoaders::LoadResult LoadedAssembly::LoadCore() const

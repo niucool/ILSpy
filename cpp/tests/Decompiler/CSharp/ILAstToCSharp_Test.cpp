@@ -740,6 +740,72 @@ TEST(ILAstToCSharp, SubtractionFromZeroIsUnaryNegation) {
     EXPECT_EQ(text.find("(0 - x)"), std::string::npos) << "not a binary subtraction";
 }
 
+TEST(ILAstToCSharp, NegatedNegativeConstantIsParenthesized) {
+    // The C# #4180 fix (InsertParenthesesVisitor.VisitUnaryOperatorExpression
+    // + IsNegativePrimitive): unary minus over a NEGATIVE primitive literal
+    // parenthesizes the literal. Without it the output is `- -N`, which C#
+    // parses as pre-decrement of an undeclared `-N` instead of negation.
+    // The IL shape (the mscorlib-observed `ldc.i4 -0x2B79C052; neg`), via the
+    // reader's neg modeling: BinaryNumericInstruction(LdcI4(0), v, Sub, I4).
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
+        std::make_unique<BinaryNumericInstruction>(
+            std::make_unique<LdcI4>(0),
+            std::make_unique<LdcI4>(-731222354),
+            BinaryNumericOperator::Sub, StackType::I4)));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("-(-731222354)"), std::string::npos) << text;
+    EXPECT_EQ(text.find("- -731222354"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, NegOfPositiveConstantStaysUnparenthesized) {
+    // The C# IsNegativePrimitive gate: only NEGATIVE primitive literals
+    // parenthesize; `neg` over a non-negative literal renders bare `-N`
+    // (already the unambiguous form).
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
+        std::make_unique<BinaryNumericInstruction>(
+            std::make_unique<LdcI4>(0),
+            std::make_unique<LdcI4>(731222354),
+            BinaryNumericOperator::Sub, StackType::I4)));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("-731222354"), std::string::npos) << text;
+    EXPECT_EQ(text.find("-("), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, NegatedNegativeConstantInAdditionChainParensOnlyTheLiteral) {
+    // The Issue4180.il corpus shape: `ldc.i4 -0x2B79C052; neg; ldc.i4
+    // -0x24C3820C; add` -- the neg fold renders the unary minus, and the
+    // add's right operand (a negative literal in a subtraction position)
+    // renders with its own signed form.
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
+        std::make_unique<BinaryNumericInstruction>(
+            std::make_unique<BinaryNumericInstruction>(
+                std::make_unique<LdcI4>(0),
+                std::make_unique<LdcI4>(-731222354),
+                BinaryNumericOperator::Sub, StackType::I4),
+            std::make_unique<LdcI4>(-618070028),
+            BinaryNumericOperator::Add, StackType::I4)));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("-(-731222354)"), std::string::npos) << text;
+}
+
 TEST(ILAstToCSharp, BooleanEqualityToZeroIsLogicalNot) {
     // `comp(eq, ldloc boolVar, ldc.i4 0)` is `!boolVar`; `comp(ne, .., 0)` is
     // just `boolVar`. Only when the variable's type is Boolean.

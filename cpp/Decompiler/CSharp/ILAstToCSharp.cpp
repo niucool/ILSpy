@@ -3639,6 +3639,27 @@ private:
     // or literal (the identifier-shaped forms) renders unparenthesized --
     // `(Button)target`, not `(Button)(target)`; anything with looser-
     // binding structure keeps the parens.
+    // The C# InsertParenthesesVisitor.IsNegativePrimitive (#4180): the
+    // primitive-literal negative check over the signed numeric constant
+    // types (the port's ILAst carries them as LdcI4/LdcI8/LdcF4/LdcF8;
+    // the C# list's sbyte/short ride the int-typed LdcI4 and decimal is
+    // not an ILAst constant shape).
+    static bool IsNegativePrimitive(const ILInstruction* node) {
+        if (node == nullptr) return false;
+        switch (node->Op) {
+            case OpCode::LdcI4:
+                return static_cast<const LdcI4*>(node)->Value < 0;
+            case OpCode::LdcI8:
+                return static_cast<const LdcI8*>(node)->Value < 0;
+            case OpCode::LdcF4:
+                return static_cast<const LdcF4*>(node)->Value < 0;
+            case OpCode::LdcF8:
+                return static_cast<const LdcF8*>(node)->Value < 0;
+            default:
+                return false;
+        }
+    }
+
     bool IsSimpleCastOperand(const ILInstruction* node) {
         if (node == nullptr)
             return true;
@@ -4597,7 +4618,15 @@ private:
                 // `0 - x` (and `0.0 - x`) is the IL for unary negation `-x`.
                 if (bin.Operator == BinaryNumericOperator::Sub && bin.Left &&
                     (bin.Left->Op == OpCode::LdcI4 && static_cast<const LdcI4*>(bin.Left.get())->Value == 0)) {
-                    return "-" + Expr(*bin.Right);
+                    std::string operand = Expr(*bin.Right);
+                    // The C# #4180 rule (InsertParenthesesVisitor.
+                    // VisitUnaryOperatorExpression + IsNegativePrimitive):
+                    // unary minus over a NEGATIVE primitive literal
+                    // parenthesizes the literal -- the adjacent `- ` tokens
+                    // would otherwise parse as pre-decrement.
+                    if (IsNegativePrimitive(bin.Right.get()))
+                        return "-(" + operand + ")";
+                    return "-" + operand;
                 }
                 const char* op = "+";
                 switch (bin.Operator) {
