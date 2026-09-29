@@ -4113,6 +4113,38 @@ parameter attribute parens); 3e45005eb (the params/default values
 on lambda parameter lists); 85399bfc0 (the `new (string,int)[]`
 space); e243786e2 (the init-only marker position).
 
+## THE NEGATED-SPECIAL-CONSTANTS FAMILY -- THE ORACLE-PRECEDES-FIX BLOCK + THE ROUND-TRIP BUG FIXED
+
+THE ORACLE BLOCK (the sync-discipline finding): the installed
+oracle (/home/jim/.dotnet/tools/ilspycmd) PRE-DATES the upstream
+family -- it renders NegEpsilon as `-5E-324` (the literal), NOT
+`-double.Epsilon` (the b3035687f form), and ByteScale as `40f/51f`
+(NOT the 59361d9de `200f/255f`). PORTING THE UPSTREAM FIXES NOW
+WOULD DIVERGE FROM THE GATE ORACLE. THE PATH: the family lands when
+a fresh upstream oracle is buildable (the 11.0.0-SDK pin -- see the
+reference-instrumentation handoff); the fixture
+(/home/jim/ilspy-test-fixtures/neg_constants/) is READY for the
+post-upgrade verification.
+
+THE REAL BUG FOUND (FIXED, committed): the field-constant
+formatter's %g (6 digits) BROKE THE ROUND-TRIP (`NegPi =
+-3.141592653589793` rendered as `-3.14159`). THE FIX: the shortest
+form that parses back exactly (1..9 digits for float, 1..17 for
+double, via %.*g + strtod/strtof round-trip) + the capital-E
+exponent marker (`-5E-324`, the PrimitiveExpression form). THE
+GATES: all four unchanged (dnlib 79,855 / net10 99,476 / cui 2,354
+-- the corpora carry no >6-digit constants; the pin; the tests).
+THE DEBUG SCAR: the `%.%dg` format-string error (the C++ format
+takes the argument precision via `*`: `%.*g`) -- the first build
+printed `%dg.0` literally.
+
+THE NEXT-QUEUE UPDATE: the A1 candidates deferred pending the
+upstream oracle; the general field-constant FRACTION machinery
+(the oracle's `40f/51f` for ByteScale -- the num/den form for the
+non-PI/E constants -- the C# IsEqual/preferredFractionDenominators
+path) is a PORTABLE-AGAINST-THE-OLD-ORACLE slice (the old oracle
+has the generic fractions!) -- a candidate next.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
