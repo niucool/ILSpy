@@ -27,6 +27,7 @@
 #include "Decompiler/IL/ControlFlow/LoopDetection.hpp"
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
 #include "Decompiler/IL/Transforms/GetILTransforms.hpp"
+#include "Decompiler/CSharp/ILAstToCSharp.hpp"
 #include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
@@ -1261,14 +1262,91 @@ TEST(ConditionDetection, GuardChainFallThroughReturnSurvives) {
     RunGetILTransforms(*fn, ctx);
     fn->CheckInvariant(ILPhase::Normal);
 
-    int leaveFalse = 0;
-    Walk(fn->Body.get(), [&](ILInstruction* i) {
-        auto* leave = dynamic_cast<Leave*>(i);
-        if (!leave) return;
-        auto* ldc = dynamic_cast<LdcI4*>(leave->Value.get());
-        if (ldc && ldc->Value == 0) ++leaveFalse;
-    });
-    EXPECT_GE(leaveFalse, 2)
+    // The semantic gate: the guards' return-false path must stay reachable.
+    // The pipeline may combine the guards (and even fold the null check
+    // into the combined condition), so the leave count is not stable --
+    // but every correct form renders a `return false;` reachable from the
+    // both-guards-false path; the mangled form returned true for every
+    // non-null input.
+    std::string text = ILAstToCSharp(*fn, "bool", "IsNonObfuscatedAssembly",
+                                     "IAssembly asm");
+    EXPECT_NE(text.find("return false;"), std::string::npos)
         << "the guards' fall-through return-false must survive the pipeline:\n"
+        << fn->ToString() << "\n--- render ---\n" << text;
+}
+
+TEST(ConditionDetection, CombinesSameExitGuardsByLeaveValue) {
+    // The SigComparer::Equals shape (dnlib): two null guards branching to
+    // the SHARED failure block. The port's CFS folds the shared branch
+    // target into per-site leaves (the C# keeps the shared block and merges
+    // the guards through MergeCommonBranches/WillShortCircuit), so the CDD
+    // must combine the folded form by the leave VALUE:
+    //   if (C1) leave 0;  if (C2) leave 0  ->  if (C1 || C2) leave 0
+    //   b0: if (a != b) br bG        b1: leave 1 (the a == b path)
+    //   b2: V_0 = Resolve(a); if (V_0 == null) br bF
+    //   b3: if (V_1 == null) br bF   b4: leave Equals(V_0, V_1)
+    //   bF: leave 0
+    auto a = std::make_shared<ILVariable>(VariableKind::Parameter, nullptr, 0);
+    a->Name = "a";
+    auto b = std::make_shared<ILVariable>(VariableKind::Parameter, nullptr, 1);
+    b->Name = "b";
+    auto v0 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 2);
+    v0->Name = "V_0";
+    auto v1 = std::make_shared<ILVariable>(VariableKind::Parameter, nullptr, 3);
+    v1->Name = "V_1";
+    auto fn = WrapBlocks({});
+    for (int i = 0; i < 6; ++i) fn->Body->AddBlock(std::make_unique<Block>());
+    const std::uint32_t offs[6] = { 0x00, 0x08, 0x0A, 0x18, 0x20, 0x28 };
+    for (int i = 0; i < 6; ++i) fn->Body->Blocks[i]->StartILOffset = offs[i];
+    Block* b0 = fn->Body->Blocks[0].get();
+    Block* b1 = fn->Body->Blocks[1].get();
+    Block* b2 = fn->Body->Blocks[2].get();
+    Block* b3 = fn->Body->Blocks[3].get();
+    Block* b4 = fn->Body->Blocks[4].get();
+    Block* bF = fn->Body->Blocks[5].get();
+    auto ld = [](std::shared_ptr<ILVariable> v) { return std::make_unique<LdLoc>(v); };
+    auto nullCheck = [&ld](std::shared_ptr<ILVariable> v) {
+        return std::make_unique<Comp>(ld(v), std::make_unique<LdNull>(),
+                                       ComparisonKind::Equality);
+    };
+    b0->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(ld(a), ld(b), ComparisonKind::Inequality),
+        std::make_unique<Branch>(b2)));
+    b1->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdcI4>(1)));
+    auto resolve = std::make_unique<Call>("dnlib.DotNet.TypeRef::Resolve");
+    resolve->ReturnType = StackType::O;
+    resolve->AddArg(ld(a));
+    b2->Add(std::make_unique<StLoc>(v0, std::move(resolve)));
+    b2->SetFinal(std::make_unique<IfInstruction>(nullCheck(v0), std::make_unique<Branch>(bF)));
+    b3->SetFinal(std::make_unique<IfInstruction>(nullCheck(v1), std::make_unique<Branch>(bF)));
+    auto equals = std::make_unique<Call>("dnlib.DotNet.SigComparer::Equals");
+    equals->ReturnType = StackType::I4;
+    equals->AddArg(ld(v0));
+    equals->AddArg(ld(v1));
+    b4->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::move(equals)));
+    bF->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdcI4>(0)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ILTransformContext ctx;
+    RunGetILTransforms(*fn, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // The two null guards combine under one LogicOr condition: some
+    // IfInstruction's condition tree mentions both V_0 and V_1 null checks.
+    int combined = 0;
+    Walk(fn->Body.get(), [&](ILInstruction* i) {
+        auto* iff = dynamic_cast<IfInstruction*>(i);
+        if (!iff || !iff->Condition) return;
+        bool hasV0 = false, hasV1 = false;
+        Walk(iff->Condition.get(), [&](ILInstruction* c) {
+            auto* ldv = dynamic_cast<LdLoc*>(c);
+            if (!ldv) return;
+            if (ldv->Variable.get() == v0.get()) hasV0 = true;
+            if (ldv->Variable.get() == v1.get()) hasV1 = true;
+        });
+        if (hasV0 && hasV1) ++combined;
+    });
+    EXPECT_GE(combined, 1)
+        << "the same-exit guards must combine into one condition tree:\n"
         << fn->ToString();
 }

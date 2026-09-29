@@ -339,6 +339,119 @@ bool TrySwapEmptyThen(BlockContainer* container, std::size_t blockIndex) {
 // collapses `if (c1) br X else { if (c2) br X else { ... } }` into
 // `if (c1 || c2 || ...) br X else <the body>` -- the shape the oracle
 // renders as `if (c1 || c2 || ...) { continue; } <body>`.
+// The positional fall-through successor (defined below; the guard combine
+// runs earlier in this TU than the helper).
+Block* NextBlockInContainer(Block* block);
+
+// The flat same-exit guard chain: `if (C1) leave V` as one block's final
+// and `if (C2) leave V` as the single-predecessor positional successor's --
+// the CFS branch-to-return fold's per-site materialization of the shared
+// exit block (the C# keeps that block whole and merges the guards through
+// MergeCommonBranches; the WillShortCircuit form: `if (cond) commonExit;
+// if (cond2) commonExit;` -> `if (cond || cond2) commonExit;`). The shared
+// identity survives the fold only as the leave VALUE (the same target
+// container and the same value expression), so the combine keys on that.
+bool TryCombineSameExitGuards(BlockContainer* container, std::size_t blockIndex) {
+    if (blockIndex + 1 >= container->Blocks.size()) return false;
+    Block* block = container->Blocks[blockIndex].get();
+    Block* nextBlock = container->Blocks[blockIndex + 1].get();
+    auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get());
+    if (!iff) return false;
+    if (iff->FalseInst) return false;  // no else: the false path falls to nextBlock
+    auto* nextIff = dynamic_cast<IfInstruction*>(nextBlock->FinalInstruction.get());
+    if (!nextIff) return false;
+    if (nextIff->FalseInst) return false;
+    // The consumed block is a pure guard (no leading instructions).
+    if (!nextBlock->Instructions.empty()) return false;
+    // The consumed block must be single-predecessor (only this block's
+    // fall-through) so removing it dangles no branch.
+    if (CountBranchPredecessors(FunctionOf(block), nextBlock) != 0) return false;
+    auto exitKey = [](const Leave* l) -> std::string {
+        if (l->TargetContainer == nullptr) return std::string();
+        if (l->Value == nullptr)
+            return "l:" + std::to_string(reinterpret_cast<std::uintptr_t>(l->TargetContainer));
+        return "lv:" + std::to_string(reinterpret_cast<std::uintptr_t>(l->TargetContainer)) +
+               ":" + l->Value->ToString();
+    };
+    // An arm's exit leave: a bare Leave, or a Block wrapping nothing but
+    // the leave (the CDD's own inline machinery wraps arms in Blocks). A
+    // Block with leading instructions is not a pure exit -- its content
+    // would be lost with the consumed block.
+    auto armLeave = [](ILInstruction* arm) -> const Leave* {
+        if (auto* l = dynamic_cast<const Leave*>(arm)) return l;
+        if (auto* b = dynamic_cast<const Block*>(arm)) {
+            if (b->Instructions.empty())
+                return dynamic_cast<const Leave*>(b->FinalInstruction.get());
+        }
+        return nullptr;
+    };
+    // Variant 1: both true arms resolve to leaves with the same exit
+    // identity (the target container + the value's text -- the
+    // SectionExitKey convention).
+    const Leave* leave1 = armLeave(iff->TrueInst.get());
+    const Leave* leave2 = armLeave(nextIff->TrueInst.get());
+    std::string key1 = leave1 != nullptr ? exitKey(leave1) : std::string();
+    std::string key2 = leave2 != nullptr ? exitKey(leave2) : std::string();
+    if (key1.empty() || key1 != key2) {
+        // Variant 2: the first guard's true arm branches to the second
+        // guard's fall-through block (the shared exit as a branch target --
+        // the multi-predecessor exit the CFS does not fold):
+        //   if (C1) br FAIL;  if (C2) br CONT;  FAIL: ...  ->
+        //   if (!C1 && C2) br CONT;  FAIL: ...
+        auto* br1 = dynamic_cast<Branch*>(iff->TrueInst.get());
+        if (!br1) return false;
+        Block* afterNext = NextBlockInContainer(nextBlock);
+        if (!afterNext || br1->TargetBlock != afterNext) return false;
+        auto andCond = std::make_unique<IfInstruction>(
+            NegateCondition(std::move(iff->Condition)),
+            std::move(nextIff->Condition), std::make_unique<LdcI4>(0));
+        iff->Condition = std::move(andCond);
+        iff->Condition->Parent = iff;
+        iff->Condition->ChildIndex = 0;
+        // The combined TRUE arm is the second guard's true arm (br CONT);
+        // the fall-through after the combined if is the shared exit block
+        // (the second guard's old fall-through), reached once the guard
+        // block is removed.
+        iff->TrueInst = std::move(nextIff->TrueInst);
+        if (iff->TrueInst) { iff->TrueInst->Parent = iff; iff->TrueInst->ChildIndex = 1; }
+        for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+            if (container->Blocks[i].get() == nextBlock) {
+                container->Blocks.erase(container->Blocks.begin() + i);
+                break;
+            }
+        }
+        for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+            container->Blocks[i]->ChildIndex = static_cast<int>(i);
+            container->Blocks[i]->Parent = container;
+        }
+        return true;
+    }
+    // Combine the conditions: LogicOr(C1, C2) = `if (C1) ldc.i4 1 else C2`.
+    // The short-circuit preserves the evaluation order (C2 only when C1 is
+    // false -- exactly when the original fall-through reached guard 2).
+    auto orCond = std::make_unique<IfInstruction>(
+        std::move(iff->Condition), std::make_unique<LdcI4>(1),
+        std::move(nextIff->Condition));
+    iff->Condition = std::move(orCond);
+    iff->Condition->Parent = iff;
+    iff->Condition->ChildIndex = 0;
+    // Consume the next guard block: its true arm's leave is value-identical
+    // to this if's (already in place), and its false path's destination is
+    // the block after it, which this block's fall-through reaches directly
+    // once the guard block is removed.
+    for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+        if (container->Blocks[i].get() == nextBlock) {
+            container->Blocks.erase(container->Blocks.begin() + i);
+            break;
+        }
+    }
+    for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+        container->Blocks[i]->ChildIndex = static_cast<int>(i);
+        container->Blocks[i]->Parent = container;
+    }
+    return true;
+}
+
 bool TryCombineSameTargetGuards(BlockContainer* container, std::size_t blockIndex) {
     if (blockIndex >= container->Blocks.size()) return false;
     Block* block = container->Blocks[blockIndex].get();
@@ -888,6 +1001,10 @@ void ConditionDetection::Run(ILFunction& function, ILTransformContext& context) 
             if (changed) continue;
             for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
                 if (TryCombineSameTargetGuards(c, i)) { changed = true; break; }
+            }
+            if (changed) continue;
+            for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
+                if (TryCombineSameExitGuards(c, i)) { changed = true; break; }
             }
             if (changed) continue;
             for (std::size_t i = c->Blocks.size(); i-- > 0;) {
