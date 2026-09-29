@@ -1161,7 +1161,18 @@ private:
                 if (!comp || comp->Kind != ComparisonKind::Equality) continue;
                 auto* ld = dynamic_cast<const LdLoc*>(comp->Left.get());
                 if (!ld || !ld->Variable) continue;
-                if (!comp->Right || comp->Right->Op != OpCode::LdNull) continue;
+                // The null gate: either a LdNull (the normalized form) or the
+                // int-zero constant the reader leaves on an unnormalized
+                // reference comparison.
+                bool isNullGate = false;
+                if (comp->Right) {
+                    if (comp->Right->Op == OpCode::LdNull)
+                        isNullGate = true;
+                    else if (auto* z =
+                                 dynamic_cast<const LdcI4*>(comp->Right.get()))
+                        isNullGate = z->Value == 0;
+                }
+                if (!isNullGate) continue;
                 // The throw arm: a block holding only the throw.
                 auto* arm = dynamic_cast<const Block*>(iff->TrueInst.get());
                 if (!arm) continue;
