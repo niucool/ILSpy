@@ -4176,6 +4176,30 @@ C# checks the MathF type definition before using it); the
 A1 REMAINING items (the lambda parameter parens etc.) now
 measurable against the v2 oracles.
 
+## THE `?? throw` COALESCE -- LANDED (30 of 43 sites)
+
+THE FOLD (committed): AnalyzeThrowCoalesce (after AnalyzeNullPropagation
+in the pipeline) -- the guard block (a block whose FINAL is
+`if (eq, ldloc L, ldnull)` with a single-construction throw arm --
+the arm Block's content is the throw) followed by the NEXT block's
+first StObj storing `ldloc L` -- records the fold and suppresses the
+guard's if via the existing coalesceSkipped_ machinery (the block's
+preceding statements, like the base call, still render). The StObj
+render consults the map: `target = param ?? throw <ctor-expr>;`.
+THE GATES: dnlib v2 80,369 -> **80,249** (-120); net10/cui/the pin/
+the tests unchanged (net10's 4 sites are the finally-variant).
+
+THE REMAINING 13 SITES (the follow-up shape): the finally-region
+guards -- `if (comp(eq, ldloc(list), ldc.i4(0))) Block { leave }` --
+the null rendered as the INT ZERO on the local, the arm a LEAVE (not
+a throw), inside a `finally` region (the exit-merged throw). The
+fold needs: the int-zero null gate (the ldnull alternative), the
+leave-arm's target throw resolution, and the finally-context safety
+(the C# renders `?? throw` there too -- the oracle's 43 include
+them). THE A1 QUEUE otherwise: the four small items (the lambda
+parameter parens etc.) show no corpus evidence -- the corpus-driven
+families (like this one) come first per the discipline.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
