@@ -4412,14 +4412,57 @@ bool DecompileTypeToStringBody(
                 methodEntity->IsExplicitInterfaceImplementation() ||
                 methodEntity->IsStatic() || memberRendersExtern)
                 return;
-            for (const TS::IMember* implemented :
-                 methodEntity->ExplicitlyImplementedInterfaceMembers()) {
+            // The forwarder gate: a row renders only when its interface
+            // method's declaring type resolves to the module the
+            // MethodDeclaration's TypeRef is SCOPED to. A type-forwarder
+            // hop between them (dnlib.dll's compiler-generated
+            // enumerators binding MoveNext to
+            // System.Collections.IEnumerator through the netstandard
+            // facade) does not render -- the real tool emits the
+            // forwarder for the same-module and the directly-referenced
+            // shapes only. The members pair positionally with the
+            // MethodImpl rows (GetOverrides resolves them in row order).
+            std::vector<Metadata::MetadataFile::MethodImplementationInfo>
+                implRows = file.GetMethodImplementations(m.Token);
+            const std::vector<const TS::IMember*>& members =
+                methodEntity->ExplicitlyImplementedInterfaceMembers();
+            std::size_t memberIndex = 0;
+            for (const TS::IMember* implemented : members) {
                 const auto* interfaceMethod =
                     dynamic_cast<const TS::IMethod*>(implemented);
                 if (interfaceMethod == nullptr ||
                     interfaceMethod->DeclaringType() == nullptr ||
                     interfaceMethod->DeclaringType()->Kind() !=
-                        TS::TypeKind::Interface)
+                        TS::TypeKind::Interface) {
+                    memberIndex++;
+                    continue;
+                }
+                const TS::IModule* scopedModule = nullptr;
+                if (memberIndex < implRows.size()) {
+                    if (auto memberRef = file.GetMemberReference(
+                            implRows[memberIndex].MethodDeclarationToken))
+                        scopedModule =
+                            module.GetDeclaringModule(memberRef->ParentToken);
+                }
+                memberIndex++;
+                if (std::getenv("ILSPY_PROBE_FWD") != nullptr)
+                    std::fprintf(stderr,
+                        "[FWD] member=%s declModule=%s scoped=%s\n",
+                        interfaceMethod->Name().c_str(),
+                        interfaceMethod->ParentModule() != nullptr
+                            ? interfaceMethod->ParentModule()->Name().c_str()
+                            : "(null)",
+                        scopedModule != nullptr
+                            ? scopedModule->Name().c_str()
+                            : "(null)");
+                // The fallback shape: a TypeRef whose scope does not
+                // resolve to a module (the same-module ModuleRef, whose
+                // name never matches the module-name scan) resolves
+                // through the compilation scan, and the forwarder emits
+                // when the definition lands in the decompiled module.
+                const TS::IModule* expectedModule =
+                    scopedModule != nullptr ? scopedModule : &module;
+                if (interfaceMethod->ParentModule() != expectedModule)
                     continue;
                 const TS::ITypePtr interfaceType =
                     interfaceMethod->DeclaringType();

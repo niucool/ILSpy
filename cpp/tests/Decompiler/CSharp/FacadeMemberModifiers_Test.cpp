@@ -811,6 +811,49 @@ TEST(FacadeMemberModifiersTest, OverrideDirectiveRendersTheForwarder)
         << text;
 }
 
+// The .override forwarder gate, the forwarded-interface arm: when the
+// MethodDeclaration's interface resolves through a TYPE FORWARDER (the
+// netstandard-facade shape of dnlib.dll's compiler-generated
+// enumerators -- the scoped module forwards the type to another
+// assembly), the real tool renders NO forwarder: the definition lands in
+// a module other than the one the declaration is scoped to.
+TEST(FacadeMemberModifiersTest, OverrideDirectiveSkipsForwardedInterface)
+{
+    constexpr const char* kFixture =
+        "/home/jim/ilspy-test-fixtures/cross_override_fixture/fwd/"
+        "CrossFwd.dll";
+    std::string text;
+    if (!RenderType(kFixture, "OverrideShape", text))
+        GTEST_SKIP() << "the cross-override fixture is not provisioned";
+    EXPECT_EQ(text.find("ILSpy generated this explicit interface "
+                        "implementation"),
+              std::string::npos)
+        << text;
+    EXPECT_EQ(text.find("IShape.GetValue()"), std::string::npos) << text;
+}
+
+// The .override forwarder gate, the direct cross-assembly arm: when the
+// interface is DEFINED in the referenced assembly the declaration is
+// scoped to (no forwarding hop), the forwarder still renders -- the
+// same shape as the same-module fixture.
+TEST(FacadeMemberModifiersTest, OverrideDirectiveRendersCrossAssemblyForwarder)
+{
+    constexpr const char* kFixture =
+        "/home/jim/ilspy-test-fixtures/cross_override_fixture/direct/"
+        "CrossOverride.dll";
+    std::string text;
+    if (!RenderType(kFixture, "OverrideShape", text))
+        GTEST_SKIP() << "the cross-override fixture is not provisioned";
+    EXPECT_NE(text.find("int IShape.GetValue()"), std::string::npos)
+        << text;
+    EXPECT_NE(text.find("ILSpy generated this explicit interface "
+                        "implementation from .override directive in Impl"),
+              std::string::npos)
+        << text;
+    EXPECT_NE(text.find("return this.Impl();"), std::string::npos)
+        << text;
+}
+
 // The C# DoDecompileType worklist (EnqueueReferencedMembers): a hidden
 // compiler-generated type whose declaring type's rendered members still
 // reference it -- the state-machine attribute's typeof -- renders at its
