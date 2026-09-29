@@ -60,6 +60,20 @@ StackType StackTypeOf(const IType* type) {
         // else StackType.Unknown (the error-type null object is not a reference type).
         return GetStackType(*type);
     }
+    // An enum's evaluation-stack type is its underlying primitive (the C#
+    // reads GetEnumUnderlyingType(); the common underlying is Int32 -> I4).
+    // A resolved definition carries the underlying; a name-only SimpleType
+    // (this port's signature model for a non-known in-module type) does
+    // not, and I4 there matches every enum underlying for the consumers --
+    // the switch-value widening accepts any of I4/I8, as the C#'s
+    // underlying read does for every underlying.
+    if (type->Kind() == TypeKind::Enum) {
+        if (const ITypeDefinition* def = type->GetDefinition()) {
+            if (ITypePtr underlying = def->EnumUnderlyingType())
+                return StackTypeOf(underlying);
+        }
+        return StackType::I4;
+    }
     if (const ITypeDefinition* def = type->GetDefinition()) {
         switch (def->KnownTypeCode()) {
             case KnownTypeCode::Boolean: case KnownTypeCode::Char:
