@@ -185,6 +185,20 @@ bool TryInlineTrueBranch(BlockContainer* container, std::size_t blockIndex) {
 // `block`) into the IfInstruction that is `block`'s final. The fall-through
 // must have exactly one predecessor (this block) so inlining doesn't change
 // the CFG for any other path. Returns true if a block was inlined.
+// Whether `arm` is an empty if-arm: a Nop, or a Block with no instructions
+// and a null/Nop final (the C# ConditionDetection.IsEmpty). Mirrors the
+// renderer's isEmptyArm but at the ILAst level, for the swap transform.
+bool IsEmptyArm(const ILInstruction* arm) {
+    if (!arm) return true;
+    if (arm->Op == OpCode::Nop) return true;
+    if (auto* b = dynamic_cast<const Block*>(arm)) {
+        if (!b->Instructions.empty()) return false;
+        if (!b->FinalInstruction) return true;
+        return b->FinalInstruction->Op == OpCode::Nop;
+    }
+    return false;
+}
+
 bool TryInlineIfFallThrough(BlockContainer* container, std::size_t blockIndex) {
     if (blockIndex + 1 >= container->Blocks.size()) return false;
     Block* block = container->Blocks[blockIndex].get();
@@ -195,7 +209,10 @@ bool TryInlineIfFallThrough(BlockContainer* container, std::size_t blockIndex) {
     // fall-through is only the cond-false path -- inlining the fall-through
     // into the else is then semantics-preserving.
     if (!iff->TrueInst || !HasFlag(iff->TrueInst->Flags(), InstructionFlags::EndPointUnreachable)) return false;
-    if (iff->FalseInst) return false;  // already has an else
+    // The C# materializes a missing else as a Nop (the IfInstruction ctor's
+    // `falseInst ?? new Nop()`), so its "no else" gates see a Nop; this port
+    // uses a null slot. Treat both as empty (the C# IsEmpty).
+    if (iff->FalseInst && !IsEmptyArm(iff->FalseInst.get())) return false;  // already has an else
 
     Block* fallThrough = container->Blocks[blockIndex + 1].get();
     if (fallThrough->Parent != container) return false;
@@ -290,20 +307,6 @@ std::unique_ptr<ILInstruction> NegateCondition(std::unique_ptr<ILInstruction> co
                                     ComparisonKind::Equality, TypeSystem::Sign::None);
 }
 
-// Whether `arm` is an empty if-arm: a Nop, or a Block with no instructions
-// and a null/Nop final (the C# ConditionDetection.IsEmpty). Mirrors the
-// renderer's isEmptyArm but at the ILAst level, for the swap transform.
-bool IsEmptyArm(const ILInstruction* arm) {
-    if (!arm) return true;
-    if (arm->Op == OpCode::Nop) return true;
-    if (auto* b = dynamic_cast<const Block*>(arm)) {
-        if (!b->Instructions.empty()) return false;
-        if (!b->FinalInstruction) return true;
-        return b->FinalInstruction->Op == OpCode::Nop;
-    }
-    return false;
-}
-
 // Swap `if (cond) {} else { work }` to `if (!cond) { work }` (negate the
 // condition, move the false arm to the true arm, drop the else). The C#
 // ConditionDetection.SwapEmptyThen. This puts the work in the true arm so the
@@ -325,6 +328,51 @@ bool TrySwapEmptyThen(BlockContainer* container, std::size_t blockIndex) {
     return true;
 }
 
+// The same-target guard merge: `if (C) br X else Block { FINAL: if (c) br X
+// else B2 }` (both gotos target the same block X) -> `if (C || c) br X else
+// B2`. This is the else-oriented form of the C# IntroduceShortCircuit: the
+// C# inverts the guards first (PickBetterBlockExit -> InvertIf, then
+// InlineTrueBranch into the then) and combines with LogicAnd; this port's
+// fall-through inline builds the else-oriented chain instead, so the merge
+// takes the LogicOr form directly (`if (C) ldc.i4 1 else c`, the C#
+// IfInstruction.LogicOr convention). Applied repeatedly by the fixpoint, it
+// collapses `if (c1) br X else { if (c2) br X else { ... } }` into
+// `if (c1 || c2 || ...) br X else <the body>` -- the shape the oracle
+// renders as `if (c1 || c2 || ...) { continue; } <body>`.
+bool TryCombineSameTargetGuards(BlockContainer* container, std::size_t blockIndex) {
+    if (blockIndex >= container->Blocks.size()) return false;
+    Block* block = container->Blocks[blockIndex].get();
+    auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get());
+    if (!iff) return false;
+    // The outer true arm: a bare branch to X.
+    auto* outerBr = dynamic_cast<Branch*>(iff->TrueInst.get());
+    if (!outerBr || !outerBr->TargetBlock) return false;
+    // The outer else: a block whose only content is the nested if.
+    auto* elseBlock = dynamic_cast<Block*>(iff->FalseInst.get());
+    if (!elseBlock || !elseBlock->Instructions.empty()) return false;
+    auto* nestedIf = dynamic_cast<IfInstruction*>(elseBlock->FinalInstruction.get());
+    if (!nestedIf) return false;
+    // The nested true arm: a bare branch to the SAME X.
+    auto* nestedBr = dynamic_cast<Branch*>(nestedIf->TrueInst.get());
+    if (!nestedBr || !nestedBr->TargetBlock) return false;
+    if (nestedBr->TargetBlock != outerBr->TargetBlock) return false;
+    // Combine: condition = LogicOr(C, c) = `if (C) ldc.i4 1 else c`.
+    auto orCond = std::make_unique<IfInstruction>(
+        std::move(iff->Condition), std::make_unique<LdcI4>(1),
+        std::move(nestedIf->Condition));
+    iff->Condition = std::move(orCond);
+    iff->Condition->Parent = iff;
+    iff->Condition->ChildIndex = 0;
+    // The nested else becomes the outer else (the nested true arm's goto is
+    // redundant: it targets the same X the outer true arm already goes to).
+    iff->FalseInst = std::move(nestedIf->FalseInst);
+    if (iff->FalseInst) {
+        iff->FalseInst->Parent = iff;
+        iff->FalseInst->ChildIndex = 2;
+    }
+    return true;
+}
+
 // `if (cond1) { if (cond2) br X }` (no else; the true arm a Block whose final
 // is a nested if-goto) -> `if (cond1 && cond2) br X`. The C# ConditionDetection.
 // IntroduceShortCircuit. The port's model: the nested if is the true-arm
@@ -341,6 +389,12 @@ bool TryIntroduceShortCircuit(BlockContainer* container, std::size_t blockIndex)
     if (!trueBlock || !trueBlock->Instructions.empty()) return false;
     auto* nestedIf = dynamic_cast<IfInstruction*>(trueBlock->FinalInstruction.get());
     if (!nestedIf) return false;
+    // The C# matches the nested if with the two-arg MatchIfInstruction,
+    // which requires the false arm to be a Nop (no else): the nested if's
+    // false path is the true-block's fall-through, the same continuation as
+    // the outer if's false path. A nested if carrying an else has a second
+    // path that the combine would drop.
+    if (nestedIf->FalseInst && !IsEmptyArm(nestedIf->FalseInst.get())) return false;
     // condition = LogicAnd(iff->Condition, nestedIf->Condition) =
     // if (iff->Condition) nestedIf->Condition else ldc.i4(0).
     auto combined = std::make_unique<IfInstruction>(
@@ -814,6 +868,10 @@ void ConditionDetection::Run(ILFunction& function, ILTransformContext& context) 
             if (changed) continue;
             for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
                 if (TryIntroduceShortCircuit(c, i)) { changed = true; break; }
+            }
+            if (changed) continue;
+            for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
+                if (TryCombineSameTargetGuards(c, i)) { changed = true; break; }
             }
             if (changed) continue;
             for (std::size_t i = c->Blocks.size(); i-- > 0;) {

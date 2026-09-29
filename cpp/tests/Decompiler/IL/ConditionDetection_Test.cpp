@@ -40,6 +40,7 @@
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
@@ -1116,4 +1117,92 @@ TEST(ConditionDetection, PickBetterBlockExitDoesNotInvertWhenTrueExitDoesNotOutr
     // invert): the true arm is still a Leave (return).
     EXPECT_EQ(iff->TrueInst->Op, OpCode::Leave)
         << "return stays as the true arm; no invert (return does not outrank goto)";
+}
+
+// The guard-chain combination (the CflowDecrypter.GetFixIndexs2 shape): a
+// chain of same-target guards `if (i == k) br INCREMENT` inside a loop
+// (the Roslyn layout: the condition block at the end, the fall-through
+// after it exits the loop), whose false paths run into the next guard,
+// ending in a body block that falls through to the increment. The oracle
+// renders `if (c1 || c2 || c3) { continue; } <body>`; the ILAst target is
+// the combined condition with the body preserved in an arm. The port's
+// fall-through inline builds the else-oriented chain; the same-target
+// merge must collapse it WITHOUT dropping the continuation (the
+// empty-guard family's semantic break: TryIntroduceShortCircuit used to
+// replace the true-arm block with the nested if's true arm, destroying the
+// nested else -- the body -- and rendering `if (c1 && c2) { }` with the
+// rest of the method missing).
+TEST(ConditionDetection, CombinesGuardChainWithoutDroppingBody) {
+    auto fn = WrapBlocks({});
+    for (int i = 0; i < 8; ++i) fn->Body->AddBlock(std::make_unique<Block>());
+    const std::uint32_t offs[8] = { 0x00, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70 };
+    for (int i = 0; i < 8; ++i) fn->Body->Blocks[i]->StartILOffset = offs[i];
+    Block* entry = fn->Body->Blocks[0].get();
+    Block* b1 = fn->Body->Blocks[1].get();
+    Block* b2 = fn->Body->Blocks[2].get();
+    Block* b3 = fn->Body->Blocks[3].get();
+    Block* body = fn->Body->Blocks[4].get();
+    Block* incr = fn->Body->Blocks[5].get();
+    Block* head = fn->Body->Blocks[6].get();
+    Block* after = fn->Body->Blocks[7].get();
+    auto i0 = std::make_shared<ILVariable>();
+    auto x = std::make_shared<ILVariable>();
+    fn->Variables.push_back(i0);
+    fn->Variables.push_back(x);
+    auto ld = [i0] { return std::make_unique<LdLoc>(i0); };
+    // entry: i = 0; br head (the pretest jump to the condition at the end)
+    entry->Add(std::make_unique<StLoc>(i0, std::make_unique<LdcI4>(0)));
+    entry->SetFinal(std::make_unique<Branch>(head));
+    // b1..b3: the guards `if (i == k) br incr` (the false = the next guard).
+    auto guardCond = [&ld](int k) {
+        return std::make_unique<Comp>(ld(), std::make_unique<LdcI4>(k),
+                                      ComparisonKind::Equality);
+    };
+    b1->SetFinal(std::make_unique<IfInstruction>(guardCond(1), std::make_unique<Branch>(incr)));
+    b2->SetFinal(std::make_unique<IfInstruction>(guardCond(2), std::make_unique<Branch>(incr)));
+    b3->SetFinal(std::make_unique<IfInstruction>(guardCond(3), std::make_unique<Branch>(incr)));
+    // body: x = i (a live store; the after-loop leave loads x).
+    body->Add(std::make_unique<StLoc>(x, ld()));
+    // incr: i = i + 1; br head (the back edge)
+    incr->Add(std::make_unique<StLoc>(i0,
+        std::make_unique<BinaryNumericInstruction>(
+            ld(), std::make_unique<LdcI4>(1), BinaryNumericOperator::Add)));
+    incr->SetFinal(std::make_unique<Branch>(head));
+    // head: if (i < 10) br b1 (the false = the fall-through to `after`)
+    head->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(ld(), std::make_unique<LdcI4>(10),
+                               ComparisonKind::LessThan),
+        std::make_unique<Branch>(b1)));
+    after->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdLoc>(x)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunPipeline(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+    // The body's live store survives somewhere in the tree.
+    bool hasStore = false;
+    Walk(fn->Body.get(), [&](ILInstruction* i) {
+        auto* st = dynamic_cast<StLoc*>(i);
+        if (st && st->Variable.get() == x.get()) hasStore = true;
+    });
+    EXPECT_TRUE(hasStore) << "the body block's content must not be dropped";
+
+    // The three guard conditions end up combined under a single if: the
+    // walk finds exactly one IfInstruction whose condition tree mentions
+    // all three guard constants (1, 2, 3).
+    int combined = 0;
+    Walk(fn->Body.get(), [&](ILInstruction* i) {
+        auto* iff = dynamic_cast<IfInstruction*>(i);
+        if (!iff || !iff->Condition) return;
+        bool has1 = false, has2 = false, has3 = false;
+        Walk(iff->Condition.get(), [&](ILInstruction* c) {
+            auto* ldc = dynamic_cast<LdcI4*>(c);
+            if (!ldc) return;
+            if (ldc->Value == 1) has1 = true;
+            if (ldc->Value == 2) has2 = true;
+            if (ldc->Value == 3) has3 = true;
+        });
+        if (has1 && has2 && has3) ++combined;
+    });
+    EXPECT_GE(combined, 1)
+        << "the guard chain must combine into one condition tree";
 }
