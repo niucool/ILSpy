@@ -4232,6 +4232,35 @@ the port's for the size); (2) the net10 finally-variant sites
 (net10's 4 `?? throw` sites are the real finally/leave shapes);
 (3) the label-merged regions per the earlier handoff.
 
+## THE BASE-QUALIFICATION FAMILY -- THE WIRING LANDED, THE RENDER PATH OPEN
+
+THE PROBE FINDINGS (the [BQ]/[ST] data): (1) the this-variable's
+Type is NULL (the reader doesn't set it -- the first approach
+dead); (2) the methodName arg is the bare method name (no type
+prefix -- the second approach dead); (3) fn_->Method IS set for
+the CSharpDecompiler path (the resolvedMethod at line ~343) and
+SetCurrentTypeName populates currentTypeName_ correctly (the [BQ]
+data shows the right self-vs-field comparisons, e.g.
+self=ResourceDirectoryUser vs field=ResourceDirectory.directories);
+(4) **THE RENDER PATH MYSTERY**: the patched StoreTargetText /
+LdFlda paths fire (the [ST] probe) but the output lines (e.g.
+`directories = new LazyList...` in the ResourceDirectoryUser ctor)
+still show the bare name -- the emission for those stores flows
+through a DIFFERENT path than the patched ones (the field-
+initializer pass? the multi-render's fresh decode? the [BQ] self
+mismatches suggest some renders carry a DIFFERENT current type --
+the ResourceDirectory self lines adjacent to the User's stores).
+THE NEXT SESSION: trace ONE store (the ResourceDirectoryUser's
+`directories = ...`) from the [ST] print to the output line -- the
+emission chain (which EmitStatement path renders that stobj and why
+the MaybeBasePrefix result is discarded); suspect the multi-render
+(the fresh decode per ILAstToCSharp call) and the field-initializer
+hoisting.
+
+THE STATE: the wiring committed (no behavior change, no
+regression: dnlib 80,219 / the pin / the tests 35/35); the
+family's -80 opportunity intact.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
