@@ -25,6 +25,7 @@
 // expression rather than dropping text or crashing.
 
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
+#include "Decompiler/CSharp/FractionApprox.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/CSharp/RequiredImportsRecorder.hpp"
 #include <algorithm>
@@ -3973,53 +3974,6 @@ private:
     // continued-fraction approximation of `value` with denominators bounded
     // by `maxDenominator`. Returns (0, 0) for the out-of-range / degenerate
     // shapes. Follows the C# two-candidate (first/second) delta comparison.
-    static std::pair<long, long> FractionApprox(double value,
-                                                int maxDenominator) {
-        if (std::fabs(value) > 0x7FFFFFFF) return {0, 0};
-        double startValue = value;
-        if (value < 0) value = -value;
-        long ai;
-        long m[2][2] = {{1, 0}, {0, 1}};
-        double v = value;
-        while (m[1][0] * (ai = static_cast<long>(v)) + m[1][1] <=
-               maxDenominator) {
-            long t = m[0][0] * ai + m[0][1];
-            m[0][1] = m[0][0];
-            m[0][0] = t;
-            t = m[1][0] * ai + m[1][1];
-            m[1][1] = m[1][0];
-            m[1][0] = t;
-            if (v - ai == 0) break;
-            v = 1 / (v - ai);
-            if (std::fabs(v) >=
-                static_cast<double>(std::numeric_limits<long>::max()))
-                break;
-        }
-        if (m[1][0] == 0) return {0, 0};
-        long firstN = m[0][0];
-        long firstD = m[1][0];
-        ai = (maxDenominator - m[1][1]) / m[1][0];
-        long secondN = m[0][0] * ai + m[0][1];
-        long secondD = m[1][0] * ai + m[1][1];
-        double firstDelta =
-            std::fabs(value - firstN / static_cast<double>(firstD));
-        double secondDelta =
-            std::fabs(value - secondN / static_cast<double>(secondD));
-        if (firstDelta < secondDelta)
-            return {startValue < 0 ? -firstN : firstN, firstD};
-        return {startValue < 0 ? -secondN : secondN, secondD};
-    }
-
-    // The C# IsValidFraction (lines 1458-1466): a positive denominator, a
-    // nonzero numerator, and either a trivial part (1) or |num| < den with
-    // the denominator built from the 2/3/5 prime family.
-    static bool IsValidFraction(long num, long den) {
-        if (!(den > 0 && num != 0)) return false;
-        if (den == 1 || std::labs(num) == 1) return true;
-        return std::labs(num) < den && (den % 2 == 0 || den % 3 == 0 ||
-                                        den % 5 == 0);
-    }
-
     // The C# ConvertFloatingPointLiteral's special-constants arm: the PI/E
     // forms (TypeSystemAstBuilder.cs lines 1553-1688). A double literal
     // whose value / Math.PI (or E) approximates a valid fraction renders
@@ -4028,44 +3982,7 @@ private:
     // form reconstructs the value. The useFraction gate: the %.17g form
     // must carry more than five significant characters (the C#'s "r"
     // round-trip string minus the sign and the leading digit).
-    static std::string SpecialDoubleConstantText(double value) {
-        static const double kFields[2] = {3.141592653589793,
-                                           2.718281828459045};
-        static const char* kNames[2] = {"PI", "E"};
-        constexpr int kMaxDenominator = 1000;
-        char buf[32];
-        std::snprintf(buf, sizeof(buf), "%.17g", value);
-        std::string str = buf;
-        if (str.size() - (str[0] == '-' ? 2 : 1) <= 5) return std::string();
-        for (int i = 0; i < 2; ++i) {
-            auto [num, den] =
-                FractionApprox(value / kFields[i], kMaxDenominator);
-            if (!IsValidFraction(num, den)) continue;
-            // The multiply form: field * n / d == value.
-            double approx = kFields[i] * static_cast<double>(num) /
-                            static_cast<double>(den);
-            if (approx == value) {
-                std::string expr = std::string("Math.") + kNames[i];
-                if (num == -1) expr = "-" + expr;
-                else if (num != 1)
-                    expr += " * " + std::to_string(num);
-                if (den != 1)
-                    expr += " / " + std::to_string(den);
-                return expr;
-            }
-            // The division form: n / (d * field) == value.
-            double divApprox = static_cast<double>(num) /
-                               (static_cast<double>(den) * kFields[i]);
-            if (divApprox == value) {
-                std::string field = std::string("Math.") + kNames[i];
-                if (den == 1)
-                    return std::to_string(num) + " / " + field;
-                return std::to_string(num) + " / (" +
-                       std::to_string(den) + " * " + field + ")";
-            }
-        }
-        return std::string();
-    }
+
 
     // The short method name (after "::") for an instance call: receiver.Method.
     static std::string ShortMethodName(std::string_view full) {
@@ -4520,7 +4437,7 @@ private:
                 // compilation to probe MathF's presence, and no fixture
                 // exercises it).
                 {
-                    std::string special = SpecialDoubleConstantText(value);
+                    std::string special = CSharp::SpecialDoubleConstantText(value);
                     if (!special.empty()) return special;
                 }
                 char buf[32];

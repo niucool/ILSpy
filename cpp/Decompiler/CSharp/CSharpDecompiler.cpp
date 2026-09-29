@@ -20,6 +20,7 @@
 #include <cstdio>
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/CSharpDecompiler.hpp"
+#include "Decompiler/CSharp/FractionApprox.hpp"
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
 #include "Decompiler/CSharp/RequiredNamespaceCollector.hpp"
 #include "Decompiler/CSharp/RequiredImportsRecorder.hpp"
@@ -1111,6 +1112,58 @@ std::string ConstantValueText(const std::any& value,
             std::string ftext = buffer;
             for (char& ch : ftext)
                 if (ch == 'e') ch = 'E';
+            // The C# ConvertConstantValue order: the named special
+            // constants first (with the negation retry: -float.Epsilon),
+            // then ConvertFloatingPointLiteral's integer-value check,
+            // the fraction (the raw continued-fraction form, the
+            // machine-scale preferred denominators, then the MathF
+            // special constants -- deferred, the flat emitter carries no
+            // compilation to probe MathF's presence), then the plain
+            // literal.
+            {
+                std::string named = CSharp::SpecialNamedFloatingConstant(
+                    /*isFloat*/ true, *f);
+                if (!named.empty()) return named;
+            }
+            bool useFraction =
+                ftext.size() - (ftext[0] == '-' ? 2 : 1) > 5;
+            if (useFraction && std::floor(*f) != *f) {
+                auto [num, den] =
+                    CSharp::FractionApprox(static_cast<double>(*f), 200);
+                bool hasRegularFraction =
+                    CSharp::IsValidFraction(num, den) &&
+                    static_cast<float>(
+                        num / static_cast<float>(den)) == *f &&
+                    std::labs(den) != 1;
+                long long pNum = 0, pDen = 0;
+                int pScore = 0;
+                bool hasPreferred = CSharp::TryGetPreferredFraction(
+                    static_cast<double>(*f), /*isDouble*/ false, pNum, pDen,
+                    pScore);
+                if (hasPreferred) {
+                    int baselineLength =
+                        hasRegularFraction
+                            ? CSharp::GetFractionDisplayLength(
+                                  num, den, /*isDouble*/ false)
+                            : static_cast<int>(ftext.size()) + 1;
+                    bool regularFractionIsSimple =
+                        hasRegularFraction &&
+                        CSharp::IsSimpleFraction(num, den);
+                    if (!regularFractionIsSimple &&
+                        pScore <= baselineLength) {
+                        if (hasRegularFraction) {
+                            num = pNum;
+                            den = pDen;
+                        } else {
+                            return std::to_string(pNum) + "f / " +
+                                   std::to_string(pDen) + "f";
+                        }
+                    }
+                }
+                if (hasRegularFraction)
+                    return std::to_string(num) + "f / " +
+                           std::to_string(den) + "f";
+            }
             return ftext + "f";
         }
         if (auto* d = std::any_cast<double>(&value)) {
@@ -1129,6 +1182,54 @@ std::string ConstantValueText(const std::any& value,
             // the PrimitiveExpression's double format).
             for (char& ch : text)
                 if (ch == 'e') ch = 'E';
+            // The C# ConvertFloatingPointLiteral order: an integer-valued
+            // constant is a plain literal; a long non-integer tries the
+            // raw fraction (denominator bounded at 1000 for the double),
+            // then the Math.PI/E special constants, then the plain
+            // literal.
+            {
+                std::string named = CSharp::SpecialNamedFloatingConstant(
+                    /*isFloat*/ false, *d);
+                if (!named.empty()) return named;
+            }
+            bool useFraction =
+                text.size() - (text[0] == '-' ? 2 : 1) > 5;
+            if (useFraction && std::floor(*d) != *d) {
+                auto [num, den] = CSharp::FractionApprox(*d, 1000);
+                bool hasRegularFraction =
+                    CSharp::IsValidFraction(num, den) &&
+                    num / static_cast<double>(den) == *d &&
+                    std::labs(den) != 1;
+                long long pNum = 0, pDen = 0;
+                int pScore = 0;
+                bool hasPreferred = CSharp::TryGetPreferredFraction(
+                    *d, /*isDouble*/ true, pNum, pDen, pScore);
+                if (hasPreferred) {
+                    int baselineLength =
+                        hasRegularFraction
+                            ? CSharp::GetFractionDisplayLength(
+                                  num, den, /*isDouble*/ true)
+                            : static_cast<int>(text.size());
+                    bool regularFractionIsSimple =
+                        hasRegularFraction &&
+                        CSharp::IsSimpleFraction(num, den);
+                    if (!regularFractionIsSimple &&
+                        pScore <= baselineLength) {
+                        if (hasRegularFraction) {
+                            num = pNum;
+                            den = pDen;
+                        } else {
+                            return std::to_string(pNum) + ".0 / " +
+                                   std::to_string(pDen) + ".0";
+                        }
+                    }
+                }
+                if (hasRegularFraction)
+                    return std::to_string(num) + ".0 / " +
+                           std::to_string(den) + ".0";
+                std::string special = CSharp::SpecialDoubleConstantText(*d);
+                if (!special.empty()) return special;
+            }
             // The C# double literal always carries the decimal point
             // (`5.0`, not `5` -- the PrimitiveExpression's double
             // format).
