@@ -123,8 +123,9 @@ bool SwitchAnalysis::AnalyzeBlockImpl(Block* block, Util::LongSet inputValues, b
         if (!(tailOnly || block->Instructions.empty()))
             return false;
         trueValues = trueValues.IntersectWith(inputValues);
-        if (trueValues.SetEquals(inputValues) || trueValues.IsEmpty())
+        if (trueValues.SetEquals(inputValues) || trueValues.IsEmpty()) {
             return false;
+        }
         // The if's true arm: a Branch to a block (recurse) or another exit
         // instruction (create a section for it). A nested Block (the
         // restructured chain's range split) descends as the next level, or,
@@ -444,8 +445,13 @@ Util::LongSet SwitchAnalysis::MakeLessThanOrEqualSet(long long val, bool unsigne
         return Util::LongSet(Util::LongInterval::Inclusive(0, val));
     }
     // The range 0 to (ulong)val expressed with signed longs is two ranges.
+    // The negative tail is INCLUSIVE of val (the C#
+    // LongInterval.Inclusive(long.MinValue, val)); the raw two-arg
+    // constructor is end-exclusive and would drop val, turning every
+    // unsigned greater-than over a negative boundary into
+    // greater-or-equal (the off-by-one that broke the hash-search walk).
     return Util::LongSet(Util::LongInterval::Inclusive(0, Max))
-        .UnionWith(Util::LongSet(Util::LongInterval(Min, val)));
+        .UnionWith(Util::LongSet(Util::LongInterval::Inclusive(Min, val)));
 }
 
 } // namespace ILSpy::Decompiler::IL

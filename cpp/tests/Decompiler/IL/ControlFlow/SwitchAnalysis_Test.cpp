@@ -536,4 +536,23 @@ TEST(SwitchAnalysis, MakeSetWhereComparisonIsTrueUnsigned) {
     EXPECT_TRUE(ge.Contains(-1));
     EXPECT_FALSE(ge.Contains(0));
     EXPECT_FALSE(ge.Contains(4));
+    // x >u -1583721377 (a uint32 hash boundary as a negative int64):
+    // strictly greater excludes the boundary itself.
+    auto gtNeg = SwitchAnalysis::MakeSetWhereComparisonIsTrue(
+        CK::GreaterThan, -1583721377LL, true);
+    EXPECT_TRUE(gtNeg.Contains(-1583721376LL));
+    EXPECT_TRUE(gtNeg.Contains(-1));
+    EXPECT_FALSE(gtNeg.Contains(-1583721377LL));
+    EXPECT_FALSE(gtNeg.Contains(0));
+    // The decomposition: x <=u val is [0..Max] U [Min..val]; its invert
+    // is [val+1..-1]. Check each layer.
+    auto leNeg = SwitchAnalysis::MakeSetWhereComparisonIsTrue(
+        CK::LessThanOrEqual, -1583721377LL, true);
+    EXPECT_TRUE(leNeg.Contains(-1583721377LL));
+    EXPECT_TRUE(leNeg.Contains(0));
+    EXPECT_FALSE(leNeg.Contains(-1583721376LL));
+    auto invNeg = leNeg.Invert();
+    EXPECT_FALSE(invNeg.Contains(-1583721377LL));
+    EXPECT_TRUE(invNeg.Contains(-1583721376LL));
+    EXPECT_TRUE(invNeg.Contains(-1));
 }
