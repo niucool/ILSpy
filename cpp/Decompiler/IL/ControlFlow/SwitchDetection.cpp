@@ -268,6 +268,14 @@ void SwitchDetection::SortSwitchSections(SwitchInstruction* sw, ILTransformConte
         // the first label value.
         auto keyOf = [&](SwitchSection* s) -> std::tuple<bool, long long, long long> {
             long long lf = labelFirst(s);
+            // The huge-complement section is the analysis' default; it sorts
+            // last regardless of its body's target offset. The C#'s default
+            // body branches to the one shared post-switch block (the highest
+            // offset), but this port's CFS branch-to-return fold materializes
+            // the shared default per site, so the merged default's branch can
+            // carry a small offset.
+            if (s != nullptr && s->Labels.Count() > MaxValuesPerSection)
+                return {true, std::numeric_limits<long long>::max(), lf};
             if (auto* br = dynamic_cast<Branch*>(s ? s->Body.get() : nullptr)) {
                 return {true, static_cast<long long>(br->TargetOffset), lf};
             }

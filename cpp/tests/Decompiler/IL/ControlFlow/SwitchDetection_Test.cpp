@@ -377,6 +377,41 @@ TEST(SwitchDetection, SortsSectionsByBranchTargetOffset) {
     b.fn->CheckInvariant(ILPhase::Normal);
 }
 
+// A reconstructed switch whose default section's branch targets a
+// per-site materialized return block (a SMALL offset -- the CFS
+// branch-to-return fold's per-site materialization; the C# tree keeps one
+// shared default block after the switch, whose offset is the highest) must
+// still order the default LAST: the huge complement the analysis builds as
+// the default stands in for the shared block.
+TEST(SwitchDetection, SortsMergedDefaultSectionLast) {
+    auto V = MakeLocal("V");
+    // Cases (label, offset): {0,0x10}, {1,0x20}; the default branches to a
+    // small-offset return block (0x05 -- the per-site materialization sits
+    // early in the IL, unlike the C#'s shared post-switch default): the
+    // default's complement labels (the huge set) must place it last
+    // regardless.
+    auto b = BuildSwitchOnLdLoc(V, {{0, 0x10}, {1, 0x20}}, 0x05);
+    // Replace the default body's labels with the complement (the analysis'
+    // default): every value except 0 and 1 -- huge.
+    for (auto& s : b.sw->Sections) {
+        if (s->Labels.IsEmpty()) {
+            s->Labels = ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0))
+                            .UnionWith(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(1)))
+                            .Invert();
+        }
+    }
+    ILTransformContext ctx;  // SortSwitchSections = false (default)
+    SwitchDetection::SimplifySwitchInstruction(b.root, ctx);
+    ASSERT_EQ(b.sw->Sections.size(), 3u);
+    EXPECT_EQ(SectionTarget(*b.sw->Sections[0]), b.cases[0]);  // offset 0x10, label 0
+    EXPECT_EQ(SectionTarget(*b.sw->Sections[1]), b.cases[1]);  // offset 0x20, label 1
+    // The huge-complement default sorts last even though its branch target
+    // offset (0x30) is not the maximum.
+    EXPECT_EQ(SectionTarget(*b.sw->Sections[2]), b.def);
+    EXPECT_GT(b.sw->Sections[2]->Labels.Count(), 100u);
+    b.fn->CheckInvariant(ILPhase::Normal);
+}
+
 // SortSwitchSections on (setting true): sections are ordered by label value
 // instead of by branch-target offset.
 TEST(SwitchDetection, SortsSectionsByLabelValueWhenSettingOn) {
