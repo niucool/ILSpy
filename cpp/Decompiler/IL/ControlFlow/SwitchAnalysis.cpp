@@ -72,6 +72,7 @@ Block* NextBlockInContainer(Block* block) {
 bool SwitchAnalysis::AnalyzeBlock(Block* block) {
     SwitchVariable.reset();
     RootBlock = block;
+    ConsumedExitBlocks.clear();
     targetBlockToSectionIndex_.clear();
     targetContainerToSectionIndex_.clear();
     Sections.clear();
@@ -80,6 +81,20 @@ bool SwitchAnalysis::AnalyzeBlock(Block* block) {
     ContainsILSwitch = false;
     if (!block) return false;
     return AnalyzeBlockImpl(block, Util::LongSet::Universe(), /*tailOnly*/ true);
+}
+
+// A block whose final is a valued leave and whose only incoming edge is the
+// positional fall-through from its predecessor: the CFS branch-to-return
+// fold's materialization of a shared return site (the C# tree keeps the
+// shared br target instead). Void leaves are excluded: the C# folds
+// branches to those in CFS itself, so the branch-to-block section shape is
+// the faithful form there.
+bool SwitchAnalysis::IsSoleOwnerValuedReturn(Block* block) const {
+    if (block == nullptr || !block->Instructions.empty() ||
+        block->IncomingEdgeCount != 1)
+        return false;
+    auto* leave = dynamic_cast<Leave*>(block->FinalInstruction.get());
+    return leave != nullptr && leave->Value != nullptr;
 }
 
 bool SwitchAnalysis::AnalyzeBlockImpl(Block* block, Util::LongSet inputValues, bool tailOnly) {
@@ -163,6 +178,23 @@ bool SwitchAnalysis::AnalyzeBlockImpl(Block* block, Util::LongSet inputValues, b
     Block* falseBlock = NextBlockInContainer(block);
     if (falseBlock && AnalyzeBlockImpl(falseBlock, remainingValues)) {
         InnerBlocks.push_back(falseBlock);
+    } else if (falseBlock && IsSoleOwnerValuedReturn(falseBlock)) {
+        // The false path runs into a local pure-return block -- this port's
+        // CFS branch-to-return fold materialized one per site where the C#
+        // tree keeps the shared branch target. Use the leave itself as the
+        // section body so the false-path remainders merge by their target
+        // container (the C# AddSection merge) into one default section; the
+        // block is dead once the switch forms.
+        auto* leave = static_cast<Leave*>(falseBlock->FinalInstruction.get());
+        std::unique_ptr<ILInstruction> value;
+        if (leave->Value) value = leave->Value->Clone();
+        auto dup = std::make_unique<Leave>(leave->TargetContainer,
+                                           std::move(value));
+        dup->SetILRange(*leave);
+        Leave* raw = dup.get();
+        ownedBodies_.push_back(std::move(dup));
+        AddSection(std::move(remainingValues), raw);
+        ConsumedExitBlocks.push_back(falseBlock);
     } else if (falseBlock) {
         auto br = std::make_unique<Branch>(falseBlock);
         auto* raw = br.get();

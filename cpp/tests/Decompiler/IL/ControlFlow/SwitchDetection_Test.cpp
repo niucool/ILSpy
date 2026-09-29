@@ -37,6 +37,9 @@
 #include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/LdStr.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
@@ -73,6 +76,7 @@ using ILSpy::Decompiler::Util::LongSet;
 using ILSpy::Decompiler::Metadata::MetadataFile;
 using ILSpy::Decompiler::TypeSystem::KnownType;
 using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+namespace TS = ILSpy::Decompiler::TypeSystem;
 
 namespace {
 
@@ -796,4 +800,130 @@ TEST(SwitchDetection, MscorlibRunSweepPreservesInvariant) {
     // not drop them (the 2nd-pass SimplifySwitchInstruction keeps them, and the
     // if-chain reconstruction only adds switches).
     EXPECT_GE(switchesAfter, switchesBefore);
+}
+
+// The C# SwitchDetection.UseCSharpSwitch's MatchRoslynSwitchOnString gate:
+// when the root block's store feeding the switch variable is a
+// ComputeStringHash call (a Roslyn switch-on-string's binary-search tree),
+// the if-tree collapses into one flat SwitchInstruction regardless of the
+// if-count heuristic. The layout mirrors the reader's tree after the CFS
+// branch-to-return fold: each false path runs into its own local
+// pure-return block (the C# tree keeps a shared br target instead; the
+// analysis merges the leave bodies by their target container, which
+// reaches the same one-default-section outcome).
+TEST(SwitchDetection, RoslynHashSearchTreeFormsFlatSwitch) {
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto S = MakeLocal("S");
+    auto H = MakeLocal("H");
+    fn->Variables.push_back(S);
+    fn->Variables.push_back(H);
+
+    const std::size_t nBlocks = 11;
+    for (std::size_t i = 0; i < nBlocks; i++)
+        fn->Body->AddBlock(std::make_unique<Block>());
+    Block* root = fn->Body->Blocks[0].get();
+    Block* mid = fn->Body->Blocks[1].get();
+    Block* leafD = fn->Body->Blocks[2].get();
+    Block* case1 = fn->Body->Blocks[3].get();
+    Block* leaf1 = fn->Body->Blocks[4].get();
+    Block* hi = fn->Body->Blocks[5].get();
+    Block* leaf2 = fn->Body->Blocks[6].get();
+    Block* case2 = fn->Body->Blocks[7].get();
+    Block* leaf3 = fn->Body->Blocks[8].get();
+    Block* body1 = fn->Body->Blocks[9].get();
+    Block* body2 = fn->Body->Blocks[10].get();
+
+    // Root: [stloc H(ComputeStringHash(S))], if (H > 10) br hi.
+    auto hashCall = std::make_unique<Call>(
+        "<PrivateImplementationDetails>::ComputeStringHash");
+    hashCall->DeclaringType = std::make_shared<TS::SimpleType>(
+        TS::TopLevelTypeName(std::string(), std::string("<PrivateImplementationDetails>")));
+    hashCall->AddArg(std::make_unique<LdLoc>(S));
+    root->Add(std::make_unique<StLoc>(H, std::move(hashCall)));
+    root->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(H),
+                                std::make_unique<LdcI4>(10),
+                                ComparisonKind::GreaterThan),
+        std::make_unique<Branch>(hi)));
+
+    // Mid: if (H == 5) br case1; the false path falls into leafD.
+    mid->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(H),
+                                std::make_unique<LdcI4>(5),
+                                ComparisonKind::Equality),
+        std::make_unique<Branch>(case1)));
+
+    leafD->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                             std::make_unique<LdcI4>(0)));
+
+    // Case head 1: if (S == "five") br body1; the false path falls into leaf1.
+    auto eq1 = std::make_unique<Call>("System.String::op_Equality");
+    eq1->DeclaringType = std::make_shared<TS::SimpleType>(
+        TS::TopLevelTypeName("System", "String"));
+    eq1->AddArg(std::make_unique<LdLoc>(S));
+    eq1->AddArg(std::make_unique<LdStr>("five"));
+    case1->SetFinal(std::make_unique<IfInstruction>(
+        std::move(eq1), std::make_unique<Branch>(body1)));
+
+    leaf1->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                             std::make_unique<LdcI4>(0)));
+
+    // Hi: if (H == 20) br case2; the false path falls into leaf2.
+    hi->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(H),
+                                std::make_unique<LdcI4>(20),
+                                ComparisonKind::Equality),
+        std::make_unique<Branch>(case2)));
+
+    leaf2->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                             std::make_unique<LdcI4>(0)));
+
+    // Case head 2: if (S == "twenty") br body2; the false path falls into leaf3.
+    auto eq2 = std::make_unique<Call>("System.String::op_Equality");
+    eq2->DeclaringType = std::make_shared<TS::SimpleType>(
+        TS::TopLevelTypeName("System", "String"));
+    eq2->AddArg(std::make_unique<LdLoc>(S));
+    eq2->AddArg(std::make_unique<LdStr>("twenty"));
+    case2->SetFinal(std::make_unique<IfInstruction>(
+        std::move(eq2), std::make_unique<Branch>(body2)));
+
+    leaf3->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                             std::make_unique<LdcI4>(0)));
+
+    body1->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                             std::make_unique<LdcI4>(1)));
+    body2->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                             std::make_unique<LdcI4>(2)));
+
+    RecomputeIncomingEdgeCounts(*fn);
+
+    ILTransformContext ctx;
+    ctx.Settings.SparseIntegerSwitch = true;
+    SwitchDetection().Run(*fn, ctx);
+
+    // The binary-search tree collapsed into one flat switch in the root.
+    auto* sw = dynamic_cast<SwitchInstruction*>(root->FinalInstruction.get());
+    ASSERT_NE(sw, nullptr) << "the hash-search tree forms a flat switch";
+    // Two case sections plus the merged default.
+    ASSERT_EQ(sw->Sections.size(), 3u);
+    bool hasFive = false, hasTwenty = false, hasDefault = false;
+    for (const auto& s : sw->Sections) {
+        if (s->Labels.Contains(5)) hasFive = true;
+        if (s->Labels.Contains(20)) hasTwenty = true;
+        if (s->Labels.Count() > 100) hasDefault = true;
+    }
+    EXPECT_TRUE(hasFive);
+    EXPECT_TRUE(hasTwenty);
+    EXPECT_TRUE(hasDefault);
+    // The default section body is the shared leave (the two false-path
+    // remainders merged).
+    bool defaultIsLeave = false;
+    for (const auto& s : sw->Sections)
+        if (s->Labels.Count() > 100)
+            defaultIsLeave = s->Body && s->Body->Op == OpCode::Leave;
+    EXPECT_TRUE(defaultIsLeave);
+    fn->CheckInvariant(ILPhase::Normal);
 }

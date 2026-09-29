@@ -40,6 +40,7 @@
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
+#include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/Util/LongSet.hpp"
 
@@ -78,6 +79,12 @@ public:
     // The block the analysis was seeded with.
     Block* RootBlock = nullptr;
 
+    // Pure-return blocks whose sole incoming edge was a false path the
+    // analysis converted into a leave-body section: dead once the switch
+    // forms (the C# tree keeps a shared br target instead; the CFS
+    // branch-to-return fold materialized one per site in this port).
+    std::vector<Block*> ConsumedExitBlocks;
+
     // Whether to allow unreachable cases in switch instructions.
     bool AllowUnreachableCases = false;
 
@@ -104,6 +111,12 @@ private:
     std::vector<std::unique_ptr<ILInstruction>> ownedBodies_;
 
     bool AnalyzeBlockImpl(Block* block, Util::LongSet inputValues, bool tailOnly = false);
+
+    // Whether `block` is a valued-return block (empty, leave-with-value
+    // final) reachable only from its positional predecessor -- the
+    // fold-materialized shared return site the false-path conversion
+    // consumes.
+    bool IsSoleOwnerValuedReturn(Block* block) const;
     bool AnalyzeSwitch(SwitchInstruction* inst, const Util::LongSet& inputValues);
     // The else-armed chain levels: the CFS restructured trees nest the chain
     // continuation in the if's false arm as a Block (instead of the C#'s

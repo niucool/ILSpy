@@ -17,6 +17,16 @@
 // DEALINGS IN THE SOFTWARE.
 
 #include "Decompiler/IL/ControlFlow/SwitchDetection.hpp"
+
+namespace ILSpy::Decompiler::IL {
+// SwitchOnStringTransform.cpp's matcher (the C# static method on the
+// class): the stloc(targetVar, call ComputeStringHash/ComputeSpanHash/
+// ComputeReadOnlySpanHash(ldloc s)) shape over the compiler-generated
+// hash helper.
+bool MatchComputeStringOrReadOnlySpanHashCall(ILInstruction* inst,
+                                              ILVariable* targetVar,
+                                              ILVariable*& switchValue);
+}
 #include "Decompiler/IL/ControlFlow/ControlFlowGraph.hpp"
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
 #include "Decompiler/IL/ILInstruction.hpp"
@@ -502,6 +512,15 @@ void SwitchDetection::ProcessBlock(Block* block, bool& needsCleanup,
                 innerBlock->FinalInstruction.reset();
                 clearedBlocks.push_back(innerBlock);
             }
+            // The false-path pure-return blocks the analysis folded into
+            // leave-body sections: dead now that the switch carries their
+            // exit (their sole edge was the consumed fall-through).
+            for (Block* exitBlock : analysis_.ConsumedExitBlocks) {
+                if (!exitBlock) continue;
+                exitBlock->Instructions.clear();
+                exitBlock->FinalInstruction.reset();
+                clearedBlocks.push_back(exitBlock);
+            }
             controlFlowGraph_.reset();  // the CFG is no longer valid
             needsCleanup = true;
             SortSwitchSections(swp, *context_);
@@ -539,9 +558,22 @@ bool SwitchDetection::UseCSharpSwitch() {
             return false;
     }
     // An existing IL switch (or a Roslyn switch-on-string) is a strong signal
-    // the surrounding code is a switch. MatchRoslynSwitchOnString is deferred
-    // (needs SwitchOnStringTransform.MatchComputeStringOrReadOnlySpanHashCall).
+    // the surrounding code is a switch.
     if (analysis_.ContainsILSwitch) return true;
+    // The C# `|| MatchRoslynSwitchOnString()`: the root block's store
+    // feeding the switch variable is a ComputeStringHash call -- a Roslyn
+    // switch-on-string compiled to a binary-search if-tree. The flat switch
+    // forms regardless of the if-count heuristic (the string case heads
+    // hang off the search leaves). The C# reads insns[Count-3], the store
+    // before the root's trailing if+br pair; this port's root keeps the if
+    // in the final slot, so the store is the last instruction.
+    if (!analysis_.RootBlock->Instructions.empty()) {
+        ILVariable* hashSwitchValue = nullptr;
+        if (MatchComputeStringOrReadOnlySpanHashCall(
+                analysis_.RootBlock->Instructions.back().get(),
+                analysis_.SwitchVariable.get(), hashSwitchValue))
+            return true;
+    }
 
     // Heuristic: prefer an if-chain when it has fewer branches than the switch
     // would have label-intervals.
