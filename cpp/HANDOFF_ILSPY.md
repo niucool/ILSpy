@@ -4145,6 +4145,37 @@ non-PI/E constants -- the C# IsEqual/preferredFractionDenominators
 path) is a PORTABLE-AGAINST-THE-OLD-ORACLE slice (the old oracle
 has the generic fractions!) -- a candidate next.
 
+## THE ORACLE UPGRADED (v11.1.0.9782) -- THE A1 FAMILY UNBLOCKED + LANDED
+
+THE UPGRADE: `dotnet tool update --global ilspycmd` -- the tool
+resolved to 11.1.0.9782 WITH the upstream fixes IN (NegEpsilon ->
+`-double.Epsilon`, ByteScale -> `200f / 255f` -- the #4180-era
+family). THE NEW BASELINES (the v2 oracles, regenerated):
+/tmp/ilspy-cmp/oracle_dnlib_v2.cs (dnlib: the port 80,369 -- the
+new-oracle renders differ from the old by 1,330 lines),
+oracle_net10_v2.cs (the port 99,529), oracle_cui_v2.cs (the port
+2,354). **THE STANDING GATES NOW USE THE V2 ORACLES.**
+
+THE A1 NEGATED-CONSTANTS FAMILY -- LANDED (the commit): (1) the
+shared FractionApprox.hpp extracted (FractionApprox +
+IsValidFraction + SpecialDoubleConstantText moved from
+ILAstToCSharp's anonymous namespace); (2) the preferred machine-
+scale denominators (the 127..1048576 table, the display-length
+score, the 2/3/5 simple-fraction guard, the |v|<1 gate); (3) the
+named special constants with the negation retry (-double.Epsilon /
+-float.Epsilon); (4) the field-constant path follows the C#
+ConvertConstantValue order (named -> integer-value -> preferred ->
+raw fraction -> PI/E -> literal). THE FIXTURE VERIFICATION: all
+eight forms byte-exact vs the fresh oracle. THE GATES: unchanged
+(the corpora carry no such constants); the pin ebf9b6e9 ✓; the
+tests 35/35.
+
+THE DEFERRED: the MathF.PI/E arm for the FLOAT constants (the flat
+emitter carries no compilation to probe MathF's presence -- the
+C# checks the MathF type definition before using it); the
+A1 REMAINING items (the lambda parameter parens etc.) now
+measurable against the v2 oracles.
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
