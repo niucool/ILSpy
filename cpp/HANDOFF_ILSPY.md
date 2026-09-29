@@ -5012,3 +5012,84 @@ IntroduceShortCircuit over the merged shape), measured against
 queue: the switch-inline section-order relaxation, the 303
 not-found/adjacent goto split, the 97 span-escapes, the `?.` shapes, the
 `.override` forwarders, the net10 foreach-collapse gap.
+
+---
+
+## Session record: the guard-chain combination lands (99af9c40e)
+
+Corpus: net10 93530 -> **90284** (the CflowDecrypter family's home corpus),
+dnlib 74651 -> 74708 (+57, the correctness price), gotos 1021 -> 1049, the
+empty-guard family 485 -> 339 (dnlib). The pin, cui, hello, the suite
+control 268 and the bennu canary all hold. Test:
+ConditionDetection.CombinesGuardChainWithoutDroppingBody (a Roslyn-layout
+loop with three same-target guards, a live body store, and the
+increment/backedge -- asserts the body survives and the conditions combine
+under one if).
+
+### 99af9c40e "Combine same-target guard chains; stop dropping nested else arms"
+
+Four pieces (each measured against the C# reference trees in
+/tmp/sos_cflow.txt and /tmp/sos_lazy2.txt):
+
+1. **The CFG's null-final fall-through edge** (ControlFlowGraph.cpp
+   CreateEdges): a block with no FinalInstruction is a plain fall-through
+   and now gets the edge to the next block. Without it such blocks had NO
+   CFG successors -- the loop detection excluded final-less body blocks
+   and the CDD's single-pred checks misrouted them. (Load-bearing: the new
+   CDD shapes segfault without it.)
+
+2. **The TryIntroduceShortCircuit nested-else gate** (the C#
+   MatchIfInstruction faithfulness): the C#'s two-arg MatchIfInstruction
+   requires the nested if's false arm to be a Nop (no else). The port fired
+   on nested ifs WITH an else and replaced the true-arm block with the
+   nested true arm, DESTROYING the else -- the empty-guard family's
+   semantic break (TryGetCpuArch's old render: the 46071/49184 cases
+   silently missing; GetFixIndexs2's old render: the whole body gone).
+
+3. **TryCombineSameTargetGuards** (the new transform): `if (C) br X else
+   Block { FINAL: if (c) br X else B2 }` (both gotos target the same X) ->
+   `if (C || c) br X else B2`. The else-oriented form of the C#
+   IntroduceShortCircuit: the C# inverts the guards first
+   (PickBetterBlockExit -> InvertIf -> InlineTrueBranch into the then) and
+   combines with LogicAnd; this port's fall-through inline builds the
+   else-oriented chain, so the merge takes the LogicOr form (`if (C)
+   ldc.i4 1 else c`, the C# LogicOr convention). The CDD fixpoint
+   collapses the whole chain into `if (c1 || c2 || ...) br SKIP else <the
+   body>`; DropTrailingGotoToNext + SwapEmptyThen then produce the final
+   `if (!(c1 || c2 || ...)) <the body>` (the de Morgan equivalent of the
+   C#'s `if (A && B && C) Block{body}`).
+
+4. **The else-nop empty treatment** in TryInlineIfFallThrough's no-else
+   gate: the C# IfInstruction ctor materializes a missing else as a Nop, so
+   the C#'s gates see one; the port used a null slot and rejected the Nop
+   form. IsEmptyArm moved above the transform for the check.
+
+Measured decomposition (env-gated bisect): the ISC gate + the CFG edge
+alone = dnlib +1203 / net10 +2286 (the chains stay as nested ifs -- the
+same shape as last session's reverted gate); the OR-combine recovers
+dnlib -1146 / net10 -5532; the net +57 dnlib = the switch-tree methods
+(OptimizeMacros +103, MDToken +101, TryGetCpuArch +47) whose case chains
+the old combine silently dropped and now render correctly as nested ifs
+where the oracle forms switches.
+
+### The next slice: the guard-continue render form
+
+The combined chains render `if (!(!A || (B || C))) { <the body> }` where
+the oracle renders `if (!A || B || C) { continue; } <the body>` (net10:
+508 `if (!(` occurrences; ~2-4 diff lines each). The C#'s ILAst keeps the
+positive &&-form (`if (A && B && C) Block{body}`, /tmp/sos_cflow.txt) and
+its statement layer does the inversion: de Morgan the condition, emit
+`continue;` for the false path, flatten the body after. The port needs:
+(a) the While-container continue-block detection (a br to the loop's
+trailing increment block renders as continue -- the port's IsContinueBranch
+only knows the For's last block and the loop heads), and (b) the
+renderer's guard inversion (the if-emission detecting a negated condition +
+a non-exiting then + the false path flowing to the loop tail). After that,
+re-apply /tmp/extendloop_held.patch (the loop extension, still held: the
+extension + this combination should now compose).
+
+The standing queue after that: the switch-tree methods' switch formation
+(the TryGetCpuArch family -- the oracle forms switches where the port
+renders nested ifs), the switch-inline section-order relaxation, the 303
+not-found/adjacent goto split, the 97 span-escapes, the `?.` shapes, the
+`.override` forwarders, the net10 foreach-collapse gap.
