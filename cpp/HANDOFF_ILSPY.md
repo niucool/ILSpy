@@ -5878,19 +5878,26 @@ ables (verified RED on the pre-fix tree).
 
 ### THE NEXT FAMILIES (the analysis, next session's targets)
 
-1. THE S_N PLACEHOLDER FAMILY (~4359 net10 lines -- the biggest single
-   remaining family): the reader's flush slots (S_0/S_1...) leak into the
-   render where the oracle inlines the store into the loop condition:
-   the oracle `while (((symbol = litlenTree.GetSymbol(input)) & -256)
-   == 0)` vs the port `while ((S_0 & 0xFFFFFF00u) == 0) { var S_0 =
-   symbol = ...; }` (the Inflater.Decode family). THE C# SURFACE: the
-   ILAst shape is the loop body's first store + the condition's load of
-   the same variable -- the C# builds `(symbol = ...) & -256` as an
-   assignment-in-condition EXPRESSION -- the statement/expression
-   builder layer (the StatementBuilder/ExpressionBuilder's
-   assignment-into-condition for loop-carried variables), likely the C#
-   ExpressionBuilder's handling of a variable whose stores all sit at
-   the loop head. THIS IS A STATEMENT-BUILDER SCALE SLICE.
+1. THE REMAINING S_N SLOTS (~4075 net10 occurrences): the loop-condition
+   assignment shapes are FIXED (f711054d8) and the array-element field
+   loads are FIXED (99b1927a5), but the multi-use stack slots persist
+   elsewhere: the dup'd-value slots (a slot read by both the compound
+   store and a later expression) and the pending-field-load slots in
+   other statement shapes. Sample: net10 OutputWindow.SlowRepeat now
+   renders `int num = windowEnd++; window[num] = window[repStart++];`
+   where the oracle inlines the compound into the index:
+   `window[windowEnd++]`. THE ROOT (traced this session): the port's
+   prefix whole-function ILInlining inlines the window field load into
+   the ldelema's array operand BEFORE the statement transform's
+   compound-inline attempt, so the num-tmp's search from its store hits
+   the array's ldobj (an impure/impure MayReorder pair) and stops
+   before reaching the index's ldloc. The C# avoids this by ORDER: its
+   reader flushed the window load into an early S_1 slot (the
+   flush-before-emit), and that slot's inline fails in the prefix (the
+   local0 store's ldobj blocks it -- the same impure wall), leaving a
+   pure ldloc in the ldelema for the num-inline to pass. THE DEEP FIX:
+   the reader's flush-at-emit (see the experiment below) plus the
+   inliner-order work -- a multi-slice campaign.
 2. THE ?. NULL-PROPAGATION FAMILY (the queue's standing item): the
    port's `finally { if (I_0 == 0) {} I_0.Dispose(); }` vs the oracle's
    `finally { moduleDefMD?.Dispose(); }` (the converted iterators'
@@ -5898,7 +5905,26 @@ ables (verified RED on the pre-fix tree).
 3. The remaining I_N placeholders after the field-surface fix are small
    (33 net10 sites, mostly the ?. family's I_0).
 
+### THE FLUSH-AT-EMIT EXPERIMENT (attempted and REVERTED this session)
+
+The C# ReadInstructions flushes the expression stack before every
+emitted (non-pushed) instruction:
+`if (!decodedInstruction.PushedOnExpressionStack) {
+FlushExpressionStack(); block.Block.Instructions.Add(inst); }`. The port
+only flushes at Peek (dup), branches, and block ends -- pending field
+loads survive across emitted stores, so the port's ILAst block layout
+differs from the C#'s (the C# materializes the orphans as slots AT each
+emission). Implementing the flush alone (FlushExpressionStack before
+each block->Add in DecodeOne) was measured WORSE: dnlib 69339->69523,
+net10 86872->87130, cui 1771->1789 -- the earlier-flushed slots are NOT
+eliminated by the port's downstream (the inliner's impure-pair walls
+stop on them in the port's orderings). The C# eliminates them because
+its layout makes each slot's use come while the intervening expressions
+are still pure slots. LANDING THE FLUSH NEEDS THE INLINER-ORDER WORK
+FIRST (or together). Recorded here so the experiment is not repeated
+blind.
+
 ### The standing gates (all verified on the committed tree)
 
-- The connid pin b38babc5465c9861; dnlib 69517; net10 87082; cui 1772;
-  hello 3; the suite control 268; the canary renders 8789 lines.
+- The connid pin b38babc5465c9861; dnlib 69286; net10 86593; cui 1771;
+  hello 3; the suite control 268; the canary renders 8788 lines.
