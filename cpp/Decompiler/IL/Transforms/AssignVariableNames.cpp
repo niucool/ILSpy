@@ -30,6 +30,9 @@
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/ITypeDefinition.hpp"
+#include "Decompiler/TypeSystem/INamespace.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/Util/Char.hpp"
 #include "Decompiler/Util/Utf.hpp"
@@ -309,9 +312,11 @@ std::string AssignVariableNames::SuggestForeachElementName(
     if (baseName.empty() && collection != nullptr &&
         collection->Op == OpCode::LdLoc) {
         // The C#'s parameter arm: a collection held in a parameter keeps
-        // the parameter's name.
+        // the parameter's name -- but never the implicit `this` (a keyword,
+        // not a name source; the item fallback takes over).
         ILVariable* v = static_cast<LdLoc*>(collection)->Variable.get();
-        if (v != nullptr && v->Kind == VariableKind::Parameter)
+        if (v != nullptr && v->Kind == VariableKind::Parameter &&
+            v->Name != "this")
             baseName = v->Name;
     }
     std::string proposedName = "item";
@@ -410,8 +415,15 @@ void CollectLoadSites(
 
 } // namespace
 
+// The C# `static bool IsLowerCase(string name)` (AssignVariableNames.cs):
+// a non-empty name whose first character is already lower-case.
+bool IsLowerCaseName(const std::string& name) {
+    return !name.empty() &&
+           std::tolower(static_cast<unsigned char>(name[0])) ==
+               static_cast<unsigned char>(name[0]);
+}
+
 void AssignVariableNames::Run(ILFunction& function, ILTransformContext& context) {
-    (void)context;
     // The loop counters (the i/j/k/n naming below).
     std::set<ILVariable*> loopCounters;
     if (function.Body)
@@ -427,6 +439,59 @@ void AssignVariableNames::Run(ILFunction& function, ILTransformContext& context)
     for (auto& v : function.Variables) {
         if (v && v->Kind == VariableKind::Parameter)
             taken.insert(v->Name);
+    }
+    // The C# VariableScope root-scope currentLowerCaseTypeOrMemberNames
+    // (AssignVariableNames.cs lines 107-129): the lower-case member names
+    // of the declaring type -- `GetMembers()` includes the inherited
+    // members, so a base-declared field name filters too -- plus the
+    // lower-case type names of the declaring type's namespace and nesting
+    // chain. A naming proposal matching one of these is rejected: the
+    // local would shadow the member/type in the rendered scope and force
+    // a `base.`/`this.` qualifier on the member accesses. The type names
+    // also reserve the name outright (the C# AddExistingName on
+    // reservedVariableNames); the member names only filter the proposals.
+    // The using-scope type-name arm (the C# context.UsingScope) stays
+    // deferred: the port's IL pipeline context carries no using scope.
+    // The primary-constructor backing-field arm (`<name>P` fields) needs
+    // the IsCompilerGenerated surface; the corpora predate C# 12 primary
+    // constructors, so the arm stays deferred with it.
+    std::set<std::string> currentLowerCaseTypeOrMemberNames;
+    {
+        const TypeSystem::ITypeDefinition* declaringType =
+            function.Method != nullptr
+                ? function.Method->DeclaringTypeDefinition()
+                : context.CurrentTypeDefinition;
+        if (declaringType != nullptr) {
+            for (const TypeSystem::IMember* m :
+                 declaringType->GetMembers()) {
+                if (m != nullptr && IsLowerCaseName(m->Name()))
+                    currentLowerCaseTypeOrMemberNames.insert(m->Name());
+            }
+            if (context.TypeSystem != nullptr) {
+                const TypeSystem::INamespace* ns =
+                    TypeSystem::GetNamespaceByFullName(
+                        *context.TypeSystem, declaringType->Namespace());
+                if (ns != nullptr) {
+                    for (const TypeSystem::ITypeDefinition* t : ns->Types()) {
+                        if (t != nullptr && IsLowerCaseName(t->Name())) {
+                            currentLowerCaseTypeOrMemberNames.insert(t->Name());
+                            taken.insert(t->Name());
+                        }
+                    }
+                }
+            }
+            for (const TypeSystem::ITypeDefinition* current = declaringType;
+                 current != nullptr;
+                 current = current->DeclaringTypeDefinition()) {
+                for (const TypeSystem::ITypeDefinition* nested :
+                     current->NestedTypes()) {
+                    if (nested != nullptr && IsLowerCaseName(nested->Name())) {
+                        currentLowerCaseTypeOrMemberNames.insert(nested->Name());
+                        taken.insert(nested->Name());
+                    }
+                }
+            }
+        }
     }
     for (auto& v : function.Variables) {
         if (!v || v->Kind == VariableKind::Parameter) continue;
@@ -454,9 +519,16 @@ void AssignVariableNames::Run(ILFunction& function, ILTransformContext& context)
                 // The C# adds the null suggestions to the set too: a
                 // store that suggests nothing makes the set ambiguous
                 // (a lone null singleton proposes nothing), so the empty
-                // string participates in the distinct-count.
-                storeNames.insert(GetNameFromInstruction(
-                    static_cast<StLoc*>(store)->Value.get()));
+                // string participates in the distinct-count. A proposal
+                // matching a member/type name is rejected instead (the
+                // currentLowerCaseTypeOrMemberNames filter: the local must
+                // not shadow the member).
+                std::string suggested = GetNameFromInstruction(
+                    static_cast<StLoc*>(store)->Value.get());
+                if (!suggested.empty() &&
+                    currentLowerCaseTypeOrMemberNames.count(suggested) != 0)
+                    continue;
+                storeNames.insert(std::move(suggested));
             }
             if (storeNames.size() == 1 && !storeNames.begin()->empty())
                 base = *storeNames.begin();
@@ -473,9 +545,15 @@ void AssignVariableNames::Run(ILFunction& function, ILTransformContext& context)
                     // The store proposal's null rule applies here too
                     // (the C# Except keeps the nulls as a distinct set
                     // element): a load whose use context suggests nothing
-                    // vetoes the proposal.
-                    loadNames.insert(
-                        GetNameForArgument(load->Parent, load->ChildIndex));
+                    // vetoes the proposal. A suggestion matching a
+                    // member/type name is rejected (the same
+                    // currentLowerCaseTypeOrMemberNames filter).
+                    std::string suggested =
+                        GetNameForArgument(load->Parent, load->ChildIndex);
+                    if (!suggested.empty() &&
+                        currentLowerCaseTypeOrMemberNames.count(suggested) != 0)
+                        continue;
+                    loadNames.insert(std::move(suggested));
                 }
                 if (loadNames.size() == 1 && !loadNames.begin()->empty())
                     base = *loadNames.begin();

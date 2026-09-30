@@ -34,8 +34,12 @@
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/LdStr.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
@@ -72,6 +76,7 @@ using ILSpy::Decompiler::Util::LongSet;
 using ILSpy::Decompiler::Metadata::MetadataFile;
 using ILSpy::Decompiler::TypeSystem::KnownType;
 using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+namespace TS = ILSpy::Decompiler::TypeSystem;
 
 namespace {
 
@@ -372,6 +377,41 @@ TEST(SwitchDetection, SortsSectionsByBranchTargetOffset) {
     b.fn->CheckInvariant(ILPhase::Normal);
 }
 
+// A reconstructed switch whose default section's branch targets a
+// per-site materialized return block (a SMALL offset -- the CFS
+// branch-to-return fold's per-site materialization; the C# tree keeps one
+// shared default block after the switch, whose offset is the highest) must
+// still order the default LAST: the huge complement the analysis builds as
+// the default stands in for the shared block.
+TEST(SwitchDetection, SortsMergedDefaultSectionLast) {
+    auto V = MakeLocal("V");
+    // Cases (label, offset): {0,0x10}, {1,0x20}; the default branches to a
+    // small-offset return block (0x05 -- the per-site materialization sits
+    // early in the IL, unlike the C#'s shared post-switch default): the
+    // default's complement labels (the huge set) must place it last
+    // regardless.
+    auto b = BuildSwitchOnLdLoc(V, {{0, 0x10}, {1, 0x20}}, 0x05);
+    // Replace the default body's labels with the complement (the analysis'
+    // default): every value except 0 and 1 -- huge.
+    for (auto& s : b.sw->Sections) {
+        if (s->Labels.IsEmpty()) {
+            s->Labels = ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0))
+                            .UnionWith(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(1)))
+                            .Invert();
+        }
+    }
+    ILTransformContext ctx;  // SortSwitchSections = false (default)
+    SwitchDetection::SimplifySwitchInstruction(b.root, ctx);
+    ASSERT_EQ(b.sw->Sections.size(), 3u);
+    EXPECT_EQ(SectionTarget(*b.sw->Sections[0]), b.cases[0]);  // offset 0x10, label 0
+    EXPECT_EQ(SectionTarget(*b.sw->Sections[1]), b.cases[1]);  // offset 0x20, label 1
+    // The huge-complement default sorts last even though its branch target
+    // offset (0x30) is not the maximum.
+    EXPECT_EQ(SectionTarget(*b.sw->Sections[2]), b.def);
+    EXPECT_GT(b.sw->Sections[2]->Labels.Count(), 100u);
+    b.fn->CheckInvariant(ILPhase::Normal);
+}
+
 // SortSwitchSections on (setting true): sections are ordered by label value
 // instead of by branch-target offset.
 TEST(SwitchDetection, SortsSectionsByLabelValueWhenSettingOn) {
@@ -568,6 +608,214 @@ TEST(SwitchDetection, RunReconstructsIfChainAsSwitch) {
     fx.fn->CheckInvariant(ILPhase::Normal);
 }
 
+TEST(SwitchDetection, MergesPerSiteReturnBlocksIntoOneDefault) {
+    // The CFS branch-to-return fold materializes the shared default return
+    // PER SITE: the false paths of the switch tree run into different
+    // single-return blocks that all leave with the same value (the corpus
+    // shape -- TryGetCpuArch's binary-search false arms). The C# tree keeps
+    // one shared target block, so its AddSection merges them by target;
+    // this port must merge by the resolved exit identity (the returned
+    // value through the passthrough blocks), or every false arm becomes
+    // its own section and the switch rejects on "non-default with tons of
+    // keys". Shape: root: if (V < 2) br left; right: if (V == 2) br caseA;
+    // left: if (V == 0) br caseB; the false paths run through empty
+    // passthrough blocks into ret1/ret2, both `leave ldc.i4(0)`.
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto V = MakeTypedLocal("V", KnownTypeCode::Int32);
+    fn->Variables.push_back(V);
+    for (int i = 0; i < 9; ++i) fn->Body->AddBlock(std::make_unique<Block>());
+    // Layout: each if's false path is the positional fall-through (the
+    // next block in the container), as the reader produces.
+    Block* root = fn->Body->Blocks[0].get();
+    Block* right = fn->Body->Blocks[1].get();
+    Block* pass1 = fn->Body->Blocks[2].get();
+    Block* ret1 = fn->Body->Blocks[3].get();
+    Block* left = fn->Body->Blocks[4].get();
+    Block* pass2 = fn->Body->Blocks[5].get();
+    Block* ret2 = fn->Body->Blocks[6].get();
+    Block* caseA = fn->Body->Blocks[7].get();
+    Block* caseB = fn->Body->Blocks[8].get();
+
+    // root: if (V < 2) br left ; fall-through right
+    root->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(V), std::make_unique<LdcI4>(2),
+                               ComparisonKind::LessThan),
+        std::make_unique<Branch>(left), nullptr));
+    // right: if (V == 2) br caseA ; fall-through pass1
+    right->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(V), std::make_unique<LdcI4>(2),
+                               ComparisonKind::Equality),
+        std::make_unique<Branch>(caseA), nullptr));
+    // left: if (V == 0) br caseB ; fall-through pass2
+    left->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(V), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Equality),
+        std::make_unique<Branch>(caseB), nullptr));
+    // the passthroughs: empty blocks whose final branches to the returns
+    pass1->SetFinal(std::make_unique<Branch>(ret1));
+    pass2->SetFinal(std::make_unique<Branch>(ret2));
+    // the per-site materialized returns: a valued leave each, same value
+    ret1->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                           std::make_unique<LdcI4>(0)));
+    ret2->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                           std::make_unique<LdcI4>(0)));
+    caseA->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                            std::make_unique<LdcI4>(1)));
+    caseB->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                            std::make_unique<LdcI4>(1)));
+    (void)caseA; (void)caseB;
+    RecomputeIncomingEdgeCounts(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ILTransformContext ctx;
+    SwitchDetection().Run(*fn, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ASSERT_TRUE(root->FinalInstruction);
+    ASSERT_EQ(root->FinalInstruction->Op, OpCode::SwitchInstruction)
+        << "the per-site return blocks must not block the switch formation";
+    auto* sw = static_cast<SwitchInstruction*>(root->FinalInstruction.get());
+    // Three sections: {0}, {2}, and the merged default ({1} union {V>2}).
+    ASSERT_EQ(sw->Sections.size(), 3u);
+    bool foundZero = false, foundTwo = false, foundDef = false;
+    for (const auto& s : sw->Sections) {
+        if (s->Labels.Contains(0) && s->Labels.Count() == 1u) foundZero = true;
+        if (s->Labels.Contains(2) && s->Labels.Count() == 1u) foundTwo = true;
+        if (!s->Labels.Contains(0) && !s->Labels.Contains(2) &&
+            s->Labels.Count() > 100u)
+            foundDef = true;
+    }
+    EXPECT_TRUE(foundZero);
+    EXPECT_TRUE(foundTwo);
+    EXPECT_TRUE(foundDef) << "the per-site returns merge into one default section";
+}
+
+// The else-armed if-chain (the nested-Block false arms, the shape the
+// transformed pipeline produces when the CFS restructures the chains):
+// `if (V == 0) br caseA else Block { if (V == 1) br caseB else Block {
+// br def } }`. The chain is reconstructed as a SwitchInstruction just like
+// the fall-through form: the false arms' nested blocks are the chain's
+// continuation, the innermost lone branch the default section.
+TEST(SwitchDetection, RunReconstructsElseArmedIfChainAsSwitch) {
+    IfChainSwitch fx;
+    fx.fn = std::make_unique<ILFunction>();
+    fx.fn->Body = std::make_unique<BlockContainer>();
+    fx.fn->Body->Parent = fx.fn.get();
+    fx.fn->Body->ChildIndex = 0;
+    fx.V = MakeTypedLocal("V", KnownTypeCode::Int32);
+    fx.fn->Variables.push_back(fx.V);
+    for (int i = 0; i < 4; ++i) fx.fn->Body->AddBlock(std::make_unique<Block>());
+    fx.root = fx.fn->Body->Blocks[0].get();
+    fx.def = fx.fn->Body->Blocks[1].get();
+    fx.caseA = fx.fn->Body->Blocks[2].get();
+    fx.caseB = fx.fn->Body->Blocks[3].get();
+    // innermost: Block { br def }
+    auto innermost = std::make_unique<Block>();
+    innermost->SetFinal(std::make_unique<Branch>(fx.def));
+    // inner: if (V == 1) br caseB else Block { br def }
+    auto inner = std::make_unique<Block>();
+    inner->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(fx.V), std::make_unique<LdcI4>(1),
+                               ComparisonKind::Equality),
+        std::make_unique<Branch>(fx.caseB), std::move(innermost)));
+    // root: if (V == 0) br caseA else Block { ... }
+    fx.root->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(fx.V), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Equality),
+        std::make_unique<Branch>(fx.caseA), std::move(inner)));
+    fx.def->SetFinal(std::make_unique<Leave>(fx.fn->Body.get()));
+    fx.caseA->SetFinal(std::make_unique<Leave>(fx.fn->Body.get()));
+    fx.caseB->SetFinal(std::make_unique<Leave>(fx.fn->Body.get()));
+    RecomputeIncomingEdgeCounts(*fx.fn);
+
+    ILTransformContext ctx;
+    SwitchDetection().Run(*fx.fn, ctx);
+
+    ASSERT_TRUE(fx.root->FinalInstruction);
+    ASSERT_EQ(fx.root->FinalInstruction->Op, OpCode::SwitchInstruction);
+    auto* sw = static_cast<SwitchInstruction*>(fx.root->FinalInstruction.get());
+    ASSERT_EQ(sw->Sections.size(), 3u);
+    bool foundA = false, foundB = false, foundDef = false;
+    for (const auto& s : sw->Sections) {
+        Block* t = SectionTarget(*s);
+        if (t == fx.caseA) {
+            foundA = true;
+            EXPECT_TRUE(s->Labels.Contains(0));
+        } else if (t == fx.caseB) {
+            foundB = true;
+            EXPECT_TRUE(s->Labels.Contains(1));
+        } else if (t == fx.def) {
+            foundDef = true;
+            EXPECT_FALSE(s->Labels.Contains(0));
+            EXPECT_FALSE(s->Labels.Contains(1));
+        }
+    }
+    EXPECT_TRUE(foundA);
+    EXPECT_TRUE(foundB);
+    EXPECT_TRUE(foundDef);
+    fx.fn->CheckInvariant(ILPhase::Normal);
+}
+
+// A statement-carrying case body (the restructured chain's inverted root:
+// `if (V == 0) { <the case body> } else { <the rest of the chain> }`) becomes
+// a section whose body is the Block itself, not a Branch. The switch forms
+// only when CloneBody can deep-clone such a Block body.
+TEST(SwitchDetection, RunClonesBlockBodiedSection) {
+    IfChainSwitch fx;
+    fx.fn = std::make_unique<ILFunction>();
+    fx.fn->Body = std::make_unique<BlockContainer>();
+    fx.fn->Body->Parent = fx.fn.get();
+    fx.fn->Body->ChildIndex = 0;
+    fx.V = MakeTypedLocal("V", KnownTypeCode::Int32);
+    fx.fn->Variables.push_back(fx.V);
+    for (int i = 0; i < 3; ++i) fx.fn->Body->AddBlock(std::make_unique<Block>());
+    fx.root = fx.fn->Body->Blocks[0].get();
+    fx.def = fx.fn->Body->Blocks[1].get();
+    fx.caseB = fx.fn->Body->Blocks[2].get();
+    // innermost: Block { br def }
+    auto innermost = std::make_unique<Block>();
+    innermost->SetFinal(std::make_unique<Branch>(fx.def));
+    // the else chain: if (V == 1) br caseB else Block { br def }
+    auto chain = std::make_unique<Block>();
+    chain->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(fx.V), std::make_unique<LdcI4>(1),
+                               ComparisonKind::Equality),
+        std::make_unique<Branch>(fx.caseB), std::move(innermost)));
+    // the {0} case body: a statement-carrying Block (not a branch target)
+    auto caseBody = std::make_unique<Block>();
+    caseBody->Add(std::make_unique<Nop>());
+    // root: if (V == 0) Block { nop } else Block { ... }
+    fx.root->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(fx.V), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Equality),
+        std::move(caseBody), std::move(chain)));
+    fx.def->SetFinal(std::make_unique<Leave>(fx.fn->Body.get()));
+    fx.caseB->SetFinal(std::make_unique<Leave>(fx.fn->Body.get()));
+    RecomputeIncomingEdgeCounts(*fx.fn);
+
+    ILTransformContext ctx;
+    SwitchDetection().Run(*fx.fn, ctx);
+
+    ASSERT_TRUE(fx.root->FinalInstruction);
+    ASSERT_EQ(fx.root->FinalInstruction->Op, OpCode::SwitchInstruction);
+    auto* sw = static_cast<SwitchInstruction*>(fx.root->FinalInstruction.get());
+    ASSERT_EQ(sw->Sections.size(), 3u);
+    // The {0} section's body is a cloned Block carrying the statement.
+    bool foundBlockBody = false;
+    for (const auto& s : sw->Sections) {
+        if (auto* b = dynamic_cast<const Block*>(s->Body.get())) {
+            foundBlockBody = true;
+            EXPECT_EQ(b->Instructions.size(), 1u);
+            EXPECT_TRUE(s->Labels.Contains(0));
+        }
+    }
+    EXPECT_TRUE(foundBlockBody);
+    fx.fn->CheckInvariant(ILPhase::Normal);
+}
+
 // When SparseIntegerSwitch is off, Run is a no-op: the if-chain stays as ifs.
 TEST(SwitchDetection, RunIsNoOpWhenSparseIntegerSwitchOff) {
     auto fx = BuildIfChainSwitch();
@@ -672,4 +920,130 @@ TEST(SwitchDetection, MscorlibRunSweepPreservesInvariant) {
     // not drop them (the 2nd-pass SimplifySwitchInstruction keeps them, and the
     // if-chain reconstruction only adds switches).
     EXPECT_GE(switchesAfter, switchesBefore);
+}
+
+// The C# SwitchDetection.UseCSharpSwitch's MatchRoslynSwitchOnString gate:
+// when the root block's store feeding the switch variable is a
+// ComputeStringHash call (a Roslyn switch-on-string's binary-search tree),
+// the if-tree collapses into one flat SwitchInstruction regardless of the
+// if-count heuristic. The layout mirrors the reader's tree after the CFS
+// branch-to-return fold: each false path runs into its own local
+// pure-return block (the C# tree keeps a shared br target instead; the
+// analysis merges the leave bodies by their target container, which
+// reaches the same one-default-section outcome).
+TEST(SwitchDetection, RoslynHashSearchTreeFormsFlatSwitch) {
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto S = MakeLocal("S");
+    auto H = MakeLocal("H");
+    fn->Variables.push_back(S);
+    fn->Variables.push_back(H);
+
+    const std::size_t nBlocks = 11;
+    for (std::size_t i = 0; i < nBlocks; i++)
+        fn->Body->AddBlock(std::make_unique<Block>());
+    Block* root = fn->Body->Blocks[0].get();
+    Block* mid = fn->Body->Blocks[1].get();
+    Block* leafD = fn->Body->Blocks[2].get();
+    Block* case1 = fn->Body->Blocks[3].get();
+    Block* leaf1 = fn->Body->Blocks[4].get();
+    Block* hi = fn->Body->Blocks[5].get();
+    Block* leaf2 = fn->Body->Blocks[6].get();
+    Block* case2 = fn->Body->Blocks[7].get();
+    Block* leaf3 = fn->Body->Blocks[8].get();
+    Block* body1 = fn->Body->Blocks[9].get();
+    Block* body2 = fn->Body->Blocks[10].get();
+
+    // Root: [stloc H(ComputeStringHash(S))], if (H > 10) br hi.
+    auto hashCall = std::make_unique<Call>(
+        "<PrivateImplementationDetails>::ComputeStringHash");
+    hashCall->DeclaringType = std::make_shared<TS::SimpleType>(
+        TS::TopLevelTypeName(std::string(), std::string("<PrivateImplementationDetails>")));
+    hashCall->AddArg(std::make_unique<LdLoc>(S));
+    root->Add(std::make_unique<StLoc>(H, std::move(hashCall)));
+    root->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(H),
+                                std::make_unique<LdcI4>(10),
+                                ComparisonKind::GreaterThan),
+        std::make_unique<Branch>(hi)));
+
+    // Mid: if (H == 5) br case1; the false path falls into leafD.
+    mid->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(H),
+                                std::make_unique<LdcI4>(5),
+                                ComparisonKind::Equality),
+        std::make_unique<Branch>(case1)));
+
+    leafD->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                             std::make_unique<LdcI4>(0)));
+
+    // Case head 1: if (S == "five") br body1; the false path falls into leaf1.
+    auto eq1 = std::make_unique<Call>("System.String::op_Equality");
+    eq1->DeclaringType = std::make_shared<TS::SimpleType>(
+        TS::TopLevelTypeName("System", "String"));
+    eq1->AddArg(std::make_unique<LdLoc>(S));
+    eq1->AddArg(std::make_unique<LdStr>("five"));
+    case1->SetFinal(std::make_unique<IfInstruction>(
+        std::move(eq1), std::make_unique<Branch>(body1)));
+
+    leaf1->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                             std::make_unique<LdcI4>(0)));
+
+    // Hi: if (H == 20) br case2; the false path falls into leaf2.
+    hi->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(H),
+                                std::make_unique<LdcI4>(20),
+                                ComparisonKind::Equality),
+        std::make_unique<Branch>(case2)));
+
+    leaf2->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                             std::make_unique<LdcI4>(0)));
+
+    // Case head 2: if (S == "twenty") br body2; the false path falls into leaf3.
+    auto eq2 = std::make_unique<Call>("System.String::op_Equality");
+    eq2->DeclaringType = std::make_shared<TS::SimpleType>(
+        TS::TopLevelTypeName("System", "String"));
+    eq2->AddArg(std::make_unique<LdLoc>(S));
+    eq2->AddArg(std::make_unique<LdStr>("twenty"));
+    case2->SetFinal(std::make_unique<IfInstruction>(
+        std::move(eq2), std::make_unique<Branch>(body2)));
+
+    leaf3->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                             std::make_unique<LdcI4>(0)));
+
+    body1->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                             std::make_unique<LdcI4>(1)));
+    body2->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+                                             std::make_unique<LdcI4>(2)));
+
+    RecomputeIncomingEdgeCounts(*fn);
+
+    ILTransformContext ctx;
+    ctx.Settings.SparseIntegerSwitch = true;
+    SwitchDetection().Run(*fn, ctx);
+
+    // The binary-search tree collapsed into one flat switch in the root.
+    auto* sw = dynamic_cast<SwitchInstruction*>(root->FinalInstruction.get());
+    ASSERT_NE(sw, nullptr) << "the hash-search tree forms a flat switch";
+    // Two case sections plus the merged default.
+    ASSERT_EQ(sw->Sections.size(), 3u);
+    bool hasFive = false, hasTwenty = false, hasDefault = false;
+    for (const auto& s : sw->Sections) {
+        if (s->Labels.Contains(5)) hasFive = true;
+        if (s->Labels.Contains(20)) hasTwenty = true;
+        if (s->Labels.Count() > 100) hasDefault = true;
+    }
+    EXPECT_TRUE(hasFive);
+    EXPECT_TRUE(hasTwenty);
+    EXPECT_TRUE(hasDefault);
+    // The default section body is the shared leave (the two false-path
+    // remainders merged).
+    bool defaultIsLeave = false;
+    for (const auto& s : sw->Sections)
+        if (s->Labels.Count() > 100)
+            defaultIsLeave = s->Body && s->Body->Op == OpCode::Leave;
+    EXPECT_TRUE(defaultIsLeave);
+    fn->CheckInvariant(ILPhase::Normal);
 }

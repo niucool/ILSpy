@@ -17,6 +17,16 @@
 // DEALINGS IN THE SOFTWARE.
 
 #include "Decompiler/IL/ControlFlow/SwitchDetection.hpp"
+
+namespace ILSpy::Decompiler::IL {
+// SwitchOnStringTransform.cpp's matcher (the C# static method on the
+// class): the stloc(targetVar, call ComputeStringHash/ComputeSpanHash/
+// ComputeReadOnlySpanHash(ldloc s)) shape over the compiler-generated
+// hash helper.
+bool MatchComputeStringOrReadOnlySpanHashCall(ILInstruction* inst,
+                                              ILVariable* targetVar,
+                                              ILVariable*& switchValue);
+}
 #include "Decompiler/IL/ControlFlow/ControlFlowGraph.hpp"
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
 #include "Decompiler/IL/ILInstruction.hpp"
@@ -132,6 +142,9 @@ std::unique_ptr<ILInstruction> CloneBody(ILInstruction* body) {
         }
         return std::make_unique<Leave>(leave->TargetContainer, std::move(valueClone));
     }
+    // A restructured chain's case body can be a whole Block (the inverted
+    // root's statement-carrying arm): the generic deep clone covers it.
+    if (body->Op == OpCode::Block) return body->Clone();
     return nullptr;  // uncloneable body kind
 }
 
@@ -252,14 +265,26 @@ void SwitchDetection::SortSwitchSections(SwitchInstruction* sw, ILTransformConte
         // first, as in C# OrderBy over int?). This port does not carry
         // per-instruction ILRange, so a Leave body uses offset 0 as a
         // fallback (the CFS first pass only sees Branch bodies, so this does
-        // not affect output today). Secondary key: the first label value.
+        // the first label value.
         auto keyOf = [&](SwitchSection* s) -> std::tuple<bool, long long, long long> {
             long long lf = labelFirst(s);
+            // The huge-complement section is the analysis' default; it sorts
+            // last regardless of its body's target offset. The C#'s default
+            // body branches to the one shared post-switch block (the highest
+            // offset), but this port's CFS branch-to-return fold materializes
+            // the shared default per site, so the merged default's branch can
+            // carry a small offset.
+            if (s != nullptr && s->Labels.Count() > MaxValuesPerSection)
+                return {true, std::numeric_limits<long long>::max(), lf};
             if (auto* br = dynamic_cast<Branch*>(s ? s->Body.get() : nullptr)) {
                 return {true, static_cast<long long>(br->TargetOffset), lf};
             }
-            if (dynamic_cast<Leave*>(s ? s->Body.get() : nullptr)) {
-                return {true, 0, lf};
+            if (auto* leave = dynamic_cast<Leave*>(s ? s->Body.get() : nullptr)) {
+                // The C# Leave body keys on its ILRange.Start; the section
+                // bodies the string-switch arm clones carry their original
+                // offsets (the case heads' true arms and the merged default),
+                // which is what orders the values ahead of the default.
+                return {true, static_cast<long long>(leave->StartILOffset), lf};
             }
             return {false, 0, lf};
         };
@@ -499,6 +524,15 @@ void SwitchDetection::ProcessBlock(Block* block, bool& needsCleanup,
                 innerBlock->FinalInstruction.reset();
                 clearedBlocks.push_back(innerBlock);
             }
+            // The false-path pure-return blocks the analysis folded into
+            // leave-body sections: dead now that the switch carries their
+            // exit (their sole edge was the consumed fall-through).
+            for (Block* exitBlock : analysis_.ConsumedExitBlocks) {
+                if (!exitBlock) continue;
+                exitBlock->Instructions.clear();
+                exitBlock->FinalInstruction.reset();
+                clearedBlocks.push_back(exitBlock);
+            }
             controlFlowGraph_.reset();  // the CFG is no longer valid
             needsCleanup = true;
             SortSwitchSections(swp, *context_);
@@ -536,9 +570,22 @@ bool SwitchDetection::UseCSharpSwitch() {
             return false;
     }
     // An existing IL switch (or a Roslyn switch-on-string) is a strong signal
-    // the surrounding code is a switch. MatchRoslynSwitchOnString is deferred
-    // (needs SwitchOnStringTransform.MatchComputeStringOrReadOnlySpanHashCall).
+    // the surrounding code is a switch.
     if (analysis_.ContainsILSwitch) return true;
+    // The C# `|| MatchRoslynSwitchOnString()`: the root block's store
+    // feeding the switch variable is a ComputeStringHash call -- a Roslyn
+    // switch-on-string compiled to a binary-search if-tree. The flat switch
+    // forms regardless of the if-count heuristic (the string case heads
+    // hang off the search leaves). The C# reads insns[Count-3], the store
+    // before the root's trailing if+br pair; this port's root keeps the if
+    // in the final slot, so the store is the last instruction.
+    if (!analysis_.RootBlock->Instructions.empty()) {
+        ILVariable* hashSwitchValue = nullptr;
+        if (MatchComputeStringOrReadOnlySpanHashCall(
+                analysis_.RootBlock->Instructions.back().get(),
+                analysis_.SwitchVariable.get(), hashSwitchValue))
+            return true;
+    }
 
     // Heuristic: prefer an if-chain when it has fewer branches than the switch
     // would have label-intervals.

@@ -78,6 +78,17 @@ public:
     // (the C# tree's parent ownership); appended by the closure-decoder slices.
     std::vector<std::unique_ptr<ILFunction>> LocalFunctions;
 
+    // The C# GC keeps a conversion's source function alive: the
+    // YieldReturnDecompiler's ConvertBody clones the MoveNext() body, and
+    // the clones' branch/leave targets that the retargeting does not cover
+    // (the branches inside cloned nested containers pointing at the
+    // original's blocks) still reference the ORIGINAL tree -- the GC holds
+    // that tree for as long as any clone references it. This port's
+    // unique_ptr tree frees the source function at the conversion's end,
+    // so the converted function owns the source tree here for its lifetime
+    // (the GC-root equivalent; no C# surface -- the C# needs none).
+    std::vector<std::unique_ptr<ILFunction>> KeepAliveFunctions;
+
     // The constructor/static status of this function's method, the pre-resolved
     // subset of the C# ILFunction.Method handle the transforms consult. Defaults
     // false (a null Method, matching the C# `function?.Method is not {...}` bail)

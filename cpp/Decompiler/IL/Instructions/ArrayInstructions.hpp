@@ -74,6 +74,13 @@ public:
     TypeSystem::ITypePtr Type;
     std::unique_ptr<ILInstruction> Array;
     std::vector<std::unique_ptr<ILInstruction>> Indices;
+    // The C# `public bool DelayExceptions` (Instructions.cs line 4940): the
+    // NullReferenceException/IndexOutOfRangeException only occurs when the
+    // reference is dereferenced, so the reader's ldelem/stelem decodes delay
+    // the address computation's exception to the actual load/store -- the
+    // flags drop MayThrow so the inliner's reorder checks (MayReorder's
+    // impure-pair rule) can move the pure-parts past it.
+    bool DelayExceptions = false;
     // The C# `public bool WithSystemIndex` operand the IndexRangeTransform sets and
     // the ExpressionBuilder's VisitLdElema reads to pick the System.Index hint;
     // rendered as the `withsystemindex.` prefix before the opcode.
@@ -93,7 +100,9 @@ public:
             if (Indices[i]) { Indices[i]->Parent = this; Indices[i]->ChildIndex = static_cast<int>(i + 1); }
         }
     }
-    InstructionFlags DirectFlags() const override { return InstructionFlags::MayThrow; }
+    InstructionFlags DirectFlags() const override {
+        return DelayExceptions ? InstructionFlags::None : InstructionFlags::MayThrow;
+    }
     StackType ResultType() const override {
         if (Array && Array->ResultType() == StackType::I) return StackType::I;
         return StackType::Ref;
@@ -106,6 +115,7 @@ public:
     }
     void WriteTo(std::string& out) const override {
         if (WithSystemIndex) out += "withsystemindex.";
+        if (DelayExceptions) out += "delayex.";
         out += "ldelema(";
         out += Type ? Type->ReflectionName() : std::string("?");
         out += ", ";

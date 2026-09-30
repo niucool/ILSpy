@@ -71,7 +71,73 @@ static bool ReachesOutsideLoop(FlowAnalysis::ControlFlowNode* from,
     return false;
 }
 
-Block* FindExitPoint(const std::set<FlowAnalysis::ControlFlowNode*>& loop) {
+// The C# `Leave.IsLeavingFunction`: a leave whose target container is the
+// function's root body (a return), as opposed to a leave breaking out of a
+// nested container. The C#'s ControlFlowGraph.CreateEdges does not count a
+// function return as a reachable exit.
+bool IsFunctionLeave(const Leave* leave) {
+    if (leave == nullptr || leave->TargetContainer == nullptr) return false;
+    const ILInstruction* p = leave;
+    while (p->Parent != nullptr) p = p->Parent;
+    const auto* fn = dynamic_cast<const ILFunction*>(p);
+    return fn != nullptr && fn->Body.get() == leave->TargetContainer;
+}
+
+// The C# ControlFlowGraph.HasReachableExit: "true iff there is a control
+// flow path from node to a branch/leave instruction leaving the container,
+// or to another node not dominated by node". A leave that exits the whole
+// function (a return) is NOT considered a reachable exit, so a return
+// block (and a self-contained linear continuation) qualifies as an exit
+// point; a loop member never does (it reaches the loop head, which it does
+// not dominate).
+bool HasReachableExitNode(FlowAnalysis::ControlFlowNode* n,
+                          BlockContainer* container) {
+    std::vector<FlowAnalysis::ControlFlowNode*> stack = { n };
+    std::unordered_set<FlowAnalysis::ControlFlowNode*> visited;
+    while (!stack.empty()) {
+        auto* cur = stack.back();
+        stack.pop_back();
+        if (!visited.insert(cur).second) continue;
+        auto* block = static_cast<Block*>(cur->UserData);
+        if (block != nullptr) {
+            bool leavesContainer = false;
+            std::function<void(const ILInstruction*)> scan2 =
+                [&](const ILInstruction* inst) {
+                if (inst == nullptr || leavesContainer) return;
+                if (auto* br = dynamic_cast<const Branch*>(inst)) {
+                    if (br->TargetBlock != nullptr &&
+                        br->TargetBlock->Parent != container) {
+                        bool nested = false;
+                        for (const ILInstruction* q = br->TargetBlock;
+                             q != nullptr; q = q->Parent) {
+                            if (q == container) { nested = true; break; }
+                        }
+                        if (!nested) leavesContainer = true;
+                    }
+                } else if (auto* lv = dynamic_cast<const Leave*>(inst)) {
+                    if (!IsFunctionLeave(lv)) leavesContainer = true;
+                }
+                if (leavesContainer) return;
+                for (int i = 0; i < inst->ChildCount(); ++i)
+                    scan2(inst->GetChild(i));
+            };
+            scan2(block->FinalInstruction.get());
+            for (const auto& inst : block->Instructions) {
+                scan2(inst.get());
+                if (leavesContainer) break;
+            }
+            if (leavesContainer) return true;
+        }
+        for (auto* succ : cur->Successors) {
+            if (!n->Dominates(succ)) return true;
+            stack.push_back(succ);
+        }
+    }
+    return false;
+}
+
+FlowAnalysis::ControlFlowNode* FindExitPointNode(
+        const std::set<FlowAnalysis::ControlFlowNode*>& loop) {
     // Deterministic, convergence-aware exit-point pick. Iterating the
     // std::set<ControlFlowNode*> directly would leak raw pointer order, so the
     // members are ordered by block StartILOffset first. A loop usually has a
@@ -103,6 +169,8 @@ Block* FindExitPoint(const std::set<FlowAnalysis::ControlFlowNode*>& loop) {
         }
     }
     if (cands.empty()) return nullptr;
+    // Convergence: the candidate all other candidates reach without
+    // re-entering the loop (the post-dominator of the exits).
     if (cands.size() > 1) {
         for (auto* cand : cands) {
             bool allReach = true;
@@ -112,12 +180,33 @@ Block* FindExitPoint(const std::set<FlowAnalysis::ControlFlowNode*>& loop) {
                     break;
                 }
             }
-            if (allReach) return static_cast<Block*>(cand->UserData);  // convergence
+            if (allReach) return cand;  // convergence
         }
     }
-    // Divergent exits (or a single candidate): pick the earliest by StartILOffset.
+    // The C# PickExitPoint source-order heuristic: among the candidates,
+    // pick the HIGHEST-IL-offset node with no reachable exit ("the real
+    // exit point... by simply picking the block with the highest IL
+    // offset"). A return block qualifies (a function return is not a
+    // reachable exit), so the loop-completion return is chosen over the
+    // earlier returns, which belong inside the loop.
+    BlockContainer* container = static_cast<BlockContainer*>(
+        static_cast<Block*>(members.front()->UserData)->Parent);
+    FlowAnalysis::ControlFlowNode* bestNode = nullptr;
+    std::uint32_t bestOffset = 0;
+    for (auto* c : cands) {
+        auto* block = static_cast<Block*>(c->UserData);
+        if (block == nullptr || block->Parent != container) continue;
+        if (HasReachableExitNode(c, container)) continue;
+        if (bestNode == nullptr || block->StartILOffset > bestOffset) {
+            bestNode = c;
+            bestOffset = block->StartILOffset;
+        }
+    }
+    if (bestNode != nullptr) return bestNode;
+    // No candidate qualifies (all have reachable exits): the earliest by
+    // StartILOffset, the stable rule.
     Block* best = nullptr;
-    std::uint32_t bestOffset = std::numeric_limits<std::uint32_t>::max();
+    bestOffset = std::numeric_limits<std::uint32_t>::max();
     for (auto* c : cands) {
         auto* block = static_cast<Block*>(c->UserData);
         if (!best || block->StartILOffset < bestOffset) {
@@ -125,15 +214,67 @@ Block* FindExitPoint(const std::set<FlowAnalysis::ControlFlowNode*>& loop) {
             bestOffset = block->StartILOffset;
         }
     }
-    return best;
+    for (auto* c : cands)
+        if (static_cast<Block*>(c->UserData) == best) return c;
+    return nullptr;
+}
+
+// The C# ExtendLoop (LoopDetection.cs): "Given a natural loop, add
+// additional CFG nodes to the loop in order to reduce the number of exit
+// points out of the loop" -- C# only allows reaching a single exit point
+// with 'break', so any additional exit would need a 'goto'. The extension
+// adds every block dominated by the loop head except the exit point's
+// subtree (the C#'s dominator-tree preorder over the head, excluding the
+// exit point): the early-return blocks end up inside the loop, where they
+// render as plain 'return' statements, and the loop keeps one exit.
+//
+// The exit point must be validated first (the C# ValidateExitPoint): no
+// node reachable from it may be dominated by the loop head but not by the
+// exit point -- a cross edge back into the extended loop would break the
+// single-entry invariant. Returns the exit-point node (also used as the
+// loop's synthesized exit branch target).
+FlowAnalysis::ControlFlowNode* ExtendLoop(
+        const ControlFlowGraph& cfg, FlowAnalysis::ControlFlowNode* head,
+        std::set<FlowAnalysis::ControlFlowNode*>& loop) {
+    FlowAnalysis::ControlFlowNode* exitPoint = FindExitPointNode(loop);
+    if (exitPoint == nullptr) return nullptr;
+    if (!head->Dominates(exitPoint)) return exitPoint;  // no extension
+    // The C# ValidateExitPoint (the recursive form over the dominator tree,
+    // flattened to a successor DFS here): invalid iff a node reachable from
+    // the exit point is dominated by the head but not by the exit point.
+    {
+        std::vector<FlowAnalysis::ControlFlowNode*> stack = { exitPoint };
+        std::unordered_set<FlowAnalysis::ControlFlowNode*> visited;
+        while (!stack.empty()) {
+            auto* n = stack.back();
+            stack.pop_back();
+            if (!visited.insert(n).second) continue;
+            for (auto* succ : n->Successors) {
+                if (head != succ && head->Dominates(succ) &&
+                    !exitPoint->Dominates(succ))
+                    return exitPoint;  // invalid: keep the natural loop
+                stack.push_back(succ);
+            }
+        }
+    }
+    // NOTE: the C# ExtendLoop also adds every head-dominated block outside
+    // the exit point's subtree here (the early-return blocks join the loop,
+    // keeping one exit). This port holds that extension until the guard-chain
+    // condition combining lands: without it the extended loops render as
+    // nested if-chains where the oracle combines the conditions (measured:
+    // net10 +1168 with the extension, the CflowDecrypter.GetFixIndexs2 shape;
+    // see the session record in HANDOFF_ILSPY.md).
+    return exitPoint;
 }
 
 void ConstructLoop(BlockContainer* parent, FlowAnalysis::ControlFlowNode* headerNode,
                    const std::set<FlowAnalysis::ControlFlowNode*>& loop,
-                   ILTransformContext& ctx) {
+                   FlowAnalysis::ControlFlowNode* exitNode, ILTransformContext& ctx) {
     (void)ctx;
     Block* oldEntryPoint = static_cast<Block*>(headerNode->UserData);
-    Block* exitBlock = FindExitPoint(loop);
+    Block* exitBlock = exitNode != nullptr
+                           ? static_cast<Block*>(exitNode->UserData)
+                           : nullptr;
 
     auto loopContainer = std::make_unique<BlockContainer>();
     loopContainer->Kind = ContainerKind::Loop;
@@ -304,8 +445,12 @@ void LoopDetection::Run(ILFunction& function, ILTransformContext& context) {
                         worklist.push_back(p);
                 }
             }
+            // The C# ExtendLoop: include the head-dominated blocks outside
+            // the exit point's subtree so the loop keeps one exit (the
+            // early returns stay inside and render as returns).
+            FlowAnalysis::ControlFlowNode* exitPoint = ExtendLoop(cfg, h, loop);
             context.StepOnce("Construct loop");
-            ConstructLoop(c, h, loop, context);
+            ConstructLoop(c, h, loop, exitPoint, context);
             createdAny = true;
         }
         }

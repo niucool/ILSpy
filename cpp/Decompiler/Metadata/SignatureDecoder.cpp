@@ -138,6 +138,41 @@ ITypePtr MakeTypeRefFromTypeDef(winmd::reader::TypeDef d) {
         ? std::string(name) : std::string(ns) + "." + std::string(name);
     TypeKind kind = DeriveTypeKind(flags, base, selfRefName);
     const auto* st = static_cast<SimpleType*>(known.get());
+    if (kind == TypeKind::Enum) {
+        // Collect the enum members' constant values (the static literal
+        // fields) so the case-label rendering can resolve a switch label
+        // to the member name (the C# CreateTypedCaseLabel's enum lookup).
+        std::map<long long, std::string> members;
+        try {
+            auto range = d.FieldList();
+            for (auto it = range.first; it != range.second; ++it) {
+                auto f = *it;
+                std::uint32_t fieldFlags = 0;
+                try { fieldFlags = f.Flags().value; } catch (const std::exception&) { continue; }
+
+                if ((fieldFlags & 0x0050u) != 0x0050u) continue;  // Static(0x10) | Literal(0x40)
+
+                auto c = f.Constant();
+                long long value = 0;
+                switch (c.Type()) {
+                    case winmd::reader::ConstantType::Int8: value = c.ValueInt8(); break;
+                    case winmd::reader::ConstantType::UInt8: value = c.ValueUInt8(); break;
+                    case winmd::reader::ConstantType::Int16: value = c.ValueInt16(); break;
+                    case winmd::reader::ConstantType::UInt16: value = c.ValueUInt16(); break;
+                    case winmd::reader::ConstantType::Int32: value = c.ValueInt32(); break;
+                    case winmd::reader::ConstantType::UInt32: value = c.ValueUInt32(); break;
+                    case winmd::reader::ConstantType::Int64: value = c.ValueInt64(); break;
+                    case winmd::reader::ConstantType::UInt64: value = static_cast<long long>(c.ValueUInt64()); break;
+                    default: continue;
+                }
+                members.emplace(value, std::string(f.Name()));
+            }
+        } catch (const std::exception&) {
+            // A malformed field/constant row: the type degrades to the
+            // member-less form (the raw case values render).
+        }
+        return std::make_shared<EnumMembersType>(st->GetTopLevelTypeName(), std::move(members));
+    }
     return std::make_shared<SimpleType>(st->GetTopLevelTypeName(), kind);
 }
 

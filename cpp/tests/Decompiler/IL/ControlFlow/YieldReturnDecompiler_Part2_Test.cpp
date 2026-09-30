@@ -39,6 +39,7 @@
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/IL/PatternMatching.hpp"
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
+#include "Decompiler/IL/Transforms/GetILTransforms.hpp"
 #include "Decompiler/Metadata/CodeMappingInfo.hpp"  // IsCompilerGeneratorEnumerator
 #include "Decompiler/Metadata/DotNetCorePathFinderExtensions.hpp"  // DetectTargetFrameworkId
 #include "Decompiler/Metadata/MetadataFile.hpp"
@@ -208,9 +209,33 @@ struct MscorlibEnumeratorFixture {
         // C# MatchEnumeratorCreationNewObj checks the ctor's ARGUMENT shape
         // in the creating method's body; here we take the enumerator from
         // the metadata and build the newobj node directly.
-        for (const auto& t : file->TypeDefs()) {
+        // Prefer the Numbers state machine (the fixture's three-yield
+        // shape the AnalyzesTheRealStateMachine expectations pin); the
+        // csc emits the nested state machines in a build-order-dependent
+        // row order, so the first row is not stable across fixture
+        // rebuilds. The fallback keeps any enumerator loadable.
+        std::vector<const typename decltype(file->TypeDefs())::value_type*>
+            candidates;
+        for (auto& t : file->TypeDefs()) {
             if (!MD::IsCompilerGeneratorEnumerator(*file, t.Token))
                 continue;
+            candidates.push_back(&t);
+        }
+        for (const auto* tp : candidates) {
+            const auto& t = *tp;
+            if (t.Name.find("Numbers") == std::string::npos)
+                continue;
+            if (PickEnumerator(t))
+                return true;
+        }
+        for (const auto* tp : candidates) {
+            if (PickEnumerator(*tp))
+                return true;
+        }
+        return false;
+    }
+    bool PickEnumerator(const typename decltype(file->TypeDefs())::value_type& t) {
+        {
             // Roslyn's iterators implement the interface members
             // EXPLICITLY ("System.Collections.IEnumerator.get_Current" as
             // the metadata name, matched through the MethodImpl table),
@@ -230,10 +255,10 @@ struct MscorlibEnumeratorFixture {
             hasGetCurrent = HasMethodNamed(*file, t.Token, "get_Current");
             hasDispose = HasMethodNamed(*file, t.Token, "Dispose");
             if (ctor == 0 || !hasGetCurrent || !hasMoveNext || !hasDispose)
-                continue;
+                return false;
             auto nameInfo = file->GetTypeDefNameInfo(t.Token);
             if (!nameInfo.has_value() || nameInfo->DeclaringTypeToken == 0)
-                continue;
+                return false;
             enumeratorType = t.Token;
             enumeratorCtor = ctor;
             currentType = nameInfo->DeclaringTypeToken;
@@ -357,6 +382,180 @@ TEST(YieldReturnDecompilerPart2, ConvertsTheRealCreatingMethodBody) {
     EXPECT_EQ(yieldReturns, 3u);
     std::sort(yieldedValues.begin(), yieldedValues.end());
     EXPECT_EQ(yieldedValues, (std::vector<int>{1, 2, 3}));
+}
+
+// The parameterized iterator's creating stub: Roslyn emits
+// `newobj; dup; stfld <>3__start; dup; stfld <>3__count; ret` -- the dup
+// opcode between the parameter stores. The reader's dup modeling must
+// materialize the newobj into ONE committed stack slot and reuse it for
+// every store and the return (the C# `Push(Peek())` shape), not a fresh
+// dup slot per occurrence; the creation pattern matches only the
+// single-slot form.
+TEST(YieldReturnDecompilerPart2, ConvertsTheParameterizedCreatingMethodBody) {
+    MscorlibEnumeratorFixture fixture;
+    if (!fixture.Load())
+        GTEST_SKIP() << "the iterator fixture is not provisioned";
+    ASSERT_NE(fixture.enumeratorType, 0u);
+
+    // The real WithParameters body (the parameterized iterator: the stub
+    // with the dup'd parameter stores).
+    std::uint32_t methodToken = 0, methodRva = 0;
+    for (const auto& m : fixture.file->GetMethods(fixture.currentType)) {
+        if (m.Name == "WithParameters" && m.RVA != 0) {
+            methodToken = m.Token;
+            methodRva = m.RVA;
+            break;
+        }
+    }
+    ASSERT_NE(methodToken, 0u);
+    auto fn = IL::ReadIL(*fixture.file, methodToken, methodRva);
+    ASSERT_NE(fn, nullptr);
+    auto methodStub = std::make_shared<TokenMethodStub>(methodToken);
+    methodStub->SetReturnType(
+        std::make_shared<TS::KnownType>(
+            TS::KnownTypeCode::IEnumerableOfT));
+    fn->Method = methodStub.get();
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.YieldReturn = true;
+    ctx.Metadata = fixture.file.get();
+    ctx.TypeSystem = fixture.ts.get();
+    ctx.DelegateBodyResolver =
+        [&fixture](std::uint32_t token,
+                   std::uint32_t rva) -> std::unique_ptr<IL::ILFunction> {
+        if (rva == 0) return nullptr;
+        return IL::ReadIL(*fixture.file, token, rva);
+    };
+
+    IL::YieldReturnDecompiler transform;
+    transform.Run(*fn, ctx);
+
+    EXPECT_TRUE(fn->IsIterator) << "the parameterized stub's dup shape "
+                                   "matches the creation pattern";
+}
+
+// The field-to-parameter translation: the converted body's reads of the
+// state machine's captured fields (`<>3__start`, the private `start` copy
+// the GetEnumerator makes) translate to the CREATING method's PARAMETER
+// variables, not to freshly minted locals -- the fieldToParameterMap keys
+// must be the resolved fields (the reader's deferred field surfaces
+// resolve before the creation pattern runs).
+TEST(YieldReturnDecompilerPart2, FieldToParameterTranslationUsesTheParameterVariables) {
+    MscorlibEnumeratorFixture fixture;
+    if (!fixture.Load())
+        GTEST_SKIP() << "the iterator fixture is not provisioned";
+    ASSERT_NE(fixture.enumeratorType, 0u);
+
+    std::uint32_t methodToken = 0, methodRva = 0;
+    for (const auto& m : fixture.file->GetMethods(fixture.currentType)) {
+        if (m.Name == "WithParameters" && m.RVA != 0) {
+            methodToken = m.Token;
+            methodRva = m.RVA;
+            break;
+        }
+    }
+    ASSERT_NE(methodToken, 0u);
+    auto fn = IL::ReadIL(*fixture.file, methodToken, methodRva);
+    ASSERT_NE(fn, nullptr);
+    auto methodStub = std::make_shared<TokenMethodStub>(methodToken);
+    methodStub->SetReturnType(
+        std::make_shared<TS::KnownType>(
+            TS::KnownTypeCode::IEnumerableOfT));
+    fn->Method = methodStub.get();
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.YieldReturn = true;
+    ctx.Metadata = fixture.file.get();
+    ctx.TypeSystem = fixture.ts.get();
+    ctx.DelegateBodyResolver =
+        [&fixture](std::uint32_t token,
+                   std::uint32_t rva) -> std::unique_ptr<IL::ILFunction> {
+        if (rva == 0) return nullptr;
+        return IL::ReadIL(*fixture.file, token, rva);
+    };
+
+    IL::YieldReturnDecompiler transform;
+    transform.Run(*fn, ctx);
+    ASSERT_TRUE(fn->IsIterator) << "the conversion ran";
+
+    // The creating method's parameters (start, count) must be READ by the
+    // translated body (the `start + i` yield reads both) -- a broken map
+    // keys the fields as null and the translation mints fresh locals
+    // instead, leaving the parameters unread.
+    int parameterLoads = 0;
+    std::vector<IL::ILInstruction*> stack{fn->Body.get()};
+    while (!stack.empty()) {
+        IL::ILInstruction* node = stack.back();
+        stack.pop_back();
+        if (auto* ld = dynamic_cast<IL::LdLoc*>(node)) {
+            if (ld->Variable != nullptr &&
+                ld->Variable->Kind == IL::VariableKind::Parameter)
+                parameterLoads++;
+        }
+        for (int i = 0; i < node->ChildCount(); i++)
+            if (IL::ILInstruction* child = node->GetChild(i))
+                stack.push_back(child);
+    }
+    EXPECT_GE(parameterLoads, 2)
+        << "the captured fields translate to the parameter variables";
+}
+
+// The full pipeline over the instance iterator with a captured 'this'
+// and a foreach loop with a conditional break (the FieldsRestorer::
+// GetPossibleFields shape -- the corpus's parameterized iterators crash
+// the loop detection after the yield-return conversion): the
+// post-conversion pipeline (the switch/loop/statement stages over the
+// new yield body) must complete without crashing.
+TEST(YieldReturnDecompilerPart2, FullPipelineOverInstanceForEachIterator) {
+    MscorlibEnumeratorFixture fixture;
+    if (!fixture.Load())
+        GTEST_SKIP() << "the iterator fixture is not provisioned";
+    ASSERT_NE(fixture.enumeratorType, 0u);
+
+    std::uint32_t methodToken = 0, methodRva = 0;
+    for (const auto& m : fixture.file->GetMethods(fixture.currentType)) {
+        if (m.Name == "InstanceForEach" && m.RVA != 0) {
+            methodToken = m.Token;
+            methodRva = m.RVA;
+            break;
+        }
+    }
+    ASSERT_NE(methodToken, 0u)
+        << "the instance-foreach iterator shape is in the fixture";
+    auto fn = IL::ReadIL(*fixture.file, methodToken, methodRva);
+    ASSERT_NE(fn, nullptr);
+    auto methodStub = std::make_shared<TokenMethodStub>(methodToken);
+    methodStub->SetReturnType(
+        std::make_shared<TS::KnownType>(
+            TS::KnownTypeCode::IEnumerableOfT));
+    fn->Method = methodStub.get();
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.YieldReturn = true;
+    ctx.Metadata = fixture.file.get();
+    ctx.TypeSystem = fixture.ts.get();
+    ctx.DelegateBodyResolver =
+        [&fixture](std::uint32_t token,
+                   std::uint32_t rva) -> std::unique_ptr<IL::ILFunction> {
+        if (rva == 0) return nullptr;
+        return IL::ReadIL(*fixture.file, token, rva);
+    };
+
+    RunGetILTransforms(*fn, ctx);
+
+    EXPECT_TRUE(fn->IsIterator) << "the conversion ran";
+    std::size_t yieldReturns = 0;
+    std::vector<IL::ILInstruction*> stack{fn->Body.get()};
+    while (!stack.empty()) {
+        IL::ILInstruction* node = stack.back();
+        stack.pop_back();
+        if (dynamic_cast<IL::YieldReturn*>(node) != nullptr)
+            yieldReturns++;
+        for (int i = 0; i < node->ChildCount(); i++)
+            if (IL::ILInstruction* child = node->GetChild(i))
+                stack.push_back(child);
+    }
+    EXPECT_EQ(yieldReturns, 1u) << fn->ToString();
 }
 
 // The try-finally reconstruction: an iterator whose try region leaves

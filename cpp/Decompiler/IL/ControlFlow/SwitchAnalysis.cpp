@@ -72,14 +72,28 @@ Block* NextBlockInContainer(Block* block) {
 bool SwitchAnalysis::AnalyzeBlock(Block* block) {
     SwitchVariable.reset();
     RootBlock = block;
-    targetBlockToSectionIndex_.clear();
-    targetContainerToSectionIndex_.clear();
+    ConsumedExitBlocks.clear();
+    sectionKeyToSectionIndex_.clear();
     Sections.clear();
     InnerBlocks.clear();
     ownedBodies_.clear();
     ContainsILSwitch = false;
     if (!block) return false;
     return AnalyzeBlockImpl(block, Util::LongSet::Universe(), /*tailOnly*/ true);
+}
+
+// A block whose final is a valued leave and whose only incoming edge is the
+// positional fall-through from its predecessor: the CFS branch-to-return
+// fold's materialization of a shared return site (the C# tree keeps the
+// shared br target instead). Void leaves are excluded: the C# folds
+// branches to those in CFS itself, so the branch-to-block section shape is
+// the faithful form there.
+bool SwitchAnalysis::IsSoleOwnerValuedReturn(Block* block) const {
+    if (block == nullptr || !block->Instructions.empty() ||
+        block->IncomingEdgeCount != 1)
+        return false;
+    auto* leave = dynamic_cast<Leave*>(block->FinalInstruction.get());
+    return leave != nullptr && leave->Value != nullptr;
 }
 
 bool SwitchAnalysis::AnalyzeBlockImpl(Block* block, Util::LongSet inputValues, bool tailOnly) {
@@ -104,20 +118,29 @@ bool SwitchAnalysis::AnalyzeBlockImpl(Block* block, Util::LongSet inputValues, b
     // `if (cond) br X` case-test shape.
     Util::LongSet trueValues;
     auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get());
-    if (iff && !iff->FalseInst && AnalyzeCondition(iff->Condition.get(), trueValues)) {
+    if (iff && AnalyzeCondition(iff->Condition.get(), trueValues)) {
         if (!(tailOnly || block->Instructions.empty()))
             return false;
         trueValues = trueValues.IntersectWith(inputValues);
-        if (trueValues.SetEquals(inputValues) || trueValues.IsEmpty())
+        if (trueValues.SetEquals(inputValues) || trueValues.IsEmpty()) {
             return false;
+        }
         // The if's true arm: a Branch to a block (recurse) or another exit
-        // instruction (create a section for it).
-        auto* trueBr = dynamic_cast<Branch*>(iff->TrueInst.get());
-        Block* trueBlock = (trueBr && trueBr->TargetBlock) ? trueBr->TargetBlock : nullptr;
-        if (trueBlock && AnalyzeBlockImpl(trueBlock, trueValues)) {
-            InnerBlocks.push_back(trueBlock);
+        // instruction (create a section for it). A nested Block (the
+        // restructured chain's range split) descends as the next level, or,
+        // when it carries statements, is the case body itself.
+        if (auto* trueNested = dynamic_cast<Block*>(iff->TrueInst.get())) {
+            if (!AnalyzeNestedBlock(trueNested, trueValues))
+                AddSection(trueValues, trueNested);
         } else {
-            AddSection(trueValues, iff->TrueInst.get());
+            auto* trueBr = dynamic_cast<Branch*>(iff->TrueInst.get());
+            Block* trueBlock =
+                (trueBr && trueBr->TargetBlock) ? trueBr->TargetBlock : nullptr;
+            if (trueBlock && AnalyzeBlockImpl(trueBlock, trueValues)) {
+                InnerBlocks.push_back(trueBlock);
+            } else {
+                AddSection(trueValues, iff->TrueInst.get());
+            }
         }
     } else if (block->FinalInstruction && block->FinalInstruction->Op == OpCode::SwitchInstruction) {
         auto* switchInst = static_cast<SwitchInstruction*>(block->FinalInstruction.get());
@@ -137,9 +160,41 @@ bool SwitchAnalysis::AnalyzeBlockImpl(Block* block, Util::LongSet inputValues, b
     // fall-through is implicit here, so synthesize a Branch to the next block
     // as the section body and keep it alive in ownedBodies_.
     auto remainingValues = inputValues.ExceptWith(trueValues);
+    // The false arm: when the if carries an else, the chain continues (or
+    // terminates) in the FalseInst -- a nested Block wrapping the next
+    // level, or (innermost) a lone Branch to the default block. Only the
+    // else-less if uses the container fall-through (the C#'s flat model).
+    if (iff->FalseInst) {
+        if (auto* falseNested = dynamic_cast<Block*>(iff->FalseInst.get())) {
+            if (!AnalyzeNestedBlock(falseNested, std::move(remainingValues))) {
+                // The else-block carries statements: it is the case body.
+                AddSection(std::move(remainingValues), falseNested);
+            }
+            return true;
+        }
+        AddSection(std::move(remainingValues), iff->FalseInst.get());
+        return true;
+    }
     Block* falseBlock = NextBlockInContainer(block);
     if (falseBlock && AnalyzeBlockImpl(falseBlock, remainingValues)) {
         InnerBlocks.push_back(falseBlock);
+    } else if (falseBlock && IsSoleOwnerValuedReturn(falseBlock)) {
+        // The false path runs into a local pure-return block -- this port's
+        // CFS branch-to-return fold materialized one per site where the C#
+        // tree keeps the shared branch target. Use the leave itself as the
+        // section body so the false-path remainders merge by their target
+        // container (the C# AddSection merge) into one default section; the
+        // block is dead once the switch forms.
+        auto* leave = static_cast<Leave*>(falseBlock->FinalInstruction.get());
+        std::unique_ptr<ILInstruction> value;
+        if (leave->Value) value = leave->Value->Clone();
+        auto dup = std::make_unique<Leave>(leave->TargetContainer,
+                                           std::move(value));
+        dup->SetILRange(*leave);
+        Leave* raw = dup.get();
+        ownedBodies_.push_back(std::move(dup));
+        AddSection(std::move(remainingValues), raw);
+        ConsumedExitBlocks.push_back(falseBlock);
     } else if (falseBlock) {
         auto br = std::make_unique<Branch>(falseBlock);
         auto* raw = br.get();
@@ -150,6 +205,57 @@ bool SwitchAnalysis::AnalyzeBlockImpl(Block* block, Util::LongSet inputValues, b
         // container, so the block does not form a switch.
         return false;
     }
+    return true;
+}
+
+bool SwitchAnalysis::AnalyzeNestedBlock(Block* block, Util::LongSet inputValues) {
+    // A nested Block wrapping the chain's continuation: the wrapper carries
+    // no instructions; its final is either the next level's if or (at the
+    // chain's end) a lone Branch to the default block. A block with
+    // statements is a case body, not a chain level -- the caller falls back
+    // to making it a section.
+    if (!block->Instructions.empty()) return false;
+    if (!block->FinalInstruction) return false;
+    if (auto* br = dynamic_cast<Branch*>(block->FinalInstruction.get())) {
+        InnerBlocks.push_back(block);
+        AddSection(std::move(inputValues), br);
+        return true;
+    }
+    auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get());
+    if (!iff) return false;
+    InnerBlocks.push_back(block);
+    Util::LongSet trueValues;
+    if (!AnalyzeCondition(iff->Condition.get(), trueValues)) return false;
+    trueValues = trueValues.IntersectWith(inputValues);
+    if (trueValues.SetEquals(inputValues) || trueValues.IsEmpty()) return false;
+    auto remainingValues = inputValues.ExceptWith(trueValues);
+    if (auto* trueNested = dynamic_cast<Block*>(iff->TrueInst.get())) {
+        if (!AnalyzeNestedBlock(trueNested, std::move(trueValues)))
+            AddSection(std::move(trueValues), trueNested);
+    } else {
+        auto* trueBr = dynamic_cast<Branch*>(iff->TrueInst.get());
+        Block* trueBlock =
+            (trueBr && trueBr->TargetBlock) ? trueBr->TargetBlock : nullptr;
+        if (trueBlock && AnalyzeBlockImpl(trueBlock, trueValues)) {
+            InnerBlocks.push_back(trueBlock);
+        } else {
+            AddSection(std::move(trueValues), iff->TrueInst.get());
+        }
+    }
+    if (iff->FalseInst) {
+        if (auto* falseNested = dynamic_cast<Block*>(iff->FalseInst.get())) {
+            if (!AnalyzeNestedBlock(falseNested, std::move(remainingValues))) {
+                AddSection(std::move(remainingValues), falseNested);
+            }
+            return true;
+        }
+        AddSection(std::move(remainingValues), iff->FalseInst.get());
+        return true;
+    }
+    // The else-less nested if: the chain continues via the branch true arm
+    // only; treat the wrapper's parent fall-through as unreachable (a
+    // nested wrapper has no container sibling to fall through to).
+    AddSection(std::move(remainingValues), iff->TrueInst.get());
     return true;
 }
 
@@ -199,38 +305,88 @@ bool SwitchAnalysis::AnalyzeSwitch(SwitchInstruction* inst, const Util::LongSet&
     return true;
 }
 
+// The resolved exit identity of a section body, for the section merge. The
+// C# AddSection merges by the branch's target block (its reader keeps the
+// `if` and the following `br` in one block, so the body branch targets the
+// case/default block directly). This port's reader splits that pair into
+// separate blocks, and its CFS branch-to-return fold materializes the
+// shared default return per site, so identity needs resolution: through
+// empty passthrough blocks (no instructions, a control-flow final) to the
+// block that actually holds the body; and when that block is a pure
+// single-return (a valued leave, no instructions -- a materialized return
+// site), by the returned value instead of the block pointer. Everything
+// else keeps the block-pointer identity (the C# merge semantics).
+std::string SwitchAnalysis::SectionExitKey(ILInstruction* inst) {
+    const ILInstruction* cur = inst;
+    bool throughPassthrough = false;
+    for (int hops = 0; cur != nullptr && hops < 64; ++hops) {
+        if (auto* br = dynamic_cast<const Branch*>(cur)) {
+            Block* target = br->TargetBlock;
+            if (target == nullptr) return {};
+            if (!target->Instructions.empty() || target->FinalInstruction == nullptr)
+                return "b:" + std::to_string(reinterpret_cast<std::uintptr_t>(target));
+            ILInstruction* next = target->FinalInstruction.get();
+            // A branch-only block is a control passthrough (this port's
+            // reader splits the C#'s in-block `if` + `br` pair): resolve
+            // through it. Anything else the block ends in is its body --
+            // a leave-ended target is a case/default body keyed by the block
+            // (the C# merge semantics), EXCEPT the valued single return
+            // reached through a passthrough: that is the CFS branch-to-
+            // return fold's per-site materialization of the shared default
+            // (the C# tree keeps one shared block there, so its merge is by
+            // target; this port must merge by the returned value).
+            if (next->Op != OpCode::Branch) {
+                if (throughPassthrough) {
+                    if (auto* lv = dynamic_cast<Leave*>(next)) {
+                        if (lv->Value != nullptr && lv->TargetContainer != nullptr)
+                            return "lv:" +
+                                   std::to_string(reinterpret_cast<std::uintptr_t>(lv->TargetContainer)) +
+                                   ":" + lv->Value->ToString();
+                        if (lv->TargetContainer != nullptr)
+                            return "l:" +
+                                   std::to_string(reinterpret_cast<std::uintptr_t>(lv->TargetContainer));
+                    }
+                }
+                return "b:" + std::to_string(reinterpret_cast<std::uintptr_t>(target));
+            }
+            throughPassthrough = true;
+            cur = next;
+            continue;
+        }
+        if (auto* leave = dynamic_cast<const Leave*>(cur)) {
+            if (leave->Value != nullptr && leave->TargetContainer != nullptr)
+                return "lv:" +
+                       std::to_string(reinterpret_cast<std::uintptr_t>(leave->TargetContainer)) +
+                       ":" + leave->Value->ToString();
+            if (leave->TargetContainer != nullptr)
+                return "l:" +
+                       std::to_string(reinterpret_cast<std::uintptr_t>(leave->TargetContainer));
+            return {};
+        }
+        // A Block body (a case body): identity is the block itself.
+        if (auto* b = dynamic_cast<const Block*>(cur))
+            return "b:" + std::to_string(reinterpret_cast<std::uintptr_t>(b));
+        return {};
+    }
+    return {};
+}
+
 void SwitchAnalysis::AddSection(Util::LongSet values, ILInstruction* inst) {
     if (values.IsEmpty()) {
         return;
     }
-    if (auto* br = dynamic_cast<Branch*>(inst)) {
-        Block* target = br->TargetBlock;
-        if (target) {
-            auto it = targetBlockToSectionIndex_.find(target);
-            if (it != targetBlockToSectionIndex_.end()) {
-                auto& primary = Sections[static_cast<std::size_t>(it->second)];
-                primary.Labels = primary.Labels.UnionWith(values);
-                primary.Body = inst;
-            } else {
-                targetBlockToSectionIndex_.emplace(target, static_cast<int>(Sections.size()));
-                Sections.push_back({std::move(values), inst});
-            }
+    std::string key = SectionExitKey(inst);
+    if (!key.empty()) {
+        auto it = sectionKeyToSectionIndex_.find(key);
+        if (it != sectionKeyToSectionIndex_.end()) {
+            auto& primary = Sections[static_cast<std::size_t>(it->second)];
+            primary.Labels = primary.Labels.UnionWith(values);
+            primary.Body = inst;
             return;
         }
-    } else if (auto* leave = dynamic_cast<Leave*>(inst)) {
-        BlockContainer* target = leave->TargetContainer;
-        if (target) {
-            auto it = targetContainerToSectionIndex_.find(target);
-            if (it != targetContainerToSectionIndex_.end()) {
-                auto& primary = Sections[static_cast<std::size_t>(it->second)];
-                primary.Labels = primary.Labels.UnionWith(values);
-                primary.Body = inst;
-            } else {
-                targetContainerToSectionIndex_.emplace(target, static_cast<int>(Sections.size()));
-                Sections.push_back({std::move(values), inst});
-            }
-            return;
-        }
+        sectionKeyToSectionIndex_.emplace(std::move(key), static_cast<int>(Sections.size()));
+        Sections.push_back({std::move(values), inst});
+        return;
     }
     Sections.push_back({std::move(values), inst});
 }
@@ -338,8 +494,13 @@ Util::LongSet SwitchAnalysis::MakeLessThanOrEqualSet(long long val, bool unsigne
         return Util::LongSet(Util::LongInterval::Inclusive(0, val));
     }
     // The range 0 to (ulong)val expressed with signed longs is two ranges.
+    // The negative tail is INCLUSIVE of val (the C#
+    // LongInterval.Inclusive(long.MinValue, val)); the raw two-arg
+    // constructor is end-exclusive and would drop val, turning every
+    // unsigned greater-than over a negative boundary into
+    // greater-or-equal (the off-by-one that broke the hash-search walk).
     return Util::LongSet(Util::LongInterval::Inclusive(0, Max))
-        .UnionWith(Util::LongSet(Util::LongInterval(Min, val)));
+        .UnionWith(Util::LongSet(Util::LongInterval::Inclusive(Min, val)));
 }
 
 } // namespace ILSpy::Decompiler::IL

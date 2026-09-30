@@ -17,6 +17,8 @@
 // DEALINGS IN THE SOFTWARE.
 
 #include "Decompiler/IL/Transforms/ExpressionTransforms.hpp"
+
+#include "Decompiler/IL/Transforms/TransformAssignment.hpp"
 #include "Decompiler/IL/ConversionKind.hpp"
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
@@ -697,6 +699,17 @@ void ExpressionTransforms::Visit(ILInstruction* inst) {
     }
     if (inst->Op == OpCode::LdObj) {
         VisitLdObj(static_cast<LdObj*>(inst));
+        return;
+    }
+    if (inst->Op == OpCode::StObj) {
+        // The C# VisitStObj: base.VisitStObj (recurse into the target and the
+        // value), then EarlyExpressionTransforms.StObjToStLoc (deferred -- the
+        // port's reader already produces the field-shaped stobj forms), then
+        // TransformAssignment.HandleCompoundAssign (the binary field case).
+        auto* stobj = static_cast<StObj*>(inst);
+        Visit(stobj->Target.get());
+        Visit(stobj->Value.get());
+        HandleCompoundAssignStObj(stobj, settings_);
         return;
     }
     if (inst->Op == OpCode::TryCatchHandler) {

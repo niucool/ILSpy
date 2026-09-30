@@ -811,6 +811,133 @@ TEST(FacadeMemberModifiersTest, OverrideDirectiveRendersTheForwarder)
         << text;
 }
 
+// The C# CleanUpMethodDeclaration's state-machine attribute removal over
+// a property getter: the [IteratorStateMachine] attribute rides the GETTER
+// method; when the getter decompiles as an iterator the property render
+// drops it (the method path already passes the iterator outcome to the
+// attribute list; the property path must consult the accessor's outcome
+// too). The oracle renders the iterator property with no attribute.
+TEST(FacadeMemberModifiersTest, IteratorPropertyGetterDropsStateMachineAttribute) {
+    constexpr const char* kFixture =
+        "/home/jim/ilspy-test-fixtures/yield_fixture/IteratorFixture.dll";
+    std::string text;
+    if (!RenderType(kFixture, "IteratorShapes", text))
+        GTEST_SKIP() << "the iterator fixture is not provisioned";
+    std::size_t prop = text.find("NumbersProperty");
+    ASSERT_NE(prop, std::string::npos) << text;
+    EXPECT_EQ(text.find("IteratorStateMachine"), std::string::npos)
+        << "the state machine attribute drops on the decompiled getter"
+        << text;
+    EXPECT_NE(text.find("yield return 4;"), std::string::npos) << text;
+}
+
+// The .override forwarder gate, the forwarded-interface arm: when the
+// MethodDeclaration's interface resolves through a TYPE FORWARDER (the
+// netstandard-facade shape of dnlib.dll's compiler-generated
+// enumerators -- the scoped module forwards the type to another
+// assembly), the real tool renders NO forwarder: the definition lands in
+// a module other than the one the declaration is scoped to.
+TEST(FacadeMemberModifiersTest, OverrideDirectiveSkipsForwardedInterface)
+{
+    constexpr const char* kFixture =
+        "/home/jim/ilspy-test-fixtures/cross_override_fixture/fwd/"
+        "CrossFwd.dll";
+    std::string text;
+    if (!RenderType(kFixture, "OverrideShape", text))
+        GTEST_SKIP() << "the cross-override fixture is not provisioned";
+    EXPECT_EQ(text.find("ILSpy generated this explicit interface "
+                        "implementation"),
+              std::string::npos)
+        << text;
+    EXPECT_EQ(text.find("IShape.GetValue()"), std::string::npos) << text;
+}
+
+// The .override forwarder gate, the direct cross-assembly arm: when the
+// interface is DEFINED in the referenced assembly the declaration is
+// scoped to (no forwarding hop), the forwarder still renders -- the
+// same shape as the same-module fixture.
+TEST(FacadeMemberModifiersTest, OverrideDirectiveRendersCrossAssemblyForwarder)
+{
+    constexpr const char* kFixture =
+        "/home/jim/ilspy-test-fixtures/cross_override_fixture/direct/"
+        "CrossOverride.dll";
+    std::string text;
+    if (!RenderType(kFixture, "OverrideShape", text))
+        GTEST_SKIP() << "the cross-override fixture is not provisioned";
+    EXPECT_NE(text.find("int IShape.GetValue()"), std::string::npos)
+        << text;
+    EXPECT_NE(text.find("ILSpy generated this explicit interface "
+                        "implementation from .override directive in Impl"),
+              std::string::npos)
+        << text;
+    EXPECT_NE(text.find("return this.Impl();"), std::string::npos)
+        << text;
+}
+
+// The C# InlineAssignmentTest's while-condition shapes: the assignment
+// expression inside the loop condition (the compiler emits `call; dup;
+// stloc; brfalse` / `...; and; ...`). The TransformInlineAssignmentLocal
+// fold plus the per-statement inliner's re-run produce the
+// `(v = expr) != null` / `((v = expr) & mask) == 0` forms -- the
+// assignment-in-condition the oracle renders (the Inflater.DecodeHuffman
+// family).
+TEST(FacadeMemberModifiersTest, InlineAssignmentInWhileCondition) {
+    constexpr const char* kFixture =
+        "/home/jim/ilspy-test-fixtures/inline_assign_fixture/"
+        "InlineAssignFixture.dll";
+    std::string text;
+    if (!RenderType(kFixture, "InlineAssignmentShapes", text))
+        GTEST_SKIP() << "the inline-assignment fixture is not provisioned";
+    EXPECT_NE(text.find("while ((text = reader.ReadLine()) != null)"),
+              std::string::npos)
+        << text;
+    EXPECT_NE(text.find("while (((num2 = reader.Read()) & mask) == 0)"),
+              std::string::npos)
+        << text;
+    EXPECT_EQ(text.find("S_0"), std::string::npos)
+        << "the placeholder stack slot is inlined away" << text;
+}
+
+// The C# reader's LdElem/StElem set DelayExceptions on the LdElema: the
+// element access's NullReference/IndexOutOfRange exception is deferred to the
+// dereference, so the address computation is flag-pure and the inliner's
+// MayReorder checks can move the pending field loads (the reader's stack
+// slots around a dup) into the element accesses. Without it the port renders
+// `var S_1 = buffer; ... S_1[dst] = S_3[src];` (the OutputWindow.SlowRepeat
+// family).
+TEST(FacadeMemberModifiersTest, ArrayFieldAccessInlinesReaderStackSlots) {
+    constexpr const char* kFixture =
+        "/home/jim/ilspy-test-fixtures/inline_assign_fixture/"
+        "InlineAssignFixture.dll";
+    std::string text;
+    if (!RenderType(kFixture, "InlineAssignmentShapes", text))
+        GTEST_SKIP() << "the inline-assignment fixture is not provisioned";
+    EXPECT_NE(text.find("buffer[dst++] = buffer[src++];"), std::string::npos)
+        << text;
+    EXPECT_EQ(text.find("S_"), std::string::npos)
+        << "the reader's stack slots are inlined into the element accesses"
+        << text;
+}
+
+// The C# ExpressionTransforms.VisitStObj calls
+// TransformAssignment.HandleCompoundAssign: a `stobj(addr, binary.op(ldobj(
+// addr), value))` over the same pure address becomes
+// `compound.op.new(addr, value)` so the field compound renders `field op=
+// value` instead of `field = field op value` (the OutputWindow
+// `windowEnd &= 32767` family).
+TEST(FacadeMemberModifiersTest, FieldCompoundAssignmentFolds) {
+    constexpr const char* kFixture =
+        "/home/jim/ilspy-test-fixtures/inline_assign_fixture/"
+        "InlineAssignFixture.dll";
+    std::string text;
+    if (!RenderType(kFixture, "InlineAssignmentShapes", text))
+        GTEST_SKIP() << "the inline-assignment fixture is not provisioned";
+    EXPECT_NE(text.find("count &= mask;"), std::string::npos) << text;
+    EXPECT_NE(text.find("count += 2;"), std::string::npos) << text;
+    EXPECT_EQ(text.find("count = count &"), std::string::npos) << text;
+    EXPECT_EQ(text.find("count = count +"), std::string::npos) << text;
+}
+
 // The C# DoDecompileType worklist (EnqueueReferencedMembers): a hidden
 // compiler-generated type whose declaring type's rendered members still
 // reference it -- the state-machine attribute's typeof -- renders at its

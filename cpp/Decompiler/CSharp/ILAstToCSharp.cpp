@@ -25,8 +25,10 @@
 // expression rather than dropping text or crashing.
 
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
+#include "Decompiler/CSharp/FractionApprox.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/CSharp/RequiredImportsRecorder.hpp"
+#include "Decompiler/CSharp/OutputVisitor/CSharpKeywordCheck.hpp"
 #include <algorithm>
 #include <functional>
 #include <cmath>
@@ -69,6 +71,7 @@
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
+#include "Decompiler/IL/Instructions/StringToInt.hpp"
 #include "Decompiler/IL/Instructions/UsingInstruction.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
@@ -248,6 +251,7 @@ public:
     void SetCurrentTypeName(const ILFunction& fn) {
         if (fn.Method == nullptr || fn.Method->DeclaringType() == nullptr)
             return;
+        currentType_ = fn.Method->DeclaringType();
         std::string name = fn.Method->DeclaringType()->ReflectionName();
         for (char& c : name) {
             if (c == '+') c = '.';
@@ -293,11 +297,18 @@ public:
     void EmitMethod(const ILFunction& fn, std::string_view returnType,
                     std::string_view methodName, std::string_view paramDecl,
                     bool isConstructor = false,
-                    std::string_view methodConstraints = std::string_view()) {
+                    std::string_view methodConstraints = std::string_view(),
+                    std::string_view typeName = std::string_view()) {
         fn_ = &fn;
         SetCurrentTypeName(fn);
         returnTypeName_ = std::string(returnType);
         methodName_ = std::string(methodName);
+        SetCurrentTypeName(fn);
+        // The metadata-wired method entity is often absent (the reader's
+        // seed fn->Method); the caller's type name covers the base-member
+        // qualification then.
+        if (currentTypeName_.empty() && !typeName.empty())
+            currentTypeName_ = std::string(typeName);
         // A constructor header carries no return type: the methodName holds
         // the TYPE name (the C# `TypeName(...)` header; the flat renderer
         // carries no modifiers).
@@ -320,7 +331,9 @@ public:
             AnalyzeNullCoalescingChains(fn.Body.get());
             AnalyzeSingleUseLocals();
             AnalyzeNullPropagation();
+            AnalyzeThrowCoalesce();
             AnalyzeLabelRegions();
+            AnalyzeGuardRegions();
             HoistForInitializers(fn.Body.get());
             EmitContainer(*fn.Body, 1);
         }
@@ -331,6 +344,7 @@ private:
     std::string& out_;
     const ILFunction* fn_ = nullptr;
     std::string currentTypeName_;
+    TypeSystem::ITypePtr currentType_;
     std::string returnTypeName_;  // the C# name of the function's return type
     std::string methodName_;  // the method's display name (for diagnostics)
     std::set<std::string> declared_;          // locals already introduced with `var`
@@ -370,9 +384,36 @@ private:
     std::map<const IfInstruction*,
              std::pair<Block*, Block*>> labelRegionFolds_;
     std::set<const Block*> labelRegionSuppressed_;
+    // The guard-region fold (the C# ConditionDetection's else-embedding
+    // plus the ReduceNestingTransform/ImproveILOrdering inversion): a
+    // block's if-final branching FORWARD to a later sibling restructures
+    // to the INVERTED if nesting the fall-through region, the target
+    // continuing after the if -- the goto form disappears. The C#
+    // produces this shape when the target is the shared continuation
+    // (the region re-joins at it, or exits through it); a TERMINAL
+    // target (a Leave/Throw final) is the early-exit form the
+    // return-propagation renders as `if (cond) { return/throw; }`.
+    struct GuardRegion {
+        BlockContainer* container = nullptr;
+        std::size_t first = 0;  // the region's first block index
+        std::size_t last = 0;   // the region's last block index (inclusive)
+    };
+    std::map<const IfInstruction*, GuardRegion> guardRegionFolds_;
+    // Every region block -> the INNERMOST fold owning it (the linear
+    // render skips owned blocks; a fold's region render skips the blocks
+    // a nested fold owns -- they render at the nested guard's site).
+    std::map<const Block*, const IfInstruction*> guardRegionOwner_;
+    // The fold whose region is currently rendering (the ownership bypass).
+    const IfInstruction* activeGuardRegion_ = nullptr;
     std::set<const ILInstruction*> singleUseSkipped_;
     std::set<const ILInstruction*> coalesceSkipped_;
     std::set<const Block*> coalesceSuppressed_;
+    // The `?? throw` coalesce: a statements-free guard block
+    // (`if (param == null) throw new ArgumentNullException("param")`)
+    // followed by the next block's first store of the same parameter
+    // folds into `<target> = param ?? throw new ...;` (the C#
+    // NullCoalescingInstruction with a Throw fallback).
+    std::map<const ILInstruction*, const Throw*> throwCoalesce_;
     std::vector<std::unique_ptr<NullCoalescingInstruction>> coalesceKeepAlive_;
     // The foreach substitution: the for-shape whose body's only uses of
     // the counter are the array element accesses renders as
@@ -548,7 +589,7 @@ private:
                                       const Call& getEnumerator,
                                       int indent, std::string& result) {
         const std::string enumName =
-            us.Variable ? us.Variable->Name : std::string();
+            us.Variable ? CSharp::OutputVisitor::EscapeIdentifier(us.Variable->Name) : std::string();
         if (enumName.empty() || us.Body == nullptr)
             return false;
         // The collection: the GetEnumerator call's receiver.
@@ -599,6 +640,9 @@ private:
             for (int n = 2; declared_.count(elemName); ++n)
                 elemName = base + std::to_string(n);
         }
+        // A keyword-named element escapes (the singularization can
+        // propose one: `inList` -> `@in`, `Overrides` -> `@override`).
+        elemName = CSharp::OutputVisitor::EscapeIdentifier(elemName);
         declared_.insert(elemName);
         // The element type: the hoisted `T v = ref ENUM.Current;` first
         // statement, else the collection type's first argument.
@@ -1130,6 +1174,78 @@ private:
     // leave-null true arm (the `if (dup == 0) return null;` guard) and the
     // fall-through use. The dup's uses counted from the tree (the reader
     // does not track the dup slots' counts).
+    // The `?? throw` coalesce analysis: the guard block (an empty
+    // block whose final is `if (local == null)` with the throw arm)
+    // followed by the next block's first store of the same local folds
+    // the guard into the store's value (`param ?? throw new ...`). The
+    // throw's argument must be a single object construction (the
+    // ArgumentNullException form); anything else keeps the statement
+    // form.
+    void AnalyzeThrowCoalesce() {
+        if (fn_ == nullptr || fn_->Body == nullptr)
+            return;
+        std::function<void(BlockContainer*)> scan = [&](BlockContainer* c) {
+            if (c == nullptr) return;
+            for (std::size_t k = 0; k + 1 < c->Blocks.size(); ++k) {
+                Block* guard = c->Blocks[k].get();
+                if (!guard->FinalInstruction)
+                    continue;
+                auto* iff = dynamic_cast<IfInstruction*>(
+                    guard->FinalInstruction.get());
+                if (!iff || iff->FalseInst) continue;
+                auto* comp = dynamic_cast<const Comp*>(iff->Condition.get());
+                if (!comp || comp->Kind != ComparisonKind::Equality) continue;
+                auto* ld = dynamic_cast<const LdLoc*>(comp->Left.get());
+                if (!ld || !ld->Variable) continue;
+                // The null gate: either a LdNull (the normalized form) or the
+                // int-zero constant the reader leaves on an unnormalized
+                // reference comparison.
+                bool isNullGate = false;
+                if (comp->Right) {
+                    if (comp->Right->Op == OpCode::LdNull)
+                        isNullGate = true;
+                    else if (auto* z =
+                                 dynamic_cast<const LdcI4*>(comp->Right.get()))
+                        isNullGate = z->Value == 0;
+                }
+                if (!isNullGate) continue;
+                // The throw arm: a block holding only the throw.
+                auto* arm = dynamic_cast<const Block*>(iff->TrueInst.get());
+                if (!arm) continue;
+                const Throw* th = nullptr;
+                if (arm->Instructions.empty() && arm->FinalInstruction &&
+                    arm->FinalInstruction->Op == OpCode::Throw)
+                    th = static_cast<const Throw*>(arm->FinalInstruction.get());
+                else if (arm->Instructions.size() == 1 &&
+                         arm->Instructions[0]->Op == OpCode::Throw)
+                    th = static_cast<const Throw*>(arm->Instructions[0].get());
+                if (!th || !th->Argument) continue;
+                // The next block's first statement: a store of the same
+                // local (the field or local store the guard protects).
+                Block* next = c->Blocks[k + 1].get();
+                if (next->Instructions.empty()) continue;
+                auto* st = dynamic_cast<const StObj*>(
+                    next->Instructions[0].get());
+                if (!st) continue;
+                auto* value = dynamic_cast<const LdLoc*>(st->Value.get());
+                if (!value || value->Variable.get() != ld->Variable.get())
+                    continue;
+                throwCoalesce_[st] = th;
+                // The guard's if-final joins the skipped finals (the
+                // block's preceding statements still render).
+                coalesceSkipped_.insert(guard->FinalInstruction.get());
+            }
+            for (auto& b : c->Blocks) {
+                if (!b) continue;
+                for (int ci = 0; ci < b->ChildCount(); ++ci)
+                    if (auto* nested =
+                            dynamic_cast<BlockContainer*>(b->GetChild(ci)))
+                        scan(nested);
+            }
+        };
+        scan(fn_->Body.get());
+    }
+
     void AnalyzeNullPropagation() {
         if (fn_ == nullptr || fn_->Body == nullptr)
             return;
@@ -1241,10 +1357,7 @@ private:
         // the negative path), the branch target the else. A Comp
         // condition negates through its kind; a value condition wraps
         // parenthesized (the `==` binds tighter than the bitwise `&`).
-        std::string condText =
-            dynamic_cast<const Comp*>(iff.Condition.get()) != nullptr
-                ? NegateCondText(*iff.Condition)
-                : "(" + Expr(*iff.Condition) + ") == 0";
+        std::string condText = NegateCondText(*iff.Condition);
         Line(indent, "if (" + condText + ")");
         Line(indent, "{");
         if (r1 != nullptr)
@@ -1341,6 +1454,183 @@ private:
             }
         };
         scan(dynamic_cast<BlockContainer*>(fn_->Body.get()));
+    }
+
+    // The guard-region analysis (the AnalyzeGuardRegions fold): scan a
+    // container's block range [from, limit) for if-finals branching
+    // forward to a later sibling; claim the fall-through region when it
+    // is single-entry and the target is non-terminal, then recurse into
+    // the region (nested guards -- their targets must stay within the
+    // outer fold's span) and resume the linear scan after the target.
+    void ScanGuardRange(BlockContainer* c, std::size_t from, std::size_t limit,
+                        const std::map<const Block*,
+                                       std::vector<const Branch*>>& incoming) {
+        for (std::size_t k = from; k < limit; ++k) {
+            Block* bK = c->Blocks[k].get();
+            if (bK == nullptr || bK->FinalInstruction == nullptr ||
+                bK->FinalInstruction->Op != OpCode::IfInstruction)
+                continue;
+            auto* iff = static_cast<IfInstruction*>(
+                bK->FinalInstruction.get());
+            // The minimal label-region fold owns its guards.
+            if (labelRegionFolds_.count(iff) != 0) continue;
+            if (iff->Condition == nullptr || iff->TrueInst == nullptr ||
+                iff->TrueInst->Op != OpCode::Branch)
+                continue;
+            if (iff->FalseInst != nullptr &&
+                iff->FalseInst->Op != OpCode::Nop)
+                continue;
+            auto* guardBr = static_cast<Branch*>(iff->TrueInst.get());
+            Block* bT = guardBr->TargetBlock;
+            if (bT == nullptr || bT->Parent != c) continue;
+            std::size_t t = 0;
+            bool found = false;
+            for (std::size_t j = k + 1; j < c->Blocks.size(); ++j)
+                if (c->Blocks[j].get() == bT) { t = j; found = true; break; }
+            if (!found || t <= k + 1 || t >= limit) continue;
+            // A TERMINAL target with a SINGLE predecessor is the
+            // early-exit form -- the return-propagation renders
+            // `if (cond) { return/throw; }`. A multi-pred terminal target
+            // (the shared epilogue) folds like any other.
+            if (bT->FinalInstruction != nullptr &&
+                (bT->FinalInstruction->Op == OpCode::Leave ||
+                 bT->FinalInstruction->Op == OpCode::Throw)) {
+                auto pit = incoming.find(bT);
+                if (pit == incoming.end() || pit->second.size() == 1)
+                    continue;
+            }
+            // Single-entry region: every branch into a region block comes
+            // from inside the region itself (the walk up to this
+            // container's block list stays within the range).
+            auto insideRegion = [&](const Branch* b) {
+                for (const ILInstruction* p = b->Parent; p != nullptr;
+                     p = p->Parent) {
+                    if (auto* blk = dynamic_cast<const Block*>(p)) {
+                        if (blk->Parent == c) {
+                            for (std::size_t j = k + 1; j < t; ++j)
+                                if (c->Blocks[j].get() == blk)
+                                    return true;
+                        }
+                    }
+                }
+                return false;
+            };
+            bool singleEntry = true;
+            for (std::size_t j = k + 1; j < t && singleEntry; ++j) {
+                auto it = incoming.find(c->Blocks[j].get());
+                if (it == incoming.end()) continue;
+                for (const Branch* b : it->second) {
+                    if (!insideRegion(b)) { singleEntry = false; break; }
+                }
+            }
+            if (!singleEntry) continue;
+            // No other fold may own the region blocks. The
+            // return-propagation's claims are exempt: an entry whose
+            // branch sits inside the region renders inside it (the
+            // single-entry gate already rejected the external-entry
+            // cases), and a nested guard fold re-claims its target. The
+            // guard-region ownership itself needs no check: the linear
+            // scan resumes after each target and the recursion is nested
+            // by construction.
+            bool overlap = false;
+            for (std::size_t j = k + 1; j < t && !overlap; ++j) {
+                Block* rj = c->Blocks[j].get();
+                if (rj == nullptr) continue;
+                if (labelRegionSuppressed_.count(rj) != 0 ||
+                    coalesceSuppressed_.count(rj) != 0)
+                    overlap = true;
+            }
+            if (overlap) continue;
+            // Claim.
+            GuardRegion g;
+            g.container = c;
+            g.first = k + 1;
+            g.last = t - 1;
+            // The return-propagation may have claimed the guard's branch
+            // (the single-pred target): the fold replaces the guard's
+            // render, so the propagation's entry dies and the target
+            // renders after the fold's if (un-suppress it).
+            returnPropagation_.erase(guardBr);
+            suppressedReturnBlocks_.erase(bT);
+            guardRegionFolds_[iff] = g;
+            for (std::size_t j = k + 1; j < t; ++j)
+                if (c->Blocks[j] != nullptr)
+                    guardRegionOwner_[c->Blocks[j].get()] = iff;
+            // Nested guards inside the region (their targets may extend
+            // to the outer target), then the linear scan resumes at t.
+            ScanGuardRange(c, k + 1, t + 1, incoming);
+            k = t - 1;
+        }
+    }
+
+    void AnalyzeGuardRegions() {
+        if (fn_ == nullptr || fn_->Body == nullptr) return;
+        // Every branch per target block (the single-entry gate).
+        std::map<const Block*, std::vector<const Branch*>> incoming;
+        std::function<void(const ILInstruction*)> collect =
+            [&](const ILInstruction* i) {
+            if (i == nullptr) return;
+            if (i->Op == OpCode::Branch) {
+                auto* b = static_cast<const Branch*>(i);
+                if (b->TargetBlock != nullptr)
+                    incoming[b->TargetBlock].push_back(b);
+            }
+            for (int ci = 0; ci < i->ChildCount(); ++ci)
+                collect(i->GetChild(ci));
+        };
+        collect(fn_->Body.get());
+        std::function<void(BlockContainer*)> scan = [&](BlockContainer* c) {
+            if (c == nullptr) return;
+            ScanGuardRange(c, 0, c->Blocks.size(), incoming);
+            std::function<void(const ILInstruction*)> descend =
+                [&](const ILInstruction* i) {
+                if (i == nullptr) return;
+                if (auto* nested = dynamic_cast<const BlockContainer*>(i))
+                    scan(const_cast<BlockContainer*>(nested));
+                for (int ci = 0; ci < i->ChildCount(); ++ci)
+                    descend(i->GetChild(ci));
+            };
+            for (const auto& bi : c->Blocks) {
+                if (!bi) continue;
+                for (const auto& si : bi->Instructions) descend(si.get());
+                if (bi->FinalInstruction)
+                    descend(bi->FinalInstruction.get());
+            }
+        };
+        scan(dynamic_cast<BlockContainer*>(fn_->Body.get()));
+        // The folded guards' branches no longer render as gotos: a target
+        // whose every incoming branch is a folded guard's true-arm, a
+        // fall-through drop, or a loop continue carries a dead label --
+        // drop it (the label collection ran before the fold analysis).
+        for (const auto& entry : guardRegionFolds_) {
+            const auto* gbr =
+                static_cast<const Branch*>(entry.first->TrueInst.get());
+            Block* target = gbr->TargetBlock;
+            auto it = incoming.find(target);
+            if (it == incoming.end()) {
+                labels_.erase(target);
+                continue;
+            }
+            bool anyLive = false;
+            for (const Branch* b : it->second) {
+                bool foldedArm = false;
+                for (const auto& f2 : guardRegionFolds_) {
+                    if (static_cast<const Branch*>(f2.first->TrueInst.get()) == b) {
+                        foldedArm = true;
+                        break;
+                    }
+                }
+                if (foldedArm) continue;
+                if (IsFallThroughGoto(b) || IsLoopEntryFallThrough(b))
+                    continue;
+                if (b->TargetBlock != nullptr &&
+                    loopHeaders_.count(b->TargetBlock) != 0)
+                    continue;  // renders as `continue;`
+                anyLive = true;
+                break;
+            }
+            if (!anyLive) labels_.erase(target);
+        }
     }
 
     // Every branch-target block gets an IL_XXXX label; walk the whole tree so
@@ -1483,17 +1773,22 @@ private:
                     for (int c = 0; c < i->ChildCount(); ++c)
                         usesVar(i->GetChild(c));
                 };
+            // The C# TransformFor's ForStatementUsesVariable: the variable
+            // must be used in the for's condition or iterators. A variable
+            // used only in the body (e.g. an accumulator stack) keeps its
+            // declaration before the loop -- the oracle renders
+            // `T v = init; for (; cond; incr)` for those, not
+            // `for (T v = init; cond; incr)`.
             const Block* header = h.container->Blocks.front().get();
             if (header && header->FinalInstruction)
                 usesVar(header->FinalInstruction.get());
-            for (const auto& b : h.container->Blocks) {
-                if (!b || b.get() == header) continue;
-                for (const auto& i2 : b->Instructions)
+            const Block* increment = h.container->Blocks.back().get();
+            if (increment != nullptr && increment != header)
+                for (const auto& i2 : increment->Instructions)
                     if (i2) usesVar(i2.get());
-            }
             if (!loopUsesV) continue;
             hoistedForInits_[h.container] = ForHoist{
-                CSharpTypeName(v->Type) + " " + v->Name + " = " +
+                CSharpTypeName(v->Type) + " " + CSharp::OutputVisitor::EscapeIdentifier(v->Name) + " = " +
                     (h.st->Value ? Expr(*h.st->Value)
                                  : std::string("(default)")),
                 v->Name};
@@ -2126,8 +2421,8 @@ private:
         // body block.
         std::unordered_map<const Block*, const Branch*> okBranchFor;
         for (const auto& section : sw.Sections)
-            okBranchFor[static_cast<const Branch*>(section->Body.get())->TargetBlock] =
-                static_cast<const Branch*>(section->Body.get());
+            if (auto* b = dynamic_cast<const Branch*>(section->Body.get()))
+                okBranchFor[b->TargetBlock] = b;
         bool foreign = false;
         std::function<void(const ILInstruction*)> check = [&](const ILInstruction* inst) {
             if (!inst || foreign) return;
@@ -2145,7 +2440,8 @@ private:
         plan.exit = exit;
         inlinedBodyBlocks_.insert(tgtSet.begin(), tgtSet.end());
         for (const auto& section : sw.Sections)
-            breakBranches_.insert(static_cast<const Branch*>(section->Body.get()));
+            if (auto* b = dynamic_cast<const Branch*>(section->Body.get()))
+                breakBranches_.insert(b);
         for (const Branch* fb : bodyExit) breakBranches_.insert(fb);
         // Any `br exit` inside a body block's instruction list becomes
         // `break` too.
@@ -2298,7 +2594,7 @@ private:
                     std::string part;
                     if (inst->Op == OpCode::StLoc) {
                         const auto& st = static_cast<const StLoc&>(*inst);
-                        std::string name = st.Variable ? st.Variable->Name : "?";
+                        std::string name = st.Variable ? CSharp::OutputVisitor::EscapeIdentifier(st.Variable->Name) : "?";
                         part = name + AssignmentText(st, name);
                     } else if (inst->Op == OpCode::StObj) {
                         const auto& st = static_cast<const StObj&>(*inst);
@@ -2502,13 +2798,15 @@ private:
                         std::string elemName = base;
                         for (int n = 2; declared_.count(elemName); ++n)
                             elemName = base + std::to_string(n);
+                        elemName =
+                            CSharp::OutputVisitor::EscapeIdentifier(elemName);
                         declared_.insert(elemName);
                         foreachSubst_.insert(accesses.begin(),
                                              accesses.end());
                         foreachElementName_ = elemName;
                         Line(indent, "foreach (" + elemType + " " +
                                         elemName + " in " +
-                                        av->Name + ")");
+                                        CSharp::OutputVisitor::EscapeIdentifier(av->Name) + ")");
                         Line(indent, "{");
                         emitForBody();
                         Line(indent, "}");
@@ -2703,6 +3001,16 @@ private:
         // the branch target -- their statements render inside the
         // folded if/else).
         if (labelRegionSuppressed_.count(&block)) return;
+        // The guard-region fold's region blocks: the linear render skips
+        // them (they render inside their fold's if); the OWNING fold's
+        // region render bypasses the skip (a nested fold's blocks render
+        // at the nested guard's site, not here).
+        {
+            auto owned = guardRegionOwner_.find(&block);
+            if (owned != guardRegionOwner_.end() &&
+                owned->second != activeGuardRegion_)
+                return;
+        }
         auto label = labels_.find(&block);
         if (label != labels_.end() && !emittedHeaderLabels_.count(&block)) {
             // C# labels start in column 0 by convention. A block whose label
@@ -2733,7 +3041,7 @@ private:
                     static_cast<StLoc*>(inst.get()));
                 if (fold != coalesceFolds_.end()) {
                     Line(indent,
-                         "var " + fold->first->Variable->Name + " = " +
+                         "var " + CSharp::OutputVisitor::EscapeIdentifier(fold->first->Variable->Name) + " = " +
                              Expr(*fold->second) + ";");
                     continue;
                 }
@@ -2763,15 +3071,50 @@ private:
             // regions (the branch target's block as the true arm, the
             // fall-through block as the else arm).
             auto fold = labelRegionFolds_.find(
-                static_cast<const IfInstruction*>(
-                    block.FinalInstruction.get()));
+                block.FinalInstruction->Op == OpCode::IfInstruction
+                    ? static_cast<const IfInstruction*>(
+                          block.FinalInstruction.get())
+                    : nullptr);
             if (fold != labelRegionFolds_.end() &&
                 fold->first != nullptr) {
                 Block* r1 = fold->second.first;
                 Block* r2 = fold->second.second;
                 EmitFoldedIf(*fold->first, r1, r2, indent);
             } else {
-                EmitStatement(*block.FinalInstruction, indent);
+                // The guard-region fold: the INVERTED if nesting the
+                // fall-through region, the target continuing after.
+                auto guardFold = guardRegionFolds_.find(
+                    block.FinalInstruction->Op == OpCode::IfInstruction
+                        ? static_cast<const IfInstruction*>(
+                              block.FinalInstruction.get())
+                        : nullptr);
+                if (guardFold != guardRegionFolds_.end() &&
+                    guardFold->first != nullptr) {
+                    const IfInstruction* giff = guardFold->first;
+                    const GuardRegion& g = guardFold->second;
+                    std::string condText =
+                        StripOuterParens(
+                            NegateCondText(*giff->Condition));
+                    Line(indent, "if (" + condText + ")");
+                    Line(indent, "{");
+                    const IfInstruction* prev = activeGuardRegion_;
+                    activeGuardRegion_ = giff;
+                    for (std::size_t j = g.first; j <= g.last; ++j) {
+                        Block* rb = g.container->Blocks[j].get();
+                        if (rb == nullptr) continue;
+                        // Blocks a nested fold owns render at the nested
+                        // guard's site inside this loop.
+                        auto nested = guardRegionOwner_.find(rb);
+                        if (nested != guardRegionOwner_.end() &&
+                            nested->second != giff)
+                            continue;
+                        EmitBlock(*rb, indent + 1);
+                    }
+                    activeGuardRegion_ = prev;
+                    Line(indent, "}");
+                } else {
+                    EmitStatement(*block.FinalInstruction, indent);
+                }
             }
         }
     }
@@ -2942,6 +3285,221 @@ private:
         return result;
     }
 
+    // The switch expression: when every section reduces to a value arm (a
+    // direct leave's value, a throw, or a thunk target's single
+    // `tmp = expr; return tmp` fold) and no section falls through to the
+    // after-switch code, render the C# 8 form
+    // `return <value> switch { <label> => <arm>, ... };` -- the shape the
+    // Roslyn switch-expressions compile to (the IL switch with the case
+    // bodies each a single value construction).
+    // A string switch: the value is a StringToInt wrapper over the string
+    // expression the switch dispatches on (the C# StatementBuilder's
+    // TranslateSwitchValue unwraps it the same way).
+    const StringToInt* StringSwitchOf(const SwitchInstruction& sw) const {
+        return sw.Value
+                   ? dynamic_cast<const StringToInt*>(sw.Value.get())
+                   : nullptr;
+    }
+
+    // The string constant a string switch's label value maps to; a null
+    // return with *isNull set marks the null-key entry (the C#
+    // CreateTypedCaseLabel lookup over strToInt.Map, `case null:`).
+    const std::string* StringCaseLabel(const StringToInt& s2i, long long v,
+                                       bool* isNull = nullptr) const {
+        if (isNull) *isNull = false;
+        for (const auto& e : s2i.Map) {
+            if (e.second != static_cast<int>(v)) continue;
+            if (e.first.has_value()) return &*e.first;
+            if (isNull) *isNull = true;
+            return nullptr;
+        }
+        return nullptr;
+    }
+
+    bool TryEmitSwitchExpression(const SwitchInstruction& sw,
+                                 const SwitchInlinePlan& plan, int indent) {
+        if (plan.defaultFallsToExit) return false;
+        struct Arm {
+            std::string label;
+            std::string expr;
+            long long sortKey = 0;
+            bool isDefault = false;
+        };
+        std::vector<Arm> arms;
+        std::size_t thunkIdx = 0;
+        for (std::size_t k = 0; k < sw.Sections.size(); ++k) {
+            const auto& section = sw.Sections[k];
+            if (!section || !section->Body) return false;
+            std::string arm;
+            if (auto it = plan.directLeaveSections.find(k);
+                it != plan.directLeaveSections.end()) {
+                if (!it->second->Value) return false;  // a void leave: no value arm
+                arm = Expr(*it->second->Value);
+            } else if (auto it2 = plan.directThrowSections.find(k);
+                       it2 != plan.directThrowSections.end()) {
+                auto* th = dynamic_cast<const Throw*>(it2->second);
+                if (!th || !th->Argument) return false;
+                arm = "throw " + Expr(*th->Argument);
+            } else {
+                if (thunkIdx >= plan.targets.size()) return false;
+                const Block* target = plan.targets[thunkIdx++];
+                if (!target) return false;
+                if (target->Instructions.size() == 1 && target->FinalInstruction) {
+                    // `tmp = expr; return tmp` folds to the expr arm.
+                    auto* st = dynamic_cast<const StLoc*>(
+                        target->Instructions[0].get());
+                    auto* lv = dynamic_cast<const Leave*>(
+                        target->FinalInstruction.get());
+                    auto* ld = lv && lv->Value
+                                   ? dynamic_cast<const LdLoc*>(lv->Value.get())
+                                   : nullptr;
+                    if (!st || !lv || !ld || st->Variable != ld->Variable)
+                        return false;
+                    arm = Expr(*st->Value);
+                } else if (target->Instructions.empty() && target->FinalInstruction &&
+                           target->FinalInstruction->Op == OpCode::Throw) {
+                    auto* th = static_cast<const Throw*>(
+                        target->FinalInstruction.get());
+                    if (!th->Argument) return false;
+                     (void)0;
+                    arm = "throw " + Expr(*th->Argument);
+                } else {
+                    return false;
+                }
+            }
+            // The label: the huge-complement section (the switch's default
+            // domain) renders `_`; a single interval renders `X` (a point)
+            // or `X..Y`; anything else keeps the statement form.
+            std::string label;
+            const auto& ivs = section->Labels.Intervals();
+            bool isDefault = false;
+            if (section->Labels.Count() > 100) {
+                label = "_";
+                isDefault = true;
+            } else if (ivs.size() == 1) {
+                if (ivs[0].Start == ivs[0].InclusiveEnd()) {
+                    if (const StringToInt* s2i = StringSwitchOf(sw)) {
+                        bool nullKey = false;
+                        if (const std::string* key =
+                                StringCaseLabel(*s2i, ivs[0].Start,
+                                                &nullKey))
+                            label = "\"" + *key + "\"";
+                        else if (nullKey)
+                            label = "null";
+                    }
+                    if (label.empty())
+                        label = std::to_string(ivs[0].Start);
+                } else {
+                    label = std::to_string(ivs[0].Start) + ".." +
+                            std::to_string(ivs[0].InclusiveEnd());
+                }
+            } else {
+                return false;
+            }
+            long long sortKey =
+                ivs.empty() ? 0 : static_cast<long long>(ivs[0].Start);
+            arms.push_back(
+                Arm{std::move(label), std::move(arm), sortKey, isDefault});
+        }
+        // The arms in source order: the labeled cases ascending, the `_`
+        // default last (the C# emits the sections sorted by label value
+        // with the default arm at the end).
+        std::stable_sort(arms.begin(), arms.end(), [](const Arm& a, const Arm& b) {
+            if (a.isDefault != b.isDefault) return b.isDefault;
+            return a.sortKey < b.sortKey;
+        });
+        const StringToInt* s2iExpr = StringSwitchOf(sw);
+        Line(indent,
+             "return " +
+                 (s2iExpr && s2iExpr->Argument
+                      ? Expr(*s2iExpr->Argument)
+                      : (sw.Value ? Expr(*sw.Value) : std::string())) +
+                 " switch");
+        Line(indent, "{");
+        for (const auto& a : arms)
+            Line(indent + 1, a.label + " => " + a.expr + ", ");
+        Line(indent, "};");
+        return true;
+    }
+
+    // The nesting depth of an if's then-arm, mirroring the C#
+    // ReduceNestingTransform's ComputeStats depth tally: one level per nested
+    // if-then arm (and per nested container), blocks themselves do not add
+    // depth. The C# guard-continue heuristic requires maxDepth >= 2.
+    static int ThenNestingDepth(const ILInstruction* inst, int depth) {
+        if (!inst) return depth;
+        int best = depth;
+        if (auto* b = dynamic_cast<const Block*>(inst)) {
+            for (const auto& s : b->Instructions)
+                best = std::max(best, ThenNestingDepth(s.get(), depth));
+            if (b->FinalInstruction)
+                best = std::max(best, ThenNestingDepth(b->FinalInstruction.get(), depth));
+            return best;
+        }
+        if (auto* c = dynamic_cast<const BlockContainer*>(inst)) {
+            for (const auto& b : c->Blocks)
+                best = std::max(best, ThenNestingDepth(b.get(), depth + 1));
+            return best;
+        }
+        if (auto* i = dynamic_cast<const IfInstruction*>(inst)) {
+            best = std::max(best, ThenNestingDepth(i->TrueInst.get(), depth + 1));
+            best = std::max(best, ThenNestingDepth(i->FalseInst.get(), depth + 1));
+            return best;
+        }
+        return best;
+    }
+
+    // The enum member name for a switch case label value, when the switch
+    // value is a load of an enum-typed variable whose type carries the
+    // members (the signature decoder's EnumMembersType). Returns empty for
+    // a non-enum switch value or a value with no member.
+    static std::string EnumCaseLabelText(const SwitchInstruction& sw, long long value) {
+        auto* ld = dynamic_cast<const LdLoc*>(sw.Value.get());
+        if (ld == nullptr || !ld->Variable || !ld->Variable->Type) return {};
+        auto* enumType = dynamic_cast<const TypeSystem::EnumMembersType*>(
+            ld->Variable->Type.get());
+        if (enumType == nullptr) return {};
+        auto it = enumType->Members().find(value);
+        if (it == enumType->Members().end()) return {};
+        return enumType->Name() + "." + it->second;
+    }
+
+    // Emit `if (<guards>) { continue; } <the body>` for the for-loop guard    // Emit `if (<guards>) { continue; } <the body>` for the for-loop guard
+    // shape (see the IfInstruction statement case). Returns false when any
+    // gate rejects and the caller falls through to the plain emission.
+    bool TryEmitGuardContinue(const IfInstruction& iff, int indent) {
+        // No else (the false path is the fall-through into the update).
+        if (iff.FalseInst && iff.FalseInst->Op != OpCode::Nop) return false;
+        // The condition is the negation wrapper `comp(eq, X, 0)`.
+        auto* c = dynamic_cast<const Comp*>(iff.Condition.get());
+        if (!c || c->Kind != ComparisonKind::Equality) return false;
+        auto* zero = dynamic_cast<const LdcI4*>(c->Right.get());
+        if (!zero || zero->Value != 0 || !c->Left) return false;
+        // The then is a block with real content.
+        auto* t = dynamic_cast<const Block*>(iff.TrueInst.get());
+        if (!t || (t->Instructions.empty() && !t->FinalInstruction)) return false;
+        // The if is a block final inside a for container, and the block's
+        // positional successor is the container's last block (the update).
+        auto* block = dynamic_cast<const Block*>(iff.Parent);
+        if (!block || block->FinalInstruction.get() != &iff) return false;
+        auto* container = dynamic_cast<const BlockContainer*>(block->Parent);
+        if (!container || container->Kind != ContainerKind::For || container->Blocks.size() < 2)
+            return false;
+        const Block* next = nullptr;
+        for (std::size_t i = 0; i + 1 < container->Blocks.size(); ++i)
+            if (container->Blocks[i].get() == block) { next = container->Blocks[i + 1].get(); break; }
+        if (next == nullptr || next != container->Blocks.back().get()) return false;
+        // The C# maxDepth >= 2 gate.
+        if (ThenNestingDepth(t, 0) < 2) return false;
+        Line(indent, "if (" + StripOuterParens(CondExpr(*c->Left)) + ")");
+        Line(indent, "{");
+        Line(indent + 1, "continue;");
+        Line(indent, "}");
+        for (const auto& s : t->Instructions) EmitStatement(*s, indent);
+        if (t->FinalInstruction) EmitStatement(*t->FinalInstruction, indent);
+        return true;
+    }
+
     void EmitStatement(const ILInstruction& inst, int indent) {
         if (DepthAtLimit()) {
             Line(indent, "/* max rendering depth: possible ILAst cycle */");
@@ -2951,7 +3509,7 @@ private:
         switch (inst.Op) {
             case OpCode::StLoc: {
                 const auto& st = static_cast<const StLoc&>(inst);
-                std::string name = st.Variable ? st.Variable->Name : "?";
+                std::string name = st.Variable ? CSharp::OutputVisitor::EscapeIdentifier(st.Variable->Name) : "?";
                 bool declare = st.Variable && st.Variable->Kind != VariableKind::Parameter &&
                                declared_.insert(name).second;
                 // `V = V op expr` -> `V op= expr` (or `V++`/`V--` for +/- 1) when
@@ -2980,6 +3538,17 @@ private:
             }
             case OpCode::StObj: {
                 const auto& st = static_cast<const StObj&>(inst);
+                // The `?? throw` coalesce: the guard's throw renders as
+                // the null-coalescing fallback.
+                if (auto tc = throwCoalesce_.find(&st);
+                    tc != throwCoalesce_.end()) {
+                    Line(indent, StoreTargetText(*st.Target) + " = " +
+                                     Expr(*static_cast<const LdLoc*>(
+                                              st.Value.get())) +
+                                     " ?? throw " + Expr(*tc->second->Argument) +
+                                     ";");
+                    return;
+                }
                 std::string valueText = Expr(*st.Value);
                 // The C# stores a boolean through the boolean literal
                 // (the CSharpPrimitiveCast over the target type): an int
@@ -3096,6 +3665,23 @@ private:
             }
             case OpCode::IfInstruction: {
                 const auto& iff = static_cast<const IfInstruction&>(inst);
+                // The C# ReduceNestingTransform's guard-continue form, at the
+                // emission layer. The ConditionDetection output for a combined
+                // guard chain inside a for loop is `if (!(guards)) { <the
+                // body> }` with the if as the loop body's final: its false path
+                // runs straight into the for's update block. The C# ILAst keeps
+                // the if as a non-terminal with the body statements after it in
+                // the same block and the ReduceNestingTransform inverts it on
+                // the tree (`if (!cond) continue; <the body>`); this port's
+                // block-final model cannot express statements after an if, so
+                // the inversion happens here. The continue is only correct
+                // when the if's false path IS the for's update block (the
+                // container's last block -- the continue target): the if must
+                // be the body's final and the next block the increment, so the
+                // emitted continue lands exactly where the fall-through went.
+                // The depth gate is the C# `maxDepth < 2` heuristic: a shallow
+                // then reads better nested than as a guard-continue.
+                if (TryEmitGuardContinue(iff, indent)) return;
                 std::string cond = iff.Condition ? CondExpr(*iff.Condition) : "(default)";
                 if (!iff.FalseInst && iff.TrueInst && iff.TrueInst->Op == OpCode::Branch) {
                     std::string gotoText = GotoText(*static_cast<const Branch*>(iff.TrueInst.get()));
@@ -3165,8 +3751,43 @@ private:
                     if (pit != switchInlinePlans_.end() && pit->second.eligible)
                         plan = &pit->second;
                 }
-                Line(indent, "switch (" + (sw.Value ? Expr(*sw.Value) : std::string("(default)")) + ")");
+                if (plan && TryEmitSwitchExpression(sw, *plan, indent))
+                    break;
+                const StringToInt* s2i = StringSwitchOf(sw);
+                Line(indent,
+                     "switch (" +
+                         (s2i && s2i->Argument
+                              ? Expr(*s2i->Argument)
+                              : (sw.Value ? Expr(*sw.Value)
+                                          : std::string("(default)"))) +
+                         ")");
                 Line(indent, "{");
+                // The C# GetDefaultSection: the section with the most labels
+                // is the default -- for every switch, not just the string
+                // ones (the StatementBuilder's TranslateSwitch reads it
+                // unconditionally). The reconstructed switches carry their
+                // default as the huge complement of the case labels, so the
+                // most-labeled section is the default. GetDefaultSection is
+                // a non-const lookup; the const cast mirrors the C# reader
+                // (the method mutates nothing).
+                const SwitchSection* stringDefaultSection =
+                    const_cast<SwitchInstruction&>(sw).GetDefaultSection();
+                // The most-labeled pick is only meaningful when the winner is
+                // the huge complement the analysis builds as the default
+                // (the C# switches always carry one); a small most-labeled
+                // section is an ordinary case (the hand-built fixtures with
+                // equal-size sections). A section with no labels at all is
+                // this port's explicit default marker (the fixtures and the
+                // pre-complement reader shapes); it wins over the pick.
+                if (stringDefaultSection != nullptr &&
+                    stringDefaultSection->Labels.Count() <= 100)
+                    stringDefaultSection = nullptr;
+                for (const auto& sec : sw.Sections) {
+                    if (sec && sec->Labels.IsEmpty() && !sec->HasNullLabel) {
+                        stringDefaultSection = sec.get();
+                        break;
+                    }
+                }
                 for (std::size_t k = 0; k < sw.Sections.size(); ++k) {
                     const auto& section = sw.Sections[k];
                     if (!section) continue;
@@ -3177,17 +3798,43 @@ private:
                         k == plan->defaultSectionIdx)
                         continue;
                     if (section->HasNullLabel) {
-                        Line(indent + 1, "case null:");
+                        Line(indent, "case null:");
                     }
-                    if (section->Labels.IsEmpty() && !section->HasNullLabel) {
-                        Line(indent + 1, "default:");
+                    if (stringDefaultSection == section.get()) {
+                        Line(indent, "default:");
+                    } else if (section->Labels.IsEmpty() &&
+                               !section->HasNullLabel) {
+                        Line(indent, "default:");
                     } else {
                         for (const auto& iv : section->Labels.Intervals()) {
-                            if (iv.Start == iv.InclusiveEnd())
-                                Line(indent + 1, "case " + std::to_string(iv.Start) + ":");
-                            else
-                                Line(indent + 1, "case " + std::to_string(iv.Start) +
+                            if (s2i && iv.Start == iv.InclusiveEnd()) {
+                                bool nullKey = false;
+                                if (const std::string* key =
+                                        StringCaseLabel(*s2i, iv.Start,
+                                                         &nullKey)) {
+                                    Line(indent,
+                                         "case \"" + *key + "\":");
+                                    continue;
+                                }
+                                if (nullKey) {
+                                    Line(indent, "case null:");
+                                    continue;
+                                }
+                            }
+                            // The C# CreateTypedCaseLabel's enum lookup:
+                            // a switch over an enum-typed variable renders
+                            // the label as the enum member name.
+                            std::string valueLabel;
+                            if (iv.Start == iv.InclusiveEnd() && s2i == nullptr)
+                                valueLabel = EnumCaseLabelText(sw, iv.Start);
+                            if (!valueLabel.empty()) {
+                                Line(indent, "case " + valueLabel + ":");
+                            } else if (iv.Start == iv.InclusiveEnd()) {
+                                Line(indent, "case " + std::to_string(iv.Start) + ":");
+                            } else {
+                                Line(indent, "case " + std::to_string(iv.Start) +
                                       ".." + std::to_string(iv.InclusiveEnd()) + ":");
+                            }
                         }
                     }
                     if (!plan) {
@@ -3269,7 +3916,7 @@ private:
                         head += " (" + (handler->Variable->Type
                                         ? handler->Variable->Type->ReflectionName()
                                         : std::string("System.Exception")) +
-                                " " + handler->Variable->Name + ")";
+                                " " + CSharp::OutputVisitor::EscapeIdentifier(handler->Variable->Name) + ")";
                         // A plain catch carries the constant filter ldc.i4(1);
                         // don't print it as a `when` clause.
                         bool isAlwaysTrue = false;
@@ -3343,7 +3990,7 @@ private:
                 const auto& pr = static_cast<const PinnedRegion&>(inst);
                 std::string varType = pr.Variable && pr.Variable->Type
                     ? CSharpTypeName(pr.Variable->Type) : std::string("var");
-                std::string varName = pr.Variable ? pr.Variable->Name : std::string("pinned");
+                std::string varName = pr.Variable ? CSharp::OutputVisitor::EscapeIdentifier(pr.Variable->Name) : std::string("pinned");
                 Line(indent, "fixed (" + varType + " " + varName + " = " +
                              (pr.Init ? Expr(*pr.Init) : std::string("null")) + ")");
                 if (pr.Body) EmitBraced(*pr.Body, indent); else Line(indent, "{ }");
@@ -3370,7 +4017,7 @@ private:
                     const LdLoc* final =
                         dynamic_cast<const LdLoc*>(blk.FinalInstruction.get());
                     std::string var = final != nullptr && final->Variable
-                        ? final->Variable->Name
+                        ? CSharp::OutputVisitor::EscapeIdentifier(final->Variable->Name)
                         : std::string();
                     if (!var.empty() && !blk.Instructions.empty()) {
                         // The outer store's variable (the block's parent
@@ -3871,53 +4518,6 @@ private:
     // continued-fraction approximation of `value` with denominators bounded
     // by `maxDenominator`. Returns (0, 0) for the out-of-range / degenerate
     // shapes. Follows the C# two-candidate (first/second) delta comparison.
-    static std::pair<long, long> FractionApprox(double value,
-                                                int maxDenominator) {
-        if (std::fabs(value) > 0x7FFFFFFF) return {0, 0};
-        double startValue = value;
-        if (value < 0) value = -value;
-        long ai;
-        long m[2][2] = {{1, 0}, {0, 1}};
-        double v = value;
-        while (m[1][0] * (ai = static_cast<long>(v)) + m[1][1] <=
-               maxDenominator) {
-            long t = m[0][0] * ai + m[0][1];
-            m[0][1] = m[0][0];
-            m[0][0] = t;
-            t = m[1][0] * ai + m[1][1];
-            m[1][1] = m[1][0];
-            m[1][0] = t;
-            if (v - ai == 0) break;
-            v = 1 / (v - ai);
-            if (std::fabs(v) >=
-                static_cast<double>(std::numeric_limits<long>::max()))
-                break;
-        }
-        if (m[1][0] == 0) return {0, 0};
-        long firstN = m[0][0];
-        long firstD = m[1][0];
-        ai = (maxDenominator - m[1][1]) / m[1][0];
-        long secondN = m[0][0] * ai + m[0][1];
-        long secondD = m[1][0] * ai + m[1][1];
-        double firstDelta =
-            std::fabs(value - firstN / static_cast<double>(firstD));
-        double secondDelta =
-            std::fabs(value - secondN / static_cast<double>(secondD));
-        if (firstDelta < secondDelta)
-            return {startValue < 0 ? -firstN : firstN, firstD};
-        return {startValue < 0 ? -secondN : secondN, secondD};
-    }
-
-    // The C# IsValidFraction (lines 1458-1466): a positive denominator, a
-    // nonzero numerator, and either a trivial part (1) or |num| < den with
-    // the denominator built from the 2/3/5 prime family.
-    static bool IsValidFraction(long num, long den) {
-        if (!(den > 0 && num != 0)) return false;
-        if (den == 1 || std::labs(num) == 1) return true;
-        return std::labs(num) < den && (den % 2 == 0 || den % 3 == 0 ||
-                                        den % 5 == 0);
-    }
-
     // The C# ConvertFloatingPointLiteral's special-constants arm: the PI/E
     // forms (TypeSystemAstBuilder.cs lines 1553-1688). A double literal
     // whose value / Math.PI (or E) approximates a valid fraction renders
@@ -3926,44 +4526,7 @@ private:
     // form reconstructs the value. The useFraction gate: the %.17g form
     // must carry more than five significant characters (the C#'s "r"
     // round-trip string minus the sign and the leading digit).
-    static std::string SpecialDoubleConstantText(double value) {
-        static const double kFields[2] = {3.141592653589793,
-                                           2.718281828459045};
-        static const char* kNames[2] = {"PI", "E"};
-        constexpr int kMaxDenominator = 1000;
-        char buf[32];
-        std::snprintf(buf, sizeof(buf), "%.17g", value);
-        std::string str = buf;
-        if (str.size() - (str[0] == '-' ? 2 : 1) <= 5) return std::string();
-        for (int i = 0; i < 2; ++i) {
-            auto [num, den] =
-                FractionApprox(value / kFields[i], kMaxDenominator);
-            if (!IsValidFraction(num, den)) continue;
-            // The multiply form: field * n / d == value.
-            double approx = kFields[i] * static_cast<double>(num) /
-                            static_cast<double>(den);
-            if (approx == value) {
-                std::string expr = std::string("Math.") + kNames[i];
-                if (num == -1) expr = "-" + expr;
-                else if (num != 1)
-                    expr += " * " + std::to_string(num);
-                if (den != 1)
-                    expr += " / " + std::to_string(den);
-                return expr;
-            }
-            // The division form: n / (d * field) == value.
-            double divApprox = static_cast<double>(num) /
-                               (static_cast<double>(den) * kFields[i]);
-            if (divApprox == value) {
-                std::string field = std::string("Math.") + kNames[i];
-                if (den == 1)
-                    return std::to_string(num) + " / " + field;
-                return std::to_string(num) + " / (" +
-                       std::to_string(den) + " * " + field + ")";
-            }
-        }
-        return std::string();
-    }
+
 
     // The short method name (after "::") for an instance call: receiver.Method.
     static std::string ShortMethodName(std::string_view full) {
@@ -3986,30 +4549,110 @@ private:
     // An instance call (call/callvirt, not newobj) renders as
     // `receiver.Method(restArgs)`; the receiver is Arguments[0]. A ref/deref
     // receiver (`&V`, `*(&V)`) is parenthesized so the member access binds.
+    // The implicit `this` parameter load: the receiver the this-targeted
+    // member rule keys on (the C# MatchLdThis).
+    static bool IsThisLoad(const ILInstruction* inst) {
+        if (inst == nullptr || inst->Op != OpCode::LdLoc) return false;
+        const auto* ld = static_cast<const LdLoc*>(inst);
+        return ld->Variable != nullptr &&
+               ld->Variable->Kind == VariableKind::Parameter &&
+               ld->Variable->Name == "this";
+    }
+
     // Static calls and newobj go through CallText. A property accessor
     // (get_X with 0 extra args / set_X with 1 extra arg) renders as
     // `receiver.X` / `receiver.X = value`.
     std::string InstanceCallText(const Call& call) {
         if (call.Arguments.empty() || !call.Arguments[0])
             return CallText(call);
+        // The this-targeted receiver rule (the C# TranslateTarget /
+        // requireTarget): a this-receiver member access elides the
+        // receiver unless the name is hidden (a shadowing local or
+        // parameter), and a `call`-opcode invocation of a base-declared
+        // virtual method renders the base reference.
+        const bool thisReceiver = IsThisLoad(call.Arguments[0].get());
+        std::string thisPrefix;
+        if (thisReceiver) {
+            std::string flattened =
+                FlattenMetadataName(std::string(call.MethodName));
+            auto sep = flattened.rfind('.');
+            if (sep != std::string::npos)
+                thisPrefix = ThisReceiverPrefixParts(
+                    flattened.substr(0, sep),
+                    ShortMethodName(call.MethodName),
+                    /*callOpcode=*/!call.IsVirtualCall, call.IsVirtualMethod);
+        }
         // Property accessor: get_X(receiver) -> receiver.X ;
-        // set_X(receiver, value) -> receiver.X = value.
+        // set_X(receiver, value) -> receiver.X = value. An accessor taking
+        // arguments beyond the receiver is an indexer access (C# has no
+        // parameterized properties besides indexers): get_X(recv, k...) ->
+        // recv[k...]; set_X(recv, k..., value) -> recv[k...] = value. The
+        // property's own name does not appear in the index syntax.
         std::string prop = AccessorPropertyName(call.MethodName);
         if (!prop.empty()) {
+            bool isSetter = false;
+            if (call.MethodName.size() >= 4) {
+                auto pos = call.MethodName.rfind("::");
+                std::string_view member = (pos != std::string_view::npos)
+                    ? std::string_view(call.MethodName).substr(pos + 2) : std::string_view(call.MethodName);
+                isSetter = member.substr(0, 4) == "set_";
+            }
+            // Arguments[0] is the receiver in both shapes (a this-receiver
+            // call carries the this load as its first argument).
+            std::size_t argBase = 1;
+            std::size_t indexCount = call.Arguments.size() - argBase - (isSetter ? 1 : 0);
+            if (indexCount > 0) {
+                std::string recv;
+                if (thisReceiver) {
+                    recv = thisPrefix;
+                } else {
+                    std::string r = Expr(*call.Arguments[0]);
+                    bool parens = !r.empty() && (r[0] == '&' || r[0] == '*');
+                    if (IsCastInstruction(call.Arguments[0].get()))
+                        parens = true;
+                    recv = parens ? "(" + r + ")" : r;
+                }
+                std::string indices;
+                for (std::size_t i = 0; i < indexCount; ++i) {
+                    if (i > 0) indices += ", ";
+                    indices += call.Arguments[argBase + i]
+                        ? Expr(*call.Arguments[argBase + i])
+                        : std::string("(default)");
+                }
+                std::string target = recv + "[" + indices + "]";
+                if (isSetter) {
+                    ILInstruction* value = call.Arguments[argBase + indexCount].get();
+                    return target + " = " + (value ? Expr(*value) : std::string("(default)"));
+                }
+                return target;
+            }
+            if (thisReceiver) {
+                std::string target = thisPrefix + prop;
+                if (isSetter && call.Arguments.size() >= 2) {
+                    return target + " = " + (call.Arguments[1] ? Expr(*call.Arguments[1]) : std::string("(default)"));
+                }
+                return target;
+            }
             std::string recv = Expr(*call.Arguments[0]);
             bool needsParens = !recv.empty() && (recv[0] == '&' || recv[0] == '*');
             if (IsCastInstruction(call.Arguments[0].get()))
                 needsParens = true;
             std::string target = (needsParens ? "(" + recv + ")" : recv) + "." + prop;
-            if (call.MethodName.size() >= 4) {
-                auto pos = call.MethodName.rfind("::");
-                std::string_view member = (pos != std::string_view::npos)
-                    ? std::string_view(call.MethodName).substr(pos + 2) : std::string_view(call.MethodName);
-                if (member.substr(0, 4) == "set_" && call.Arguments.size() >= 2) {
-                    return target + " = " + (call.Arguments[1] ? Expr(*call.Arguments[1]) : std::string("(default)"));
-                }
+            if (isSetter && call.Arguments.size() >= 2) {
+                return target + " = " + (call.Arguments[1] ? Expr(*call.Arguments[1]) : std::string("(default)"));
             }
             return target;
+        }
+        if (thisReceiver) {
+            std::string text =
+                thisPrefix + ShortMethodName(call.MethodName) + "(";
+            for (std::size_t i = 1; i < call.Arguments.size(); ++i) {
+                if (i > 1) text += ", ";
+                text += call.Arguments[i] ? Expr(*call.Arguments[i])
+                                         : "(default)";
+            }
+            text += ')';
+            return text;
         }
         std::string recv = Expr(*call.Arguments[0]);
         // A ref/deref receiver renders with a leading `ref `/`&`/`*`, which
@@ -4158,8 +4801,71 @@ private:
             return "this";
         if (!ld->Variable->Type) return std::string{};
         if (dynamic_cast<const TypeSystem::ByReferenceType*>(ld->Variable->Type.get()))
-            return ld->Variable->Name;
+            return CSharp::OutputVisitor::EscapeIdentifier(ld->Variable->Name);
         return std::string{};
+    }
+
+    // The C# TranslateTarget + RequiresQualifier/requireTarget receiver
+    // rule for a this-targeted member access, unified over fields and
+    // methods:
+    //  * the bare member name renders whenever nothing hides it;
+    //  * a same-named local or parameter (the C# HidesVariableWithName)
+    //    forces the explicit receiver -- `this.name = name` for an
+    //    own-type member, `base.name = name` for a base-declared one
+    //    (the ctor stores behind same-named parameters);
+    //  * a NON-VIRTUAL invocation (`call` opcode; a field access always)
+    //    of a base-declared VIRTUAL method renders the base reference
+    //    (`base.M(...)` -- the C# CallBuilder's requireTarget =
+    //    `CallOpCode != CallVirt && method.IsVirtual`); a base-declared
+    //    non-virtual method called with `call`, and every `callvirt`, keep
+    //    the this reference (elided, or `this.` when hidden);
+    //  * members of types outside the current type's chain (the display
+    //    classes, the enclosing captures) keep the receiver-elided form.
+    std::string ThisReceiverPrefix(const std::string& flattened,
+                                    bool callOpcode, bool memberIsVirtual) {
+        auto sep = flattened.rfind('.');
+        if (sep == std::string::npos) return std::string();
+        return ThisReceiverPrefixParts(flattened.substr(0, sep),
+                                        flattened.substr(sep + 1),
+                                        callOpcode, memberIsVirtual);
+    }
+
+    std::string ThisReceiverPrefixParts(const std::string& declType,
+                                         const std::string& memberName,
+                                         bool callOpcode, bool memberIsVirtual) {
+        if (currentTypeName_.empty() || currentType_ == nullptr)
+            return std::string();
+        bool shadow = false;
+        if (fn_ != nullptr) {
+            for (const auto& v : fn_->Variables) {
+                if (v && v->Index >= 0 && v->Name == memberName) {
+                    shadow = true;
+                    break;
+                }
+            }
+            if (!shadow) {
+                for (const auto* p : fn_->Parameters) {
+                    if (p != nullptr && p->Name() == memberName) {
+                        shadow = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (declType == currentTypeName_)
+            return shadow ? "this." : std::string();
+        bool onBase = false;
+        for (const auto* base : TypeSystem::GetAllBaseTypes(currentType_.get())) {
+            if (base == nullptr) continue;
+            if (base->ReflectionName() == declType) {
+                onBase = true;
+                break;
+            }
+        }
+        if (!onBase) return std::string();
+        if (shadow) return "base.";
+        if (callOpcode && memberIsVirtual) return "base.";
+        return std::string();
     }
 
     std::string StoreTargetText(const ILInstruction& target) {
@@ -4167,7 +4873,11 @@ private:
             const auto& f = static_cast<const LdFlda&>(target);
             std::string field = FlattenMetadataName(f.FieldName);
             std::string obj = f.Target ? Expr(*f.Target) : "(default)";
-            return obj == "this" ? SimpleName(field) : obj + "." + SimpleName(field);
+            return obj == "this"
+                       ? ThisReceiverPrefix(field, /*callOpcode=*/true,
+                                            /*memberIsVirtual=*/false) +
+                             SimpleName(field)
+                       : obj + "." + SimpleName(field);
         }
         if (target.Op == OpCode::LdsFlda) {
             std::string flattened = FlattenMetadataName(
@@ -4184,14 +4894,16 @@ private:
         if (auto* ld = dynamic_cast<const LdLoc*>(&target))
             if (ld->Variable && ld->Variable->Type &&
                 dynamic_cast<const TypeSystem::PointerType*>(ld->Variable->Type.get()))
-                return "*" + ld->Variable->Name;
+                return "*" + CSharp::OutputVisitor::EscapeIdentifier(ld->Variable->Name);
         return "*(" + Expr(target) + ")";
     }
 
     // "Namespace.Type::name" -> "name" (the field/member segment).
     static std::string SimpleName(const std::string& flattened) {
         auto dot = flattened.rfind('.');
-        return dot == std::string::npos ? flattened : flattened.substr(dot + 1);
+        return CSharp::OutputVisitor::EscapeIdentifier(dot == std::string::npos
+                         ? flattened
+                         : flattened.substr(dot + 1));
     }
 
     std::string ElementAccess(const LdElema& elema) {
@@ -4226,6 +4938,24 @@ private:
             }
             return "(" + left + " " + op + " " + right + ")";
         }
+        // A Boolean-valued leaf negates as !x; a reference-typed leaf as the
+        // null comparison; a numeric-stack leaf as the zero comparison. The
+        // C# reader materializes the brtrue/brfalse null/zero comparisons
+        // itself, so its render never sees a bare non-boolean in a condition
+        // slot; this port's reader keeps the bare load, so the negation
+        // supplies the comparison (the `(ownerModule) == 0` family -- not
+        // valid C# for a class-typed condition).
+        if (IsBooleanValued(&cond)) {
+            if (cond.Op == OpCode::MatchInstruction)
+                return "!(" + Expr(cond) + ")";
+            return "!" + Expr(cond);
+        }
+        StackType st = cond.ResultType();
+        if (st == StackType::O)
+            return Expr(cond) + " == null";
+        if (st == StackType::I4 || st == StackType::I8 || st == StackType::I ||
+            st == StackType::F4 || st == StackType::F8)
+            return Expr(cond) + " == 0";
         return "!(" + Expr(cond) + ")";
     }
 
@@ -4242,10 +4972,172 @@ private:
         return e.substr(1, e.size() - 2);
     }
 
+    // Whether `inst` is Boolean-valued: a comparison, a short-circuit
+    // tree, a Boolean local or a Boolean-returning call. The logic-not
+    // shapes (comp(eq, X, 0) over these) can push their negation inside.
+    static bool IsBooleanValued(const ILInstruction* inst) {
+        if (!inst) return false;
+        if (inst->Op == OpCode::Comp) return true;
+        // A pattern test (`x is T t`) is Boolean by construction (its
+        // ResultType is I4 like a comparison's).
+        if (inst->Op == OpCode::MatchInstruction) return true;
+        if (inst->Op == OpCode::IfInstruction) {
+            auto* iff = static_cast<const IfInstruction*>(inst);
+            auto isLdc = [](const ILInstruction* a, int v) -> bool {
+                if (!a || a->Op != OpCode::LdcI4) return false;
+                return static_cast<const LdcI4*>(a)->Value == v;
+            };
+            return (isLdc(iff->TrueInst.get(), 1) && iff->FalseInst && iff->Condition) ||
+                   (isLdc(iff->FalseInst.get(), 0) && iff->TrueInst && iff->Condition);
+        }
+        if (inst->Op == OpCode::LdLoc) {
+            auto* ld = static_cast<const LdLoc*>(inst);
+            return ld->Variable && ld->Variable->Type &&
+                   IsBooleanType(ld->Variable->Type.get());
+        }
+        if (inst->Op == OpCode::Call) {
+            auto* call = static_cast<const Call*>(inst);
+            return call->ReturnIType && IsBooleanType(call->ReturnIType.get());
+        }
+        // A field load (the reader models ldfld/ldsfld as ldobj over the
+        // field address): Boolean-typed fields are truthiness leaves.
+        if (inst->Op == OpCode::LdObj) {
+            auto* ld = static_cast<const LdObj*>(inst);
+            return ld->Type && IsBooleanType(ld->Type.get());
+        }
+        return false;
+    }
+
+    static bool IsBooleanType(const TypeSystem::IType* type) {
+        auto* k = dynamic_cast<const TypeSystem::KnownType*>(type);
+        return k && k->Code() == TypeSystem::KnownTypeCode::Boolean;
+    }
+
+    // A comparison rendered bare (no grouping parens -- the C# condition
+    // render keeps comparisons unparenthesized inside short-circuit
+    // chains), with the operator flipped under a negation and the zero
+    // constant typed as `null` for a reference-typed left (the same
+    // null-literal rule the parenthesized Comp value render applies).
+    std::string ComparisonTextBare(const Comp& comp, bool negate) {
+        if (comp.Right && comp.Right->Op == OpCode::LdcI4 &&
+            static_cast<const LdcI4*>(comp.Right.get())->Value == 0 && comp.Left) {
+            const TypeSystem::IType* leftType = nullptr;
+            if (comp.Left->Op == OpCode::LdLoc) {
+                auto* ld = static_cast<const LdLoc*>(comp.Left.get());
+                if (ld->Variable) leftType = ld->Variable->Type.get();
+            } else if (comp.Left->Op == OpCode::Call) {
+                leftType = static_cast<const Call*>(comp.Left.get())->ReturnIType.get();
+            }
+            if (leftType != nullptr) {
+                auto* k = dynamic_cast<const TypeSystem::KnownType*>(leftType);
+                bool isRefLeft = k == nullptr || [&] {
+                    switch (k->Code()) {
+                        case TypeSystem::KnownTypeCode::Boolean:
+                        case TypeSystem::KnownTypeCode::Char:
+                        case TypeSystem::KnownTypeCode::SByte:
+                        case TypeSystem::KnownTypeCode::Byte:
+                        case TypeSystem::KnownTypeCode::Int16:
+                        case TypeSystem::KnownTypeCode::UInt16:
+                        case TypeSystem::KnownTypeCode::Int32:
+                        case TypeSystem::KnownTypeCode::UInt32:
+                        case TypeSystem::KnownTypeCode::Int64:
+                        case TypeSystem::KnownTypeCode::UInt64:
+                        case TypeSystem::KnownTypeCode::Single:
+                        case TypeSystem::KnownTypeCode::Double:
+                            return false;
+                        default:
+                            return true;
+                    }
+                }();
+                if (isRefLeft) {
+                    bool eq = (comp.Kind == ComparisonKind::Equality) ^ negate;
+                    return (comp.Left ? Expr(*comp.Left) : std::string("(default)")) +
+                           (eq ? " == null" : " != null");
+                }
+            }
+        }
+        ComparisonKind kind = negate ? NegateComparison(comp.Kind) : comp.Kind;
+        const char* op = "==";
+        switch (kind) {
+            case ComparisonKind::Equality: op = "=="; break;
+            case ComparisonKind::Inequality: op = "!="; break;
+            case ComparisonKind::LessThan: op = "<"; break;
+            case ComparisonKind::LessThanOrEqual: op = "<="; break;
+            case ComparisonKind::GreaterThan: op = ">"; break;
+            case ComparisonKind::GreaterThanOrEqual: op = ">="; break;
+        }
+        return (comp.Left ? Expr(*comp.Left) : std::string("(default)")) + " " + op +
+               " " + (comp.Right ? Expr(*comp.Right) : std::string("(default)"));
+    }
+
+    // The C# ExpressionBuilder.TranslateCondition(condition, negate): a
+    // negation pushes into the condition tree instead of wrapping it.
+    // `!(a || b)` renders `!a && !b` (de Morgan -- the connective flips,
+    // the operands keep the flag), `!(x < y)` renders `x >= y`, a logic-not
+    // over a Boolean value collapses (`!!x` is `x`), and a non-negatable
+    // leaf keeps the `!` prefix. Short-circuit chains of the same effective
+    // connective render flat (both operators associative); an `||` operand
+    // under a `&&` connective keeps grouping parens (precedence).
+    std::string ConditionText(const ILInstruction& cond, bool negate) {
+        if (auto* comp = dynamic_cast<const Comp*>(&cond)) {
+            // The logic-not over a Boolean value: comp(eq, X, 0) is !X,
+            // comp(ne, X, 0) is X.
+            if (comp->Right && comp->Right->Op == OpCode::LdcI4 &&
+                static_cast<const LdcI4*>(comp->Right.get())->Value == 0 && comp->Left &&
+                IsBooleanValued(comp->Left.get())) {
+                bool notFlag = comp->Kind == ComparisonKind::Equality;
+                return ConditionText(*comp->Left, negate ^ notFlag);
+            }
+            return ComparisonTextBare(*comp, negate);
+        }
+        if (auto* iff = dynamic_cast<const IfInstruction*>(&cond)) {
+            auto isLdc = [](const ILInstruction* a, int v) -> bool {
+                if (!a || a->Op != OpCode::LdcI4) return false;
+                return static_cast<const LdcI4*>(a)->Value == v;
+            };
+            // LogicOr(a, b) = if (a) 1 else b ; LogicAnd(a, b) = if (a) b else 0.
+            bool shapeIsOr = isLdc(iff->TrueInst.get(), 1) && iff->FalseInst && iff->Condition;
+            bool shapeIsAnd = isLdc(iff->FalseInst.get(), 0) && iff->TrueInst && iff->Condition;
+            if (shapeIsOr || shapeIsAnd) {
+                const char* conn = (shapeIsOr ^ negate) ? " || " : " && ";
+                bool parentEffIsOr = shapeIsOr ^ negate;
+                auto operand = [&](const ILInstruction* arm) -> std::string {
+                    if (auto* inner = dynamic_cast<const IfInstruction*>(arm)) {
+                        bool innerOr = isLdc(inner->TrueInst.get(), 1) && inner->FalseInst;
+                        if (innerOr || (isLdc(inner->FalseInst.get(), 0) && inner->TrueInst)) {
+                            // An `||` operand under a `&&` connective needs
+                            // grouping parens; a same-connective operand
+                            // flattens.
+                            if (!parentEffIsOr && (innerOr ^ negate))
+                                return "(" + ConditionText(*arm, negate) + ")";
+                            return ConditionText(*arm, negate);
+                        }
+                    }
+                    return ConditionText(*arm, negate);
+                };
+                if (shapeIsOr)
+                    return operand(iff->Condition.get()) + conn + operand(iff->FalseInst.get());
+                return operand(iff->Condition.get()) + conn + operand(iff->TrueInst.get());
+            }
+        }
+        // Leaves: a Boolean leaf takes the `!` prefix (parenthesized when
+        // the leaf expression is not atomic -- a pattern test's `x is T t`
+        // binds looser than `!`); anything else keeps the existing
+        // conversion (integer leaves render `x != 0` / `x == 0`).
+        if (negate && IsBooleanValued(&cond)) {
+            std::string leaf = Expr(cond);
+            if (cond.Op == OpCode::MatchInstruction) return "!(" + leaf + ")";
+            return "!" + leaf;
+        }
+        if (negate)
+            return StripOuterParens(ConvertConditionText(cond, true));
+        return StripOuterParens(ConvertConditionText(cond, false));
+    }
+
     // The condition expression for an `if`/`while`: strip redundant outer
     // parens so `if ((cond))` becomes `if (cond)`.
     std::string CondExpr(const ILInstruction& inst) {
-        return StripOuterParens(ConvertConditionText(inst, false));
+        return StripOuterParens(ConditionText(inst, false));
     }
 
     // The C# ExpressionBuilder.TranslateCondition ->
@@ -4292,10 +5184,10 @@ private:
                         case TypeSystem::KnownTypeCode::Char:
                             return Expr(cond) + (negate ? " == 0" : " != 0");
                         default:
-                            return Expr(cond);
+                            break;  // the type-aware tail below
                     }
                 }
-                return Expr(cond);
+                break;  // the type-aware tail below
             }
             case OpCode::Call: {
                 const auto* call = static_cast<const Call*>(&cond);
@@ -4304,10 +5196,9 @@ private:
                         ? dynamic_cast<const TypeSystem::KnownType*>(
                               call->ReturnIType.get())
                         : nullptr;
-                if (k != nullptr &&
-                    k->Code() == TypeSystem::KnownTypeCode::Boolean)
-                    return Expr(cond);
                 if (k != nullptr) {
+                    if (k->Code() == TypeSystem::KnownTypeCode::Boolean)
+                        return Expr(cond);
                     switch (k->Code()) {
                         case TypeSystem::KnownTypeCode::SByte:
                         case TypeSystem::KnownTypeCode::Byte:
@@ -4319,14 +5210,32 @@ private:
                         case TypeSystem::KnownTypeCode::UInt64:
                             return Expr(cond) + (negate ? " == 0" : " != 0");
                         default:
-                            return Expr(cond);
+                            break;  // the type-aware tail below
                     }
                 }
-                return Expr(cond);
+                break;  // the type-aware tail below
             }
             default:
-                return Expr(cond);
+                break;  // the type-aware tail below
         }
+        // The type-aware tail: the C# reader materializes the
+        // brtrue/brfalse null/zero comparisons itself, so its condition
+        // render never sees a bare non-boolean leaf; this port's reader
+        // keeps the bare load, so the render supplies the comparison -- a
+        // reference-stack leaf the null comparison (the LazyList
+        // `if (listener)` family: `if (listener)` is not valid C#), a
+        // numeric-stack leaf the zero comparison. A Boolean-valued leaf
+        // the switch arms did not cover (the Boolean-typed field loads)
+        // renders bare; an Unknown stack type (the untyped dup slots)
+        // keeps the bare form -- the C#'s own TypeKind.Unknown arm.
+        if (IsBooleanValued(&cond)) return Expr(cond);
+        StackType st = cond.ResultType();
+        if (st == StackType::O)
+            return Expr(cond) + (negate ? " == null" : " != null");
+        if (st == StackType::I4 || st == StackType::I8 || st == StackType::I ||
+            st == StackType::F4 || st == StackType::F8)
+            return Expr(cond) + (negate ? " == 0" : " != 0");
+        return Expr(cond);
     }
 
     std::string Expr(const ILInstruction& inst) {
@@ -4359,24 +5268,46 @@ private:
                 auto su = singleUseElisions_.find(&ld);
                 if (su != singleUseElisions_.end())
                     return Expr(*su->second);
-                return ld.Variable ? ld.Variable->Name : "?";
+                // The implicit `this` parameter (the reader's negative-index
+                // convention) renders as the `this` KEYWORD TOKEN, never an
+                // identifier -- the C# models it as a ThisReferenceExpression,
+                // which WriteIdentifier never sees.
+                if (ld.Variable && ld.Variable->Kind == VariableKind::Parameter &&
+                    ld.Variable->Name == "this")
+                    return "this";
+                return ld.Variable ? CSharp::OutputVisitor::EscapeIdentifier(ld.Variable->Name) : "?";
             }
             case OpCode::StLoc: {
                 // An inline assignment used as an expression value:
                 // `outer = (inner = value)` -- render as the chained assignment
                 // `outer = inner = value`. Chained assignment is right-
                 // associative, so no parentheses are needed around the inner.
+                // Assignment has the lowest C# expression precedence, so an
+                // assignment used as an OPERATOR operand needs parentheses:
+                // `(text = ReadLine()) != null`, not `text = ReadLine() != null`
+                // (which parses as `text = (ReadLine() != null)` -- a different
+                // program). The operand contexts are Comp and the binary
+                // arithmetic/bitwise operators; the chain (another StLoc), the
+                // call arguments, and the statement/return-value slots keep
+                // the bare form (the C# output visitor's precedence-driven
+                // parentheses, approximated by the parent's opcode).
                 const auto& st = static_cast<const StLoc&>(inst);
-                std::string name = st.Variable ? st.Variable->Name : std::string("?");
+                std::string name = st.Variable ? CSharp::OutputVisitor::EscapeIdentifier(st.Variable->Name) : std::string("?");
                 std::string val = st.Value ? Expr(*st.Value) : std::string("(default)");
-                return name + " = " + val;
+                std::string text = name + " = " + val;
+                const ILInstruction* parent = inst.Parent;
+                bool operandContext =
+                    parent != nullptr &&
+                    (parent->Op == OpCode::Comp ||
+                     parent->Op == OpCode::BinaryNumericInstruction);
+                return operandContext ? "(" + text + ")" : text;
             }
             case OpCode::LdLoca: {
                 const auto& ld = static_cast<const LdLoca&>(inst);
                 // `ldloca V` is the IL idiom for `ref V` (a byref argument or
                 // an address-of). Render as `ref V` (the C# form), not `&V`
                 // (the IL form).
-                return "ref " + (ld.Variable ? ld.Variable->Name : std::string("?"));
+                return "ref " + (ld.Variable ? CSharp::OutputVisitor::EscapeIdentifier(ld.Variable->Name) : std::string("?"));
             }
             case OpCode::LdcI4: {
                 // The C# IsSpecialConstant: the recognizable boundary
@@ -4418,7 +5349,7 @@ private:
                 // compilation to probe MathF's presence, and no fixture
                 // exercises it).
                 {
-                    std::string special = SpecialDoubleConstantText(value);
+                    std::string special = CSharp::SpecialDoubleConstantText(value);
                     if (!special.empty()) return special;
                 }
                 char buf[32];
@@ -4478,7 +5409,7 @@ private:
                             static_cast<const TypeSystem::KnownType*>(ld->Variable->Type.get())->Code() ==
                                 TypeSystem::KnownTypeCode::Boolean) {
                             isBoolLeft = true;
-                            leftExpr = ld->Variable->Name;
+                            leftExpr = CSharp::OutputVisitor::EscapeIdentifier(ld->Variable->Name);
                         }
                     } else if (comp.Left->Op == OpCode::Call) {
                         auto* call = static_cast<const Call*>(comp.Left.get());
@@ -4663,6 +5594,15 @@ private:
                 } else if (p != nullptr && p->Op == OpCode::IfInstruction &&
                            inst.ChildIndex != 0) {
                     parenthesize = true;
+                } else if (p != nullptr && p->Op == OpCode::Comp &&
+                           (bin.Operator == BinaryNumericOperator::BitAnd ||
+                            bin.Operator == BinaryNumericOperator::BitOr ||
+                            bin.Operator == BinaryNumericOperator::BitXor)) {
+                    // The C# bitwise operators bind looser than the
+                    // comparison operators: an `a & b` compared against a
+                    // constant is `(a & b) == 0`, not `a & b == 0` (which
+                    // parses as `a & (b == 0)`).
+                    parenthesize = true;
                 }
                 if (parenthesize) text = "(" + text + ")";
                 return text;
@@ -4741,7 +5681,11 @@ private:
                 const auto& f = static_cast<const LdFlda&>(inst);
                 std::string field = FlattenMetadataName(f.FieldName);
                 std::string obj = f.Target ? Expr(*f.Target) : "(default)";
-                return obj == "this" ? SimpleName(field) : obj + "." + SimpleName(field);
+                return obj == "this"
+                           ? ThisReceiverPrefix(field, /*callOpcode=*/true,
+                                                /*memberIsVirtual=*/false) +
+                                 SimpleName(field)
+                           : obj + "." + SimpleName(field);
             }
             case OpCode::LdsFlda: {
                 std::string flattened = FlattenMetadataName(
@@ -4818,7 +5762,7 @@ private:
                 // patterns) and deconstruct patterns are deferred.
                 const auto& m = static_cast<const MatchInstruction&>(inst);
                 std::string lhs = m.TestedOperand ? Expr(*m.TestedOperand) : std::string("(default)");
-                std::string varName = m.Variable ? m.Variable->Name : std::string("_");
+                std::string varName = m.Variable ? CSharp::OutputVisitor::EscapeIdentifier(m.Variable->Name) : std::string("_");
                 std::string pattern;
                 if (m.IsVar()) {
                     // `expr is var x`
@@ -4857,13 +5801,31 @@ private:
                     if (!a || a->Op != OpCode::LdcI4) return false;
                     return static_cast<const LdcI4*>(a)->Value == v;
                 };
+                // Flatten same-operator chains (the C# renders the
+                // short-circuit operators left-associatively without grouping
+                // parens): `a || (b || c)` -> `a || b || c`. Both operators
+                // are associative, so the inner grouping parens are noise.
+                // A mixed-operator operand keeps its parens (precedence).
+                auto flattenSameOp = [&](const std::unique_ptr<ILInstruction>& arm,
+                                         const char* opText) -> std::string {
+                    std::string text = Expr(*arm);
+                    if (arm->Op != OpCode::IfInstruction) return text;
+                    const auto& armIf = static_cast<const IfInstruction&>(*arm);
+                    bool isSameOp = opText[0] == '|'
+                        ? isLdcI4(armIf.TrueInst.get(), 1) && armIf.FalseInst
+                        : isLdcI4(armIf.FalseInst.get(), 0) && armIf.TrueInst;
+                    if (!isSameOp) return text;
+                    return StripOuterParens(std::move(text));
+                };
                 if (isLdcI4(iff.FalseInst.get(), 0) && iff.TrueInst && iff.Condition) {
                     // LogicAnd(a, b) = if (a) b else 0  ->  a && b
-                    return "(" + Expr(*iff.Condition) + " && " + Expr(*iff.TrueInst) + ")";
+                    return "(" + flattenSameOp(iff.Condition, "&&") + " && " +
+                           flattenSameOp(iff.TrueInst, "&&") + ")";
                 }
                 if (isLdcI4(iff.TrueInst.get(), 1) && iff.FalseInst && iff.Condition) {
                     // LogicOr(a, b) = if (a) 1 else b  ->  a || b
-                    return "(" + Expr(*iff.Condition) + " || " + Expr(*iff.FalseInst) + ")";
+                    return "(" + flattenSameOp(iff.Condition, "||") + " || " +
+                           flattenSameOp(iff.FalseInst, "||") + ")";
                 }
                 // Otherwise the conditional operator `cond ? true : false`.
                 auto ArmExpr = [&](const std::unique_ptr<ILInstruction>& arm) -> std::string {
@@ -4971,9 +5933,16 @@ private:
                 if (ca.TargetKind == CompoundTargetKind::Address &&
                     ca.Target && ca.Target->Op == OpCode::LdLoca) {
                     const auto& lda = static_cast<const LdLoca&>(*ca.Target);
-                    target = lda.Variable ? lda.Variable->Name : std::string("?");
+                    target = lda.Variable ? CSharp::OutputVisitor::EscapeIdentifier(lda.Variable->Name) : std::string("?");
+                } else if (ca.Target) {
+                    // A field or element target: the compound stores through
+                    // the address, so the target renders as the store's
+                    // left-hand side (the same field-path / element-access
+                    // text the StObj statement uses), not as an address
+                    // expression.
+                    target = StoreTargetText(*ca.Target);
                 } else {
-                    target = ca.Target ? Expr(*ca.Target) : std::string("(default)");
+                    target = std::string("(default)");
                 }
                 std::string value = ca.Value ? Expr(*ca.Value) : std::string("(default)");
                 // The post-increment/decrement: Add/Sub with a ldc.i4 1 RHS in
@@ -5019,7 +5988,7 @@ private:
                 if (ca.TargetKind == CompoundTargetKind::Address &&
                     ca.Target && ca.Target->Op == OpCode::LdLoca) {
                     const auto& lda = static_cast<const LdLoca&>(*ca.Target);
-                    target = lda.Variable ? lda.Variable->Name : std::string("?");
+                    target = lda.Variable ? CSharp::OutputVisitor::EscapeIdentifier(lda.Variable->Name) : std::string("?");
                 } else {
                     target = ca.Target ? Expr(*ca.Target) : std::string("(default)");
                 }
@@ -5278,7 +6247,7 @@ private:
         if (auto* ld = dynamic_cast<const LdLoc*>(&target))
             if (ld->Variable && ld->Variable->Type &&
                 dynamic_cast<const TypeSystem::PointerType*>(ld->Variable->Type.get()))
-                return "*" + ld->Variable->Name;
+                return "*" + CSharp::OutputVisitor::EscapeIdentifier(ld->Variable->Name);
         return "*(" + Expr(target) + ")";
     }
 };
@@ -5386,7 +6355,8 @@ std::string ILAstToCSharp(const ILFunction& fn,
                           std::string_view methodName,
                           std::string_view paramDecl,
                           bool isConstructor,
-                          std::string_view methodConstraints) {
+                          std::string_view methodConstraints,
+                          std::string_view typeName) {
     // The transformed-tree dump (ILSPY_DUMP_TF): the POST-pipeline ILAst
     // in the --ilast-all text form -- the raw reader dump and the render's
     // tree differ (the pipeline restructures the shapes), so the fold

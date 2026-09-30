@@ -72,6 +72,7 @@
 #define ILSPY_DECOMPILER_CSHARP_OUTPUTVISITOR_CSHARPKEYWORDCHECK_HPP
 
 #include <algorithm>
+#include <string>
 #include <string_view>
 #include <unordered_set>
 
@@ -95,15 +96,14 @@ using Syntax::Modifiers;
 
 namespace OutputVisitor {
 
-// Determines whether the given identifier is a C# keyword in the given context and so must be
-// rendered with a leading `@` (the verbatim-identifier prefix). With a null `context` every
-// keyword (unconditional, query, and `await`) is treated as unconditional -- the C# default
-// argument and the `context == null` short-circuits.
-inline bool IsKeyword(std::string_view identifier, AstNode* context = nullptr)
+// The unconditional-keyword test alone (the 77 reserved-in-every-context
+// keywords). The query-contextual keywords and `await` depend on an AST
+// context the flat renderers do not model -- the flat render never emits
+// query expressions or async lambdas, so those identifiers never escape
+// there (the C# WriteIdentifier consults the identifier's AST node for
+// exactly this context).
+inline bool IsUnconditionalKeyword(std::string_view identifier)
 {
-	// The C# keyword tables (`static readonly HashSet<string>`). Stored as `string_view`s over
-	// string literals (static storage duration), so the views are valid for the program lifetime
-	// and the lookups are zero-allocation. Function-local statics initialize once (thread-safe).
 	static const std::unordered_set<std::string_view> unconditionalKeywords = {
 		"abstract", "as", "base", "bool", "break", "byte", "case", "catch",
 		"char", "checked", "class", "const", "continue", "decimal", "default", "delegate",
@@ -116,15 +116,35 @@ inline bool IsKeyword(std::string_view identifier, AstNode* context = nullptr)
 		"true", "try", "typeof", "uint", "ulong", "unchecked", "unsafe", "ushort",
 		"using", "virtual", "void", "volatile", "while"
 	};
+	// only 2..10-char lower-case identifiers can be unconditional keywords (the longest is
+	// "namespace"/"protected"/"readonly"/"unchecked"). The `size() < 2`
+	// check short-circuits before `identifier[0]` is evaluated, so an empty view is safe. The
+	// `unsigned char` cast reproduces the C# unsigned-`char` comparison for a non-ASCII first
+	// byte (a negative `signed char` would otherwise trip the `< 'a'` gate).
+	if (identifier.size() < 2 || identifier.size() > 10
+		|| static_cast<unsigned char>(identifier[0]) < 'a')
+	{
+		return false;
+	}
+	return unconditionalKeywords.count(identifier) != 0;
+}
+
+// Determines whether the given identifier is a C# keyword in the given context and so must be
+// rendered with a leading `@` (the verbatim-identifier prefix). With a null `context` every
+// keyword (unconditional, query, and `await`) is treated as unconditional -- the C# default
+// argument and the `context == null` short-circuits.
+inline bool IsKeyword(std::string_view identifier, AstNode* context = nullptr)
+{
+	// The C# keyword tables (`static readonly HashSet<string>`). Stored as `string_view`s over
+	// string literals (static storage duration), so the views are valid for the program lifetime
+	// and the lookups are zero-allocation. Function-local statics initialize once (thread-safe).
 	static const std::unordered_set<std::string_view> queryKeywords = {
 		"from", "where", "join", "on", "equals", "into", "let", "orderby",
 		"ascending", "descending", "select", "group", "by"
 	};
 	// The C# `Max(s => s.Length)` over both tables -- computed once on first call.
 	static const int maxKeywordLength = [] {
-		int m = 0;
-		for (auto s : unconditionalKeywords)
-			m = std::max(m, static_cast<int>(s.size()));
+		int m = 10;  // the unconditional table's longest ("namespace", ...)
 		for (auto s : queryKeywords)
 			m = std::max(m, static_cast<int>(s.size()));
 		return m;
@@ -141,7 +161,7 @@ inline bool IsKeyword(std::string_view identifier, AstNode* context = nullptr)
 		return false;
 	}
 
-	if (unconditionalKeywords.count(identifier) != 0)
+	if (IsUnconditionalKeyword(identifier))
 	{
 		return true;
 	}
@@ -185,6 +205,21 @@ inline bool IsKeyword(std::string_view identifier, AstNode* context = nullptr)
 	}
 
 	return false;
+}
+
+// The C# `TextWriterTokenWriter.WriteIdentifier` escape half: a keyword-named
+// identifier renders with the leading `@` verbatim-identifier prefix (the
+// `identifier.IsVerbatim || IsKeyword(name)` test; the port's flat renderers
+// carry no verbatim flag, so only the keyword arm applies). Only the
+// UNCONDITIONAL keywords escape: the query-contextual keywords and `await`
+// depend on the identifier's AST context (a query expression / an async
+// member), which the flat renderers never emit -- the C# WriteIdentifier
+// consults the identifier's AST node for exactly that context.
+inline std::string EscapeIdentifier(std::string_view name)
+{
+	if (IsUnconditionalKeyword(name))
+		return "@" + std::string(name);
+	return std::string(name);
 }
 
 }  // namespace OutputVisitor

@@ -3643,6 +3643,770 @@ oracle's `case Machine.I386:`) -- the render's to_string needs the
 enum-member lookup (the local's type -> the fields' constant
 values).
 
+## THE SWITCH -- THE [SD] STAGE DATA (the rejection mass localized)
+
+THE STAGES (measured on dnlib): 29,818 ProcessBlock calls; **1,687
+chains analyze successfully** (sections 1-13+); **only 104 get the
+switch** (UseCSharpSwitch = true) -- **1,583 REJECTED by the
+UseCSharpSwitch heuristics**. THE ORACLE renders the TryGetCpuArch
+chain as a switch -- so the C#'s heuristic ACCEPTS what the port's
+port rejects: A DIVERGENCE in the heuristic's implementation (the
+default-section rule / MaxValuesPerSection / the ifCount-vs-
+intervalCount preference / the single-condition veto / the
+breakBlock checks -- the specific gate NOT yet isolated). THE
+INSTRUMENTATION BUG (recorded): the [SD3] prints were appended
+AFTER the `return false;` lines -- dead code that somehow printed
+(the line-number mapping unreliable); THE FIXED PROBE (the next
+session): restructure each `return false` as `if (cond) { [SD3]
+print; return false; }` (the print BEFORE the return, in the
+condition's branch) -- one run gives the per-gate rejection counts
+and the TryGetCpuArch's specific gate. THEN: the divergence fix
+(the port's heuristic vs the C#'s -- read the C#
+SwitchDetection.UseCSharpSwitch side by side) + the enum member
+names (the queued bonus). THE STATE: the probes reverted (the pin,
+the dnlib 80,185).
+
+## THE SWITCH -- THE DIVERGENCE ISOLATED (the root cause found)
+
+THE [SD4] NAMED-GATE PROBE (the fixed instrumentation, the prints
+inside the condition braces): **noInnerBlocks = 1,545 of 1,583
+rejections** (multiBig only 9; NO other gate fired). THE ANALYSIS
+SUCCEEDS (the sections build: 3-13 per chain) BUT RECORDS ZERO
+INNER BLOCKS -- every recursion fails at the first level.
+
+THE ROOT CAUSE (the C# side-by-side, SwitchAnalysis.cs lines
+135-181): the C#'s flattened block model has the if as
+Instructions[Count-2] and the FALSE ARM as the block's LAST
+instruction (an explicit Branch) -- **the C# NEVER SEES AN
+ELSE-ARMED IF**. The port's model nests the else (iff->FalseInst
+is an instruction: the Block / the Branch / the case body) -- and
+the port's recursion gate `iff && !iff->FalseInst` REJECTS every
+else-armed intermediate block -- the transformed tree's chains
+(the [NP3]/[ER] forensics: the restructured chains carry else
+arms) all have else-armed intermediates -- so the recursion adds a
+SECTION per level (never InnerBlocks) -- the analysis "succeeds"
+with sections-only -- UseCSharpSwitch's noInnerBlocks veto
+rejects 1,545 chains.
+
+THE FIX (the next slice -- the else-arm recursion in
+AnalyzeBlockImpl): when the iff HAS a FalseInst, the false
+continuation = the FalseInst itself: (a) a Branch -> the target
+block (the standard path); (b) a nested Block (the port's
+else-block wrapping) -> the recursion's Parent/IncomingEdgeCount
+gates must handle the nested shape (the Block is an instruction,
+not a container sibling -- either walk into the Block's final as
+the level's if, or relax the gates for the owned Block arms).
+THE C# EQUIVALENT: the C#'s model makes the else the fall-through
+branch of the SIBLING block; the port's fix must synthesize that
+walk from the nested shape. DESIGN FIRST (the transformed dump on
+one chain: the exact FalseInst types at each level), THEN THE
+GATE RELAXATION. THE STATE: the probes reverted (the pin, the
+dnlib 80,185).
+
+## THE ELSE-ARM RECURSION -- LANDED + THE POISONING BUG FOUND
+
+LANDED (the commit): AnalyzeNestedBlock (the else-armed chains'
+nested-Block descent) + the test seed
+RunReconstructsElseArmedIfChainAsSwitch (RED first: the no-else gate
+rejected the fixture; GREEN after). THE GATES: the connid pin, the
+suite (the SwitchDetection 12/12; the 188 mass failures are the
+PRE-EXISTING env drift -- the control run on the clean tree: 188 =
+188), the corpus UNCHANGED (dnlib 80,185 / gotos 1,263 -- no
+regression, no payoff yet).
+
+THE POISONING BUG (the next slice's target): the corpus payoff is
+blocked by a STATE-MUTATION defect -- **a SECOND
+UseCSharpSwitch() call on the same analysis ACCEPTS what the first
+call REJECTS**: the instrumented binary (the [SD] stage print
+calling UseCSharpSwitch before the real gate) forms 47 switches
+(gotos 1,263 -> 1,216); the clean single-call binary forms ZERO.
+The first call poisons some node state the second call reads.
+ISOLATED: IsSingleCondition self-resets (the final
+node->Visited=false loop) -- the poisoner is elsewhere: the
+suspects = IsShortCircuit, LoopContext::MatchContinue (the
+loopContext_ rebuild vs the cached controlFlowGraph_), or the
+ControlFlowGraph's node caches. THE NEXT PROBE: the diff of the
+graph node flags/caches before vs after the first call (dump
+Visited + the LoopContext's internal sets at the UseCSharpSwitch
+entry, twice). THE REJECTED-CALL GATES: the named [SD4] probe on
+the (18,16) chains fired NOTHING (all 7 gates pass!) yet use=0 on
+the first call -- the exit is via a path the gates do not cover,
+consistent with the state read. THE RAW-TREE NOTE: the
+TryGetCpuArch raw dump is the FLAT brtrue chain (no switch
+opcode) -- the oracle reconstructs it from the ifs through the
+SAME analysis, so the fix belongs in the port's walk state, not
+the chain detection.
+
+## THE POISONING BUG -- RESOLVED AS A LAYOUT-SENSITIVE UB (the next slice)
+
+THE PHASE BISECT (all clean, correctly-braced probes): AnalyzeControlFlow alone -- no flip; + IsSingleCondition -- no flip; + SwitchUsesGoto -- no flip; the FULL double-call -- no flip. THE "POISONING" THEORY IS DEAD: the 1216-era results were artifacts of the mangled-gate binaries (the multiBig wrap was ALSO mangled -- an unconditional return false -- so ALL the [SD4] gate data was garbage and the 1216 was that binary's different render, not the synthesis).
+
+THE REAL PHENOMENON (the flip test): the tree with the 7 correctly-braced [SD5] gate wraps forms **46 switches (gotos 1,263 -> 1,217)**; the pristine tree forms 0; an env-gated empty if alone does NOT flip it. THE WRAPS ARE SEMANTICALLY INERT (getenv-gated prints + the identical returns) -- **THE OUTCOME DEPENDS ON THE BINARY/STACK LAYOUT: A LAYOUT-SENSITIVE UB IN THE SWITCH-ANALYSIS PATH** (the candidate classes: an uninitialized read in the ControlFlowGraph/LoopContext/dominator tree, a use-after-free on a recycled stack/heap slot, a stale reference into a moved-from vector -- the SwitchAnalysis sections/InnerBlocks vectors are moved-from in the arms).
+
+THE CLEAN GATE DATA (from the [SD5] run, the only trustworthy one): noInnerBlocks 1,543 (the single-if noise floor), singleCondition 55, multiBig 49, ifShorter 7, usesGoto 0, breakOffset 0 -- **the big restructured chains PASS ALL GATES and should form switches** -- consistent with the UB hypothesis (the accept path reads garbage that differs by layout).
+
+THE NEXT SESSION: (1) the ASAN/UBSAN build -- the configure needs -DCMAKE_PREFIX_PATH=<build>/linux-ninja/vcpkg_installed/x64-linux (the VCPKG_INSTALLED_DIR alone did not satisfy find_package; the vcpkg checkout at /home/jim/source/vcpkg has no installed dir, the main build's vcpkg_installed is the source); the sanitizer NAMES the UB; (2) the suspect list for a manual read: the LongSet moves (AnalyzeArm's trueValues/remainingValues moves -- a moved-from LongSet read later?), the Section bodies' Branch pointers (the ownedBodies_ lifetime), the graph node Visited flags' initialization. THE STATE: the pristine tree (the pin, the dnlib 80,185, gotos 1,263, the SwitchDetection 12/12).
+
+## THE UB FIXED -- THE SWITCH RENDER DETERMINISTIC (the corpus formation still gated)
+
+THE SANITIZER HUNT (the ASAN+UBSAN build at /tmp/asan-build -- the
+configure needs BOTH -DCMAKE_TOOLCHAIN_FILE=vcpkg AND
+-DCMAKE_PREFIX_PATH=<main-build>/vcpkg_installed/x64-linux; the
+/tmp quota: freed by removing /tmp/pg-build + the probe_cs* dirs):
+UBSAN NAMED the UB: ILAstToCSharp.cpp 2129/2130/2148 -- the
+inline-plan machinery static_cast<Branch*>(section->Body.get())
+and read TargetBlock from the WRONG OBJECT (the restructured
+chains' Block-bodied sections) -- the garbage reads = the layout
+flip. THE FIXES (committed): (1) the three casts -> dynamic_cast +
+the conservative skip (the non-Branch sections bail the inline
+plan); (2) the label-region fold's find key checked for the opcode
+first (the every-final downcast); (3) CloneBody's Block case via
+the generic ILInstruction::Clone deep clone (the Block-bodied
+sections clone; the new test RunClonesBlockBodiedSection RED ->
+GREEN). THE PRE-EXISTING (not mine, separate bugs, out of scope):
+DelegateConstruction.cpp:62 (LdVirtFtn downcast), IType.hpp:984
+(NullabilityAnnotatedType member access), the winmd_reader
+misaligned loads (the vendored lib's by-design packed reads).
+
+THE STATE: deterministic on both builds (the main + the ASAN):
+gotos 1,263, dnlib 80,185, the pin, the SwitchDetection 13/13.
+THE CLEAN [SD6] DATA (the deterministic binary): 104 use=1 (the
+ContainsILSwitch chains -- the real switch opcodes); the big
+restructured chains (sections=18 inner=16 etc.) STILL use=0 -- the
+TRUE gate unknown (the [SD5] "passes all gates" data came from the
+flipped binaries -- VOID). THE NEXT SESSION'S FIRST MOVE: the
+correctly-braced named-gate probe on THE DETERMINISTIC binary ->
+the big chains' actual reject; then the fix -> the legitimate
+switch formation (the corpus payoff).
+
+## THE FLIPPER ISOLATED -- THE USESGOTO WRAP (an MSAN-class UB)
+
+THE WRAP-BY-WRAP BISECT (the deterministic binary, one wrap at a
+time): multiBig alone -- no flip (1263); + noInnerBlocks/noDefault/
+ifShorter -- no flip; **+ the usesGoto wrap (an inert `{ if
+(getenv) fprintf; return false; }` block around the return) -- THE
+FLIP (1217)**; the singleCondition/breakOffset wraps -- not the
+flipper. THE MECHANISM: the wrap changes the compilation of the
+UseCSharpSwitch/SwitchUsesGoto path (the inlining/layout of the
+locals) and the verdict flips -- **A LAYOUT-SENSITIVE UNINIT/STALE
+READ INSIDE THE SwitchUsesGoto CALL CHAIN** (GetBreakTargets /
+FindContinue / MatchContinue / the dominator machinery). ASAN+UBSAN
+CLEAN there (named only the render-side downcasts, all fixed) --
+the remaining UB is the MSAN class (uninitialized/stale stack or
+field reads). valgrind NOT INSTALLED on this box; the MSAN build
+needs everything instrumented (the vcpkg libs too -- painful).
+
+THE NEXT SESSION'S HUNTS (in order of cost): (1) the code-read of
+ComputeDominators (Decompiler/FlowAnalysis/Dominance.cpp) -- the
+post-order walk starts at entryPoint and follows Successors; any
+node the walk misses keeps its PostOrderNumber UNINITIALIZED (an
+int member, no default init) -- if a nested/restructured edge
+structure leaves a node unvisited-but-read (FindCommonDominator /
+the LoopContext's post-order sort), that is the flip; (2) the
+valgrind install (the apt needs the user) or the MSAN attempt; (3)
+the manual local-by-local read of SwitchUsesGoto's callees. THE
+STATE: the pristine tree (the pin, the dnlib 80,185, the gotos
+1,263, the SwitchDetection 13/13) -- all deterministic.
+
+## THE UNINIT HUNT -- THE FORMATION BLOCKER CHAIN (the switch-expression gap exposed)
+
+THE HUNTS: PostOrderNumber/ImmediateDominator/Dominates ALL
+properly initialized (the MSAN-class theory weakened); the [SUG]
+differential probe (SwitchUsesGoto's internals, on the perturbed
+binary): ext/bt distributions -- 63 chains reach bt=0 (pass
+SwitchUsesGoto, breakBlock null -> UseCSharpSwitch returns TRUE).
+
+THE GENERIC-CLONE EXPERIMENT (CloneBody delegating everything to
+ILInstruction::Clone, the C# parity -- the C# clones every section
+body with ILInstruction.Clone()): +1 switch (211), -1 goto, **+3
+DIFF (80,185 -> 80,188)** -- REVERTED per the discipline. THE ONE
+newly-unblocked chain's oracle form: **THE SWITCH EXPRESSION**
+(`return num switch { ... }`, the C# 8 arms) -- the port's
+switch-STATEMENT render is 3 lines worse than its prior if-chain
+vs the oracle's expression. THE FINDING: the 63-bt=0 chains'
+unblock lands ONLY WITH the switch-expression synthesis (the
+oracle's form for that family); the generic CloneBody is the right
+parity fix but its corpus payoff is gated behind the expression
+render. THE OTHER 62: still blocked (their ProcessBlock aborts
+elsewhere -- the next blocker after allCloneable -- unprobed).
+
+THE NEXT FAMILY (the switch-expression synthesis): the oracle's
+`return <expr> switch { <labels> => <value>, ... }` forms -- the
+SwitchInstruction over the method's tail (the leave-value context)
+-- the render family on top of the existing SwitchInstruction
+machinery (the sections' values as the arms). AFTER it: re-land
+the generic CloneBody + the accept-side gates. THE STATE: the
+committed tree (the pin, the dnlib 80,185, the gotos 1,263, the
+SwitchDetection 13/13).
+
+## THE SWITCH EXPRESSION -- LANDED (the family's first slice green)
+
+THE RENDER (committed 490546e36): TryEmitSwitchExpression in the
+ILAstToCSharp's emitter class -- when every section of a
+SwitchInstruction resolves to a value arm (a direct leave's value,
+a throw, or a thunk target's single `tmp = expr; return tmp` fold)
+and no section falls through (plan.defaultFallsToExit false), emit
+`return <value> switch { <label> => <arm>, ... };` with the labeled
+arms ascending and the `_` default last. THE GATES: dnlib 80,185 ->
+**79,855** (-330!), net10 99,578 -> **99,476** (-102), cui 2,354
+unchanged, the connid pin, the SwitchDetection 13/13. THE DEBUG
+NOTES: the render-hook edit was lost to a failed script's early
+assert (the function never called -- ZERO [SE] traces); the probe
+insertion mangled the single-line ifs AGAIN (the same
+unconditional-return trap -- every call bailed at the first line;
+the [SE5] pointer data showed identical pointers, the tell). THE
+ARM ORDER: the default `_` LAST, the others ascending (the
+stable_sort by (isDefault, sortKey)) -- the section order from the
+SwitchDetection puts the complement first.
+
+THE GENERIC-CLONE RE-LAND (attempted, reverted AGAIN): dnlib
+improved (-3 more, 79,852) but **net10 REGRESSED +12 (99,488)**
+-- the newly-unblocked net10 chains render forms the oracle does
+not (the accept-side verdicts diverge there). REVERTED per the
+discipline (a5535534d); the C#-parity clone stays gated behind the
+accept-side gate work (the UseCSharpSwitch verdicts for those
+chains -- the oracle keeps them as if-chains; the port accepts --
+a gate-by-gate comparison against the reference UseCSharpSwitch on
+THE NET10 chains is the follow-up).
+
+THE REMAINING GAPS (the switch family): the `ref reader` arm
+argument (the oracle `ref reader`, the port `reader` -- the
+ref-argument rendering family, pre-existing); the TryGetCpuArch
+enum chains (the accept-side + the enum member names in the case
+labels -- the queued bonus).
+
+## THE ACCEPT-SIDE GATE COMPARISON -- THE CFG PARITY CONFIRMED, THE ET-CHAIN GATE UNFOUND
+
+THE [UG] PROBE (the clone tree, the net10 chains): flowNodes 2-3
+(the mixed flat/nested inner sets), caseNodes 2-4, ug=0/1 mixed,
+**breakBlock ALWAYS nil** -- the port accepts every chain that
+reaches the tail (`breakBlock == nullptr -> return true`). THE
+DIVERGENT CHAINS (the net10 +12): the `et != 17/18`-style NE-CHAINS
+(the 2-value + empty-fall-through-case shapes, e.g.
+info.proxyCreatorType) -- the oracle renders the IF-ELSE form, the
+port (with the generic clone) forms the switch.
+
+THE REFERENCE SIDE-BY-SIDE (ControlFlowGraph.cs CreateEdges vs the
+port's): **THE LEAVE-EDGE PARITY CONFIRMED** -- the C# also creates
+NO CFG edges for leave-exiting blocks ("Leave instructions (like
+other exits out of the container) are ignored for the CFG and
+dominance") -- the port's bb=nil behavior MATCHES the reference.
+THE C#'s REJECT FOR THE ET-CHAINS IS IN THE ANALYSIS LEVEL (the
+exact gate unfound): the sections {17}, {18}, the complement -- the
+C#'s veto candidates: the AnalyzeCondition on the ne-chains with
+the empty fall-through case body, the section construction for the
+implicit fall-through arm, or a flat-vs-nested inner-set difference
+affecting ifCount. THE NEXT SESSION: dump the C# oracle's actual
+verdict path -- decompile the et-chain method with the REFERENCE
+ILSpy (the oracle's --ilast or the debug prints) OR run the
+reference's SwitchDetection under a debugger on the same method to
+see WHICH gate rejects; then mirror it.
+
+THE STATE: the committed tree (the switch expression landed; the
+clone re-land still reverted -- gated on this comparison); the pin,
+the dnlib 79,855, the net10 99,476, the cui 2,354, the
+SwitchDetection 13/13.
+
+## THE REFERENCE-SIDE PROBE -- THE DEFINITIVE PATH SCOPED
+
+THE ORACLE BINARY: /home/jim/.dotnet/tools/ilspycmd (the reference
+ilspycmd). ITS OUTPUT = the final render only (the if-form for the
+et-chains) -- the gate traces are NOT exposed by the CLI. THE
+DEFINITIVE PATH (the next session): the C# SOURCE IS THE REPO
+(../ICSharpCode.Decompiler/IL/ControlFlow/SwitchDetection.cs) --
+build the reference ILSpyCmd with a debug print in UseCSharpSwitch
+(the gate name at each return) -- `dotnet build` the
+ICSharpCode.ILSpyCmd project, run it on the et-chain method (the
+de4dot.code.dll's proxyCreatorType chain), read WHICH gate the
+reference rejects through. THEN mirror the gate in the port.
+
+THE ANALYSIS SO FAR (the et-chain ne-family): the port's flow
+(flow=2 case=3 ug=0 bb=nil -> accept) vs the reference's reject;
+the leave-edge parity confirmed; the remaining suspect surface =
+the analysis-level differences (the flat-vs-nested inner sets,
+the fall-through section construction, the caseNodes membership
+`target->Parent == currentContainer_` -- the nested
+instruction-Blocks are not container members). THE STATE: the
+committed tree unchanged (the pin, the dnlib 79,855, the net10
+99,476, the SwitchDetection 13/13).
+
+## THE REFERENCE INSTRUMENTATION -- BLOCKED ON THE SDK PIN
+
+THE ATTEMPT: the UseCSharpSwitch instrumentation (the [CSGATE]
+prints at every return) applied cleanly to the reference source
+(ICSharpCode.Decompiler/IL/ControlFlow/SwitchDetection.cs --
+REVERTED, never committed). THE BUILD BLOCKED: the repo's
+global.json pins SDK 11.0.0; the installed SDKs are 8.0.425 and
+10.0.401 (dotnet at /home/jim/.dotnet with DOTNET_ROOT set; the
+restore refuses with "Requested SDK version: 11.0.0"). THE
+UNBLOCK OPTIONS (the user's call): (a) install the 11.0.0 SDK
+(~200MB via dotnet-install); (b) a scratch override -- copy the
+decompiler source set into a temp project with its own
+global.json/the SDK 10 (the API surface risk); (c) accept the
+code-read path (the flat-vs-nested analysis of the et-chain's
+section construction). THE INSTRUMENTATION PATCH (the re-apply
+recipe): the print at every `return false/true` in UseCSharpSwitch
+with the inner/section counts; the run target: the
+de4dot.code.dll's proxyCreatorType chain; the read: which gate the
+reference rejects through. THE STATE: unchanged (the C# tree
+clean, the cpp tree at the committed handoff).
+
+## THE UPSTREAM SYNC INVENTORY (fdc4c7c16..7434b07f8, the port plan)
+
+THE DELTA: 454 commits total, **192 non-merge in
+ICSharpCode.Decompiler/** (178 files, +10,262/-5,631). THE ZERO-
+CONFLICT FINDING: **SwitchDetection.cs / SwitchAnalysis.cs are
+UNCHANGED upstream** -- our switch family (the else-arm recursion,
+the switch-expression render) has no conflicts. The other conflict
+surfaces are listed in class D.
+
+### CLASS A -- the correctness fixes (the port-worthy behaviors)
+
+**A1. The render/output fixes (small, isolated, the immediate
+diff wins)**: d99de57d3 (#4180 the negated-negative-constant
+parenthesization, InsertParenthesesVisitor +18); the negated
+floating-point special constants family (b209b3972, 59361d9de,
+b3035687f); 0879e35c0 (the HEX form of negative ldc.i4/i8 --
+COMPOSES with our AND-context hex family); 5be91a123 (the
+ref-conditional assignment target parens); 0ef295947 (lambda
+parameter attributes parens); 3e45005eb (params/default values on
+lambda parameter lists); 85399bfc0 (`new (string,int)[]` space);
+e243786e2 (the init-only marker position); e7bed9c78.
+
+**A2. The TransformExpressionTrees campaign (~20 commits)**:
+d0987646b (null call arguments), 193e493cc (lifted result types),
+7df4072d1 (built-in comparisons with value types), 03410c445,
+bfa3f1898, 9947ad528, 486cdcd4b, e3c445b9a, 34cceea42, 14aecbaf1,
+154d60e2a, 49b7257e9, d9b502aa2, a3b06e79f, 80b901ee2, d797d4abb,
+5c26625df -- the ILAst-shape normalization series (the same ILAst
+as an equivalent lambda etc.).
+
+**A3. The span/array-initializer campaign (the C# 14 span
+conversions)**: 6de4c1d5b, 3a3a79e88, 7112ef952, 2100d53fa,
+5347b03ad, d1b8cd646, 63900bb38 (the spec alignment), cd181b3f0,
+67ef99999.
+
+**A4. The switch-expression/type-inference family (COMPOSES with
+our synthesis)**: 1a784e2fa (throw switch-expr typeHint),
+ca24b8f3a (#3683 the switch-expression casts for the best common
+type), b54a073ef (BestCommonType object/dynamic), 01895fbab
+(tuple element names), 979f5c9f0 (nullability merging).
+
+**A5. The property/backing-field family (see D1)**: 8b183ab20
+(metadata property backing fields), 3da129632 (#3624 the C# 14
+field keyword), 1e8ec6068, bdf48e5a4, e423cfb9c, 46d21ed9a,
+ebb8697e1 -- the PatternStatementTransform campaign.
+
+**A6. The record family (see D2)**: 0e6b9a7e2 (#3568 the record
+member order off the generated members), 22ce4c442 (required
+members on record copy constructors).
+
+**A7. The misc correctness fixes (per-commit corpus triage)**:
+c760a1d62 (redundant comp != 0), e678321e0 (enum vs 0 cast),
+63d03f1b4 (#1142 enum out-of-range constants), fb9ff796d
+(stackalloc char->short), f007528af (#3008 the display-class
+scope), e0aee1baa (#3714 the innermost capture scope), 8ab3f93f5
+(#3704 dynamic static type), 124d9116d (the v?. assertion),
+af941339c (#2054 type-forwarder cycles), 85198271c (#3320 pre-
+Roslyn dynamic await), 4e2f28109 (#2823 async catch offsets),
+99613cc79/26f2a2236 (the LINQ type arguments), 30c6b70d9 (#3352
+query expressions), b1e516387 (#3894 lambda parameter typing),
+e16a5523e (#3729), aab8b9b28 (#3853 scoped locals), 6be02a2e0
+(#3962 nested designations), d04cc4aed (#3453/#3208), 2efd871ab
+(#3451), 2d2e9c15e (instance-dependent ctor assignments),
+13c6cc674, 60c08fcb7, 4a2afbb72, 3a8e7dee2, f2b80df14, e530b1c1b,
+d730ec0a2, 7bf102f3b, 9238c3b63, fe9f6db3e, c1ac674b0,
+9b3e33472, bdb4ffaa5, feee85dc6, e475e2644, 73c3283ef,
+c6aa9510b, a9c4f6c6b, 997d2f2db, 3160485f1, e85d2ba00, 4a0918cbe,
+c9010c712, fb780dcbc, 259e51382, 21189fdc9.
+
+**A8. The diagnostics/infra fixes**: fff1b2f09 (XML doc ref-pack
+missing runtime files), 453028f50 (the decompilation-error member
+context), 3cb27b0dc (#3510).
+
+### CLASS B -- the refactors (port after, or skip)
+The StackType.O split (3f76bd97f, c4e181505, 38f54008d, 790f4f60e,
+4b040c1bb -- a major invariant churn; LAST or skip); InferType
+everywhere (5526400b1, cf4dba701); the qualifier/lookup sharing
+(16196731d, 10e76635e, a7f2a98f8); the ResolveResult
+reorganization (471c3b177, 69e281329, 48fcf0313, e63d30606); the
+invariant relaxations (60efa214b, 530a214b2, **8fa1fd76d -- the
+SwitchInstruction throw-arm invariant, RELATES to our
+switch-expression throw arms**); 76f67f3fc, 40b90766a, 5670bfc13,
+5d9cdce94, 4bc51e608, 437d8fe2d, cd212ea05, 9aa3911f3, 2115bd902,
+26145d6f1; the nullable-enables; d22d4301e (the nested conditionals
+-> if-else -- a behavior-adjacent refactor).
+
+### CLASS C -- the test/infra-only (skip/defer)
+The test-only commits, the NuGet bumps, the style, f226592bd
+(CLAUDE->AGENTS), the 262 commits outside ICSharpCode.Decompiler
+(the ILSpy UI + the WPF/project-export campaign #3315 -- the
+ILSpyX/UI surface, out of the cpp port's current scope).
+
+### CLASS D -- the conflicts (the conscious resolutions)
+**D1. 8b183ab20 vs our PropertyAndEventBackingFieldLookup**: the
+same feature -- upstream relaxes the CompilerGeneratedAttribute
+requirement (the naming pattern + the accessor shape suffice).
+RESOLUTION: port the relaxation into our lookup (a gate change,
+not a rewrite).
+**D2. 0e6b9a7e2 + 22ce4c442 vs our RecordSynthesizer**: the member
+ORDER (read off Equals/GetHashCode/PrintMembers/copy-ctor) and
+the required members on the copy constructor. RESOLUTION: compare
+the upstream's order-read vs ours; port the ordering rule + the
+required-members decoration.
+**D3. The PatternStatementTransform campaign (A5)**: extends the
+file our FieldInitializerPass work touched (different regions --
+the backing-field/semi-auto paths); port per-commit with the
+corpus gates.
+**D4. e674361fb + d31bea210 (the indexer argument writing)**: the
+argument-emission machinery -- moderate overlap with our render;
+port carefully.
+**D5. NO conflicts in SwitchDetection/SwitchAnalysis** (zero
+upstream changes).
+
+### THE PORTING ORDER
+1. A1 (the quick render fixes -- the immediate diff wins)
+2. A8 (the diagnostics)
+3. A7 (the misc -- per-commit corpus triage)
+4. A4 (the switch-expression family -- composes with our synthesis)
+5. D1+D2+A5+A6 (the conscious merges)
+6. A2 (the expression-tree campaign)
+7. A3 (the span campaign)
+8. B (the refactors; the StackType split last or skipped)
+
+THE GUARDS PER SLICE: the connid pin (NOTE: the upstream fixes may
+LEGITIMATELY change the oracle's renders -- re-generate the
+reference renders per changed surface, the pin re-based only with
+a fresh-oracle diff comparison, the D58-style discipline), the
+corpus parity (dnlib/net10/cui), the sweep, hello, the bennu
+canary, AND the new upstream tests where the port carries them
+(the ILPretty/Correctness fixtures: Issue4180, Issue3568, ...).
+
+## THE UPSTREAM PORT -- THE FIRST TRIAGE RESULTS (A1 started)
+
+**#4180 (d99de57d3, the negated-negative-constant parens): NOT
+APPLICABLE.** The port has no unary-minus AST node: the reader
+turns `neg` into `BinaryNumericInstruction(Sub, LdcI4(0), v)` (the
+`0 - x` form) and the binary render emits spaced operators, so
+`0 - -729399378` is legal C# with no adjacent-minus hazard. The
+upstream fix protects its output visitor's UnaryOperatorExpression
+-- a structure this port does not carry. VERIFIED: the fixture
+build (/home/jim/ilspy-test-fixtures/neg_parens/) folded the
+constants away in both configs (the shape only exists in
+obfuscated/hand-written IL -- the upstream shipped an .il fixture;
+no ilasm on this box), and the corpus carries zero `- -` shapes.
+
+**0879e35c0 (the hex form of negative ldc.i4/i8): DEFERRED.** The
+fix targets the IL-BODY disassembler (MethodBodyDisassembler.cs --
+the `--il` view's ldc operand printing); the port's body
+disassembler does not yet print ldc operands (the ILDisassembler
+is a 79-line stub; the ReflectionDisassembler carries the CLI).
+The fix lands when the port's disassembler surface grows the ldc
+operand printing.
+
+**THE NEXT A1 CANDIDATES (the applicability triage)**: the negated
+floating-point special constants family (b209b3972, 59361d9de,
+b3035687f -- likely composes with the port's Math.PI/E fraction
+approximation in ILAstToCSharp.cpp ~line 4049); 5be91a123 (the
+ref-conditional assignment target); 0ef295947 (the lambda
+parameter attribute parens); 3e45005eb (the params/default values
+on lambda parameter lists); 85399bfc0 (the `new (string,int)[]`
+space); e243786e2 (the init-only marker position).
+
+## THE NEGATED-SPECIAL-CONSTANTS FAMILY -- THE ORACLE-PRECEDES-FIX BLOCK + THE ROUND-TRIP BUG FIXED
+
+THE ORACLE BLOCK (the sync-discipline finding): the installed
+oracle (/home/jim/.dotnet/tools/ilspycmd) PRE-DATES the upstream
+family -- it renders NegEpsilon as `-5E-324` (the literal), NOT
+`-double.Epsilon` (the b3035687f form), and ByteScale as `40f/51f`
+(NOT the 59361d9de `200f/255f`). PORTING THE UPSTREAM FIXES NOW
+WOULD DIVERGE FROM THE GATE ORACLE. THE PATH: the family lands when
+a fresh upstream oracle is buildable (the 11.0.0-SDK pin -- see the
+reference-instrumentation handoff); the fixture
+(/home/jim/ilspy-test-fixtures/neg_constants/) is READY for the
+post-upgrade verification.
+
+THE REAL BUG FOUND (FIXED, committed): the field-constant
+formatter's %g (6 digits) BROKE THE ROUND-TRIP (`NegPi =
+-3.141592653589793` rendered as `-3.14159`). THE FIX: the shortest
+form that parses back exactly (1..9 digits for float, 1..17 for
+double, via %.*g + strtod/strtof round-trip) + the capital-E
+exponent marker (`-5E-324`, the PrimitiveExpression form). THE
+GATES: all four unchanged (dnlib 79,855 / net10 99,476 / cui 2,354
+-- the corpora carry no >6-digit constants; the pin; the tests).
+THE DEBUG SCAR: the `%.%dg` format-string error (the C++ format
+takes the argument precision via `*`: `%.*g`) -- the first build
+printed `%dg.0` literally.
+
+THE NEXT-QUEUE UPDATE: the A1 candidates deferred pending the
+upstream oracle; the general field-constant FRACTION machinery
+(the oracle's `40f/51f` for ByteScale -- the num/den form for the
+non-PI/E constants -- the C# IsEqual/preferredFractionDenominators
+path) is a PORTABLE-AGAINST-THE-OLD-ORACLE slice (the old oracle
+has the generic fractions!) -- a candidate next.
+
+## THE ORACLE UPGRADED (v11.1.0.9782) -- THE A1 FAMILY UNBLOCKED + LANDED
+
+THE UPGRADE: `dotnet tool update --global ilspycmd` -- the tool
+resolved to 11.1.0.9782 WITH the upstream fixes IN (NegEpsilon ->
+`-double.Epsilon`, ByteScale -> `200f / 255f` -- the #4180-era
+family). THE NEW BASELINES (the v2 oracles, regenerated):
+/tmp/ilspy-cmp/oracle_dnlib_v2.cs (dnlib: the port 80,369 -- the
+new-oracle renders differ from the old by 1,330 lines),
+oracle_net10_v2.cs (the port 99,529), oracle_cui_v2.cs (the port
+2,354). **THE STANDING GATES NOW USE THE V2 ORACLES.**
+
+THE A1 NEGATED-CONSTANTS FAMILY -- LANDED (the commit): (1) the
+shared FractionApprox.hpp extracted (FractionApprox +
+IsValidFraction + SpecialDoubleConstantText moved from
+ILAstToCSharp's anonymous namespace); (2) the preferred machine-
+scale denominators (the 127..1048576 table, the display-length
+score, the 2/3/5 simple-fraction guard, the |v|<1 gate); (3) the
+named special constants with the negation retry (-double.Epsilon /
+-float.Epsilon); (4) the field-constant path follows the C#
+ConvertConstantValue order (named -> integer-value -> preferred ->
+raw fraction -> PI/E -> literal). THE FIXTURE VERIFICATION: all
+eight forms byte-exact vs the fresh oracle. THE GATES: unchanged
+(the corpora carry no such constants); the pin ebf9b6e9 ✓; the
+tests 35/35.
+
+THE DEFERRED: the MathF.PI/E arm for the FLOAT constants (the flat
+emitter carries no compilation to probe MathF's presence -- the
+C# checks the MathF type definition before using it); the
+A1 REMAINING items (the lambda parameter parens etc.) now
+measurable against the v2 oracles.
+
+## THE `?? throw` COALESCE -- LANDED (30 of 43 sites)
+
+THE FOLD (committed): AnalyzeThrowCoalesce (after AnalyzeNullPropagation
+in the pipeline) -- the guard block (a block whose FINAL is
+`if (eq, ldloc L, ldnull)` with a single-construction throw arm --
+the arm Block's content is the throw) followed by the NEXT block's
+first StObj storing `ldloc L` -- records the fold and suppresses the
+guard's if via the existing coalesceSkipped_ machinery (the block's
+preceding statements, like the base call, still render). The StObj
+render consults the map: `target = param ?? throw <ctor-expr>;`.
+THE GATES: dnlib v2 80,369 -> **80,249** (-120); net10/cui/the pin/
+the tests unchanged (net10's 4 sites are the finally-variant).
+
+THE REMAINING 13 SITES (the follow-up shape): the finally-region
+guards -- `if (comp(eq, ldloc(list), ldc.i4(0))) Block { leave }` --
+the null rendered as the INT ZERO on the local, the arm a LEAVE (not
+a throw), inside a `finally` region (the exit-merged throw). The
+fold needs: the int-zero null gate (the ldnull alternative), the
+leave-arm's target throw resolution, and the finally-context safety
+(the C# renders `?? throw` there too -- the oracle's 43 include
+them). THE A1 QUEUE otherwise: the four small items (the lambda
+parameter parens etc.) show no corpus evidence -- the corpus-driven
+families (like this one) come first per the discipline.
+
+## THE `?? throw` COALESSE -- 41 OF 43 (the int-zero gate landed)
+
+THE VARIANT RESOLVED: the "finally-region int-zero" sites were
+mostly NOT finally-shapes -- the CollectionDebugView-style ctors
+carry the SAME clean shape but with the NULL AS THE INT ZERO
+(comp(eq, ldloc list, ldc.i4(0)) -- the unnormalized reference
+comparison; the pipeline's null-literal normalization missed
+these). THE GATE: accept LdNull OR LdcI4(0) as the null gate.
+**41 of 43 sites** now fold (was 30); dnlib v2 80,249 -> **80,219**
+(the family's total: 80,369 -> 80,219, -150). THE GATES: net10/cui/
+the pin/the tests unchanged.
+
+THE REMAINING 2 SITES: unprobed (likely a genuinely different
+shape -- the leave-arm in a finally or a non-ArgumentNullException
+construction); the diff impact is ~10 lines.
+
+## THE `?? throw` FAMILY -- COMPLETE (43/43 structural)
+
+THE REMAINING-2 PROBE (cheap): the comm diff's "missing" lines are
+`base.version = version ?? throw ...` -- the port folds them all but
+renders `version = version ?? ...` WITHOUT the `base.` prefix (the
+oracle qualifies the base-class field stores as `base.name = ...`,
+`base.version = ...`). **THE FOLD IS 43/43; THE RESIDUAL IS THE
+BASE-MEMBER QUALIFICATION FAMILY** (the port's field-store render
+never qualifies a base-class field access -- a separate,
+measurable family: the oracle's `base.` occurrences vs the port's).
+THE NEXT QUEUE: (1) the base-member qualification (the `base.name =
+name`-style field stores -- grep the oracle's `base\.` count vs
+the port's for the size); (2) the net10 finally-variant sites
+(net10's 4 `?? throw` sites are the real finally/leave shapes);
+(3) the label-merged regions per the earlier handoff.
+
+## THE BASE-QUALIFICATION FAMILY -- THE WIRING LANDED, THE RENDER PATH OPEN
+
+THE PROBE FINDINGS (the [BQ]/[ST] data): (1) the this-variable's
+Type is NULL (the reader doesn't set it -- the first approach
+dead); (2) the methodName arg is the bare method name (no type
+prefix -- the second approach dead); (3) fn_->Method IS set for
+the CSharpDecompiler path (the resolvedMethod at line ~343) and
+SetCurrentTypeName populates currentTypeName_ correctly (the [BQ]
+data shows the right self-vs-field comparisons, e.g.
+self=ResourceDirectoryUser vs field=ResourceDirectory.directories);
+(4) **THE RENDER PATH MYSTERY**: the patched StoreTargetText /
+LdFlda paths fire (the [ST] probe) but the output lines (e.g.
+`directories = new LazyList...` in the ResourceDirectoryUser ctor)
+still show the bare name -- the emission for those stores flows
+through a DIFFERENT path than the patched ones (the field-
+initializer pass? the multi-render's fresh decode? the [BQ] self
+mismatches suggest some renders carry a DIFFERENT current type --
+the ResourceDirectory self lines adjacent to the User's stores).
+THE NEXT SESSION: trace ONE store (the ResourceDirectoryUser's
+`directories = ...`) from the [ST] print to the output line -- the
+emission chain (which EmitStatement path renders that stobj and why
+the MaybeBasePrefix result is discarded); suspect the multi-render
+(the fresh decode per ILAstToCSharp call) and the field-initializer
+hoisting.
+
+THE STATE: the wiring committed (no behavior change, no
+regression: dnlib 80,219 / the pin / the tests 35/35); the
+family's -80 opportunity intact.
+
+## THE BASE-QUALIFICATION -- THE SEPARATOR BUG FOUND, THE RULE ARCHAELOGY QUEUED
+
+THE TRACE (this session): the [ST] probe with the out_ length +
+the currentTypeName_ revealed the ROOT BUG: **the flattened field
+name is DOT-SEPARATED ("NS.Type.field"), the helper's rfind("::")
+found nothing and bailed empty** -- the prefix never fired. THE FIX
+LANDED AND OVERFIRED: with the dot separator, the naive
+declType != self gate fired 1,709 times (the oracle's 138 -- the
+nested/enclosing types, the display classes); the base-chain gate
+(GetAllBaseTypes) reduced it to 764 -- **still 5x the oracle** (the
+diff +78). THE DATA: 648 port-only `base.` lines vs 22 oracle-only
+-- **THE ORACLE'S RULE IS SELECTIVE, NOT every-base-declared-field**:
+the oracle renders `characteristics = reader.ReadUInt32()` bare (a
+base-declared field in a derived ctor!) while `base.version = ...`
+qualifies. THE C# RULE ARCHAEOLOGY (the next session): the C#
+emits base. for the HIDING/AMBIGUITY cases (a same-name member in
+the derived type shadows the base's) and possibly only in the ctor
+contexts -- read the reference's MemberResolveResult/IsPossible-
+ReferenceToThis handling and the base-reference emission conditions
+in the C# TypeSystemAstBuilder/OutputVisitor; mirror the exact
+rule. THE STATE: reverted to the committed no-fire wiring (dnlib
+80,219 / the pin / the tests 35/35 -- no regression); the family's
+-80 opportunity intact behind the rule.
+
+## THE BASE-QUALIFICATION FAMILY -- LANDED (the C# rule mirrored)
+
+THE RULE ARCHAEOLOGY (the reference reads): the C# ExpressionBuilder's
+TranslateTarget (line 2734): the base-reference target for a
+this-targeted, non-virtual-invocation member whose declaring type
+!= the current type (the field accesses pass nonVirtualInvocation:
+true); **the RequiresQualifier check then ELIDES the qualifier unless
+the bare name resolves to something else** -- the shadowing rule.
+THE MIRRORED GATES: (1) the dot separator (the flattened name is
+"NS.Type.field" -- the earlier rfind("::") never fired); (2) the
+declaring type in the current type's base chain (GetAllBaseTypes --
+the nested/enclosing types and display classes excluded); (3) the
+shadow gate: a local or parameter in scope carrying the field's
+name (the ctor stores behind same-named parameters -- the oracle's
+dominant form). THE RESULT: dnlib v2 80,219 -> **79,991 (-228)**;
+net10 99,529 -> 99,525 (-4); cui unchanged; the pin; the tests
+35/35. THE RESIDUE: the port renders 200 base. vs the oracle's 138
+(62 extra -- some shadow sites the oracle resolves differently,
+likely the field-name lookups the port's simple name comparison
+over-matches); the net diff is the gate and it improved.
+
+THE SESSION'S TOTAL (the ?? throw + the base-qualification): dnlib
+v2 80,369 -> 79,991 (-378 since the v2 baseline).
+
+# ============================================================
+# THE CURRENT POSITION (the controlled handoff -- ready for /new)
+# ============================================================
+
+## THE STANDING GATES (all green at the handoff)
+
+- **The connid pin**: `ebf9b6e9fd29112f` (the /tmp/connid_res.dll render).
+- **The corpus parity (the V2 ORACLES -- the v11.1.0.9782 upgrade)**:
+  dnlib **79,991** (`diff /tmp/ilspy-cmp/oracle_dnlib_v2.cs <render>`),
+  net10 **99,525** (oracle_net10_v2.cs, the dll at
+  /home/jim/source/de4dot/Release/net10.0/de4dot.code.dll),
+  cui **2,354** (oracle_cui_try1.cs / oracle_cui_v2.cs identical there).
+- **The goto count**: 1,263; **the `?.` count**: 100; the switches: 210.
+- **The suite**: the SwitchDetection/CSharpDecompiler filters 35/35;
+  the FULL suite has ~188 pre-existing failures (the environment
+  drift -- the mscorlib fixture paths; a control run confirmed
+  188 = 188 on the pristine tree; NOT a regression).
+- **The fixtures**: /home/jim/ilspy-test-fixtures/neg_constants/
+  (the negated-constant + fraction forms, byte-exact vs the v2
+  oracle), positional_record/, net48/, and the others.
+- **The build**: cd cpp && export TMPDIR=/home/jim/tmp-build && export
+  PATH=/home/jim/cpp-tools/cmake/bin:/home/jim/cpp-tools/ninja-bin:
+  /usr/bin:/bin:$PATH && ninja -C build/linux-ninja ilspy_cli
+  ilspy_tests. The ASAN/UBSAN build at /tmp/asan-build (the
+  configure needs -DCMAKE_TOOLCHAIN_FILE + -DCMAKE_PREFIX_PATH to
+  the main build's vcpkg_installed/x64-linux; the /tmp quota is
+  tight -- the pg-build and probe dirs were removed).
+
+## THE CAMPAIGN TOTALS (the position)
+
+- **THE UPSTREAM SYNC** (fdc4c7c16..7434b07f8, 192 non-merge commits
+  in ICSharpCode.Decompiler/): the inventory CATEGORIZED (classes A1-
+  A8/B/C/D, the porting order, the conflicts); the oracle UPGRADED
+  to v11.1.0.9782 (the upstream fixes IN) with the v2 baselines; the
+  A1 items landed: the negated-constants + the preferred machine-
+  scale fractions (byte-exact on the fixture), the field-constant
+  double/float ROUND-TRIP fix (the shortest form that parses back
+  exactly, the capital-E marker), #4180 NOT APPLICABLE (the port's
+  `0 - x` neg model), the hex-negative fix DEFERRED (the disassembler
+  surface gap). THE DNLIB V2 JOURNEY: 80,369 (the v2 baseline) ->
+  **79,991** via: the `?? throw` coalesce (43/43 sites, -150: the
+  30 clean + the 11 int-zero-gate + the 2 base-qualification) and
+  the base-member qualification (the C# rule mirrored: the base-
+  chain + the shadow gate, -228).
+- **THE PERF/MEMORY THREAD**: CLOSED at the outstanding state (the
+  duplicate-load fix 1,095MB -> 142MB; the custom-attribute index
+  3.7x wall; the port ~4x faster than the oracle with 2.6x less
+  memory; byte-identical outputs). One open question (the release-
+  side sampling) stays unvalidated (no gdb/lldb/eu-stack).
+- **THE SWITCH FAMILY**: the switch-expression render LANDED (-330
+  dnlib, -102 net10); the else-arm recursion LANDED (the analysis);
+  the switch formation still gated (the big restructured chains
+  reject in UseCSharpSwitch on a not-yet-isolated gate -- the
+  reference-instrumentation path designed but blocked on the SDK
+  pin 11.0.0, now UNBLOCKED via the v11.1.0.9782 oracle -- the C#
+  source instrumentation + the fresh-oracle comparison can proceed).
+
+## THE QUEUE (the next slices, in order)
+
+1. **The base-qualification residue**: the port renders 200 `base.`
+   vs the oracle's 138 (62 extra -- the shadow sites the oracle
+   resolves differently; the net diff already improved so these are
+   the fine-tuning: compare the 62 sites' shapes vs the oracle's
+   RequiresQualifier resolution -- likely the field-name lookup the
+   simple name comparison over-matches, e.g. the closure fields).
+2. **The label-merged regions** (the label-region generalization:
+   the multi-block regions, the arbitrary distances, the loop back-
+   edges -- the 1,263 remaining gotos vs the oracle's 21; the
+   ILSPY_DUMP_TF shapes are the design source).
+3. **The switch formation** (the big restructured chains: the
+   reference-side verdict probe now UNBLOCKED -- instrument the C#
+   source's UseCSharpSwitch, run the v11.1.0.9782 oracle on the
+   et-chain, read which gate the reference rejects through, mirror
+   it; then the generic CloneBody re-land + the accept-side gates).
+4. **The remaining `?.` shapes** (100 vs the oracle's ~123): the
+   coalesce/elision variants per the original handoff list.
+5. **The record re-synthesis follow-ups** (upstream 0e6b9a7e2 the
+   record member order, 22ce4c442 the copy-ctor required members --
+   the D2 conflicts; our RecordSynthesizer's equivalents).
+6. **The A2/A3 campaigns** (the expression trees ~20 commits, the
+   span conversions -- per the inventory's porting order).
+7. **The small-mask hex residue** (the 0x10/0x80/0x400 forms --
+   corpus-driven only).
+
+## THE CRITICAL CONVENTIONS (carried)
+
+- RED per slice; the guards hold; commit per green; push per green;
+  the `Assisted-by: GLM:glm-5.3-flash:pi` trailer.
+- The corpus-first rule (the fixture-first when no corpus evidence).
+- The dump-first rule (ILSPY_DUMP_TF, the transformed tree).
+- The hazards: the python s.replace without assert; the heredoc
+  escaping; the single-line-if probe mangles (the print becomes the
+  if's body, the return unconditional -- hit THREE times); the
+  multi-render (each ILAstToCSharp call decodes its own fn);
+  the /tmp quota; the stale-dll lesson.
+- THE V2 ORACLES ARE THE GATES NOW (the old _try1 files remain for
+  archaeology only).
+
 ## THE PERFORMANCE ARC (the priority work order)
 
 THE DATASET: dnlib.dll (1.1 MB, 710 types, ~9k bodies, netcoreapp3.1) --
@@ -3685,3 +4449,1482 @@ flat render). The C# comparison: the oracle's whole run is ~9.4s, so
 the port's per-unit work is ~2x -- the caches are the lever, gated on
 the fixture regression.
 
+
+# ============================================================
+# THE SESSION RECORD (the naming-fidelity arc: three slices, -3,982 dnlib)
+# ============================================================
+
+## THE STANDING GATES (all green at this session's end)
+
+- **The connid pin**: `ebf9b6e9fd29112f` (byte-identical through all three
+  slices).
+- **The corpus parity**: dnlib **76,009** (the arc this session: 79,991 ->
+  79,601 -> 79,535 -> 76,009), net10 **96,041** (99,525 -> 99,481 ->
+  99,471 -> 96,041), cui **2,312** (2,354 -> unchanged -> 2,312), hello 3
+  (the recorded residue), the bennu canary verified before/after per slice.
+- **The suite**: the full env-excluded run's failure set IDENTICAL to the
+  pristine-tree control (268 = 269 - 1, the committed RED test; the handoff's
+  older "188" baseline was recorded under a different fixture environment --
+  the CONTROL RUN is the gate, not the absolute number).
+- **The guards held per slice**: the pin, all four corpora, hello, the
+  canary, the sweep control, the seeded suites (the one stale expectation
+  updated with its slice).
+
+## SLICE 1 -- THE currentLowerCaseTypeOrMemberNames FILTER (468faebb1)
+
+THE ROOT: the C# AssignVariableNames' root VariableScope filters every
+naming proposal through currentLowerCaseTypeOrMemberNames -- the lower-case
+member names of the declaring type (`GetMembers()` INCLUDES the inherited
+members -- the non-interface base chain), plus the lower-case type names
+of the declaring type's namespace and nesting chain (both the filter AND
+the reserved set). The port lacked the filter, so a local stored from
+`ldfld this->field` was named after the field; the shadow then tripped the
+base-qualification gate and every access rendered `base.field` where the
+oracle keeps the bare name (the measured 22 over-fired `base.` sites were
+mostly THIS bug, not a qualification bug). The port mirrors the filter at
+the store/load proposals (the address/newobj arms stay deferred with the
+recorded deferrals; the using-scope type-name arm deferred -- the IL
+pipeline context carries no using scope; the primary-ctor `<name>P` arm
+deferred -- no corpus evidence). THE MEASURE: dnlib 79,991 -> 79,601 (-390),
+net10 -> 99,481 (-44), the base. residue 22 -> 8 over-fires (the rest:
+3 `?.` sites + 5 keyword-escaping sites). THE RED: the seeded
+RejectsProposalThatShadowInheritedMemberName (LookupStubs' base-chain
+fixture).
+
+## SLICE 2 -- THE KEYWORD-IDENTIFIER ESCAPE (a69955282)
+
+THE BUG: the C# TextWriterTokenWriter.WriteIdentifier prepends `@` to every
+keyword-named identifier; the port rendered them RAW -- invalid C# at most
+sites (`private string namespace = "ns";`, `KeywordNames(string namespace,
+int class)`). 76 oracle `@`-identifiers on dnlib vs the port's 1. THE FIX:
+`EscapeIdentifier` (CSharpKeywordCheck.hpp, beside IsKeyword) applied at
+the identifier render sites: the facade's field-declaration + signature
+parameter names, the body emitter's variable/member-segment/foreach-element
+renders (SimpleName, the LdLoc/StLoc/LdLoca arms, the declarations, the
+catch/pinned/match variables, the compound-assign targets). THREE
+corrections found under the corpus gates: (1) the QUERY-CONTEXTUAL keywords
+and `await` must NOT escape (the flat render never emits query expressions
+-- the null-context IsKeyword rule over-fired 100 `@group` sites on net10;
+EscapeIdentifier uses the new IsUnconditionalKeyword -- the unconditional
+table factored out of IsKeyword); (2) the implicit `this` parameter renders
+as the KEYWORD TOKEN (never `@this` -- the C# ThisReferenceExpression,
+which WriteIdentifier never sees); (3) the foreach-element parameter arm no
+longer proposes `this` as a name (`foreach (CustomAttribute @this in this)`
+-> the item fallback). THE MEASURE: dnlib 79,601 -> 79,535 (-66), net10 ->
+99,471 (-10), the canary byte-identical (no keyword names in that
+fixture). THE RED: the keyword_names fixture
+(/home/jim/ilspy-test-fixtures/keyword_names/, KeywordNames.cs with its
+build recipe; the oracle render beside it) + 4 gtests.
+
+## SLICE 3 -- THE THIS-RECEIVER ELISION (41ee272ac) -- THE BIGGEST SINGLE
+## SLICE OF THE CAMPAIGN (-3,526)
+
+THE BUG (two faces): (a) the port rendered the explicit receiver on every
+this-targeted call -- 2,831 `this.M(...)` sites against the oracle's 8;
+(b) the shadowed own-type field stores degraded to SELF-ASSIGNMENTS
+(`name = name;` assigns the parameter to itself; the field is never set --
+a correctness bug, not cosmetics). THE C# RULE (the CallBuilder's
+GetRequiredTransformationsForCall + ConvertField's RequiresQualifier,
+unified): a this-targeted member access renders the BARE name whenever
+nothing hides it; a same-named local/parameter (HidesVariableWithName)
+forces the receiver (`this.name = name` for own-type, `base.name = name`
+for base-declared); a `call`-opcode invocation of a base-declared VIRTUAL
+method renders `base.M(...)` (requireTarget = CallOpCode != CallVirt &&
+method.IsVirtual); a callvirt, an own-type call, and a non-virtual base
+method called with `call` all elide. THE IMPLEMENTATION: the Call
+instruction gains IsVirtualCall (the callvirt opcode) and IsVirtualMethod
+(the token's MethodAttributes.Virtual bit -- MethodDef tokens only, the
+reader sets both); MaybeBasePrefix generalized into ThisReceiverPrefix /
+ThisReceiverPrefixParts (the shadow scan + the own/base/foreign decision
+tree); InstanceCallText intercepts the this-receiver argument (IsThisLoad)
+before the receiver render, in both the plain-call and the
+property-accessor arms. THE MEASURE: dnlib 79,535 -> 76,009 (-3,526!), the
+`this.` count 3,882 -> 762 (the oracle's 603; the residue: 17 port-only
+`.override` forwarder `this.MoveNext()` renders -- the oracle emits NO
+forwarders for those, a separate family -- plus duplicated-line count
+artifacts, the unique-form gap is 1 display-class line), net10 99,471 ->
+96,041 (-430), cui -> 2,312 (-42), the pin byte-identical, the canary 474
+lines all in the expected family. THE RED: the keyword_names fixture
+extended (KeywordNamesBase + the override + Describe) -- the port now
+renders `this.@namespace = @namespace;`, `base.Suffix()`, and bare
+`GetNamespace() + Suffix()` exactly. ONE stale seeded expectation updated
+(ILAstToCSharp.InstanceCallRendersAsReceiverDotMethod expected the old
+`this.ToString(arg_1)` approximation; the C# form is the bare
+`ToString(arg_1)`).
+
+## THE RESIDUES THIS SESSION EXPOSED (the queue additions)
+
+1. **The `.override` forwarder family**: the port synthesizes explicit-impl
+   forwarders (`bool IEnumerator.MoveNext() { return this.MoveNext(); }`)
+   at ~17 dnlib sites where the oracle renders NONE (the oracle's handling
+   of the iterator MethodImpls differs -- the state-machine hiding may
+   absorb them). Measured, unprobed.
+2. **The foreach-collapse gap on net10**: 33 `@interface` oracle sites
+   (`foreach (TypeInfo @interface in type.interfaces)`) where the port
+   renders the UNCOLLAPSED GetEnumerator form (the try-wrapped enumerator
+   pattern the collapse misses).
+3. **The `this.` forwarder + display-class receiver residue** (159 raw
+   lines, mostly duplicated-line artifacts).
+4. The known arcs stand: the label-merged regions (~2k goto/label lines),
+   the display-class forms (~450), the dup_/S_ slot chains (~2,070).
+
+## THE QUEUE (updated, in order)
+
+1. **The label-merged regions** (the cross-container analysis; the
+   ILSPY_DUMP_TF shapes are the design source; ~2k lines).
+2. **The switch formation** (the reference-side verdict probe unblocked;
+   the C# source instrumentation path).
+3. **The remaining `?.` shapes** (100 vs ~123) + the `?.`-folded pdbState
+   sites.
+4. **The .override forwarder family** (the 17 sites; probe why the oracle
+   emits none).
+5. **The net10 foreach-collapse gap** (the try-wrapped enumerator shape).
+6. The record follow-ups, the A2/A3 campaigns, the small-mask hex residue
+   (all per the earlier queue).
+
+# ============================================================
+# THE SESSION RECORD (the guard-region fold: the label-merged
+# regions arc's multi-block sub-slice, dnlib -803)
+# ============================================================
+
+## THE STANDING GATES (all green at this session's end)
+
+- **The connid pin**: `ebf9b6e9fd29112f` (byte-identical through the slice).
+- **The corpus parity**: dnlib **75,206** (76,009 -> 75,206), net10
+  **94,313** (96,041 -> 94,313), cui **2,292** (2,312 -> 2,292), hello 3
+  (the recorded residue), the canary's diff all in the restructure family.
+- **The goto count**: 1,263 -> **1,021**.
+- **The suite**: the full env-excluded run's failure set IDENTICAL to the
+  pristine-tree control (the [GRD] instrumentation measured on a scratch
+  build; the committed tree is clean).
+
+## THE SLICE (65269ad0a) -- THE GUARD-REGION FOLD
+
+THE SHAPE (the ILSPY_DUMP_TF dump over ReadArrayArgument, the design
+reference): `bK: if (cond) br bT else nop` + the multi-block fall-through
+region + bT. The port rendered the guard's goto AND inlined single-pred
+targets into the true arm (the returnPropagation machinery) -- which
+INVERTS the region order: a terminal fall-through block (the throw)
+rendered after the if as if unconditionally reached, and the target's
+fall-through continuation rendered unreachable. THE C# RULE (the
+reference archaeology): ConditionDetection (a basic-block transform)
+inlines single-pred targets into the arms, merges common branches (the
+"Embed else-block for goto removal": ExtractBlock moves the fall-through
+blocks into the else), and ReduceNestingTransform (a later ILAst
+transform) hoists else blocks after the if when the exit can be
+duplicated, plus ImproveILOrdering's inversion when the true arm ends
+unreachable. The oracle's form for the multi-statement shared epilogue
+(the ReadArrayArgument family): `if (!cond) { <region> } <epilogue>`.
+
+THE FOLD: AnalyzeGuardRegions + the EmitBlock final interception -- the
+region nests under the INVERTED condition (NegateCondText, the outer
+parens stripped) and renders through the FULL nested block machinery
+(EmitBlock, so labels, nested guards, and loops inside the region work);
+the target continues after the if. THE GATES (each measured):
+- a same-container forward branch (t > k+1, t < the claimable span) with
+  a Nop/null false arm;
+- the target non-terminal OR multi-pred (a single-pred TERMINAL target
+  is the early-exit form -- the return-propagation renders
+  `if (cond) { return/throw; }`; a multi-pred terminal target, the shared
+  epilogue, FOLDS);
+- single-entry region: no branch from outside enters any region block
+  (the parent-chain walk to the container's block list);
+- no label-region/coalesce overlap; nested folds confined to the outer
+  fold's span (the recursive ScanGuardRange with the target limit);
+- the fold ERASES its guard's returnPropagation_ entry (the target
+  un-suppresses and renders after the if).
+
+THE DEBUG ARC (the honest record): (1) restricting the
+return-propagation to terminal targets alone REGRESSED +459 gotos (the
+non-terminal inlinings were removing gotos) -- reverted; the surgical
+interaction (the fold erases the entries of the guards it claims) is the
+right seam; (2) the overlap gate on suppressedReturnBlocks_ rejected the
+OUTER folds whose inner region blocks the propagation had claimed --
+dropped (the single-entry gate already covers the external sources);
+(3) the guardRegionOwner_ overlap rejected the NESTED folds (the outer
+fold's ownership of its own region) -- dropped (the scan structure
+prevents same-level overlaps by construction); (4) the dead labels on
+unreferenced fold targets drop (the label-erasure pass: every incoming
+branch is a folded guard's arm, a fall-through drop, or a continue).
+
+THE MEASURE: gotos 1,263 -> 1,021 (-242); dnlib 76,009 -> 75,206;
+net10 96,041 -> 94,313; cui 2,312 -> 2,292; the pin byte-identical;
+hello 3. ReadArrayArgument now renders the oracle's exact structure
+(the `if (num != -1) { if (num < 0) { throw; } ... }` nesting, the
+epilogue after).
+
+## THE REMAINING GOTO PROFILE (the [GRD] instrumentation, dnlib)
+
+The 1,021 remaining gotos' guards reject at: 303 not-found/adjacent
+(the target not in the container's later blocks -- the backward branches
+and the cross-container targets; needs the finer split), 97 span-escapes
+(the nested guard's target beyond the outer fold's span), 184
+single-entry rejections (the diamond patterns -- multiple paths enter
+the region; the C# handles these via the structured arm inlining), 16
+overlaps, 14 single-pred terminal targets (the propagation's form,
+correct). THE NEXT SUB-SLICES (in measured order): (1) the
+single-entry/diamond family (the C# inline-true-branch path); (2) the
+backward/cross-container targets (the split of the 303); (3) the
+span-escapes.
+
+## THE OTHER FAMILIES THIS SESSION NOTED (unchanged queue)
+
+The propagation's displaced-fall-through semantic bug (the inlined
+non-terminal target's exit branch dropped by the CONTAINER order while
+the EMIT order differs -- the ReadArrayArgument b4 case) is FIXED IN
+PRACTICE by the fold claiming those guards; the residual population
+(the propagation's non-guard inlinings with Branch finals) is unprobed
+-- a [PR]-style dump of the inlined-final drops is the check if the
+corpus shows residue.
+
+## THE STRING-SWITCH CASCADE (commit 9611036e8, the follow-up slice)
+
+The dispatched sub-slice (the 184 single-entry rejections) PIVOTED on
+diagnosis: the dominant shape was not diamonds but string-comparison
+dispatch chains (the oracle renders them as switch statements, the port
+as raw if-goto chains; 0 of the oracle's 45 `case "..."` sites on
+dnlib). ROOT CAUSE: a reader-model divergence -- the C# reader keeps
+the brtrue fall-through in the same block (chains are `[if (cond) br
+handler, br nextCase]` pairs, what the cascade matchers scan); the
+port's reader ends a block at every conditional branch. The ported
+cascade only ever fired on seeded RoslynFixture trees.
+
+THE SLICE: the CoalesceGuardChains bridge rewrites the fragmented
+guards into the instruction-list form before the matchers, gated to the
+string-switch family and pre-counted (>= 3 unique values) so rejected
+chains keep their fragmented render. The cascade pieces it needed
+end-to-end: the StringToInt switch value (cloned, not wrapped -- the
+matched instruction stays in the tree until the ReplaceAt), the
+AddSection Parent links (a Sections.push_back bypass broke the render
+invariants), the SortBlocks(deleteUnreachableBlocks: true) cleanup
+(the consumed guards render as garbage if left), the section-body thunk
+resolution (the reader's fall-through blocks), the null-final
+terminator rule in TopologicalSort's reachability walk, and the render
+side (the StringToInt value, `case "..."` labels, `case null:`, the
+default via GetDefaultSection).
+
+THE KEY LESSONS (recorded for the next bridge pieces): (1) the nested
+two-store extraction MUST check the stored variable matches the loaded
+one (the C# MatchStLoc overload; a parameter was picking up an unrelated
+`int x = 0` and rendering `switch (0)`); (2) RecomputeIncomingEdgeCounts
+must NOT count the container-entry edge (the D59 convention -- counting
+it broke every D59-tuned matcher: the using transform rendered
+try/finally across the corpus); instead the Run's visit gate exempts
+container entries explicitly; (3) the C# cascade tail's
+SimplifySwitchInstruction runs BEFORE the container SortBlocks -- keep
+that order; (4) the C# StatementBuilder inlines every section's target
+block into the section (ConvertSwitchSectionBody) -- the port's
+switch-inline plan approximates this with an order requirement the C#
+does not have.
+
+THE MEASURE: dnlib 75,206 -> 75,168; net10 94,313 -> 94,225; cui
+2,292 -> 2,274; string cases 0 -> 10 of 45; the pin byte-identical;
+hello 3; the canary identical to HEAD; the sweep 268 (control-matched,
+no new failures). The gotos 1,021 -> 1,026 (+5): the 5 converted sites
+whose section bodies the inline analysis rejects on the SECTION-ORDER
+requirement render per-case gotos (InitializeInternal class).
+
+THE NEXT SUB-SLICES (measured): (1) MatchRoslynSwitchOnString (the
+ComputeStringHash shape) needs its own bridge entry -- the null-head
+guard + the case blocks inside the numeric hash switch (the oracle's
+other 35 sites); (2) the switch-inline analysis's section-order
+requirement -- relaxing it with the C#'s break-append rule (a reachable
+body-end section renders `break;` after its content) also clears the +5
+gotos; (3) the switch case-label indentation (the port renders cases
+one level deeper than the oracle on EVERY switch -- a global style
+family); (4) then the standing queue (the single-entry/diamond family,
+the 303 split, the 97 span-escapes).
+
+## THE FLAT HASH-SWITCH SLICE (commit 329c5bcfc)
+
+The dispatched next sub-slice (the MatchRoslynSwitchOnString bridge, the
+other 35 sites) PIVOTED on diagnosis: the Roslyn switch-on-string compiles
+to a BINARY-SEARCH IF-TREE over ComputeStringHash values with string-eq
+case heads at the leaves -- NO IL switch opcodes. The C#'s SwitchDetection
+flattens that tree into one SwitchInstruction via TWO pieces the port
+lacked, now ported:
+
+(1) UseCSharpSwitch's MatchRoslynSwitchOnString gate: the root's
+ComputeStringHash store forces the flat switch past the if-count heuristic
+(the port had deferred it with a note; the matcher was already linkable).
+(2) The false-path remainders must merge into one default section. The C#
+false paths br to the SHARED default block (AddSection merges by target);
+this port's CFS folds branch-to-valued-return into LOCAL leave blocks, so
+the analysis now recognizes the fold-materialized local return (a
+sole-owner valued-leave block) and uses the leave as the section body
+(merging by target container, the C# AddSection leave arm). Void leaves
+keep the branch form (the C# folds those in CFS itself).
+
+THE MEASURE: dnlib 75,168 -> 74,930 (-238), net10 94,225 -> 94,201 (-24);
+pin/hello/canary/sweep all hold. THE SWITCHES FORM AT THE SUB-ROOTS (the
+leaf-cluster positions), not the method root: the root's analysis
+produces the right 15 sections (14 cases + 1 merged default) but
+UseCSharpSwitch still rejects it -- see the next-session entry.
+
+## THE REMAINING ROOT-LEVEL BLOCKERS (measured, for the next session)
+
+(A) THE EMPTY-SET PARTITION ANOMALY: the root's walk (dnlib.DotNet.
+Extensions.IsPrimitive and the GetSystemTypeName-family methods) hits
+`bail empty-set` -- a comparison `eq V_1 C` reached with an inputValues
+partition that does NOT contain C (e.g. input = the universe minus
+[-1583721377..-1], then `eq V_1 -1583721377`). The walk descended into a
+block on the WRONG SIDE of a partition: some false path follows the
+POSITIONAL next (the port's model) where the C# follows the explicit br
+target. The bail makes the caller add the whole partition as a section
+(the 543,980,045-value intervals) -> the multi-big-section gate rejects.
+Debug recipe: the [SDA] instrumentation (env ILSPY_SDA) in SwitchAnalysis
++ a per-method dump at SwitchDetection entry (env ILSPY_SDD); compare
+against the C# sosdump harness (/tmp/sosdump -- the C# sosdbg harness at
+DOTNET_ROOT=/home/jim/.dotnet, `~/.dotnet/dotnet bin/Release/net10.0/
+sosdump.dll <asm> <type> <method> [param-substring]` dumps the C# tree
+before/after any named transform). The suspicious difference so far: the
+C# case heads are the INVERTED form (`if (comp(op_eq == 0)) br default;
+br retTrue`) while the port's are positive (`if (op_eq) leave 1`) -- the
+C# reader/early-transforms invert brtrue-chains; the port's CFS fold also
+replaced the case heads' true arms (br to the shared ret-true block) with
+direct `leave ldc.1` (the ClonePureLoad extension -- the C# only folds
+NOP-valued leaves in default mode).
+
+(B) THE ARM ITSELF (MatchRoslynSwitchOnString in SwitchOnStringTransform):
+needs the root-level `[stloc hash, switch]` block (blocked on A), the
+null-head (the port's is a block-final `if (comp==null) leave 0`, the C#
+form is `[if (comp==null) br nullCase, br switchBlock]` in the list with a
+BR true arm), and the case-head bridge (the port's `if (op_eq) leave 1`
+vs the C#'s two-instruction case heads). The port's arm (line ~844 of
+SwitchOnStringTransform.cpp) is otherwise complete.
+
+(C) THE DEAD-RETURN GARBAGE TAIL: the formed sub-switches render the case
+heads' true-arm local [leave 1] blocks as trailing `return true;` lines
+(~7 per method, the "remaining blocks" render). The arm (B) consumes the
+whole structure and moots this; a fallback fix is the switch-inline plan
+inlining br-to-pure-return arms.
+
+THE C# HARNESS for tree comparisons: /tmp/sosdump (a net10 console app
+against the w2-trace-built ICSharpCode.Decompiler.dll); it prints the C#
+ILAst before/after any transform by name match -- the reader-model diffs
+are found fastest by dumping both sides at the same pipeline stage.
+
+---
+
+## Session record: the string-switch arc lands (fbb33de39, dd3535d76)
+
+Corpus: dnlib 74930 -> 74731, net10 94201 -> 94066, cui 2274 -> **1332**
+(the string-switch cascade over cui's many string switches), gotos 1023 ->
+1021, string `case "..."` labels 10 -> 24. The connid pin re-recorded for
+the deliberate label-indent change: `4e1ed917a09392be`.
+
+### fbb33de39 "Fix unsigned LTE boundary; flat hash switch converts to strings"
+
+1. **The empty-set partition off-by-one (the root blocker)**:
+   `MakeLessThanOrEqualSet`'s negative-unsigned branch built the tail with
+   the end-exclusive two-arg `LongInterval(Min, val)` where the C# uses
+   `Inclusive(Min, val)`. Every unsigned greater-than over a negative
+   boundary behaved as greater-or-equal, the false-path partitions dropped
+   the boundary a later eq leaf needed, the hash-search walk bailed on an
+   empty set, and the caller added the whole input partition as a section
+   (the multi-big-section gate then rejected the root flat switch). Unit
+   test: `SwitchAnalysis.MakeSetWhereComparisonIsTrueUnsigned` (the boundary
+   memberships asserted for both GT and LTE over negative values).
+
+2. **The arm's reader-model bridges** (MatchRoslynSwitchOnString): the null
+   head as `[stloc V_0, if (V_0 == null) leave]`-FINAL with the switch block
+   positionally next; the flat switch as the block FINAL; the case heads as
+   if-finals in BOTH polarities -- the positive `if (op_eq) leave 1` (true
+   arm = the body leave, false path = the local default block) and the
+   negated `if (comp(eq, op_eq, 0)) leave 0` (true arm = the default leave,
+   false path = the local body block); exit identity compared by return
+   value (PureLeaveValueString) instead of the shared target block (the CFS
+   fold materializes the shared default per site). The null case is skipped
+   when its folded return equals the default's (the C# gate on the null
+   branch targeting the default's block). Test:
+   `SwitchOnStringTransformTest.ReaderShapeRoslynSwitchConvertsToSwitch`
+   (build the reader shape: the head/switch-final, the interleaved case
+   heads + local defaults, the merged-leave default).
+
+### dd3535d76 "Case labels sit at switch indent; sections sort by source"
+
+1. **The case-label indentation**: the oracle keeps switch section labels
+   at the switch statement's own indent (only the case bodies indent); the
+   port emitted both one level deeper. Fixed in ILAstToCSharp's
+   SwitchInstruction render (all seven `Line(indent + 1, "case ...")` sites
+   -> `Line(indent, ...)`).
+2. **The section order**: the C# SortSwitchSections keys a Leave body on
+   its StartILOffset; the port's fallback of 0 sorted every leave-bodied
+   section first (the arm's default before the cases). The arm now stamps
+   its value-section clones with the owning case-head block's offset, and
+   the default's clone past every case body (0x7FFFFFFE -- the C# default
+   block sits in the exit region; the port's fold consumed that block into
+   the merged leave). The port's `Branch(Block*)` ctor already carries the
+   target's offset (the C# convention), so the negated-form case-head bodies
+   (branches to the local [leave 1] blocks) sort in the case region.
+
+### The empty-guard family (OPEN -- the next big dnlib family)
+
+485 instances in dnlib (`if (cond) { }` with the content flattened after).
+The set_Root and IndexOf_NoLock case studies, root-caused:
+
+**set_Root (dnlib.W32Resources.Win32ResourcesPE)**: the IL
+`A; brfalse SET; B; bne.un SET; ret; SET: set_Value; ret` -- the guard
+`if (!A || B != value) set_Value`. The port's CDD fixpoint runs
+InlineIfFallThrough@1, InlineIfFallThrough@0 (the fall-throughs become
+else-arms), InvertIfExit@0, then **IntroduceShortCircuit** -- which matches
+`if (C1) Block { FINAL: if (C2) br X else { exit } }` and takes
+`nestedIf->TrueInst` as the combined true arm, **dropping the nested if's
+else (the early-exit region)**. The C# requires the nested if to be a bare
+`[if, br]` pair (`trueBlock.FinalInstruction is Nop`) -- no else. Adding the
+`nestedIf->FalseInst != nullptr` rejection is semantically right but
+REGRESSES the corpus +1174: the broken combine was load-bearing for
+flattening, and the un-combined guards render worse because of a second bug
+(below). The fix must land together with the or-guard rendering.
+
+**IndexOf_NoLock (dnlib.Utils.LazyList`1)**: the C#'s loop container
+includes the `[leave V_0]` block (the return-i leave) INSIDE the while
+container; the if's false arm is an explicit `br IL_0023` to it. The port's
+loop detection lifts only the cycle blocks [guard, if, increment] into the
+container and leaves the [leave V_0] block outside (before the loop), so
+the if-final's false path (the positional next) lands on the INCREMENT --
+the early return is misrouted, the loop's exit then flows through the
+container's trailing `br IL_0023` into the [leave V_0], and the render
+becomes `if (cond) { } ... return i` (the -1 leave unreachable). The C#
+reference trees are captured in /tmp/sos_lazy2.txt (before/after
+ConditionDetection, via the sosdump harness patched to ConditionDetection
+-- the Win32ResourcesPE type does not resolve in the harness's C#
+DecompilerTypeSystem for set_Root; LazyList does).
+
+The likely correct sequence: (1) the loop-detection/reader model must keep
+the exit-target leave blocks inside the loop container (or the if's false
+arm must carry the explicit br), (2) then IntroduceShortCircuit gets the
+C#'s no-else guard, (3) then the or-chains render like the C#'s (the C#
+keeps them as separate if-guards with leave true arms -- see the AFTER tree
+in /tmp/sos_lazy2.txt).
+
+### Where the numbers stand
+
+dnlib 74731, net10 94066, cui 1332, gotos 1021, hello 3-line residue, the
+suite control 268, the bennu canary 4/4. The connid pin
+4e1ed917a09392be (re-recorded with dd3535d76 for the label indent).
+
+Next in the queue after the empty-guard family: the switch-inline
+section-order relaxation (the remaining goto rejections), the 303
+not-found/adjacent goto split, the 97 span-escapes, the `?.` shapes, the
+`.override` forwarders, the net10 foreach-collapse gap.
+
+---
+
+## Session record: the loop exit-point pick lands (856fb34ce); the ExtendLoop held
+
+Corpus: dnlib 74731 -> 74651, net10 94066 -> **93530** (the biggest net10
+move since the guard-region fold), cui/hello/gotos unchanged, the pin
+4e1ed917a09392be, the suite control 268, the bennu canary 4/4.
+
+### 856fb34ce "Pick loop exit by source order over no-exit candidates"
+
+The C# LoopDetection.FindExitPoint -> PickExitPoint: the loop's exit point
+= the highest-IL-offset node with no reachable exit ("we can find the real
+exit point by simply picking the block with the highest IL offset" -- the
+source-order heuristic). A function return is NOT a reachable exit
+(ControlFlowGraph.CreateEdges skips IsLeavingFunction leaves), so the
+loop-completion return qualifies and an earlier return at a lower offset
+belongs inside the loop. The port now ports HasReachableExit (a successor
+DFS: a path to a node the candidate does not dominate, or a branch/leave
+out of the container except function returns) and picks the
+highest-offset qualifying candidate among the out-of-loop successors; the
+convergence check stays ahead of it (the case-2 post-dominator proxy,
+mscorlib's GetCVTypeFromClass shape). Tests:
+LoopDetection.ExtendsLoopWithEarlyReturnBlocks (the exit-pick half) and
+PicksEarliestOutOfLoopExitDeterministically updated to the C#-faithful
+highest rule (the C# preorder: b2 is disqualified by reaching the head,
+the descent reaches b5 at 0x50 which qualifies, b4's 0x40 never
+overwrites).
+
+### THE HELD EXTENSION (designed, measured, NOT shipped)
+
+The C# ExtendLoop right after the natural loop: add every block
+dominated by the loop head except the exit point's subtree (the
+dominator-tree preorder from the head, excluding the exit point), so the
+loop keeps ONE exit and the early-return blocks render as plain returns
+inside. The port's version was implemented and measured:
+
+- dnlib: 74651 -> 74574 (-77), the empty-guard family 485 -> 364,
+  gotos 1021 -> 997 (-24).
+- net10: 93530 -> 94698 (**+1168**): the extended loops whose guards the
+  C# COMBINES render as nested if-chains instead. The C# AFTER tree
+  (captured in /tmp/sos_cflow.txt, CflowDecrypter.GetFixIndexs2):
+  `if (if (IsLdcI4) if (Count > V_3+5) comp(Code == 141) else 0 else 0)
+  Block IL_0064 { ... }` -- the guard chain &&-combined into the if
+  condition with the body as a labeled block, which the renderer emits as
+  `if (!A || B || C) { continue; } <body>`. The port's tree after the
+  extension: the guards stay SEPARATE sibling blocks
+  (`[stloc, if (comp(eq, IsLdcI4, 0)) br CONTINUE else nop]` chains),
+  rendered as the nested if-chain with `!= 0` conditions.
+  GetFixIndexs2 measured: 73 diff lines (the old broken-but-short
+  empty-guard render) -> 127 (the correct structure, uncombined style).
+
+The extension code + its container-membership test are in
+/tmp/extendloop_held.patch (the working-tree diff against 856fb34ce's
+parent, including the extension body in ExtendLoop and the full
+ExtendsLoopWithEarlyReturnBlocks assertions). Re-apply, then land the
+guard-chain combination, then the extension ships.
+
+### The guard-chain combination (the next slice, steps 2+3)
+
+The C# mechanism (ConditionDetection.HandleIfInstruction, lines 85-96 of
+the C# ConditionDetection.cs): per-block fixpoint
+`while (InlineTrueBranch || InlineExitBranch) { PickBetterBlockExit;
+MergeCommonBranches; SwapEmptyThen; IntroduceShortCircuit; }`. For the
+guard blocks `[.., if (cond) br CONTINUE, br nextGuard]`:
+- InlineTrueBranch: the true target (the continue block) is multi-pred
+  (every guard branches there) -> cannot inline; the fallback ("use empty
+  block as then-branch" when the false arm is Nop and the exits are
+  compatible) applies.
+- InlineExitBranch: the block's exit `br nextGuard` -- the next guard is
+  single-pred -> INLINE its content into this block. The chain merges
+  into one block, and IntroduceShortCircuit then combines the nested ifs
+  into the if-expression form (`if (A) if (B) C else 0 else 0`).
+The port's TryInlineIfFallThrough is blocked on these guards by the
+`else nop` (the ReduceNestingTransform.ExtractElseBlock artifact -- the
+C# sets `ifInst.FalseInst = new Nop()` too, and the C# IsEmpty(nop) is
+true): the port's gate `if (iff->FalseInst) return false` must treat a
+Nop else as empty (IsEmptyArm already does). The port's iteration is
+per-container, not per-block-in-post-order; the C# guarantees the inlined
+blocks are already processed ("Because this is a post-order block
+transform... the blocks being embedded are already fully processed").
+
+Also measured on the way: the for-initializer hoist gate (the port's
+HoistForInitializers checked the whole loop body for uses; the C#
+TransformFor's ForStatementUsesVariable checks the condition and
+iterators only -- a body-only variable like an accumulator stack keeps
+its declaration before the loop). That fix is IN 856fb34ce's parent
+state (it landed with the pick measurement round; it changes little
+alone: net10 -9).
+
+### Where the numbers stand
+
+dnlib 74651, net10 93530, cui 1332, gotos 1021, hello 3-line residue,
+the suite control 268, the bennu canary 4/4, string case labels 24.
+
+Next: (a) the guard-chain combination (the HandleIfInstruction fixpoint
+port over the port's [if, br] model -- the else-nop empty check, the
+exit-branch inline that merges the guard chain, then the
+IntroduceShortCircuit over the merged shape), measured against
+/tmp/sos_cflow.txt and /tmp/sos_lazy2.txt; (b) re-apply
+/tmp/extendloop_held.patch and ship the extension; (c) the remaining
+queue: the switch-inline section-order relaxation, the 303
+not-found/adjacent goto split, the 97 span-escapes, the `?.` shapes, the
+`.override` forwarders, the net10 foreach-collapse gap.
+
+---
+
+## Session record: the guard-chain combination lands (99af9c40e)
+
+Corpus: net10 93530 -> **90284** (the CflowDecrypter family's home corpus),
+dnlib 74651 -> 74708 (+57, the correctness price), gotos 1021 -> 1049, the
+empty-guard family 485 -> 339 (dnlib). The pin, cui, hello, the suite
+control 268 and the bennu canary all hold. Test:
+ConditionDetection.CombinesGuardChainWithoutDroppingBody (a Roslyn-layout
+loop with three same-target guards, a live body store, and the
+increment/backedge -- asserts the body survives and the conditions combine
+under one if).
+
+### 99af9c40e "Combine same-target guard chains; stop dropping nested else arms"
+
+Four pieces (each measured against the C# reference trees in
+/tmp/sos_cflow.txt and /tmp/sos_lazy2.txt):
+
+1. **The CFG's null-final fall-through edge** (ControlFlowGraph.cpp
+   CreateEdges): a block with no FinalInstruction is a plain fall-through
+   and now gets the edge to the next block. Without it such blocks had NO
+   CFG successors -- the loop detection excluded final-less body blocks
+   and the CDD's single-pred checks misrouted them. (Load-bearing: the new
+   CDD shapes segfault without it.)
+
+2. **The TryIntroduceShortCircuit nested-else gate** (the C#
+   MatchIfInstruction faithfulness): the C#'s two-arg MatchIfInstruction
+   requires the nested if's false arm to be a Nop (no else). The port fired
+   on nested ifs WITH an else and replaced the true-arm block with the
+   nested true arm, DESTROYING the else -- the empty-guard family's
+   semantic break (TryGetCpuArch's old render: the 46071/49184 cases
+   silently missing; GetFixIndexs2's old render: the whole body gone).
+
+3. **TryCombineSameTargetGuards** (the new transform): `if (C) br X else
+   Block { FINAL: if (c) br X else B2 }` (both gotos target the same X) ->
+   `if (C || c) br X else B2`. The else-oriented form of the C#
+   IntroduceShortCircuit: the C# inverts the guards first
+   (PickBetterBlockExit -> InvertIf -> InlineTrueBranch into the then) and
+   combines with LogicAnd; this port's fall-through inline builds the
+   else-oriented chain, so the merge takes the LogicOr form (`if (C)
+   ldc.i4 1 else c`, the C# LogicOr convention). The CDD fixpoint
+   collapses the whole chain into `if (c1 || c2 || ...) br SKIP else <the
+   body>`; DropTrailingGotoToNext + SwapEmptyThen then produce the final
+   `if (!(c1 || c2 || ...)) <the body>` (the de Morgan equivalent of the
+   C#'s `if (A && B && C) Block{body}`).
+
+4. **The else-nop empty treatment** in TryInlineIfFallThrough's no-else
+   gate: the C# IfInstruction ctor materializes a missing else as a Nop, so
+   the C#'s gates see one; the port used a null slot and rejected the Nop
+   form. IsEmptyArm moved above the transform for the check.
+
+Measured decomposition (env-gated bisect): the ISC gate + the CFG edge
+alone = dnlib +1203 / net10 +2286 (the chains stay as nested ifs -- the
+same shape as last session's reverted gate); the OR-combine recovers
+dnlib -1146 / net10 -5532; the net +57 dnlib = the switch-tree methods
+(OptimizeMacros +103, MDToken +101, TryGetCpuArch +47) whose case chains
+the old combine silently dropped and now render correctly as nested ifs
+where the oracle forms switches.
+
+### The next slice: the guard-continue render form
+
+The combined chains render `if (!(!A || (B || C))) { <the body> }` where
+the oracle renders `if (!A || B || C) { continue; } <the body>` (net10:
+508 `if (!(` occurrences; ~2-4 diff lines each). The C#'s ILAst keeps the
+positive &&-form (`if (A && B && C) Block{body}`, /tmp/sos_cflow.txt) and
+its statement layer does the inversion: de Morgan the condition, emit
+`continue;` for the false path, flatten the body after. The port needs:
+(a) the While-container continue-block detection (a br to the loop's
+trailing increment block renders as continue -- the port's IsContinueBranch
+only knows the For's last block and the loop heads), and (b) the
+renderer's guard inversion (the if-emission detecting a negated condition +
+a non-exiting then + the false path flowing to the loop tail). After that,
+re-apply /tmp/extendloop_held.patch (the loop extension, still held: the
+extension + this combination should now compose).
+
+The standing queue after that: the switch-tree methods' switch formation
+(the TryGetCpuArch family -- the oracle forms switches where the port
+renders nested ifs), the switch-inline section-order relaxation, the 303
+not-found/adjacent goto split, the 97 span-escapes, the `?.` shapes, the
+`.override` forwarders, the net10 foreach-collapse gap.
+
+---
+
+## Session record: the for-promotion, the guard-continue, the indexer (b1fc862c1..ee6227422)
+
+Corpus across the three commits: net10 90284 -> **89286** (-998), dnlib
+74708 -> **73675** (-1033), gotos 1049 -> 1030. The pin, cui, hello, the
+suite control 268 and the bennu canary hold throughout.
+
+### b1fc862c1 "Count for-loop edges by origin; find the pre-header by control flow"
+
+The roslyn lowering family (GetFixIndexs2) missed the for promotion: the
+loop detection places the container at the header block's IL position, so
+the pre-header and the holder need not be positionally adjacent (the
+reader's block order puts the after-the-loop blocks between them). Two
+gates read the positional relationship and rejected the for:
+
+- The edge gate now counts Branch edges INTO the entry by origin: exactly
+  one inside (the single back-edge from the increment; a second would be a
+  continue-to-head the C# count of 2 rejects) and at most one outside (the
+  materialized container connection -- the C# BlockContainer contributes
+  its connection edge on Connected(); the port's reader materializes it as
+  the pre-header's `br entry` whenever the fall is not positional). A
+  second outside branch is a real goto into the loop (reject).
+- CollectInitStores also follows the control flow: the block outside the
+  loop whose final branches to the entry is the pre-header (the holder's
+  positional predecessor may be an unrelated after-loop block).
+
+RED: HighLevelLoopTransform.RunMatchForWhenLoopHolderIsNotAdjacent (the
+pre-header, an unrelated middle block, the holder, the exit -- wired
+pre-header -> middle -> exit). The oracle now matches
+`for (int i = 0; i < instructions.Count; i++)` on the family's home method.
+Corpus: net10 -643, dnlib -218, gotos -19.
+
+### a8c1197da "Render the for-loop guard-continue form; flatten same-operator chains"
+
+- The C# ReduceNestingTransform's guard form at the emission layer: the
+  combined guard `if (!(guards)) { <the body> }` with the if as the for
+  body's final (the false path runs straight into the for's update) emits
+  `if (<guards>) { continue; } <the body flat>`. The C# ILAst keeps the if
+  as a non-terminal with the body statements after it and inverts on the
+  tree; the port's block-final model cannot express statements after an
+  if, so the inversion happens in the emitter (TryEmitGuardContinue in
+  ILAstToCSharp.cpp). The gates: no else, the condition the negation
+  wrapper comp(eq, X, 0), the then a Block with content, the if a block
+  final inside a For container whose successor IS the container's last
+  block (the update -- the emitted continue must land exactly where the
+  fall-through went), and the C# maxDepth >= 2 heuristic (ThenNestingDepth
+  -- one level per nested if-then arm; the C# ComputeStats tally).
+- The short-circuit operators flatten same-operator chains (the C#
+  left-associative render): `a || (b || c)` -> `a || b || c` (both
+  associative; a mixed-operator operand keeps its parens). net10's
+  `|| (` count: 394 -> 102 (the oracle's 26 are the required
+  mixed-precedence ones).
+
+Corpus: net10 -25, dnlib +1 -- the guard text now matches the oracle
+line-for-line on GetFixIndexs2, but the diff count was masked by the
+collection-indexer gap on the same lines (the next slice).
+
+### ee6227422 "Render multi-argument accessors as indexer accesses"
+
+The instance-call render treated get_X/set_X uniformly as a property
+access and DROPPED the arguments beyond the receiver: `call
+get_Item(list, i)` rendered `list.Item` (the index lost). An accessor
+taking arguments beyond the receiver is an indexer access (C# has no
+parameterized properties besides indexers): `list[i]` /
+`list[i] = v`; the accessor's name does not appear in the index syntax.
+The receiver stays Arguments[0] in both shapes (a this-receiver call
+carries the this load as its first argument -- getting argBase wrong
+rendered `if ([this])` for get_HasId(this)).
+
+RED: ILAstToCSharp.MultiArgAccessorRendersAsIndexer (verified red on the
+pre-change tree). Corpus: dnlib -816 (the entire excess .Item count),
+net10 -330 (the guard-continue lines' mask lifted). The for count is 676
+vs the oracle's 724.
+
+### The extension re-measured and re-held
+
+The held /tmp/extendloop_held.patch no longer applies (the target files
+moved on); the extension body was re-implemented from the design (the
+dominator-tree preorder from the head, skipping the exit point's subtree)
+and measured WITH the guard-chain combination landed: dnlib 73675 ->
+73860 (+185), net10 89286 -> 89749 (+463). The extension changes which
+blocks the CDD sees, and the combined guard chains inside the extended
+loops render deeper/nested where the un-extended loops already match
+(the sample regression: `if (ptr != this.num) continue;` ->
+brace-nested + goto). The extension stays HELD; the design is recorded at
+/tmp/extendloop_held2.patch.
+
+### The standing queue
+
+The while-guard de Morgan pushdown (the FindNewarr family: the port
+renders `if (!(A || B))` where the oracle renders `if (!A' && B')` -- the
+negation pushed into the comparisons; ~486 `if (!(` sites on net10), the
+switch-tree methods' switch formation (the TryGetCpuArch family -- the
+oracle forms switches where the port renders nested ifs), the
+switch-inline section-order relaxation, the 303 not-found/adjacent goto
+split, the 97 span-escapes, the `?.` shapes, the `.override` forwarders,
+the net10 foreach-collapse gap (the Find method's enumerator pattern).
+
+---
+
+## Session record: the de Morgan pushdown, the switch formation (c37e6cd1b..678854f11)
+
+Corpus across the session: net10 89286 -> **88136** (-1150), dnlib 73675 ->
+**72663** (-1012), gotos 1030 -> 929. The pin is re-recorded as
+0f20d63ad310ae59 (the switch-render family changed the connid fixture).
+cui, hello, the suite control 268 and the bennu canary hold throughout.
+
+### c37e6cd1b "Push condition negations into the tree (de Morgan at render)"
+
+The C# ExpressionBuilder.TranslateCondition(condition, negate) pushes a
+negation into the condition tree instead of wrapping it. The renderer's
+CondExpr now goes through ConditionText, the negate-flag recursion:
+`!(a || b)` flips the connective and keeps the flag on the operands, `!(x
+< y)` flips the comparison operator, a logic-not over a Boolean value
+collapses, and a non-negatable leaf keeps the `!` prefix. Comparisons
+render bare inside the chains with the existing null-literal typing;
+same-connective chains flatten; an `||` operand under a `&&` connective
+keeps grouping parens. RED:
+ILAstToCSharp.NegatedShortCircuitPushesDeMorganIntoComparisons. Corpus:
+dnlib -128, net10 -166 (the `if (!(` count 486 -> 185).
+
+### 9f42c0c5d "Merge switch sections by resolved exit identity; render the default"
+
+The switch-on-int/enum formation was blocked for every method whose
+default paths the CFS branch-to-return fold had materialized per site
+(the TryGetCpuArch family -- binary-search false arms running through
+empty passthrough blocks into different single-return blocks that all
+leave with the same value). AddSection merged by the branch's target
+block, so every false arm became its own section and UseCSharpSwitch
+rejected on "non-default with tons of keys". Three pieces:
+
+- AddSection merges by the resolved exit identity (SectionExitKey):
+  through branch-only passthrough blocks (this port's reader splits the
+  C#'s in-block `if` + `br` pair), and -- when the resolution ends in a
+  valued single return reached through a passthrough -- by the returned
+  value (the per-site materialization is this port's artifact; the C#
+  tree keeps one shared default block). A leave-ended target reached
+  directly keeps the block identity (two case bodies returning the same
+  value stay separate -- the C# merge semantics).
+- The IL switch reader's default section carries the complement of the
+  table's index range as its labels (the C# DecodeSwitch), not an empty
+  set.
+- The render picks the default as the C# StatementBuilder does (the
+  GetDefaultSection most-labeled pick), guarded to the huge complement
+  (a small most-labeled section is an ordinary case); a no-label section
+  remains this port's explicit default marker and wins.
+
+RED: SwitchDetection.MergesPerSiteReturnBlocksIntoOneDefault (through
+three iterations: the block wiring must be positional, the value-key
+only applies through a passthrough, and the most-labeled pick needs the
+>100 guard or the hand-built fixtures' equal-size sections collide).
+Corpus: dnlib -884, net10 -984, gotos -101 -- the biggest single-slice
+move of the campaign; TryGetCpuArch renders `switch` with the merged case
+groups.
+
+### 678854f11 "Remove the switch-formation debug traces"
+
+The ILSPY_SWDBG dumps and the ILSPY_DUMP_PREHLL hook slipped into the
+two commits above (env-gated stderr prints). Print-only; every guard
+re-verified unchanged.
+
+### The switch-render polish queue (the follow-up family)
+
+- The enum widening: the switch value renders `switch ((long)(machine))`
+  -- the LdLoc's ResultType for an enum-typed variable is not I4, so the
+  formation wraps a Conv I8; the C# keeps `switch (machine)` (the enum's
+  stack type is I4).
+- The case labels render the raw numbers (`case 332:`); the oracle uses
+  the enum member names (`case Machine.I386:`) -- the C#
+  CreateTypedCaseLabel's enum lookup.
+- The default section renders first; the oracle sorts it last (the
+  section-order sort's default placement).
+- The pin regression to chase: the connid Connect method's default now
+  emits `default: goto IL_0018;` where the inline plan used to emit the
+  fall-through `break` -- the inline-plan's default handling interacts
+  with the complement-labeled def section.
+
+### The standing queue
+
+The while-guard de Morgan residue (the 185 remaining `if (!(` sites are
+negations over non-tree leaves), the switch-render polish above, the
+switch-inline section-order relaxation, the 303 not-found/adjacent goto
+split, the 97 span-escapes, the `?.` shapes, the `.override` forwarders,
+the net10 foreach-collapse gap (the Find method's enumerator pattern).
+
+---
+
+## Session record: the switch-render polish (bc91874f1..0bc64fc9e)
+
+Corpus across the session: dnlib 72663 -> **71548** (-1115), net10 88136
+-> **87917** (-219), gotos 929 -> 880, cui 1332 -> 1331. The pin is
+re-recorded as b38babc5465c9861 (the default-last repositioning moved the
+connid fixture's default section; the `default: goto IL_0018` shape itself
+is the inline-plan follow-up below). The suite control 268, hello and the
+bennu canary hold throughout.
+
+### bc91874f1 "Map enum types to their underlying stack type"
+
+An enum's evaluation-stack type is its underlying primitive. The port's
+signature model keeps a non-known in-module type as a name-only
+SimpleType whose Kind() is derived but whose underlying is not carried,
+so StackTypeOf answered O for every enum and the switch formation
+wrapped every enum switch value (`switch ((long)(machine))`). StackTypeOf
+now answers the underlying (from a resolved definition when it carries
+one, else I4 -- the widening accepts any of I4/I8, matching the C#'s
+underlying read for every enum underlying). RED:
+ILAst.StackTypeOfEnumIsItsUnderlyingType. Corpus: dnlib -107, net10 -39.
+
+### 32278a660 "Render enum switch case labels as the member names"
+
+The C# CreateTypedCaseLabel's enum lookup. The enum now rides an
+EnumMembersType (a SimpleType subclass) whose member map the signature
+decoder collects from the TypeDef's static literal fields (the flags
+Static 0x10 | Literal 0x40 -- NOT 0x60, which is InitOnly|Literal and
+skipped every member; found by tracing the per-field flags). A malformed
+row degrades to the member-less form. The case-label emission resolves
+the value through the switch value's variable's type:
+`case Machine.I386:`. RED:
+ILAstToCSharp.SwitchCaseLabelsUseEnumMemberNames. Corpus: dnlib -274,
+net10 -14 -- TryGetCpuArch renders the oracle's exact case groups.
+
+### 0bc64fc9e "Sort the switch default section last"
+
+The C#'s default orders last because its body branches to the one
+shared post-switch block (the highest offset); this port's per-site
+materializations carry small offsets and sorted the default first. The
+offset sort keys the huge-complement section (> MaxValuesPerSection
+labels, the analysis' default) to the maximum. RED:
+SwitchDetection.SortsMergedDefaultSectionLast. Corpus: dnlib -734, net10
+-166, gotos -47, cui -1 -- the largest slice of the polish queue.
+
+### The remaining polish
+
+- The pin's Connect method still renders `default: goto IL_0018;` where
+  the inline plan used to emit the fall-through `break` -- the
+  switch-inline plan's default handling interacts with the
+  complement-labeled def section (the plan's defaultFallsToExit check
+  reads the body's branch target; the complement section's body is the
+  per-site branch).
+- The switch value for a SIMPLE-typed enum still resolves I4 via the
+  pragmatic default; a resolved MetadataTypeDefinition would carry the
+  real underlying (the type-system resolution plumbing remains).
+
+### The standing queue
+
+The while-guard de Morgan residue (the 185 `if (!(` sites are negations
+over non-tree leaves), the switch-inline section-order relaxation, the
+303 not-found/adjacent goto split, the 97 span-escapes, the `?.` shapes,
+the `.override` forwarders, the net10 foreach-collapse gap (the Find
+method's enumerator pattern).
+
+---
+
+## Session record: the inline-plan default (attempted, held; the dangling-goto find)
+
+No landed commits this session: the inline-plan default slice turned out
+to be a four-way refactor and was reverted clean (the working tree at
+6f055927a). The findings, so the next attempt starts from the design:
+
+### The pin regression's full anatomy (default: goto IL_0018 vs break)
+
+The connid Connect method's default section now renders
+`default: goto IL_0018;` where the inline plan used to emit the
+fall-through `break`. Three mechanisms interlock:
+
+1. The plan's target collection treats the default section's body branch
+   like a case body's (collected as a target). For the Connect shape (the
+   case bodies are direct Leaves, so the targets list holds ONLY the
+   default's exit branch), the exit determination ("the block after the
+   last target") finds no block after the default's own target -> exit
+   null -> no defaultFallsToExit -> the default renders as a labeled
+   section with its body branch -> `goto IL_0018` + the label.
+
+2. Recording the default's branch instead of collecting it (the fix
+   attempt) fixes (1) but breaks the default-with-work shapes (the
+   `default: <body>; break;` form, the SwitchBodyThunks* fixtures): the
+   default's body block is a legitimate target there. The distinguishing
+   rule: the default's branch target == the exit (the case bodies'
+   convergence, or the block after the last CASE target) -> the
+   fall-through form; else -> the inlined-thunk form. The exit rule must
+   exclude the default's own target from the "last target" computation
+   only when the case bodies contribute no convergence.
+
+3. The goto-to-return propagation (AnalyzeReturnPropagation) fires on the
+   default's exit branch (a return-only exit block, one pred) and
+   suppresses the exit block -- but the defaultFallsToExit skip removes
+   the propagation's only render site. The propagation must skip switch
+   section body branches (they are the plan's domain): `for (p = src; p;
+   p = p->Parent) if (p->Op == SwitchSection || SwitchInstruction) skip`.
+
+4. The render's thunk-index arithmetic (section k -> plan->targets index)
+   must skip the recorded default section (it consumes no target) both
+   when it falls to the exit and when it renders as a statement.
+
+The red test for the whole shape is written (kept in the test file of the
+reverted attempt; rewrite as): a switch whose case {0} body is a direct
+Leave, whose default section carries complement labels and branches to
+the post-switch block with work in it -- expect no `default:` label, no
+goto, the post-switch code rendered after the switch. The existing
+`SwitchInlinesLeaveFinalBodies` expectation (`default:` present) must
+flip to absent: the C# renders the default-to-exit form with NO label
+(the after-switch code is the default path; the Connect oracle confirms).
+
+### The dangling-goto correctness bug (2 sites, dnlib)
+
+Two gotos reference labels that are never emitted (broken output):
+`MetadataBase.Load(nint, CLRRuntimeReaderKind)` line ~77948 (the catch's
+trailing `goto IL_0023` -- the post-try block dropped as dead but the
+goto kept) and `OptimizeMacros` line ~85437 (the switch default's
+`goto IL_0038` -- the exit block dropped/skipped, the label never
+emitted). The C# eliminates both (the dead-code pass drops the block AND
+the goto that targets it). The fix needs: a goto whose target block is
+dropped as unreachable must either drop with it (when the fall-through
+reaches the same place) or the label must emit at the dropped block's
+position (an empty labeled statement). Goto classification on the current
+dnlib render: 880 total = 15 adjacent (label on the next line) + 537
+forward-near + 310 far + 18 backward + 2 dangling.
+
+### The standing queue (unchanged)
+
+The while-guard de Morgan residue (185 `if (!(` sites, negations over
+non-tree leaves), the switch-inline section-order relaxation, the goto
+families above, the span-escapes, the `?.` shapes, the `.override`
+forwarders, the net10 foreach-collapse gap.
+
+## Session record: the cui-gate artifact found; the InvertIf soundness gate (0decb762d)
+
+### THE CUI GATE WAS SILNTLY BROKEN SINCE 11:15 SEP 29 (the record correction)
+
+Every saved cui render from 11:15 Sep 29 onward is a 61-byte CLI usage
+error ("Specify --help for a list of available options and commands.")
+or a 0-byte disk-quota file. The diff of the oracle against the usage
+error is EXACTLY 1332 (all 1331 oracle lines + the one error line) and
+against the empty file exactly 1331 -- so the recorded "cui 2274 ->
+1332" (the string-switch arc) and "cui 1332 -> 1331" (the switch-render
+polish) were artifacts of the broken invocation, not measurements. The
+coincidence (1332 = the real number after the string-switch cascade at
+12:05, from the last good full renders cui_h/cui_i -- which are
+themselves usage errors, so even that reading is suspect) masked the
+breakage. THE TRUE CUI NUMBER at 128fce7e2: **2259** (the last
+trustworthy full render is cui_tc2.cs at 03:37 = 2326; the string-switch
+arc and later slices improved it to 2259). All future cui gates: verify
+the render is non-empty and larger than 10 lines before diffing.
+
+### 0decb762d "Gate InvertIf on the false-path block exiting"
+
+A CORRECTNESS BUG fixed: the C# InvertIf reads the code after the if
+from the SAME block (GetExit asserts the last instruction has an
+unreachable end point); the port's reader ends a block at every
+conditional branch, so the port's next block's FinalInstruction can be a
+fall-through if. Moving such a final into the new TRUE arm re-routed its
+fall-through to the old-then position, orphaning the following blocks.
+TWO manifestations: de4dot.code SigCreator::IsNonObfuscatedAssembly
+returned true for every non-null input (the return-false leave dropped
+as unreachable after RemoveUnreachableBlocks), and the dnlib SigComparer
+Equals family TRUNCATED whole method bodies after the null guards
+(HEAD's 71548-state render of Equals(IType, IType) was 14 lines; the
+full body is ~40). The diagnosis path: the per-stage dump (a temporary
+ILSPY_DUMP_STAGES probe on RunGetILTransforms) localized the mangling to
+ReduceNestingTransform's ImproveILOrdering -> InvertIf; the RED
+(ConditionDetection.GuardChainFallThroughReturnSurvives) needed the
+seeded leaves to carry IL offsets (the LdcI4 values' StartILOffset --
+without them GetStartILOffset reports empty and the IL-order gate bails,
+so the first seed attempts passed vacuously).
+
+InvertIf now returns bool; TryPickBetterBlockExit propagates the bail --
+reporting a change that did not happen made the CDD fixpoint restart on
+a no-op forever (the net10 whole-module render HUNG in
+InitAssemblyClient; the per-transform probe showed TryPickBetterBlockExit
+firing 77+ times unchanged). The ReduceNestingTransform callers ignore
+the return (their folds just no-op).
+
+THE CORPUS RE-BASE (deliberate, the correctness price): dnlib 71548 ->
+73171, net10 87917 -> 90580, gotos 880 -> 1177, cui unchanged at 2259.
+The per-side split: dnlib oracle-only 34200 -> 33014 (the truncated
+bodies now render -- the correctness face improved by 1186 lines) and
+mine-only 37348 -> 40403 (the un-combined flat guard forms). The blocked
+inversions were load-bearing for the diff metric: the sites render as
+flat early-exit guard chains (`if (a == null) return false; if (b ==
+null) return false;`) where the oracle renders the COMBINED form
+(`if (a == null || b == null) return false;`). A refined-gate variant
+(allow the inversion when the old then's trailing Branch targets the
+next block's positional successor -- the routing-equivalence case)
+measured WORSE (dnlib 73417) and was dropped; the pure bail is simpler
+and better.
+
+THE RECOVERY PATH (the next slice, the highest leverage now): the
+guard-chain combination by LEAVE-VALUE identity -- the port's CFS folds
+the guards' shared branch target (br RET_TRUE) into per-site inline
+leaves BEFORE the CDD runs, destroying the same-target information the
+C#'s IntroduceShortCircuit combines over. The section-exit-identity
+merge (9f42c0c5d) solved the same problem for switches by merging
+through the folded returns by VALUE; the guard combination needs the
+same trick: `if (!A) leave V` + `if (!B) leave V` (the same leave VALUE
+V, positionally chained, single-pred) -> `if (!A || !B) leave V`.
+
+### THE DE MORGAN RESIDUE RE-MEASURED (the finding that opened the bug)
+
+The oracle ITSELF renders 187 `if (!(` lines on net10 (the port: 186) --
+the remaining divergence is not the `!(` count but the SITES: the
+oracle's `!(` forms are LogicNot-wrapped boolean leaves (the C#
+ConvertToBoolean's LogicNot -- `!(x is T y)`, `!(a != b)` KEPT un-flipped
+in operand position), while the port's are the un-combined guard chains.
+The C# NEVER pushes negations into the tree at the expression level
+(ConvertToBoolean wraps with LogicNot; the flips happen at the
+BRANCH-POLARITY level in ConditionDetection) -- the port's landed de
+Morgan pushdown (c37e6cd1b) was a compensation for the port's branch
+polarity, correct where it fires; the residue family IS the guard-chain
+combination above, not more pushdown.
+
+### The standing gates (all verified on the committed tree)
+
+- The connid pin: b38babc5465c9861 (byte-identical through the change).
+- dnlib 73171 / net10 90580 / cui 2259 / hello 3 / gotos 1177.
+- The suite control: 268 (two fresh runs identical; one intervening 269
+  run was a flake).
+- The bennu canary fixture renders deterministically (8871 lines); the
+  899-line delta vs the 09:16 Sep 29 render is the same guard family
+  (including the ReadExistingAssembly method -- BOTH renders are the
+  known empty-guard breakage there, differently wrong). NOTE: the bennu
+  submodule pins third_party/ilspy at 9e3559b7d (older than this tree);
+  the canary harness (tests/dotnet_golden.sh) tests the SUBMODULE's
+  build -- a submodule bump is its own operation per the bennu TODO.
+
+### The queue (updated, in order)
+
+1. The guard-chain combination by leave-value identity (the corpus
+   recovery: the flat chains -> the oracle's `||` forms; the +3055
+   mine-only mass).
+2. The label-merged regions (the cross-container analysis).
+3. The switch-inline section-order relaxation.
+4. The goto families (the 303 not-found/adjacent split, the 97
+   span-escapes, the 2 dangling gotos).
+5. The `?.` shapes (100 vs ~123) + the pdbState sites.
+6. The `.override` forwarders (the 17 sites).
+7. The net10 foreach-collapse gap.
+
+## Session record: the guard-chain combination lands (c6f3d94ec)
+
+Corpus: dnlib 73171 -> **72235** (-936), net10 90580 -> **88923** (-1657),
+cui 2259 -> 2271 (+12, the combined-form churn, semantically verified),
+gotos 1177 unchanged. The connid pin b38babc5465c9861 unchanged; hello 3;
+the suite control 268; the canary renders 8859 lines (the delta in the
+expected guard family).
+
+### c6f3d94ec "Combine same-exit guards by leave-value identity"
+
+THE CDD STEP TryCombineSameExitGuards (wired after
+TryCombineSameTargetGuards in the fixpoint): two positionally adjacent
+no-else guards whose TRUE arms resolve to the same leave identity (the
+target container + the value's ToString -- the SectionExitKey
+convention; the arm a bare Leave or a Block wrapping nothing but the
+leave) become `if (C1 || C2) leave V`, the second guard block consumed.
+THE ROOT: the C# merges the flat chains through MergeCommonBranches
+(the WillShortCircuit form) because its reader keeps both guards in one
+block branching to one shared exit; the port's CFS folds branch-to-
+return into per-site leaves, so the shared identity survives only as
+the leave VALUE. VARIANT 2: the first guard's true arm still a Branch
+to the second guard's fall-through block (the multi-pred exit the CFS
+does not fold) -> `if (!C1 && C2) br CONT` with the shared exit as the
+fall-through (the C#'s pre-InvertIf `a != null && b != null` form).
+
+THE RED: ConditionDetection.CombinesSameExitGuardsByLeaveValue (the
+SigComparer::Equals shape, seeded over the FULL pipeline -- the raw
+branch form lets the CFS fold reproduce the real folded state).
+GuardChainFallThroughReturnSurvives now gates on the RENDERED
+`return false;` (the combine legitimately folds the null check into the
+combined condition, merging the return-false leaves into one shared
+exit -- the leave-count assertion was stale the moment the combine
+became correct).
+
+THE 3-WAY NUANCE (the recorded follow-up, ~119 dnlib sites x 2 lines):
+the port renders `if (a == null || b == null || !Increment())` where
+the oracle splits the Increment guard off (`if (a == null || b ==
+null) return false; if (!Increment()) return false;`). The C# merges
+only same-RAW-target guards; the Increment guard's raw true arm was
+`br CONT` (a different target), but by the time the port's variant 1
+sees the chain, an earlier step has inverted the Increment guard to the
+exit-armed form -- the polarity distinction is lost. Fixing it needs the
+merge to happen before that inversion (the fixpoint ordering) or a
+polarity marker. Semantically equivalent either way (the short-circuit
+preserves the evaluation order).
+
+THE REVERTED EXTENSION (the shape ledger): a leave-key variant 3
+(matching the first guard's folded leave against the second guard's
+fall-through block's leave) fired on mixed-polarity pairs the oracle
+keeps separate and produced BARE-TRUTHINESS conditions
+(`if (imageDataDirectory.VirtualAddress)`) through the negation chain
+-- +117/+550 on the corpora. REVERTED; the render's handling of
+NegateCondition over null-comparisons is the blocker to revisit it.
+
+### The standing gates (all verified on the committed tree)
+
+- The connid pin b38babc5465c9861; dnlib 72235; net10 89223; cui 2271;
+  hello 3; gotos 1177; the suite control 268 (two runs); the canary
+  8859 lines.
+
+### The queue (updated, in order)
+
+1. The 3-way guard split (the Increment-guard exclusion, ~119 sites).
+2. The label-merged regions (the cross-container analysis).
+3. The switch-inline section-order relaxation.
+4. The goto families (the 303 not-found/adjacent split, the 97
+   span-escapes, the 2 dangling gotos).
+5. The `?.` shapes (100 vs ~123) + the pdbState sites.
+6. The `.override` forwarders (the 17 sites).
+7. The net10 foreach-collapse gap.
+
+## Session record: the MemberRef field sigs + the condition-leaf render (f54e16a81)
+
+Corpus: dnlib 72235 -> **72111** (-124), net10 88923 -> **88805** (-118),
+cui 2271 unchanged, gotos 1177 -> 1159, hello 3, the pin
+b38babc5465c9861 unchanged, the suite control 268, the canary renders.
+
+### f54e16a81 "Decode MemberRef field sigs; type-aware condition leaf render"
+
+TWO interlocking correctness fixes, found through the `if (listener)`
+family (the LazyList.Set_NoLock render: `if (listener)` -- not valid C#
+for a class-typed field where the oracle renders `if (listener !=
+null)`):
+
+(1) THE METADATA BUG: GetFieldSignature masked ANY token's rid into the
+Field table, so a MemberRef field reference (`ldfld` through a
+fieldref -- the relinked same-module assemblies carry them; the raw
+body bytes of Set_NoLock show 0x0A tokens) read some unrelated field's
+signature: the LazyList`1 fields decoded as System.UInt32 /
+dnlib.PE.Subsystem / System.Byte[]. The MemberRef path now decodes the
+row's own signature blob with the VAR scope of the parent type's
+definition (a TypeSpec parent's GENERICINST blob `15 12 <coded> <args>`
+names it; a TypeDef parent is the definition itself; anything else the
+positional fallback). The probe path: GetFieldSignature(0x0A0000B9)
+correctly gives IListListener`1[[TValue]] -- the raw ILAst keeps the
+scrambled forms (the reader threads the same call). RED:
+MemberRefFieldSignature.DecodesTheMemberRefBlobWithTheParentVarScope.
+
+(2) THE RENDER BUG: a bare truthiness leaf in a condition slot rendered
+the expression itself whatever its type. The C# reader materializes the
+brtrue/brfalse null/zero comparisons itself; this port's reader keeps
+the bare load, so the render supplies the comparison: the
+reference-stack leaf the null comparison, the numeric-stack leaf the
+zero comparison, the Boolean-valued leaf the bare form, the Unknown
+stack type (the untyped dup slots) the bare form (the C#'s
+TypeKind.Unknown arm). THREE follow-on gates the corpus exposed: the
+Boolean-typed FIELD loads (IsBooleanValued now handles LdObj -- the
+`if (is64bit != 0)` regression was the bool fields falling to the
+numeric arm); the pattern tests (MatchInstruction is I4-by-construction
+-- `x is T t != 0` became the bare `x is T t`); and the pattern
+negation parens (`!(x is T t)` -- the `!` binds tighter). The folded-
+guard and empty-arm negation paths share the dispatch (NegateCondText).
+RED: ILAstToCSharp.ReferenceTypedConditionLeafRendersNullComparison.
+
+### THE 3-WAY GUARD SPLIT: BLOCKED BY THE BLOCK MODEL (the finding)
+
+The Increment-guard exclusion (~119 dnlib sites, the oracle renders
+`if (a == null || b == null) return false; if (!Increment()) return
+false;` where the port renders the 3-way `if (a == null || b == null ||
+!recursionCounter.Increment()) return false;`) is NOT reachable by the
+guard-combine path: the seeded mixed-polarity pair combines fine (the
+variant-3 leave-key extension fired), but the real Equals chain
+re-merges the Increment guard downstream regardless. THE MECHANISM:
+the C#'s IntroduceShortCircuit requires the arm to contain ONLY the
+nested if (`trueBlock.Instructions.Count == 1 && FinalInstruction is
+Nop`) -- after the C# inlines the recursion block into the guard's
+arm, the arm carries [if (Increment) br CONT, br FAIL] -- TWO
+instructions -- and the merge is REJECTED. This port's block model
+cannot express content after an if inside an arm (the recorded
+"statements after an if" limitation -- the same blocker as the
+label-merged regions), so the port's arm always looks
+single-instruction and the ISC absorbs the Increment guard. The fix
+needs the reader-level restructure (the C#'s in-block if+br pairs) --
+the deepest model change, out of scope for a slice. The variant-3
+leave-key extension was re-landed and REVERTED again (dnlib 72111 ->
+72200, +89: the churn without the Equals payoff).
+
+### The standing gates (all verified on the committed tree)
+
+- The connid pin b38babc5465c9861; dnlib 72111; net10 88805; cui 2271;
+  hello 3; gotos 1159; the suite control 268; the canary 8859 lines.
+
+### The queue (updated, in order)
+
+1. The label-merged regions (the cross-container analysis; NOTE: the
+   same block-model blocker may apply -- assess first).
+2. The switch-inline section-order relaxation.
+3. The goto families (the not-found/adjacent split, the span-escapes,
+   the 2 dangling gotos).
+4. The `?.` shapes + the pdbState sites.
+5. The `.override` forwarders (the 17 sites).
+6. The net10 foreach-collapse gap.
+
+## Session record: the .override forwarder gate (6bd94f8e2)
+
+Corpus: dnlib 72111 -> **72052** (-59), net10 88805 -> **88804** (-1),
+cui 2271 -> **2258** (-13), hello 3, the pin b38babc5465c9861
+unchanged, the forwarders 0 on all three corpora (matching the oracle),
+the suite control 268, the canary renders 8859 lines.
+
+### THE ORACLE REFERENCE FACT (the decisive session discovery)
+
+The oracle files are BYTE-IDENTICAL to the ilspycmd 11.1.0.9782 (the
+globally installed tool) run with `-r
+/home/jim/.dotnet/shared/Microsoft.NETCore.App/10.0.12` -- verified
+diff = 0 lines on dnlib. The oracle's reference environment = the tool +
+the 10.0.12 runtime dir on the reference path. Without -r the tool's
+output differs by exactly 55 lines (the dnlib.Threading.Lock
+qualification family). The pinned tree (9e3559b7d, version 11.0.0-rc)
+is OLDER than the tool (11.1.0.9782): the newer release changed the
+forwarder behavior this session chased.
+
+### 6bd94f8e2 "Gate .override forwarders on the scoped-module resolution"
+
+The port rendered forwarders for the cross-assembly .override rows the
+tool leaves out (17 dnlib + 5 net10 + 3 cui). THE EMPIRICAL GATE, pinned
+with a three-fixture set (the MetadataBuilder recipe at
+/home/jim/tmp-build/crossoverprobe/ -- two IShapeLib variants: the
+direct real interface and the facade forwarding to ShapeImpl; the
+fixture dir /home/jim/ilspy-test-fixtures/cross_override_fixture/
+{direct,fwd}/):
+- EMITS when the MethodDeclaration's interface resolves to the module
+  its TypeRef is SCOPED to (the same-module OverrideSynth shape; the
+  direct cross-assembly direct/CrossOverride shape -- the tool emits
+  both).
+- DOES NOT EMIT when a TYPE FORWARDER sits between the scope and the
+  definition (fwd/CrossFwd over a facade IShapeLib; the netstandard ->
+  System.Runtime chain is the same shape).
+The port's gate: in renderOverrideForwarders (CSharpDecompiler.cpp),
+the resolved interface method's ParentModule() must equal the scope's
+module (`module.GetDeclaringModule` over the MethodImpl row's
+declaration MemberRef parent TypeRef); a null scope (the same-module
+ModuleRef, whose name never matches the module-name scan -- the C#
+falls back to the compilation scan there) accepts the main module.
+
+THE WRONG-LAYER LESSON: the first cut gated
+MetadataMethod::ExplicitlyImplementedInterfaceMembers itself; that also
+starved the dotted-name split (the net10 `IEnumerator<MethodDef>.Current`
+members rendered fully qualified, +13 lines) -- the members must stay
+resolvable for the name decision; the gate belongs in the render where
+the tool's synthesis lives.
+
+The port's facade resolution currently yields the UnknownType (the
+fwd/CrossFwd fixture probes showed kind=7) where the tool's resolves-
+then-gates -- the OUTCOME matches (no forwarder) either way; a future
+slice could chase the resolution parity (the port's
+ResolveForwardedType chain over the referenced facades) if a corpus
+family needs it.
+
+### The standing gates (all verified on the committed tree)
+
+- The connid pin b38babc5465c9861; dnlib 72052; net10 88804; cui 2258;
+  hello 3; the forwarders 0/0/0; the suite control 268 (the
+  XmlDocumentationCommentsRenderOnMembers failure is a pre-existing
+  member of the 268 baseline, NOT a regression of this session); the
+  canary renders 8859 lines.
+
+### The queue (updated, in order)
+
+1. The label-merged regions (the cross-container analysis; the
+   block-model assessment first).
+2. The switch-inline section-order relaxation.
+3. The goto families (the not-found/adjacent split, the span-escapes,
+   the 2 dangling gotos).
+4. The `?.` shapes + the pdbState sites.
+5. The net10 foreach-collapse gap.
+6. The net10 iterator-decompile gap (the oracle decompiles
+   DeobUtils.GetInitCcts into the yield-return form; the port leaves
+   the raw state machine -- found while measuring this slice; a big
+   family if it lands).
+
+## Session record: the iterator-decompile gap (dc7ca83eb)
+
+Corpus: dnlib 72052 -> **69539** (-2513), net10 88804 -> **87148**
+(-1656), cui 2258 -> **1774** (-484), hello 3, the pin
+b38babc5465c9861 unchanged, the suite control 268, the canary renders
+8789 lines, the whole net10 module is ASAN-clean. The yield-return
+sites: 40 dnlib / 25 net10 / 4 cui.
+
+### dc7ca83eb "Faithful dup reader slot reuse; iterator stubs decompile"
+
+THE ROOT DIVERGENCE: the reader's dup opcode. The C# `case Dup: return
+Push(Peek())` -- the Peek FLUSHES the expression stack into committed
+stack slots and returns `ldloc` of the top slot, so BOTH copies of a
+duplicated value read ONE committed slot (the Roslyn parameterized
+iterator stub `newobj; dup; stfld <>3__p1; dup; stfld <>3__p2; ret`
+reads the same slot for every parameter store and the return). The port
+materialized a FRESH dup_N slot per dup occurrence -- the copy between
+the parameter stores broke MatchEnumeratorCreationPattern (a copy the
+inliner cannot fold: the second slot is multi-use). THE FIX:
+FlushExpressionStack + `ldloc(currentStack.back())` -- the C# shape.
+
+THE EXPOSED UNSOUNDNESSES (each ASAN-verified on the whole net10
+module):
+1. The converted function outlived the source MoveNext tree (the C# GC
+   keeps it for the clones' un-retargeted branch targets -- the branches
+   inside cloned nested containers). FIX: ILFunction::KeepAliveFunctions
+   (the GC-root equivalent).
+2. The port's BlockContainer::Clone lacked the C#'s retarget pass (the
+   cloned branches whose targets are the original container's own
+   blocks -> the clone's blocks at the same ChildIndex; the cloned
+   leaves ditto). FIX: the C#-faithful remap in ILInstructionClone.cpp.
+3. TryInlineIfFallThrough's single-predecessor gate only saw the CFG of
+   the container being processed -- a branch in a SIBLING container
+   targeting the fall-through block survived the erase as a dangling
+   TargetBlock (the ASAN heap-use-after-free in
+   VariableUsage::CountEdges). FIX: a whole-function-tree walk for
+   branches targeting the block.
+4. DynamicCallSiteTransform's InvokeMember binder-arg scan mis-advanced
+   its store position in the no-type-arguments shape (the ldnull store
+   consumed a slot the C# reads the context argument at) -- the faithful
+   dup slots stopped the binder args inlining, exposing it. FIX: pos++
+   for the null-valued store (the C# fixed-index behavior).
+
+THE FIXTURE: IteratorFixture gained the InstanceForEach shape (an
+instance iterator with a captured this and a foreach over IEnumerable
+with a break); the enumerator scan now prefers the Numbers state
+machine (the csc emits the nested state machines in a
+build-order-dependent row order). The fixture rebuild command:
+`dotnet /home/jim/.dotnet/sdk/10.0.401/Roslyn/bincore/csc.dll -nologo
+-t:library -out:IteratorFixture.dll -langversion:latest -nostdlib
+-noconfig -r:.../System.Private.CoreLib.dll -r:.../System.Runtime.dll
+-r:.../System.Collections.dll IteratorFixture.cs` (the shared 10.0.12
+runtime dir).
+
+THE DEBUGGING TECHNIQUES (reusable): the ASAN build at
+build/linux-asan (a full CLI rebuild over the current tree gives the
+exact use-after-free reports with the freed-by and allocated-by
+stacks); a SIGSEGV/SIGABRT backtrace handler in ILSpyCmd/main.cpp
+(removed before the commit); the env-gated probes (ILSPY_PROBE_YLD etc.
+-- removed before the commit).
+
+### The standing gates (all verified on the committed tree)
+
+- The connid pin b38babc5465c9861; dnlib 69539; net10 87148; cui 1774;
+  hello 3; the yields 40/25/4; the suite control 268; the canary
+  renders 8789 lines; the net10 module ASAN-clean.
+
+### The queue (updated, in order)
+
+1. The label-merged regions (the cross-container analysis).
+2. The switch-inline section-order relaxation.
+3. The goto families (the not-found/adjacent split, the span-escapes,
+   the 2 dangling gotos).
+4. The `?.` shapes + the pdbState sites.
+5. The remaining iterator/render polish: the state machine CLASSES
+   still render alongside the decompiled iterators (the oracle hides
+   them when the creating method converts -- the MemberIsHidden
+   [IteratorStateMachine] gate); the placeholder variable names in the
+   converted bodies (I_0/S_0 -- the AssignVariableNames over the
+   fieldToParameterMap/StateMachingField metadata); the corpus diff now
+   has a large "converted body shape" family worth a fidelity pass
+   (foreach, using, the try-finally forms over the converted bodies).
+
+## Session record: the iterator follow-ups (ab5350f88, b29436787)
+
+Corpus: dnlib 69539 -> **69517**, net10 87148 -> **87082**, cui 1774 ->
+**1772**, hello 3, the pin b38babc5465c9861 unchanged, the suite control
+268, the canary renders.
+
+### ab5350f88 "Drop the getter's state-machine attribute when it decompiles"
+
+The C# CleanUpMethodDeclaration removes a method's
+[IteratorStateMachine] when the iterator de-sugar succeeded; the method
+render path already consulted the outcome, the PROPERTY path rendered
+the getter's attribute list without it. The accessor body render now
+reports the iterator outcome and the getter block's attribute list
+consumes it. RED:
+FacadeMemberModifiersTest.IteratorPropertyGetterDropsStateMachineAttribute
+(the NumbersProperty getter shape added to the yield fixture).
+
+### b29436787 "Resolve iterator field surfaces before the creation-pattern match"
+
+The converted bodies read the captured fields through I_0 placeholders
+instead of the parameters: the fieldToParameterMap's keys came out NULL.
+The C# reader resolves the field references during the decode; this
+port's reader defers them (the raw token surfaces) and the pipeline pass
+that resolves them runs after the yield-return transform -- the
+creation-pattern's stfld fields were unresolved, the MemberDefinition()
+null, every map key the null that collapsed the stub's entries. The Run
+entry now calls ResolveReaderSurfaces first. RED:
+YieldReturnDecompilerPart2.FieldToParameterTranslationUsesTheParameterVari
+ables (verified RED on the pre-fix tree).
+
+### THE NEXT FAMILIES (the analysis, next session's targets)
+
+1. THE REMAINING S_N SLOTS (~4075 net10 occurrences): the loop-condition
+   assignment shapes are FIXED (f711054d8) and the array-element field
+   loads are FIXED (99b1927a5), but the multi-use stack slots persist
+   elsewhere: the dup'd-value slots (a slot read by both the compound
+   store and a later expression) and the pending-field-load slots in
+   other statement shapes. Sample: net10 OutputWindow.SlowRepeat now
+   renders `int num = windowEnd++; window[num] = window[repStart++];`
+   where the oracle inlines the compound into the index:
+   `window[windowEnd++]`. THE ROOT (traced this session): the port's
+   prefix whole-function ILInlining inlines the window field load into
+   the ldelema's array operand BEFORE the statement transform's
+   compound-inline attempt, so the num-tmp's search from its store hits
+   the array's ldobj (an impure/impure MayReorder pair) and stops
+   before reaching the index's ldloc. The C# avoids this by ORDER: its
+   reader flushed the window load into an early S_1 slot (the
+   flush-before-emit), and that slot's inline fails in the prefix (the
+   local0 store's ldobj blocks it -- the same impure wall), leaving a
+   pure ldloc in the ldelema for the num-inline to pass. THE DEEP FIX:
+   the reader's flush-at-emit (see the experiment below) plus the
+   inliner-order work -- a multi-slice campaign.
+2. THE ?. NULL-PROPAGATION FAMILY (the queue's standing item): the
+   port's `finally { if (I_0 == 0) {} I_0.Dispose(); }` vs the oracle's
+   `finally { moduleDefMD?.Dispose(); }` (the converted iterators'
+   finally regions, ~26 net10 sites).
+3. The remaining I_N placeholders after the field-surface fix are small
+   (33 net10 sites, mostly the ?. family's I_0).
+
+### THE FLUSH-AT-EMIT EXPERIMENT (attempted and REVERTED this session)
+
+The C# ReadInstructions flushes the expression stack before every
+emitted (non-pushed) instruction:
+`if (!decodedInstruction.PushedOnExpressionStack) {
+FlushExpressionStack(); block.Block.Instructions.Add(inst); }`. The port
+only flushes at Peek (dup), branches, and block ends -- pending field
+loads survive across emitted stores, so the port's ILAst block layout
+differs from the C#'s (the C# materializes the orphans as slots AT each
+emission). Implementing the flush alone (FlushExpressionStack before
+each block->Add in DecodeOne) was measured WORSE: dnlib 69339->69523,
+net10 86872->87130, cui 1771->1789 -- the earlier-flushed slots are NOT
+eliminated by the port's downstream (the inliner's impure-pair walls
+stop on them in the port's orderings). The C# eliminates them because
+its layout makes each slot's use come while the intervening expressions
+are still pure slots. LANDING THE FLUSH NEEDS THE INLINER-ORDER WORK
+FIRST (or together). Recorded here so the experiment is not repeated
+blind.
+
+### The standing gates (all verified on the committed tree)
+
+- The connid pin b38babc5465c9861; dnlib 69286; net10 86593; cui 1771;
+  hello 3; the suite control 268; the canary renders 8788 lines.

@@ -744,3 +744,208 @@ TEST(SwitchOnStringTransformTest, LegacyDictionarySwitchFolds)
 }
 
 } // namespace
+// The reader-model bridge: the port's reader ends a block at every
+// conditional branch (each guard is a block FINAL with the fall-through in
+// the NEXT block); the C# reader keeps the brtrue fall-through in the same
+// block, so its cascading chains are `[if (cond) br handler, br nextCase]`
+// instruction pairs -- the shape the ported cascade matchers expect. The
+// bridge coalesces the fragmented form before the matchers run. This test
+// builds the fragmented form (the reader's output) and asserts the switch
+// synthesis fires on it.
+TEST(SwitchOnStringTransformTest, FragmentedCascadingChainConvertsToSwitch)
+{
+    auto stringType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
+    auto fn = std::make_unique<IL::ILFunction>();
+    auto s = MakeLocal("s", stringType);
+    fn->Variables.push_back(s);
+
+    auto container = std::make_unique<IL::BlockContainer>();
+    // The handler bodies + the default exit (referenced by the chain, no
+    // flow meaning in the order).
+    std::vector<IL::Block*> bodies;
+    std::vector<std::unique_ptr<IL::Block>> bodyOwners;
+    auto exit = std::make_unique<IL::Block>();
+    exit->Kind = IL::BlockKind::ControlFlow;
+    exit->Add(std::make_unique<IL::Leave>(container.get()));
+    IL::Block* exitPtr = exit.get();
+    for (int i = 0; i < 3; i++) {
+        auto body = std::make_unique<IL::Block>();
+        body->Kind = IL::BlockKind::ControlFlow;
+        body->Add(std::make_unique<IL::Leave>(container.get()));
+        bodies.push_back(body.get());
+        bodyOwners.push_back(std::move(body));
+    }
+    // The fragmented chain leads the container (the head is the
+    // method-body entry, the container's first block): each guard is its
+    // own block's FINAL (the port's reader form); the fall-through
+    // continues to the next guard block.
+    IL::Block* headPtr = nullptr;
+    const char* values[3] = {"aa", "bb", "cc"};
+    for (int i = 0; i < 3; i++) {
+        auto guard = std::make_unique<IL::Block>();
+        guard->Kind = IL::BlockKind::ControlFlow;
+        if (i == 0) headPtr = guard.get();
+        auto eqCall = std::make_unique<IL::Call>("System.String::op_Equality");
+        eqCall->DeclaringType =
+            std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
+        eqCall->Arguments.push_back(std::make_unique<IL::LdLoc>(s));
+        eqCall->Arguments.push_back(
+            std::make_unique<IL::LdStr>(values[i]));
+        auto ifInst = std::make_unique<IL::IfInstruction>(
+            std::move(eqCall),
+            std::make_unique<IL::Branch>(bodies[i]));
+        guard->SetFinal(std::move(ifInst));
+        container->AddBlock(std::move(guard));
+    }
+    // The chain's tail: the unconditional branch to the default exit.
+    auto tail = std::make_unique<IL::Block>();
+    tail->Kind = IL::BlockKind::ControlFlow;
+    tail->SetFinal(std::make_unique<IL::Branch>(exitPtr));
+    container->AddBlock(std::move(tail));
+    for (auto& b : bodyOwners)
+        container->AddBlock(std::move(b));
+    container->AddBlock(std::move(exit));
+
+    fn->Body = std::move(container);
+    IL::RecomputeIncomingEdgeCounts(*fn);
+    IL::ComputeVariableUsage(*fn);
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.SwitchStatementOnString = true;
+    IL::SwitchOnStringTransform transform;
+    transform.Run(*fn, ctx);
+
+    // The chain synthesized into a SwitchInstruction over the string.
+    ASSERT_NE(headPtr, nullptr);
+    auto* sw = dynamic_cast<IL::SwitchInstruction*>(
+        headPtr->Instructions.empty()
+            ? nullptr
+            : dynamic_cast<IL::SwitchInstruction*>(
+                  headPtr->Instructions[0].get()));
+    ASSERT_NE(sw, nullptr) << "the fragmented chain converts to a switch";
+    auto* stringToInt = dynamic_cast<IL::StringToInt*>(sw->Value.get());
+    ASSERT_NE(stringToInt, nullptr);
+    EXPECT_EQ(stringToInt->Map.size(), 3u);
+
+    // The C# Run tail (container.SortBlocks(deleteUnreachableBlocks:
+    // true)) deletes the consumed guard blocks: only the head and the
+    // handler blocks remain -- no dead [if, br] pairs render as gotos.
+    auto* body = dynamic_cast<IL::BlockContainer*>(fn->Body.get());
+    ASSERT_NE(body, nullptr);
+    EXPECT_EQ(body->Blocks.size(), 5u)
+        << "head + three handlers + exit; the guards and the default's "
+           "thunk block are gone";
+    std::function<bool(const IL::ILInstruction*)> hasOpEquality =
+        [&](const IL::ILInstruction* i) {
+        if (i == nullptr) return false;
+        if (auto* call = dynamic_cast<const IL::Call*>(i))
+            if (call->MethodName.find("op_Equality") != std::string::npos)
+                return true;
+        for (int ci = 0; ci < i->ChildCount(); ++ci)
+            if (hasOpEquality(i->GetChild(ci))) return true;
+        return false;
+    };
+    EXPECT_FALSE(hasOpEquality(body))
+        << "no guard conditions survive the switch synthesis";
+}
+
+// The reader's real tree after SwitchDetection forms the flat hash switch
+// (the shape MatchRoslynSwitchOnString sees on corpus input): the hash store
+// and the switch in one block with the switch as the block FINAL, the case
+// heads as if-finals whose true arms are the CFS-folded local returns, and
+// each case head's false path running into its own local default-return
+// block (the fold-materialized shared default). The arm still converts it
+// to the string switch.
+TEST(SwitchOnStringTransformTest, ReaderShapeRoslynSwitchConvertsToSwitch)
+{
+    auto stringType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
+    auto fn = std::make_unique<IL::ILFunction>();
+    auto container = std::make_unique<IL::BlockContainer>();
+    auto s = MakeLocal("s", stringType);
+    auto hash = MakeLocal("hash");
+    fn->Variables.push_back(s);
+    fn->Variables.push_back(hash);
+
+    auto head = std::make_unique<IL::Block>();
+    head->Kind = IL::BlockKind::ControlFlow;
+    IL::Block* headPtr = head.get();
+
+    auto hashCall = std::make_unique<IL::Call>(
+        "<PrivateImplementationDetails>::ComputeStringHash");
+    hashCall->DeclaringType = std::make_shared<TS::SimpleType>(
+        TS::TopLevelTypeName(std::string(), std::string("<PrivateImplementationDetails>")));
+    hashCall->AddArg(std::make_unique<IL::LdLoc>(s));
+    headPtr->Add(std::make_unique<IL::StLoc>(hash, std::move(hashCall)));
+
+    // The case heads and their local default-return blocks (the reader's
+    // interleaved order: each head's false path falls into its own
+    // [leave 0] block).
+    std::vector<IL::Block*> caseHeads;
+    std::vector<std::unique_ptr<IL::Block>> pending;
+    for (int i = 0; i < 2; i++) {
+        auto caseHead = std::make_unique<IL::Block>();
+        caseHead->Kind = IL::BlockKind::ControlFlow;
+        auto eqCall = std::make_unique<IL::Call>("System.String::op_Equality");
+        eqCall->DeclaringType = std::make_shared<TS::SimpleType>(
+            TS::TopLevelTypeName("System", "String"));
+        eqCall->AddArg(std::make_unique<IL::LdLoc>(s));
+        eqCall->AddArg(std::make_unique<IL::LdStr>("v" + std::to_string(i)));
+        caseHead->SetFinal(std::make_unique<IL::IfInstruction>(
+            std::move(eqCall),
+            std::make_unique<IL::Leave>(container.get(),
+                                        std::make_unique<IL::LdcI4>(1))));
+        caseHeads.push_back(caseHead.get());
+        pending.push_back(std::move(caseHead));
+        auto localDefault = std::make_unique<IL::Block>();
+        localDefault->Kind = IL::BlockKind::ControlFlow;
+        localDefault->SetFinal(std::make_unique<IL::Leave>(
+            container.get(), std::make_unique<IL::LdcI4>(0)));
+        pending.push_back(std::move(localDefault));
+    }
+
+    // The flat switch: per-case sections branch to the case heads; the
+    // default section is the merged leave body (the analysis's false-path
+    // conversion).
+    auto sw = std::make_unique<IL::SwitchInstruction>(
+        std::make_unique<IL::LdLoc>(hash));
+    for (int i = 0; i < 2; i++) {
+        auto section = std::make_unique<IL::SwitchSection>(
+            Util::LongSet(static_cast<long long>(1000 + i)));
+        section->SetBody(std::make_unique<IL::Branch>(caseHeads[static_cast<std::size_t>(i)]));
+        sw->AddSection(std::move(section));
+    }
+    auto defaultSection = std::make_unique<IL::SwitchSection>(
+        Util::LongSet(Util::LongInterval(0, 1000)).Invert());
+    defaultSection->SetBody(std::make_unique<IL::Leave>(
+        container.get(), std::make_unique<IL::LdcI4>(0)));
+    sw->AddSection(std::move(defaultSection));
+    headPtr->SetFinal(std::move(sw));
+
+    // The head is the container entry (the first block); the case heads
+    // and their local defaults follow in the reader's interleaved order.
+    container->AddBlock(std::move(head));
+    for (auto& b : pending)
+        container->AddBlock(std::move(b));
+    fn->Body = std::move(container);
+    IL::RecomputeIncomingEdgeCounts(*fn);
+    headPtr->IncomingEdgeCount = 1;
+    IL::ComputeVariableUsage(*fn);
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.SwitchStatementOnString = true;
+    IL::SwitchOnStringTransform transform;
+    transform.Run(*fn, ctx);
+
+    // The head's final is now the string switch over the raw string local.
+    auto* newSw =
+        dynamic_cast<IL::SwitchInstruction*>(headPtr->FinalInstruction.get());
+    ASSERT_NE(newSw, nullptr) << "the reader shape converts to a string switch";
+    ASSERT_EQ(headPtr->Instructions.size(), 0u)
+        << "the hash-store is folded away";
+    auto* stringToInt = dynamic_cast<IL::StringToInt*>(newSw->Value.get());
+    ASSERT_NE(stringToInt, nullptr);
+    EXPECT_EQ(stringToInt->Map.size(), 2u);
+    auto* arg = dynamic_cast<IL::LdLoc*>(stringToInt->Argument.get());
+    ASSERT_NE(arg, nullptr);
+    EXPECT_EQ(arg->Variable.get(), s.get());
+}

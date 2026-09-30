@@ -523,6 +523,11 @@ bool DynamicCallSiteTransform::ScanCallSiteInitBlock(
             if (!MatchStLocReport(BlockInstructionAt(callSiteInitBlock, pos),
                                   variableOrTemporary, value))
                 return false;
+            // The null-valued store consumed its slot: the C# reads the
+            // context argument at the fixed next index (the no-type-args
+            // shape's chain has one store per binder argument).
+            if (value != nullptr && value->Op == OpCode::LdNull)
+                pos++;
         } else {
             value = binderCall->Arguments[2].get();
             variable = nullptr;

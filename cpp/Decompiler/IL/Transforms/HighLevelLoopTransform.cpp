@@ -49,55 +49,43 @@
 
 namespace ILSpy::Decompiler::IL {
 
-// Count the edges into `entry` that originate from a Branch somewhere in the
-// function plus positional fall-through from any preceding block in its
-// container (the same rules VariableUsage's RecomputeIncomingEdgeCounts uses,
-// restricted to a single target).
-static int IncomingEdgesTo(ILInstruction* root, Block* entry, BlockContainer* loop = nullptr) {
-    int count = 0;
-    // Whether `br` is the redundant pre-header entry branch into `loop`'s
-    // header (the block before the loop container falls through into the
-    // loop, rendered as nothing by IsLoopEntryFallThrough). Such a branch is
-    // not a real incoming edge for the for-loop shape: it is the implicit
-    // loop start, not a second back-edge.
-    auto isPreHeaderEntry = [&](Branch* br) -> bool {
-        if (!loop || !br || !br->TargetBlock) return false;
-        if (loop->Blocks.empty() || loop->Blocks.front().get() != br->TargetBlock) return false;
-        Block* encBlock = nullptr;
-        for (ILInstruction* p = br; p; p = p->Parent) {
-            encBlock = dynamic_cast<Block*>(p);
-            if (encBlock) break;
-        }
-        if (!encBlock || encBlock->FinalInstruction.get() != br) return false;
-        for (ILInstruction* p = encBlock; p; p = p->Parent)
-            if (p == loop) return false;  // inside the loop: a back-edge
-        auto* encContainer = dynamic_cast<BlockContainer*>(encBlock->Parent);
-        if (!encContainer) return false;
-        for (std::size_t i = 0; i + 1 < encContainer->Blocks.size(); ++i) {
-            if (encContainer->Blocks[i].get() != encBlock) continue;
-            Block* next = encContainer->Blocks[i + 1].get();
-            if (!next || next->Instructions.empty()) return false;
-            auto* lc = dynamic_cast<BlockContainer*>(next->Instructions[0].get());
-            return lc == loop;
-        }
-        return false;
-    };
+// Count the Branch edges into `entry`, split by origin: from inside `loop`
+// (the back-edges and any branches that skip the increment) vs from outside
+// it. The C# MatchForLoop gate reads `loop.EntryPoint.IncomingEdgeCount !=
+// 2`, where one of the two edges is the container connection the C#
+// BlockContainer itself contributes on `Connected()` -- the entry edge of
+// the container as a statement, independent of any Branch. This port's
+// reader materializes that connection as an explicit `br entry` in the
+// loop's pre-header whenever the fall into the loop is not positional, and
+// the loop detection places the container at the header block's IL position,
+// so the pre-header and the container need not be adjacent. The equivalent
+// gate is therefore by origin: exactly one inside edge (the single
+// back-edge from the increment block; a second would be a continue-to-head
+// the C# count of 2 would reject), and at most one outside edge (the
+// materialized container connection -- whether the pre-header branches to
+// the entry or falls through into the container positionally; a second
+// outside branch would be a real goto into the loop).
+struct IncomingEdgeCounts {
+    int inside = 0;
+    int outside = 0;
+};
+
+static IncomingEdgeCounts IncomingBranchEdges(ILInstruction* root, Block* entry, BlockContainer* loop) {
+    IncomingEdgeCounts counts;
     std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
         if (!inst) return;
-        if (auto* br = dynamic_cast<Branch*>(inst))
-            if (br->TargetBlock == entry && !isPreHeaderEntry(br)) ++count;
-        if (auto* c = dynamic_cast<BlockContainer*>(inst)) {
-            for (std::size_t i = 0; i + 1 < c->Blocks.size(); ++i) {
-                if (c->Blocks[i + 1].get() == entry) {
-                    ILInstruction* fin = c->Blocks[i]->FinalInstruction.get();
-                    if (fin && !HasFlag(fin->Flags(), InstructionFlags::EndPointUnreachable)) ++count;
-                }
+        if (auto* br = dynamic_cast<Branch*>(inst)) {
+            if (br->TargetBlock == entry && loop != nullptr) {
+                bool fromInside = false;
+                for (ILInstruction* p = br; p != nullptr; p = p->Parent)
+                    if (p == loop) { fromInside = true; break; }
+                if (fromInside) ++counts.inside; else ++counts.outside;
             }
         }
         for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
     };
     walk(root);
-    return count;
+    return counts;
 }
 
 // Whether `inst` or any descendant is an assignment (StLoc or a compound
@@ -138,7 +126,8 @@ static void CollectLoadedVariables(ILInstruction* inst, std::set<ILVariable*>& o
 // container (the `int i = 0;` in the same block as a leading `for`), or, if the
 // loop is the holder's first instruction, the preceding sibling block's
 // instructions (a separate pre-header block).
-static void CollectInitStores(BlockContainer* loop, std::set<ILVariable*>& out) {
+static void CollectInitStores(BlockContainer* loop, Block* entry, ILInstruction* functionRoot,
+                              std::set<ILVariable*>& out) {
     std::function<void(ILInstruction*)> collectStores = [&](ILInstruction* in) {
         if (!in) return;
         if (auto* st = dynamic_cast<StLoc*>(in))
@@ -166,14 +155,42 @@ static void CollectInitStores(BlockContainer* loop, std::set<ILVariable*>& out) 
     // The loop is the holder's first instruction: the init is in the
     // preceding sibling block (the pre-header), if any.
     auto* c = dynamic_cast<BlockContainer*>(holder->Parent);
-    if (!c) return;
-    for (std::size_t i = 0; i < c->Blocks.size(); ++i)
-        if (c->Blocks[i].get() == holder) {
-            if (i > 0)
-                for (const auto& inst : c->Blocks[i - 1]->Instructions)
-                    collectStores(inst.get());
-            return;
+    if (c) {
+        for (std::size_t i = 0; i < c->Blocks.size(); ++i)
+            if (c->Blocks[i].get() == holder) {
+                if (i > 0)
+                    for (const auto& inst : c->Blocks[i - 1]->Instructions)
+                        collectStores(inst.get());
+                break;
+            }
+    }
+    // The pre-header need not be the holder's positional predecessor: the
+    // loop detection places the container at the header block's IL position,
+    // so the reader's block order can put other blocks between the pre-header
+    // and the holder (they belong after the loop in control flow). Follow the
+    // control flow instead: the block whose final branches to the entry from
+    // outside the loop is the pre-header (the container connection).
+    std::function<void(ILInstruction*)> findPreHeader = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (auto* br = dynamic_cast<Branch*>(inst)) {
+            if (br->TargetBlock == entry) {
+                bool fromInside = false;
+                for (ILInstruction* p = br; p != nullptr; p = p->Parent)
+                    if (p == loop) { fromInside = true; break; }
+                if (!fromInside) {
+                    for (ILInstruction* p = br; p != nullptr; p = p->Parent) {
+                        if (auto* b = dynamic_cast<Block*>(p)) {
+                            for (const auto& inst2 : b->Instructions)
+                                collectStores(inst2.get());
+                            break;
+                        }
+                    }
+                }
+            }
         }
+        for (int i = 0; i < inst->ChildCount(); ++i) findPreHeader(inst->GetChild(i));
+    };
+    if (functionRoot != nullptr) findPreHeader(functionRoot);
 }
 
 // Whether any variable loaded in `incrBlock` is DECLARED only in the loop
@@ -185,7 +202,8 @@ static void CollectInitStores(BlockContainer* loop, std::set<ILVariable*>& out) 
 // Stores in the increment itself do NOT count as in-scope (the for-update is
 // an expression, not a declaration site).
 static bool IncrementLoadsBodyDeclaredVariable(
-        BlockContainer* loop, Block* incrBlock, const std::set<const Block*>& bodyBlocks) {
+        BlockContainer* loop, Block* entry, ILInstruction* functionRoot, Block* incrBlock,
+        const std::set<const Block*>& bodyBlocks) {
     std::set<ILVariable*> loaded;
     for (const auto& inst : incrBlock->Instructions)
         CollectLoadedVariables(inst.get(), loaded);
@@ -193,7 +211,7 @@ static bool IncrementLoadsBodyDeclaredVariable(
     // In-scope: variables stored in the init region (pre-header) or the loop
     // header -- these render before the for-update and can be referenced by it.
     std::set<ILVariable*> inScope;
-    CollectInitStores(loop, inScope);
+    CollectInitStores(loop, entry, functionRoot, inScope);
     {
         std::function<void(ILInstruction*)> collectStores = [&](ILInstruction* in) {
             if (!in) return;
@@ -237,7 +255,8 @@ static bool TryMatchFor(BlockContainer* loop, ILInstruction* functionRoot) {
     // so the only counted edge to the entry block is the increment back-edge;
     // anything else (a second back-edge skipping the increment, an external
     // goto) makes the for shape unsafe.
-    if (IncomingEdgesTo(functionRoot, entry, loop) != 1) return false;
+    IncomingEdgeCounts edges = IncomingBranchEdges(functionRoot, entry, loop);
+    if (edges.inside != 1 || edges.outside > 1) return false;
     // Find the increment block: all simple statements + Branch entry.
     std::size_t incIndex = std::string::npos;
     for (std::size_t i = 1; i < loop->Blocks.size(); ++i) {
@@ -254,7 +273,7 @@ static bool TryMatchFor(BlockContainer* loop, ILInstruction* functionRoot) {
         std::set<const Block*> bodyBlocks;
         for (std::size_t k = 1; k < loop->Blocks.size(); ++k)
             if (k != i) bodyBlocks.insert(loop->Blocks[k].get());
-        if (IncrementLoadsBodyDeclaredVariable(loop, b, bodyBlocks)) continue;
+        if (IncrementLoadsBodyDeclaredVariable(loop, entry, functionRoot, b, bodyBlocks)) continue;
         incIndex = i;
         break;
     }

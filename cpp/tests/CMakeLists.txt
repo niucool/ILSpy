@@ -26,6 +26,7 @@ add_executable(ilspy_tests
     Decompiler/Xml/XNode_Test.cpp
     Decompiler/Xml/XObject_Test.cpp
     Decompiler/Metadata/Metadata_Test.cpp
+    Decompiler/Metadata/MemberRefFieldSignature_Test.cpp
     Decompiler/Metadata/WebCilFile_Test.cpp
     Decompiler/Metadata/MetadataAttributes_Test.cpp
     Decompiler/Metadata/MethodBody_Test.cpp
@@ -518,6 +519,7 @@ add_executable(ilspy_tests
     Decompiler/IL/Transforms/LocalFunctionDecompiler_Test.cpp
     Decompiler/IL/Transforms/SwitchOnStringHashtable_Test.cpp
     Decompiler/IL/Transforms/SwitchOnStringLengthChar_Test.cpp
+    Decompiler/IL/Transforms/SwitchOnStringTransform_Test.cpp
     Decompiler/IL/Transforms/TransformArrayInitializers_Test.cpp
     Decompiler/CSharp/Transforms/PatternStatementTransform_Test.cpp
     Decompiler/CSharp/Transforms/PrettifyAssignments_Test.cpp
@@ -527,6 +529,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/ILAstToCSharpAsyncDynamicArms_Test.cpp
     Decompiler/CSharp/FacadeMemberModifiers_Test.cpp
     Decompiler/CSharp/ForeachVariableName_Test.cpp
+    Decompiler/CSharp/KeywordIdentifierEscape_Test.cpp
     Decompiler/CSharp/CSharpDecompiler_Test.cpp
     Decompiler/CSharp/Transforms/CustomPatterns_Test.cpp
     Decompiler/CSharp/Transforms/CombineQueryExpressions_Test.cpp
