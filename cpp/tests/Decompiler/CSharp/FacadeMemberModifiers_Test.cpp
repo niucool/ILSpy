@@ -874,6 +874,30 @@ TEST(FacadeMemberModifiersTest, OverrideDirectiveRendersCrossAssemblyForwarder)
         << text;
 }
 
+// The C# InlineAssignmentTest's while-condition shapes: the assignment
+// expression inside the loop condition (the compiler emits `call; dup;
+// stloc; brfalse` / `...; and; ...`). The TransformInlineAssignmentLocal
+// fold plus the per-statement inliner's re-run produce the
+// `(v = expr) != null` / `((v = expr) & mask) == 0` forms -- the
+// assignment-in-condition the oracle renders (the Inflater.DecodeHuffman
+// family).
+TEST(FacadeMemberModifiersTest, InlineAssignmentInWhileCondition) {
+    constexpr const char* kFixture =
+        "/home/jim/ilspy-test-fixtures/inline_assign_fixture/"
+        "InlineAssignFixture.dll";
+    std::string text;
+    if (!RenderType(kFixture, "InlineAssignmentShapes", text))
+        GTEST_SKIP() << "the inline-assignment fixture is not provisioned";
+    EXPECT_NE(text.find("while ((text = reader.ReadLine()) != null)"),
+              std::string::npos)
+        << text;
+    EXPECT_NE(text.find("while (((num2 = reader.Read()) & mask) == 0)"),
+              std::string::npos)
+        << text;
+    EXPECT_EQ(text.find("S_0"), std::string::npos)
+        << "the placeholder stack slot is inlined away" << text;
+}
+
 // The C# DoDecompileType worklist (EnqueueReferencedMembers): a hidden
 // compiler-generated type whose declaring type's rendered members still
 // reference it -- the state-machine attribute's typeof -- renders at its

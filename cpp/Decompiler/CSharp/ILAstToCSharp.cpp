@@ -5282,10 +5282,25 @@ private:
                 // `outer = (inner = value)` -- render as the chained assignment
                 // `outer = inner = value`. Chained assignment is right-
                 // associative, so no parentheses are needed around the inner.
+                // Assignment has the lowest C# expression precedence, so an
+                // assignment used as an OPERATOR operand needs parentheses:
+                // `(text = ReadLine()) != null`, not `text = ReadLine() != null`
+                // (which parses as `text = (ReadLine() != null)` -- a different
+                // program). The operand contexts are Comp and the binary
+                // arithmetic/bitwise operators; the chain (another StLoc), the
+                // call arguments, and the statement/return-value slots keep
+                // the bare form (the C# output visitor's precedence-driven
+                // parentheses, approximated by the parent's opcode).
                 const auto& st = static_cast<const StLoc&>(inst);
                 std::string name = st.Variable ? CSharp::OutputVisitor::EscapeIdentifier(st.Variable->Name) : std::string("?");
                 std::string val = st.Value ? Expr(*st.Value) : std::string("(default)");
-                return name + " = " + val;
+                std::string text = name + " = " + val;
+                const ILInstruction* parent = inst.Parent;
+                bool operandContext =
+                    parent != nullptr &&
+                    (parent->Op == OpCode::Comp ||
+                     parent->Op == OpCode::BinaryNumericInstruction);
+                return operandContext ? "(" + text + ")" : text;
             }
             case OpCode::LdLoca: {
                 const auto& ld = static_cast<const LdLoca&>(inst);
@@ -5578,6 +5593,15 @@ private:
                         parenthesize = true;
                 } else if (p != nullptr && p->Op == OpCode::IfInstruction &&
                            inst.ChildIndex != 0) {
+                    parenthesize = true;
+                } else if (p != nullptr && p->Op == OpCode::Comp &&
+                           (bin.Operator == BinaryNumericOperator::BitAnd ||
+                            bin.Operator == BinaryNumericOperator::BitOr ||
+                            bin.Operator == BinaryNumericOperator::BitXor)) {
+                    // The C# bitwise operators bind looser than the
+                    // comparison operators: an `a & b` compared against a
+                    // constant is `(a & b) == 0`, not `a & b == 0` (which
+                    // parses as `a & (b == 0)`).
                     parenthesize = true;
                 }
                 if (parenthesize) text = "(" + text + ")";

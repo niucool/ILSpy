@@ -462,6 +462,14 @@ bool TransformAssignment::TransformInlineAssignmentLocal(
     auto inlineAssignment = std::make_unique<StLoc>(
         stackVar, std::make_unique<StLoc>(var, std::move(value)));
     nextInst->ReplaceWith(std::move(inlineAssignment));
+    // The fold consumed nextInst's load of the stack variable (the C# maintains
+    // the variable's usage counts incrementally; this port recomputes them at
+    // pass boundaries, so a stale LoadCount here would keep the per-statement
+    // inliner from inlining the stack variable's remaining load into the loop
+    // condition -- the `(v = expr)`-in-condition shapes would keep the
+    // placeholder stack slot).
+    if (stackVar != nullptr && stackVar->LoadCount > 0)
+        stackVar->LoadCount--;
     return true;
 }
 
@@ -478,12 +486,15 @@ void TransformAssignment::Run(Block& block, int pos, StatementTransformContext& 
     // the three inc/dec folds. TransformInlineAssignmentStObjOrCall (the
     // StObj/Call inline-assign, needs InferType / IsSameMember / IMethod) is
     // deferred, so only TransformInlineAssignmentLocal is wired here; it runs
-    // before the inc/dec folds so a folded inline-assignment short-circuits the
-    // position (the driver advances or re-runs). The inline-assignment folds do
-    // NOT call RequestRerunCurrentPosition (the C# `return` after them); only the
-    // inc/dec folds request a rerun (the C# `context.RequestRerun()`).
-    if (TransformInlineAssignmentLocal(block, pos, context))
+    // before the inc/dec folds. The C# gates the fold with `if (...) {
+    // context.RequestRerun(); ... }` -- BOTH the inline-assignment folds and
+    // the inc/dec folds request the rerun (the fold "creates a top-level
+    // stloc which might affect inlining" -- the stack variable's remaining
+    // load becomes inlinable, e.g. into the following loop condition).
+    if (TransformInlineAssignmentLocal(block, pos, context)) {
+        context.RequestRerunCurrentPosition();
         return;
+    }
     if (TransformPostIncDecOperatorWithInlineStore(block, pos, context) ||
         TransformPostIncDecOperator(block, pos, context) ||
         TransformPreIncDecOperatorWithInlineStore(block, pos, context))
