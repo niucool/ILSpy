@@ -246,6 +246,59 @@ bool VariablesEqual(const ILVariable* x, const ILVariable* y) {
     return false;
 }
 
+// Port of the C# `ILInstruction.Match(other)` structural comparison for the
+// address shapes the compound-load match compares (the C# PerformMatch: the
+// LdLoc compares the variable; the LdFlda the field plus the target; the
+// constants their values; the rest recurse over the children). The C# Match
+// is generic; this covers the address-computation nodes (ldloc/ldloca/ldflda/
+// ldelema/constants) and falls back to the children for the rest.
+bool AddressExpressionsMatch(const ILInstruction* a, const ILInstruction* b) {
+    if (a == b) return true;
+    if (a == nullptr || b == nullptr || a->Op != b->Op) return false;
+    switch (a->Op) {
+        case OpCode::LdLoc: {
+            const auto* la = static_cast<const LdLoc*>(a);
+            const auto* lb = static_cast<const LdLoc*>(b);
+            return la->Variable.get() == lb->Variable.get();
+        }
+        case OpCode::LdLoca: {
+            const auto* la = static_cast<const LdLoca*>(a);
+            const auto* lb = static_cast<const LdLoca*>(b);
+            return la->Variable.get() == lb->Variable.get();
+        }
+        case OpCode::LdFlda: {
+            const auto* fa = static_cast<const LdFlda*>(a);
+            const auto* fb = static_cast<const LdFlda*>(b);
+            return fa->FieldName == fb->FieldName &&
+                   AddressExpressionsMatch(fa->Target.get(), fb->Target.get());
+        }
+        case OpCode::LdcI4:
+            return static_cast<const LdcI4*>(a)->Value ==
+                   static_cast<const LdcI4*>(b)->Value;
+        default:
+            if (a->ChildCount() != b->ChildCount()) return false;
+            for (int i = 0; i < a->ChildCount(); ++i)
+                if (!AddressExpressionsMatch(a->GetChild(i), b->GetChild(i)))
+                    return false;
+            return true;
+    }
+}
+
+// Port of the C# `ILVariable.IsUsedWithin` for the forbidden-variable check:
+// whether the variable is loaded or address-taken anywhere within the tree.
+bool IsUsedWithin(const ILVariable* v, const ILInstruction* inst) {
+    if (v == nullptr || inst == nullptr) return false;
+    if (inst->Op == OpCode::LdLoc &&
+        static_cast<const LdLoc*>(inst)->Variable.get() == v)
+        return true;
+    if (inst->Op == OpCode::LdLoca &&
+        static_cast<const LdLoca*>(inst)->Variable.get() == v)
+        return true;
+    for (int i = 0; i < inst->ChildCount(); ++i)
+        if (IsUsedWithin(v, inst->GetChild(i))) return true;
+    return false;
+}
+
 } // namespace
 
 bool IsCompoundStore(ILInstruction* inst, TypeSystem::ITypePtr& storeType,
@@ -267,8 +320,24 @@ bool IsCompoundStore(ILInstruction* inst, TypeSystem::ITypePtr& storeType,
             return true;
         }
     }
-    // StObj (needs InferType for the target's real type) and Call (needs
-    // IsSameMember + IMethod for the property-setter gate) are deferred.
+    if (const auto* stobj = dynamic_cast<StObj*>(inst)) {
+        // The StObj case: a field/element store. The C# infers the real type
+        // from the target (a ByReferenceType/PointerType element type when
+        // compatible with stobj.Type, else stobj.Type); this port has no
+        // InferType, so stobj.Type is used directly (the field shapes this
+        // family targets carry the store type in the StObj -- e.g. an int
+        // field's stfld decodes with the field's type). The Call case (the
+        // property-setter gate) remains deferred.
+        storeType = stobj->Type;
+        value = stobj->Value.get();
+        // The C# gate: the store's target must be pure (the compound target
+        // gets reused; an impure address computation could not be). The
+        // reader's ldfld/stfld/stelem set DelayExceptions so their address
+        // computations are flag-pure.
+        return IsPure(stobj->Target->Flags());
+    }
+    // The Call case (needs IsSameMember + IMethod for the property-setter
+    // gate) is deferred.
     return false;
 }
 
@@ -301,9 +370,32 @@ bool IsMatchingCompoundLoad(ILInstruction* load, ILInstruction* store,
         };
         return true;
     }
-    // LdObj/StObj (needs IsDuplicatedAddressComputation + previousInstruction)
-    // and MatchingGetterAndSetterCalls (needs IMethod/AccessorOwner) are
-    // deferred -- return false.
+    // The LdObj/StObj case: the load reads through the same address the store
+    // writes (a field or element compound). The C# first checks the purity of
+    // both address computations, then the forbidden variable, then either a
+    // structural Match of the two addresses (this port) or the duplicated
+    // Roslyn address computation through a stack slot (deferred: it needs the
+    // previousInstruction context this port's signature does not carry). The
+    // address is cloned out of the load (the C# reuses the node reference;
+    // the load is inside the value the store gets replaced with, so it is
+    // destroyed by the replacement).
+    auto* ldobj = dynamic_cast<LdObj*>(load);
+    auto* stobj = dynamic_cast<StObj*>(store);
+    if (ldobj && stobj) {
+        if (!IsPure(ldobj->Target->Flags())) return false;
+        if (forbiddenVariable != nullptr &&
+            IsUsedWithin(forbiddenVariable, ldobj->Target.get()))
+            return false;
+        if (!AddressExpressionsMatch(ldobj->Target.get(), stobj->Target.get()))
+            return false;
+        if (ldobj->Target == nullptr) return false;
+        target = ldobj->Target->Clone();
+        targetKind = CompoundTargetKind::Address;
+        finalizeMatch = nullptr;
+        return true;
+    }
+    // MatchingGetterAndSetterCalls (needs IMethod/AccessorOwner) and the
+    // duplicated-address-computation path are deferred -- return false.
     return false;
 }
 
@@ -1012,4 +1104,59 @@ bool TransformAssignment::TransformPreIncDecOperatorWithInlineStore(
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Port of TransformAssignment.HandleCompoundAssign, the StObj binary case
+// (the expression-transform entry the C# ExpressionTransforms.VisitStObj calls
+// after base.VisitStObj). The C# signature takes the compoundStore plus the
+// StatementTransformContext; the port takes the settings directly (the
+// remaining context uses -- the Step counter -- are debug-only). The C# flow:
+// the settings gate, the IsCompoundStore/IsMatchingCompoundLoad pair, the
+// ValidateCompoundAssign check, then the store is replaced with a
+// NumericCompoundAssign in the EvaluatesToNewValue mode (the compound's value
+// is the new value: `x = x op v` becomes `x op= v`). The StLoc-in-setter
+// lifting (the property `set_P(stloc v(binary.op(get_P(...), value)))` shape),
+// the Call/property case, the user-defined-operator case, the dynamic-binary
+// case and the string.Concat case are deferred (they need IMethod /
+// AccessorOwner metadata this port does not model).
+// ---------------------------------------------------------------------------
+bool HandleCompoundAssignStObj(StObj* stobj, const ILTransformSettings* settings) {
+    if (settings == nullptr) return false;
+    // The C# gate: both MakeAssignmentExpressions and IntroduceIncrementAndDecrement.
+    if (!settings->MakeAssignmentExpressions || !settings->IntroduceIncrementAndDecrement)
+        return false;
+    TypeSystem::ITypePtr targetType;
+    ILInstruction* value = nullptr;
+    if (!IsCompoundStore(stobj, targetType, value)) return false;
+    // The binary case: `stobj(addr, binary.op(ldobj(addr), rhs))`.
+    Conv* conv = nullptr;
+    ILInstruction* unwrapped = UnwrapSmallIntegerConv(value, conv);
+    auto* binary = dynamic_cast<BinaryNumericInstruction*>(unwrapped);
+    if (binary == nullptr) return false;
+    // (The C# `if (compoundStore is StLoc) return false;` guard only rejects
+    // the local-variable entry; this entry is StObj-only.)
+    std::unique_ptr<ILInstruction> target;
+    CompoundTargetKind targetKind = CompoundTargetKind::Address;
+    CompoundFinalizeMatch finalizeMatch;
+    if (!IsMatchingCompoundLoad(binary->Left.get(), stobj, target, targetKind,
+                                finalizeMatch, nullptr))
+        return false;
+    if (!ValidateCompoundAssign(binary, conv, targetType.get(), settings))
+        return false;
+    if (finalizeMatch) {
+        // (The LdObj/StObj match sets no finalizeMatch; kept for parity with
+        // the C# invoke-before-build order.)
+    }
+    // Detach/clone the value and the target before ReplaceWith destroys the
+    // store's subtree (no GC -- the binary and the ldobj live inside it).
+    auto rhs = binary->Right ? binary->Right->Clone() : nullptr;
+    auto nca = std::make_unique<NumericCompoundAssign>(
+        binary->Operator, binary->CheckForOverflow, binary->Sign,
+        binary->LeftInputType, binary->RightInputType, binary->ResultStackType,
+        binary->IsLifted, targetType, CompoundEvalMode::EvaluatesToNewValue,
+        std::move(target), targetKind, std::move(rhs));
+    stobj->ReplaceWith(std::move(nca));
+    return true;
+}
+
 } // namespace ILSpy::Decompiler::IL
+

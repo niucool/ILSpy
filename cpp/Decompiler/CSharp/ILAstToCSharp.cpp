@@ -5934,8 +5934,15 @@ private:
                     ca.Target && ca.Target->Op == OpCode::LdLoca) {
                     const auto& lda = static_cast<const LdLoca&>(*ca.Target);
                     target = lda.Variable ? CSharp::OutputVisitor::EscapeIdentifier(lda.Variable->Name) : std::string("?");
+                } else if (ca.Target) {
+                    // A field or element target: the compound stores through
+                    // the address, so the target renders as the store's
+                    // left-hand side (the same field-path / element-access
+                    // text the StObj statement uses), not as an address
+                    // expression.
+                    target = StoreTargetText(*ca.Target);
                 } else {
-                    target = ca.Target ? Expr(*ca.Target) : std::string("(default)");
+                    target = std::string("(default)");
                 }
                 std::string value = ca.Value ? Expr(*ca.Value) : std::string("(default)");
                 // The post-increment/decrement: Add/Sub with a ldc.i4 1 RHS in

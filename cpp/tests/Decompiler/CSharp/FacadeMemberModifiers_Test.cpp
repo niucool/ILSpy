@@ -919,6 +919,25 @@ TEST(FacadeMemberModifiersTest, ArrayFieldAccessInlinesReaderStackSlots) {
         << text;
 }
 
+// The C# ExpressionTransforms.VisitStObj calls
+// TransformAssignment.HandleCompoundAssign: a `stobj(addr, binary.op(ldobj(
+// addr), value))` over the same pure address becomes
+// `compound.op.new(addr, value)` so the field compound renders `field op=
+// value` instead of `field = field op value` (the OutputWindow
+// `windowEnd &= 32767` family).
+TEST(FacadeMemberModifiersTest, FieldCompoundAssignmentFolds) {
+    constexpr const char* kFixture =
+        "/home/jim/ilspy-test-fixtures/inline_assign_fixture/"
+        "InlineAssignFixture.dll";
+    std::string text;
+    if (!RenderType(kFixture, "InlineAssignmentShapes", text))
+        GTEST_SKIP() << "the inline-assignment fixture is not provisioned";
+    EXPECT_NE(text.find("count &= mask;"), std::string::npos) << text;
+    EXPECT_NE(text.find("count += 2;"), std::string::npos) << text;
+    EXPECT_EQ(text.find("count = count &"), std::string::npos) << text;
+    EXPECT_EQ(text.find("count = count +"), std::string::npos) << text;
+}
+
 // The C# DoDecompileType worklist (EnqueueReferencedMembers): a hidden
 // compiler-generated type whose declaring type's rendered members still
 // reference it -- the state-machine attribute's typeof -- renders at its
