@@ -5762,3 +5762,86 @@ family needs it.
    DeobUtils.GetInitCcts into the yield-return form; the port leaves
    the raw state machine -- found while measuring this slice; a big
    family if it lands).
+
+## Session record: the iterator-decompile gap (dc7ca83eb)
+
+Corpus: dnlib 72052 -> **69539** (-2513), net10 88804 -> **87148**
+(-1656), cui 2258 -> **1774** (-484), hello 3, the pin
+b38babc5465c9861 unchanged, the suite control 268, the canary renders
+8789 lines, the whole net10 module is ASAN-clean. The yield-return
+sites: 40 dnlib / 25 net10 / 4 cui.
+
+### dc7ca83eb "Faithful dup reader slot reuse; iterator stubs decompile"
+
+THE ROOT DIVERGENCE: the reader's dup opcode. The C# `case Dup: return
+Push(Peek())` -- the Peek FLUSHES the expression stack into committed
+stack slots and returns `ldloc` of the top slot, so BOTH copies of a
+duplicated value read ONE committed slot (the Roslyn parameterized
+iterator stub `newobj; dup; stfld <>3__p1; dup; stfld <>3__p2; ret`
+reads the same slot for every parameter store and the return). The port
+materialized a FRESH dup_N slot per dup occurrence -- the copy between
+the parameter stores broke MatchEnumeratorCreationPattern (a copy the
+inliner cannot fold: the second slot is multi-use). THE FIX:
+FlushExpressionStack + `ldloc(currentStack.back())` -- the C# shape.
+
+THE EXPOSED UNSOUNDNESSES (each ASAN-verified on the whole net10
+module):
+1. The converted function outlived the source MoveNext tree (the C# GC
+   keeps it for the clones' un-retargeted branch targets -- the branches
+   inside cloned nested containers). FIX: ILFunction::KeepAliveFunctions
+   (the GC-root equivalent).
+2. The port's BlockContainer::Clone lacked the C#'s retarget pass (the
+   cloned branches whose targets are the original container's own
+   blocks -> the clone's blocks at the same ChildIndex; the cloned
+   leaves ditto). FIX: the C#-faithful remap in ILInstructionClone.cpp.
+3. TryInlineIfFallThrough's single-predecessor gate only saw the CFG of
+   the container being processed -- a branch in a SIBLING container
+   targeting the fall-through block survived the erase as a dangling
+   TargetBlock (the ASAN heap-use-after-free in
+   VariableUsage::CountEdges). FIX: a whole-function-tree walk for
+   branches targeting the block.
+4. DynamicCallSiteTransform's InvokeMember binder-arg scan mis-advanced
+   its store position in the no-type-arguments shape (the ldnull store
+   consumed a slot the C# reads the context argument at) -- the faithful
+   dup slots stopped the binder args inlining, exposing it. FIX: pos++
+   for the null-valued store (the C# fixed-index behavior).
+
+THE FIXTURE: IteratorFixture gained the InstanceForEach shape (an
+instance iterator with a captured this and a foreach over IEnumerable
+with a break); the enumerator scan now prefers the Numbers state
+machine (the csc emits the nested state machines in a
+build-order-dependent row order). The fixture rebuild command:
+`dotnet /home/jim/.dotnet/sdk/10.0.401/Roslyn/bincore/csc.dll -nologo
+-t:library -out:IteratorFixture.dll -langversion:latest -nostdlib
+-noconfig -r:.../System.Private.CoreLib.dll -r:.../System.Runtime.dll
+-r:.../System.Collections.dll IteratorFixture.cs` (the shared 10.0.12
+runtime dir).
+
+THE DEBUGGING TECHNIQUES (reusable): the ASAN build at
+build/linux-asan (a full CLI rebuild over the current tree gives the
+exact use-after-free reports with the freed-by and allocated-by
+stacks); a SIGSEGV/SIGABRT backtrace handler in ILSpyCmd/main.cpp
+(removed before the commit); the env-gated probes (ILSPY_PROBE_YLD etc.
+-- removed before the commit).
+
+### The standing gates (all verified on the committed tree)
+
+- The connid pin b38babc5465c9861; dnlib 69539; net10 87148; cui 1774;
+  hello 3; the yields 40/25/4; the suite control 268; the canary
+  renders 8789 lines; the net10 module ASAN-clean.
+
+### The queue (updated, in order)
+
+1. The label-merged regions (the cross-container analysis).
+2. The switch-inline section-order relaxation.
+3. The goto families (the not-found/adjacent split, the span-escapes,
+   the 2 dangling gotos).
+4. The `?.` shapes + the pdbState sites.
+5. The remaining iterator/render polish: the state machine CLASSES
+   still render alongside the decompiled iterators (the oracle hides
+   them when the creating method converts -- the MemberIsHidden
+   [IteratorStateMachine] gate); the placeholder variable names in the
+   converted bodies (I_0/S_0 -- the AssignVariableNames over the
+   fieldToParameterMap/StateMachingField metadata); the corpus diff now
+   has a large "converted body shape" family worth a fidelity pass
+   (foreach, using, the try-finally forms over the converted bodies).
