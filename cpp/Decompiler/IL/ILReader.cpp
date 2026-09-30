@@ -595,23 +595,18 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             break;  // discard
         }
         case ILOpCode::Dup: {
-            if (s.expressionStack.empty()) {
-                // Duplicating a committed stack-slot value is just another load
-                // of the slot (the C# Peek does the same via currentStack).
-                if (s.currentStack.empty()) return DecodeOutcome::Bail;
-                if (!s.Push(std::make_unique<LdLoc>(s.currentStack.back()))) return DecodeOutcome::Bail;
-                break;
-            }
-            auto top = s.Pop();
-            if (!top) return DecodeOutcome::Bail;
-            auto v = std::make_shared<ILVariable>();
-            v->Name = "dup_" + std::to_string(start);
-            v->Kind = VariableKind::StackSlot;
-            v->Type = TypeOfValue(top.get());
-            s.stackVarsCreated.push_back(v);
-            block->Add(std::make_unique<StLoc>(v, std::move(top)));
-            if (!s.Push(std::make_unique<LdLoc>(v))) return DecodeOutcome::Bail;
-            if (!s.Push(std::make_unique<LdLoc>(v))) return DecodeOutcome::Bail;
+            // The C# `return Push(Peek())`: the Peek FLUSHES the expression
+            // stack into committed stack slots (the duplicated value crosses
+            // the materialization boundary once) and loads the top committed
+            // slot -- the slot STAYS committed, so both copies of the value
+            // read the same slot (the Roslyn iterator stub's `newobj; dup;
+            // stfld ...; dup; stfld ...; ret` reuses ONE slot for every
+            // parameter store and the return; a fresh slot per dup would
+            // leave a copy between the stores that breaks the
+            // enumerator-creation pattern).
+            FlushExpressionStack(s, block);
+            if (s.currentStack.empty()) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<LdLoc>(s.currentStack.back()))) return DecodeOutcome::Bail;
             break;
         }
 

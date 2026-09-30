@@ -222,6 +222,28 @@ bool TryInlineIfFallThrough(BlockContainer* container, std::size_t blockIndex) {
     auto* ftNode = cfg.GetNode(fallThrough);
     if (!ftNode || ftNode->Predecessors.size() != 1) return false;
     if (ftNode->Predecessors[0] != cfg.GetNode(block)) return false;
+    // The CFG above only sees this container's subtree: a branch in a
+    // SIBLING container (the same function, a different container) may
+    // still target the fall-through block, and erasing it from this
+    // container would destroy the block under that branch's TargetBlock.
+    // Walk the whole function tree for branches targeting the block --
+    // the single CFG predecessor is the positional fall-through, so any
+    // branch hit makes the erase unsafe.
+    {
+        ILInstruction* root = container;
+        while (root->Parent != nullptr) root = root->Parent;
+        std::vector<ILInstruction*> stack{root};
+        while (!stack.empty()) {
+            ILInstruction* node = stack.back();
+            stack.pop_back();
+            if (auto* br = dynamic_cast<Branch*>(node)) {
+                if (br->TargetBlock == fallThrough) return false;
+            }
+            for (int i = 0; i < node->ChildCount(); i++)
+                if (ILInstruction* child = node->GetChild(i))
+                    stack.push_back(child);
+        }
+    }
 
     // Gate: when the true arm is NOT a bare Branch (i.e. it is a Block ending
     // in an exit, the post-invert shape), only inline if the true arm's exit

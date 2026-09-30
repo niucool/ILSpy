@@ -1134,6 +1134,11 @@ std::unique_ptr<BlockContainer> YieldReturnDecompiler::AnalyzeMoveNext(
     // (The C# ReleaseRef drops the old function's references to the moved
     // instructions; the port's unique_ptr tree owns them and the move into
     // newBody already transferred ownership.)
+    // The old tree stays alive on the converted function: the clones the
+    // ConvertBody produced keep their un-retargeted branch targets (the
+    // branches inside cloned nested containers) pointing at this tree's
+    // blocks -- the C# GC holds it; the port's KeepAliveFunctions owns it.
+    function.KeepAliveFunctions.push_back(std::move(moveNextFunction));
     return newBody;
 }
 
