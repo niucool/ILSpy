@@ -912,6 +912,9 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             std::vector<std::unique_ptr<ILInstruction>> indices;
             indices.push_back(std::move(idx));
             auto addr = std::make_unique<LdElema>(type, std::move(arr), std::move(indices));
+            // The C# LdElem/StElem set DelayExceptions on the ldelema: the
+            // element access's exception is delayed to the dereference.
+            addr->DelayExceptions = true;
             if (!s.Push(std::make_unique<LdObj>(std::move(addr), type))) return DecodeOutcome::Bail;
             break;
         }
@@ -923,6 +926,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
         std::vector<std::unique_ptr<ILInstruction>> indices; \
         indices.push_back(std::move(idx)); \
         auto addr = std::make_unique<LdElema>(type, std::move(arr), std::move(indices)); \
+        addr->DelayExceptions = true;  /* the C# StElem's DelayExceptions */ \
         block->Add(std::make_unique<StObj>(std::move(addr), std::move(val), type)); \
         break; \
     }
@@ -939,6 +943,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             std::vector<std::unique_ptr<ILInstruction>> indices;
             indices.push_back(std::move(idx));
             auto addr = std::make_unique<LdElema>(type, std::move(arr), std::move(indices));
+            addr->DelayExceptions = true;  // the C# StElem's DelayExceptions
             block->Add(std::make_unique<StObj>(std::move(addr), std::move(val), type));
             break;
         }

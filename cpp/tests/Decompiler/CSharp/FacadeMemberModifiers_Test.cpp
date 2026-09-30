@@ -898,6 +898,27 @@ TEST(FacadeMemberModifiersTest, InlineAssignmentInWhileCondition) {
         << "the placeholder stack slot is inlined away" << text;
 }
 
+// The C# reader's LdElem/StElem set DelayExceptions on the LdElema: the
+// element access's NullReference/IndexOutOfRange exception is deferred to the
+// dereference, so the address computation is flag-pure and the inliner's
+// MayReorder checks can move the pending field loads (the reader's stack
+// slots around a dup) into the element accesses. Without it the port renders
+// `var S_1 = buffer; ... S_1[dst] = S_3[src];` (the OutputWindow.SlowRepeat
+// family).
+TEST(FacadeMemberModifiersTest, ArrayFieldAccessInlinesReaderStackSlots) {
+    constexpr const char* kFixture =
+        "/home/jim/ilspy-test-fixtures/inline_assign_fixture/"
+        "InlineAssignFixture.dll";
+    std::string text;
+    if (!RenderType(kFixture, "InlineAssignmentShapes", text))
+        GTEST_SKIP() << "the inline-assignment fixture is not provisioned";
+    EXPECT_NE(text.find("buffer[dst++] = buffer[src++];"), std::string::npos)
+        << text;
+    EXPECT_EQ(text.find("S_"), std::string::npos)
+        << "the reader's stack slots are inlined into the element accesses"
+        << text;
+}
+
 // The C# DoDecompileType worklist (EnqueueReferencedMembers): a hidden
 // compiler-generated type whose declaring type's rendered members still
 // reference it -- the state-machine attribute's typeof -- renders at its
