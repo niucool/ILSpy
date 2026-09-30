@@ -434,6 +434,72 @@ TEST(YieldReturnDecompilerPart2, ConvertsTheParameterizedCreatingMethodBody) {
                                    "matches the creation pattern";
 }
 
+// The field-to-parameter translation: the converted body's reads of the
+// state machine's captured fields (`<>3__start`, the private `start` copy
+// the GetEnumerator makes) translate to the CREATING method's PARAMETER
+// variables, not to freshly minted locals -- the fieldToParameterMap keys
+// must be the resolved fields (the reader's deferred field surfaces
+// resolve before the creation pattern runs).
+TEST(YieldReturnDecompilerPart2, FieldToParameterTranslationUsesTheParameterVariables) {
+    MscorlibEnumeratorFixture fixture;
+    if (!fixture.Load())
+        GTEST_SKIP() << "the iterator fixture is not provisioned";
+    ASSERT_NE(fixture.enumeratorType, 0u);
+
+    std::uint32_t methodToken = 0, methodRva = 0;
+    for (const auto& m : fixture.file->GetMethods(fixture.currentType)) {
+        if (m.Name == "WithParameters" && m.RVA != 0) {
+            methodToken = m.Token;
+            methodRva = m.RVA;
+            break;
+        }
+    }
+    ASSERT_NE(methodToken, 0u);
+    auto fn = IL::ReadIL(*fixture.file, methodToken, methodRva);
+    ASSERT_NE(fn, nullptr);
+    auto methodStub = std::make_shared<TokenMethodStub>(methodToken);
+    methodStub->SetReturnType(
+        std::make_shared<TS::KnownType>(
+            TS::KnownTypeCode::IEnumerableOfT));
+    fn->Method = methodStub.get();
+
+    IL::ILTransformContext ctx;
+    ctx.Settings.YieldReturn = true;
+    ctx.Metadata = fixture.file.get();
+    ctx.TypeSystem = fixture.ts.get();
+    ctx.DelegateBodyResolver =
+        [&fixture](std::uint32_t token,
+                   std::uint32_t rva) -> std::unique_ptr<IL::ILFunction> {
+        if (rva == 0) return nullptr;
+        return IL::ReadIL(*fixture.file, token, rva);
+    };
+
+    IL::YieldReturnDecompiler transform;
+    transform.Run(*fn, ctx);
+    ASSERT_TRUE(fn->IsIterator) << "the conversion ran";
+
+    // The creating method's parameters (start, count) must be READ by the
+    // translated body (the `start + i` yield reads both) -- a broken map
+    // keys the fields as null and the translation mints fresh locals
+    // instead, leaving the parameters unread.
+    int parameterLoads = 0;
+    std::vector<IL::ILInstruction*> stack{fn->Body.get()};
+    while (!stack.empty()) {
+        IL::ILInstruction* node = stack.back();
+        stack.pop_back();
+        if (auto* ld = dynamic_cast<IL::LdLoc*>(node)) {
+            if (ld->Variable != nullptr &&
+                ld->Variable->Kind == IL::VariableKind::Parameter)
+                parameterLoads++;
+        }
+        for (int i = 0; i < node->ChildCount(); i++)
+            if (IL::ILInstruction* child = node->GetChild(i))
+                stack.push_back(child);
+    }
+    EXPECT_GE(parameterLoads, 2)
+        << "the captured fields translate to the parameter variables";
+}
+
 // The full pipeline over the instance iterator with a captured 'this'
 // and a foreach loop with a conditional break (the FieldsRestorer::
 // GetPossibleFields shape -- the corpus's parameterized iterators crash

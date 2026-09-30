@@ -306,6 +306,15 @@ void YieldReturnDecompiler::Run(ILFunction& function,
     finallyMethodToStateRange_.clear();
     hasFinallyMethodToStateRange_ = false;
 
+    // The C# reader resolves the field references during the decode; this
+    // port's reader defers them (the raw token surfaces), and the pipeline
+    // pass that resolves them (the DynamicCallSiteTransform's slot) has
+    // not run yet at the yield-return transform's position. Resolve here
+    // so the creation-pattern's field identity (the
+    // fieldToParameterMap's keys -- the MemberDefinition pointers) and
+    // the later field translations agree.
+    ResolveReaderSurfaces(function, context);
+
     if (!MatchEnumeratorCreationPattern(function, context)) {
         return;
     }
