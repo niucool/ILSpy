@@ -5845,3 +5845,60 @@ stacks); a SIGSEGV/SIGABRT backtrace handler in ILSpyCmd/main.cpp
    fieldToParameterMap/StateMachingField metadata); the corpus diff now
    has a large "converted body shape" family worth a fidelity pass
    (foreach, using, the try-finally forms over the converted bodies).
+
+## Session record: the iterator follow-ups (ab5350f88, b29436787)
+
+Corpus: dnlib 69539 -> **69517**, net10 87148 -> **87082**, cui 1774 ->
+**1772**, hello 3, the pin b38babc5465c9861 unchanged, the suite control
+268, the canary renders.
+
+### ab5350f88 "Drop the getter's state-machine attribute when it decompiles"
+
+The C# CleanUpMethodDeclaration removes a method's
+[IteratorStateMachine] when the iterator de-sugar succeeded; the method
+render path already consulted the outcome, the PROPERTY path rendered
+the getter's attribute list without it. The accessor body render now
+reports the iterator outcome and the getter block's attribute list
+consumes it. RED:
+FacadeMemberModifiersTest.IteratorPropertyGetterDropsStateMachineAttribute
+(the NumbersProperty getter shape added to the yield fixture).
+
+### b29436787 "Resolve iterator field surfaces before the creation-pattern match"
+
+The converted bodies read the captured fields through I_0 placeholders
+instead of the parameters: the fieldToParameterMap's keys came out NULL.
+The C# reader resolves the field references during the decode; this
+port's reader defers them (the raw token surfaces) and the pipeline pass
+that resolves them runs after the yield-return transform -- the
+creation-pattern's stfld fields were unresolved, the MemberDefinition()
+null, every map key the null that collapsed the stub's entries. The Run
+entry now calls ResolveReaderSurfaces first. RED:
+YieldReturnDecompilerPart2.FieldToParameterTranslationUsesTheParameterVari
+ables (verified RED on the pre-fix tree).
+
+### THE NEXT FAMILIES (the analysis, next session's targets)
+
+1. THE S_N PLACEHOLDER FAMILY (~4359 net10 lines -- the biggest single
+   remaining family): the reader's flush slots (S_0/S_1...) leak into the
+   render where the oracle inlines the store into the loop condition:
+   the oracle `while (((symbol = litlenTree.GetSymbol(input)) & -256)
+   == 0)` vs the port `while ((S_0 & 0xFFFFFF00u) == 0) { var S_0 =
+   symbol = ...; }` (the Inflater.Decode family). THE C# SURFACE: the
+   ILAst shape is the loop body's first store + the condition's load of
+   the same variable -- the C# builds `(symbol = ...) & -256` as an
+   assignment-in-condition EXPRESSION -- the statement/expression
+   builder layer (the StatementBuilder/ExpressionBuilder's
+   assignment-into-condition for loop-carried variables), likely the C#
+   ExpressionBuilder's handling of a variable whose stores all sit at
+   the loop head. THIS IS A STATEMENT-BUILDER SCALE SLICE.
+2. THE ?. NULL-PROPAGATION FAMILY (the queue's standing item): the
+   port's `finally { if (I_0 == 0) {} I_0.Dispose(); }` vs the oracle's
+   `finally { moduleDefMD?.Dispose(); }` (the converted iterators'
+   finally regions, ~26 net10 sites).
+3. The remaining I_N placeholders after the field-surface fix are small
+   (33 net10 sites, mostly the ?. family's I_0).
+
+### The standing gates (all verified on the committed tree)
+
+- The connid pin b38babc5465c9861; dnlib 69517; net10 87082; cui 1772;
+  hello 3; the suite control 268; the canary renders 8789 lines.
