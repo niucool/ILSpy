@@ -811,6 +811,26 @@ TEST(FacadeMemberModifiersTest, OverrideDirectiveRendersTheForwarder)
         << text;
 }
 
+// The C# CleanUpMethodDeclaration's state-machine attribute removal over
+// a property getter: the [IteratorStateMachine] attribute rides the GETTER
+// method; when the getter decompiles as an iterator the property render
+// drops it (the method path already passes the iterator outcome to the
+// attribute list; the property path must consult the accessor's outcome
+// too). The oracle renders the iterator property with no attribute.
+TEST(FacadeMemberModifiersTest, IteratorPropertyGetterDropsStateMachineAttribute) {
+    constexpr const char* kFixture =
+        "/home/jim/ilspy-test-fixtures/yield_fixture/IteratorFixture.dll";
+    std::string text;
+    if (!RenderType(kFixture, "IteratorShapes", text))
+        GTEST_SKIP() << "the iterator fixture is not provisioned";
+    std::size_t prop = text.find("NumbersProperty");
+    ASSERT_NE(prop, std::string::npos) << text;
+    EXPECT_EQ(text.find("IteratorStateMachine"), std::string::npos)
+        << "the state machine attribute drops on the decompiled getter"
+        << text;
+    EXPECT_NE(text.find("yield return 4;"), std::string::npos) << text;
+}
+
 // The .override forwarder gate, the forwarded-interface arm: when the
 // MethodDeclaration's interface resolves through a TYPE FORWARDER (the
 // netstandard-facade shape of dnlib.dll's compiler-generated

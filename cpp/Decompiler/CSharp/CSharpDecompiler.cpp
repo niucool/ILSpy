@@ -1841,13 +1841,16 @@ std::string AccessorVisibilityText(const TS::IMethod* accessor,
 std::string AccessorBodyText(const Metadata::MetadataFile& file,
                              TS::DecompilerTypeSystem* typeSystem,
                              std::uint32_t accessorToken,
-                             const char* accessorName) {
+                             const char* accessorName,
+                             bool* iteratorDecompiled = nullptr) {
     std::uint32_t rva = file.GetMethodRVA(accessorToken);
     if (rva == 0)
         return std::string();
     std::string text;
+    bool iteratorOutcome = false;
     if (!CSharpDecompiler::DecompileMethodToString(
-            file, typeSystem, accessorToken, rva, accessorName, text)) {
+            file, typeSystem, accessorToken, rva, accessorName, text,
+            /*isConstructor=*/false, nullptr, &iteratorOutcome)) {
         // The C# DecompileMethod's body-decode failure over an accessor:
         // the block with the reference-assembly empty-body comment (a
         // reference assembly's stale RVA never decodes, and the property
@@ -1856,6 +1859,8 @@ std::string AccessorBodyText(const Metadata::MetadataFile& file,
         return "/*Error: Empty body found. Decompiled assembly might be "
                "a reference assembly.*/;\n";
     }
+    if (iteratorDecompiled != nullptr)
+        *iteratorDecompiled = iteratorOutcome;
     std::size_t open = text.find("{\n");
     std::size_t close = text.rfind("\n}");
     if (open == std::string::npos || close == std::string::npos ||
@@ -3625,8 +3630,20 @@ bool DecompileTypeToStringBody(
         if (!anyAccessor) {
             out += "\n{\n";
             if (accessors.GetterToken != 0) {
+                // The C# CleanUpMethodDeclaration over the accessor: the
+                // state-machine attribute on the getter drops when the
+                // getter decompiled as an iterator (the method path's
+                // rule; the accessor renders the getter's own attribute
+                // list, so the outcome must be consulted here too). The
+                // body re-render reports the outcome; an empty
+                // (non-decoding) body leaves it false.
+                bool getterIterator = false;
+                getterBody = AccessorBodyText(
+                    file, typeSystem, accessors.GetterToken, "get",
+                    &getterIterator);
                 out += MemberAttributesText(
-                    module.GetDefinitionMethod(accessors.GetterToken));
+                    module.GetDefinitionMethod(accessors.GetterToken),
+                    /*asyncDecompiled=*/false, getterIterator);
                 out += AccessorReturnAttributesText(getterEntity);
                 out += AccessorVisibilityText(
                     module.GetDefinitionMethod(accessors.GetterToken),
@@ -3634,8 +3651,6 @@ bool DecompileTypeToStringBody(
                 if (getterBody.empty()) {
                     out += "get;\n";
                 } else {
-                    getterBody = AccessorBodyText(
-                        file, typeSystem, accessors.GetterToken, "get");
                     out += "get\n{\n" + getterBody + "}\n";
                 }
                 anyAccessor = true;
