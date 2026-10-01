@@ -106,5 +106,13 @@ add_subdirectory(ILSpyX)
 add_subdirectory(BamlDecompiler)
 add_subdirectory(ILSpyCmd)
 
-enable_testing()
-add_subdirectory(tests)
+# bennu-umbrella compatibility (same convention as the capa/floss/vivisect
+# subprojects, see bennu/CMakeLists.txt): the umbrella sets BUILD_TESTING=OFF
+# (CACHE FORCE) and adds this project with EXCLUDE_FROM_ALL, so skip the test
+# tree there — otherwise ilspy_tests registers into the umbrella's ctest suite
+# unbuildable. Standalone builds default BUILD_TESTING to ON and keep tests.
+option(BUILD_TESTING "Build the testing tree." ON)
+if(BUILD_TESTING)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
