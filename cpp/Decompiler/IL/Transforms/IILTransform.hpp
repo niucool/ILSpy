@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>  // MSVC: std::string used in LocalFunctionBodyResolver sig
 
 namespace ILSpy::Decompiler::CSharp::Resolver {
 class CSharpResolver;
