@@ -517,9 +517,15 @@ void SwitchDetection::ProcessBlock(Block* block, bool& needsCleanup,
             block->SetFinal(std::move(sw));
             // Clear the absorbed inner blocks (the C# innerBlock.Instructions.Clear()
             // -- here clear both the non-terminal instructions and the final, so
-            // the block is fully empty and removable).
+            // the block is fully empty and removable). Only the container-resident
+            // inner blocks (the chain's fall-through levels) are cleared: an
+            // inline nested Block (the else-wrapper shape) is owned by the if
+            // instruction the SetFinal below replaces, so it dies with that
+            // assignment -- touching it here is a use-after-free, and its
+            // destruction is exactly the C#-GC-shaped lifetime the section
+            // clones (CloneBody) already account for.
             for (Block* innerBlock : analysis_.InnerBlocks) {
-                if (!innerBlock) continue;
+                if (!innerBlock || innerBlock->Parent != currentContainer_) continue;
                 innerBlock->Instructions.clear();
                 innerBlock->FinalInstruction.reset();
                 clearedBlocks.push_back(innerBlock);

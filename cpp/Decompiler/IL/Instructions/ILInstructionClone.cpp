@@ -627,6 +627,11 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             auto clone = std::make_unique<LdElema>(s.Type, s.Array ? s.Array->Clone() : nullptr,
                 CloneChildren(s.Indices));
             clone->WithSystemIndex = s.WithSystemIndex;
+            // The C# ShallowClone copies every property; the hand-written
+            // clone must carry the exception-delay and readonly prefixes too
+            // (the sweep's ToString comparison pins the delayex. prefix).
+            clone->DelayExceptions = s.DelayExceptions;
+            clone->IsReadOnly = s.IsReadOnly;
             c = std::move(clone);
             break;
         }

@@ -31,6 +31,7 @@
 #include "Decompiler/IL/Instructions/InvalidInstructions.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/VariableKind.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 
@@ -657,13 +658,16 @@ TEST(ILReader, NestedCallsCarryNonEmptyStackFlag)
         } else if (inst->Op == OpCode::StLoc) {
             auto* store = static_cast<StLoc*>(inst);
             ++stlocs;
-            // The port's dup arm commits the duplicated value into a synthetic
-            // `dup_<offset>` stack-slot store (the C# Push(Peek()) aliasing the
-            // tree node instead); those synthetic stores carry the C# default
-            // false like every non-IL store. Every store decoded from an IL
-            // stloc opcode is statement-level here and must be true.
+            // The reader materializes expression-stack values into synthetic
+            // stack-slot stores when the value crosses a materialization
+            // boundary (the C# `Push(Peek())` aliases the tree node instead;
+            // the port commits a real StLoc into an `S_<n>` slot, and the dup
+            // arm reuses the same flush path). Those synthetic stores carry
+            // the C# default false like every non-IL store. Every store
+            // decoded from an IL stloc opcode is a Local here and must be
+            // true.
             if (store->Variable == nullptr
-                || store->Variable->Name.rfind("dup_", 0) != 0) {
+                || store->Variable->Kind != VariableKind::StackSlot) {
                 EXPECT_TRUE(store->ILStackWasEmpty)
                     << "every statement-level store sits on an empty stack";
             }

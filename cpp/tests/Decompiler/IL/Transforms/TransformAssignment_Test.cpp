@@ -2157,9 +2157,16 @@ TEST(TransformAssignmentTest, MscorlibSweepPreservesInvariant) {
     // times across 8000 methods per a corpus probe), so the total NCA count is > 0.
     EXPECT_GT(totalFolds, 0);
     // The TransformPreIncDecOperatorWithInlineStore pre-increment expression form
-    // is a Roslyn-era codegen pattern that fires 0 times on the legacy-csc corpus,
-    // so the NewValue NCA count is 0 (the transform does not misfire on this corpus).
-    EXPECT_EQ(totalNewFolds, 0);
+    // was a Roslyn-era codegen pattern that fired 0 times on the legacy-csc corpus
+    // before the field-compound fold landed (the port of the C# ExpressionTransforms.
+    // VisitStObj -> HandleCompoundAssign entry): `stobj(addr, binary(ldobj(addr), rhs))`
+    // over a pure matching address now folds to a NumericCompoundAssign whose value
+    // IS the new value, so the field compound assignments in the legacy corpus
+    // (`field op= value` and the add(1, old) pre-increment operand order) legitimately
+    // produce EvaluatesToNewValue nodes (195 across 8000 methods on this corpus).
+    // The per-method CheckInvariant above and the C#-ported purity/structural-match/
+    // validate gates carry the anti-misfire guarantee this 0-expectation used to pin.
+    EXPECT_GT(totalNewFolds, 0);
     // The operator-call (op_Increment/op_Decrement) inc/dec fold fires 0 times on
     // the .NET Framework 4 legacy-csc mscorlib corpus (a corpus probe found 0
     // UserDefinedCompoundAssign nodes across 8000 methods -- the legacy csc does
