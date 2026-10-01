@@ -741,6 +741,35 @@ private:
     // content is a leave to the function body, count their predecessors,
     // and when exactly one branch reaches the block with no fall-through
     // into it, record the branch -> leave mapping and suppress the block.
+    // Whether `src` (a block-final plain Branch) would be dropped by the
+    // EmitContainer fall-through scan: the target is a later block in the
+    // same container reachable through transparent relay blocks and
+    // switch-inlined bodies, with no content block in between.
+    bool WouldBeDroppedAsFallThrough(const Branch* src) {
+        if (!src || !src->TargetBlock) return false;
+        auto* blk = dynamic_cast<Block*>(src->Parent);
+        if (blk == nullptr) return false;
+        auto* cont = dynamic_cast<BlockContainer*>(blk->Parent);
+        if (cont == nullptr) return false;
+        std::size_t idx = 0;
+        bool found = false;
+        for (std::size_t i = 0; i < cont->Blocks.size(); ++i) {
+            if (cont->Blocks[i].get() == blk) {
+                idx = i;
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+        for (std::size_t j = idx + 1; j < cont->Blocks.size(); ++j) {
+            if (src->TargetBlock == cont->Blocks[j].get()) return true;
+            if (inlinedBodyBlocks_.count(cont->Blocks[j].get())) continue;
+            if (IsTransparentRelay(cont, j)) continue;
+            break;
+        }
+        return false;
+    }
+
     void AnalyzeReturnPropagation(ILInstruction* root) {
         if (root == nullptr || fn_ == nullptr || fn_->Body == nullptr)
             return;
@@ -790,6 +819,20 @@ private:
                 };
                 find(root);
                 if (src == nullptr) continue;
+                // The claim's render site is the branch's own emission (the
+                // statement-level propagated render, or the GotoText `return`
+                // form). A block-final plain Branch whose target is a later
+                // block in the same container is DROPPED as a redundant
+                // fall-through by the container's target-aware scan -- it
+                // never renders, so a claim through it would suppress the
+                // target with no render site (silent content loss). Skip
+                // those claims; the target renders in the linear walk.
+                if (src->Parent && src->Parent->Op == OpCode::Block) {
+                    auto* srcBlock = static_cast<Block*>(src->Parent);
+                    if (srcBlock->FinalInstruction.get() == src &&
+                        WouldBeDroppedAsFallThrough(src))
+                        continue;
+                }
                 returnPropagation_[src] = b;
                 suppressedReturnBlocks_.insert(b);
             }

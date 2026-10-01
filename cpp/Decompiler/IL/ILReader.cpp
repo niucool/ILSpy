@@ -119,18 +119,7 @@ ITypePtr TypeOfValue(const ILInstruction* inst) {
         case StackType::F8:
             return std::make_shared<KnownType>(KnownTypeCode::Double);
         case StackType::O:
-            // The reference stack type stays untyped for now: typing it
-            // Object unlocks the pipeline's reference-type coalesce fold on
-            // the hoisted slots (a correct fold -- the oracle renders the
-            // `??`), but the post-fold block arrangement (the folded store
-            // + the fall-through branch) then trips the renderer's
-            // return-propagation analysis into claiming the following
-            // statement block without a release path (its content is
-            // suppressed and never rendered -- the CommandLineParser
-            // PrintOption family). The primitive stack types carry the
-            // C# FindType(ResultType) typing now; the reference slots take
-            // it with the render-analysis release fix.
-            return nullptr;
+            return std::make_shared<KnownType>(KnownTypeCode::Object);
         default:
             break;
     }

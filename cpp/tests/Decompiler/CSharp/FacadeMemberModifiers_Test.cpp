@@ -981,6 +981,26 @@ TEST(FacadeMemberModifiersTest, FlushSlotsNameByGuessedType) {
         << "the call-result flush slot is typed and named by type" << text;
 }
 
+// The reference-typed flush slot's coalesce fold (unlocked by the O
+// stack-type typing) composes with the statement rendering: the folded
+// store's block ends in a plain fall-through branch, and the renderer's
+// return-propagation analysis used to claim the following statement
+// blocks through that branch -- but the branch is dropped as a
+// redundant fall-through, so the claim had no render site and the
+// statements were silently lost (the CommandLineParser.PrintOption
+// family: `object obj = a ?? b;` followed by nothing).
+TEST(FacadeMemberModifiersTest, CoalesceFoldKeepsFollowingStatements) {
+    constexpr const char* kFixture =
+        "/home/jim/ilspy-test-fixtures/flush_slot_fixture/"
+        "FlushSlotFixture.dll";
+    std::string text;
+    if (!RenderType(kFixture, "FlushSlotShapes", text))
+        GTEST_SKIP() << "the flush-slot fixture is not provisioned";
+    EXPECT_NE(text.find("Report(obj);"), std::string::npos) << text;
+    EXPECT_NE(text.find("Report(\"both\");"), std::string::npos) << text;
+    EXPECT_NE(text.find("?? src.Long());"), std::string::npos) << text;
+}
+
 // The C# DoDecompileType worklist (EnqueueReferencedMembers): a hidden
 // compiler-generated type whose declaring type's rendered members still
 // reference it -- the state-machine attribute's typeof -- renders at its
