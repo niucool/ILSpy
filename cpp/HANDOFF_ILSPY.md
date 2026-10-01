@@ -5924,7 +5924,47 @@ are still pure slots. LANDING THE FLUSH NEEDS THE INLINER-ORDER WORK
 FIRST (or together). Recorded here so the experiment is not repeated
 blind.
 
+### THE ?. NULL-PROPAGATION VOID-CALL FOLD (landed, 372787481)
+
+THE SHAPE (this port's block-model form): the compiler lowers
+`v?.M()` in a finally to `ldloc v; brfalse end; ldloc v; callvirt M;
+endfinally`, which this port carries as the guard block's if-final
+(comp(Eq, ldloc v, null-form) -> Block { leave }) plus the
+single-pred next block holding the use-call. The C# pipeline reaches
+its NullPropagationStatementTransform's single-if form via the CDD's
+InvertIf (extracting the fall-through into the if arm -- not
+expressible in the if-as-final model), so the fold needed the
+two-block form directly (TryNullPropForVoidCallTwoBlock in
+NullPropagationTransform.cpp). The null-form accepts ldnull OR
+ldc.i4(0) for a reference-typed local whose type the reader left
+unresolved. TWO GATES keep it on the family: the guard block must be
+EMPTY apart from the if (folding a block with other statements moves
+the use past them and the restructuring turns the branch into a goto
+-- the ungated version measured -71 dnlib better but introduced a
+new goto in the canary, so the gate trades the metric for
+correctness), and the next block single-pred. The statement renderer
+gained the NullableRewrap case (the `?.` receiver form) -- this also
+fixed the EIGHT pre-existing `/* unhandled statement op 39 */`
+renders in the canary (the same fold's output from the direct-form
+arm). THE MEASUREMENT: dnlib 69286 -> 69225; net10 86593 -> 86588;
+the canary: 8788 lines, no new gotos, the only diff = the eight
+unhandled-op sites becoming valid `?.` renders. RED:
+FacadeMemberModifiersTest.NullPropagationVoidCallInFinally.
+
+### THE PERF RE-MEASUREMENT (the member-materialization item CLOSED)
+
+The release build (build/linux-rel, rebuilt on the 372787481 tree)
+renders dnlib in 2.7s -- BYTE-IDENTICAL to the debug output, the pin
+unchanged. The oracle takes ~9.9s. The perf arc's "9.2s parity" is
+stale: the resolver-cache fix (the memory arc's 1,095MB -> 142MB)
+also collapsed the wall; the using-set walk's 6.26s is gone. THE
+MEMBER-MATERIALIZATION CACHE (the named fix for the using-set walk)
+IS OBSOLETE -- the port is ~3.7x faster than the oracle on the wall
+and well under its memory band. Do not re-open the using-set
+performance work without a fresh profile.
+
 ### The standing gates (all verified on the committed tree)
 
-- The connid pin b38babc5465c9861; dnlib 69286; net10 86593; cui 1771;
-  hello 3; the suite control 268; the canary renders 8788 lines.
+- The connid pin b38babc5465c9861; dnlib 69225; net10 86588; cui 1771;
+  hello 3; the suite control 268; the canary renders 8788 lines, 100
+  gotos (unchanged).
