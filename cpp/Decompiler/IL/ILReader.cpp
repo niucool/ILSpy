@@ -102,6 +102,38 @@ ITypePtr TypeOfValue(const ILInstruction* inst) {
         return std::make_shared<KnownType>(KnownTypeCode::Single);
     if (dynamic_cast<const LdcF8*>(inst))
         return std::make_shared<KnownType>(KnownTypeCode::Double);
+    // The C# FlushExpressionStack types the slot by the expression's stack
+    // type (compilation.FindType(inst.ResultType)): I4->Int32, I8->Int64,
+    // I->IntPtr, F4->Single, F8->Double, O->Object. This covers the call
+    // results and the element loads -- without it the slot carries no type
+    // and the surviving declaration renders `var` with an S_N name.
+    switch (inst->ResultType()) {
+        case StackType::I4:
+            return std::make_shared<KnownType>(KnownTypeCode::Int32);
+        case StackType::I8:
+            return std::make_shared<KnownType>(KnownTypeCode::Int64);
+        case StackType::I:
+            return std::make_shared<KnownType>(KnownTypeCode::IntPtr);
+        case StackType::F4:
+            return std::make_shared<KnownType>(KnownTypeCode::Single);
+        case StackType::F8:
+            return std::make_shared<KnownType>(KnownTypeCode::Double);
+        case StackType::O:
+            // The reference stack type stays untyped for now: typing it
+            // Object unlocks the pipeline's reference-type coalesce fold on
+            // the hoisted slots (a correct fold -- the oracle renders the
+            // `??`), but the post-fold block arrangement (the folded store
+            // + the fall-through branch) then trips the renderer's
+            // return-propagation analysis into claiming the following
+            // statement block without a release path (its content is
+            // suppressed and never rendered -- the CommandLineParser
+            // PrintOption family). The primitive stack types carry the
+            // C# FindType(ResultType) typing now; the reference slots take
+            // it with the render-analysis release fix.
+            return nullptr;
+        default:
+            break;
+    }
     return nullptr;
 }
 

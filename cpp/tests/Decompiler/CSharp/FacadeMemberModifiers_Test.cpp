@@ -959,6 +959,28 @@ TEST(FacadeMemberModifiersTest, NullPropagationVoidCallInFinally) {
         << "the null-guard is folded into the null-propagation" << text;
 }
 
+// The surviving reader flush slots name by the guessed store type: the C#
+// AssignVariableNames' StackSlot arm runs GuessType(variable.Type, store.Value)
+// (the variable's type when not Object, else the store value's inferred type)
+// and names the variable from that (num for an int call result, b for a byte
+// element load). The reader's flush types the slot by the expression's stack
+// type (the C# FindType(inst.ResultType)), so a call result carries Object and
+// the guess falls to the call's return type. The StreamManipulator.GetBits
+// family: the port rendered `var S_0 = ...` where the oracle has
+// `int num = ...`.
+TEST(FacadeMemberModifiersTest, FlushSlotsNameByGuessedType) {
+    constexpr const char* kFixture =
+        "/home/jim/ilspy-test-fixtures/flush_slot_fixture/"
+        "FlushSlotFixture.dll";
+    std::string text;
+    if (!RenderType(kFixture, "FlushSlotShapes", text))
+        GTEST_SKIP() << "the flush-slot fixture is not provisioned";
+    EXPECT_NE(text.find("int num = src.Next();"), std::string::npos)
+        << text;
+    EXPECT_EQ(text.find("var S_0 = src.Next()"), std::string::npos)
+        << "the call-result flush slot is typed and named by type" << text;
+}
+
 // The C# DoDecompileType worklist (EnqueueReferencedMembers): a hidden
 // compiler-generated type whose declaring type's rendered members still
 // reference it -- the state-machine attribute's typeof -- renders at its
