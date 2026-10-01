@@ -306,6 +306,15 @@ void YieldReturnDecompiler::Run(ILFunction& function,
     finallyMethodToStateRange_.clear();
     hasFinallyMethodToStateRange_ = false;
 
+    // The C# reader resolves the field references during the decode; this
+    // port's reader defers them (the raw token surfaces), and the pipeline
+    // pass that resolves them (the DynamicCallSiteTransform's slot) has
+    // not run yet at the yield-return transform's position. Resolve here
+    // so the creation-pattern's field identity (the
+    // fieldToParameterMap's keys -- the MemberDefinition pointers) and
+    // the later field translations agree.
+    ResolveReaderSurfaces(function, context);
+
     if (!MatchEnumeratorCreationPattern(function, context)) {
         return;
     }
@@ -1134,6 +1143,11 @@ std::unique_ptr<BlockContainer> YieldReturnDecompiler::AnalyzeMoveNext(
     // (The C# ReleaseRef drops the old function's references to the moved
     // instructions; the port's unique_ptr tree owns them and the move into
     // newBody already transferred ownership.)
+    // The old tree stays alive on the converted function: the clones the
+    // ConvertBody produced keep their un-retargeted branch targets (the
+    // branches inside cloned nested containers) pointing at this tree's
+    // blocks -- the C# GC holds it; the port's KeepAliveFunctions owns it.
+    function.KeepAliveFunctions.push_back(std::move(moveNextFunction));
     return newBody;
 }
 

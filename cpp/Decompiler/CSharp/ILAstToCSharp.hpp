@@ -52,6 +52,10 @@ std::string ILAstToCSharp(const ILFunction& fn,
                          // The method-level constraint clauses (` where T :
                          // class`) rendered after the parameter list, before
                          // the body's opening brace.
-                         std::string_view methodConstraints = std::string_view());
+                         std::string_view methodConstraints = std::string_view(),
+                         // The declaring type's display name (the base-member
+                         // qualification's current-type reference when the
+                         // fn's method entity is absent).
+                         std::string_view typeName = std::string_view());
 
 } // namespace ILSpy::Decompiler::IL

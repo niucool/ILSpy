@@ -59,9 +59,177 @@
 #include <vector>
 
 namespace ILSpy::Decompiler::IL {
+
+// (the string-equality matcher, defined below; the reader-model bridge's
+// gate calls it before the definition point)
+bool MatchStringEqualityComparison(ILInstruction* condition,
+                                   ILVariable*& variable,
+                                   std::string& stringValue,
+                                   bool& isVBCompareString);
+
 namespace {
 
 namespace TS = ::ILSpy::Decompiler::TypeSystem;
+
+// (the null-comparison matcher, defined below; the reader-model bridge
+// and the cascade call it before the definition point)
+bool MatchCompEqualsNull(ILInstruction* inst, ILInstruction*& arg);
+
+// ---- The reader-model bridge --------------------------------------------
+
+// The C# reader keeps the brtrue fall-through in the SAME block (a Roslyn
+// cascading chain is a sequence of `[if (cond) br handler, br nextCase]`
+// instruction pairs -- the shape the cascade matchers scan); the port's
+// reader ends a block at every conditional branch (each guard a block
+// FINAL, the fall-through the container's next block). This bridge
+// coalesces the fragmented form before the matchers run: a guard block
+// whose final is `if (cond) br X else nop/null`, followed by a
+// single-predecessor next block, becomes `[..., if (cond) br X, br next]`.
+// Only the string-switch family (the equality call or the null
+// comparison) converts -- the bridge exists for the cascade matchers, and
+// a chain they reject must keep rendering as it did fragmented.
+bool IsStringSwitchGuardCondition(ILInstruction* condition) {
+    ILVariable* variable = nullptr;
+    std::string value;
+    bool isVB = false;
+    return MatchStringEqualityComparison(condition, variable, value, isVB);
+}
+
+// A fragmented guard block: the final is `if (cond) br X else nop/null`
+// with a string-switch condition.
+bool IsStringGuardBlock(Block* block) {
+    if (block == nullptr) return false;
+    if (block->FinalInstruction == nullptr ||
+        block->FinalInstruction->Op != OpCode::IfInstruction)
+        return false;
+    auto* iff = static_cast<IfInstruction*>(block->FinalInstruction.get());
+    if (iff->Condition == nullptr || iff->TrueInst == nullptr ||
+        iff->TrueInst->Op != OpCode::Branch)
+        return false;
+    if (iff->FalseInst != nullptr && iff->FalseInst->Op != OpCode::Nop)
+        return false;
+    return IsStringSwitchGuardCondition(iff->Condition.get());
+}
+
+// The guard's comparison string (empty when not extractable).
+std::string StringGuardValue(Block* block) {
+    if (!IsStringGuardBlock(block)) return std::string();
+    auto* iff = static_cast<IfInstruction*>(block->FinalInstruction.get());
+    ILVariable* variable = nullptr;
+    std::string value;
+    bool isVB = false;
+    if (!MatchStringEqualityComparison(iff->Condition.get(), variable,
+                                       value, isVB))
+        return std::string();
+    return value;
+}
+
+// Resolve a pure-thunk chain: a block with no instructions whose final is
+// a Branch. The port's reader materializes the positional fall-through
+// after a case as its own block (the C# reader's explicit br targets the
+// final block directly), so a synthesized section's Branch can point at a
+// chain of such thunks. (The C# ControlFlowSimplification resolves these
+// chains before the switch arms run; the port resolves them at the point
+// of synthesis.)
+Block* ResolveSectionThunk(Block* b) {
+    std::set<Block*> seen;
+    while (b != nullptr && seen.insert(b).second &&
+           b->Instructions.empty() && b->FinalInstruction &&
+           b->FinalInstruction->Op == OpCode::Branch) {
+        auto* br = static_cast<Branch*>(b->FinalInstruction.get());
+        if (br->TargetBlock == nullptr) break;
+        b = br->TargetBlock;
+    }
+    return b;
+}
+
+void CoalesceGuardChains(ILFunction& function, BlockContainer* body) {
+    if (body == nullptr) return;
+    bool changed = false;
+    std::function<void(BlockContainer*)> scan = [&](BlockContainer* c) {
+        if (c == nullptr || c->Blocks.empty()) return;
+        for (std::size_t k = 0; k + 1 < c->Blocks.size();) {
+            Block* a = c->Blocks[k].get();
+            Block* b = c->Blocks[k + 1].get();
+            if (a == nullptr || b == nullptr) { k++; continue; }
+            if (!IsStringGuardBlock(a)) { k++; continue; }
+            // The next block: not the container's entry, and its only
+            // incoming edge is this block's fall-through.
+            if (b == c->EntryPoint() || b->IncomingEdgeCount != 1) {
+                k++;
+                continue;
+            }
+            // Walk the fragmented chain forward: consecutive guard blocks
+            // each reachable only from their predecessor's fall-through.
+            // The chain ends at the first block that is not a guard (the
+            // default/fall-through target of the switch).
+            std::size_t n = 1;
+            while (k + n < c->Blocks.size()) {
+                Block* next = c->Blocks[k + n].get();
+                if (next == nullptr || next == c->EntryPoint()) break;
+                if (next->IncomingEdgeCount != 1) break;
+                if (!IsStringGuardBlock(next)) break;
+                n++;
+            }
+            // Only convert chains the cascade will consume: the switch
+            // synthesis requires at least three unique values. A shorter
+            // chain must keep rendering as it did fragmented -- the
+            // coalesced form carries an explicit fall-through branch
+            // (a goto) per guard.
+            std::set<std::string> uniqueValues;
+            for (std::size_t j = 0; j < n; j++) {
+                ILInstruction* guardCond =
+                    static_cast<IfInstruction*>(
+                        c->Blocks[k + j]->FinalInstruction.get())
+                        ->Condition.get();
+                ILInstruction* nullArg = nullptr;
+                if (MatchCompEqualsNull(guardCond, nullArg)) {
+                    // The null case: a distinct value from every string.
+                    uniqueValues.insert(std::string());
+                    continue;
+                }
+                std::string v = StringGuardValue(c->Blocks[k + j].get());
+                uniqueValues.insert(v + "\x01" + std::to_string(v.size()));
+            }
+            if (uniqueValues.size() < 3) { k += n; continue; }
+            // Convert: the if moves into the instructions (the Nop false
+            // arm drops -- the false path is the block's continuation,
+            // the C# model), and the fall-through becomes an explicit
+            // branch to the next block.
+            for (std::size_t j = 0; j < n; j++) {
+                Block* guardBlock = c->Blocks[k + j].get();
+                Block* next =
+                    c->Blocks[k + j + 1 < c->Blocks.size() ? k + j + 1
+                                                           : k + j].get();
+                if (guardBlock == next) continue;
+                auto* iff = static_cast<IfInstruction*>(
+                    guardBlock->FinalInstruction.get());
+                iff->FalseInst = nullptr;
+                std::unique_ptr<ILInstruction> guard =
+                    std::move(guardBlock->FinalInstruction);
+                guardBlock->Add(std::move(guard));
+                guardBlock->Add(std::make_unique<Branch>(next));
+                changed = true;
+            }
+            k += n;
+        }
+        std::function<void(const ILInstruction*)> descend =
+            [&](const ILInstruction* i) {
+            if (i == nullptr) return;
+            if (auto* nested = dynamic_cast<const BlockContainer*>(i))
+                scan(const_cast<BlockContainer*>(nested));
+            for (int ci = 0; ci < i->ChildCount(); ++ci)
+                descend(i->GetChild(ci));
+        };
+        for (const auto& bi : c->Blocks) {
+            if (!bi) continue;
+            for (const auto& si : bi->Instructions) descend(si.get());
+            if (bi->FinalInstruction) descend(bi->FinalInstruction.get());
+        }
+    };
+    scan(body);
+    if (changed) RecomputeIncomingEdgeCounts(function);
+}
 
 // ---- File-local matchers (the C# instance Match* methods; the port keeps
 // them as free functions per the file-local-probe convention) ----------------
@@ -223,6 +391,10 @@ void SwitchOnStringTransform::Run(ILFunction& function,
     if (!context.Settings.SwitchStatementOnString) return;
     auto* body = dynamic_cast<BlockContainer*>(function.Body.get());
     if (body == nullptr) return;
+    // The reader-model bridge: coalesce the port's fragmented guard chains
+    // (each conditional branch ends a block) into the C# instruction-list
+    // form the cascade matchers below expect.
+    CoalesceGuardChains(function, body);
     // The C# ScanHashtableInitializerBlocks pre-scan: the entry block's
     // null-check/init shape is walked once and the extracted (string, index)
     // pairs are keyed by the compiler-generated field name so the Hashtable
@@ -231,8 +403,16 @@ void SwitchOnStringTransform::Run(ILFunction& function,
         ScanHashtableInitializerBlocks(body->EntryPoint());
     std::vector<Block*> blocks;
     CollectBlocks(body, blocks);
+    std::vector<BlockContainer*> changedContainers;
     for (Block* block : blocks) {
-        if (block->IncomingEdgeCount == 0) continue;
+        // The C# counts the container-entry edge (the EntryPoint setter
+        // bump), so an entry block always passes its `count == 0` gate;
+        // this port does not count it (the D59 convention), so the entry
+        // is exempted here explicitly.
+        bool isContainerEntry = false;
+        if (auto* c = dynamic_cast<BlockContainer*>(block->Parent))
+            isContainerEntry = c->EntryPoint() == block;
+        if (block->IncomingEdgeCount == 0 && !isContainerEntry) continue;
         bool changed = false;
         for (int i = static_cast<int>(block->Instructions.size()) - 1; i >= 0; i--) {
             if (SimplifyCSharp1CascadingIfStatements(*block, i, context)) {
@@ -269,11 +449,49 @@ void SwitchOnStringTransform::Run(ILFunction& function,
             }
         }
         if (!changed) continue;
+        // Resolve the synthesized switch's section bodies through pure
+        // thunks: sections whose chains end at the same block merge (the
+        // null case into the default), and the thunk blocks go unreachable
+        // for the closing SortBlocks cleanup.
+        for (const auto& inst : block->Instructions) {
+            auto* sw = dynamic_cast<SwitchInstruction*>(inst.get());
+            if (sw == nullptr) continue;
+            bool retargeted = false;
+            for (auto& section : sw->Sections) {
+                if (!section || !section->Body) continue;
+                auto* br = dynamic_cast<Branch*>(section->Body.get());
+                if (br == nullptr || br->TargetBlock == nullptr) continue;
+                Block* resolved = ResolveSectionThunk(br->TargetBlock);
+                if (resolved != br->TargetBlock) {
+                    br->TargetBlock = resolved;
+                    retargeted = true;
+                }
+            }
+            if (retargeted) RecomputeIncomingEdgeCounts(function);
+        }
         SwitchDetection::SimplifySwitchInstruction(block, context);
         // The C# InlineSwitchExpressionDefaultCaseThrowHelper call is deferred
-        // with SwitchDetection's throw-helper surface; the closing
-        // SortBlocks(deleteUnreachableBlocks: true) is unsafe in this port
-        // (the D58 convention) and is deferred with it.
+        // with SwitchDetection's throw-helper surface.
+        if (auto* container = dynamic_cast<BlockContainer*>(block->Parent))
+            changedContainers.push_back(container);
+    }
+    // The C# Run tail: `foreach (var container in changedContainers)
+    // container.SortBlocks(deleteUnreachableBlocks: true);` -- the cascade
+    // consumes the guard blocks' content but leaves them as unreachable
+    // [if, br] pairs in the container; the sort's reachability walk deletes
+    // them. Safe here (post-loop, containers are not deleted): the
+    // DynamicCallSiteTransform convention. The counts are refreshed so
+    // downstream transforms see the sections' new branch targets and the
+    // deleted blocks.
+    if (!changedContainers.empty()) {
+        std::sort(changedContainers.begin(), changedContainers.end());
+        changedContainers.erase(
+            std::unique(changedContainers.begin(), changedContainers.end()),
+            changedContainers.end());
+        for (auto* container : changedContainers) {
+            container->SortBlocks(true);
+        }
+        RecomputeIncomingEdgeCounts(function);
     }
 }
 
@@ -467,17 +685,95 @@ bool MatchStringLengthCall(ILInstruction* inst, ILVariable* switchValueVar) {
            }();
 }
 
+// The default value a section body resolves to when it is (or falls into) a
+// pure leave: the merged leave body directly, or the single-return block a
+// false path runs into positionally. The port's CFS fold materializes the
+// shared default return per site, so exit identity must be compared by the
+// returned value rather than by block pointer (the C# compares the single
+// shared target block).
+std::optional<std::string> PureLeaveValueString(const ILInstruction* body) {
+    const auto* leave = dynamic_cast<const Leave*>(body);
+    if (leave != nullptr) {
+        if (leave->Value == nullptr) return std::nullopt;
+        return leave->Value->ToString();
+    }
+    const auto* br = dynamic_cast<const Branch*>(body);
+    if (br == nullptr || br->TargetBlock == nullptr) return std::nullopt;
+    const Block* b = br->TargetBlock;
+    if (!b->Instructions.empty() || b->FinalInstruction == nullptr)
+        return std::nullopt;
+    return PureLeaveValueString(b->FinalInstruction.get());
+}
+
+Block* NextBlockInContainer(Block* block) {
+    if (block == nullptr) return nullptr;
+    auto* container = dynamic_cast<BlockContainer*>(block->Parent);
+    if (container == nullptr) return nullptr;
+    for (std::size_t idx = 0; idx < container->Blocks.size(); ++idx) {
+        if (container->Blocks[idx].get() == block) {
+            return (idx + 1 < container->Blocks.size())
+                       ? container->Blocks[idx + 1].get()
+                       : nullptr;
+        }
+    }
+    return nullptr;
+}
+
 // The C# MatchRoslynCaseBlockHead (the two-instruction case-head block) and
 // its special case where the compiler optimized the if away.
 bool MatchRoslynCaseBlockHead(Block* target, ILVariable* switchValueVar,
                               ILInstruction*& bodyOrLeave,
                               Block*& defaultOrExitBlock, std::string& stringValue,
-                              bool& emptyStringEqualsNull) {
+                              bool& emptyStringEqualsNull,
+                              ILInstruction*& exitLeave) {
     bodyOrLeave = nullptr;
     defaultOrExitBlock = nullptr;
+    exitLeave = nullptr;
     stringValue.clear();
     emptyStringEqualsNull = false;
-    if (target->Instructions.size() != 2) return false;
+    if (target->Instructions.size() != 2) {
+        // This port's reader form: the case head's if is the block's
+        // FinalInstruction -- the CFS branch-to-return fold replaced the
+        // br to the shared body block with the local leave under the true
+        // arm -- and the false path runs positionally into the local
+        // default-return block.
+        auto* iff =
+            dynamic_cast<IfInstruction*>(target->FinalInstruction.get());
+        if (iff == nullptr || !target->Instructions.empty()) return false;
+        ILInstruction* cond = iff->Condition.get();
+        // The negated reader form: if (comp(eq, <stringEq>, 0)) <default>;
+        // the true arm is the folded default return and the false path
+        // runs positionally into the local body block (the C# form swaps
+        // the br pair under MatchLogicNot).
+        ILInstruction* notArg = nullptr;
+        bool negated = false;
+        while (MatchLogicNot(cond, notArg)) {
+            cond = notArg;
+            negated = !negated;
+        }
+        bool isVB = false;
+        if (!MatchStringEqualityComparisonFor(cond, switchValueVar, stringValue,
+                                               isVB)) {
+            return false;
+        }
+        if (isVB) return false;
+        if (negated) {
+            // The true arm is the exit; the body is the positional next.
+            auto* leave = dynamic_cast<Leave*>(iff->TrueInst.get());
+            if (leave == nullptr) return false;
+            Block* next = NextBlockInContainer(target);
+            if (next == nullptr) return false;
+            bodyOrLeave = next;
+            defaultOrExitBlock = nullptr;
+            exitLeave = leave;
+            return true;
+        }
+        bodyOrLeave = iff->TrueInst.get();
+        if (bodyOrLeave == nullptr) return false;
+        defaultOrExitBlock = NextBlockInContainer(target);
+        exitLeave = nullptr;
+        return defaultOrExitBlock != nullptr;
+    }
     ILInstruction* condition = nullptr;
     ILInstruction* bodyBranch = nullptr;
     if (!MatchIfInstruction(target->Instructions[0].get(), condition,
@@ -626,16 +922,27 @@ bool IsNullCheckInDefaultBlock(ILInstruction*& exitOrDefault, ILVariable* switch
 // ReplaceWithSwitchInstruction local function.
 bool MatchRoslynSwitchOnString(Block& block, int& i, ILTransformContext& context) {
     auto& instructions = block.Instructions;
-    if (i >= static_cast<int>(instructions.size()) - 1) return false;
+    if (instructions.empty() ||
+        i >= static_cast<int>(instructions.size()))
+        return false;
     // stloc switchValueVar(switchValue)
     // if (comp(ldloc switchValueVar == ldnull)) br nullCase
     // br nextBlock
     auto* instructionsPtr = &instructions;
+    Block* switchBlock = &block;
     int switchBlockInstructionsOffset = i;
     Block* nullValueCaseBlock = nullptr;
     ILInstruction* instForNullCheck = nullptr;
     ILInstruction* condition = nullptr;
     ILInstruction* exitBlockJump = nullptr;
+    // This port's reader form of the null head: [.., stloc V_0, 
+    // if (V_0 == null) <return>] as the block FINAL -- the CFS
+    // branch-to-return fold replaced the br to the shared null case with
+    // the local leave -- and the false path running positionally into the
+    // switch block. The hash store and the flat switch sit in that next
+    // block, the switch as its FinalInstruction.
+    bool portNullHead = false;
+    ILInstruction* nullCaseLeave = nullptr;
     if (MatchIfInstruction(instructions[i].get(), condition, exitBlockJump) &&
         MatchCompEqualsNull(condition, instForNullCheck)) {
         Branch* nextBlockJump = dynamic_cast<Branch*>(instructions[i + 1].get());
@@ -645,14 +952,38 @@ bool MatchRoslynSwitchOnString(Block& block, int& i, ILTransformContext& context
             return false;
         }
         if (!MatchBranch(exitBlockJump, nullValueCaseBlock)) return false;
-        instructionsPtr = &nextBlockJump->TargetBlock->Instructions;
+        switchBlock = nextBlockJump->TargetBlock;
+        instructionsPtr = &switchBlock->Instructions;
         switchBlockInstructionsOffset = 0;
+    } else if (i == static_cast<int>(instructions.size()) - 1 &&
+               MatchIfInstruction(block.FinalInstruction.get(), condition,
+                                  exitBlockJump) &&
+               MatchCompEqualsNull(condition, instForNullCheck) &&
+               dynamic_cast<Leave*>(exitBlockJump) != nullptr) {
+        Block* next = NextBlockInContainer(&block);
+        if (next == nullptr) return false;
+        portNullHead = true;
+        nullCaseLeave = exitBlockJump;
+        switchBlock = next;
+        instructionsPtr = &next->Instructions;
+        if (instructionsPtr->empty()) return false;
+        switchBlockInstructionsOffset =
+            static_cast<int>(instructionsPtr->size()) - 1;
     }
     // stloc switchValueVar(call ComputeStringHash(switchValueLoad))
     // switch (ldloc switchValueVar) { ... }
-    if (!(static_cast<int>(instructionsPtr->size()) > switchBlockInstructionsOffset + 1)) return false;
-    auto* switchInst = dynamic_cast<SwitchInstruction*>(
-        (*instructionsPtr)[switchBlockInstructionsOffset + 1].get());
+    // The C# reader keeps [stloc, switch] in the instruction list; this
+    // port's SwitchDetection leaves the flat switch as the block's
+    // FinalInstruction.
+    SwitchInstruction* switchInst = nullptr;
+    if (switchBlockInstructionsOffset + 1 <
+        static_cast<int>(instructionsPtr->size())) {
+        switchInst = dynamic_cast<SwitchInstruction*>(
+            (*instructionsPtr)[switchBlockInstructionsOffset + 1].get());
+    } else if (instructionsPtr == &switchBlock->Instructions) {
+        switchInst =
+            dynamic_cast<SwitchInstruction*>(switchBlock->FinalInstruction.get());
+    }
     ILVariable* switchValueVar = nullptr;
     ILVariable* hashVar = nullptr;
     if (switchInst == nullptr ||
@@ -697,11 +1028,14 @@ bool MatchRoslynSwitchOnString(Block& block, int& i, ILTransformContext& context
     for (auto& section : switchInst->Sections) {
         if (section.get() == defaultSection) continue;
         Block* target = nullptr;
-        if (!MatchBranch(section->Body.get(), target)) return false;
+        if (!MatchBranch(section->Body.get(), target)) {
+            return false;
+        }
         std::string stringValue;
         bool emptyStringEqualsNull = false;
         ILInstruction* targetOrLeave = nullptr;
         Block* currentExitBlock = nullptr;
+        ILInstruction* currentExitLeave = nullptr;
         if (MatchRoslynEmptyStringCaseBlockHead(
                 target, switchValueVar, targetOrLeave, currentExitBlock)) {
             stringValue = "";
@@ -709,10 +1043,38 @@ bool MatchRoslynSwitchOnString(Block& block, int& i, ILTransformContext& context
         } else if (!MatchRoslynCaseBlockHead(target, switchValueVar,
                                              targetOrLeave, currentExitBlock,
                                              stringValue,
-                                             emptyStringEqualsNull)) {
+                                             emptyStringEqualsNull,
+                                             currentExitLeave)) {
             return false;
         }
-        if (currentExitBlock != exitOrDefaultBlock) return false;
+        if (currentExitBlock != exitOrDefaultBlock) {
+            // The port's fold materializes the shared default return per
+            // site: each case head's false path runs into its own local
+            // [leave value] block (or, in the negated form, carries the
+            // folded default leave as the if's true arm) while the default
+            // section carries the merged leave. Those are the same exit
+            // when the returned values match (the C# compares the shared
+            // target block).
+            std::optional<std::string> caseExitValue;
+            if (currentExitLeave != nullptr) {
+                auto* leave = dynamic_cast<Leave*>(currentExitLeave);
+                if (leave != nullptr && leave->Value != nullptr)
+                    caseExitValue = leave->Value->ToString();
+            } else if (currentExitBlock != nullptr &&
+                       currentExitBlock->Instructions.empty() &&
+                       currentExitBlock->FinalInstruction != nullptr) {
+                auto* leave = dynamic_cast<Leave*>(
+                    currentExitBlock->FinalInstruction.get());
+                if (leave != nullptr && leave->Value != nullptr)
+                    caseExitValue = leave->Value->ToString();
+            }
+            auto defaultValue =
+                defaultSection->Body != nullptr
+                    ? PureLeaveValueString(defaultSection->Body.get())
+                    : std::nullopt;
+            if (!caseExitValue.has_value() || caseExitValue != defaultValue)
+                return false;
+        }
         if (emptyStringEqualsNull && stringValue.empty()) {
             stringValues.push_back({std::nullopt, targetOrLeave});
             stringValues.push_back({std::string(), targetOrLeave});
@@ -726,6 +1088,27 @@ bool MatchRoslynSwitchOnString(Block& block, int& i, ILTransformContext& context
         // The null-case body: a branch to nullValueCaseBlock, built below
         // (the C# stores the Block directly).
         stringValues.back().targetOrLeave = nullValueCaseBlock;
+    }
+    if (portNullHead) {
+        // The port's null-head form: the null case's body is the folded
+        // local leave under the null-check if's true arm. The C# skips the
+        // null case when the null branch targets the default's exit block
+        // (the null falls into the default); the fold's equivalent is the
+        // same return value.
+        bool nullIsDefault = false;
+        if (auto* leave = dynamic_cast<Leave*>(nullCaseLeave)) {
+            if (leave->Value != nullptr &&
+                defaultSection != nullptr && defaultSection->Body != nullptr) {
+                auto defaultValue =
+                    PureLeaveValueString(defaultSection->Body.get());
+                if (defaultValue.has_value() &&
+                    *defaultValue == leave->Value->ToString()) {
+                    nullIsDefault = true;
+                }
+            }
+        }
+        if (!nullIsDefault)
+            stringValues.push_back({std::nullopt, nullCaseLeave});
     }
     // In newer Roslyn versions (>= 3.7) the null check appears in the default
     // case, not prior to the switch.
@@ -760,13 +1143,118 @@ bool MatchRoslynSwitchOnString(Block& block, int& i, ILTransformContext& context
         switchValueInst = nullptr;
     }
     const bool sameInstructions = instructionsPtr == &instructions;
+    // The port's direct form: the flat switch is this block's FINAL (the
+    // hash store at [i] is the last instruction).
+    const bool portDirectFinal =
+        sameInstructions && !portNullHead &&
+        switchInst == block.FinalInstruction.get();
     // The switchValueInst construction: the C# uses the LdLoc node from the
     // hash call's argument. Rebuild it from the variable.
     auto switchValueLdLoc = [&switchValueVar]() {
         return std::unique_ptr<ILInstruction>(
             new LdLoc(ILVariablePtr(std::shared_ptr<ILVariable>(), switchValueVar)));
     };
-    if (sameInstructions) {
+    // The shared new-switch construction (the C#
+    // ReplaceWithSwitchInstruction local function): one section per value
+    // plus the default.
+    auto buildNewSwitch = [&](std::unique_ptr<ILInstruction> argument)
+        -> std::unique_ptr<SwitchInstruction> {
+        auto stringToInt = std::make_unique<StringToInt>(
+            std::move(argument),
+            std::vector<std::pair<std::optional<std::string>, int>>{}, nullptr);
+        for (std::size_t idx = 0; idx < stringValues.size(); idx++) {
+            stringToInt->Map.emplace_back(stringValues[idx].value,
+                                          static_cast<int>(idx));
+        }
+        auto newSwitch = std::make_unique<SwitchInstruction>(std::move(stringToInt));
+        for (std::size_t idx = 0; idx < stringValues.size(); idx++) {
+            ILInstruction* body = stringValues[idx].targetOrLeave;
+            if (auto* b = dynamic_cast<Block*>(body)) {
+                newSwitch->AddSection(
+                    MakeSection(Util::LongSet(static_cast<long long>(idx)),
+                                std::make_unique<Branch>(b)));
+            } else if (body != nullptr) {
+                auto cloned = body->Clone();
+                // The C# orders the arm's sections by the body brs' target
+                // offsets (the case heads' IL region, ascending with the
+                // case order). This port's CFS fold replaced those brs with
+                // per-site leaves carrying the shared return's offset, so
+                // the clone is stamped with the owning case-head block's
+                // offset -- the same order the C# sort derives from the br
+                // targets.
+                ILInstruction* p = body->Parent;
+                while (p != nullptr && dynamic_cast<Block*>(p) == nullptr)
+                    p = p->Parent;
+                if (p != nullptr)
+                    cloned->StartILOffset = p->StartILOffset;
+                newSwitch->AddSection(
+                    MakeSection(Util::LongSet(static_cast<long long>(idx)),
+                                std::move(cloned)));
+            } else {
+                return nullptr;
+            }
+        }
+        {
+            Util::LongSet defaultLabel(
+                Util::LongInterval(0, static_cast<long long>(stringValues.size())));
+            auto def = MakeSection(defaultLabel.Invert(),
+                                   defaultSection->Body != nullptr
+                                       ? defaultSection->Body->Clone()
+                                       : nullptr);
+            // The C# default section keys on the default block's offset
+            // (the method's exit region, after every case body); this port's
+            // fold consumed that block into the merged leave, so the clone
+            // is stamped past every case-body offset to keep the default
+            // last under the offset-keyed section sort.
+            if (def != nullptr && def->Body != nullptr)
+                def->Body->StartILOffset = 0x7FFFFFFE;
+            newSwitch->AddSection(std::move(def));
+        }
+        return newSwitch;
+    };
+    if (portNullHead) {
+        // This port's null-head form: the head block is
+        // [.., stloc V_0(expr)] with the null-check if as the FINAL; the
+        // new switch replaces that if-final and the switch block (the hash
+        // store + the flat switch, positionally next) goes unreachable for
+        // the closing SortBlocks cleanup.
+        bool keepAssignmentBefore = true;
+        std::unique_ptr<ILInstruction> argument;
+        // The C# folds the value expression inline when the relayed store is
+        // a single-definition local loaded once per case head (plus the
+        // null check; the section count also includes the default).
+        ILVariable* stlocVar = nullptr;
+        ILInstruction* switchValueTmp = nullptr;
+        if (MatchStLoc(instructions[i].get(), stlocVar, switchValueTmp) &&
+            stlocVar == switchValueVar && switchValueVar->IsSingleDefinition() &&
+            switchValueVar->LoadCount ==
+                static_cast<int>(switchInst->Sections.size())) {
+            argument = switchValueTmp->Clone();
+            keepAssignmentBefore = false;
+        } else {
+            argument = switchValueLdLoc();
+        }
+        auto newSwitch = buildNewSwitch(std::move(argument));
+        if (newSwitch == nullptr) return false;
+        newSwitch->StartILOffset = block.FinalInstruction->StartILOffset;
+        newSwitch->EndILOffset = block.FinalInstruction->EndILOffset;
+        block.SetFinal(std::move(newSwitch));
+        if (!keepAssignmentBefore) {
+            RemoveRange(block, i, 1);
+            i -= 1;
+        }
+    } else if (portDirectFinal) {
+        // This port's direct form: [stloc hash] with the flat switch as the
+        // block FINAL. The new switch replaces the final and the hash store
+        // is dropped (the StringToInt argument is the raw string local).
+        auto newSwitch = buildNewSwitch(switchValueLdLoc());
+        if (newSwitch == nullptr) return false;
+        newSwitch->StartILOffset = instructions[i]->StartILOffset;
+        newSwitch->EndILOffset = instructions[i]->EndILOffset;
+        RemoveRange(block, i, 1);
+        block.SetFinal(std::move(newSwitch));
+        i -= 1;
+    } else if (sameInstructions) {
         // stloc switchValueLoadVariable(switchValue)
         // stloc switchValueVar(call ComputeStringHash(ldloc switchValueLoadVariable))
         // switch (ldloc switchValueVar) { ... }
@@ -785,48 +1273,14 @@ bool MatchRoslynSwitchOnString(Block& block, int& i, ILTransformContext& context
         } else {
             keepAssignmentBefore = true;
         }
-        // The StringToInt argument: the C# passes the raw switchValue
-        // instruction (taking ownership); the port clones it into the node.
         std::unique_ptr<ILInstruction> argument;
         if (switchValueInst != nullptr) {
             argument = switchValueInst->Clone();
         } else {
             argument = switchValueLdLoc();
         }
-        auto stringToInt = std::make_unique<StringToInt>(
-            std::move(argument),
-            std::vector<std::pair<std::optional<std::string>, int>>{},
-            nullptr);
-        // Fill the map from the collected values.
-        for (std::size_t idx = 0; idx < stringValues.size(); idx++) {
-            stringToInt->Map.emplace_back(stringValues[idx].value,
-                                          static_cast<int>(idx));
-        }
-        auto newSwitch = std::make_unique<SwitchInstruction>(std::move(stringToInt));
-        // Sections: one per value + the default.
-        for (std::size_t idx = 0; idx < stringValues.size(); idx++) {
-            ILInstruction* body = stringValues[idx].targetOrLeave;
-            if (auto* b = dynamic_cast<Block*>(body)) {
-                newSwitch->Sections.push_back(
-                    MakeSection(Util::LongSet(static_cast<long long>(idx)),
-                                std::make_unique<Branch>(b)));
-            } else if (body != nullptr) {
-                newSwitch->Sections.push_back(
-                    MakeSection(Util::LongSet(static_cast<long long>(idx)),
-                                body->Clone()));
-            } else {
-                return false;
-            }
-        }
-        {
-            Util::LongSet defaultLabel(
-                Util::LongInterval(0, static_cast<long long>(stringValues.size())));
-            auto def = MakeSection(defaultLabel.Invert(),
-                                   defaultSection->Body != nullptr
-                                       ? defaultSection->Body->Clone()
-                                       : nullptr);
-            newSwitch->Sections.push_back(std::move(def));
-        }
+        auto newSwitch = buildNewSwitch(std::move(argument));
+        if (newSwitch == nullptr) return false;
         // Replace the stloc-ComputeStringHash with the new switch.
         newSwitch->StartILOffset = instructions[i]->StartILOffset;
         newSwitch->EndILOffset = instructions[i]->EndILOffset;
@@ -875,38 +1329,8 @@ bool MatchRoslynSwitchOnString(Block& block, int& i, ILTransformContext& context
         } else {
             argument = switchValueLdLoc();
         }
-        auto stringToInt = std::make_unique<StringToInt>(
-            std::move(argument),
-            std::vector<std::pair<std::optional<std::string>, int>>{},
-            nullptr);
-        for (std::size_t idx = 0; idx < stringValues.size(); idx++) {
-            stringToInt->Map.emplace_back(stringValues[idx].value,
-                                          static_cast<int>(idx));
-        }
-        auto newSwitch = std::make_unique<SwitchInstruction>(std::move(stringToInt));
-        for (std::size_t idx = 0; idx < stringValues.size(); idx++) {
-            ILInstruction* body = stringValues[idx].targetOrLeave;
-            if (auto* b = dynamic_cast<Block*>(body)) {
-                newSwitch->Sections.push_back(
-                    MakeSection(Util::LongSet(static_cast<long long>(idx)),
-                                std::make_unique<Branch>(b)));
-            } else if (body != nullptr) {
-                newSwitch->Sections.push_back(
-                    MakeSection(Util::LongSet(static_cast<long long>(idx)),
-                                body->Clone()));
-            } else {
-                return false;
-            }
-        }
-        {
-            Util::LongSet defaultLabel(
-                Util::LongInterval(0, static_cast<long long>(stringValues.size())));
-            auto def = MakeSection(defaultLabel.Invert(),
-                                   defaultSection->Body != nullptr
-                                       ? defaultSection->Body->Clone()
-                                       : nullptr);
-            newSwitch->Sections.push_back(std::move(def));
-        }
+        auto newSwitch = buildNewSwitch(std::move(argument));
+        if (newSwitch == nullptr) return false;
         newSwitch->StartILOffset = instructions[i]->StartILOffset;
         newSwitch->EndILOffset = instructions[i]->EndILOffset;
         ReplaceAt(block, i, std::move(newSwitch));
@@ -1010,6 +1434,11 @@ bool SimplifyCascadingIfStatementsImpl(Block& block, int& i,
                                        firstBlockValue, isVBCompareString)) {
         return false;
     }
+    // The C# null head (comp(ldloc == ldnull)) reports stringValue = null
+    // -- the null case -- distinct from an empty string: the section merges
+    // with the default when both target the same block.
+    ILInstruction* nullCaseArg = nullptr;
+    bool headIsNullCase = MatchCompEqualsNull(condition, nullCaseArg);
     if (isVBCompareString) {
         std::swap(firstBlockOrDefaultJump, nextCaseJump);
     }
@@ -1056,6 +1485,13 @@ bool SimplifyCascadingIfStatementsImpl(Block& block, int& i,
                                   : firstBlockOrDefaultJump)) {
             return false;
         }
+    } else if (headIsNullCase) {
+        if (!addSwitchSection(std::nullopt,
+                              firstBlock != nullptr
+                                  ? static_cast<ILInstruction*>(firstBlock)
+                                  : firstBlockOrDefaultJump)) {
+            return false;
+        }
     } else {
         if (!addSwitchSection(firstBlockValue,
                               firstBlock != nullptr
@@ -1074,11 +1510,15 @@ bool SimplifyCascadingIfStatementsImpl(Block& block, int& i,
         // stloc switchValueVar(switchValue)
         ILVariable* otherSwitchValueVar = nullptr;
         ILInstruction* otherValue = nullptr;
+        ILVariable* storedVar = nullptr;
         if (i >= 2 && MatchLdLoc(switchValueTmp, otherSwitchValueVar) &&
             otherSwitchValueVar->IsSingleDefinition() &&
             otherSwitchValueVar->LoadCount == 1 &&
-            MatchStLoc(instructions[i - 2].get(), otherSwitchValueVar,
-                       otherValue)) {
+            // The C# MatchStLoc(variable, ...) overload also requires the
+            // stored variable to BE otherSwitchValueVar: the store feeding
+            // the load, not merely any preceding store.
+            MatchStLoc(instructions[i - 2].get(), storedVar, otherValue) &&
+            storedVar == otherSwitchValueVar) {
             switchValue = otherValue;
             removeExtraLoad = true;
         } else {
@@ -1174,8 +1614,19 @@ bool SimplifyCascadingIfStatementsImpl(Block& block, int& i,
     // Sections: skip the offset leading entries (the null/empty pair), label
     // the rest 0..N-1.
     std::vector<Value> sectionValues(values.begin() + offset, values.end());
-    auto newSwitch = std::make_unique<SwitchInstruction>(
-        std::unique_ptr<ILInstruction>(switchValue));
+    // The C#: `var stringToInt = new StringToInt(switchValue, values.Skip(offset)
+    // .Select(item => item.Item1).ToArray(), switchValueVar.Type); var inst =
+    // new SwitchInstruction(stringToInt);` -- the switch dispatches over the
+    // string->label map, not the raw string. The C# takes ownership of the
+    // matched instruction; the matched range stays in the tree until the
+    // ReplaceAt/RemoveRange below, so the port clones (the MatchRoslyn*
+    // convention).
+    std::vector<std::optional<std::string>> stringKeys;
+    for (const auto& v : sectionValues) stringKeys.push_back(v.value);
+    auto stringToInt = std::make_unique<StringToInt>(
+        switchValue->Clone(), stringKeys, switchValueVar->Type);
+    auto newSwitch =
+        std::make_unique<SwitchInstruction>(std::move(stringToInt));
     for (std::size_t idx = 0; idx < sectionValues.size(); idx++) {
         ILInstruction* body = sectionValues[idx].inst;
         std::unique_ptr<ILInstruction> bodyInst;
@@ -1186,7 +1637,7 @@ bool SimplifyCascadingIfStatementsImpl(Block& block, int& i,
         } else {
             return false;
         }
-        newSwitch->Sections.push_back(MakeSection(
+        newSwitch->AddSection(MakeSection(
             Util::LongSet(static_cast<long long>(idx)), std::move(bodyInst)));
     }
     {
@@ -1205,7 +1656,7 @@ bool SimplifyCascadingIfStatementsImpl(Block& block, int& i,
         } else {
             return false;
         }
-        newSwitch->Sections.push_back(
+        newSwitch->AddSection(
             MakeSection(labels.Invert(), std::move(defaultBody)));
     }
     // Emit: replace the matched instruction range with the switch.
@@ -1411,14 +1862,14 @@ bool SimplifyCSharp1CascadingIfStatementsImpl(Block& block, int& i,
     }
     auto newSwitch = std::make_unique<SwitchInstruction>(std::move(stringToInt));
     for (std::size_t idx = 0; idx < values.size(); idx++) {
-        newSwitch->Sections.push_back(
+        newSwitch->AddSection(
             MakeSection(Util::LongSet(static_cast<long long>(idx)),
                         std::unique_ptr<ILInstruction>(values[idx].inst)));
     }
     {
         Util::LongSet labels(
             Util::LongInterval(0, static_cast<long long>(values.size())));
-        newSwitch->Sections.push_back(
+        newSwitch->AddSection(
             MakeSection(labels.Invert(),
                         std::make_unique<Branch>(currentCaseBlock)));
     }
@@ -1903,7 +2354,7 @@ bool MatchLegacySwitchOnStringWithDictImpl(Block& block, int& i,
     auto newSwitch =
         std::make_unique<SwitchInstruction>(std::move(stringToInt));
     for (auto& section : sections) {
-        newSwitch->Sections.push_back(std::move(section));
+        newSwitch->AddSection(std::move(section));
     }
     newSwitch->StartILOffset = instructions[i]->StartILOffset;
     newSwitch->EndILOffset = instructions[i]->EndILOffset;
@@ -2279,7 +2730,7 @@ bool MatchLegacySwitchOnStringWithHashtableImpl(
         }
         context.StepOnce("MatchLegacySwitchOnStringWithHashtable");
         for (auto& section : sections) {
-            newSwitch->Sections.push_back(std::move(section));
+            newSwitch->AddSection(std::move(section));
         }
         newSwitch->StartILOffset = instructions[i]->StartILOffset;
         newSwitch->EndILOffset = instructions[i]->EndILOffset;
@@ -2371,10 +2822,12 @@ bool MatchSwitchOnCharBlock(Block* block, int length, ILVariable* switchValueVar
                     bool emptyStringEqualsNull = false;
                     ILInstruction* bodyOrLeave = nullptr;
                     Block* exit = nullptr;
+                    ILInstruction* exitLeave = nullptr;
                     if (!MatchRoslynCaseBlockHead(cursor, switchValueVar,
                                                   bodyOrLeave, exit,
                                                   stringValue,
-                                                  emptyStringEqualsNull)) {
+                                                  emptyStringEqualsNull,
+                                                  exitLeave)) {
                         return false;
                     }
                     if (static_cast<int>(stringValue.size()) != length ||
@@ -2695,10 +3148,11 @@ bool MatchRoslynSwitchOnStringUsingLengthAndCharImpl(Block& block, int i,
         bool emptyStringEqualsNull = false;
         ILInstruction* bodyOrLeave = nullptr;
         Block* exit = nullptr;
+        ILInstruction* exitLeave = nullptr;
         if (targetBlock != nullptr &&
             MatchRoslynCaseBlockHead(targetBlock, switchValueVar, bodyOrLeave,
                                      exit, stringValue,
-                                     emptyStringEqualsNull)) {
+                                     emptyStringEqualsNull, exitLeave)) {
             bool seen = false;
             for (auto& existing : stringValues) {
                 if (existing.first.has_value() &&
@@ -2760,7 +3214,7 @@ bool MatchRoslynSwitchOnStringUsingLengthAndCharImpl(Block& block, int i,
                 static_cast<long long>(idx),
                 static_cast<long long>(idx) + 1)));
         section->SetBody(std::move(sectionBody));
-        newSwitch->Sections.push_back(std::move(section));
+        newSwitch->AddSection(std::move(section));
     }
     // The default section: the inverted complement of the value labels.
     auto defaultSection = std::make_unique<SwitchSection>(
@@ -2770,7 +3224,7 @@ bool MatchRoslynSwitchOnStringUsingLengthAndCharImpl(Block& block, int i,
     defaultSection->SetBody(defaultCase != nullptr
                                 ? defaultCase->Clone()
                                 : nullptr);
-    newSwitch->Sections.push_back(std::move(defaultSection));
+    newSwitch->AddSection(std::move(defaultSection));
     newSwitch->StartILOffset = instructions[i]->StartILOffset;
     newSwitch->EndILOffset = instructions[i]->EndILOffset;
     ReplaceAt(block, i, std::move(newSwitch));

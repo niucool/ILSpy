@@ -1814,8 +1814,67 @@ MetadataFile::GetPropertyAndEventBackingFieldLookup() const {
 
 ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::GetFieldSignature(std::uint32_t fieldToken) const {
     if (!IsValid()) return nullptr;
+    std::uint32_t table = fieldToken >> 24;
     std::uint32_t row = fieldToken & 0x00FFFFFFu;
-    if (row == 0 || row > impl_->db->Field.size()) return nullptr;
+    if (row == 0) return nullptr;
+    if (table == 0x0A) {
+        // A MemberRef field reference (`ldfld` through a fieldref -- the
+        // relinked same-module assemblies carry them): the row's own
+        // signature blob, with the VAR scope of the parent type's
+        // definition. A TypeSpec parent's GENERICINST blob carries the
+        // TypeDefOrRef of that definition; a TypeDef parent is the
+        // definition itself. Anything else (a TypeRef or ModuleRef parent)
+        // has no local generic-parameter rows -- the positional fallback
+        // names apply.
+        if (row > impl_->db->MemberRef.size()) return nullptr;
+        try {
+            auto memberRef = GetMemberReference(fieldToken);
+            if (!memberRef) return nullptr;
+            GenericParamNames genNames;
+            std::uint32_t parentTable = memberRef->ParentToken >> 24;
+            std::uint32_t parentRow = memberRef->ParentToken & 0x00FFFFFFu;
+            if (parentTable == 0x1B) {
+                auto tsBlob = GetTypeSpecSignatureBlob(memberRef->ParentToken);
+                if (tsBlob && tsBlob->size() >= 3 && (*tsBlob)[0] == 0x15) {
+                    // GENERICINST (0x15) [CLASS (0x12) | VALUETYPE (0x11)]
+                    // <compressed TypeDefOrRef coded index> <args...>.
+                    std::uint32_t coded = 0;
+                    std::size_t i = 2;
+                    std::uint32_t shift = 0;
+                    while (i < tsBlob->size() && shift < 28) {
+                        std::uint8_t b = (*tsBlob)[i++];
+                        coded |= static_cast<std::uint32_t>(b & 0x7Fu) << shift;
+                        if ((b & 0x80) == 0) break;
+                        shift += 7;
+                    }
+                    if ((coded & 3u) == 0 && (coded >> 2) != 0) {
+                        parentTable = 0x02;
+                        parentRow = coded >> 2;
+                    } else {
+                        parentTable = 0;
+                        parentRow = 0;
+                    }
+                }
+            }
+            if (parentTable == 0x02 && parentRow != 0 &&
+                parentRow <= impl_->db->TypeDef.size()) {
+                auto range = impl_->db->TypeDef[parentRow - 1].GenericParam();
+                for (auto it = range.first; it != range.second; ++it) {
+                    std::uint32_t n = (*it).Number();
+                    if (n >= genNames.classNames.size())
+                        genNames.classNames.resize(n + 1);
+                    genNames.classNames[n] = std::string((*it).Name());
+                }
+            }
+            auto blob = GetSignatureBlob(fieldToken);
+            if (!blob) return nullptr;
+            return DecodeFieldSignatureBlob(*impl_->db, blob->data(), blob->size(),
+                                            &genNames);
+        } catch (const std::exception&) {
+            return nullptr;
+        }
+    }
+    if (table != 0x04 || row > impl_->db->Field.size()) return nullptr;
     try {
         auto blobIndex = impl_->db->Field.get_value<std::uint32_t>(row - 1, 2);  // Signature blob
         auto blob = impl_->db->get_blob(blobIndex);

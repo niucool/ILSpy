@@ -53,7 +53,17 @@ endif()
 # e.g. ISymbol::SymbolKind()) trips it in every TU that includes the
 # TypeSystem headers, so disable it for every target; older GCC and Clang
 # silently ignore the unknown negative form.
-if(NOT MSVC)
+#
+# GCC < 13 predates the -Wchanges-meaning spelling entirely, so -Wno-* is
+# silently ignored there and the diagnostic stays a hard error gated by
+# -fpermissive (the box's stock GCC 11.4 hits exactly this). Use -fpermissive
+# on those — same convention the sibling dnlib/dnscope C++ ports use — and
+# the surgical -Wno-changes-meaning where it exists.
+if(MSVC)
+    # nothing to do
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13)
+    add_compile_options(-fpermissive)
+else()
     add_compile_options(-Wno-changes-meaning)
 endif()
 

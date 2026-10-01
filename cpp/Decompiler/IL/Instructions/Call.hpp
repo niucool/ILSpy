@@ -96,6 +96,18 @@ public:
     // True for call/callvirt on an instance method (Arguments[0] is the
     // receiver); false for static calls and newobj. Set by the IL reader.
     bool IsInstanceCall = false;
+    // True for a `callvirt` opcode (false for `call` and `newobj`). The IL
+    // reader sets it from the decoded opcode. The receiver rule consumes it
+    // (the C# CallBuilder's requireTarget: a BaseReferenceExpression target
+    // keeps the receiver only for a non-callvirt invocation of a virtual
+    // method -- `base.M(...)`; every other this-targeted call elides it).
+    bool IsVirtualCall = false;
+    // True when the TARGET METHOD carries MethodAttributes.Virtual (0x40).
+    // The IL reader sets it from the method token's attributes; the receiver
+    // rule's `method.IsVirtual` half (a `call` to a base-declared virtual
+    // method on `this` renders `base.M(...)`; a non-virtual base method
+    // called with `call` renders the bare name).
+    bool IsVirtualMethod = false;
     // True for a `newobj` call (the C# models this as a separate NewObj node;
     // this port reuses Call with this flag, matching the IsInstanceCall
     // precedent). The IL reader sets it from the decoded opcode. Consumed by

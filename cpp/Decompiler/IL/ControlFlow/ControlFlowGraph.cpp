@@ -97,10 +97,12 @@ void ControlFlowGraph::CreateEdges() {
         });
         // Our reader materializes branch finals only for explicit jumps: a
         // block whose final is a conditional If falls through to the next
-        // block in the container (the C# reader emits an explicit fall-through
-        // Branch instead; the edge is the same either way).
+        // block in the container, and a block with no final at all (a plain
+        // fall-through, e.g. one left by an inline that moved its exit away)
+        // does too (the C# reader emits an explicit fall-through Branch for
+        // both; the edge is the same either way).
         ILInstruction* fin = block->FinalInstruction.get();
-        if (fin && !HasFlag(fin->Flags(), InstructionFlags::EndPointUnreachable)) {
+        if (!fin || !HasFlag(fin->Flags(), InstructionFlags::EndPointUnreachable)) {
             if (i + 1 < blocks.size() && blocks[i + 1]->Parent == container_)
                 sourceNode->AddEdgeTo(cfg_[i + 1].get());
         }

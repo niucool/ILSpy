@@ -22,6 +22,7 @@
 // the StackType mapping, and the WriteTo dump. This is the Phase 3 foundation;
 // the IL reader that builds this tree from real method bodies comes next.
 
+#include "Decompiler/TypeSystem/LookupStubs.hpp"
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
@@ -103,6 +104,30 @@ TEST(ILAst, TreeInvariantAndFlags) {
     // Block flags union children: includes MayWriteLocals and MayBranch.
     EXPECT_TRUE(HasFlag(b.Flags(), InstructionFlags::MayWriteLocals));
     EXPECT_TRUE(HasFlag(b.Flags(), InstructionFlags::MayBranch));
+}
+
+TEST(ILAst, StackTypeOfEnumIsItsUnderlyingType) {
+    // The C# GetStackType reads the enum's underlying primitive (an enum's
+    // evaluation-stack type is I4 for the common Int32 underlying) -- a
+    // switch over an enum-typed variable must not widen the switch value
+    // to `switch ((long)(machine))`.
+    namespace TS = ILSpy::Decompiler::TypeSystem;
+    namespace TSup = ILSpy::Decompiler::TypeSystem::TestSupport;
+    TSup::LookupCompilation compilation;
+    auto enumDef = std::make_shared<TSup::LookupTypeDefinition>(
+        "Machine", "dnlib.PE",
+        TS::FullTypeName(TS::TopLevelTypeName("dnlib.PE", "Machine", 0)),
+        TS::TypeKind::Enum, TS::Accessibility::Public, compilation, nullptr);
+    enumDef->SetEnumUnderlyingType(
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32));
+    EXPECT_EQ(StackTypeOf(enumDef), StackType::I4)
+        << "an enum-typed local's ResultType is its underlying primitive";
+
+    auto v = std::make_shared<ILVariable>(
+        VariableKind::Parameter, enumDef, 0);
+    v->Name = "machine";
+    auto ld = std::make_unique<LdLoc>(v);
+    EXPECT_EQ(ld->ResultType(), StackType::I4);
 }
 
 TEST(ILAst, StackTypeMapping) {

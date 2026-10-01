@@ -23,12 +23,20 @@
 
 #include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
+#include "Decompiler/IL/Transforms/IILTransform.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/TypeSystem/FullTypeName.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/TypeSystem/LookupStubs.hpp"
 
 #include <gtest/gtest.h>
 
@@ -169,4 +177,66 @@ TEST(AssignVariableNames, GenericTypeTakesBaseNameNotTypeArg) {
     fn->Variables.push_back(v);
     AssignVariableNames().Run(*fn, Ctx());
     EXPECT_EQ(fn->Variables[0]->Name, "list");
+}
+
+TEST(AssignVariableNames, RejectsProposalThatShadowsInheritedMemberName) {
+    // The C# currentLowerCaseTypeOrMemberNames filter (AssignVariableNames.cs
+    // VariableScope ctor): a naming proposal matching a lower-case MEMBER name
+    // of the declaring type is rejected -- the local must not shadow the member
+    // (an `allTypeDefs` local over the base field would force `base.` on every
+    // later access). The store proposal for `stloc V = ldfld this->allTypeDefs`
+    // suggests the field name; the filter rejects it and the type fallback
+    // names the array local "array".
+    using namespace ILSpy::Decompiler::TypeSystem;
+    using namespace ILSpy::Decompiler::TypeSystem::TestSupport;
+    LookupCompilation compilation;
+    auto baseType = std::make_shared<LookupTypeDefinition>(
+        std::string("Base"), std::string("Test"),
+        FullTypeName(TopLevelTypeName(std::string("Test"), std::string("Base"))),
+        TypeKind::Class, Accessibility::Public, compilation, nullptr);
+    auto arrayType = std::make_shared<ArrayType>(
+        std::make_shared<KnownType>(KnownTypeCode::Byte));
+    auto field = std::make_shared<LookupField>(
+        std::string("allTypeDefs"), arrayType, compilation);
+    baseType->SetFields({ field.get() });
+    auto derivedType = std::make_shared<LookupTypeDefinition>(
+        std::string("Derived"), std::string("Test"),
+        FullTypeName(TopLevelTypeName(std::string("Test"), std::string("Derived"))),
+        TypeKind::Class, Accessibility::Public, compilation, nullptr);
+    derivedType->AddDirectBaseType(baseType);
+
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto block = std::make_unique<Block>();
+    Block* blockPtr = block.get();
+    fn->Body->AddBlock(std::move(block));
+
+    // The `this` parameter (the reader's negative-index convention).
+    auto thisVar = std::make_shared<ILVariable>(VariableKind::Parameter,
+                                                baseType, -1);
+    thisVar->Name = "this";
+    fn->Variables.push_back(thisVar);
+    // The local stored from the field load.
+    auto local = std::make_shared<ILVariable>(VariableKind::Local,
+                                             arrayType, -1);
+    local->Name = "V_0";
+    fn->Variables.push_back(local);
+
+    // stloc V_0(ldobj(ldflda(ldloc this, "Test.Base::allTypeDefs"))).
+    auto ldflda = std::make_unique<LdFlda>(
+        std::make_unique<LdLoc>(thisVar), std::string("Test.Base::allTypeDefs"));
+    auto load = std::make_unique<LdObj>(std::move(ldflda), arrayType);
+    auto store = std::make_unique<StLoc>(local, std::move(load));
+    local->StoreInstructions.push_back(store.get());
+    blockPtr->Add(std::move(store));
+
+    ILTransformContext ctx;
+    ctx.CurrentTypeDefinition = derivedType.get();
+    AssignVariableNames().Run(*fn, ctx);
+    // The proposal "allTypeDefs" is a member name of the declaring type's
+    // base chain: rejected. The type fallback names the array "array".
+    EXPECT_EQ(local->Name, "array")
+        << "a proposal matching a member name must not shadow the member";
 }

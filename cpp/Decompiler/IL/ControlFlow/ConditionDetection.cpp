@@ -185,6 +185,20 @@ bool TryInlineTrueBranch(BlockContainer* container, std::size_t blockIndex) {
 // `block`) into the IfInstruction that is `block`'s final. The fall-through
 // must have exactly one predecessor (this block) so inlining doesn't change
 // the CFG for any other path. Returns true if a block was inlined.
+// Whether `arm` is an empty if-arm: a Nop, or a Block with no instructions
+// and a null/Nop final (the C# ConditionDetection.IsEmpty). Mirrors the
+// renderer's isEmptyArm but at the ILAst level, for the swap transform.
+bool IsEmptyArm(const ILInstruction* arm) {
+    if (!arm) return true;
+    if (arm->Op == OpCode::Nop) return true;
+    if (auto* b = dynamic_cast<const Block*>(arm)) {
+        if (!b->Instructions.empty()) return false;
+        if (!b->FinalInstruction) return true;
+        return b->FinalInstruction->Op == OpCode::Nop;
+    }
+    return false;
+}
+
 bool TryInlineIfFallThrough(BlockContainer* container, std::size_t blockIndex) {
     if (blockIndex + 1 >= container->Blocks.size()) return false;
     Block* block = container->Blocks[blockIndex].get();
@@ -195,7 +209,10 @@ bool TryInlineIfFallThrough(BlockContainer* container, std::size_t blockIndex) {
     // fall-through is only the cond-false path -- inlining the fall-through
     // into the else is then semantics-preserving.
     if (!iff->TrueInst || !HasFlag(iff->TrueInst->Flags(), InstructionFlags::EndPointUnreachable)) return false;
-    if (iff->FalseInst) return false;  // already has an else
+    // The C# materializes a missing else as a Nop (the IfInstruction ctor's
+    // `falseInst ?? new Nop()`), so its "no else" gates see a Nop; this port
+    // uses a null slot. Treat both as empty (the C# IsEmpty).
+    if (iff->FalseInst && !IsEmptyArm(iff->FalseInst.get())) return false;  // already has an else
 
     Block* fallThrough = container->Blocks[blockIndex + 1].get();
     if (fallThrough->Parent != container) return false;
@@ -205,6 +222,28 @@ bool TryInlineIfFallThrough(BlockContainer* container, std::size_t blockIndex) {
     auto* ftNode = cfg.GetNode(fallThrough);
     if (!ftNode || ftNode->Predecessors.size() != 1) return false;
     if (ftNode->Predecessors[0] != cfg.GetNode(block)) return false;
+    // The CFG above only sees this container's subtree: a branch in a
+    // SIBLING container (the same function, a different container) may
+    // still target the fall-through block, and erasing it from this
+    // container would destroy the block under that branch's TargetBlock.
+    // Walk the whole function tree for branches targeting the block --
+    // the single CFG predecessor is the positional fall-through, so any
+    // branch hit makes the erase unsafe.
+    {
+        ILInstruction* root = container;
+        while (root->Parent != nullptr) root = root->Parent;
+        std::vector<ILInstruction*> stack{root};
+        while (!stack.empty()) {
+            ILInstruction* node = stack.back();
+            stack.pop_back();
+            if (auto* br = dynamic_cast<Branch*>(node)) {
+                if (br->TargetBlock == fallThrough) return false;
+            }
+            for (int i = 0; i < node->ChildCount(); i++)
+                if (ILInstruction* child = node->GetChild(i))
+                    stack.push_back(child);
+        }
+    }
 
     // Gate: when the true arm is NOT a bare Branch (i.e. it is a Block ending
     // in an exit, the post-invert shape), only inline if the true arm's exit
@@ -290,20 +329,6 @@ std::unique_ptr<ILInstruction> NegateCondition(std::unique_ptr<ILInstruction> co
                                     ComparisonKind::Equality, TypeSystem::Sign::None);
 }
 
-// Whether `arm` is an empty if-arm: a Nop, or a Block with no instructions
-// and a null/Nop final (the C# ConditionDetection.IsEmpty). Mirrors the
-// renderer's isEmptyArm but at the ILAst level, for the swap transform.
-bool IsEmptyArm(const ILInstruction* arm) {
-    if (!arm) return true;
-    if (arm->Op == OpCode::Nop) return true;
-    if (auto* b = dynamic_cast<const Block*>(arm)) {
-        if (!b->Instructions.empty()) return false;
-        if (!b->FinalInstruction) return true;
-        return b->FinalInstruction->Op == OpCode::Nop;
-    }
-    return false;
-}
-
 // Swap `if (cond) {} else { work }` to `if (!cond) { work }` (negate the
 // condition, move the false arm to the true arm, drop the else). The C#
 // ConditionDetection.SwapEmptyThen. This puts the work in the true arm so the
@@ -325,6 +350,164 @@ bool TrySwapEmptyThen(BlockContainer* container, std::size_t blockIndex) {
     return true;
 }
 
+// The same-target guard merge: `if (C) br X else Block { FINAL: if (c) br X
+// else B2 }` (both gotos target the same block X) -> `if (C || c) br X else
+// B2`. This is the else-oriented form of the C# IntroduceShortCircuit: the
+// C# inverts the guards first (PickBetterBlockExit -> InvertIf, then
+// InlineTrueBranch into the then) and combines with LogicAnd; this port's
+// fall-through inline builds the else-oriented chain instead, so the merge
+// takes the LogicOr form directly (`if (C) ldc.i4 1 else c`, the C#
+// IfInstruction.LogicOr convention). Applied repeatedly by the fixpoint, it
+// collapses `if (c1) br X else { if (c2) br X else { ... } }` into
+// `if (c1 || c2 || ...) br X else <the body>` -- the shape the oracle
+// renders as `if (c1 || c2 || ...) { continue; } <body>`.
+// The positional fall-through successor (defined below; the guard combine
+// runs earlier in this TU than the helper).
+Block* NextBlockInContainer(Block* block);
+
+// The flat same-exit guard chain: `if (C1) leave V` as one block's final
+// and `if (C2) leave V` as the single-predecessor positional successor's --
+// the CFS branch-to-return fold's per-site materialization of the shared
+// exit block (the C# keeps that block whole and merges the guards through
+// MergeCommonBranches; the WillShortCircuit form: `if (cond) commonExit;
+// if (cond2) commonExit;` -> `if (cond || cond2) commonExit;`). The shared
+// identity survives the fold only as the leave VALUE (the same target
+// container and the same value expression), so the combine keys on that.
+bool TryCombineSameExitGuards(BlockContainer* container, std::size_t blockIndex) {
+    if (blockIndex + 1 >= container->Blocks.size()) return false;
+    Block* block = container->Blocks[blockIndex].get();
+    Block* nextBlock = container->Blocks[blockIndex + 1].get();
+    auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get());
+    if (!iff) return false;
+    if (iff->FalseInst) return false;  // no else: the false path falls to nextBlock
+    auto* nextIff = dynamic_cast<IfInstruction*>(nextBlock->FinalInstruction.get());
+    if (!nextIff) return false;
+    if (nextIff->FalseInst) return false;
+    // The consumed block is a pure guard (no leading instructions).
+    if (!nextBlock->Instructions.empty()) return false;
+    // The consumed block must be single-predecessor (only this block's
+    // fall-through) so removing it dangles no branch.
+    if (CountBranchPredecessors(FunctionOf(block), nextBlock) != 0) return false;
+    auto exitKey = [](const Leave* l) -> std::string {
+        if (l->TargetContainer == nullptr) return std::string();
+        if (l->Value == nullptr)
+            return "l:" + std::to_string(reinterpret_cast<std::uintptr_t>(l->TargetContainer));
+        return "lv:" + std::to_string(reinterpret_cast<std::uintptr_t>(l->TargetContainer)) +
+               ":" + l->Value->ToString();
+    };
+    // An arm's exit leave: a bare Leave, or a Block wrapping nothing but
+    // the leave (the CDD's own inline machinery wraps arms in Blocks). A
+    // Block with leading instructions is not a pure exit -- its content
+    // would be lost with the consumed block.
+    auto armLeave = [](ILInstruction* arm) -> const Leave* {
+        if (auto* l = dynamic_cast<const Leave*>(arm)) return l;
+        if (auto* b = dynamic_cast<const Block*>(arm)) {
+            if (b->Instructions.empty())
+                return dynamic_cast<const Leave*>(b->FinalInstruction.get());
+        }
+        return nullptr;
+    };
+    // Variant 1: both true arms resolve to leaves with the same exit
+    // identity (the target container + the value's text -- the
+    // SectionExitKey convention).
+    const Leave* leave1 = armLeave(iff->TrueInst.get());
+    const Leave* leave2 = armLeave(nextIff->TrueInst.get());
+    std::string key1 = leave1 != nullptr ? exitKey(leave1) : std::string();
+    std::string key2 = leave2 != nullptr ? exitKey(leave2) : std::string();
+    if (key1.empty() || key1 != key2) {
+        // Variant 2: the first guard's true arm branches to the second
+        // guard's fall-through block (the shared exit as a branch target --
+        // the multi-predecessor exit the CFS does not fold):
+        //   if (C1) br FAIL;  if (C2) br CONT;  FAIL: ...  ->
+        //   if (!C1 && C2) br CONT;  FAIL: ...
+        auto* br1 = dynamic_cast<Branch*>(iff->TrueInst.get());
+        if (!br1) return false;
+        Block* afterNext = NextBlockInContainer(nextBlock);
+        if (!afterNext || br1->TargetBlock != afterNext) return false;
+        auto andCond = std::make_unique<IfInstruction>(
+            NegateCondition(std::move(iff->Condition)),
+            std::move(nextIff->Condition), std::make_unique<LdcI4>(0));
+        iff->Condition = std::move(andCond);
+        iff->Condition->Parent = iff;
+        iff->Condition->ChildIndex = 0;
+        // The combined TRUE arm is the second guard's true arm (br CONT);
+        // the fall-through after the combined if is the shared exit block
+        // (the second guard's old fall-through), reached once the guard
+        // block is removed.
+        iff->TrueInst = std::move(nextIff->TrueInst);
+        if (iff->TrueInst) { iff->TrueInst->Parent = iff; iff->TrueInst->ChildIndex = 1; }
+        for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+            if (container->Blocks[i].get() == nextBlock) {
+                container->Blocks.erase(container->Blocks.begin() + i);
+                break;
+            }
+        }
+        for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+            container->Blocks[i]->ChildIndex = static_cast<int>(i);
+            container->Blocks[i]->Parent = container;
+        }
+        return true;
+    }
+    // Combine the conditions: LogicOr(C1, C2) = `if (C1) ldc.i4 1 else C2`.
+    // The short-circuit preserves the evaluation order (C2 only when C1 is
+    // false -- exactly when the original fall-through reached guard 2).
+    auto orCond = std::make_unique<IfInstruction>(
+        std::move(iff->Condition), std::make_unique<LdcI4>(1),
+        std::move(nextIff->Condition));
+    iff->Condition = std::move(orCond);
+    iff->Condition->Parent = iff;
+    iff->Condition->ChildIndex = 0;
+    // Consume the next guard block: its true arm's leave is value-identical
+    // to this if's (already in place), and its false path's destination is
+    // the block after it, which this block's fall-through reaches directly
+    // once the guard block is removed.
+    for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+        if (container->Blocks[i].get() == nextBlock) {
+            container->Blocks.erase(container->Blocks.begin() + i);
+            break;
+        }
+    }
+    for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+        container->Blocks[i]->ChildIndex = static_cast<int>(i);
+        container->Blocks[i]->Parent = container;
+    }
+    return true;
+}
+
+bool TryCombineSameTargetGuards(BlockContainer* container, std::size_t blockIndex) {
+    if (blockIndex >= container->Blocks.size()) return false;
+    Block* block = container->Blocks[blockIndex].get();
+    auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get());
+    if (!iff) return false;
+    // The outer true arm: a bare branch to X.
+    auto* outerBr = dynamic_cast<Branch*>(iff->TrueInst.get());
+    if (!outerBr || !outerBr->TargetBlock) return false;
+    // The outer else: a block whose only content is the nested if.
+    auto* elseBlock = dynamic_cast<Block*>(iff->FalseInst.get());
+    if (!elseBlock || !elseBlock->Instructions.empty()) return false;
+    auto* nestedIf = dynamic_cast<IfInstruction*>(elseBlock->FinalInstruction.get());
+    if (!nestedIf) return false;
+    // The nested true arm: a bare branch to the SAME X.
+    auto* nestedBr = dynamic_cast<Branch*>(nestedIf->TrueInst.get());
+    if (!nestedBr || !nestedBr->TargetBlock) return false;
+    if (nestedBr->TargetBlock != outerBr->TargetBlock) return false;
+    // Combine: condition = LogicOr(C, c) = `if (C) ldc.i4 1 else c`.
+    auto orCond = std::make_unique<IfInstruction>(
+        std::move(iff->Condition), std::make_unique<LdcI4>(1),
+        std::move(nestedIf->Condition));
+    iff->Condition = std::move(orCond);
+    iff->Condition->Parent = iff;
+    iff->Condition->ChildIndex = 0;
+    // The nested else becomes the outer else (the nested true arm's goto is
+    // redundant: it targets the same X the outer true arm already goes to).
+    iff->FalseInst = std::move(nestedIf->FalseInst);
+    if (iff->FalseInst) {
+        iff->FalseInst->Parent = iff;
+        iff->FalseInst->ChildIndex = 2;
+    }
+    return true;
+}
+
 // `if (cond1) { if (cond2) br X }` (no else; the true arm a Block whose final
 // is a nested if-goto) -> `if (cond1 && cond2) br X`. The C# ConditionDetection.
 // IntroduceShortCircuit. The port's model: the nested if is the true-arm
@@ -341,6 +524,12 @@ bool TryIntroduceShortCircuit(BlockContainer* container, std::size_t blockIndex)
     if (!trueBlock || !trueBlock->Instructions.empty()) return false;
     auto* nestedIf = dynamic_cast<IfInstruction*>(trueBlock->FinalInstruction.get());
     if (!nestedIf) return false;
+    // The C# matches the nested if with the two-arg MatchIfInstruction,
+    // which requires the false arm to be a Nop (no else): the nested if's
+    // false path is the true-block's fall-through, the same continuation as
+    // the outer if's false path. A nested if carrying an else has a second
+    // path that the combine would drop.
+    if (nestedIf->FalseInst && !IsEmptyArm(nestedIf->FalseInst.get())) return false;
     // condition = LogicAnd(iff->Condition, nestedIf->Condition) =
     // if (iff->Condition) nestedIf->Condition else ldc.i4(0).
     auto combined = std::make_unique<IfInstruction>(
@@ -674,8 +863,7 @@ bool TryPickBetterBlockExit(BlockContainer* container, std::size_t blockIndex) {
     // fall-through) so the move is semantics-preserving; InvertIf re-checks
     // this via CountBranchPredecessors and bails if multi-pred.
     if (CountBranchPredecessors(FunctionOf(block), nextBlock) != 0) return false;
-    ConditionDetection::InvertIf(block, iff);
-    return true;
+    return ConditionDetection::InvertIf(block, iff);
 }
 
 } // namespace
@@ -722,20 +910,20 @@ int ConditionDetection::GetStartILOffset(ILInstruction* inst, bool& isEmpty) {
 // the container. The next block must be single-predecessor (only this block's
 // fall-through) so moving its content into the if's TrueInst and the old then
 // into the next block is semantics-preserving.
-void ConditionDetection::InvertIf(Block* block, IfInstruction* ifInst) {
-    if (!block || !ifInst) return;
+bool ConditionDetection::InvertIf(Block* block, IfInstruction* ifInst) {
+    if (!block || !ifInst) return false;
     // `ifInst` must be the block's FinalInstruction (the C# `ifInst.Parent == block`).
-    if (block->FinalInstruction.get() != ifInst) return;
+    if (block->FinalInstruction.get() != ifInst) return false;
     // No else (the C# `IsEmpty(ifInst.FalseInst)` -- a null FalseInst is this
     // port's "no else", since the reader emits a void if with a null FalseInst
     // rather than a Nop FalseInst).
-    if (ifInst->FalseInst) return;
+    if (ifInst->FalseInst) return false;
     // The then must exit (the C# `ifInst.TrueInst.HasFlag(EndPointUnreachable)`).
-    if (!ifInst->TrueInst) return;
-    if (!HasFlag(ifInst->TrueInst->Flags(), InstructionFlags::EndPointUnreachable)) return;
+    if (!ifInst->TrueInst) return false;
+    if (!HasFlag(ifInst->TrueInst->Flags(), InstructionFlags::EndPointUnreachable)) return false;
 
     Block* nextBlock = NextBlockInContainer(block);
-    if (!nextBlock) return;  // no falseCode; degenerate
+    if (!nextBlock) return false;  // no falseCode; degenerate
 
     // The next block must be single-predecessor (only this block's fall-through)
     // so the move is semantics-preserving. The C# has the falseCode in the same
@@ -750,7 +938,23 @@ void ConditionDetection::InvertIf(Block* block, IfInstruction* ifInst) {
     // ReduceNestingTransform/HighLevelLoopTransform the count is fresh, and
     // `CountBranchPredecessors == 0` is equivalent to `IncomingEdgeCount == 1`
     // for a fall-through next block).
-    if (CountBranchPredecessors(FunctionOf(block), nextBlock) != 0) return;
+    if (CountBranchPredecessors(FunctionOf(block), nextBlock) != 0) return false;
+
+    // The false-path continuation must exit: the C#'s InvertIf reads the
+    // instructions following the if out of the SAME block, whose last
+    // instruction is guaranteed to have an unreachable end point (GetExit's
+    // assert -- a C# Block always ends in a terminator or an if whose both
+    // arms exit). This port's next block carries its own FinalInstruction,
+    // which may instead be a fall-through if (the reader ends a block at
+    // every conditional branch): moving such a final into the new TRUE arm
+    // re-routes its fall-through to the old-then position, orphaning the
+    // blocks that followed it (the truncated-body render the Equals family
+    // carried). Require the next block's final to have an unreachable end
+    // point before the move.
+    if (!nextBlock->FinalInstruction ||
+        !HasFlag(nextBlock->FinalInstruction->Flags(),
+                 InstructionFlags::EndPointUnreachable))
+        return false;
 
     // Save the old TrueInst (then). Detach it before the slot is reassigned.
     auto thenOwned = std::move(ifInst->TrueInst);
@@ -793,6 +997,7 @@ void ConditionDetection::InvertIf(Block* block, IfInstruction* ifInst) {
     // ImproveILOrdering/ReduceNesting folds handle the re-visit if needed).
     ifInst->Condition = NegateCondition(std::move(ifInst->Condition));
     if (ifInst->Condition) { ifInst->Condition->Parent = ifInst; ifInst->Condition->ChildIndex = 0; }
+    return true;
 }
 
 void ConditionDetection::Run(ILFunction& function, ILTransformContext& context) {
@@ -814,6 +1019,14 @@ void ConditionDetection::Run(ILFunction& function, ILTransformContext& context) 
             if (changed) continue;
             for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
                 if (TryIntroduceShortCircuit(c, i)) { changed = true; break; }
+            }
+            if (changed) continue;
+            for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
+                if (TryCombineSameTargetGuards(c, i)) { changed = true; break; }
+            }
+            if (changed) continue;
+            for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
+                if (TryCombineSameExitGuards(c, i)) { changed = true; break; }
             }
             if (changed) continue;
             for (std::size_t i = c->Blocks.size(); i-- > 0;) {

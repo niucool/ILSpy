@@ -790,6 +790,43 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
                 clone->AddBlock(std::unique_ptr<Block>(
                     static_cast<Block*>(b ? b->Clone().release() : nullptr)));
             }
+            // The C# BlockContainer.Clone's retarget pass: a cloned branch
+            // whose target block belongs to the ORIGINAL container points at
+            // the clone's block at the same ChildIndex, and a cloned leave
+            // targeting the original container targets the clone. The
+            // branches/leaves whose targets live in a DIFFERENT container
+            // keep the original target (the C# GC keeps the original tree
+            // alive for those; this port's callers keep the source tree
+            // alive -- the YieldReturnDecompiler's KeepAliveFunctions).
+            {
+                std::vector<ILInstruction*> stack{clone.get()};
+                std::vector<Branch*> branches;
+                std::vector<Leave*> leaves;
+                while (!stack.empty()) {
+                    ILInstruction* node = stack.back();
+                    stack.pop_back();
+                    if (auto* br = dynamic_cast<Branch*>(node))
+                        branches.push_back(br);
+                    else if (auto* lv = dynamic_cast<Leave*>(node))
+                        leaves.push_back(lv);
+                    for (int i = 0; i < node->ChildCount(); i++)
+                        if (ILInstruction* child = node->GetChild(i))
+                            stack.push_back(child);
+                }
+                for (Branch* br : branches) {
+                    if (br->TargetBlock != nullptr &&
+                        br->TargetBlock->Parent == &s) {
+                        std::size_t idx =
+                            static_cast<std::size_t>(br->TargetBlock->ChildIndex);
+                        if (idx < clone->Blocks.size())
+                            br->TargetBlock = clone->Blocks[idx].get();
+                    }
+                }
+                for (Leave* lv : leaves) {
+                    if (lv->TargetContainer == &s)
+                        lv->TargetContainer = clone.get();
+                }
+            }
             c = std::move(clone);
             break;
         }

@@ -20,6 +20,7 @@
 #include <cstdio>
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/CSharpDecompiler.hpp"
+#include "Decompiler/CSharp/FractionApprox.hpp"
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
 #include "Decompiler/CSharp/RequiredNamespaceCollector.hpp"
 #include "Decompiler/CSharp/RequiredImportsRecorder.hpp"
@@ -59,6 +60,7 @@
 #include "Decompiler/CSharp/OutputVisitor/FormattingOptionsFactory.hpp"
 #include "Decompiler/CSharp/OutputVisitor/InsertParenthesesVisitor.hpp"
 #include "Decompiler/CSharp/OutputVisitor/GenericGrammarAmbiguityVisitor.hpp"
+#include "Decompiler/CSharp/OutputVisitor/CSharpKeywordCheck.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/PartialTypeInfo.hpp"
 #include "Decompiler/Metadata/UniversalAssemblyResolver.hpp"
@@ -193,7 +195,8 @@ std::string CSharpDecompiler::MethodDeclString(
             paramDecl += "object";
         paramDecl += ' ';
         if (i < parameterNames.size() && !parameterNames[i].empty())
-            paramDecl += parameterNames[i];
+            paramDecl +=
+                OutputVisitor::EscapeIdentifier(parameterNames[i]);
         else
             paramDecl += "arg_" + std::to_string(base + static_cast<int>(i));
     }
@@ -250,7 +253,8 @@ std::string CSharpDecompiler::MethodDeclString(
                                         scopeResolver);
         paramDecl += ' ';
         if (i < parameterNames.size() && !parameterNames[i].empty())
-            paramDecl += parameterNames[i];
+            paramDecl +=
+                OutputVisitor::EscapeIdentifier(parameterNames[i]);
         else
             paramDecl += "arg_" + std::to_string(base + static_cast<int>(i));
         // The C# IsDefaultValueAssignmentAllowed: an optional parameter
@@ -1099,19 +1103,141 @@ std::string ConstantValueText(const std::any& value,
         if (auto* u64 = std::any_cast<std::uint64_t>(&value))
             return std::to_string(*u64) + "uL";
         if (auto* f = std::any_cast<float>(&value)) {
+            // The shortest form that round-trips: the C# float literal
+            // (up to 9 significant digits, `float.IsFinite`-style "R").
             char buffer[64];
-            std::snprintf(buffer, sizeof(buffer), "%g", *f);
-            return std::string(buffer) + "f";
+            for (int prec = 1; prec <= 9; ++prec) {
+                std::snprintf(buffer, sizeof(buffer), "%.*g", prec, *f);
+                float parsed = std::strtof(buffer, nullptr);
+                if (parsed == *f || (std::isnan(parsed) && std::isnan(*f)))
+                    break;
+            }
+            std::string ftext = buffer;
+            for (char& ch : ftext)
+                if (ch == 'e') ch = 'E';
+            // The C# ConvertConstantValue order: the named special
+            // constants first (with the negation retry: -float.Epsilon),
+            // then ConvertFloatingPointLiteral's integer-value check,
+            // the fraction (the raw continued-fraction form, the
+            // machine-scale preferred denominators, then the MathF
+            // special constants -- deferred, the flat emitter carries no
+            // compilation to probe MathF's presence), then the plain
+            // literal.
+            {
+                std::string named = CSharp::SpecialNamedFloatingConstant(
+                    /*isFloat*/ true, *f);
+                if (!named.empty()) return named;
+            }
+            bool useFraction =
+                ftext.size() - (ftext[0] == '-' ? 2 : 1) > 5;
+            if (useFraction && std::floor(*f) != *f) {
+                auto [num, den] =
+                    CSharp::FractionApprox(static_cast<double>(*f), 200);
+                bool hasRegularFraction =
+                    CSharp::IsValidFraction(num, den) &&
+                    static_cast<float>(
+                        num / static_cast<float>(den)) == *f &&
+                    std::labs(den) != 1;
+                long long pNum = 0, pDen = 0;
+                int pScore = 0;
+                bool hasPreferred = CSharp::TryGetPreferredFraction(
+                    static_cast<double>(*f), /*isDouble*/ false, pNum, pDen,
+                    pScore);
+                if (hasPreferred) {
+                    int baselineLength =
+                        hasRegularFraction
+                            ? CSharp::GetFractionDisplayLength(
+                                  num, den, /*isDouble*/ false)
+                            : static_cast<int>(ftext.size()) + 1;
+                    bool regularFractionIsSimple =
+                        hasRegularFraction &&
+                        CSharp::IsSimpleFraction(num, den);
+                    if (!regularFractionIsSimple &&
+                        pScore <= baselineLength) {
+                        if (hasRegularFraction) {
+                            num = pNum;
+                            den = pDen;
+                        } else {
+                            return std::to_string(pNum) + "f / " +
+                                   std::to_string(pDen) + "f";
+                        }
+                    }
+                }
+                if (hasRegularFraction)
+                    return std::to_string(num) + "f / " +
+                           std::to_string(den) + "f";
+            }
+            return ftext + "f";
         }
         if (auto* d = std::any_cast<double>(&value)) {
+            // The shortest form that round-trips: the C# double literal
+            // (up to 17 significant digits, "R"-style). A plain %g loses
+            // precision and the value no longer round-trips.
             char buffer[64];
-            std::snprintf(buffer, sizeof(buffer), "%g", *d);
+            for (int prec = 1; prec <= 17; ++prec) {
+                std::snprintf(buffer, sizeof(buffer), "%.*g", prec, *d);
+                double parsed = std::strtod(buffer, nullptr);
+                if (parsed == *d || (std::isnan(parsed) && std::isnan(*d)))
+                    break;
+            }
             std::string text = buffer;
+            // The C# literal's exponent marker is capital (`5E-324`,
+            // the PrimitiveExpression's double format).
+            for (char& ch : text)
+                if (ch == 'e') ch = 'E';
+            // The C# ConvertFloatingPointLiteral order: an integer-valued
+            // constant is a plain literal; a long non-integer tries the
+            // raw fraction (denominator bounded at 1000 for the double),
+            // then the Math.PI/E special constants, then the plain
+            // literal.
+            {
+                std::string named = CSharp::SpecialNamedFloatingConstant(
+                    /*isFloat*/ false, *d);
+                if (!named.empty()) return named;
+            }
+            bool useFraction =
+                text.size() - (text[0] == '-' ? 2 : 1) > 5;
+            if (useFraction && std::floor(*d) != *d) {
+                auto [num, den] = CSharp::FractionApprox(*d, 1000);
+                bool hasRegularFraction =
+                    CSharp::IsValidFraction(num, den) &&
+                    num / static_cast<double>(den) == *d &&
+                    std::labs(den) != 1;
+                long long pNum = 0, pDen = 0;
+                int pScore = 0;
+                bool hasPreferred = CSharp::TryGetPreferredFraction(
+                    *d, /*isDouble*/ true, pNum, pDen, pScore);
+                if (hasPreferred) {
+                    int baselineLength =
+                        hasRegularFraction
+                            ? CSharp::GetFractionDisplayLength(
+                                  num, den, /*isDouble*/ true)
+                            : static_cast<int>(text.size());
+                    bool regularFractionIsSimple =
+                        hasRegularFraction &&
+                        CSharp::IsSimpleFraction(num, den);
+                    if (!regularFractionIsSimple &&
+                        pScore <= baselineLength) {
+                        if (hasRegularFraction) {
+                            num = pNum;
+                            den = pDen;
+                        } else {
+                            return std::to_string(pNum) + ".0 / " +
+                                   std::to_string(pDen) + ".0";
+                        }
+                    }
+                }
+                if (hasRegularFraction)
+                    return std::to_string(num) + ".0 / " +
+                           std::to_string(den) + ".0";
+                std::string special = CSharp::SpecialDoubleConstantText(*d);
+                if (!special.empty()) return special;
+            }
             // The C# double literal always carries the decimal point
             // (`5.0`, not `5` -- the PrimitiveExpression's double
             // format).
             if (text.find('.') == std::string::npos &&
-                text.find('e') == std::string::npos &&
+                text.find('E') == std::string::npos &&
                 text.find("inf") == std::string::npos &&
                 text.find("nan") == std::string::npos)
                 text += ".0";
@@ -1715,13 +1841,16 @@ std::string AccessorVisibilityText(const TS::IMethod* accessor,
 std::string AccessorBodyText(const Metadata::MetadataFile& file,
                              TS::DecompilerTypeSystem* typeSystem,
                              std::uint32_t accessorToken,
-                             const char* accessorName) {
+                             const char* accessorName,
+                             bool* iteratorDecompiled = nullptr) {
     std::uint32_t rva = file.GetMethodRVA(accessorToken);
     if (rva == 0)
         return std::string();
     std::string text;
+    bool iteratorOutcome = false;
     if (!CSharpDecompiler::DecompileMethodToString(
-            file, typeSystem, accessorToken, rva, accessorName, text)) {
+            file, typeSystem, accessorToken, rva, accessorName, text,
+            /*isConstructor=*/false, nullptr, &iteratorOutcome)) {
         // The C# DecompileMethod's body-decode failure over an accessor:
         // the block with the reference-assembly empty-body comment (a
         // reference assembly's stale RVA never decodes, and the property
@@ -1730,6 +1859,8 @@ std::string AccessorBodyText(const Metadata::MetadataFile& file,
         return "/*Error: Empty body found. Decompiled assembly might be "
                "a reference assembly.*/;\n";
     }
+    if (iteratorDecompiled != nullptr)
+        *iteratorDecompiled = iteratorOutcome;
     std::size_t open = text.find("{\n");
     std::size_t close = text.rfind("\n}");
     if (open == std::string::npos || close == std::string::npos ||
@@ -3499,8 +3630,20 @@ bool DecompileTypeToStringBody(
         if (!anyAccessor) {
             out += "\n{\n";
             if (accessors.GetterToken != 0) {
+                // The C# CleanUpMethodDeclaration over the accessor: the
+                // state-machine attribute on the getter drops when the
+                // getter decompiled as an iterator (the method path's
+                // rule; the accessor renders the getter's own attribute
+                // list, so the outcome must be consulted here too). The
+                // body re-render reports the outcome; an empty
+                // (non-decoding) body leaves it false.
+                bool getterIterator = false;
+                getterBody = AccessorBodyText(
+                    file, typeSystem, accessors.GetterToken, "get",
+                    &getterIterator);
                 out += MemberAttributesText(
-                    module.GetDefinitionMethod(accessors.GetterToken));
+                    module.GetDefinitionMethod(accessors.GetterToken),
+                    /*asyncDecompiled=*/false, getterIterator);
                 out += AccessorReturnAttributesText(getterEntity);
                 out += AccessorVisibilityText(
                     module.GetDefinitionMethod(accessors.GetterToken),
@@ -3508,8 +3651,6 @@ bool DecompileTypeToStringBody(
                 if (getterBody.empty()) {
                     out += "get;\n";
                 } else {
-                    getterBody = AccessorBodyText(
-                        file, typeSystem, accessors.GetterToken, "get");
                     out += "get\n{\n" + getterBody + "}\n";
                 }
                 anyAccessor = true;
@@ -3847,7 +3988,7 @@ bool DecompileTypeToStringBody(
                 if (!documentation.empty())
                     out += DocumentationCommentLines(documentation);
             }
-            out += f.Name;
+            out += OutputVisitor::EscapeIdentifier(f.Name);
             bool withInitializer =
                 displayMode == EnumValueDisplayMode::All ||
                 displayMode == EnumValueDisplayMode::AllHex ||
@@ -4043,7 +4184,7 @@ bool DecompileTypeToStringBody(
         out += MemberModifiersText(fieldEntity);
         out += fieldTypeName;
         out += ' ';
-        out += f.Name;
+        out += OutputVisitor::EscapeIdentifier(f.Name);
         if (fieldEntity != nullptr && fieldEntity->IsConst()) {
             std::string literal = ConstantFieldLiteral(*fieldEntity);
             // The enum-typed const fields render the qualified member
@@ -4286,14 +4427,57 @@ bool DecompileTypeToStringBody(
                 methodEntity->IsExplicitInterfaceImplementation() ||
                 methodEntity->IsStatic() || memberRendersExtern)
                 return;
-            for (const TS::IMember* implemented :
-                 methodEntity->ExplicitlyImplementedInterfaceMembers()) {
+            // The forwarder gate: a row renders only when its interface
+            // method's declaring type resolves to the module the
+            // MethodDeclaration's TypeRef is SCOPED to. A type-forwarder
+            // hop between them (dnlib.dll's compiler-generated
+            // enumerators binding MoveNext to
+            // System.Collections.IEnumerator through the netstandard
+            // facade) does not render -- the real tool emits the
+            // forwarder for the same-module and the directly-referenced
+            // shapes only. The members pair positionally with the
+            // MethodImpl rows (GetOverrides resolves them in row order).
+            std::vector<Metadata::MetadataFile::MethodImplementationInfo>
+                implRows = file.GetMethodImplementations(m.Token);
+            const std::vector<const TS::IMember*>& members =
+                methodEntity->ExplicitlyImplementedInterfaceMembers();
+            std::size_t memberIndex = 0;
+            for (const TS::IMember* implemented : members) {
                 const auto* interfaceMethod =
                     dynamic_cast<const TS::IMethod*>(implemented);
                 if (interfaceMethod == nullptr ||
                     interfaceMethod->DeclaringType() == nullptr ||
                     interfaceMethod->DeclaringType()->Kind() !=
-                        TS::TypeKind::Interface)
+                        TS::TypeKind::Interface) {
+                    memberIndex++;
+                    continue;
+                }
+                const TS::IModule* scopedModule = nullptr;
+                if (memberIndex < implRows.size()) {
+                    if (auto memberRef = file.GetMemberReference(
+                            implRows[memberIndex].MethodDeclarationToken))
+                        scopedModule =
+                            module.GetDeclaringModule(memberRef->ParentToken);
+                }
+                memberIndex++;
+                if (std::getenv("ILSPY_PROBE_FWD") != nullptr)
+                    std::fprintf(stderr,
+                        "[FWD] member=%s declModule=%s scoped=%s\n",
+                        interfaceMethod->Name().c_str(),
+                        interfaceMethod->ParentModule() != nullptr
+                            ? interfaceMethod->ParentModule()->Name().c_str()
+                            : "(null)",
+                        scopedModule != nullptr
+                            ? scopedModule->Name().c_str()
+                            : "(null)");
+                // The fallback shape: a TypeRef whose scope does not
+                // resolve to a module (the same-module ModuleRef, whose
+                // name never matches the module-name scan) resolves
+                // through the compilation scan, and the forwarder emits
+                // when the definition lands in the decompiled module.
+                const TS::IModule* expectedModule =
+                    scopedModule != nullptr ? scopedModule : &module;
+                if (interfaceMethod->ParentModule() != expectedModule)
                     continue;
                 const TS::ITypePtr interfaceType =
                     interfaceMethod->DeclaringType();

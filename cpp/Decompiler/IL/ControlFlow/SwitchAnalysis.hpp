@@ -40,11 +40,13 @@
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
+#include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/Util/LongSet.hpp"
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -78,6 +80,12 @@ public:
     // The block the analysis was seeded with.
     Block* RootBlock = nullptr;
 
+    // Pure-return blocks whose sole incoming edge was a false path the
+    // analysis converted into a leave-body section: dead once the switch
+    // forms (the C# tree keeps a shared br target instead; the CFS
+    // branch-to-return fold materialized one per site in this port).
+    std::vector<Block*> ConsumedExitBlocks;
+
     // Whether to allow unreachable cases in switch instructions.
     bool AllowUnreachableCases = false;
 
@@ -97,15 +105,27 @@ private:
     // De-duplication maps: a Branch target block -> section index, and a Leave
     // target container -> section index, so two arms that jump to the same
     // place merge into one section.
-    std::unordered_map<Block*, int> targetBlockToSectionIndex_;
-    std::unordered_map<BlockContainer*, int> targetContainerToSectionIndex_;
+    std::unordered_map<std::string, int> sectionKeyToSectionIndex_;
     // Synthesized fall-through Branches (not in the tree) kept alive so the
     // section bodies point at valid memory until SwitchDetection consumes them.
     std::vector<std::unique_ptr<ILInstruction>> ownedBodies_;
 
     bool AnalyzeBlockImpl(Block* block, Util::LongSet inputValues, bool tailOnly = false);
+
+    // Whether `block` is a valued-return block (empty, leave-with-value
+    // final) reachable only from its positional predecessor -- the
+    // fold-materialized shared return site the false-path conversion
+    // consumes.
+    bool IsSoleOwnerValuedReturn(Block* block) const;
     bool AnalyzeSwitch(SwitchInstruction* inst, const Util::LongSet& inputValues);
+    // The else-armed chain levels: the CFS restructured trees nest the chain
+    // continuation in the if's false arm as a Block (instead of the C#'s
+    // fall-through sibling block). AnalyzeNestedBlock descends into such a
+    // wrapper: its final is the next level's if, or (innermost) a lone
+    // Branch to the default block.
+    bool AnalyzeNestedBlock(Block* block, Util::LongSet inputValues);
     void AddSection(Util::LongSet values, ILInstruction* inst);
+    std::string SectionExitKey(ILInstruction* inst);
     bool MatchSwitchVar(ILInstruction* inst);
     bool MatchSwitchVar(ILInstruction* inst, long long& sub);
     bool AnalyzeCondition(ILInstruction* condition, Util::LongSet& trueValues);

@@ -595,23 +595,18 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             break;  // discard
         }
         case ILOpCode::Dup: {
-            if (s.expressionStack.empty()) {
-                // Duplicating a committed stack-slot value is just another load
-                // of the slot (the C# Peek does the same via currentStack).
-                if (s.currentStack.empty()) return DecodeOutcome::Bail;
-                if (!s.Push(std::make_unique<LdLoc>(s.currentStack.back()))) return DecodeOutcome::Bail;
-                break;
-            }
-            auto top = s.Pop();
-            if (!top) return DecodeOutcome::Bail;
-            auto v = std::make_shared<ILVariable>();
-            v->Name = "dup_" + std::to_string(start);
-            v->Kind = VariableKind::StackSlot;
-            v->Type = TypeOfValue(top.get());
-            s.stackVarsCreated.push_back(v);
-            block->Add(std::make_unique<StLoc>(v, std::move(top)));
-            if (!s.Push(std::make_unique<LdLoc>(v))) return DecodeOutcome::Bail;
-            if (!s.Push(std::make_unique<LdLoc>(v))) return DecodeOutcome::Bail;
+            // The C# `return Push(Peek())`: the Peek FLUSHES the expression
+            // stack into committed stack slots (the duplicated value crosses
+            // the materialization boundary once) and loads the top committed
+            // slot -- the slot STAYS committed, so both copies of the value
+            // read the same slot (the Roslyn iterator stub's `newobj; dup;
+            // stfld ...; dup; stfld ...; ret` reuses ONE slot for every
+            // parameter store and the return; a fresh slot per dup would
+            // leave a copy between the stores that breaks the
+            // enumerator-creation pattern).
+            FlushExpressionStack(s, block);
+            if (s.currentStack.empty()) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<LdLoc>(s.currentStack.back()))) return DecodeOutcome::Bail;
             break;
         }
 
@@ -635,6 +630,9 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             call->ReturnIType = callSig->ReturnType;
             call->ParameterIType = callSig->ParameterTypes;
             call->IsInstanceCall = callSig->IsInstance && op != ILOpCode::Newobj;
+            call->IsVirtualCall = (op == ILOpCode::Callvirt);
+            call->IsVirtualMethod =
+                (file.GetMethodAttributes(tok) & 0x40) != 0;
             call->IsNewObj = (op == ILOpCode::Newobj);
             call->MethodToken = tok;
             call->DeclaringType = file.ResolveMethodDeclaringType(tok, s.ownerMethodToken);
@@ -914,6 +912,9 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             std::vector<std::unique_ptr<ILInstruction>> indices;
             indices.push_back(std::move(idx));
             auto addr = std::make_unique<LdElema>(type, std::move(arr), std::move(indices));
+            // The C# LdElem/StElem set DelayExceptions on the ldelema: the
+            // element access's exception is delayed to the dereference.
+            addr->DelayExceptions = true;
             if (!s.Push(std::make_unique<LdObj>(std::move(addr), type))) return DecodeOutcome::Bail;
             break;
         }
@@ -925,6 +926,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
         std::vector<std::unique_ptr<ILInstruction>> indices; \
         indices.push_back(std::move(idx)); \
         auto addr = std::make_unique<LdElema>(type, std::move(arr), std::move(indices)); \
+        addr->DelayExceptions = true;  /* the C# StElem's DelayExceptions */ \
         block->Add(std::make_unique<StObj>(std::move(addr), std::move(val), type)); \
         break; \
     }
@@ -941,6 +943,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             std::vector<std::unique_ptr<ILInstruction>> indices;
             indices.push_back(std::move(idx));
             auto addr = std::make_unique<LdElema>(type, std::move(arr), std::move(indices));
+            addr->DelayExceptions = true;  // the C# StElem's DelayExceptions
             block->Add(std::make_unique<StObj>(std::move(addr), std::move(val), type));
             break;
         }
@@ -1134,8 +1137,14 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
                 sec->SetBody(std::make_unique<Branch>(targets[i]));
                 sw->AddSection(std::move(sec));
             }
-            // Default section: fall through to the instruction after the switch.
+            // Default section: fall through to the instruction after the
+            // switch. The labels are the complement of the table's index
+            // range (the C# DecodeSwitch: LongSet(new LongInterval(0,
+            // targets.Length)).Invert()) -- every value the table does not
+            // cover. GetDefaultSection (the section with the most labels)
+            // relies on this being the huge complement, not an empty set.
             auto def = std::make_unique<SwitchSection>();
+            def->Labels = Util::LongSet(Util::LongInterval(0, static_cast<long long>(n))).Invert();
             def->SetBody(std::make_unique<Branch>(static_cast<std::uint32_t>(pos)));
             sw->AddSection(std::move(def));
             block->SetFinal(std::move(sw));

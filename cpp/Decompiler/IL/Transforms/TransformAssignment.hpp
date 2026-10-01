@@ -52,6 +52,7 @@
 #pragma once
 
 #include "Decompiler/IL/ILInstruction.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Transforms/StatementTransform.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
@@ -91,6 +92,15 @@ using CompoundFinalizeMatch = std::function<void(ILFunction&)>;
 // IMethod for the property-setter gate) -- the deferred cases.
 bool IsCompoundStore(ILInstruction* inst, TypeSystem::ITypePtr& storeType,
                      ILInstruction*& value);
+
+// Port of TransformAssignment.HandleCompoundAssign (the StObj binary case --
+// the expression-transform entry the C# ExpressionTransforms.VisitStObj calls).
+// `stobj` is a `stobj(addr, binary.op(ldobj(addr), value))` where both
+// addresses are the same pure address computation; the store is replaced with
+// `compound.op.new(addr, value)` (EvaluatesToNewValue). Returns false when the
+// shape does not match. The StLoc-in-setter lifting, the Call (property
+// setter), user-defined-operator, dynamic and string.Concat cases are deferred.
+bool HandleCompoundAssignStObj(StObj* stobj, const ILTransformSettings* settings);
 
 // Port of TransformAssignment.IsMatchingCompoundLoad (LdLoc/StLoc case). Checks
 // whether `load` and `store` both access the same store and can be combined into

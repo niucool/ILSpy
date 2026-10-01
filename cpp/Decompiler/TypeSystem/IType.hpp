@@ -37,6 +37,7 @@
 #include <cassert>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -425,6 +426,21 @@ protected:
 private:
     TopLevelTypeName name_;
     TypeKind kind_;
+};
+
+// An enum type reference whose members' constant values the signature
+// decoder collected from the TypeDef's fields. The case-label rendering
+// (the C# CreateTypedCaseLabel's enum lookup) resolves a switch label
+// value to the enum member name; a name-only SimpleType carries no
+// members, so the decode-time collection rides the type.
+class EnumMembersType : public SimpleType {
+public:
+    EnumMembersType(TopLevelTypeName name, std::map<long long, std::string> members)
+        : SimpleType(std::move(name), TypeKind::Enum), members_(std::move(members)) {}
+    // The enum members by constant value (the static literal fields).
+    const std::map<long long, std::string>& Members() const noexcept { return members_; }
+private:
+    std::map<long long, std::string> members_;
 };
 
 // A parameterized (generic) type: e.g. List<int>. The base type is the

@@ -27,6 +27,8 @@
 #include "Decompiler/IL/VariableKind.hpp"
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
+#include <map>
+
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
@@ -167,7 +169,11 @@ TEST(ILAstToCSharp, ArithmeticAndComparisonExpressions) {
 
 TEST(ILAstToCSharp, ConditionalBranchEmitsIfGotoAndLabel) {
     // b0: if (1 == 1) goto b2;  b1: stloc (body);  b2: return.
-    // b2 is NOT the next block (b1 is), so the goto is non-redundant.
+    // b2 is NOT the next block (b1 is), so the branch is non-redundant --
+    // but the guard-region fold restructures it: the fall-through region
+    // nests under the INVERTED condition, the target continues after (the
+    // C# ConditionDetection/ReduceNestingTransform shape; the goto form
+    // survives only for the shapes the fold's gates reject).
     auto b0 = std::make_unique<Block>();
     b0->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
                                     std::make_unique<LdcI4>(0)));
@@ -194,9 +200,11 @@ TEST(ILAstToCSharp, ConditionalBranchEmitsIfGotoAndLabel) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "");
-    EXPECT_NE(text.find("	if (1 == 1) goto IL_0020;\n"), std::string::npos) << text;
-    EXPECT_NE(text.find("\nIL_0020:\n"), std::string::npos) << text;
-}
+    EXPECT_NE(text.find("if (1 != 1)\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	var V_1 = 1;\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("goto "), std::string::npos)
+        << "the guard-region fold removes the goto: " << text;
+    }
 
 TEST(ILAstToCSharp, VoidCallStatementAndStringEscapes) {
     auto call = std::make_unique<Call>("System.Console::WriteLine");
@@ -234,8 +242,97 @@ TEST(ILAstToCSharp, InstanceCallRendersAsReceiverDotMethod) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "int arg_1");
-    EXPECT_NE(text.find("	this.ToString(arg_1);\n"), std::string::npos) << text;
+    // The C# requireTarget rule: a this-receiver instance call ELIDES the
+    // receiver (the ThisReferenceExpression target renders bare) -- not
+    // `this.ToString(arg_1)` and never the static-style form.
+    EXPECT_NE(text.find("\tToString(arg_1);\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("this.ToString("), std::string::npos)
+        << "the this-receiver elides (the C# requireTarget rule)";
     EXPECT_EQ(text.find("System.Object.ToString("), std::string::npos) << "not a static-style call";
+}
+
+TEST(ILAstToCSharp, MultiArgAccessorRendersAsIndexer) {
+    // A property accessor taking arguments beyond the receiver is an
+    // indexer access (C# has no parameterized properties besides indexers):
+    // `call IList::get_Item(list, i)` renders `list[i]`, not `list.Item`
+    // (the index argument must not be dropped); `call IList::set_Item(list,
+    // i, v)` renders `list[i] = v`. A plain accessor without extra arguments
+    // stays a property access (`list.Count`).
+    auto list = MakeVar(VariableKind::Local, "list", 0);
+    auto i = MakeVar(VariableKind::Local, "i", 1);
+
+    auto getCall = std::make_unique<Call>(
+        "System.Collections.Generic.IList`1[[System.Object]]::get_Item");
+    getCall->IsInstanceCall = true;
+    getCall->ReturnType = StackType::O;
+    getCall->AddArg(std::make_unique<LdLoc>(list));
+    getCall->AddArg(std::make_unique<LdLoc>(i));
+
+    auto setCall = std::make_unique<Call>(
+        "System.Collections.Generic.IList`1[[System.Object]]::set_Item");
+    setCall->IsInstanceCall = true;
+    setCall->ReturnType = StackType::Void;
+    setCall->AddArg(std::make_unique<LdLoc>(list));
+    setCall->AddArg(std::make_unique<LdLoc>(i));
+    setCall->AddArg(std::make_unique<LdLoc>(list));
+
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(list, std::move(getCall)));
+    block->Add(std::move(setCall));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("= list[i];"), std::string::npos)
+        << "an indexer getter renders the index, not a property";
+    EXPECT_NE(text.find("list[i] = list;"), std::string::npos)
+        << "an indexer setter renders the index and the value";
+    EXPECT_EQ(text.find(".Item"), std::string::npos)
+        << "the accessor name must not appear in the index syntax";
+}
+
+TEST(ILAstToCSharp, NegatedShortCircuitPushesDeMorganIntoComparisons) {
+    // The C# ExpressionBuilder.TranslateCondition(condition, negate): the
+    // negation pushes into the condition tree instead of wrapping it. The
+    // ConditionDetection output `if (!(a != 5 || b < 3)) { ... }` (the
+    // combined guard chain over a while loop, where the guard-continue fold
+    // does not apply) renders the de Morgan form with the comparison
+    // operators flipped: `if (a == 5 && b >= 3) { ... }` -- the oracle's
+    // while-guard form (FindNewarr: `if (Code == Newarr && i >= 1)`).
+    auto a = MakeVar(VariableKind::Local, "a", 0);
+    auto b = MakeVar(VariableKind::Local, "b", 1);
+
+    // LogicOr(comp(ne, a, 5), comp(lt, b, 3)): if ((a != 5)) 1 else (b < 3)
+    auto orTree = std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(a), std::make_unique<LdcI4>(5),
+                               ComparisonKind::Inequality),
+        std::make_unique<LdcI4>(1),
+        std::make_unique<Comp>(std::make_unique<LdLoc>(b), std::make_unique<LdcI4>(3),
+                               ComparisonKind::LessThan));
+    // The guard: if (orTree == 0) { work }
+    auto work = std::make_unique<Block>();
+    work->Add(std::make_unique<StLoc>(a, std::make_unique<LdcI4>(7)));
+
+    auto b0 = std::make_unique<Block>();
+    auto b1 = std::make_unique<Block>();
+    auto fn = MakeFunction({});
+    Block* b1Ptr = b1.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::move(orTree), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Equality),
+        std::move(work)));
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<Branch>(b1Ptr));  // unreachable-safe final
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("if (a == 5 && b >= 3)"), std::string::npos)
+        << "the negation distributes (de Morgan) with flipped comparison operators";
+    EXPECT_EQ(text.find("!("), std::string::npos)
+        << "no wrapping negation survives over a short-circuit tree";
 }
 
 TEST(ILAstToCSharp, ConstructorCallEmitsNewExpression) {
@@ -426,6 +523,45 @@ TEST(ILAstToCSharp, SwitchSectionWithLeaveBodyInlinesReturn) {
     EXPECT_NE(text.find("return 5;"), std::string::npos) << text;
     EXPECT_NE(text.find("default:"), std::string::npos) << text;
     EXPECT_NE(text.find("V_0 = 7"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, SwitchCaseLabelsUseEnumMemberNames) {
+    // The C# CreateTypedCaseLabel's enum lookup: a switch over an
+    // enum-typed variable renders the case labels as the enum member names
+    // (`case Machine.I386:`), not the raw values (`case 332:`).
+    namespace TS = ILSpy::Decompiler::TypeSystem;
+    std::map<long long, std::string> members;
+    members[332] = "I386";
+    members[34404] = "AMD64";
+    auto enumType = std::make_shared<TS::EnumMembersType>(
+        TS::TopLevelTypeName("dnlib.PE", "Machine", 0), std::move(members));
+    auto v = std::make_shared<ILVariable>(VariableKind::Parameter, enumType, 0);
+    v->Name = "machine";
+
+    auto b0 = std::make_unique<Block>();
+    auto b2 = std::make_unique<Block>(); Block* b2Ptr = b2.get();
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b2));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v));
+    auto caseSection = std::make_unique<SwitchSection>(
+        ILSpy::Decompiler::Util::LongSet(static_cast<long long>(332)));
+    caseSection->SetBody(std::make_unique<Leave>(fn->Body.get(),
+                                                 std::make_unique<LdcI4>(1)));
+    auto defaultSection = std::make_unique<SwitchSection>();
+    defaultSection->SetBody(std::make_unique<Leave>(fn->Body.get(),
+                                                    std::make_unique<LdcI4>(0)));
+    sw->AddSection(std::move(caseSection));
+    sw->AddSection(std::move(defaultSection));
+    fn->Body->Blocks[0]->SetFinal(std::move(sw));
+    b2Ptr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "int", "M", "Machine machine");
+    EXPECT_NE(text.find("case Machine.I386:"), std::string::npos) << text;
+    EXPECT_EQ(text.find("case 332:"), std::string::npos)
+        << "the enum switch renders the member name, not the raw value";
 }
 
 TEST(ILAstToCSharp, SwitchSectionWithThrowBodyInlinesThrow) {
@@ -2621,4 +2757,139 @@ TEST(ILAstToCSharp, SwitchAllBodiesExitOrFallThroughNoConvergenceExit) {
     EXPECT_NE(text.find("num = 42"), std::string::npos) << text;
     // No break: no body branches to a shared exit.
     EXPECT_EQ(text.find("break;"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, GuardRegionFoldsMultiBlockFallThrough) {
+    // The guard-region fold (the C# ConditionDetection / MergeCommonBranches
+    // shape): `if (cond) br bT else nop` with the multi-block fall-through
+    // region between the guard and the target restructures to the INVERTED
+    // if nesting the region, the target continuing after -- the goto form
+    // disappears:
+    //   b0: if (num == 0) br b3 else nop
+    //   b1: a = 1;                 <- the region (multi-block)
+    //   b2: b = 2;
+    //   b3: c = 3;                 <- the target (non-terminal)
+    //   b4: return;
+    auto num = MakeVar(VariableKind::Parameter, "num", 0);
+    auto a = MakeVar(VariableKind::Local, "a", 1);
+    auto b = MakeVar(VariableKind::Local, "b", 2);
+    auto c = MakeVar(VariableKind::Local, "c", 3);
+
+    auto b0 = std::make_unique<Block>();
+    auto b1 = std::make_unique<Block>();
+    auto b2 = std::make_unique<Block>();
+    auto b3 = std::make_unique<Block>();
+    auto b4 = std::make_unique<Block>();
+    b1->Add(std::make_unique<StLoc>(a, std::make_unique<LdcI4>(1)));
+    b2->Add(std::make_unique<StLoc>(b, std::make_unique<LdcI4>(2)));
+    b3->Add(std::make_unique<StLoc>(c, std::make_unique<LdcI4>(3)));
+
+    auto fn = MakeFunction({});
+    Block* b3Ptr = b3.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(b3));
+    fn->Body->AddBlock(std::move(b4));
+
+    auto br = std::make_unique<Branch>(static_cast<std::uint32_t>(0x30));
+    br->TargetBlock = b3Ptr;
+    br->HasOffset = false;
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(num),
+                               std::make_unique<LdcI4>(0),
+                               ComparisonKind::Equality),
+        std::move(br), std::make_unique<Nop>()));
+    fn->Body->Blocks[4]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "int num");
+    // The region nests under the INVERTED condition; the target continues
+    // after the if (the oracle's structure, not the goto form).
+    EXPECT_NE(text.find("if (num != 0)\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	var a = 1;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	var b = 2;\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("goto "), std::string::npos) << "no goto survives: " << text;
+}
+
+TEST(ILAstToCSharp, GuardRegionFoldsTerminalFallThrough) {
+    // The terminal-region variant (the ReadArrayArgument shape): the
+    // fall-through region is a throw, the target is the normal path. The
+    // inverted form nests the throw in the if's arm -- the linear form
+    // would render the throw as UNCONDITIONALLY reached (a semantic bug).
+    //   b0: if (num >= 0) br b2 else nop
+    //   b1: throw ...               <- the region (terminal)
+    //   b2: a = 1;                  <- the target (non-terminal)
+    //   b3: return;
+    auto num = MakeVar(VariableKind::Parameter, "num", 0);
+    auto a = MakeVar(VariableKind::Local, "a", 1);
+
+    auto b0 = std::make_unique<Block>();
+    auto b1 = std::make_unique<Block>();
+    auto b2 = std::make_unique<Block>();
+    auto b3 = std::make_unique<Block>();
+    b1->Add(std::make_unique<Throw>(std::make_unique<LdStr>("boom")));
+    b2->Add(std::make_unique<StLoc>(a, std::make_unique<LdcI4>(1)));
+
+    auto fn = MakeFunction({});
+    Block* b2Ptr = b2.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(b3));
+
+    auto br = std::make_unique<Branch>(static_cast<std::uint32_t>(0x20));
+    br->TargetBlock = b2Ptr;
+    br->HasOffset = false;
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(num),
+                               std::make_unique<LdcI4>(0),
+                               ComparisonKind::GreaterThanOrEqual),
+        std::move(br), std::make_unique<Nop>()));
+    fn->Body->Blocks[3]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "int num");
+    EXPECT_NE(text.find("if (num < 0)\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	throw \"boom\";\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	var a = 1;\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("goto "), std::string::npos) << "no goto survives: " << text;
+}
+
+TEST(ILAstToCSharp, ReferenceTypedConditionLeafRendersNullComparison) {
+    // A reference-typed truthiness leaf in a condition slot renders the
+    // null comparison, not the bare expression: `if (listener)` is not C#
+    // for a class-typed local; the oracle renders `if (listener != null)`
+    // (the LazyList.Set_NoLock family). The C# reader materializes the
+    // brtrue/brfalse null comparisons itself; this port's reader keeps the
+    // bare load, so the condition render supplies the comparison.
+    auto listener = MakeVar(VariableKind::Local, "listener", 0,
+        std::make_shared<ILSpy::Decompiler::TypeSystem::SimpleType>(
+            ILSpy::Decompiler::TypeSystem::TopLevelTypeName(
+                "dnlib.Utils", "ILazyListener")));
+    auto b0 = std::make_unique<Block>();
+    auto body = std::make_unique<Block>();
+    auto cont = std::make_unique<Block>();
+    auto fn = MakeFunction({});
+    Block* contPtr = cont.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(body));
+    fn->Body->AddBlock(std::move(cont));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(listener), std::make_unique<Branch>(contPtr)));
+    fn->Body->Blocks[1]->Add(std::make_unique<StLoc>(
+        MakeVar(VariableKind::Local, "num", 1), std::make_unique<LdcI4>(7)));
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<Branch>(contPtr));
+    fn->Body->Blocks[2]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    // The guard's fall-through region (num = 7) runs on the NULL path, so
+    // the folded region renders under the null comparison.
+    EXPECT_NE(text.find("if (listener == null)"), std::string::npos)
+        << "the reference-typed condition leaf renders the null comparison:\n" << text;
+    EXPECT_EQ(text.find("if (listener)\n"), std::string::npos)
+        << "not the bare truthiness form:\n" << text;
+    EXPECT_EQ(text.find("listener) == 0"), std::string::npos)
+        << "not the zero comparison on a class-typed leaf:\n" << text;
 }

@@ -66,7 +66,12 @@ public:
     // (no else) and an unreachable `TrueInst` (the C# `Debug.Assert`s).
     // `ExpressionTransforms.RunOnSingleStatement` (the C# re-visit that folds
     // `Comp.LogicNot`) is not ported; `NegateCondition` folds directly.
-    static void InvertIf(Block* block, IfInstruction* ifInst);
+    // Returns true when the inversion happened. The port's next block can
+    // carry a fall-through final where the C# model guarantees a terminator,
+    // so the inversion can bail after the caller's own gates passed; the
+    // callers that report a fixpoint change must propagate the failure
+    // (otherwise the fixpoint restarts on a no-op forever).
+    static bool InvertIf(Block* block, IfInstruction* ifInst);
 };
 
 } // namespace ILSpy::Decompiler::IL
