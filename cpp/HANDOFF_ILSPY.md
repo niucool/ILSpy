@@ -5996,8 +5996,54 @@ a claim-shape refinement that no blunt gate provides. The O-typing's
 pipeline tree diff (the coalesce fold firing) is visible via
 ILSPY_DUMP_TF full-module dumps old-vs-new.
 
+### THE O-TYPING LANDED (fc1fb7ddd + ebd144fdc; the deferred case closed)
+
+SLICE 1 (fc1fb7ddd): the O->Object typing + the release path. The
+probes traced the content loss to its exact mechanism: the return-
+propagation analysis claims single-pred blocks following an
+unconditional transfer, and renders the claimed content at the
+CLAIMING BRANCH's site -- but a block-final plain Branch whose target
+is a later block in the same container is DROPPED as a redundant
+fall-through (EmitBlock rendered it with dropFinal=1), so the claim
+had NO render site. The fix (WouldBeDroppedAsFallThrough in
+ILAstToCSharp.cpp, mirroring the container's transparent-relay scan)
+skips those claims; the targets render in the linear walk. This also
+repaired PRE-EXISTING silent drops (whole nested foreach loops and
+epilogue stores the old claims suppressed). RED:
+CoalesceFoldKeepsFollowingStatements (the PickThenUse fixture).
+
+SLICE 2 (ebd144fdc): the C# AssignVariableNames' StackSlot arm --
+GuessType(variable.Type, store.Value) over the stores, named by type.
+A slot typed Object (the collection initializer's newobj, a field
+load, a reference call result) names from the value's real type
+(`list`, not `obj`). RED: StackSlotNamesFromGuessedStoreType.
+
+THE MEASUREMENT: dnlib 69205 -> 69057; net10 86578 -> 86548; cui 1771
+-> 1770. THE S_N COLLAPSE: dnlib 1743 -> 195 obj sites; net10 3987 ->
+84. The net10 path: the O-typing alone measured -85 but restored
+previously-dropped content (+188 in verbose forms); the naming arm
+then more than recovered it.
+
+THE FOLLOW-UPS (the residual families, all visible in the diffs):
+1. THE DECLARED TYPE: the Object slots declare `object list = new
+   List<OpCode>();` where the oracle declares `List<OpCode> list`.
+   The slot's Type is the stack type (Object) by the C# FindType
+   rule; the oracle's typed declarations come from the collection-
+   initializer folding (the local is eliminated) or the C#
+   DeclareVariables/UseVar machinery. A slice could re-type the
+   variable at the naming pass (the GuessType result), but the C#
+   does NOT do that -- verify against the C# pipeline first.
+2. THE LOAD-PROPOSAL PARAMETER NAMES: the oracle names the PickThenUse
+   slot `value` (the Report call's parameter name -- the C#
+   GetNameForArgument resolves the call's parameter metadata); the
+   port's GetNameForArgument does not resolve call parameter names
+   yet (the port rendered `obj` there).
+3. THE FOREACH COLLAPSE: the restored loops render in the verbose
+   while/enumerator forms (the standing net10 foreach-collapse gap
+   family); collapsing them reclaims the restored-content diff lines.
+
 ### The standing gates (all verified on the committed tree)
 
-- The connid pin b38babc5465c9861; dnlib 69205; net10 86578; cui 1771;
-  hello 3; the suite control 268; the canary renders 8788 lines, 100
-  gotos (unchanged).
+- The connid pin b38babc5465c9861; dnlib 69057; net10 86548; cui 1770;
+  hello 3; the suite control 268; the canary renders 8846 lines, 100
+  gotos (the +58 over the previous state are restored statements).
