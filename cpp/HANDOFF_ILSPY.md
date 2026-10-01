@@ -5963,8 +5963,41 @@ IS OBSOLETE -- the port is ~3.7x faster than the oracle on the wall
 and well under its memory band. Do not re-open the using-set
 performance work without a fresh profile.
 
+### THE FLUSH-SLOT TYPING (landed d4fc15f28; the O-typing analysis for
+### the next slice)
+
+THE LANDING: the reader's TypeOfValue gained the C# FlushExpressionStack
+typing (compilation.FindType(inst.ResultType)) as the fallback: I4->Int32,
+I8->Int64, I->IntPtr, F4->Single, F8->Double. The call-result flush slots
+now declare `int num = ...` (the StreamManipulator.GetBits family) and
+name by type. dnlib 69225 -> 69205; net10 86588 -> 86578. RED:
+FacadeMemberModifiersTest.FlushSlotsNameByGuessedType (the
+flush_slot_fixture, compiled with csc -optimize+ -- the dup shape needs
+the RELEASE compiler; the debug fixture emits the verbose local form).
+
+THE O-TYPING (deferred with the full root cause in the code comment):
+typing the reference slots Object measures dnlib -585 / net10 -85 (the
+S_N count 1876 -> 382!) -- it unlocks the pipeline's reference-type
+COALESCE FOLD on the hoisted slots (correct: the oracle renders the
+`??`), but the post-fold block arrangement then trips the RENDERER's
+return-propagation analysis: the folded store's block ends in a plain
+branch, so the analysis claims the following single-pred statement block
+(preds==1, prev-final==Branch) and suppresses it -- nothing renders its
+content (the CommandLineParser.PrintOption family; the statements vanish
+from the output). TWO BLUNT GATES MEASURED AND REJECTED: (a) blocking
+the claim on the render contract (empty+Leave): +2096 dnlib -- the
+claims feed the guard/label-region folds' choreography (the erase at
+the claim sites, the overlap exemptions); (b) gating only the EmitBlock
+suppression: +1697 dnlib -- the claimed blocks are ALSO rendered inside
+the region folds, so un-suppressing double-renders. THE NEXT SLICE: the
+release path -- the guard-region fold (or a new fold) must cover the
+claimed coalesce-fallthrough statement blocks, or the RP analysis needs
+a claim-shape refinement that no blunt gate provides. The O-typing's
+pipeline tree diff (the coalesce fold firing) is visible via
+ILSPY_DUMP_TF full-module dumps old-vs-new.
+
 ### The standing gates (all verified on the committed tree)
 
-- The connid pin b38babc5465c9861; dnlib 69225; net10 86588; cui 1771;
+- The connid pin b38babc5465c9861; dnlib 69205; net10 86578; cui 1771;
   hello 3; the suite control 268; the canary renders 8788 lines, 100
   gotos (unchanged).
