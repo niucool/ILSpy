@@ -938,6 +938,27 @@ TEST(FacadeMemberModifiersTest, FieldCompoundAssignmentFolds) {
     EXPECT_EQ(text.find("count = count +"), std::string::npos) << text;
 }
 
+// The guarded void call in a finally region: the compiler emits
+// `ldloc v; brfalse end; ldloc v; callvirt Dispose; endfinally`, which this
+// port's block model carries as the if-final with the leave in the true arm
+// and the use in the fall-through block. The C# NullPropagationStatementTransform
+// folds the inverted single-if form (`if (v != null) { v.M(); }`) into
+// `v?.M();`; this port needs the two-block form of the same fold (the C#'s
+// InvertIf extracts the fall-through into the if arm -- not expressible in
+// the if-as-final model). The ObfuscatedFile.LoadModule
+// `finally { moduleDefMD?.Dispose(); }` family.
+TEST(FacadeMemberModifiersTest, NullPropagationVoidCallInFinally) {
+    constexpr const char* kFixture =
+        "/home/jim/ilspy-test-fixtures/inline_assign_fixture/"
+        "InlineAssignFixture.dll";
+    std::string text;
+    if (!RenderType(kFixture, "InlineAssignmentShapes", text))
+        GTEST_SKIP() << "the inline-assignment fixture is not provisioned";
+    EXPECT_NE(text.find("holder?.Dispose();"), std::string::npos) << text;
+    EXPECT_EQ(text.find("if (holder == null)"), std::string::npos)
+        << "the null-guard is folded into the null-propagation" << text;
+}
+
 // The C# DoDecompileType worklist (EnqueueReferencedMembers): a hidden
 // compiler-generated type whose declaring type's rendered members still
 // reference it -- the state-machine attribute's typeof -- renders at its

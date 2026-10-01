@@ -3567,6 +3567,41 @@ private:
                 Line(indent, StoreTargetText(*st.Target) + " = " + valueText + ";");
                 return;
             }
+            case OpCode::NullableRewrap: {
+                // The void-call null-propagation statement: `v?.M(...);` (the
+                // NullPropagationStatementTransform's two-block fold builds the
+                // rewrap over the use-call whose receiver is a NullableUnwrap).
+                // The rewrap itself is implicit in the `?.` surface syntax, so
+                // the call renders with the null-conditional receiver directly.
+                const auto& nr = static_cast<const NullableRewrap&>(inst);
+                const Call* call =
+                    nr.Argument
+                        ? dynamic_cast<const Call*>(nr.Argument.get())
+                        : nullptr;
+                if (call != nullptr && !call->Arguments.empty() &&
+                    call->Arguments[0]->Op == OpCode::NullableUnwrap) {
+                    const auto* unwrap =
+                        static_cast<const NullableUnwrap*>(
+                            call->Arguments[0].get());
+                    std::string recv =
+                        unwrap->Argument ? Expr(*unwrap->Argument)
+                                        : std::string("(default)");
+                    std::string method =
+                        call->MethodName.rfind("::") == std::string::npos
+                            ? call->MethodName
+                            : call->MethodName.substr(
+                                  call->MethodName.rfind("::") + 2);
+                    std::string args;
+                    for (std::size_t ai = 1; ai < call->Arguments.size(); ++ai) {
+                        if (!args.empty()) args += ", ";
+                        args += Expr(*call->Arguments[ai]);
+                    }
+                    Line(indent, recv + "?." + method + "(" + args + ");");
+                    return;
+                }
+                Line(indent, Expr(inst) + ";");
+                return;
+            }
             case OpCode::NumericCompoundAssign: {
                 // A numeric compound assignment as a statement: `target op= value;`
                 // (or `target++;`/`target--;` for the post-increment/decrement).
