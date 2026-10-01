@@ -18,6 +18,7 @@
 
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/CSharp/OutputVisitor/CSharpKeywordCheck.hpp"
+#include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
@@ -28,6 +29,7 @@
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdStr.hpp"
 
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
@@ -107,6 +109,48 @@ std::string InferName(const TypeSystem::IType* type) {
         name = name.substr(1);
     name[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(name[0])));
     return name;
+}
+
+// The C# AssignVariableNames.InferredTypeOf approximation for the StackSlot
+// naming arm: the instruction's type for the shapes the flush slots carry
+// (the C# ILTypeExtensions.InferType's NewObj/NewArr/Call cases; the port
+// adds the LdObj field loads and the pending local loads). Returns null
+// when the shape is not covered (the caller keeps the variable's type).
+TypeSystem::ITypePtr InferredTypeOf(const ILInstruction* inst) {
+    if (inst == nullptr) return nullptr;
+    if (auto* call = dynamic_cast<const Call*>(inst)) {
+        // The C# NewObj: the constructed type (the method's declaring
+        // type); a value-producing call: the return type.
+        if (call->IsNewObj) return call->DeclaringType;
+        return call->ReturnIType;
+    }
+    if (auto* na = dynamic_cast<const NewArr*>(inst))
+        return std::make_shared<TypeSystem::ArrayType>(na->Type);
+    if (auto* ldobj = dynamic_cast<const LdObj*>(inst)) return ldobj->Type;
+    if (auto* ld = dynamic_cast<const LdLoc*>(inst))
+        return ld->Variable ? ld->Variable->Type : nullptr;
+    if (dynamic_cast<const LdStr*>(inst))
+        return std::make_shared<TypeSystem::KnownType>(
+            TypeSystem::KnownTypeCode::String);
+    return nullptr;
+}
+
+// The C# AssignVariableNames.GuessType(variableType, inst): the variable's
+// type when it is not Object, else the instruction's inferred type when
+// known, else the variable's type. A flush slot typed Object (a
+// reference-typed call result, a field load, a collection initializer's
+// newobj) takes its name from the value's real type this way.
+TypeSystem::ITypePtr GuessType(const TypeSystem::ITypePtr& variableType,
+                                const ILInstruction* inst) {
+    if (variableType != nullptr) {
+        auto* k =
+            dynamic_cast<const TypeSystem::KnownType*>(variableType.get());
+        if (k == nullptr ||
+            k->Code() != TypeSystem::KnownTypeCode::Object)
+            return variableType;
+    }
+    if (auto inferred = InferredTypeOf(inst)) return inferred;
+    return variableType;
 }
 
 // The C# `static string CleanUpVariableName(string name)`
@@ -558,6 +602,27 @@ void AssignVariableNames::Run(ILFunction& function, ILTransformContext& context)
                 if (loadNames.size() == 1 && !loadNames.begin()->empty())
                     base = *loadNames.begin();
             }
+        }
+        if (base.empty() && v->Kind == VariableKind::StackSlot) {
+            // The C# GenerateNameForVariable's proposedNameForStoresFromNewObj
+            // arm (StackSlot-only): GuessType(variable.Type, store.Value)
+            // over the stores, named by type. A flush slot typed Object
+            // names from the store value's real type -- the collection
+            // initializer's `new List<OpCode>()` slot names `list`, the
+            // field-load slot names by the field's type -- matching the
+            // oracle's naming instead of the slot's Object stack type.
+            std::set<std::string> guesses;
+            for (ILInstruction* store : v->StoreInstructions) {
+                if (store->Op != OpCode::StLoc) continue;
+                auto* st = static_cast<StLoc*>(store);
+                std::string n =
+                    InferName(GuessType(v->Type, st->Value.get()).get());
+                if (!n.empty() &&
+                    currentLowerCaseTypeOrMemberNames.count(n) == 0)
+                    guesses.insert(std::move(n));
+            }
+            if (guesses.size() == 1 && !guesses.begin()->empty())
+                base = *guesses.begin();
         }
         if (base.empty())
             base = InferName(v->Type.get());

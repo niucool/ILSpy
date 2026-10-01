@@ -1001,6 +1001,21 @@ TEST(FacadeMemberModifiersTest, CoalesceFoldKeepsFollowingStatements) {
     EXPECT_NE(text.find("?? src.Long());"), std::string::npos) << text;
 }
 
+// The C# AssignVariableNames' StackSlot arm (proposedNameForStoresFromNewObj):
+// a flush slot typed Object names from the store value's guessed type -- the
+// collection initializer's `newobj; dup; <add>; ...; ret` shape (the
+// Callvirt.Pattern family) names its slot `list`, not `obj`.
+TEST(FacadeMemberModifiersTest, StackSlotNamesFromGuessedStoreType) {
+    constexpr const char* kFixture =
+        "/home/jim/ilspy-test-fixtures/flush_slot_fixture/"
+        "FlushSlotFixture.dll";
+    std::string text;
+    if (!RenderType(kFixture, "FlushSlotShapes", text))
+        GTEST_SKIP() << "the flush-slot fixture is not provisioned";
+    EXPECT_NE(text.find("list.Add(1);"), std::string::npos) << text;
+    EXPECT_EQ(text.find("obj.Add(1);"), std::string::npos) << text;
+}
+
 // The C# DoDecompileType worklist (EnqueueReferencedMembers): a hidden
 // compiler-generated type whose declaring type's rendered members still
 // reference it -- the state-machine attribute's typeof -- renders at its
