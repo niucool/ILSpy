@@ -730,6 +730,15 @@ const IType& MetadataField::DecodeTypeAndVolatileFlag() const
     {
         ty = UnknownType();
     }
+    catch (const std::logic_error&)
+    {
+        // The SignatureTypeProviderDecoder's malformed-blob throws ("blob
+        // truncated", "bad compressed integer", ...) surface as
+        // std::logic_error -- the SRM BadImageFormatException family. C#
+        // ILSpy degrades these to an unknown field type instead of failing
+        // the whole module render; mirror that.
+        ty = UnknownType();
+    }
     // The C# `LazyInit.GetOrSet(ref this.type, ty)`.
     type_ = std::move(ty);
     return *type_;
