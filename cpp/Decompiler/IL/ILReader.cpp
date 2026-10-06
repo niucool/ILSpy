@@ -102,6 +102,27 @@ ITypePtr TypeOfValue(const ILInstruction* inst) {
         return std::make_shared<KnownType>(KnownTypeCode::Single);
     if (dynamic_cast<const LdcF8*>(inst))
         return std::make_shared<KnownType>(KnownTypeCode::Double);
+    // The C# FlushExpressionStack types the slot by the expression's stack
+    // type (compilation.FindType(inst.ResultType)): I4->Int32, I8->Int64,
+    // I->IntPtr, F4->Single, F8->Double, O->Object. This covers the call
+    // results and the element loads -- without it the slot carries no type
+    // and the surviving declaration renders `var` with an S_N name.
+    switch (inst->ResultType()) {
+        case StackType::I4:
+            return std::make_shared<KnownType>(KnownTypeCode::Int32);
+        case StackType::I8:
+            return std::make_shared<KnownType>(KnownTypeCode::Int64);
+        case StackType::I:
+            return std::make_shared<KnownType>(KnownTypeCode::IntPtr);
+        case StackType::F4:
+            return std::make_shared<KnownType>(KnownTypeCode::Single);
+        case StackType::F8:
+            return std::make_shared<KnownType>(KnownTypeCode::Double);
+        case StackType::O:
+            return std::make_shared<KnownType>(KnownTypeCode::Object);
+        default:
+            break;
+    }
     return nullptr;
 }
 

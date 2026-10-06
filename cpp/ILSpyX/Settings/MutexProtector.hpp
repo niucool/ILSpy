@@ -57,8 +57,13 @@ public:
 
 private:
     std::string name_;
+#ifndef _WIN32
     int lockFd_ = -1;
     bool releasedDepth_ = false;
+#else
+    // Win32 named-mutex handle (void* to keep <windows.h> out of this header).
+    void* mutex_ = nullptr;
+#endif
 };
 
 }  // namespace ILSpy::ILSpyX::Settings

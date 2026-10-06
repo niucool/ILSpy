@@ -41,6 +41,10 @@
 #include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
+#include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
@@ -132,6 +136,15 @@ std::unique_ptr<ILInstruction> DetachFromParent(ILInstruction* inst) {
 // this port's block model). Mirrors the helper in NullCoalescingTransform /
 // ExpressionTransforms / SwitchAnalysis. nullptr if `block` is not in a
 // container's Blocks list or is the last block.
+// Find the ILFunction root that owns `inst` by walking the Parent chain to
+// the root (ILFunction::IsRoot) -- the same helper shape as
+// NullCoalescingTransform.cpp / ExpressionTransforms.cpp.
+ILFunction* FunctionOf(ILInstruction* inst) {
+    for (ILInstruction* p = inst; p != nullptr; p = p->Parent)
+        if (p->IsRoot()) return static_cast<ILFunction*>(p);
+    return nullptr;
+}
+
 Block* NextBlockInContainer(Block* block) {
     if (!block) return nullptr;
     auto* container = dynamic_cast<BlockContainer*>(block->Parent);
@@ -510,6 +523,87 @@ bool TryNullPropForVoidCall(ILVariable* testedVar, Mode mode,
     return true;
 }
 
+// The two-block form of the void-call `?.` fold -- this port's block-model
+// form of the C#'s single-if shape. The C# pipeline inverts the guard and
+// extracts the fall-through use into the if arm before the
+// NullPropagationStatementTransform runs (the C# InvertIf: `if (cond) leave;
+// use` becomes `if (!cond) { use } leave`), so the C# fold sees
+// `if (v != null) { v.M(); }`. This port's if-as-final block model cannot
+// express an if with a trailing exit in one block, so the same IL arrives as
+// the if-final with the leave in the true arm and the use in the
+// fall-through block:
+//   guard block: [if-final: comp(Eq, ldloc v, null-form) -> Block { leave }]
+//   next block (single-pred): [the use-call chain on ldloc v; ...]
+// -> the guard block: [NullableRewrap(use with NullableUnwrap(v-load))], the
+//    branch to the next block (the rewrap's null path falls through to it).
+// `null-form` is ldnull, or ldc.i4(0) for a reference-typed local whose type
+// the reader left unresolved (the ILReader's brfalse picks the i4-0 constant
+// when the condition's stack type is not O; the render maps both to null).
+bool TryNullPropForVoidCallTwoBlock(ILVariable* testedVar, Mode mode,
+                                    IfInstruction* ifInst, Block* hostBlock,
+                                    ILTransformContext& context) {
+    if (!ifInst || !ifInst->TrueInst) return false;
+    // The true arm must be the skip-exit: a Block holding a valueless Leave,
+    // or a bare valueless Leave.
+    // The guard block must be empty apart from the if-final: the skip-guard
+    // shape (a whole block whose only content is the null check and its
+    // skip-exit, the compiler's `ldloc v; brfalse end; ldloc v; callvirt M`
+    // lowering). A guard block carrying other statements ahead of the if is
+    // the general inverted-guard form; folding there moves the use past those
+    // statements in the render order and the surrounding restructuring turns
+    // the branch into a goto.
+    if (!hostBlock->Instructions.empty()) return false;
+    ILInstruction* trueArm = ifInst->TrueInst.get();
+    if (auto* armBlock = dynamic_cast<Block*>(trueArm)) {
+        // The skip-leave may sit as the arm block's single instruction or as
+        // its final (this port's Block model renders both as `Block { leave }`).
+        if (armBlock->Instructions.size() == 1 && !armBlock->FinalInstruction) {
+            trueArm = armBlock->Instructions[0].get();
+        } else if (armBlock->Instructions.empty() && armBlock->FinalInstruction) {
+            trueArm = armBlock->FinalInstruction.get();
+        } else {
+            return false;
+        }
+    }
+    auto* skipLeave = dynamic_cast<Leave*>(trueArm);
+    if (!skipLeave || skipLeave->Value != nullptr) return false;
+    Block* nextBlock = NextBlockInContainer(hostBlock);
+    if (!nextBlock) return false;
+    // The next block must be single-predecessor: only the guard block's
+    // fall-through reaches it, so moving its use into the guard block cannot
+    // reorder any other predecessor's evaluation.
+    ILFunction* fn = FunctionOf(hostBlock);
+    if (fn != nullptr) {
+        int preds = 0;
+        std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+            if (!inst) return;
+            if (auto* br = dynamic_cast<Branch*>(inst))
+                if (br->TargetBlock == nextBlock) ++preds;
+            for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+        };
+        walk(fn->Body.get());
+        if (preds != 0) return false;
+    }
+    // The use: the next block's single instruction.
+    if (nextBlock->Instructions.size() != 1) return false;
+    ILInstruction* use = nextBlock->Instructions[0].get();
+    if (!use) return false;
+    ILInstruction* varLoad = nullptr;
+    if (!IsValidAccessChain(testedVar, mode, use, varLoad)) return false;
+    if (!varLoad) return false;
+    context.StepOnce("Null-propagation (void call, two-block guard)");
+    IntroduceUnwrap(testedVar, varLoad, mode);
+    auto useOwned = DetachFromParent(use);
+    if (!useOwned) return false;
+    auto rewrap = std::make_unique<NullableRewrap>(std::move(useOwned));
+    // The if-final (and its skip-leave) is destroyed by the SetFinal below;
+    // the null path flows through the rewrap's skip into the branch, the
+    // next block keeps its final (the leave at the container exit).
+    hostBlock->Add(std::move(rewrap));
+    hostBlock->SetFinal(std::make_unique<Branch>(nextBlock));
+    return true;
+}
+
 } // namespace
 
 // static
@@ -601,6 +695,33 @@ void NullPropagationStatementTransform::Run(Block& block, int pos,
                 TryNullPropForVoidCall(testedVar, Mode::ReferenceType,
                                         iff, &block, context.Base);
                 return;
+            }
+        }
+        // The two-block guard form (this port's block-model shape of the
+        // same fold; see TryNullPropForVoidCallTwoBlock): the INVERTED guard
+        // `comp(Eq, ldloc v, null-form)` whose true arm is the skip-leave,
+        // with the use in the fall-through block.
+        if (comp->Kind == ComparisonKind::Equality &&
+            comp->LiftingKind == ComparisonLiftingKind::None) {
+            ILVariable* testedVar = nullptr;
+            bool nullForm = false;
+            if (comp->Right) {
+                if (comp->Right->Op == OpCode::LdNull) {
+                    nullForm = true;
+                } else if (comp->Right->Op == OpCode::LdcI4 &&
+                           static_cast<const LdcI4*>(comp->Right.get())->Value == 0 &&
+                           testedVar == nullptr && MatchLdLoc(comp->Left.get(), testedVar) &&
+                           testedVar != nullptr &&
+                           StackTypeOf(testedVar->Type.get()) == StackType::O) {
+                    // An unresolved reference type renders the brfalse's i4-0
+                    // constant; the local is still reference-typed.
+                    nullForm = true;
+                }
+            }
+            if (nullForm && MatchLdLoc(comp->Left.get(), testedVar)) {
+                if (TryNullPropForVoidCallTwoBlock(testedVar, Mode::ReferenceType,
+                                                   iff, &block, context.Base))
+                    return;
             }
         }
     }

@@ -5924,7 +5924,126 @@ are still pure slots. LANDING THE FLUSH NEEDS THE INLINER-ORDER WORK
 FIRST (or together). Recorded here so the experiment is not repeated
 blind.
 
+### THE ?. NULL-PROPAGATION VOID-CALL FOLD (landed, 372787481)
+
+THE SHAPE (this port's block-model form): the compiler lowers
+`v?.M()` in a finally to `ldloc v; brfalse end; ldloc v; callvirt M;
+endfinally`, which this port carries as the guard block's if-final
+(comp(Eq, ldloc v, null-form) -> Block { leave }) plus the
+single-pred next block holding the use-call. The C# pipeline reaches
+its NullPropagationStatementTransform's single-if form via the CDD's
+InvertIf (extracting the fall-through into the if arm -- not
+expressible in the if-as-final model), so the fold needed the
+two-block form directly (TryNullPropForVoidCallTwoBlock in
+NullPropagationTransform.cpp). The null-form accepts ldnull OR
+ldc.i4(0) for a reference-typed local whose type the reader left
+unresolved. TWO GATES keep it on the family: the guard block must be
+EMPTY apart from the if (folding a block with other statements moves
+the use past them and the restructuring turns the branch into a goto
+-- the ungated version measured -71 dnlib better but introduced a
+new goto in the canary, so the gate trades the metric for
+correctness), and the next block single-pred. The statement renderer
+gained the NullableRewrap case (the `?.` receiver form) -- this also
+fixed the EIGHT pre-existing `/* unhandled statement op 39 */`
+renders in the canary (the same fold's output from the direct-form
+arm). THE MEASUREMENT: dnlib 69286 -> 69225; net10 86593 -> 86588;
+the canary: 8788 lines, no new gotos, the only diff = the eight
+unhandled-op sites becoming valid `?.` renders. RED:
+FacadeMemberModifiersTest.NullPropagationVoidCallInFinally.
+
+### THE PERF RE-MEASUREMENT (the member-materialization item CLOSED)
+
+The release build (build/linux-rel, rebuilt on the 372787481 tree)
+renders dnlib in 2.7s -- BYTE-IDENTICAL to the debug output, the pin
+unchanged. The oracle takes ~9.9s. The perf arc's "9.2s parity" is
+stale: the resolver-cache fix (the memory arc's 1,095MB -> 142MB)
+also collapsed the wall; the using-set walk's 6.26s is gone. THE
+MEMBER-MATERIALIZATION CACHE (the named fix for the using-set walk)
+IS OBSOLETE -- the port is ~3.7x faster than the oracle on the wall
+and well under its memory band. Do not re-open the using-set
+performance work without a fresh profile.
+
+### THE FLUSH-SLOT TYPING (landed d4fc15f28; the O-typing analysis for
+### the next slice)
+
+THE LANDING: the reader's TypeOfValue gained the C# FlushExpressionStack
+typing (compilation.FindType(inst.ResultType)) as the fallback: I4->Int32,
+I8->Int64, I->IntPtr, F4->Single, F8->Double. The call-result flush slots
+now declare `int num = ...` (the StreamManipulator.GetBits family) and
+name by type. dnlib 69225 -> 69205; net10 86588 -> 86578. RED:
+FacadeMemberModifiersTest.FlushSlotsNameByGuessedType (the
+flush_slot_fixture, compiled with csc -optimize+ -- the dup shape needs
+the RELEASE compiler; the debug fixture emits the verbose local form).
+
+THE O-TYPING (deferred with the full root cause in the code comment):
+typing the reference slots Object measures dnlib -585 / net10 -85 (the
+S_N count 1876 -> 382!) -- it unlocks the pipeline's reference-type
+COALESCE FOLD on the hoisted slots (correct: the oracle renders the
+`??`), but the post-fold block arrangement then trips the RENDERER's
+return-propagation analysis: the folded store's block ends in a plain
+branch, so the analysis claims the following single-pred statement block
+(preds==1, prev-final==Branch) and suppresses it -- nothing renders its
+content (the CommandLineParser.PrintOption family; the statements vanish
+from the output). TWO BLUNT GATES MEASURED AND REJECTED: (a) blocking
+the claim on the render contract (empty+Leave): +2096 dnlib -- the
+claims feed the guard/label-region folds' choreography (the erase at
+the claim sites, the overlap exemptions); (b) gating only the EmitBlock
+suppression: +1697 dnlib -- the claimed blocks are ALSO rendered inside
+the region folds, so un-suppressing double-renders. THE NEXT SLICE: the
+release path -- the guard-region fold (or a new fold) must cover the
+claimed coalesce-fallthrough statement blocks, or the RP analysis needs
+a claim-shape refinement that no blunt gate provides. The O-typing's
+pipeline tree diff (the coalesce fold firing) is visible via
+ILSPY_DUMP_TF full-module dumps old-vs-new.
+
+### THE O-TYPING LANDED (fc1fb7ddd + ebd144fdc; the deferred case closed)
+
+SLICE 1 (fc1fb7ddd): the O->Object typing + the release path. The
+probes traced the content loss to its exact mechanism: the return-
+propagation analysis claims single-pred blocks following an
+unconditional transfer, and renders the claimed content at the
+CLAIMING BRANCH's site -- but a block-final plain Branch whose target
+is a later block in the same container is DROPPED as a redundant
+fall-through (EmitBlock rendered it with dropFinal=1), so the claim
+had NO render site. The fix (WouldBeDroppedAsFallThrough in
+ILAstToCSharp.cpp, mirroring the container's transparent-relay scan)
+skips those claims; the targets render in the linear walk. This also
+repaired PRE-EXISTING silent drops (whole nested foreach loops and
+epilogue stores the old claims suppressed). RED:
+CoalesceFoldKeepsFollowingStatements (the PickThenUse fixture).
+
+SLICE 2 (ebd144fdc): the C# AssignVariableNames' StackSlot arm --
+GuessType(variable.Type, store.Value) over the stores, named by type.
+A slot typed Object (the collection initializer's newobj, a field
+load, a reference call result) names from the value's real type
+(`list`, not `obj`). RED: StackSlotNamesFromGuessedStoreType.
+
+THE MEASUREMENT: dnlib 69205 -> 69057; net10 86578 -> 86548; cui 1771
+-> 1770. THE S_N COLLAPSE: dnlib 1743 -> 195 obj sites; net10 3987 ->
+84. The net10 path: the O-typing alone measured -85 but restored
+previously-dropped content (+188 in verbose forms); the naming arm
+then more than recovered it.
+
+THE FOLLOW-UPS (the residual families, all visible in the diffs):
+1. THE DECLARED TYPE: the Object slots declare `object list = new
+   List<OpCode>();` where the oracle declares `List<OpCode> list`.
+   The slot's Type is the stack type (Object) by the C# FindType
+   rule; the oracle's typed declarations come from the collection-
+   initializer folding (the local is eliminated) or the C#
+   DeclareVariables/UseVar machinery. A slice could re-type the
+   variable at the naming pass (the GuessType result), but the C#
+   does NOT do that -- verify against the C# pipeline first.
+2. THE LOAD-PROPOSAL PARAMETER NAMES: the oracle names the PickThenUse
+   slot `value` (the Report call's parameter name -- the C#
+   GetNameForArgument resolves the call's parameter metadata); the
+   port's GetNameForArgument does not resolve call parameter names
+   yet (the port rendered `obj` there).
+3. THE FOREACH COLLAPSE: the restored loops render in the verbose
+   while/enumerator forms (the standing net10 foreach-collapse gap
+   family); collapsing them reclaims the restored-content diff lines.
+
 ### The standing gates (all verified on the committed tree)
 
-- The connid pin b38babc5465c9861; dnlib 69286; net10 86593; cui 1771;
-  hello 3; the suite control 268; the canary renders 8788 lines.
+- The connid pin b38babc5465c9861; dnlib 69057; net10 86548; cui 1770;
+  hello 3; the suite control 268; the canary renders 8846 lines, 100
+  gotos (the +58 over the previous state are restored statements).
