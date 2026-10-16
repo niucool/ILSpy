@@ -1,0 +1,943 @@
+// Copyright (c) 2026 Jim Hester
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+// Tests for the CSharpDecompiler facade (the C# `public class
+// CSharpDecompiler` port shell): the pipeline entry aliases the
+// IL-namespace list, and DecompileFunctionToString runs the pipeline over
+// a synthetic function and renders the method text.
+
+#include "Decompiler/CSharp/CSharpDecompiler.hpp"
+
+#include "Decompiler/CSharp/ILAstToCSharp.hpp"
+#include "Decompiler/DecompilerSettings.hpp"
+#include "TestFixtures/ConnIdResFixtures.hpp"
+#include "Decompiler/CSharp/Syntax/Attribute.hpp"
+#include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
+#include "Decompiler/CSharp/Syntax/UsingDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/SyntaxTree.hpp"
+#include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/Metadata/DotNetCorePathFinderExtensions.hpp"
+#include "Decompiler/Metadata/UniversalAssemblyResolver.hpp"
+#include "Decompiler/TypeSystem/DecompilerTypeSystem.hpp"
+#include "Decompiler/TypeSystem/ICompilation.hpp"
+#include "Decompiler/TypeSystem/INamespace.hpp"
+#include "Decompiler/TypeSystem/StringComparer.hpp"
+#include "Decompiler/TypeSystem/TypeProvider.hpp"
+#include "Decompiler/Metadata/CustomAttributeDecoder.hpp"
+#include "Decompiler/Util/CacheManager.hpp"
+#include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/ControlFlow/ControlFlowSimplification.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+
+#include <gtest/gtest.h>
+
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <memory>
+#include <algorithm>
+#include <string>
+
+namespace {
+
+namespace IL = ::ILSpy::Decompiler::IL;
+namespace TS = ::ILSpy::Decompiler::TypeSystem;
+namespace Metadata = ::ILSpy::Decompiler::Metadata;
+using ::ILSpy::Decompiler::Metadata::MethodSignature;
+
+// The connid_res compilation fixture (the MetadataModule_Test
+// MainModuleCompilation pattern): a hand-rolled ICompilation whose main
+// module is set after construction (the module ctor binds the compilation
+// reference first).
+class ConnIdCompilation : public TS::ICompilation {
+public:
+    ConnIdCompilation() = default;
+
+    void SetMainModule(const TS::IModule* module) { mainModule_ = module; }
+
+    // --- ICompilation ---
+    const TS::IModule& MainModule() const override { return *mainModule_; }
+    std::vector<const TS::IModule*> Modules() const override
+    {
+        return std::vector<const TS::IModule*>{ mainModule_ };
+    }
+    std::vector<const TS::IModule*> ReferencedModules() const override { return {}; }
+    const TS::INamespace& RootNamespace() const override
+    {
+        return mainModule_->RootNamespace();
+    }
+    const TS::INamespace* GetNamespaceForExternAlias(const std::string&) const override
+    {
+        return nullptr;
+    }
+    const TS::IType& FindType(TS::KnownTypeCode) const override { return knownType_; }
+    const TS::StringComparer& NameComparer() const override
+    {
+        return TS::StringComparer::Ordinal();
+    }
+    const ILSpy::Decompiler::Util::CacheManager& CacheManager() const override
+    {
+        return cacheManager_;
+    }
+    TS::TypeSystemOptions TypeSystemOptions() const override
+    {
+        return TS::TypeSystemOptions::Default;
+    }
+
+private:
+    const TS::IModule* mainModule_ = nullptr;
+    ILSpy::Decompiler::Util::CacheManager cacheManager_;
+    TS::KnownType knownType_{ TS::KnownTypeCode::Object };
+};
+namespace CSharp = ::ILSpy::Decompiler::CSharp;
+namespace Syntax = ::ILSpy::Decompiler::CSharp::Syntax;
+using ILVariablePtr = std::shared_ptr<IL::ILVariable>;
+
+// The per-body decompile half: a synthetic function whose body is
+// `stloc v(ldc.i4 42)` runs through the pipeline and renders with the
+// constant folded.
+TEST(CSharpDecompilerTest, DecompileFunctionToStringRendersThePipelineOutput)
+{
+    auto fn = std::make_unique<IL::ILFunction>();
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    ILVariablePtr v = fn->RegisterVariable(IL::VariableKind::Local,
+                                           intType, std::string("V_0"));
+    auto body = std::make_unique<IL::BlockContainer>();
+    fn->Body = std::move(body);
+    // The Body's Parent wiring (the C# ILFunction ctor's child-slot
+    // assignment; the port's hand-built trees wire it explicitly -- the
+    // CachedDelegateInitialization fixture precedent).
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto block = std::make_unique<IL::Block>();
+    block->Kind = IL::BlockKind::ControlFlow;
+    IL::Block* blockPtr = block.get();
+    fn->Body->AddBlock(std::move(block));
+    {
+        auto value = std::make_unique<IL::LdcI4>(42);
+        auto store = std::make_unique<IL::StLoc>(v, std::move(value));
+        blockPtr->Add(std::move(store));
+    }
+    blockPtr->SetFinal(std::make_unique<IL::LdLoc>(v));
+
+    std::string text = CSharp::CSharpDecompiler::DecompileFunctionToString(
+        *fn, "int", "M", "");
+    EXPECT_FALSE(text.empty());
+    EXPECT_NE(text.find("42"), std::string::npos)
+        << "the rendered method text carries the constant";
+}
+
+// The signature-decl builder (the C# Decompile path's parameter-declaration
+// half, extracted from the CLI's inline block): named parameters carry
+// their name; unnamed parameters fall back to arg_<base + index> (base 1
+// for an instance method -- `this` is the implicit arg_0; base 0 static).
+TEST(CSharpDecompilerTest, MethodDeclStringFallsBackToArgNames)
+{
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto stringType =
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::String);
+    MethodSignature sig;
+    sig.ReturnType = intType;
+    sig.ParameterTypes = {intType, stringType};
+    sig.IsInstance = true;
+    // The first parameter carries a metadata name; the second does not.
+    EXPECT_EQ(CSharp::CSharpDecompiler::MethodDeclString(
+                  sig, std::vector<std::string>{"x"}),
+              "int x, string arg_2");
+}
+
+// The static shape: the fallback base is 0 (no implicit this).
+TEST(CSharpDecompilerTest, MethodDeclStringStaticBaseIsZero)
+{
+    auto intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    MethodSignature sig;
+    sig.ReturnType = intType;
+    sig.ParameterTypes = {intType, intType};
+    sig.IsInstance = false;
+    EXPECT_EQ(CSharp::CSharpDecompiler::MethodDeclString(
+                  sig, std::vector<std::string>{}),
+              "int arg_0, int arg_1");
+}
+
+// The full per-method entry over the in-repo corpus: the connid_res.dll
+// fixture (a real csc-compiled library) decompiles at least one method
+// body with its method name in the rendered text.
+TEST(CSharpDecompilerTest, DecompileMethodRendersACorpusMethod)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile module(path);
+    ASSERT_TRUE(module.IsValid());
+    bool rendered = false;
+    for (const auto& t : module.TypeDefs()) {
+        if (t.Name == "<Module>") continue;
+        for (const auto& m : module.GetMethods(t.Token)) {
+            if (m.RVA == 0) continue;
+            std::string text;
+            if (CSharp::CSharpDecompiler::DecompileMethodToString(
+                    module, m.Token, m.RVA, m.Name, text)) {
+                EXPECT_NE(text.find(m.Name), std::string::npos)
+                    << "the rendered method carries its name";
+                rendered = true;
+                break;
+            }
+        }
+        if (rendered) break;
+    }
+    EXPECT_TRUE(rendered) << "the corpus yields at least one decodable body";
+}
+
+// The type-level entry: the connid_res corpus type renders with the type
+// header and at least one member body.
+TEST(CSharpDecompilerTest, DecompileTypeRendersTheTypeAndMembers)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile module(path);
+    ASSERT_TRUE(module.IsValid());
+    for (const auto& t : module.TypeDefs()) {
+        if (t.Name == "<Module>") continue;
+        std::string text;
+        if (CSharp::CSharpDecompiler::DecompileTypeToString(module, t.Token,
+                                                            text)) {
+            EXPECT_NE(text.find(t.Name), std::string::npos)
+                << "the rendered type carries its name";
+            SUCCEED();
+            return;
+        }
+    }
+    FAIL() << "no type in the corpus decompiled";
+}
+
+// The PartialTypeInfo registry (the C# `partialTypes` dictionary): a
+// registered declared member is skipped in the type's member iteration,
+// and merging a second info with the same declaring type unionizes the
+// member sets (the C# AddDeclaredMembers shape).
+TEST(CSharpDecompilerTest, PartialTypeInfoSkipsDeclaredMembers)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile module(path);
+    ASSERT_TRUE(module.IsValid());
+    // Find the first type with a decodable method body; capture its method
+    // set and the first body's text.
+    for (const auto& t : module.TypeDefs()) {
+        if (t.Name == "<Module>") continue;
+        auto methods = module.GetMethods(t.Token);
+        std::uint32_t firstBody = 0;
+        std::string firstMethod;
+        for (const auto& m : methods) {
+            if (m.RVA == 0) continue;
+            std::string text;
+            if (!CSharp::CSharpDecompiler::DecompileMethodToString(
+                    module, m.Token, m.RVA, m.Name, text))
+                continue;
+            firstBody = m.Token;
+            firstMethod = m.Name;
+            break;
+        }
+        if (firstBody == 0) continue;
+        // Register the method as partially declared: it disappears from the
+        // type's rendered members.
+        Metadata::PartialTypeInfo info(t.Token);
+        info.AddDeclaredMember(firstBody);
+        CSharp::CSharpDecompiler::RegisterPartialTypeDefinition(info);
+        std::string text;
+        ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
+            module, t.Token, text));
+        EXPECT_EQ(text.find(firstMethod), std::string::npos)
+            << "the declared member is skipped in the type render";
+        // The registry is process-global (the static placeholder): clear
+        // the registration so the later corpus-driven tests do not see it.
+        CSharp::CSharpDecompiler::ClearPartialTypes();
+        SUCCEED();
+        return;
+    }
+    FAIL() << "no type with a decodable body in the corpus";
+}
+
+// The merge: two infos for the same declaring type unionize (the C#
+// AddDeclaredMembers path in RegisterPartialTypeDefinition).
+TEST(CSharpDecompilerTest, PartialTypeInfosMergeForTheSameType)
+{
+    Metadata::PartialTypeInfo a(0x02000001);
+    a.AddDeclaredMember(0x06000001);
+    Metadata::PartialTypeInfo b(0x02000001);
+    b.AddDeclaredMember(0x06000002);
+    CSharp::CSharpDecompiler::RegisterPartialTypeDefinition(a);
+    CSharp::CSharpDecompiler::RegisterPartialTypeDefinition(b);
+    // The registry lookup surface is the static
+    // FindRegisteredPartialType probe.
+    EXPECT_TRUE(CSharp::CSharpDecompiler::FindRegisteredPartialType(0x02000001)
+                    ->IsDeclaredMember(0x06000001));
+    EXPECT_TRUE(CSharp::CSharpDecompiler::FindRegisteredPartialType(0x02000001)
+                    ->IsDeclaredMember(0x06000002));
+    EXPECT_FALSE(CSharp::CSharpDecompiler::FindRegisteredPartialType(0x02000001)
+                     ->IsDeclaredMember(0x06000003));
+    // The registry is process-global (the static placeholder for the C#
+    // instance field): clear it so the later corpus-driven tests (the
+    // whole-module render) do not see this test's registrations.
+    CSharp::CSharpDecompiler::ClearPartialTypes();
+    EXPECT_EQ(CSharp::CSharpDecompiler::FindRegisteredPartialType(0x02000001),
+              nullptr);
+    EXPECT_EQ(CSharp::CSharpDecompiler::FindRegisteredPartialType(0x02000009),
+              nullptr)
+        << "an unregistered type has no partial info";
+}
+
+// The module/assembly-attributes entry (the C#
+// `public string DecompileModuleAndAssemblyAttributesToString()` --
+// CSharpDecompiler.cs line 838): the connid_res corpus renders
+// `[assembly: ...]` attribute lines (the C# `[assembly: Attr(...)]`
+// section shape; the attribute arguments render from the FixedArguments).
+// The C# `public SyntaxTree DecompileModuleAndAssemblyAttributes()` (line
+// 823): the AST path -- the attribute sections built through the
+// TypeSystemAstBuilder's ConvertAttribute, the transform pipeline run over
+// the tree. Each section carries its target and exactly one attribute.
+TEST(CSharpDecompilerTest, DecompileModuleAndAssemblyAttributesBuildsTree)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+    ConnIdCompilation compilation;
+    TS::MetadataModule module{compilation, &file, TS::TypeSystemOptions::Default};
+    compilation.SetMainModule(&module);
+
+    std::unique_ptr<Syntax::SyntaxTree> tree(
+        CSharp::CSharpDecompiler::DecompileModuleAndAssemblyAttributes(
+            module));
+    ASSERT_NE(tree, nullptr);
+    int assemblySections = 0;
+    int moduleSections = 0;
+    int usingDeclarations = 0;
+    for (int i = 0; i < tree->Members().Count(); i++) {
+        // IntroduceUsingDeclarations (the pipeline's eighth transform) puts
+        // the collected namespaces' UsingDeclarations above the sections.
+        if (dynamic_cast<Syntax::UsingDeclaration*>(tree->Members().At(i))
+            != nullptr) {
+            usingDeclarations++;
+            continue;
+        }
+        auto* section =
+            dynamic_cast<Syntax::AttributeSection*>(tree->Members().At(i));
+        ASSERT_NE(section, nullptr)
+            << "every non-using member is an attribute section";
+        ASSERT_EQ(section->Attributes().Count(), 1)
+            << "each section holds exactly one attribute";
+        if (section->AttributeTarget() == "assembly")
+            assemblySections++;
+        else if (section->AttributeTarget() == "module")
+            moduleSections++;
+        else
+            FAIL() << "unexpected target " << section->AttributeTarget();
+    }
+    EXPECT_GT(assemblySections, 0)
+        << "the corpus assembly carries assembly attributes";
+    EXPECT_GT(moduleSections, 0)
+        << "the corpus module carries the RefSafetyRules attribute";
+}
+
+// The C# `public string DecompileWholeModuleAsString()` (line 1220): the
+// whole-module render -- the module/assembly attribute sections (the AST
+// path), then every type in metadata order (the `<Module>` placeholder
+// skipped, the C# DoDecompileTypes gate).
+// The instance surface (the C# `CSharpDecompiler(MetadataFile,
+// DecompilerSettings)` ctor + the per-instance state): one instance
+// wires the type system once; the whole-module and per-type renders go
+// through it; and the partial-types registry is PER-INSTANCE -- one
+// instance's registrations are invisible to another (the C# registry
+// lives on the instance, unlike the port's earlier process-global
+// placeholder).
+TEST(CSharpDecompilerTest, InstanceDecompilerOwnsItsPartialTypes)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+    // The Page1 tokens (the member iteration's registration target).
+    std::uint32_t page1Token = 0;
+    std::uint32_t initializeComponent = 0;
+    for (const auto& t : file.TypeDefs()) {
+        if (t.Name != "Page1") continue;
+        page1Token = t.Token;
+        for (const auto& m : file.GetMethods(t.Token))
+            if (m.Name == "InitializeComponent")
+                initializeComponent = m.Token;
+    }
+    ASSERT_NE(page1Token, 0u);
+    ASSERT_NE(initializeComponent, 0u);
+
+    ::ILSpy::Decompiler::DecompilerSettings settings;
+    CSharp::CSharpDecompiler decompiler(file, settings);
+    // The instance renders the whole module.
+    std::string whole = decompiler.DecompileWholeModuleToString();
+    EXPECT_NE(whole.find("public class Page1 : Application, IComponentConnector"),
+              std::string::npos);
+    EXPECT_EQ(whole.find("public partial class Page1"), std::string::npos);
+    // The partial-type registration hides the member in THIS instance's
+    // render.
+    Metadata::PartialTypeInfo info(page1Token);
+    info.AddDeclaredMember(initializeComponent);
+    decompiler.AddPartialTypeDefinition(info);
+    std::string own;
+    ASSERT_TRUE(decompiler.DecompileTypeToString(page1Token, own));
+    EXPECT_EQ(own.find("InitializeComponent()"), std::string::npos)
+        << "the registered member is skipped in this instance's render";
+    // A second instance does not see the registration.
+    CSharp::CSharpDecompiler other(file, settings);
+    std::string theirs;
+    ASSERT_TRUE(other.DecompileTypeToString(page1Token, theirs));
+    EXPECT_NE(theirs.find("InitializeComponent()"), std::string::npos)
+        << "the registry does not leak across instances";
+}
+
+TEST(CSharpDecompilerTest, DecompileWholeModuleRendersAttributesAndTypes)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+    std::string text =
+        CSharp::CSharpDecompiler::DecompileWholeModuleToString(file);
+    // The module/assembly attribute sections lead the output.
+    EXPECT_NE(text.find("[assembly:"), std::string::npos);
+    EXPECT_NE(text.find("[module:"), std::string::npos);
+    // Every type renders (metadata order); the <Module> placeholder is
+    // skipped.
+    EXPECT_NE(text.find("public class Page1 : Application, IComponentConnector"),
+              std::string::npos);
+    EXPECT_EQ(text.find("<Module>"), std::string::npos);
+    // The members ride the type bodies (the property surface lands with
+    // this same entry's type loop).
+    EXPECT_NE(text.find("InitializeComponent()"), std::string::npos);
+    // The constructor renders with the type name (not the raw .ctor).
+    EXPECT_EQ(text.find(".ctor"), std::string::npos);
+}
+
+TEST(CSharpDecompilerTest, DecompileModuleAndAssemblyAttributesRender)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+    ConnIdCompilation compilation;
+    TS::MetadataModule module{compilation, &file, TS::TypeSystemOptions::Default};
+    compilation.SetMainModule(&module);
+    std::string text =
+        CSharp::CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
+            module);
+    EXPECT_FALSE(text.empty())
+        << "the corpus assembly carries assembly attributes";
+    EXPECT_NE(text.find("[assembly:"), std::string::npos)
+        << "the attribute section carries the assembly target";
+    EXPECT_NE(text.find("[module:"), std::string::npos)
+        << "the module section carries the module target";
+    // The corpus rows (the mscorlib-backed decode): the compiler-emitted
+    // set over a csc net10.0 library, in the C#-faithful short-name form
+    // (the TypeSystemAstBuilder strips the trailing "Attribute" suffix).
+    EXPECT_NE(text.find("CompilationRelaxations"), std::string::npos);
+    EXPECT_NE(text.find("RuntimeCompatibility"), std::string::npos);
+    EXPECT_NE(text.find("Debuggable"), std::string::npos);
+    EXPECT_NE(text.find("AssemblyVersion"), std::string::npos);
+    EXPECT_NE(text.find("RefSafetyRules"), std::string::npos);
+    if (std::getenv("TET_TRACE")) {
+        std::fprintf(stderr, "TET-ATTR: %s\n", text.c_str());
+    }
+}
+
+// The type-level field/property surfaces (the C# DecompileType member
+// iteration covers fields and properties; the port renders a field's
+// `Type name;` declaration from GetFields + GetFieldSignature, and the
+// property accessors ride the method iteration). The connid_res corpus
+// (MyApp.Page1, the XAML code-behind) carries at least one decodable
+// member set.
+// The decode-error shape (the C# TypeSystemAstBuilder.ConvertAttribute's
+// `HasDecodeErrors` arm: `HasArgumentList = true` plus the
+// `ErrorExpression("Could not decode attribute arguments.")`, which renders
+// purely as its comment): an attribute whose blob fails to decode (the
+// connid Debuggable row's enum argument resolves through a referenced core
+// library the connid-only compilation does not carry) renders in the
+// output-visitor form: `Debuggable(/*Could not decode attribute
+// arguments.*/)` (the multi-line comment carries no inner padding, the
+// NRefactory trivia-writer shape; the settings' Allman-derived policy puts
+// no space before the argument list).
+// The enum-argument decode over the reference set (the C# CLI's actual
+// type-system shape): the connid DebuggableAttribute row's enum argument
+// resolves its DebuggingModes TypeRef through the resolver-loaded
+// referenced assemblies, so the attribute decodes and renders the enum
+// member form (ConvertEnumValue's MakeEnumMemberReference: the real
+// ilspycmd qualifies the nested enum as
+// DebuggableAttribute.DebuggingModes.X; the port's ConvertType renders the
+// short nested name -- a TypeSystemAstBuilder follow-up). The decode-error
+// comment form (the test above) is the UNRESOLVED fallback; this test
+// holds the resolved path. Gated on the box resolving the reference set
+// (the dotnet shared directories the net10.0 target's netcore arms
+// search): without them the resolver loads nothing and the attribute
+// keeps the decode-error render, which this box's default CLI run also
+// shows when the directories are absent.
+TEST(CSharpDecompilerTest, AttributeEnumArgumentDecodesOverTheReferenceSet)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+    // The facade's per-call wiring (the DecompileTypeToString note): the
+    // resolver over the main file's own name, throwOnError false, the
+    // target framework from the module.
+    ::ILSpy::Decompiler::Metadata::UniversalAssemblyResolver resolver(
+        file.FileName(), false,
+        ::ILSpy::Decompiler::Metadata::DetectTargetFrameworkId(file));
+    ::ILSpy::Decompiler::TypeSystem::DecompilerTypeSystem typeSystem(
+        file, resolver);
+    // The gate on the box's reference set: the connid library's actual
+    // reference (a net10.0 csc build references System.Runtime). The
+    // resolver reaches it through the dotnet shared directories, which the
+    // PATH scan of DotNetCorePathFinder.FindDotNetExeDirectory finds only
+    // when `dotnet` is on PATH -- the MinimalCorlib net still loads without
+    // it, so the check is on the named reference, not on any module.
+    const auto& modules = typeSystem.Modules();
+    bool systemRuntimeLoaded = false;
+    for (const TS::IModule* m : modules) {
+        if (m != &typeSystem.MainModule() && m->Name() == "System.Runtime")
+            systemRuntimeLoaded = true;
+    }
+    if (!systemRuntimeLoaded)
+        GTEST_SKIP()
+            << "the dotnet shared directories are not reachable "
+               "(dotnet not on PATH)";
+    std::string text =
+        CSharp::CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
+            typeSystem.MainMetadataModule());
+    // The real C# reference render for this row (verified against the repo's
+    // ICSharpCode.Decompiler over the identical fixture): the enum argument
+    // decodes AND the pipeline qualifies the nested enum through
+    // IntroduceUsingDeclarations's FullyQualifyAmbiguousTypeNamesVisitor, with
+    // no space between the attribute type and the argument list.
+    EXPECT_NE(text.find("Debuggable(DebuggableAttribute.DebuggingModes."
+                        "IgnoreSymbolStoreSequencePoints)"),
+              std::string::npos)
+        << "the enum argument decodes to the qualified member form: " << text;
+    EXPECT_EQ(text.find("Could not decode attribute arguments."),
+              std::string::npos)
+        << "the decode-error comment form is gone once the reference set "
+           "resolves: "
+        << text;
+}
+
+TEST(CSharpDecompilerTest,
+     DecompileModuleAttributesRenderDecodeErrorsAsComments)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+    ConnIdCompilation compilation;
+    TS::MetadataModule module{compilation, &file, TS::TypeSystemOptions::Default};
+    compilation.SetMainModule(&module);
+    std::string text =
+        CSharp::CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
+            module);
+    EXPECT_NE(
+        text.find("Debuggable(/*Could not decode attribute arguments.*/)"),
+        std::string::npos)
+        << "the decode-error attribute renders as the C# comment form: "
+        << text;
+}
+
+TEST(CSharpDecompilerTest, DecompileTypeRendersFieldsAndProperties)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile module(path);
+    ASSERT_TRUE(module.IsValid());
+    // MyApp.Page1 carries the _contentLoaded field (the XAML code-behind's
+    // IComponentConnector pattern).
+    for (const auto& t : module.TypeDefs()) {
+        if (t.Name != "Page1") continue;
+        auto fields = module.GetFields(t.Token);
+        ASSERT_FALSE(fields.empty()) << "Page1 carries its code-behind fields";
+        std::string text;
+        ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
+            module, t.Token, text));
+        // The field surfaces in the rendered members.
+        EXPECT_NE(text.find("_contentLoaded"), std::string::npos)
+            << "the code-behind field renders in the type body";
+        return;
+    }
+    FAIL() << "the connid corpus has no Page1 type";
+}
+
+// The `partial` type-header modifier (the C# DecompileType renders the
+// type declaration with the `partial` modifier when the type carries
+// partial-type info -- CSharpDecompiler.cs DoDecompileType, the
+// `hasPartialTypeDeclaration` gate): the facade's type render emits the
+// `public partial class Name` header over the members.
+// The property member surface (the C# DecompileType's DoDecompileMember
+// property arm): a property renders as its `Type Name { get; set; }`
+// declaration -- the type from the getter's return signature (the C# reads
+// the property signature; the accessor's return type carries the same type
+// by the compiler's contract), the accessor presence from the
+// MethodSemantics lookup. The accessor METHODS no longer render separately
+// (the C# renders them through the property), and the compiler-generated
+// `<Name>k__BackingField` declarations disappear (the auto-property end
+// state the AST-level transform produces).
+TEST(CSharpDecompilerTest, DecompileTypeRendersProperties)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile module(path);
+    ASSERT_TRUE(module.IsValid());
+    for (const auto& t : module.TypeDefs()) {
+        if (t.Name != "EventSetter") continue;
+        std::string text;
+        ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
+            module, t.Token, text));
+        // Event: get + set; Handler: get + set; Setters is getter-only.
+        EXPECT_NE(text.find("Event { get; set; }"), std::string::npos)
+            << "the property renders as its auto-property declaration: "
+            << text;
+        EXPECT_NE(text.find("Handler { get; set; }"), std::string::npos);
+        EXPECT_EQ(text.find("get_Event("), std::string::npos)
+            << "the accessor methods render through the property";
+        EXPECT_EQ(text.find("set_Handler("), std::string::npos);
+        EXPECT_EQ(text.find("k__BackingField;"), std::string::npos)
+            << "the auto-property backing field declarations disappear";
+        return;
+    }
+    FAIL() << "the connid corpus has no EventSetter type";
+}
+
+// The getter-only property form (the Style.Setters shape).
+TEST(CSharpDecompilerTest, DecompileTypeRendersGetterOnlyProperties)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile module(path);
+    ASSERT_TRUE(module.IsValid());
+    for (const auto& t : module.TypeDefs()) {
+        if (std::string(t.Name) != "Style") continue;
+        std::string text;
+        ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
+            module, t.Token, text));
+        // The getter-only property has a real body (no backing field);
+        // its single-return getter renders the C# expression-bodied form
+        // (the oracle's `Setters => new SetterBaseCollection();`); only
+        // the auto-property shape (or a body-less accessor) keeps the
+        // stub form.
+        EXPECT_NE(text.find("Setters => new "), std::string::npos)
+            << text;
+        EXPECT_EQ(text.find("Setters { get; }"), std::string::npos)
+            << "a real accessor body does not render the stub: " << text;
+        SUCCEED();
+        return;
+    }
+    FAIL() << "the connid corpus has no Style type";
+}
+
+// The constructor member surface (the C# DoDecompileMember's constructor
+// arm): a `.ctor` method renders with the TYPE name and no return type
+// (the C# `public EventSetter()` header; the flat renderer carries no
+// modifiers).
+TEST(CSharpDecompilerTest, DecompileTypeRendersConstructors)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile module(path);
+    ASSERT_TRUE(module.IsValid());
+    for (const auto& t : module.TypeDefs()) {
+        if (t.Name != "EventSetter") continue;
+        std::string text;
+        ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
+            module, t.Token, text));
+        // The implicit default constructor is ELIDED (the compiler's
+        // default over the object base -- the oracle renders the bare
+        // property members with no constructor at all), and the raw
+        // metadata constructor name never leaks.
+        EXPECT_EQ(text.find("EventSetter()"), std::string::npos)
+            << "the implicit default constructor is elided: " << text;
+        EXPECT_EQ(text.find(".ctor"), std::string::npos)
+            << "the raw metadata constructor name does not leak: " << text;
+        return;
+    }
+    FAIL() << "the connid corpus has no EventSetter type";
+}
+
+// The event member surface (the C# DoDecompileMember's event arm): an
+// event renders as its `event Type Name;` declaration -- the type through
+// the module's token resolver (the C# entity.ReturnType; the add/remove
+// accessor bodies are the flat renderer's documented stand-in gap, like
+// the fields').
+TEST(CSharpDecompilerTest, DecompileTypeRendersEvents)
+{
+    std::error_code ec;
+    if (!std::filesystem::exists(
+            "/home/jim/ilspy-test-fixtures/net48/PresentationFramework.dll",
+            ec))
+        GTEST_SKIP() << "the net48 fixture set is not provisioned";
+    ::ILSpy::Decompiler::Metadata::MetadataFile file(
+        "/home/jim/ilspy-test-fixtures/net48/PresentationFramework.dll");
+    ASSERT_TRUE(file.IsValid());
+    for (const auto& t : file.TypeDefs()) {
+        if (t.Name != "FrameworkContentElement") continue;
+        std::string text;
+        ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
+            file, t.Token, text));
+        // Loaded: a RoutedEventHandler event. The reference assembly's
+        // accessors carry stale RVAs that never decode, so the event
+        // renders the add/remove accessor blocks with the empty-body
+        // error comments (the oracle's form), not the field-like
+        // semicolon form.
+        if (std::getenv("TET_TRACE"))
+            std::fprintf(stderr, "TET-EV: %s\n", text.c_str());
+        EXPECT_NE(text.find("event RoutedEventHandler Loaded\n\t{\n\tadd"),
+                  std::string::npos)
+            << "the event renders its accessor blocks (the member block "
+               "indents one tab): " << text;
+        return;
+    }
+    FAIL() << "the corpus has no FrameworkContentElement type";
+}
+
+// The C# partial gate (DoDecompile: partialTypeInfo != null ->
+// Modifiers.Partial): the flat render registers partials through the
+// same registry the C# DoDecompileTypes consumers use, so a plain
+// decompile renders `public class Page1` -- the oracle-pinned shape.
+TEST(CSharpDecompilerTest, DecompileTypePartialGateMatchesTheRegistry)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile module(path);
+    ASSERT_TRUE(module.IsValid());
+    for (const auto& t : module.TypeDefs()) {
+        if (t.Name != "Page1") continue;
+        std::string text;
+        ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
+            module, t.Token, text));
+        // A type with no registered partial half carries no partial
+        // modifier (the C# partialTypeInfo != null arm; the designer-
+        // generated half is the consumer's registration, not the
+        // metadata's); the faithful header carries the accessibility and
+        // the base types.
+        EXPECT_NE(text.find("public class Page1 : Application, IComponentConnector"),
+                  std::string::npos)
+            << "the type header renders: " << text;
+        EXPECT_EQ(text.find("public partial class Page1"), std::string::npos)
+            << "partial is registered-partial-types only, actual:\n"
+            << text;
+        if (std::getenv("TET_TRACE")) {
+            std::fprintf(stderr, "TET-TYPE: %s\n", text.c_str());
+        }
+        return;
+    }
+    FAIL() << "the connid corpus has no Page1 type";
+}
+
+// The fixed-argument decode (the C# TypeSystemAstBuilder.ConvertAttribute
+// shape -- each positional argument renders as its constant literal, a
+// string in double quotes, a bool as true/false, the numerics as their
+// text): the connid corpus's assembly attributes carry decodable fixed
+// arguments (the CompilationRelaxations(8) int and the AssemblyVersion
+// string).
+TEST(CSharpDecompilerTest, DecompileModuleAttributesRenderFixedArguments)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ASSERT_FALSE(path.empty());
+    ::ILSpy::Decompiler::Metadata::MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+    ConnIdCompilation compilation;
+    TS::MetadataModule module{compilation, &file, TS::TypeSystemOptions::Default};
+    compilation.SetMainModule(&module);
+    std::string text =
+        CSharp::CSharpDecompiler::DecompileModuleAndAssemblyAttributesToString(
+            module);
+    // CompilationRelaxations(8): the compiler-emitted relaxation value
+    // renders as the numeric literal (the short-name + the Mono policy's
+    // space-before-call-parentheses, the output-visitor form).
+    EXPECT_NE(text.find("CompilationRelaxations(8)"),
+              std::string::npos)
+        << "the int fixed argument renders: " << text;
+    if (std::getenv("TET_TRACE")) {
+        std::fprintf(stderr, "TET-ATTR: %s\n", text.c_str());
+    }
+}
+
+
+TEST(CSharpDecompilerTest, ProbeDumpMembers)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ::ILSpy::Decompiler::Metadata::MetadataFile f(path);
+    for (const auto& t : f.TypeDefs()) {
+        std::fprintf(stderr, "TYPE %s (0x%08x)\n", t.Name.c_str(), t.Token);
+        for (const auto& pr : f.GetProperties(t.Token))
+            std::fprintf(stderr, "  PROP %s (0x%08x)\n", pr.Name.c_str(), pr.Token);
+        for (const auto& e : f.GetEvents(t.Token))
+            std::fprintf(stderr, "  EVENT %s (0x%08x)\n", e.Name.c_str(), e.Token);
+        for (const auto& m : f.GetMethods(t.Token))
+            std::fprintf(stderr, "  METHOD %s (0x%08x, rva=%u)\n", m.Name.c_str(), m.Token, m.RVA);
+    }
+}
+
+TEST(CSharpDecompilerTest, ProbeDumpRender)
+{
+    std::string path = ILSpy::Tests::WriteConnIdResDll();
+    ::ILSpy::Decompiler::Metadata::MetadataFile f(path);
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Name != "EventSetter") continue;
+        std::string text;
+        CSharp::CSharpDecompiler::DecompileTypeToString(f, t.Token, text);
+        std::fprintf(stderr, "RENDER:\n%s\n", text.c_str());
+    }
+}
+
+// ---- The T3 metadata-only emission (the reference-assembly --csharp
+// shape; the corpus is the net48 reference System.IO.Compression.
+// FileSystem.dll whose ZipFile static class carries only zero-length
+// bodies at non-zero RVAs).
+
+const char* FileSystemCorpusPath() {
+    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB"); env != nullptr) {
+        static std::string cached;
+        cached = (std::filesystem::path(env).parent_path() /
+                  "System.IO.Compression.FileSystem.dll")
+                     .string();
+        return cached.c_str();
+    }
+    return "/usr/lib/mono/4.5/System.IO.Compression.FileSystem.dll";
+}
+
+// The C# DoDecompile(IMethod)'s HasBody arm: a zero-length body at a
+// non-zero RVA is HasBody()==true, so DecompileBody runs and renders
+// the Empty-body comment -- NOT the extern modifier (that arm is only
+// for true RVA==0 members). The oracle text (the ZipFile gold):
+// `public static ZipArchive OpenRead(string archiveFileName)` with the
+// body `{ /*Error: Empty body found. Decompiled assembly might be a
+// reference assembly.*/; }`.
+TEST(CSharpDecompilerTest, ZeroLengthBodyRendersTheEmptyBodyComment) {
+    const char* path = FileSystemCorpusPath();
+    if (!std::filesystem::exists(path)) {
+        GTEST_SKIP() << "corpus not provisioned";
+    }
+    ::ILSpy::Decompiler::Metadata::MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t openReadToken = 0;
+    std::uint32_t openReadRva = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Name != "ZipFile") continue;
+        for (const auto& m : f.GetMethods(t.Token)) {
+            if (m.Name != "OpenRead") continue;
+            openReadToken = m.Token;
+            openReadRva = m.RVA;
+        }
+    }
+    ASSERT_NE(openReadToken, 0u);
+
+    std::string out;
+    ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileMethodToString(
+        f, openReadToken, openReadRva, "OpenRead", out, false));
+    EXPECT_NE(out.find(
+        "/*Error: Empty body found. Decompiled assembly might be a "
+        "reference assembly.*/;"),
+        std::string::npos)
+        << "the Empty-body InvalidBranch renders as the C# comment form, "
+           "actual:\n"
+        << out;
+    EXPECT_EQ(out.find("extern "), std::string::npos)
+        << "HasBody()==true members take the body arm, not the extern arm";
+}
+
+// The type-level emission of the metadata-only ZipFile: the C# header
+// is `public static class ZipFile` (the ConvertTypeDefinition arms:
+// the accessibility + the static modifier from IsStatic; partial only
+// when partialTypes registered the type -- a reference assembly has no
+// registrations), every member renders (the declaration-first
+// ConvertEntity shape), and the zero-length bodies render the
+// Empty-body comment.
+TEST(CSharpDecompilerTest, MetadataOnlyTypeRenderCarriesTheMembers) {
+    const char* path = FileSystemCorpusPath();
+    if (!std::filesystem::exists(path)) {
+        GTEST_SKIP() << "corpus not provisioned";
+    }
+    ::ILSpy::Decompiler::Metadata::MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t zipFileToken = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Name != "ZipFile") continue;
+        zipFileToken = t.Token;
+    }
+    ASSERT_NE(zipFileToken, 0u);
+
+    std::string out;
+    ASSERT_TRUE(CSharp::CSharpDecompiler::DecompileTypeToString(
+        f, zipFileToken, out));
+    EXPECT_NE(out.find("public static class ZipFile"), std::string::npos)
+        << "actual:\n"
+        << out;
+    EXPECT_EQ(out.find("partial"), std::string::npos)
+        << "partial is registered-partial-types only (the C# gate)";
+    EXPECT_NE(out.find("public static ZipArchive OpenRead(string "
+                       "archiveFileName)"),
+              std::string::npos);
+    EXPECT_NE(out.find(
+        "/*Error: Empty body found. Decompiled assembly might be a "
+        "reference assembly.*/;"),
+        std::string::npos);
+    // The P/Invoke shape would carry extern; ZipFile has none -- the
+    // whole type is HasBody()==true ref-pack bodies.
+    EXPECT_EQ(out.find("extern "), std::string::npos);
+
+    // The formatting migration's acceptance: the declaration body (from
+    // the type's own doc comment through the closing brace) matches the
+    // committed ZipFile gold byte-for-byte, CR-stripped (the established
+    // convention). The leading using directives are the documented
+    // next-slice divergence: the port's collector pools the referenced
+    // namespaces while the C# emits the usings the tree's rendered names
+    // require (the keyword-spelled primitives pull no using), so the
+    // port carries one extra `using System;` here today.
+    const std::string kBodyAnchor = "/// <summary>Provides static methods";
+    const std::size_t portBody = out.find(kBodyAnchor);
+    ASSERT_NE(portBody, std::string::npos);
+    std::string goldText = [] {
+        std::ifstream in(
+            ILSPY_TESTS_SOURCE_DIR
+            "/fixtures/metadata_only/"
+            "System.IO.Compression.ZipFile_type_csharp.gold.txt",
+            std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)),
+                           std::istreambuf_iterator<char>());
+    }();
+    const std::size_t goldBody = goldText.find(kBodyAnchor);
+    ASSERT_NE(goldBody, std::string::npos);
+    auto stripCr = [](std::string text) {
+        text.erase(std::remove(text.begin(), text.end(), '\r'),
+                   text.end());
+        return text;
+    };
+    EXPECT_EQ(stripCr(out.substr(portBody)),
+              stripCr(goldText.substr(goldBody)));
+}
+} // namespace
+

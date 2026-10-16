@@ -1,0 +1,64 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+// to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+// Port of ICSharpCode.Decompiler/IL/Transforms/AssignVariableNames.cs (subset).
+// Renames compiler-generated locals and stack slots to readable C# names
+// inferred from their type (System.Int32 -> num, System.String -> text, ...),
+// disambiguated against parameter names and earlier locals. Parameters keep
+// their metadata names. Skipped: Humanizer pluralisation, the scope system,
+// loop-counter detection, display-class handling, and C#-keyword avoidance.
+
+#pragma once
+
+#include "Decompiler/IL/Transforms/IILTransform.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
+
+#include <string>
+
+namespace ILSpy::Decompiler::IL {
+
+class AssignVariableNames : public IILTransform {
+public:
+    void Run(ILFunction& function, ILTransformContext& context) override;
+
+    // The C# `internal static bool IsValidName(string varName)`
+    // (AssignVariableNames.cs line 677): whether a name is a legal C#
+    // identifier (letter or '_' first, letters/digits/ '_' after, no
+    // whitespace) -- the assignment-eligibility check the transform's rename
+    // and the CallBuilder argument-name mapping both consume.
+    static bool IsValidName(const std::string& varName);
+
+    // The C# GetNameByType's naming core (the known-type dict, the
+    // array/pointer/byref names, the interface strip, the lowercased
+    // short type name): the type-based variable-name suggestion. Shared
+    // with the flat emitter's foreach element naming (the element takes
+    // the same name the ILAst transform would assign the loop variable --
+    // the rendered type text itself is never a name: a keyword like
+    // `byte` is not a legal identifier).
+    static std::string SuggestNameForType(const TypeSystem::IType* type);
+
+    // The C# GenerateForeachVariableName: the foreach element's name from
+    // the COLLECTION expression -- the collection's suggested name
+    // (the field or Get-method remainder) singularized (the Humanizer
+    // English rules: directories -> directory, data -> datum), the
+    // List-suffix / list / children adjustments, the digit strip, and
+    // the "item" fallback.
+    static std::string SuggestForeachElementName(ILInstruction* collection);
+};
+
+} // namespace ILSpy::Decompiler::IL

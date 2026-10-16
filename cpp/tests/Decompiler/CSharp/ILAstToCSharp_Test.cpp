@@ -1,0 +1,2790 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+// to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+// Tests for the ILAst-to-C#-text seed (Decompiler/CSharp/ILAstToCSharp).
+// Hand-built ILAst trees are translated and the emitted text is compared
+// exactly (the seed's output format is fixed), plus an end-to-end run against
+// mscorlib: ReadIL decodes a real getter and the translator must emit the
+// field-return statement.
+
+#include "Decompiler/CSharp/ILAstToCSharp.hpp"
+#include "Decompiler/IL/ILReader.hpp"
+#include "Decompiler/IL/VariableKind.hpp"
+#include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
+#include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
+#include <map>
+
+#include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/Branch.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/CastClass.hpp"
+#include "Decompiler/IL/Instructions/Comp.hpp"
+#include "Decompiler/IL/Instructions/Conv.hpp"
+#include "Decompiler/IL/Instructions/IfInstruction.hpp"
+#include "Decompiler/IL/Instructions/IsInst.hpp"
+#include "Decompiler/IL/Instructions/LdcConstants.hpp"
+#include "Decompiler/IL/Instructions/RefAnyType.hpp"
+#include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdLen.hpp"
+#include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdNull.hpp"
+#include "Decompiler/IL/Instructions/UsingInstruction.hpp"
+#include "Decompiler/IL/Instructions/LdStr.hpp"
+#include "Decompiler/IL/Instructions/Rethrow.hpp"
+#include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/Nop.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
+#include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/IL/Instructions/TokenInstructions.hpp"
+#include "Decompiler/IL/Instructions/TryInstructions.hpp"
+#include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+
+#include <gtest/gtest.h>
+
+#include <cstdint>
+#include <filesystem>
+#include <memory>
+#include <string>
+
+using namespace ILSpy::Decompiler::IL;
+using ILSpy::Decompiler::Metadata::MetadataFile;
+using ILSpy::Decompiler::TypeSystem::ITypePtr;
+using ILSpy::Decompiler::TypeSystem::ByReferenceType;
+using ILSpy::Decompiler::TypeSystem::KnownType;
+using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+
+namespace {
+
+ILVariablePtr MakeVar(VariableKind kind, std::string name, std::int32_t index,
+                      ITypePtr type = nullptr) {
+    auto v = std::make_shared<ILVariable>();
+    v->Name = std::move(name);
+    v->Kind = kind;
+    v->Index = index;
+    v->Type = std::move(type);
+    return v;
+}
+
+// Build a one-method ILFunction from a list of prepared blocks and wire up the
+// function-level links the way the IL reader leaves them.
+std::unique_ptr<ILFunction> MakeFunction(std::vector<std::unique_ptr<Block>> blocks) {
+    auto container = std::make_unique<BlockContainer>();
+    for (auto& b : blocks) container->AddBlock(std::move(b));
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::move(container);
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    return fn;
+}
+
+std::unique_ptr<Leave> ReturnFinal(BlockContainer* container,
+                                   std::unique_ptr<ILInstruction> value = nullptr) {
+    return std::make_unique<Leave>(container, std::move(value));
+}
+
+} // namespace
+
+TEST(ILAstToCSharp, StraightLineStoreAndEmptyReturn) {
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
+                                       std::make_unique<LdcI4>(42)));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(ILAstToCSharp(*fn, "void", "M", ""),
+              "void M()\n{\n	var V_0 = 42;\n	return;\n}\n");
+}
+
+TEST(ILAstToCSharp, ParametersAreAssignedNotDeclared) {
+    auto param = MakeVar(VariableKind::Parameter, "arg_1", 1);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(param, std::make_unique<LdcI4>(5)));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "int arg_1");
+    EXPECT_NE(text.find("\n	arg_1 = 5;\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("var arg_1"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, SecondStoreIsAssignmentNotRedeclaration) {
+    auto local = MakeVar(VariableKind::Local, "V_0", 0);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(local, std::make_unique<LdcI4>(1)));
+    block->Add(std::make_unique<StLoc>(local, std::make_unique<LdcI4>(2)));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("	var V_0 = 1;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	V_0 = 2;\n"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, ArithmeticAndComparisonExpressions) {
+    auto arg1 = MakeVar(VariableKind::Parameter, "arg_1", 1);
+    auto v0 = MakeVar(VariableKind::Local, "V_0", 0);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(v0, std::make_unique<BinaryNumericInstruction>(
+        std::make_unique<LdLoc>(arg1), std::make_unique<LdcI4>(1),
+        BinaryNumericOperator::Add)));
+
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get(),
+        std::make_unique<Comp>(std::make_unique<LdLoc>(v0), std::make_unique<LdcI4>(0),
+                               ComparisonKind::GreaterThan)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(ILAstToCSharp(*fn, "bool", "Check", "int arg_1"),
+              "bool Check(int arg_1)\n{\n	var V_0 = arg_1 + 1;\n	return V_0 > 0;\n}\n");
+}
+
+TEST(ILAstToCSharp, ConditionalBranchEmitsIfGotoAndLabel) {
+    // b0: if (1 == 1) goto b2;  b1: stloc (body);  b2: return.
+    // b2 is NOT the next block (b1 is), so the branch is non-redundant --
+    // but the guard-region fold restructures it: the fall-through region
+    // nests under the INVERTED condition, the target continues after (the
+    // C# ConditionDetection/ReduceNestingTransform shape; the goto form
+    // survives only for the shapes the fold's gates reject).
+    auto b0 = std::make_unique<Block>();
+    b0->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
+                                    std::make_unique<LdcI4>(0)));
+    auto b1 = std::make_unique<Block>();
+    b1->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_1", 1),
+                                    std::make_unique<LdcI4>(1)));
+    auto b2 = std::make_unique<Block>();
+
+    auto fn = MakeFunction({});
+    Block* b2Ptr = b2.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+
+    auto br = std::make_unique<Branch>(static_cast<std::uint32_t>(0x20));
+    br->TargetBlock = b2Ptr;
+    br->HasOffset = false;
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(1),
+                               ComparisonKind::Equality),
+        std::move(br)));
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<Branch>(b2Ptr));  // b1 -> b2
+    fn->Body->Blocks[2]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("if (1 != 1)\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	var V_1 = 1;\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("goto "), std::string::npos)
+        << "the guard-region fold removes the goto: " << text;
+    }
+
+TEST(ILAstToCSharp, VoidCallStatementAndStringEscapes) {
+    auto call = std::make_unique<Call>("System.Console::WriteLine");
+    call->AddArg(std::make_unique<LdStr>("a\nb\"\\"));
+    call->ReturnType = StackType::Void;
+
+    auto block = std::make_unique<Block>();
+    block->Add(std::move(call));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find(R"(	Console.WriteLine("a\nb\"\\");)"),
+              std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, InstanceCallRendersAsReceiverDotMethod) {
+    // An instance call `call Type::Method(receiver, arg)` renders as
+    // `receiver.Method(arg)`, not `Type.Method(receiver, arg)`.
+    auto recv = MakeVar(VariableKind::Parameter, "this", 0);
+    auto arg1 = MakeVar(VariableKind::Parameter, "arg_1", 1);
+    auto call = std::make_unique<Call>("System.Object::ToString");
+    call->IsInstanceCall = true;
+    call->ReturnType = StackType::O;
+    call->AddArg(std::make_unique<LdLoc>(recv));
+    call->AddArg(std::make_unique<LdLoc>(arg1));
+
+    auto block = std::make_unique<Block>();
+    block->Add(std::move(call));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "int arg_1");
+    // The C# requireTarget rule: a this-receiver instance call ELIDES the
+    // receiver (the ThisReferenceExpression target renders bare) -- not
+    // `this.ToString(arg_1)` and never the static-style form.
+    EXPECT_NE(text.find("\tToString(arg_1);\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("this.ToString("), std::string::npos)
+        << "the this-receiver elides (the C# requireTarget rule)";
+    EXPECT_EQ(text.find("System.Object.ToString("), std::string::npos) << "not a static-style call";
+}
+
+TEST(ILAstToCSharp, MultiArgAccessorRendersAsIndexer) {
+    // A property accessor taking arguments beyond the receiver is an
+    // indexer access (C# has no parameterized properties besides indexers):
+    // `call IList::get_Item(list, i)` renders `list[i]`, not `list.Item`
+    // (the index argument must not be dropped); `call IList::set_Item(list,
+    // i, v)` renders `list[i] = v`. A plain accessor without extra arguments
+    // stays a property access (`list.Count`).
+    auto list = MakeVar(VariableKind::Local, "list", 0);
+    auto i = MakeVar(VariableKind::Local, "i", 1);
+
+    auto getCall = std::make_unique<Call>(
+        "System.Collections.Generic.IList`1[[System.Object]]::get_Item");
+    getCall->IsInstanceCall = true;
+    getCall->ReturnType = StackType::O;
+    getCall->AddArg(std::make_unique<LdLoc>(list));
+    getCall->AddArg(std::make_unique<LdLoc>(i));
+
+    auto setCall = std::make_unique<Call>(
+        "System.Collections.Generic.IList`1[[System.Object]]::set_Item");
+    setCall->IsInstanceCall = true;
+    setCall->ReturnType = StackType::Void;
+    setCall->AddArg(std::make_unique<LdLoc>(list));
+    setCall->AddArg(std::make_unique<LdLoc>(i));
+    setCall->AddArg(std::make_unique<LdLoc>(list));
+
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(list, std::move(getCall)));
+    block->Add(std::move(setCall));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("= list[i];"), std::string::npos)
+        << "an indexer getter renders the index, not a property";
+    EXPECT_NE(text.find("list[i] = list;"), std::string::npos)
+        << "an indexer setter renders the index and the value";
+    EXPECT_EQ(text.find(".Item"), std::string::npos)
+        << "the accessor name must not appear in the index syntax";
+}
+
+TEST(ILAstToCSharp, NegatedShortCircuitPushesDeMorganIntoComparisons) {
+    // The C# ExpressionBuilder.TranslateCondition(condition, negate): the
+    // negation pushes into the condition tree instead of wrapping it. The
+    // ConditionDetection output `if (!(a != 5 || b < 3)) { ... }` (the
+    // combined guard chain over a while loop, where the guard-continue fold
+    // does not apply) renders the de Morgan form with the comparison
+    // operators flipped: `if (a == 5 && b >= 3) { ... }` -- the oracle's
+    // while-guard form (FindNewarr: `if (Code == Newarr && i >= 1)`).
+    auto a = MakeVar(VariableKind::Local, "a", 0);
+    auto b = MakeVar(VariableKind::Local, "b", 1);
+
+    // LogicOr(comp(ne, a, 5), comp(lt, b, 3)): if ((a != 5)) 1 else (b < 3)
+    auto orTree = std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(a), std::make_unique<LdcI4>(5),
+                               ComparisonKind::Inequality),
+        std::make_unique<LdcI4>(1),
+        std::make_unique<Comp>(std::make_unique<LdLoc>(b), std::make_unique<LdcI4>(3),
+                               ComparisonKind::LessThan));
+    // The guard: if (orTree == 0) { work }
+    auto work = std::make_unique<Block>();
+    work->Add(std::make_unique<StLoc>(a, std::make_unique<LdcI4>(7)));
+
+    auto b0 = std::make_unique<Block>();
+    auto b1 = std::make_unique<Block>();
+    auto fn = MakeFunction({});
+    Block* b1Ptr = b1.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::move(orTree), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Equality),
+        std::move(work)));
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<Branch>(b1Ptr));  // unreachable-safe final
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("if (a == 5 && b >= 3)"), std::string::npos)
+        << "the negation distributes (de Morgan) with flipped comparison operators";
+    EXPECT_EQ(text.find("!("), std::string::npos)
+        << "no wrapping negation survives over a short-circuit tree";
+}
+
+TEST(ILAstToCSharp, ConstructorCallEmitsNewExpression) {
+    auto call = std::make_unique<Call>("System.Text.StringBuilder::.ctor");
+    call->ReturnType = StackType::Void;
+    auto arg1 = MakeVar(VariableKind::Parameter, "arg_1", 1);
+    call->AddArg(std::make_unique<LdLoc>(arg1));
+
+    auto block = std::make_unique<Block>();
+    block->Add(std::move(call));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "int arg_1");
+    // The new-expression's type renders its short name (the C# name lookup
+    // through the using directives).
+    EXPECT_NE(text.find("	new StringBuilder(arg_1);\n"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, BaseConstructorCallEmitsBase) {
+    // A `.ctor` call statement whose first arg is `this` is a base ctor call:
+    // render as `base(args)`, dropping the implicit `this`.
+    auto thisVar = MakeVar(VariableKind::Parameter, "this", 0);
+    auto arg1 = MakeVar(VariableKind::Parameter, "arg_1", 1);
+    auto call = std::make_unique<Call>("System.Object::.ctor");
+    call->ReturnType = StackType::Void;
+    call->AddArg(std::make_unique<LdLoc>(thisVar));
+    call->AddArg(std::make_unique<LdLoc>(arg1));
+
+    auto block = std::make_unique<Block>();
+    block->Add(std::move(call));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", ".ctor", "int arg_1");
+    EXPECT_NE(text.find("	base(arg_1);\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("new System.Object"), std::string::npos) << "base ctor call is not new";
+}
+
+TEST(ILAstToCSharp, FieldStoreAndLoadThroughLdFlda) {
+    auto thisVar = MakeVar(VariableKind::Parameter, "this", 0);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StObj>(
+        std::make_unique<LdFlda>(std::make_unique<LdLoc>(thisVar), "MyApp.C::count"),
+        std::make_unique<LdcI4>(7), nullptr));
+
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get(),
+        std::make_unique<LdObj>(
+            std::make_unique<LdFlda>(std::make_unique<LdLoc>(thisVar), "MyApp.C::count"),
+            std::make_unique<KnownType>(KnownTypeCode::Int32))));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "int", "get_Count", "");
+    EXPECT_NE(text.find("	count = 7;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	return count;\n"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, ByRefVariableDerefIsImplicit) {
+    // ldobj/stobj on a byref variable (a managed ref) renders as the variable
+    // name -- the indirection is implicit in C#. `*(this)` in a value-type
+    // method and `*(byrefParam)` both collapse to the bare name.
+    auto thisVar = MakeVar(VariableKind::Parameter, "this", 0);
+    auto refParam = MakeVar(VariableKind::Parameter, "array", 1,
+        std::make_shared<ByReferenceType>(
+            std::make_shared<KnownType>(KnownTypeCode::Int32)));
+    auto block = std::make_unique<Block>();
+    // array = *(array)  (stobj on the byref)
+    block->Add(std::make_unique<StObj>(std::make_unique<LdLoc>(refParam),
+        std::make_unique<LdcI4>(0), nullptr));
+    // return *(this)  (ldobj on this)
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get(),
+        std::make_unique<LdObj>(std::make_unique<LdLoc>(thisVar),
+            std::make_shared<KnownType>(KnownTypeCode::Int32))));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "int", "M", "ref int array");
+    EXPECT_NE(text.find("	array = 0;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	return this;\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("*("), std::string::npos) << "no explicit deref of a byref";
+}
+
+TEST(ILAstToCSharp, ThrowEmitsThrowStatement) {
+    auto block = std::make_unique<Block>();
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Throw>(std::make_unique<LdNull>()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("	throw null;\n"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, SwitchInlinesLeaveFinalBodies) {
+    // A switch whose bodies self-terminate (Leave/return) with no shared exit
+    // convergence inlines them: each case renders its body's return directly,
+    // no thunk gotos, no IL_ labels.
+    auto v0 = MakeVar(VariableKind::Local, "V_0", 0);
+    auto b0 = std::make_unique<Block>();
+    auto b1 = std::make_unique<Block>();
+    auto b2 = std::make_unique<Block>();
+
+    auto fn = MakeFunction({});
+    Block* b1Ptr = b1.get();
+    Block* b2Ptr = b2.get();
+    auto b3 = std::make_unique<Block>();  // post-switch continuation
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(b3));
+
+    auto brCase = std::make_unique<Branch>(static_cast<std::uint32_t>(0x30));
+    brCase->TargetBlock = b1Ptr;
+    brCase->HasOffset = false;
+    auto brDefault = std::make_unique<Branch>(static_cast<std::uint32_t>(0x40));
+    brDefault->TargetBlock = b2Ptr;
+    brDefault->HasOffset = false;
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v0));
+    auto caseSection = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0)));
+    caseSection->SetBody(std::move(brCase));
+    sw->AddSection(std::move(caseSection));
+    auto defaultSection = std::make_unique<SwitchSection>();
+    defaultSection->SetBody(std::move(brDefault));
+    sw->AddSection(std::move(defaultSection));
+    fn->Body->Blocks[0]->SetFinal(std::move(sw));
+
+    fn->Body->Blocks[1]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Body->Blocks[2]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Body->Blocks[3]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("	switch (V_0)\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	case 0:\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	default:\n"), std::string::npos) << text;
+    // The bodies inline: no thunk gotos, no IL_ labels.
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    // Each case's return renders inline.
+    EXPECT_NE(text.find("return;"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, SwitchSectionWithLeaveBodyInlinesReturn) {
+    // A switch section whose body is a DIRECT Leave (a `return value;` --
+    // common in switch-on-enum getters: `case 0: return X;`), not a Branch
+    // thunk to a body block. The seed's switch-inline analysis bailed such
+    // sections as `not-thunk`; the case rendered `goto IL_X;` to a labeled
+    // block `IL_X: return X;` after the switch. The section should inline:
+    // `case 0: return X;` directly under the label, no thunk/goto/label.
+    auto v0 = MakeVar(VariableKind::Local, "V_0", 0);
+    auto b0 = std::make_unique<Block>();
+    auto b2 = std::make_unique<Block>(); Block* b2Ptr = b2.get();
+    auto b3 = std::make_unique<Block>(); Block* b3Ptr = b3.get();
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(b3));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v0));
+    // case 0: direct Leave (return 5) -- the section body is a Leave, not a Branch.
+    auto caseSection = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0)));
+    caseSection->SetBody(std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdcI4>(5)));
+    sw->AddSection(std::move(caseSection));
+    // default: a Branch thunk to b2 (work; br b3) -- the shared exit convergence.
+    auto defaultSection = std::make_unique<SwitchSection>();
+    auto brDefault = std::make_unique<Branch>(b2Ptr); brDefault->HasOffset = false;
+    defaultSection->SetBody(std::move(brDefault));
+    sw->AddSection(std::move(defaultSection));
+    fn->Body->Blocks[0]->SetFinal(std::move(sw));
+
+    b2Ptr->Add(std::make_unique<StLoc>(v0, std::make_unique<LdcI4>(7)));
+    b2Ptr->SetFinal(std::make_unique<Branch>(b3Ptr));
+    b3Ptr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "int", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 0:"), std::string::npos) << text;
+    EXPECT_NE(text.find("return 5;"), std::string::npos) << text;
+    EXPECT_NE(text.find("default:"), std::string::npos) << text;
+    EXPECT_NE(text.find("V_0 = 7"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, SwitchCaseLabelsUseEnumMemberNames) {
+    // The C# CreateTypedCaseLabel's enum lookup: a switch over an
+    // enum-typed variable renders the case labels as the enum member names
+    // (`case Machine.I386:`), not the raw values (`case 332:`).
+    namespace TS = ILSpy::Decompiler::TypeSystem;
+    std::map<long long, std::string> members;
+    members[332] = "I386";
+    members[34404] = "AMD64";
+    auto enumType = std::make_shared<TS::EnumMembersType>(
+        TS::TopLevelTypeName("dnlib.PE", "Machine", 0), std::move(members));
+    auto v = std::make_shared<ILVariable>(VariableKind::Parameter, enumType, 0);
+    v->Name = "machine";
+
+    auto b0 = std::make_unique<Block>();
+    auto b2 = std::make_unique<Block>(); Block* b2Ptr = b2.get();
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b2));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v));
+    auto caseSection = std::make_unique<SwitchSection>(
+        ILSpy::Decompiler::Util::LongSet(static_cast<long long>(332)));
+    caseSection->SetBody(std::make_unique<Leave>(fn->Body.get(),
+                                                 std::make_unique<LdcI4>(1)));
+    auto defaultSection = std::make_unique<SwitchSection>();
+    defaultSection->SetBody(std::make_unique<Leave>(fn->Body.get(),
+                                                    std::make_unique<LdcI4>(0)));
+    sw->AddSection(std::move(caseSection));
+    sw->AddSection(std::move(defaultSection));
+    fn->Body->Blocks[0]->SetFinal(std::move(sw));
+    b2Ptr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "int", "M", "Machine machine");
+    EXPECT_NE(text.find("case Machine.I386:"), std::string::npos) << text;
+    EXPECT_EQ(text.find("case 332:"), std::string::npos)
+        << "the enum switch renders the member name, not the raw value";
+}
+
+TEST(ILAstToCSharp, SwitchSectionWithThrowBodyInlinesThrow) {
+    // A switch section whose body is a direct Throw (`case 0: throw new ...;`),
+    // not a Branch thunk to a body block. The seed's switch-inline analysis
+    // bailed such sections as `not-thunk`; the case rendered `goto IL_X;` to a
+    // labeled block `IL_X: throw new ...;` after the switch. The section should
+    // inline: `case 0: throw new ...;` directly under the label, no thunk/goto.
+    auto v0 = MakeVar(VariableKind::Local, "V_0", 0);
+    auto b0 = std::make_unique<Block>();
+    auto b2 = std::make_unique<Block>(); Block* b2Ptr = b2.get();
+    auto b3 = std::make_unique<Block>(); Block* b3Ptr = b3.get();
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(b3));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v0));
+    // case 0: direct Throw -- the section body is a Throw, not a Branch.
+    auto caseSection = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0)));
+    caseSection->SetBody(std::make_unique<Throw>(std::make_unique<Call>()));
+    sw->AddSection(std::move(caseSection));
+    // default: a Branch thunk to b2 (work; br b3) -- the shared exit convergence.
+    auto defaultSection = std::make_unique<SwitchSection>();
+    auto brDefault = std::make_unique<Branch>(b2Ptr); brDefault->HasOffset = false;
+    defaultSection->SetBody(std::move(brDefault));
+    sw->AddSection(std::move(defaultSection));
+    fn->Body->Blocks[0]->SetFinal(std::move(sw));
+
+    b2Ptr->Add(std::make_unique<StLoc>(v0, std::make_unique<LdcI4>(7)));
+    b2Ptr->SetFinal(std::make_unique<Branch>(b3Ptr));
+    b3Ptr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 0:"), std::string::npos) << text;
+    EXPECT_NE(text.find("throw"), std::string::npos) << text;
+    EXPECT_NE(text.find("default:"), std::string::npos) << text;
+    EXPECT_NE(text.find("V_0 = 7"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, SwitchAtContainerEndWithSelfTerminatingBodiesInlines) {
+    // A switch at the END of its container (no block after the last body block)
+    // where every body self-terminates (return/throw): there is no shared
+    // `break` exit, and no post-switch block to use as the implicit exit. The
+    // analysis used to bail `no-post-exit`; it should accept (exit = null) --
+    // the positional-integrity gate rejects any body that would need to fall to
+    // a next section/exit it cannot reach, so only self-terminating bodies
+    // qualify. No `break;` lines render.
+    auto v0 = MakeVar(VariableKind::Local, "V_0", 0);
+    auto b0 = std::make_unique<Block>();
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    auto b2 = std::make_unique<Block>(); Block* b2Ptr = b2.get();
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));  // last block -- no post-switch block
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v0));
+    auto s1 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(1)));
+    s1->SetBody([&]{ auto b=std::make_unique<Branch>(b1Ptr); b->HasOffset=false; return b; }());
+    sw->AddSection(std::move(s1));
+    auto s2 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(2)));
+    s2->SetBody([&]{ auto b=std::make_unique<Branch>(b2Ptr); b->HasOffset=false; return b; }());
+    sw->AddSection(std::move(s2));
+    fn->Body->Blocks[0]->SetFinal(std::move(sw));
+
+    // Both bodies self-terminate (return) -- no shared exit, no fall-through.
+    b1Ptr->SetFinal(ReturnFinal(fn->Body.get()));
+    b2Ptr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 1:"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 2:"), std::string::npos) << text;
+    // No break: every body returns, no shared exit.
+    EXPECT_EQ(text.find("break;"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, SwitchBodyWithNestedConditionalReturnInlines) {
+    // A case body whose trailing is a NESTED conditional return: the body's
+    // final is `if (cond1) if (cond2) return;` (a no-else if whose true arm is a
+    // BARE no-else IfInstruction whose true arm is a Leave). The only non-fall
+    // path exits (cond1 && cond2 -> return); every other path falls positionally.
+    // The trueArmExits check (D184) recognized a Block-with-Leave-final but not a
+    // bare nested IfInstruction, so this bailed `final-kind`. The body
+    // contributes no exit branch; the emission renders the nested if-leave.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto v1 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 1);
+    v1->Name = "flag";
+    auto v2 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 2);
+    v2->Name = "flag2";
+    auto fn = MakeFunction({});
+    auto host = std::make_unique<Block>(); Block* hostPtr = host.get();
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    auto b2 = std::make_unique<Block>(); Block* b2Ptr = b2.get();
+    auto exitB = std::make_unique<Block>(); Block* exitPtr = exitB.get();
+    fn->Body->AddBlock(std::move(host));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(exitB));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v));
+    auto sec0 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0)));
+    sec0->SetBody([&]{ auto b=std::make_unique<Branch>(b1Ptr); b->HasOffset=false; return b; }());
+    sw->AddSection(std::move(sec0));
+    auto secDef = std::make_unique<SwitchSection>();
+    secDef->SetBody([&]{ auto b=std::make_unique<Branch>(b2Ptr); b->HasOffset=false; return b; }());
+    sw->AddSection(std::move(secDef));
+    hostPtr->SetFinal(std::move(sw));
+
+    // case 0 body: x = 1; if (num) if (flag) return;  -- the nested conditional
+    // return. True arm of outer if is a BARE IfInstruction (flag) return.
+    b1Ptr->Add(std::make_unique<StLoc>(v1, std::make_unique<LdcI4>(1)));
+    auto innerIf = std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v2), std::make_unique<Leave>(fn->Body.get()));
+    b1Ptr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v), std::move(innerIf)));
+    // default body: y = 2; br exit
+    b2Ptr->Add(std::make_unique<StLoc>(v1, std::make_unique<LdcI4>(2)));
+    b2Ptr->SetFinal(std::make_unique<Branch>(exitPtr));
+    exitPtr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(v1);
+    fn->Variables.push_back(v2);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 0:"), std::string::npos) << text;
+    EXPECT_NE(text.find("if (num)"), std::string::npos) << text;
+    EXPECT_NE(text.find("if (flag2)"), std::string::npos) << text;
+    EXPECT_NE(text.find("return;"), std::string::npos) << text;
+    EXPECT_NE(text.find("flag = 1"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, CastsAndTypeOperators) {
+    auto arg1 = MakeVar(VariableKind::Parameter, "arg_1", 1);
+
+    // isinst: (arg_1 as System.String)
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
+        std::make_unique<IsInst>(std::make_unique<KnownType>(KnownTypeCode::String),
+                                 std::make_unique<LdLoc>(arg1))));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    // castclass: return (System.String)(V_0)
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get(),
+        std::make_unique<CastClass>(std::make_unique<KnownType>(KnownTypeCode::String),
+                                    std::make_unique<LdLoc>(
+                                        MakeVar(VariableKind::Local, "V_0", 0)))));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "System.String", "M", "object arg_1");
+    EXPECT_NE(text.find("	var V_0 = arg_1 as string;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	return (string)V_0;\n"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, RefAnyTypeRendersAsReftypeKeywordDotTypeHandle) {
+    // The `refanytype` IL opcode (the C# `__reftype` undocumented keyword) pops
+    // a TypedReference and yields its embedded type handle. The seed renders
+    // `RefAnyType(arg)` as `__reftype(arg).TypeHandle` (the C# back end's
+    // ExpressionBuilder output -- an UndocumentedExpression + `.TypeHandle`
+    // member access), not the `(default)/*op=NN*/` fallthrough. The 3
+    // System.TypedReference methods on mscorlib (GetTargetType, TargetTypeToken,
+    // GetHashCode) use this; without the case they render the invalid-ish
+    // `(default)/*op=94*/`.
+    auto value = MakeVar(VariableKind::Parameter, "value", 1);
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::make_unique<Block>());
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get(),
+        std::make_unique<RefAnyType>(std::make_unique<LdLoc>(value))));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "System.RuntimeTypeHandle", "M", "TypedReference value");
+    EXPECT_NE(text.find("__reftype(value).TypeHandle"), std::string::npos)
+        << "RefAnyType should render as __reftype(value).TypeHandle, not the "
+           "(default)/*op=94*/ fallthrough:\n" << text;
+    EXPECT_EQ(text.find("(default)/*op="), std::string::npos)
+        << "no unhandled-instruction fallthrough should remain:\n" << text;
+}
+
+TEST(ILAstToCSharp, ArrayAndLengthExpressions) {
+    auto arg1 = MakeVar(VariableKind::Parameter, "arg_1", 1);
+    auto block = std::make_unique<Block>();
+    // V_0 = arg_1.Length
+    block->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
+        std::make_unique<LdLen>(StackType::I4, std::make_unique<LdLoc>(arg1))));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    // return arg_1[V_0] (ldobj over ldelema, the shape ldelem.* produces)
+    std::vector<std::unique_ptr<ILInstruction>> indices;
+    indices.push_back(std::make_unique<LdLoc>(MakeVar(VariableKind::Local, "V_0", 0)));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get(),
+        std::make_unique<LdObj>(
+            std::make_unique<LdElema>(std::make_unique<KnownType>(KnownTypeCode::Int32),
+                                      std::make_unique<LdLoc>(arg1), std::move(indices)),
+            std::make_unique<KnownType>(KnownTypeCode::Int32))));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "int", "M", "int[] arg_1");
+    EXPECT_NE(text.find("	var V_0 = arg_1.Length;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	return arg_1[V_0];\n"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, ConvI4OverLdLenIsImplicit) {
+    // conv.i4(ldlen(arr)) is the IL for `arr.Length`; the cast to signed i4 is
+    // implicit in C#, so the seed renders just `arr.Length` (no `(int)(...)`).
+    auto arg1 = MakeVar(VariableKind::Parameter, "arg_1", 1);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
+        std::make_unique<Conv>(
+            std::make_unique<LdLen>(StackType::I, std::make_unique<LdLoc>(arg1)), PrimitiveType::I4, false, Sign::None)));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "int[] arg_1");
+    EXPECT_NE(text.find("	var V_0 = arg_1.Length;\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("(int)"), std::string::npos) << "no redundant cast around ldlen";
+}
+
+TEST(ILAstToCSharp, CompoundAssignmentForSelfBinaryStore) {
+    // `V = V + expr` -> `V += expr`; `V = V + 1` -> `V++`; `V = V - 1` -> `V--`.
+    auto V = MakeVar(VariableKind::Local, "V_0", 0);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(V, std::make_unique<LdcI4>(0)));  // declare V_0
+    block->Add(std::make_unique<StLoc>(V,
+        std::make_unique<BinaryNumericInstruction>(
+            std::make_unique<LdLoc>(V), std::make_unique<LdcI4>(2),
+            BinaryNumericOperator::Add)));
+    block->Add(std::make_unique<StLoc>(V,
+        std::make_unique<BinaryNumericInstruction>(
+            std::make_unique<LdLoc>(V), std::make_unique<LdcI4>(1),
+            BinaryNumericOperator::Add)));
+    block->Add(std::make_unique<StLoc>(V,
+        std::make_unique<BinaryNumericInstruction>(
+            std::make_unique<LdLoc>(V), std::make_unique<LdcI4>(1),
+            BinaryNumericOperator::Sub)));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("	V_0 += 2;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	V_0++;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	V_0--;\n"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, PlainStoreWhenLeftIsNotTheTarget) {
+    // `V = other + expr` (left is a different variable) stays a plain store.
+    auto V = MakeVar(VariableKind::Local, "V_0", 0);
+    auto other = MakeVar(VariableKind::Parameter, "arg_1", 1);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(V,
+        std::make_unique<BinaryNumericInstruction>(
+            std::make_unique<LdLoc>(other), std::make_unique<LdcI4>(1),
+            BinaryNumericOperator::Add)));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "int arg_1");
+    EXPECT_NE(text.find("	var V_0 = arg_1 + 1;\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("V_0 += "), std::string::npos) << "not a compound assignment";
+}
+
+TEST(ILAstToCSharp, TypedDeclarationUsesCSharpKeyword) {
+    // A local whose type is a known primitive declares with the C# keyword
+    // (`int V_0 = ...`), not `var`. A null-typed local (e.g. a stack slot)
+    // falls back to `var`.
+    auto intV = MakeVar(VariableKind::Local, "V_0", 0,
+        std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto untyped = MakeVar(VariableKind::Local, "V_1", 1);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(intV, std::make_unique<LdcI4>(0)));
+    block->Add(std::make_unique<StLoc>(untyped, std::make_unique<LdcI4>(0)));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("	int V_0 = 0;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	var V_1 = 0;\n"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, SubtractionFromZeroIsUnaryNegation) {
+    // `0 - x` is the IL for unary negation `-x`.
+    auto x = MakeVar(VariableKind::Parameter, "x", 0);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
+        std::make_unique<BinaryNumericInstruction>(
+            std::make_unique<LdcI4>(0), std::make_unique<LdLoc>(x),
+            BinaryNumericOperator::Sub)));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "int x");
+    EXPECT_NE(text.find("	var V_0 = -x;\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("(0 - x)"), std::string::npos) << "not a binary subtraction";
+}
+
+TEST(ILAstToCSharp, BooleanEqualityToZeroIsLogicalNot) {
+    // `comp(eq, ldloc boolVar, ldc.i4 0)` is `!boolVar`; `comp(ne, .., 0)` is
+    // just `boolVar`. Only when the variable's type is Boolean.
+    auto flag = MakeVar(VariableKind::Parameter, "flag", 0,
+        std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto block = std::make_unique<Block>();
+    // if (flag == 0) return;
+    block->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(flag), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Equality),
+        std::make_unique<Leave>(nullptr)));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "bool flag");
+    EXPECT_NE(text.find("if (!flag)"), std::string::npos) << text;
+    EXPECT_EQ(text.find("flag == 0"), std::string::npos) << "bool == 0 is !bool";
+}
+
+TEST(ILAstToCSharp, ConstantTrueCatchFilterIsOmitted) {
+    // A plain catch carries the constant filter ldc.i4(1) (BlockBuilder.cs);
+    // the C#-text seed prints it as a plain `catch (T name)`, no `when`.
+    auto tryC = std::make_unique<BlockContainer>();
+    {
+        auto tb = std::make_unique<Block>();
+        auto fn0 = tryC.get();
+        tb->SetFinal(std::make_unique<Leave>(nullptr));
+        tryC->AddBlock(std::move(tb));
+        (void)fn0;
+    }
+    auto tc = std::make_unique<TryCatch>(std::move(tryC));
+    auto hxVar = MakeVar(VariableKind::ExceptionStackSlot, "E_5", -1,
+                         std::make_unique<KnownType>(KnownTypeCode::Object));
+    auto bodyC = std::make_unique<BlockContainer>();
+    {
+        auto hb = std::make_unique<Block>();
+        bodyC->AddBlock(std::move(hb));
+    }
+    tc->AddHandler(std::make_unique<TryCatchHandler>(
+        std::make_unique<LdcI4>(1), std::move(bodyC), hxVar));
+
+    auto block = std::make_unique<Block>();
+    block->Add(std::move(tc));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("catch (System.Object E_5)"), std::string::npos) << text;
+    EXPECT_EQ(text.find("when ("), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, RethrowEmitsBareThrow) {
+    auto block = std::make_unique<Block>();
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Rethrow>());
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("	throw;\n"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, EmptyBodyEmitsEmptyMethod) {
+    auto fn = std::make_unique<ILFunction>();
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text, "void M()\n{\n}\n");
+}
+
+TEST(ILAstToCSharp, DecodesRealGetterFromMscorlib) {
+#if defined(_WIN32)
+    const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    std::uint32_t stringTok = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Namespace == "System" && t.Name == "String") { stringTok = t.Token; break; }
+    }
+    ASSERT_NE(stringTok, 0u);
+
+    bool found = false;
+    for (const auto& m : f.GetMethods(stringTok)) {
+        if (m.Name != "get_FirstChar" || m.RVA == 0) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        ASSERT_NE(fn, nullptr) << "ReadIL failed on String::get_FirstChar";
+        fn->CheckInvariant(ILPhase::Normal);
+        std::string text = ILAstToCSharp(*fn, "char", "get_FirstChar", "");
+        EXPECT_NE(text.find("return m_firstChar;"), std::string::npos) << text;
+        found = true;
+        break;
+    }
+    ASSERT_TRUE(found) << "System.String::get_FirstChar not found in fixture";
+}
+
+TEST(ILAstToCSharp, TranslatesEveryDecodableMscorlibMethodWithoutCrashing) {
+#if defined(_WIN32)
+    const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    int translated = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Name == "<Module>") continue;
+        for (const auto& m : f.GetMethods(t.Token)) {
+            if (m.RVA == 0) continue;
+            auto fn = ReadIL(f, m.Token, m.RVA);
+            if (!fn) continue;
+            std::string text = ILAstToCSharp(*fn, "void", m.Name, "");
+            EXPECT_FALSE(text.empty());
+            EXPECT_NE(text.find(m.Name), std::string::npos) << text;
+            ++translated;
+        }
+        if (translated > 3000) break;
+    }
+    EXPECT_GT(translated, 1000) << "too few methods translated";
+}
+
+TEST(ILAstToCSharp, LoopContainerRendersAsWhileTrueWithContinueAndBreak) {
+    // A Loop-kind container renders as `while (true) { ... }`; a back-edge
+    // branch to the header (the first block) is `continue`, and a leave of
+    // the loop container is `break`. A leave of the function body is `return`.
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    // Pre-header block: holds the loop container, then returns.
+    auto preHeader = std::make_unique<Block>();
+    // The loop container.
+    auto loopC = std::make_unique<BlockContainer>();
+    loopC->Kind = ContainerKind::Loop;
+    auto header = std::make_unique<Block>();
+    Block* headerPtr = header.get();
+    loopC->AddBlock(std::move(header));
+    auto body = std::make_unique<Block>();
+    Block* bodyPtr = body.get();
+    loopC->AddBlock(std::move(body));
+    auto incr = std::make_unique<Block>();
+    Block* incrPtr = incr.get();
+    loopC->AddBlock(std::move(incr));
+    // header: leave(loop) (break out). body: br header (mid-loop continue).
+    // incr: br header (last-block back-edge -- implicit, dropped).
+    headerPtr->SetFinal(std::make_unique<Leave>(loopC.get()));
+    bodyPtr->SetFinal(std::make_unique<Branch>(headerPtr));
+    incrPtr->SetFinal(std::make_unique<Branch>(headerPtr));
+    preHeader->Add(std::move(loopC));
+    preHeader->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(preHeader));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("while (true)"), std::string::npos) << text;
+    EXPECT_NE(text.find("break;"), std::string::npos) << text;
+    EXPECT_NE(text.find("continue;"), std::string::npos) << text;
+    EXPECT_NE(text.find("return;"), std::string::npos) << text;
+    // No IL_ labels and no gotos (the loop header is not labeled).
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, ReturnLdcI4InBoolFunctionIsFalseTrue) {
+    // `leave(ldc.i4(0))` / `leave(ldc.i4(1))` in a Boolean-returning function
+    // renders as `return false;` / `return true;` (the IL idiom for bool
+    // return values). A non-bool function keeps `return 0;` / `return 1;`.
+    auto block = std::make_unique<Block>();
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdcI4>(0)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // A bool-returning function: return false.
+    std::string text = ILAstToCSharp(*fn, "bool", "M", "");
+    EXPECT_NE(text.find("return false;"), std::string::npos) << text;
+    EXPECT_EQ(text.find("return 0;"), std::string::npos) << text;
+
+    // An int-returning function: return 0 (not false).
+    std::string textInt = ILAstToCSharp(*fn, "int", "M", "");
+    EXPECT_NE(textInt.find("return 0;"), std::string::npos) << textInt;
+    EXPECT_EQ(textInt.find("return false;"), std::string::npos) << textInt;
+}
+
+
+// The seed's recursive emitters (EmitStatement / EmitBlock / EmitContainer /
+// EmitBraced / Expr) have a recursion-depth guard so a malformed ILAst -- a
+// cycle or a pathologically deep tree -- produces a single `/* max rendering
+// depth */` marker instead of a runaway (a repeated token such as `lock (...)`
+// ad infinitum) that would corrupt the output or OOM. A pathologically deep
+// but otherwise valid strict tree (deeply nested if-then blocks) triggers the
+// guard; the output is bounded and contains the marker.
+TEST(ILAstToCSharp, DepthGuardBoundsPathologicallyDeepTree) {
+    // Build a 150-deep nested if-then: each block's final is an IfInstruction
+    // whose TrueInst is a fresh Block, nested 150x. Each nesting level
+    // increments the seed's depth_ counter ~3x (EmitStatement + EmitBraced +
+    // EmitBlock), so 150 levels exceeds the 300 limit and the guard fires.
+    auto fn = MakeFunction({});
+    auto* container = fn->Body.get();
+    auto rootBlock = std::make_unique<Block>();
+    Block* cur = rootBlock.get();
+    fn->Body->AddBlock(std::move(rootBlock));
+    for (int i = 0; i < 150; ++i) {
+        auto inner = std::make_unique<Block>();
+        Block* innerPtr = inner.get();
+        cur->SetFinal(std::make_unique<IfInstruction>(
+            std::make_unique<LdcI4>(0), std::move(inner), nullptr));
+        cur = innerPtr;  // descend into the fresh inner block (owned by the if)
+    }
+    cur->SetFinal(ReturnFinal(container));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    // The guard must fire: the output contains the marker, not a runaway.
+    EXPECT_NE(text.find("max rendering depth"), std::string::npos)
+        << "the depth guard must fire on a 150-deep tree";
+    // The output is bounded: well under a runaway (a runaway would be
+    // megabytes; a 150-deep tree with the guard is a few KB at most).
+    EXPECT_LT(text.size(), 100000u)
+        << "the output must be bounded, not a runaway";
+    // The guard does NOT crash (the method still renders, bounded by the guard).
+    EXPECT_NE(text.find("void M()"), std::string::npos);
+}
+
+TEST(ILAstToCSharp, PreHeaderEntryBranchToWhileConditionIsDropped) {
+    // A while loop's pre-header entry branch targets the loop condition block.
+    // That block becomes the `while (cond)` head and carries no IL label, so
+    // emitting `goto IL_XXXX;` for the entry branch produces a DANGLING goto
+    // (a reference to a label that is never emitted). The pre-header falls
+    // through into the loop, so the branch must be dropped instead.
+    //
+    //   b0:           br header            (entry; must be dropped)
+    //   preHeader:    { whileC } ; leave   (the While container, emitted next)
+    //   whileC:       header: if (cond) br body else leave(whileC)   (while head)
+    //                 body:   ... ; br header                         (back edge)
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+
+    auto whileC = std::make_unique<BlockContainer>();
+    whileC->Kind = ContainerKind::While;
+    auto header = std::make_unique<Block>();
+    header->StartILOffset = 0x20;
+    Block* headerPtr = header.get();
+    auto body = std::make_unique<Block>();
+    Block* bodyPtr = body.get();
+
+    auto preHeader = std::make_unique<Block>();
+    Block* preHeaderPtr = preHeader.get();
+
+    // header: while condition `if (cond) br body else leave(whileC)`.
+    headerPtr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::make_unique<Branch>(bodyPtr), std::make_unique<Leave>(whileC.get())));
+    // body: a statement, then back-edge to the header (dropped at render).
+    bodyPtr->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
+                                         std::make_unique<LdcI4>(1)));
+    bodyPtr->SetFinal(std::make_unique<Branch>(headerPtr));
+
+    whileC->AddBlock(std::move(header));
+    whileC->AddBlock(std::move(body));
+    preHeader->Add(std::move(whileC));
+    preHeader->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+
+    // b0: the entry branch into the loop condition (the dangling goto if kept).
+    auto b0 = std::make_unique<Block>();
+    auto entryBr = std::make_unique<Branch>(headerPtr);
+    entryBr->TargetOffset = 0x20;  // the label text if (wrongly) emitted
+    b0->SetFinal(std::move(entryBr));
+
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(preHeader));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("while ("), std::string::npos) << text;
+    EXPECT_EQ(text.find("goto IL_0020"), std::string::npos)
+        << "the entry branch to the while condition must be dropped, not emitted "
+           "as a dangling goto:\n" << text;
+}
+
+TEST(ILAstToCSharp, GotoToLoopHeaderWithCodeBetweenEmitsLabel) {
+    // A `goto` to a loop header from a NON-adjacent position (code between the
+    // goto and the loop) is not a fall-through, so it must render as a real
+    // `goto IL_XXXX;` -- and the loop header must carry an `IL_XXXX:` label so
+    // the goto is not a dangling reference (invalid C#). The early-exit guard
+    // shape: `if (cond) goto loopHeader; return; <loop>` (the goto skips the
+    // return and re-enters the loop).
+    //
+    //   b0:        if (1 != 0) br header else (fall to b1)
+    //   b1:        leave (return; the code between the goto and the loop)
+    //   preHeader: { whileC }
+    //     whileC (While):
+    //       header: if (cond) br body else leave(whileC)   [offset IL_0071]
+    //       body:   ...; br header
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+
+    auto whileC = std::make_unique<BlockContainer>();
+    whileC->Kind = ContainerKind::While;
+    auto header = std::make_unique<Block>();
+    header->StartILOffset = 0x71;  // IL_0071
+    Block* headerPtr = header.get();
+    auto body = std::make_unique<Block>();
+    Block* bodyPtr = body.get();
+    header->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::make_unique<Branch>(bodyPtr), std::make_unique<Leave>(whileC.get())));
+    body->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
+                                       std::make_unique<LdcI4>(1)));
+    body->SetFinal(std::make_unique<Branch>(headerPtr));
+    whileC->AddBlock(std::move(header));
+    whileC->AddBlock(std::move(body));
+    auto preHeader = std::make_unique<Block>();
+    preHeader->Add(std::move(whileC));
+    preHeader->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+
+    // b0: the early-exit guard -- `if (1 != 0) br header` (falls to b1 on false).
+    auto b0 = std::make_unique<Block>();
+    auto guardBr = std::make_unique<Branch>(headerPtr);
+    guardBr->TargetOffset = 0x71;
+    b0->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::move(guardBr)));
+    // b1: the return (the code between the goto and the loop).
+    auto b1 = std::make_unique<Block>();
+    b1->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(preHeader));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    // The goto to the loop header renders as a real `goto IL_0071;` (the guard
+    // jumps over the return into the loop), not a dangling reference.
+    EXPECT_NE(text.find("goto IL_0071;"), std::string::npos)
+        << "the guard's goto to the loop header should render, not vanish:\n" << text;
+    // The loop header carries the matching label before the `while` keyword so
+    // the goto is a valid reference (not a dangling goto to a missing label).
+    EXPECT_NE(text.find("IL_0071:\n"), std::string::npos)
+        << "the loop header must carry an IL_0071: label before the while:\n" << text;
+}
+
+TEST(ILAstToCSharp, SwitchInsideIfArmInlinesCaseBodies) {
+    // A switch whose host block is an if-arm (not directly in a container) --
+    // `if (cond) { switch (V) { case 0: br b1; default: br b2; } }` -- has its
+    // case bodies in the ANCESTOR container (the one holding the if). The
+    // switch-inline analysis must walk up to the nearest BlockContainer to find
+    // the bodies (the `no-outer` shape), so the cases inline their bodies'
+    // returns instead of rendering `goto IL_XXXX;` thunks + labeled blocks.
+    auto v0 = MakeVar(VariableKind::Local, "V_0", 0);
+    auto b0 = std::make_unique<Block>();
+    auto b1 = std::make_unique<Block>();
+    auto b2 = std::make_unique<Block>();
+    auto b3 = std::make_unique<Block>();  // post-switch continuation
+    auto fn = MakeFunction({});
+    Block* b1Ptr = b1.get();
+    Block* b2Ptr = b2.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(b3));
+
+    // The switch: case 0 -> br b1 (return); default -> br b2 (return).
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v0));
+    auto caseSection = std::make_unique<SwitchSection>(
+        ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0)));
+    auto brCase = std::make_unique<Branch>(b1Ptr);
+    brCase->TargetOffset = 0x30;
+    caseSection->SetBody(std::move(brCase));
+    sw->AddSection(std::move(caseSection));
+    auto defaultSection = std::make_unique<SwitchSection>();
+    auto brDefault = std::make_unique<Branch>(b2Ptr);
+    brDefault->TargetOffset = 0x40;
+    defaultSection->SetBody(std::move(brDefault));
+    sw->AddSection(std::move(defaultSection));
+
+    // The switch sits in the if's true arm (a Block whose parent is the
+    // IfInstruction, not a container) -- the `no-outer` shape.
+    auto trueArm = std::make_unique<Block>();
+    trueArm->SetFinal(std::move(sw));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::move(trueArm)));
+    fn->Body->Blocks[1]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Body->Blocks[2]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Body->Blocks[3]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("switch (V_0)"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 0:"), std::string::npos) << text;
+    // The case bodies inline (their returns render under the cases); no thunk
+    // gotos to labeled blocks after the switch.
+    EXPECT_EQ(text.find("goto IL_"), std::string::npos)
+        << "the case bodies should inline, not render goto IL_ thunks:\n" << text;
+}
+
+TEST(ILAstToCSharp, GotoToTryEntryWithCodeBetweenEmitsLabelBeforeTry) {
+    // The early-exit-guard-into-try shape: `if (cond) goto <try-entry>; return;
+    // try { <try-entry>: ... } finally { ... }`. The goto jumps over the `return`
+    // and into the try's entry block. C# forbids `goto` into a `try` block, so
+    // the entry block's `IL_XXXX:` label must render BEFORE the `try` keyword
+    // (outside the construct), making the goto target the try statement (valid)
+    // rather than a point inside it. Mirrors the loop-header label fix
+    // (GotoToLoopHeaderWithCodeBetweenEmitsLabel) generalized to try/finally.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto fn = MakeFunction({});
+    // B0: the guard -- `if (1 != 0) br X` (falls to B1=return on false).
+    auto b0 = std::make_unique<Block>(); Block* b0Ptr = b0.get();
+    // B1: the early-exit `return` (the code between the goto and the try).
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    // B2: the pure-construct block carrying the TryFinally.
+    auto b2 = std::make_unique<Block>(); Block* b2Ptr = b2.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    // try body container: first block is X (work; return).
+    auto tryBody = std::make_unique<BlockContainer>();
+    auto xBlock = std::make_unique<Block>(); Block* xPtr = xBlock.get();
+    xBlock->StartILOffset = 0x16;  // IL_0016
+    xBlock->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(2)));
+    xBlock->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    tryBody->AddBlock(std::move(xBlock));
+    // finally body container: work3; endfinally.
+    auto finallyBody = std::make_unique<BlockContainer>();
+    auto fBlock = std::make_unique<Block>();
+    fBlock->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(3)));
+    fBlock->SetFinal(std::make_unique<Leave>(nullptr));
+    finallyBody->AddBlock(std::move(fBlock));
+    b2Ptr->SetFinal(std::make_unique<TryFinally>(std::move(tryBody), std::move(finallyBody)));
+    // B0's final: `if (1 != 0) br X` -- the guard that jumps into the try entry.
+    auto guardBr = std::make_unique<Branch>(xPtr);
+    guardBr->TargetOffset = 0x16;
+    b0Ptr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::move(guardBr)));
+    // B1: the early-exit return.
+    b1Ptr->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    // The guard's goto renders (it jumps over the return into the try).
+    EXPECT_NE(text.find("goto IL_0016;"), std::string::npos)
+        << "the guard's goto should render, not vanish:\n" << text;
+    // The label is BEFORE the `try` keyword (outside the construct), so the
+    // goto targets the try statement -- valid C#. It must NOT sit on the line
+    // right after `try {` (that would be a goto-into-try, invalid C#).
+    auto labelPos = text.find("IL_0016:");
+    auto tryPos = text.find("try");
+    ASSERT_NE(labelPos, std::string::npos) << text;
+    ASSERT_NE(tryPos, std::string::npos) << text;
+    EXPECT_LT(labelPos, tryPos) << "the label must precede the `try` keyword:\n" << text;
+    EXPECT_EQ(text.find("try\n	{\nIL_0016:"), std::string::npos)
+        << "the label must not sit inside the try body:\n" << text;
+}
+
+TEST(ILAstToCSharp, CSharpTypeNameRendersGeneric) {
+    // A parameterized (generic) type must render as C# `List<string>`, not the
+    // ECMA reflection name `List`1<System.String>` nor a mangled last-segment
+    // substring like `String>`.
+    using namespace ILSpy::Decompiler::TypeSystem;
+    auto listOfString = std::make_shared<ParameterizedType>(
+        std::make_shared<SimpleType>(TopLevelTypeName("System.Collections.Generic.List`1")),
+        std::vector<ITypePtr>{ std::make_shared<KnownType>(KnownTypeCode::String) });
+    EXPECT_EQ(CSharpTypeName(listOfString), "List<string>");
+    // Nested: Dictionary<int, List<string>>.
+    auto dictOfIntListString = std::make_shared<ParameterizedType>(
+        std::make_shared<SimpleType>(TopLevelTypeName("System.Collections.Generic.Dictionary`2")),
+        std::vector<ITypePtr>{ std::make_shared<KnownType>(KnownTypeCode::Int32), listOfString });
+    EXPECT_EQ(CSharpTypeName(dictOfIntListString), "Dictionary<int, List<string>>");
+}
+
+TEST(ILAstToCSharp, GenericNewObjRendersCSharpTypeArguments) {
+    // A newobj on a generic type must render `new List<string>(...)` via the
+    // resolved DeclaringType, not the metadata name `List`1<System.String>`.
+    using namespace ILSpy::Decompiler::TypeSystem;
+    auto listOfString = std::make_shared<ParameterizedType>(
+        std::make_shared<SimpleType>(TopLevelTypeName("System.Collections.Generic.List`1")),
+        std::vector<ITypePtr>{ std::make_shared<KnownType>(KnownTypeCode::String) });
+    auto call = std::make_unique<Call>("System.Collections.Generic.List`1<System.String>::.ctor");
+    call->IsNewObj = true;
+    call->ReturnType = StackType::O;
+    call->DeclaringType = listOfString;
+
+    auto v = MakeVar(VariableKind::Local, "list", 0, listOfString);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(v, std::move(call)));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("new List<string>()"), std::string::npos) << text;
+    EXPECT_EQ(text.find("List`1"), std::string::npos) << "metadata arity suffix leaked:\n" << text;
+}
+
+TEST(ILAstToCSharp, NopElseArmIsNotEmitted) {
+    // An if whose else arm is a Nop (or an empty block) contributes nothing and
+    // must not render an empty `else { }` block.
+    auto fn = MakeFunction({});
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
+                                       std::make_unique<LdcI4>(1)));
+    auto trueArm = std::make_unique<Block>();
+    trueArm->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_1", 1),
+                                         std::make_unique<LdcI4>(2)));
+    block->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::move(trueArm), std::make_unique<Nop>()));
+    fn->Body->AddBlock(std::move(block));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("if (1 != 0)"), std::string::npos) << text;
+    EXPECT_EQ(text.find("else"), std::string::npos)
+        << "a Nop else arm must not produce an `else` block:\n" << text;
+}
+
+TEST(ILAstToCSharp, RedundantConditionalGotoToNextBlockIsDropped) {
+    // b0: if (1 != 0) br b1   (no else)   -- b1 is the NEXT block, so the
+    //   branch is taken iff the condition holds and falls through otherwise;
+    //   both paths reach b1, so the whole if is a redundant no-op.
+    // The branch is the TRUE ARM of the block-final if (not the block final
+    // itself), which the fall-through drop used to miss, emitting a dangling
+    // `if (1 != 0) goto IL_XXXX;` plus a redundant label.
+    auto fn = MakeFunction({});
+    auto b0 = std::make_unique<Block>();
+    b0->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
+                                    std::make_unique<LdcI4>(1)));
+    auto b1 = std::make_unique<Block>();
+    b1->StartILOffset = 0x20;
+    Block* b1Ptr = b1.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+
+    auto br = std::make_unique<Branch>(b1Ptr);
+    br->TargetOffset = 0x20;
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::move(br)));
+    fn->Body->Blocks[1]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos)
+        << "a conditional jump to the immediately-following block is a no-op:\n" << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos)
+        << "no loop/block label should be emitted for a dropped jump:\n" << text;
+}
+
+TEST(ILAstToCSharp, GenericMemberRefMetadataNameRendersCSharpForm) {
+    // A reference to a member of a generic type (e.g. `EmptyArray<System.Byte>.Zero`
+    // or `ArraySortHelper<System.Object>::.ctor`) must not leak the ECMA metadata
+    // name's ``N<...>` arity suffix. The arity marker is a CLR encoding detail;
+    // C# writes the type as `Name<args>`.
+    auto fn = MakeFunction({});
+    auto block = std::make_unique<Block>();
+    // return System.EmptyArray`1<System.Byte>::Zero  (static field read as an
+    // expression; the seed renders ldsflda as the raw name for now).
+    block->Add(std::make_unique<StLoc>(
+        MakeVar(VariableKind::Local, "V_0", 0),
+        std::make_unique<LdTypeToken>(
+            "System.Collections.Generic.List`1<System.String>")));
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get(),
+        std::make_unique<LdLoc>(MakeVar(VariableKind::Local, "V_0", 0))));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "object", "M", "");
+    EXPECT_EQ(text.find("`1"), std::string::npos)
+        << "the arity suffix ``N` leaked into the output:\n" << text;
+    EXPECT_NE(text.find("List<System.String>"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, NestedInlineAssignmentRendersChained) {
+    // An inline assignment used as the VALUE of another store -- the IL idiom
+    // for C# `a = b = value` -- previously fell through Expr to the `(default)`
+    // comment. Render it as `a = b = value`.
+    auto fn = MakeFunction({});
+    auto block = std::make_unique<Block>();
+    auto aVar = MakeVar(VariableKind::Local, "dup_0", 0);
+    auto bVar = MakeVar(VariableKind::Local, "V_1", 1);
+    // stloc dup_0, stloc V_1, ldc.i4 7   ->  dup_0 = V_1 = 7
+    block->Add(std::make_unique<StLoc>(aVar,
+        std::make_unique<StLoc>(bVar, std::make_unique<LdcI4>(7))));
+    block->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Body->AddBlock(std::move(block));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("dup_0 = V_1 = 7;"), std::string::npos) << text;
+    EXPECT_EQ(text.find("(default)"), std::string::npos)
+        << "inline-assignment value must not be the default fallback:\n" << text;
+}
+
+TEST(ILAstToCSharp, GenericArrayNewRendersMethodTypeParamName) {
+    // In a generic method, `newarr T` carries a TypeSpec operand `!!0[...]`
+    // whose MVAR scopes to the CALLING method's generic params. The IL reader
+    // resolves TypeSpec tokens with that context so the declaration-ordered
+    // method name (T) renders instead of the positional placeholder.
+#if defined(_WIN32)
+    const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    std::uint32_t arrayTok = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Namespace == "System" && t.Name == "Array") { arrayTok = t.Token; break; }
+    }
+    ASSERT_NE(arrayTok, 0u);
+
+    bool found = false;
+    for (const auto& m : f.GetMethods(arrayTok)) {
+        if (m.Name != "Resize" || m.RVA == 0) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        ASSERT_NE(fn, nullptr) << "ReadIL failed on Array::Resize";
+        fn->CheckInvariant(ILPhase::Normal);
+        std::string text = ILAstToCSharp(*fn, "void", "Resize", "");
+        EXPECT_NE(text.find("new T[newSize]"), std::string::npos)
+            << "expected named method type param in newarr emission:\n" << text;
+        EXPECT_EQ(text.find("!!0"), std::string::npos)
+            << "positional MVAR placeholder leaked into emission:\n" << text;
+        found = true;
+        break;
+    }
+    ASSERT_TRUE(found) << "System.Array::Resize<T> not found in fixture";
+}
+
+TEST(ILAstToCSharp, StaticCallOnCallerContextGenericRendersNamedArg) {
+    // A static call on a generic type whose declaring-type token is a TypeSpec
+    // (e.g. EqualityComparer<!0>.get_Default inside ValueTuple<T1>) resolves
+    // through ResolveTokenToString. That TypeSpec's VAR binds in the caller's
+    // scope, so the text should read EqualityComparer<T1>.Default.GetHashCode.
+#if defined(_WIN32)
+    const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    std::uint32_t vtTok = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Namespace == "System" && t.Name == "ValueTuple`1") { vtTok = t.Token; break; }
+    }
+    ASSERT_NE(vtTok, 0u) << "System.ValueTuple`1 not found in fixture";
+
+    bool found = false;
+    for (const auto& m : f.GetMethods(vtTok)) {
+        if (m.Name != "GetHashCode" || m.RVA == 0) continue;
+        auto sig = f.GetMethodSignature(m.Token);
+        if (!sig || !sig->ParameterTypes.empty()) continue;  // the parameterless one
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        ASSERT_NE(fn, nullptr) << "ReadIL failed on ValueTuple`1::GetHashCode";
+        fn->CheckInvariant(ILPhase::Normal);
+        std::string text = ILAstToCSharp(*fn, "int", "GetHashCode", "");
+        EXPECT_NE(text.find("EqualityComparer<T1>.Default.GetHashCode"), std::string::npos)
+            << "expected caller-scope VAR name in static-call text:\n" << text;
+        EXPECT_EQ(text.find("!0"), std::string::npos)
+            << "positional VAR placeholder leaked into emission:\n" << text;
+        found = true;
+        break;
+    }
+    ASSERT_TRUE(found) << "System.ValueTuple`1::GetHashCode() not found in fixture";
+}
+
+TEST(ILAstToCSharp, ForLoopContainerRendersForWithIncrementClause) {
+    // A For-kind container (HighLevelLoopTransform's MatchForLoop result:
+    // entry+condition if, body blocks, and the increment block at the END)
+    // renders as `for (; cond; incr) { body }`. The increment clause comes
+    // from the last block's StLoc(s) (`num++`), the increment block's
+    // back-edge branch is implicit, and an in-body `br entry` renders
+    // `continue;`.
+    auto num = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    num->Name = "num";
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto preHeader = std::make_unique<Block>();
+    preHeader->Add(std::make_unique<StLoc>(num, std::make_unique<LdcI4>(0)));  // num = 0;
+
+    auto loopC = std::make_unique<BlockContainer>();
+    loopC->Kind = ContainerKind::For;
+    BlockContainer* loopPtr = loopC.get();
+    auto entry = std::make_unique<Block>();
+    Block* entryPtr = entry.get();
+    auto body = std::make_unique<Block>();
+    Block* bodyPtr = body.get();
+    auto incr = std::make_unique<Block>();
+    Block* incrPtr = incr.get();
+
+    // entry: if (num < 5) br body else leave loop
+    entry->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(num), std::make_unique<LdcI4>(5),
+                               ComparisonKind::LessThan),
+        std::make_unique<Branch>(bodyPtr), std::make_unique<Leave>(loopPtr)));
+    loopC->AddBlock(std::move(entry));
+    // body: if (num == 3) br incr (an in-body continue), num = num * 2;
+    // br incr (the natural fall into the increment block).
+    body->Add(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(num), std::make_unique<LdcI4>(3),
+                               ComparisonKind::Equality),
+        std::make_unique<Branch>(incrPtr)));
+    body->Add(std::make_unique<StLoc>(
+        num, std::make_unique<BinaryNumericInstruction>(
+                 std::make_unique<LdLoc>(num), std::make_unique<LdcI4>(2),
+                 BinaryNumericOperator::Mul, StackType::I4)));
+    bodyPtr->SetFinal(std::make_unique<Branch>(incrPtr));
+    loopC->AddBlock(std::move(body));
+    // incr: num++; br entry (implicit back-edge)
+    incr->Add(std::make_unique<StLoc>(
+        num, std::make_unique<BinaryNumericInstruction>(
+                 std::make_unique<LdLoc>(num), std::make_unique<LdcI4>(1),
+                 BinaryNumericOperator::Add, StackType::I4)));
+    incrPtr->SetFinal(std::make_unique<Branch>(entryPtr));
+    loopC->AddBlock(std::move(incr));
+
+    preHeader->Add(std::move(loopC));
+    preHeader->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(preHeader));
+    fn->Variables.push_back(num);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("for (var num = 0; num < 5; num++)"), std::string::npos) << text;
+    EXPECT_NE(text.find("num *= 2;"), std::string::npos) << text;
+    EXPECT_NE(text.find("continue;"), std::string::npos) << text;
+    // The increment block's back-edge renders nothing extra: no `goto IL_`.
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+}
+TEST(ILAstToCSharp, ForSplitIncrementEmitsNoTrailingContinue) {
+    // MatchForLoop's no-dedicated-block split leaves the body's final as a
+    // Branch to the NEW increment block. At the end of the loop body that
+    // edge is the iteration itself, not a `continue` -- the emission must
+    // drop the trailing `br increment`, not print a dangling `continue;`
+    // right before the loop close brace.
+    auto num = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    num->Name = "num";
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto preHeader = std::make_unique<Block>();
+    preHeader->Add(std::make_unique<StLoc>(num, std::make_unique<LdcI4>(0)));  // num = 0;
+
+    auto loopC = std::make_unique<BlockContainer>();
+    loopC->Kind = ContainerKind::For;
+    BlockContainer* loopPtr = loopC.get();
+    auto entry = std::make_unique<Block>();
+    Block* entryPtr = entry.get();
+    auto body = std::make_unique<Block>();
+    Block* bodyPtr = body.get();
+    auto incr = std::make_unique<Block>();
+    Block* incrPtr = incr.get();
+
+    // entry: if (num < 5) br body else leave loop
+    entry->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(num), std::make_unique<LdcI4>(5),
+                               ComparisonKind::LessThan),
+        std::make_unique<Branch>(bodyPtr), std::make_unique<Leave>(loopPtr)));
+    loopC->AddBlock(std::move(entry));
+    // body: num = num * 2; br incr  (the split's iteration step -- drops silently)
+    body->Add(std::make_unique<StLoc>(
+        num, std::make_unique<BinaryNumericInstruction>(
+                 std::make_unique<LdLoc>(num), std::make_unique<LdcI4>(2),
+                 BinaryNumericOperator::Mul, StackType::I4)));
+    bodyPtr->SetFinal(std::make_unique<Branch>(incrPtr));
+    loopC->AddBlock(std::move(body));
+    // incr: num++; br entry (implicit back-edge)
+    incr->Add(std::make_unique<StLoc>(
+        num, std::make_unique<BinaryNumericInstruction>(
+                 std::make_unique<LdLoc>(num), std::make_unique<LdcI4>(1),
+                 BinaryNumericOperator::Add, StackType::I4)));
+    incrPtr->SetFinal(std::make_unique<Branch>(entryPtr));
+    loopC->AddBlock(std::move(incr));
+
+    preHeader->Add(std::move(loopC));
+    preHeader->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(preHeader));
+    fn->Variables.push_back(num);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("for (var num = 0; num < 5; num++)"), std::string::npos) << text;
+    EXPECT_NE(text.find("num *= 2"), std::string::npos) << text;
+    // The body's trailing br-incr is the iteration, not a continue.
+    EXPECT_EQ(text.find("continue;"), std::string::npos) << text;
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, WhileLoopHeaderPreambleStatementsRenderInsideBody) {
+    // A While container's header block may carry statements between the entry
+    // (the guard) and the condition if: the do-while-like `u = f(); if (c) }`
+    // shape the C# compiler emits. The emission must not drop them silently.
+    auto num = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    num->Name = "num";
+    auto other = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    other->Name = "other";
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto preHeader = std::make_unique<Block>();
+    preHeader->Add(std::make_unique<StLoc>(num, std::make_unique<LdcI4>(0)));  // num = 0;
+
+    auto loopC = std::make_unique<BlockContainer>();
+    loopC->Kind = ContainerKind::While;
+    BlockContainer* loopPtr = loopC.get();
+    auto entry = std::make_unique<Block>();
+    Block* entryPtr = entry.get();
+    auto body = std::make_unique<Block>();
+    Block* bodyPtr = body.get();
+
+    // header: stloc other(42); then the condition.
+    entry->Add(std::make_unique<StLoc>(other, std::make_unique<LdcI4>(42)));
+    entry->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(num), std::make_unique<LdcI4>(5),
+                               ComparisonKind::LessThan),
+        std::make_unique<Branch>(bodyPtr), std::make_unique<Leave>(loopPtr)));
+    loopC->AddBlock(std::move(entry));
+    // body: stloc num(num+1); br entry.
+    body->Add(std::make_unique<StLoc>(
+        num, std::make_unique<BinaryNumericInstruction>(
+                 std::make_unique<LdLoc>(num), std::make_unique<LdcI4>(1),
+                 BinaryNumericOperator::Add, StackType::I4)));
+    bodyPtr->SetFinal(std::make_unique<Branch>(entryPtr));
+    loopC->AddBlock(std::move(body));
+
+    preHeader->Add(std::move(loopC));
+    preHeader->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(preHeader));
+    fn->Variables.push_back(num);
+    fn->Variables.push_back(other);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("while (num < 5)"), std::string::npos) << text;
+    // The header preamble (other = 42) must render inside the loop body --
+    // the current emission drops it silently.
+    EXPECT_NE(text.find("other = 42"), std::string::npos)
+        << "header preamble statement dropped from the While body rendering:\n" << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, GotoFallingOutOfUsingConstructToFollowingBlockIsDropped) {
+    // The using-exit shape `using (r) { ...; br after }; after:` emits a
+    // redundant `goto after;` right before the using brace closes -- the
+    // branch falls out of the construct to the textually-following block.
+    // IsFallThroughGoto must see through the construct boundary (it currently
+    // only checks same-container siblings): the goto drops silently.
+    auto r = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    r->Name = "streamReader";
+
+    auto fn = MakeFunction({});
+
+    // Entry block: holds the UsingInstruction; falls through to the
+    // following block (the construct-exit label).
+    auto entry = std::make_unique<Block>();
+    Block* entryPtr = entry.get();
+
+    // After block: the block the using's interior goto falls out to.
+    auto after = std::make_unique<Block>();
+    Block* afterPtr = after.get();
+    after->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+
+    // The using body container: [loop-like block whose final is br afterPtr].
+    auto usingBody = std::make_unique<BlockContainer>();
+    usingBody->Kind = ContainerKind::Loop;   // exercise loop shapes minimally
+    auto work = std::make_unique<Block>();
+    Block* workPtr = work.get();
+    work->Add(std::make_unique<StLoc>(r, std::make_unique<LdcI4>(42)));
+    // Inside the using, the block's final branches to the block after the
+    // using (the construct-exit fall-through).
+    work->SetFinal(std::make_unique<Branch>(afterPtr));
+    usingBody->AddBlock(std::move(work));
+
+    entry->Add(std::make_unique<UsingInstruction>(
+        r, std::make_unique<LdNull>(), std::move(usingBody)));
+    // The entry falls to the after block.
+    entryPtr->SetFinal(std::make_unique<Branch>(afterPtr));
+    fn->Body->AddBlock(std::move(entry));
+    fn->Body->AddBlock(std::move(after));
+    fn->Variables.push_back(r);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    // The goto inside the using falls out of the construct to `after` -- no
+    // goto should print (it is the construct-exit fall-through).
+    EXPECT_EQ(text.find("goto"), std::string::npos)
+        << "redundant exit-from-construct goto emitted:\n" << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    // The using statement still renders (the seed elides the using-local and
+    // renders `using (resource)` for whatever expression shape the call had).
+    EXPECT_NE(text.find("using (null)"), std::string::npos) << text;
+    // The label-free block content renders.
+    EXPECT_NE(text.find("streamReader = 42"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, GotoFallingOutOfIfElseArmsToFollowingBlockIsDropped) {
+    // An if-else whose both arms end with `goto nextBlock`, where nextBlock is
+    // the block after the if's enclosing block: both arm gotos are redundant
+    // fall-throughs (the if completes and control reaches nextBlock). The
+    // then arm's bare goto and the else arm's trailing goto both drop.
+    // IsFallThroughGoto's TextuallyNextEmittedBlock must walk up through the
+    // if-arm (parent = IfInstruction, not a BlockContainer) and through the
+    // if being the enclosing block's FinalInstruction (not an Instructions
+    // entry) to reach the container's next block.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto v1 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 1);
+    v1->Name = "x";
+    auto fn = MakeFunction({});
+    auto b0 = std::make_unique<Block>(); Block* b0Ptr = b0.get();
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    // then arm: bare goto b1
+    auto thenArm = std::make_unique<Block>();
+    thenArm->SetFinal(std::make_unique<Branch>(b1Ptr));
+    // else arm: work; goto b1
+    auto elseArm = std::make_unique<Block>();
+    elseArm->Add(std::make_unique<StLoc>(v1, std::make_unique<LdcI4>(2)));
+    elseArm->SetFinal(std::make_unique<Branch>(b1Ptr));
+    // b0's final is the if-else
+    b0Ptr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v), std::move(thenArm), std::move(elseArm)));
+    // b1: return
+    b1Ptr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(v1);
+    fn->CheckInvariant(ILPhase::Normal);
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos)
+        << "redundant if-else-arm fall-through goto emitted:\n" << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("x = 2"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, GotoAsDirectTrueArmOfIfElseToFollowingBlockIsDropped) {
+    // The then arm is a DIRECT Branch (the if's TrueInst, not a Block): `if (cond)
+    // br nextBlock else { work }`, where nextBlock is the block after the if's
+    // enclosing block. The true-arm goto is redundant: the true path falls to
+    // nextBlock (the if's textual next), the false path (work) is untouched.
+    // IsFallThroughGoto previously only accepted a true-arm Branch of a NO-ELSE
+    // if; this if has an else, so it bailed. (The else arm carrying work makes
+    // its goto -- if any -- a Block final that already drops; the asymmetry left
+    // the bare true-arm direct-Branch goto.)
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto v1 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 1);
+    v1->Name = "x";
+    auto fn = MakeFunction({});
+    auto b0 = std::make_unique<Block>(); Block* b0Ptr = b0.get();
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    // else arm: a Block with work and a fall-through (null final) -- reaches b1
+    // via the if's textual next.
+    auto elseArm = std::make_unique<Block>();
+    elseArm->Add(std::make_unique<StLoc>(v1, std::make_unique<LdcI4>(2)));
+    // b0's final is the if-else; the TRUE arm is a direct Branch to b1.
+    b0Ptr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v), std::make_unique<Branch>(b1Ptr),
+        std::move(elseArm)));
+    b1Ptr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(v1);
+    fn->CheckInvariant(ILPhase::Normal);
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos)
+        << "redundant direct-true-arm fall-through goto emitted:\n" << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("x = 2"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, IfElseWithDroppedFallThroughTrueArmSwapsToNegatedCond) {
+    // When the true arm of an if-else is a fall-through Branch (dropped per
+    // D189), it renders as an empty `{ }`. The emitter's empty-arm swap must
+    // treat a fall-through Branch arm as empty so `if (cond) { } else { work }`
+    // swaps to `if (!cond) { work }` (cleaner, no empty then, no else).
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto v1 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 1);
+    v1->Name = "x";
+    auto fn = MakeFunction({});
+    auto b0 = std::make_unique<Block>(); Block* b0Ptr = b0.get();
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    auto elseArm = std::make_unique<Block>();
+    elseArm->Add(std::make_unique<StLoc>(v1, std::make_unique<LdcI4>(2)));
+    b0Ptr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v), std::make_unique<Branch>(b1Ptr),
+        std::move(elseArm)));
+    b1Ptr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(v1);
+    fn->CheckInvariant(ILPhase::Normal);
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("x = 2"), std::string::npos) << text;
+    // The empty then arm swapped: negated condition, no `else`.
+    EXPECT_NE(text.find("if (!(num))"), std::string::npos) << text;
+    EXPECT_EQ(text.find("else"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, LogicAndConditionRendersAsShortCircuitAnd) {
+    // An if whose condition is a LogicAnd -- `if (a) b else ldc.i4 0` (the
+    // C# IfInstruction.LogicAnd form) -- renders as `a && b`, not the ternary
+    // `(a ? b : 0)`. ConditionDetection.IntroduceShortCircuit builds these
+    // chains; the renderer must render them as idiomatic `&&`.
+    auto a = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    a->Name = "a";
+    auto b = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 1);
+    b->Name = "b";
+    auto fn = MakeFunction({});
+    auto b0 = std::make_unique<Block>(); Block* b0Ptr = b0.get();
+    auto exitB = std::make_unique<Block>(); Block* exitPtr = exitB.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(exitB));
+    // condition = LogicAnd(a, b) = if (a) b else ldc.i4(0)
+    auto cond = std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(a), std::make_unique<LdLoc>(b),
+        std::make_unique<LdcI4>(0));
+    b0Ptr->SetFinal(std::make_unique<IfInstruction>(std::move(cond),
+        std::make_unique<Leave>(fn->Body.get())));
+    exitPtr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Variables.push_back(a);
+    fn->Variables.push_back(b);
+    fn->CheckInvariant(ILPhase::Normal);
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("a && b"), std::string::npos)
+        << "LogicAnd condition should render as `a && b`:\n" << text;
+    EXPECT_EQ(text.find("?"), std::string::npos)
+        << "the ternary form must not appear for a LogicAnd:\n" << text;
+}
+
+TEST(ILAstToCSharp, LogicOrConditionRendersAsShortCircuitOr) {
+    // An if whose condition is a LogicOr -- `if (a) ldc.i4 1 else b` (the C#
+    // IfInstruction.LogicOr form) -- renders as `a || b`, not `(a ? 1 : b)`.
+    auto a = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    a->Name = "a";
+    auto b = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 1);
+    b->Name = "b";
+    auto fn = MakeFunction({});
+    auto b0 = std::make_unique<Block>(); Block* b0Ptr = b0.get();
+    auto exitB = std::make_unique<Block>(); Block* exitPtr = exitB.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(exitB));
+    // condition = LogicOr(a, b) = if (a) ldc.i4(1) else b
+    auto cond = std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(a), std::make_unique<LdcI4>(1),
+        std::make_unique<LdLoc>(b));
+    b0Ptr->SetFinal(std::make_unique<IfInstruction>(std::move(cond),
+        std::make_unique<Leave>(fn->Body.get())));
+    exitPtr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Variables.push_back(a);
+    fn->Variables.push_back(b);
+    fn->CheckInvariant(ILPhase::Normal);
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("a || b"), std::string::npos)
+        << "LogicOr condition should render as `a || b`:\n" << text;
+}
+
+TEST(ILAstToCSharp, GotoIntoImmediatelyFollowingTryEntryIsDropped) {
+    // The `goto IL_X; try { IL_X: ... }` shape: a block B0 ends with `br X` and
+    // the next sibling block B1 is a pure-construct block (no instructions, a
+    // TryFinally final) whose try-body's FIRST block is X. The goto jumps into
+    // the try's entry -- redundant, since control falls from B0 into B1's try
+    // at X anyway. IsFallThroughGoto must descend into the next block's
+    // construct body to find X as the textually-next emitted block.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto fn = MakeFunction({});
+    // B0: work; br X (X is the try-body entry, in B1).
+    auto b0 = std::make_unique<Block>(); Block* b0Ptr = b0.get();
+    b0->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(1)));
+    // B1: a pure-construct block whose final is the TryFinally.
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    // try body container: first block is X (work2; leave/return).
+    auto tryBody = std::make_unique<BlockContainer>();
+    auto xBlock = std::make_unique<Block>(); Block* xPtr = xBlock.get();
+    xBlock->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(2)));
+    xBlock->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    tryBody->AddBlock(std::move(xBlock));
+    // finally body container: work3; endfinally (Leave null target).
+    auto finallyBody = std::make_unique<BlockContainer>();
+    auto fBlock = std::make_unique<Block>();
+    fBlock->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(3)));
+    fBlock->SetFinal(std::make_unique<Leave>(nullptr));
+    finallyBody->AddBlock(std::move(fBlock));
+    b1Ptr->SetFinal(std::make_unique<TryFinally>(std::move(tryBody), std::move(finallyBody)));
+    // B0's final is the goto into X (the try entry).
+    b0Ptr->SetFinal(std::make_unique<Branch>(xPtr));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos)
+        << "redundant goto-into-try-entry emitted:\n" << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("try"), std::string::npos) << text;
+    EXPECT_NE(text.find("finally"), std::string::npos) << text;
+    EXPECT_NE(text.find("num = 1"), std::string::npos) << text;
+    EXPECT_NE(text.find("num = 2"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, GotoAcrossTransparentRelayBlockIsDropped) {
+    // A block-final `br X` whose target X is NOT the immediately-next container
+    // block, but the next EMITTED block -- the block(s) between are transparent
+    // relays (no instructions, a Branch final to a later block, which themselves
+    // emit nothing). The inline fall-through drop compared against
+    // container.Blocks[i+1] (the relay), not the next emitted block, so a
+    // redundant `goto X` survived across a relay. Skipping relays finds X.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto fn = MakeFunction({});
+    auto b0 = std::make_unique<Block>(); Block* b0Ptr = b0.get();
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    auto b2 = std::make_unique<Block>(); Block* b2Ptr = b2.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    // b0: work; br b2 (the redundant goto across the relay b1).
+    b0Ptr->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(1)));
+    b0Ptr->SetFinal(std::make_unique<Branch>(b2Ptr));
+    // b1: a transparent relay -- no instructions, br b2 (emits nothing).
+    b1Ptr->SetFinal(std::make_unique<Branch>(b2Ptr));
+    // b2: work2; return.
+    b2Ptr->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(2)));
+    b2Ptr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos)
+        << "redundant goto across a relay emitted:\n" << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("num = 1"), std::string::npos) << text;
+    EXPECT_NE(text.find("num = 2"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, GotoFromInsideWhileToLoopExitIsBreak) {
+    // A `br exit` from inside a while loop body, where `exit` is the loop's
+    // post-loop block (the block the loop falls to after completion), renders
+    // as `break;` -- the C# loop-exit statement. The branch is the true arm of a
+    // no-else `if (cond) br exit` in the body (a conditional break); the loop's
+    // exit is the block after the loop container's holder.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto v2 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 1);
+    v2->Name = "flag";
+    auto fn = MakeFunction({});
+    auto loopHolder = std::make_unique<Block>(); Block* loopHolderPtr = loopHolder.get();
+    auto exitB = std::make_unique<Block>(); Block* exitPtr = exitB.get();
+    fn->Body->AddBlock(std::move(loopHolder));
+    fn->Body->AddBlock(std::move(exitB));
+
+    auto loopC = std::make_unique<BlockContainer>();
+    loopC->Kind = ContainerKind::While;
+    BlockContainer* loopPtr = loopC.get();
+
+    // header: if (num) br body1 else leave(loop) -- the while condition.
+    auto header = std::make_unique<Block>(); Block* headerPtr = header.get();
+    header->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v), std::make_unique<Branch>(nullptr),
+        std::make_unique<Leave>(nullptr)));
+    loopC->AddBlock(std::move(header));
+
+    // body1: if (flag) br exit (the conditional break); no else, falls to body2.
+    auto body1 = std::make_unique<Block>(); Block* body1Ptr = body1.get();
+    body1->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v2), std::make_unique<Branch>(exitPtr)));
+    loopC->AddBlock(std::move(body1));
+
+    // body2: num = 1; br header (the back-edge).
+    auto body2 = std::make_unique<Block>(); Block* body2Ptr = body2.get();
+    body2->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(1)));
+    body2->SetFinal(std::make_unique<Branch>(headerPtr));
+    loopC->AddBlock(std::move(body2));
+
+    // Patch the header's arms now the block pointers are stable.
+    auto* iff = dynamic_cast<IfInstruction*>(loopPtr->Blocks[0]->FinalInstruction.get());
+    ASSERT_NE(iff, nullptr);
+    iff->TrueInst = std::make_unique<Branch>(body1Ptr);
+    iff->TrueInst->Parent = iff;
+    iff->TrueInst->ChildIndex = 1;
+    dynamic_cast<Leave*>(iff->FalseInst.get())->TargetContainer = loopPtr;
+
+    loopHolderPtr->Add(std::move(loopC));
+    loopHolderPtr->SetFinal(std::make_unique<Branch>(exitPtr));  // falls to exit
+    exitPtr->SetFinal(ReturnFinal(fn->Body.get()));
+
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(v2);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("while (num)"), std::string::npos) << text;
+    EXPECT_NE(text.find("if (flag) break;"), std::string::npos) << text;
+    EXPECT_NE(text.find("num = 1;"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, EndFinallyLeaveIsNotEmittedAsBreak) {
+    // An `endfinally` (a Leave with a null TargetContainer) is the implicit
+    // terminator of a finally block: the finally ends and control returns to
+    // the try's continuation. It must render as NOTHING -- not `break;` (there
+    // is no enclosing loop/switch; a bare `break;` is invalid C#). The seed
+    // used to fall through the Leave handler's `else` branch (TargetContainer
+    // != function body) and emit `break;`.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto fn = MakeFunction({});
+    auto b0 = std::make_unique<Block>(); Block* b0Ptr = b0.get();
+    fn->Body->AddBlock(std::move(b0));
+
+    // try body: work; leave(fn) (a return).
+    auto tryBody = std::make_unique<BlockContainer>();
+    auto tBlock = std::make_unique<Block>();
+    tBlock->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(1)));
+    tBlock->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    tryBody->AddBlock(std::move(tBlock));
+
+    // finally body: work2; endfinally (Leave null target).
+    auto finallyBody = std::make_unique<BlockContainer>();
+    auto fBlock = std::make_unique<Block>();
+    fBlock->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(2)));
+    fBlock->SetFinal(std::make_unique<Leave>(nullptr));  // endfinally
+    finallyBody->AddBlock(std::move(fBlock));
+
+    b0Ptr->SetFinal(std::make_unique<TryFinally>(std::move(tryBody), std::move(finallyBody)));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("try"), std::string::npos) << text;
+    EXPECT_NE(text.find("finally"), std::string::npos) << text;
+    EXPECT_NE(text.find("num = 1"), std::string::npos) << text;
+    EXPECT_NE(text.find("num = 2"), std::string::npos) << text;
+    // The endfinally must NOT render as `break;` (no enclosing loop/switch).
+    EXPECT_EQ(text.find("break;"), std::string::npos)
+        << "endfinally rendered as a bare break (invalid C#):\n" << text;
+}
+
+TEST(ILAstToCSharp, SwitchBodyThunksInlineIntoCaseSections) {
+    // The lowered-switch layout the seed receives: a switch instruction whose
+    // every section body is a Branch thunk to a body block laid out after the
+    // switch-host block in the same outer container, with the bodies ending in
+    // a Branch to the shared exit block that follows them all. The C# form
+    // places the bodies under their case labels with `break` in place of the
+    // exit branch. The seed previously rendered the thunk gotos and left the
+    // bodies as labeled blocks after the switch.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto v1 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 1);
+    v1->Name = "x";
+    auto v2 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 2);
+    v2->Name = "y";
+    auto fn = MakeFunction({});
+
+    auto host = std::make_unique<Block>();
+    Block* hostPtr = host.get();
+    auto b1 = std::make_unique<Block>();
+    Block* b1Ptr = b1.get();
+    auto b2 = std::make_unique<Block>();
+    Block* b2Ptr = b2.get();
+    auto exitB = std::make_unique<Block>();
+    Block* exitPtr = exitB.get();
+
+    fn->Body->AddBlock(std::move(host));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(exitB));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v));
+    auto sec0 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0)));
+    auto brCase = std::make_unique<Branch>(b1Ptr);
+    brCase->HasOffset = false;
+    sec0->SetBody(std::move(brCase));
+    sw->AddSection(std::move(sec0));
+    auto secDef = std::make_unique<SwitchSection>();
+    auto brDef = std::make_unique<Branch>(b2Ptr);
+    brDef->HasOffset = false;
+    secDef->SetBody(std::move(brDef));
+    sw->AddSection(std::move(secDef));
+    hostPtr->SetFinal(std::move(sw));
+
+    // case 0 body: x = 1; br exit
+    b1Ptr->Add(std::make_unique<StLoc>(v1, std::make_unique<LdcI4>(1)));
+    b1Ptr->SetFinal(std::make_unique<Branch>(exitPtr));
+    // default body: y = 2; br exit
+    b2Ptr->Add(std::make_unique<StLoc>(v2, std::make_unique<LdcI4>(2)));
+    b2Ptr->SetFinal(std::make_unique<Branch>(exitPtr));
+    // exit: return
+    exitPtr->SetFinal(ReturnFinal(fn->Body.get()));
+
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(v1);
+    fn->Variables.push_back(v2);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    // The bodies inline under their cases: no thunk gotos, no IL labels.
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 0:"), std::string::npos) << text;
+    EXPECT_NE(text.find("default:"), std::string::npos) << text;
+    // The body statements appear INSIDE the switch braces.
+    auto casePos = text.find("case 0:");
+    auto exitPos = text.find("return;");
+    EXPECT_NE(casePos, std::string::npos);
+    EXPECT_NE(text.find("x = 1;"), std::string::npos) << text;
+    EXPECT_NE(text.find("y = 2;"), std::string::npos) << text;
+    EXPECT_LT(text.find("x = 1;"), exitPos) << text;
+    // The exit-branch gotos render as `break;`.
+    EXPECT_NE(text.find("break;"), std::string::npos) << text;
+    // The exit block's label does not print (no gotos remain referencing it).
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, SwitchBodyWithConditionalExitInlineAsIfBreak) {
+    // A body may end with a conditional exit `if (cond) br exit` (a block-
+    // final if with no else): it renders as `if (cond) break;` inline. The
+    // fall-through (the cond-false path) continues into the *next outer
+    // block*; for a mid-switch body that must be the next section's body
+    // (section order == outer order wherever fall-through ordering matters),
+    // otherwise the fold bails to the dbgthunk rendering.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto v1 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 1);
+    v1->Name = "x";
+    auto v2 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 2);
+    v2->Name = "y";
+    auto fn = MakeFunction({});
+
+    auto host = std::make_unique<Block>();
+    Block* hostPtr = host.get();
+    auto b1 = std::make_unique<Block>();
+    Block* b1Ptr = b1.get();
+    auto b2 = std::make_unique<Block>();
+    Block* b2Ptr = b2.get();
+    auto exitB = std::make_unique<Block>();
+    Block* exitPtr = exitB.get();
+
+    fn->Body->AddBlock(std::move(host));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(exitB));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v));
+    auto sec0 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0)));
+    auto brCase = std::make_unique<Branch>(b1Ptr);
+    brCase->HasOffset = false;
+    sec0->SetBody(std::move(brCase));
+    sw->AddSection(std::move(sec0));
+    auto secDef = std::make_unique<SwitchSection>();
+    auto brDef = std::make_unique<Branch>(b2Ptr);
+    brDef->HasOffset = false;
+    secDef->SetBody(std::move(brDef));
+    sw->AddSection(std::move(secDef));
+    hostPtr->SetFinal(std::move(sw));
+
+    // case 0 body: x = 1; if (v) br exit   -- the false path falls through
+    // into b2 (the next OUTER block, which is also the next SECTION body).
+    b1Ptr->Add(std::make_unique<StLoc>(v1, std::make_unique<LdcI4>(1)));
+    b1Ptr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v), std::make_unique<Branch>(exitPtr)));
+    // default body: y = 2; br exit
+    b2Ptr->Add(std::make_unique<StLoc>(v2, std::make_unique<LdcI4>(2)));
+    b2Ptr->SetFinal(std::make_unique<Branch>(exitPtr));
+    // exit: return
+    exitPtr->SetFinal(ReturnFinal(fn->Body.get()));
+
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(v1);
+    fn->Variables.push_back(v2);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 0:"), std::string::npos) << text;
+    EXPECT_NE(text.find("if (num) break;"), std::string::npos) << text;
+    EXPECT_NE(text.find("default:"), std::string::npos) << text;
+    EXPECT_NE(text.find("y = 2;"), std::string::npos) << text;
+    EXPECT_NE(text.find("break;"), std::string::npos) << text;
+    // The case-0 conditional break comes BEFORE the default block (the
+    // section-order == outer-order constraint is what makes this safe).
+    EXPECT_LT(text.find("if (num) break;"), text.find("default:")) << text;
+}
+
+TEST(ILAstToCSharp, SwitchBodyWithConditionalExitAndNopElseInlines) {
+    // Same as SwitchBodyWithConditionalExitInlineAsIfBreak but the trailing if
+    // carries a redundant Nop else arm (`if (cond) br exit else nop`). The Nop
+    // else is semantically fall-through (no-op), so the body is equivalent to
+    // a no-else conditional exit and must inline as `if (cond) break;` -- not
+    // bail to the goto thunk form. The emitter already treats a Nop arm as
+    // empty; the analysis must too.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto v1 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 1);
+    v1->Name = "x";
+    auto v2 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 2);
+    v2->Name = "y";
+    auto fn = MakeFunction({});
+
+    auto host = std::make_unique<Block>();
+    Block* hostPtr = host.get();
+    auto b1 = std::make_unique<Block>();
+    Block* b1Ptr = b1.get();
+    auto b2 = std::make_unique<Block>();
+    Block* b2Ptr = b2.get();
+    auto exitB = std::make_unique<Block>();
+    Block* exitPtr = exitB.get();
+
+    fn->Body->AddBlock(std::move(host));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(exitB));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v));
+    auto sec0 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0)));
+    auto brCase = std::make_unique<Branch>(b1Ptr);
+    brCase->HasOffset = false;
+    sec0->SetBody(std::move(brCase));
+    sw->AddSection(std::move(sec0));
+    auto secDef = std::make_unique<SwitchSection>();
+    auto brDef = std::make_unique<Branch>(b2Ptr);
+    brDef->HasOffset = false;
+    secDef->SetBody(std::move(brDef));
+    sw->AddSection(std::move(secDef));
+    hostPtr->SetFinal(std::move(sw));
+
+    // case 0 body: x = 1; if (v) br exit else nop -- the redundant Nop else
+    // is fall-through; the false path falls into b2 (next outer == next section).
+    b1Ptr->Add(std::make_unique<StLoc>(v1, std::make_unique<LdcI4>(1)));
+    b1Ptr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v), std::make_unique<Branch>(exitPtr),
+        std::make_unique<Nop>()));
+    // default body: y = 2; br exit
+    b2Ptr->Add(std::make_unique<StLoc>(v2, std::make_unique<LdcI4>(2)));
+    b2Ptr->SetFinal(std::make_unique<Branch>(exitPtr));
+    exitPtr->SetFinal(ReturnFinal(fn->Body.get()));
+
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(v1);
+    fn->Variables.push_back(v2);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 0:"), std::string::npos) << text;
+    EXPECT_NE(text.find("if (num) break;"), std::string::npos) << text;
+    EXPECT_NE(text.find("default:"), std::string::npos) << text;
+    EXPECT_NE(text.find("y = 2;"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, SwitchBodyWithNestedConditionalExitInlines) {
+    // A case body whose trailing is a NESTED conditional exit: the body's
+    // final is `if (cond) { if (cond2) br exit }` (no-else outer if whose true
+    // arm is a Block ending in a no-else if whose true arm is `br exit`). The
+    // only non-fall-through path is `br exit` under the compound condition
+    // (cond && cond2); every other path (cond-false, cond-true/cond2-false)
+    // falls positionally. The body contributes the nested exit branch
+    // (conditionalExit); the positional integrity gate already sees the
+    // no-else outer if as falling through. Emission renders the nested if in
+    // place with the inner br-exit as `break;` (via GotoText's breakBranches_
+    // handling), giving `if (cond) { if (cond2) break; }` then fall.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto v1 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 1);
+    v1->Name = "x";
+    auto v2 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 2);
+    v2->Name = "y";
+    auto fn = MakeFunction({});
+
+    auto host = std::make_unique<Block>(); Block* hostPtr = host.get();
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    auto b2 = std::make_unique<Block>(); Block* b2Ptr = b2.get();
+    auto exitB = std::make_unique<Block>(); Block* exitPtr = exitB.get();
+    fn->Body->AddBlock(std::move(host));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(exitB));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v));
+    auto sec0 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0)));
+    sec0->SetBody([&]{ auto b=std::make_unique<Branch>(b1Ptr); b->HasOffset=false; return b; }());
+    sw->AddSection(std::move(sec0));
+    auto secDef = std::make_unique<SwitchSection>();
+    secDef->SetBody([&]{ auto b=std::make_unique<Branch>(b2Ptr); b->HasOffset=false; return b; }());
+    sw->AddSection(std::move(secDef));
+    hostPtr->SetFinal(std::move(sw));
+
+    // case 0 body: x = 1; if (num) { if (x) br exit }  -- the inner br exit is
+    // nested two levels deep; all other paths fall into b2 (next outer = next
+    // section).
+    b1Ptr->Add(std::make_unique<StLoc>(v1, std::make_unique<LdcI4>(1)));
+    auto innerIf = std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v1), std::make_unique<Branch>(exitPtr));
+    auto innerBlk = std::make_unique<Block>();
+    innerBlk->SetFinal(std::move(innerIf));
+    b1Ptr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v), std::move(innerBlk)));
+    // default body: y = 2; br exit
+    b2Ptr->Add(std::make_unique<StLoc>(v2, std::make_unique<LdcI4>(2)));
+    b2Ptr->SetFinal(std::make_unique<Branch>(exitPtr));
+    exitPtr->SetFinal(ReturnFinal(fn->Body.get()));
+
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(v1);
+    fn->Variables.push_back(v2);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 0:"), std::string::npos) << text;
+    EXPECT_NE(text.find("if (num)"), std::string::npos) << text;
+    EXPECT_NE(text.find("if (x) break;"), std::string::npos) << text;
+    EXPECT_NE(text.find("x = 1;"), std::string::npos) << text;
+    EXPECT_NE(text.find("default:"), std::string::npos) << text;
+    EXPECT_NE(text.find("y = 2;"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, SwitchBodyWithThrowExitIsInlined) {
+    // A case body that terminates in a `throw` (guarding a public API entry
+    // into the switch) has a Throw final, contributing no exit branch. The
+    // emission inlines it with the throw in place; the other sections must
+    // carry the exit convergence.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto fn = MakeFunction({});
+
+    auto host = std::make_unique<Block>();
+    Block* hostPtr = host.get();
+    auto b1 = std::make_unique<Block>();
+    Block* b1Ptr = b1.get();
+    auto b2 = std::make_unique<Block>();
+    Block* b2Ptr = b2.get();
+    auto exitB = std::make_unique<Block>();
+    Block* exitPtr = exitB.get();
+
+    fn->Body->AddBlock(std::move(host));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(exitB));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v));
+    auto sec0 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(5)));
+    auto brCase = std::make_unique<Branch>(b1Ptr);
+    brCase->HasOffset = false;
+    sec0->SetBody(std::move(brCase));
+    sw->AddSection(std::move(sec0));
+    auto secDef = std::make_unique<SwitchSection>();
+    auto brDef = std::make_unique<Branch>(b2Ptr);
+    brDef->HasOffset = false;
+    secDef->SetBody(std::move(brDef));
+    sw->AddSection(std::move(secDef));
+    hostPtr->SetFinal(std::move(sw));
+
+    // case 5 body: throw new System.ArgumentException("x");
+    b1Ptr->SetFinal(std::make_unique<Throw>(
+        std::make_unique<Call>()));
+    // default body: stloc; br exit
+    b2Ptr->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(2)));
+    b2Ptr->SetFinal(std::make_unique<Branch>(exitPtr));
+    exitPtr->SetFinal(ReturnFinal(fn->Body.get()));
+
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 5:"), std::string::npos) << text;
+    EXPECT_NE(text.find("throw"), std::string::npos) << text;
+    EXPECT_NE(text.find("default:"), std::string::npos) << text;
+    EXPECT_NE(text.find("break;"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, SwitchBodyWithConditionalReturnInlineAsIfReturn) {
+    // A case body whose trailing is `if (cond) { return; }` (no else): the true
+    // arm is a Block whose final is a Leave. The body contributes no exit branch
+    // (the true path returns); the false path falls positionally. The emission
+    // inlines it as `if (cond) { return; }` and the section fall-through handles
+    // the false path.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto fn = MakeFunction({});
+    auto host = std::make_unique<Block>(); Block* hostPtr = host.get();
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    auto b2 = std::make_unique<Block>(); Block* b2Ptr = b2.get();
+    auto exitB = std::make_unique<Block>(); Block* exitPtr = exitB.get();
+    fn->Body->AddBlock(std::move(host));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(exitB));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v));
+    auto sec0 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0)));
+    auto brCase = std::make_unique<Branch>(b1Ptr); brCase->HasOffset = false;
+    sec0->SetBody(std::move(brCase));
+    sw->AddSection(std::move(sec0));
+    auto secDef = std::make_unique<SwitchSection>();
+    auto brDef = std::make_unique<Branch>(b2Ptr); brDef->HasOffset = false;
+    secDef->SetBody(std::move(brDef));
+    sw->AddSection(std::move(secDef));
+    hostPtr->SetFinal(std::move(sw));
+
+    // case 0 body: if (num) { return; }  -- the true arm is a Block with a Leave final.
+    auto retBlock = std::make_unique<Block>();
+    retBlock->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    b1Ptr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v), std::move(retBlock)));
+    // default body: stloc; br exit
+    b2Ptr->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(2)));
+    b2Ptr->SetFinal(std::make_unique<Branch>(exitPtr));
+    exitPtr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 0:"), std::string::npos) << text;
+    EXPECT_NE(text.find("if (num)"), std::string::npos) << text;
+    EXPECT_NE(text.find("return;"), std::string::npos) << text;
+    EXPECT_NE(text.find("default:"), std::string::npos) << text;
+    EXPECT_NE(text.find("break;"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, SwitchBodyWithFallingThroughTrueArmInlines) {
+    // A case body whose trailing is `if (cond) { work; }` (no else): the true
+    // arm is a Block with real instructions but NO final instruction, so it
+    // falls through. The body contributes no exit branch -- both the true
+    // path (after the work) and the false path fall positionally. The emission
+    // inlines the if in place; the section fall-through handles the rest.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto fn = MakeFunction({});
+    auto host = std::make_unique<Block>(); Block* hostPtr = host.get();
+    auto b2 = std::make_unique<Block>(); Block* b2Ptr = b2.get();
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    auto exitB = std::make_unique<Block>(); Block* exitPtr = exitB.get();
+    fn->Body->AddBlock(std::move(host));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(exitB));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v));
+    auto sec1 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(1)));
+    sec1->SetBody([&]{ auto b=std::make_unique<Branch>(b2Ptr); b->HasOffset=false; return b; }());
+    sw->AddSection(std::move(sec1));
+    auto sec0 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0)));
+    sec0->SetBody([&]{ auto b=std::make_unique<Branch>(b1Ptr); b->HasOffset=false; return b; }());
+    sw->AddSection(std::move(sec0));
+    hostPtr->SetFinal(std::move(sw));
+
+    // case 1 body (first section): stloc; br exit -- sets the convergence exit.
+    b2Ptr->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(2)));
+    b2Ptr->SetFinal(std::make_unique<Branch>(exitPtr));
+    // case 0 body (last section): if (num) { num = 1; } -- true arm is a Block
+    // with an StLoc and no final, so it falls through; no exit branch.
+    auto workBlock = std::make_unique<Block>();
+    workBlock->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(1)));
+    b1Ptr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v), std::move(workBlock)));
+    exitPtr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 0:"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 1:"), std::string::npos) << text;
+    EXPECT_NE(text.find("if (num)"), std::string::npos) << text;
+    EXPECT_NE(text.find("num = 1"), std::string::npos) << text;
+    EXPECT_NE(text.find("num = 2"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, SwitchAllBodiesExitOrFallThroughNoConvergenceExit) {
+    // The no-convergence switch: every body self-terminates (throw/return) or
+    // falls positionally into the next section's body -- no body branches to a
+    // shared exit. The Win32Error lowering shape: `case A: throw; case B:
+    // doStuff(); case C: if (err) throw; ...; return;`. The fold accepts it
+    // (exit = null); no `break;` lines render.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto fn = MakeFunction({});
+    auto host = std::make_unique<Block>(); Block* hostPtr = host.get();
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    auto b2 = std::make_unique<Block>(); Block* b2Ptr = b2.get();
+    auto b3 = std::make_unique<Block>(); Block* b3Ptr = b3.get();
+    auto postB = std::make_unique<Block>(); Block* postPtr = postB.get();
+    fn->Body->AddBlock(std::move(host));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(b3));
+    fn->Body->AddBlock(std::move(postB));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v));
+    auto s1 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(1)));
+    s1->SetBody([&]{ auto b=std::make_unique<Branch>(b1Ptr); b->HasOffset=false; return b; }());
+    sw->AddSection(std::move(s1));
+    auto s2 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(2)));
+    s2->SetBody([&]{ auto b=std::make_unique<Branch>(b2Ptr); b->HasOffset=false; return b; }());
+    sw->AddSection(std::move(s2));
+    auto s3 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(3)));
+    s3->SetBody([&]{ auto b=std::make_unique<Branch>(b3Ptr); b->HasOffset=false; return b; }());
+    sw->AddSection(std::move(s3));
+    hostPtr->SetFinal(std::move(sw));
+
+    // case 1: throw (self-terminating)
+    b1Ptr->SetFinal(std::make_unique<Throw>(std::make_unique<Call>()));
+    // case 2: null-final (falls positionally into case 3's body)
+    b2Ptr->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(42)));
+    // case 3: if (num) throw; ...; return (self-terminating)
+    auto throwBlk = std::make_unique<Block>();
+    throwBlk->SetFinal(std::make_unique<Throw>(std::make_unique<Call>()));
+    b3Ptr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v), std::move(throwBlk)));
+    // post-switch block (continues after the switch)
+    postPtr->SetFinal(ReturnFinal(fn->Body.get()));
+
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 1:"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 2:"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 3:"), std::string::npos) << text;
+    EXPECT_NE(text.find("throw"), std::string::npos) << text;
+    EXPECT_NE(text.find("num = 42"), std::string::npos) << text;
+    // No break: no body branches to a shared exit.
+    EXPECT_EQ(text.find("break;"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, GuardRegionFoldsMultiBlockFallThrough) {
+    // The guard-region fold (the C# ConditionDetection / MergeCommonBranches
+    // shape): `if (cond) br bT else nop` with the multi-block fall-through
+    // region between the guard and the target restructures to the INVERTED
+    // if nesting the region, the target continuing after -- the goto form
+    // disappears:
+    //   b0: if (num == 0) br b3 else nop
+    //   b1: a = 1;                 <- the region (multi-block)
+    //   b2: b = 2;
+    //   b3: c = 3;                 <- the target (non-terminal)
+    //   b4: return;
+    auto num = MakeVar(VariableKind::Parameter, "num", 0);
+    auto a = MakeVar(VariableKind::Local, "a", 1);
+    auto b = MakeVar(VariableKind::Local, "b", 2);
+    auto c = MakeVar(VariableKind::Local, "c", 3);
+
+    auto b0 = std::make_unique<Block>();
+    auto b1 = std::make_unique<Block>();
+    auto b2 = std::make_unique<Block>();
+    auto b3 = std::make_unique<Block>();
+    auto b4 = std::make_unique<Block>();
+    b1->Add(std::make_unique<StLoc>(a, std::make_unique<LdcI4>(1)));
+    b2->Add(std::make_unique<StLoc>(b, std::make_unique<LdcI4>(2)));
+    b3->Add(std::make_unique<StLoc>(c, std::make_unique<LdcI4>(3)));
+
+    auto fn = MakeFunction({});
+    Block* b3Ptr = b3.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(b3));
+    fn->Body->AddBlock(std::move(b4));
+
+    auto br = std::make_unique<Branch>(static_cast<std::uint32_t>(0x30));
+    br->TargetBlock = b3Ptr;
+    br->HasOffset = false;
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(num),
+                               std::make_unique<LdcI4>(0),
+                               ComparisonKind::Equality),
+        std::move(br), std::make_unique<Nop>()));
+    fn->Body->Blocks[4]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "int num");
+    // The region nests under the INVERTED condition; the target continues
+    // after the if (the oracle's structure, not the goto form).
+    EXPECT_NE(text.find("if (num != 0)\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	var a = 1;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	var b = 2;\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("goto "), std::string::npos) << "no goto survives: " << text;
+}
+
+TEST(ILAstToCSharp, GuardRegionFoldsTerminalFallThrough) {
+    // The terminal-region variant (the ReadArrayArgument shape): the
+    // fall-through region is a throw, the target is the normal path. The
+    // inverted form nests the throw in the if's arm -- the linear form
+    // would render the throw as UNCONDITIONALLY reached (a semantic bug).
+    //   b0: if (num >= 0) br b2 else nop
+    //   b1: throw ...               <- the region (terminal)
+    //   b2: a = 1;                  <- the target (non-terminal)
+    //   b3: return;
+    auto num = MakeVar(VariableKind::Parameter, "num", 0);
+    auto a = MakeVar(VariableKind::Local, "a", 1);
+
+    auto b0 = std::make_unique<Block>();
+    auto b1 = std::make_unique<Block>();
+    auto b2 = std::make_unique<Block>();
+    auto b3 = std::make_unique<Block>();
+    b1->Add(std::make_unique<Throw>(std::make_unique<LdStr>("boom")));
+    b2->Add(std::make_unique<StLoc>(a, std::make_unique<LdcI4>(1)));
+
+    auto fn = MakeFunction({});
+    Block* b2Ptr = b2.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(b3));
+
+    auto br = std::make_unique<Branch>(static_cast<std::uint32_t>(0x20));
+    br->TargetBlock = b2Ptr;
+    br->HasOffset = false;
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(num),
+                               std::make_unique<LdcI4>(0),
+                               ComparisonKind::GreaterThanOrEqual),
+        std::move(br), std::make_unique<Nop>()));
+    fn->Body->Blocks[3]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "int num");
+    EXPECT_NE(text.find("if (num < 0)\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	throw \"boom\";\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("	var a = 1;\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("goto "), std::string::npos) << "no goto survives: " << text;
+}
+
+TEST(ILAstToCSharp, ReferenceTypedConditionLeafRendersNullComparison) {
+    // A reference-typed truthiness leaf in a condition slot renders the
+    // null comparison, not the bare expression: `if (listener)` is not C#
+    // for a class-typed local; the oracle renders `if (listener != null)`
+    // (the LazyList.Set_NoLock family). The C# reader materializes the
+    // brtrue/brfalse null comparisons itself; this port's reader keeps the
+    // bare load, so the condition render supplies the comparison.
+    auto listener = MakeVar(VariableKind::Local, "listener", 0,
+        std::make_shared<ILSpy::Decompiler::TypeSystem::SimpleType>(
+            ILSpy::Decompiler::TypeSystem::TopLevelTypeName(
+                "dnlib.Utils", "ILazyListener")));
+    auto b0 = std::make_unique<Block>();
+    auto body = std::make_unique<Block>();
+    auto cont = std::make_unique<Block>();
+    auto fn = MakeFunction({});
+    Block* contPtr = cont.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(body));
+    fn->Body->AddBlock(std::move(cont));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(listener), std::make_unique<Branch>(contPtr)));
+    fn->Body->Blocks[1]->Add(std::make_unique<StLoc>(
+        MakeVar(VariableKind::Local, "num", 1), std::make_unique<LdcI4>(7)));
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<Branch>(contPtr));
+    fn->Body->Blocks[2]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    // The guard's fall-through region (num = 7) runs on the NULL path, so
+    // the folded region renders under the null comparison.
+    EXPECT_NE(text.find("if (listener == null)"), std::string::npos)
+        << "the reference-typed condition leaf renders the null comparison:\n" << text;
+    EXPECT_EQ(text.find("if (listener)\n"), std::string::npos)
+        << "not the bare truthiness form:\n" << text;
+    EXPECT_EQ(text.find("listener) == 0"), std::string::npos)
+        << "not the zero comparison on a class-typed leaf:\n" << text;
+}

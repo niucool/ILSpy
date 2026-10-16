@@ -1,0 +1,256 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+// to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+// FOR ANY CLAIM, DAMAGES OR ANY OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+// Port of the IlspyCmdProgram members the CLI's -il path consumes
+// (ICSharpCode.ILSpyCmd/IlspyCmdProgram.cs): ShowIL (the whole-module IL
+// render the -il/--il-sequence-points flags dispatch to) and TryLoadPDB
+// (the -usepdb dispatch over DebugInfoUtils). The rest of the program class
+// (the McMaster CommandLineUtils option attributes, the host wiring, and
+// every other action) is Phase-10 later work; main.cpp parses the options
+// with cxxopts (the plan's McMaster replacement) and calls these.
+//
+// C#-to-C++ porting decisions:
+//  * The C# instance members port as free functions taking the parsed flag
+//    state as parameters (the SRMExtensions free-function convention): the
+//    C# reads the ShowILSequencePointsFlag/InputPDBFile instance fields.
+//  * The C# `public (bool IsSet, string Value) InputPDBFile` (the
+//    SingleOrNoValue option shape) ports as the InputPDBFile struct: IsSet
+//    carries the flag's presence and Value the PDB file name, with nullopt
+//    as the C# null Value the bare `-usepdb` form parses to. The cxxopts
+//    parse cannot distinguish the bare form from an explicitly empty value
+//    (`-usepdb ""`), so main.cpp maps BOTH to nullopt -- where the real C#
+//    takes the FromFile("") path (whose empty-name guard yields no debug
+//    info), the port takes the LoadSymbols discovery. A documented
+//    CLI-parse-layer divergence (the plan's implicit_value choice).
+//  * The C# `output.WriteLine($"// IL code: {module.Name}")` writes the
+//    header line straight to the TextWriter the PlainTextOutput then wraps;
+//    the port writes it to the ostringstream first. WriteLine uses
+//    Environment.NewLine -- the port's kNewLine "\r\n" convention
+//    (PlainTextOutput hardcodes the Windows value).
+//  * The C# `new PEFile(assemblyFileName)` throws for a missing/unparseable
+//    file (the CLI's catch renders the exception); the port's MetadataFile
+//    never throws -- ShowIL over an unparseable file renders the header
+//    line with an empty name and no contents and returns 0 (main.cpp gates
+//    IsValid before dispatching).
+
+#pragma once
+
+#include "Decompiler/DebugInfo/IDebugInfoProvider.hpp"
+#include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/TypeSystem/TypeKind.hpp"
+
+#include <filesystem>
+#include <memory>
+#include <optional>
+#include <set>
+#include <sstream>
+#include <string>
+#include <vector>
+
+namespace ILSpy::ILSpyCmd {
+
+// The C# `public (bool IsSet, string Value) InputPDBFile` -- the parsed
+// -usepdb option: IsSet is the flag's presence, Value the PDB file name
+// (nullopt = the C# null of the bare `-usepdb` form).
+struct InputPDBFile {
+    bool IsSet = false;
+    std::optional<std::string> Value;
+};
+
+// The C# `IDebugInfoProvider TryLoadPDB(PEFile module)`: the -usepdb
+// dispatch -- the bare form discovers the module's PDB through the PE debug
+// directory (LoadSymbols), the valued form opens the named PDB (FromFile),
+// and an unset flag yields no debug info (null).
+std::unique_ptr<Decompiler::DebugInfo::IDebugInfoProvider> TryLoadPDB(
+    const Decompiler::Metadata::MetadataFile& module,
+    const InputPDBFile& pdbFile);
+
+// The C# `int ShowIL(string assemblyFileName, TextWriter output)`: the
+// whole-module IL render -- the `// IL code: <name>` header line, then the
+// ReflectionDisassembler over a PlainTextOutput wrapping the output with
+// DebugInfo set from TryLoadPDB and ShowSequencePoints from the
+// --il-sequence-points flag, rendering WriteModuleContents. Returns 0 (the
+// C# return value).
+int ShowIL(const std::string& assemblyFileName, std::ostringstream& output,
+    bool showILSequencePoints, const InputPDBFile& pdbFile);
+
+// The C# `int ListContent(string assemblyFileName, TextWriter output,
+// ISet<TypeKind> kinds)` (IlspyCmdProgram.cs): the -l/--list render -- every
+// type definition in the TypeDef table's ROW order (the C#
+// `decompiler.TypeSystem.MainModule.TypeDefinitions` walk -- MetadataModule
+// iterates metadata.TypeDefinitions, so <Module> is included and nested
+// types appear at their physical rows) whose kind is selected, as
+// `{Kind} {FullTypeName.ReflectionName}` lines: the TypeKind enum member
+// name (Enum.ToString) and the SRMExtensions GetFullTypeName declaring-chain
+// reflection name (the `n arity suffix and the '+' nesting separators).
+// Returns 0 (the C# return value; a kinds set that selects nothing prints
+// nothing). The -o writer branch goes through OutputFilePath (".list.txt")
+// + WriteOutputFile in the caller.
+int ListContent(const std::string& assemblyFileName, std::ostringstream& output,
+    const std::set<ILSpy::Decompiler::TypeSystem::TypeKind>& kinds);
+
+// The C# `int ListResources(string assemblyFileName, TextWriter output)`
+// (IlspyCmdProgram.cs): the --list-resources render -- every embedded
+// manifest resource as one line, with .resources containers expanded to
+// their '<container>/<entry>' entries (the EnumerateResourcePaths port,
+// ResourceExtensions.hpp). WriteLine uses Environment.NewLine -- the
+// port's kNewLine "\r\n" convention (PlainTextOutput hardcodes the
+// Windows value). Returns 0 (the C# return value; an assembly with no
+// embedded resources prints nothing). The -o writer branch goes through
+// OutputFilePath (".resources.txt") + WriteOutputFile in the caller.
+int ListResources(const std::string& assemblyFileName, std::ostringstream& output);
+
+// The C# `int ExtractResource(string assemblyFileName, string resourceName,
+// TextWriter output, string outputDirectory, CommandLineApplication app)`
+// (IlspyCmdProgram.cs): the --resource extraction -- the resource lookup
+// through TryGetResource with the '<name>' not-found error (the two stderr
+// lines plus the available-resources listing, rendered to errorOutput for
+// the caller to flush) and EX_DATAERR (65); with no outputDirectory a
+// byte[] value written raw into the output (the C#
+// Console.OpenStandardOutput binary write -- the port's ostringstream
+// holds arbitrary bytes and main.cpp writes the block in binary mode), and
+// any other value written as its text (the C# ToString() -- the port's
+// invariant-culture render, matching the real tool whose runtimeconfig sets
+// System.Globalization.Invariant).
+// With an outputDirectory (-o set) the value goes to a file instead: the
+// file name is WholeProjectDecompiler.SanitizeFileName(Path.GetFileName(
+// resourceName)) (the port's CSharp::ProjectDecompiler sanitizer family
+// over the probed Path.GetFileName shape -- the ASCII drive-letter root
+// 'X:' is stripped before the last-separator split), joined under the -o
+// directory; a byte[] value's bytes and a text value's text are written
+// verbatim (File.WriteAllBytes / File.WriteAllText -- UTF-8 without a BOM,
+// the port's WriteOutputFile), and nothing goes to stdout.
+// The .baml arm (isBaml && a byte[] value -> DecompileBaml): the real arm
+// over the landed BamlDecompiler -- the resolver built for the assembly
+// (throwOnError=false, DetectTargetFrameworkId) with every -r reference
+// path added, and the BamlDecompilerSettings ThrowOnAssemblyResolveErrors
+// from GetSettings, which without --ilspy-settingsfile (the option the port
+// does not register) is ALWAYS false (the C# DecompilerSettings
+// initializer). With -o the XAML saves under the '.xaml'-suffixed
+// sanitized name (the XDocument.Save render: declaration + BOM); otherwise
+// the ToString render (no declaration) goes to output. A BamlReader
+// rejection (e.g. "Invalid BAML signature length.") propagates out to the
+// global catch (EX_SOFTWARE) with the port rendering the message only (the
+// C# stack trace is omitted).
+int ExtractResource(const std::string& assemblyFileName,
+    const std::string& resourceName, std::ostringstream& output,
+    std::ostringstream& errorOutput,
+    const std::optional<std::string>& outputDirectory = std::nullopt,
+    const std::vector<std::string>& referencePaths = {});
+
+// The C# `static string ResolveOutputDirectory(string outputDirectory)`
+// (IlspyCmdProgram.cs): the -o/--outputdir value resolved BEFORE any action
+// dispatch -- nullopt for an unset/whitespace value (the C# null, which the
+// actions read as "write to standard out"), otherwise the .NET
+// Path.GetFullPath shape: resolved against the current directory and
+// normalized for '.'/'..' components. The port uses std::filesystem's
+// absolute + lexically_normal pair (no '~' expansion -- Path.GetFullPath
+// has none either on Windows).
+std::optional<std::string> ResolveOutputDirectory(const std::string& outputDirectory);
+
+// The OS-boundary translation for the CLI's UTF-8 path strings (the C#
+// composes Unicode paths end to end through System.IO): the platform's
+// native fs::path. On Windows the fs::path narrow constructor would
+// transcode through the ANSI code page, mangling non-ASCII names -- the
+// explicit UTF-8 -> UTF-16 conversion preserves them.
+std::filesystem::path ToNativePath(const std::string& utf8);
+
+// The C# `string outputName = Path.GetFileNameWithoutExtension(fileName);
+// output = File.CreateText(Path.Combine(outputDirectory, outputName) + extension)`
+// (IlspyCmdProgram.cs PerformPerFileAction, the -o writer branches): the
+// per-action output file path. GetFileNameWithoutExtension takes the
+// file-name component (after the last separator) minus everything from
+// its LAST '.' -- a trailing dot drops the dot ("foo." -> "foo"), a
+// leading dot yields the empty name (".dll" -> "") -- and Path.Combine
+// joins under the -o directory (an empty name makes it return the
+// directory itself, so the extension lands directly on it).
+std::string OutputFilePath(const std::string& outputDirectory,
+    const std::string& assemblyFileName, const std::string& extension);
+
+// The C# -o writer branch for the decompile path (IlspyCmdProgram.cs
+// lines 406-411): `Path.Combine(outputDirectory,
+// (string.IsNullOrEmpty(TypeName) ? outputName : TypeName)) +
+// ".decompiled.cs"` -- the assembly's base name without -t, or the TYPE
+// NAME VERBATIM with -t (the namespace dots are part of the name, not an
+// extension to strip).
+std::string DecompiledOutputFilePath(const std::string& outputDirectory,
+    const std::string& assemblyFileName, const std::string& typeName);
+
+// The C# `File.CreateText(path)` + the finally `output.Close()` pair
+// behind every -o writer branch: create/truncate the file and write the
+// whole block (the port renders to a buffer first and writes it at once;
+// the shared C# writer is closed only at the end of the run, which is
+// lossless for the port's single-assembly CLI). File.CreateText encodes
+// UTF-8 WITHOUT a BOM, and the rendered text already carries the CRLF
+// TextWriter convention, so the bytes go out verbatim. A file that cannot
+// be created throws (the C# IOException escaping to the OnExecuteAsync
+// global catch with EX_SOFTWARE; the port renders the message only, no
+// managed stack trace -- the caller exits 70).
+void WriteOutputFile(const std::string& path, const std::string& contents);
+
+// The C# `int DumpPackageAssemblies(string packageFileName, string
+// outputDirectory, CommandLineApplication app)` (IlspyCmdProgram.cs): the
+// -d/--dump-package action -- the whole file read into memory (the C#
+// memory-maps it; the port's whole-buffer read is the established file
+// convention), the SingleFileBundle.IsBundle check (the exact "Cannot dump
+// assembiles for ..." stderr line -- the C# misspelling preserved -- plus
+// EX_DATAERR), the manifest read, then one output file per entry: entries
+// whose RelativePath escapes the output directory (a "../" component after
+// the backslash-to-slash normalization, or a rooted path) are skipped with
+// the "Skipping single-file entry ..." stderr line, uncompressed entries
+// copy their bundle bytes, compressed entries inflate through the raw
+// deflate decoder (the miniz tinfl machinery behind the embedded-PDB
+// decode) with the produced-length check -- a mismatch renders the
+// "Corrupted single-file entry ..." stderr line and EX_DATAERR, a corrupt
+// deflate stream throws (the C# DeflateStream InvalidDataException
+// escaping to the global catch: the caller renders the message and returns
+// EX_SOFTWARE). A missing outputDirectory throws the C# ArgumentNullException
+// shape (Path.Combine(null, ...) -- the global catch renders it with
+// EX_SOFTWARE). The stdout convention does not apply: every diagnostic goes
+// to errorOutput for the caller to flush, and files are written through
+// UTF-16 paths so non-ASCII RelativePaths resolve correctly on Windows
+// (the C# writes through System.IO's Unicode paths).
+int DumpPackage(const std::string& packageFileName,
+    const std::optional<std::string>& outputDirectory,
+    std::ostringstream& errorOutput);
+
+// The load-failure shape for a file the CLI cannot open as a CLI assembly
+// (IlspyCmdProgram.cs's global catch plus the RunAsync argument
+// validation): a missing path carries the C# pre-command validation pair
+// (the `File '<path>' does not exist!` stderr line and the `Specify --help
+// ...` stdout hint, exit code 1); an existing file classifies the engine
+// throw the C# `new PEFile(...)` would raise -- `System.BadImageFormat
+// Exception: <the SRM message>` for a non-PE image,
+// `ICSharpCode.Decompiler.Metadata.MetadataFileNotSupportedException: PE
+// file does not contain any managed metadata.` for a valid image without a
+// CLI directory, and the representative `System.OverflowException:`
+// `Arithmetic operation resulted in an overflow.` for a metadata root the
+// port cannot parse (the PEReaderParse.hpp documented divergence -- the
+// port cannot classify the corruption through the never-throwing
+// constructor). The exception lines render WITHOUT the managed stack trace
+// (the main.cpp convention) and carry the C# global catch's EX_SOFTWARE
+// exit code; errorLine is never empty for a failure.
+struct CliOpenFailure {
+    std::string errorLine;
+    std::string stdoutLine;
+    int exitCode = 0;
+};
+
+CliOpenFailure ClassifyCliOpenFailure(const std::string& path);
+
+}  // namespace ILSpy::ILSpyCmd

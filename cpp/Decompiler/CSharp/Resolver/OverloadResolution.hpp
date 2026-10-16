@@ -1,0 +1,378 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of
+// this software and associated documentation files (the "Software"), to deal in the
+// Software without restriction, including without limitation the rights to use, copy,
+// modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
+// and to permit persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies
+// or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+// Port of `ICSharpCode.Decompiler.CSharp.Resolver.OverloadResolution` -- the C# overload resolution
+// (C# spec draft-v11 section 12.6.4). This header ports the class SKELETON: the constructor (validation
+// + field init + the `AllowExpandingParams`/`AllowOptionalParameters` defaults), the input properties
+// (`IsExtensionMethodInvocation`/`AllowExpandingParams`/`AllowOptionalParameters`/`AllowImplicitIn`/
+// `CheckForOverflow`/`Arguments`), the member fields, the `AddCandidate` engine entry (the normal
+// + expanded-form pair delegating to `Detail::AddCandidate`), the `AddMethodLists` engine entry (the
+// derived-type-hides-base-methods walk delegating to `Detail::AddMethodLists`), the output
+// properties (`BestCandidate`/`BestCandidateAmbiguousWith`/`FoundApplicableCandidate`/`IsAmbiguous`/
+// `BestCandidateErrors` -- the lazy `ValidateMethodConstraints` memoization -- /
+// `BestCandidateIsExpandedForm`/`InferredTypeArguments`/`ArgumentConversions`/
+// `GetArgumentToParameterMap`), the `LogCandidateAddingResult` debug-log helper, and the output
+// wrappers (`GetArgumentsWithConversions`/`GetArgumentsWithConversionsAndNames`/
+// `GetBestCandidateWithSubstitutedTypeArguments`/`CreateResolveResult` -- the argument-conversion
+// wrapping, the best-candidate re-specialization, and the `CSharpInvocationResolveResult`
+// composition, delegating to `Detail::GetArgumentsWithConversions` and
+// `Detail::GetBestCandidateWithSubstitutedTypeArguments`). The only deferred piece is the constant-folding arm of the
+// wrapping core (it needs `CSharpResolver.ResolveCast`; see the `Detail::GetArgumentsWithConversions`
+// doc).
+//
+// The C# `Candidate` nested class is ported as the separate `OverloadResolutionCandidate` (D506); the
+// pure-transform engine steps that do NOT need `CSharpConversions`/`TypeInference` are ported as
+// `Detail::` free functions in `OverloadResolutionHelpers.{hpp,cpp}` (`ResolveParameterTypes` D508,
+// `MapCorrespondingParameters` D509, `CheckApplicabilityArgumentCounts` D510) -- they take the
+// `arguments`/`argumentNames`/`allowOptionalParameters` they need as parameters since the free function
+// has no instance state. This skeleton gives those helpers an owning `OverloadResolution` instance to
+// compose into once the engine steps land.
+//
+// Field ownership (the C# is a class with GC-owned reference fields):
+//  * `compilation` -> non-owning `const ICompilation*` (the C# holds a reference; the caller owns the
+//    compilation, which outlives the resolver).
+//  * `arguments` -> owning `std::vector<std::shared_ptr<ResolveResult>>` (the C# `ResolveResult[]`; the
+//    `ResolveResult` hierarchy is fully ported in `Semantics/`).
+//  * `argumentNames` -> owning `std::vector<std::string>` (the C# `string[]`; `null` normalized to
+//    all-empty in the ctor).
+//  * `conversions` -> non-owning `const CSharpConversions*` (forward-declared; unported). The C# ctor
+//    default `conversions ?? CSharpConversions.Get(compilation)` is deferred -- the port ctor takes a
+//    nullable pointer and stores it as-is (the `?? Get(compilation)` fallback lands with the
+//    `CSharpConversions` port).
+//  * `bestCandidate`/`bestCandidateAmbiguousWith` -> owning `std::shared_ptr<OverloadResolutionCandidate>`
+//    (nullable; the C# holds the class instance by reference).
+//  * `explicitlyGivenTypeArguments` -> owning `std::optional<std::vector<ITypePtr>>` (the C# `IType[]`,
+//    `null` when no type arguments were specified).
+//  * `bestCandidateWasValidated`/`bestCandidateValidationResult` -> plain bool / enum (the lazy
+//    `ValidateMethodConstraints` memoization state behind the `BestCandidateErrors` getter).
+
+#pragma once
+
+#include "Decompiler/CSharp/Resolver/OverloadResolutionCandidate.hpp"  // OverloadResolutionCandidate (bestCandidate)
+#include "Decompiler/CSharp/Resolver/OverloadResolutionErrors.hpp"  // OverloadResolutionErrors
+#include "Decompiler/Semantics/ResolveResult.hpp"  // ResolveResult (arguments)
+#include "Decompiler/TypeSystem/ICompilation.hpp"  // ICompilation (compilation)
+#include "Decompiler/TypeSystem/IType.hpp"  // ITypePtr (explicitlyGivenTypeArguments)
+
+#include <memory>
+#include <optional>
+#include <stdexcept>  // invalid_argument / runtime_error
+#include <string>
+#include <vector>
+
+namespace ILSpy::Decompiler::CSharp::Resolver {
+
+// Forward-declared (unported): the conversion controller. The C# ctor default
+// `conversions ?? CSharpConversions.Get(compilation)` is deferred.
+class CSharpConversions;
+
+// Forward-declared (now ported, in MethodGroupResolveResult.hpp): the method-list bucket type
+// `AddMethodLists` takes (`const std::vector<MethodListWithDeclaringType>&` needs only a
+// declaration; the .cpp includes the full header).
+class MethodListWithDeclaringType;
+
+// Forward-declared (now ported, D472): the invocation result `CreateResolveResult` builds
+// (a pointer return needs only a declaration; the .cpp includes the full header).
+class CSharpInvocationResolveResult;
+
+class OverloadResolution {
+public:
+    // The C# `public OverloadResolution(ICompilation compilation, ResolveResult[] arguments,
+    // string[] argumentNames = null, IType[] typeArguments = null, CSharpConversions conversions = null)`.
+    //
+    // `argumentNames` is `std::nullopt` for the C# `null` default (normalized to all-empty, length ==
+    // `arguments.size()`); a present-but-mismatched-length vector throws (the C# `ArgumentException`).
+    // `typeArguments` is `std::nullopt` for the C# `null` default; a present non-empty vector sets
+    // `explicitlyGivenTypeArguments` (an empty vector leaves it `nullopt`, matching the C#
+    // `typeArguments != null && typeArguments.Length > 0` guard). `conversions` is a nullable
+    // non-owning pointer (the C# `?? CSharpConversions.Get(compilation)` fallback is deferred).
+    OverloadResolution(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                       std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> arguments,
+                       std::optional<std::vector<std::string>> argumentNames = std::nullopt,
+                       std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>> typeArguments = std::nullopt,
+                       const CSharpConversions* conversions = nullptr);
+
+    // --- Input Properties (the C# `public bool ... { get; set; }`) ---
+
+    // The C# `IsExtensionMethodInvocation` (default false). Setting true restricts the first-argument
+    // conversions to identity/reference/boxing.
+    bool IsExtensionMethodInvocation() const { return isExtensionMethodInvocation_; }
+    bool& IsExtensionMethodInvocation() { return isExtensionMethodInvocation_; }
+
+    // The C# `AllowExpandingParams` (default true) -- whether expanding `params` into individual
+    // elements is allowed.
+    bool AllowExpandingParams() const { return allowExpandingParams_; }
+    bool& AllowExpandingParams() { return allowExpandingParams_; }
+
+    // The C# `AllowOptionalParameters` (default true) -- whether optional parameters may be left at
+    // their default value.
+    bool AllowOptionalParameters() const { return allowOptionalParameters_; }
+    bool& AllowOptionalParameters() { return allowOptionalParameters_; }
+
+    // The C# `AllowImplicitIn` (default true) -- whether a value argument can be passed to an `in`
+    // reference parameter.
+    bool AllowImplicitIn() const { return allowImplicitIn_; }
+    bool& AllowImplicitIn() { return allowImplicitIn_; }
+
+    // The C# `CheckForOverflow` (default false) -- whether `ConversionResolveResult`s apply overflow
+    // checking.
+    bool CheckForOverflow() const { return checkForOverflow_; }
+    bool& CheckForOverflow() { return checkForOverflow_; }
+
+    // The C# `public IList<ResolveResult> Arguments { get { return arguments; } }`.
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& Arguments() const {
+        return arguments_;
+    }
+
+    // The C# `argumentNames` field (not public in C#, but the engine helpers take it). Empty-string ==
+    // positional (the C# `null` entry).
+    const std::vector<std::string>& ArgumentNames() const { return argumentNames_; }
+
+    // The C# `compilation` field (not public in C#; exposed for the engine helpers / deferred output
+    // properties).
+    const ILSpy::Decompiler::TypeSystem::ICompilation& Compilation() const { return *compilation_; }
+
+    // The C# `conversions` field (not public in C#; exposed for the deferred engine steps). Non-owning;
+    // nullable until the `CSharpConversions` port.
+    const CSharpConversions* Conversions() const { return conversions_; }
+
+    // The C# `explicitlyGivenTypeArguments` field -- `nullopt` when no type arguments were specified.
+    const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& ExplicitlyGivenTypeArguments() const {
+        return explicitlyGivenTypeArguments_;
+    }
+
+    // --- The `AddCandidate` region (C# lines 231-263) ---
+
+    // The C# `public OverloadResolutionErrors AddCandidate(IParameterizedMember member)` -- the
+    // engine entry adding a candidate member to the resolution with no additional errors (the
+    // overload delegates with `OverloadResolutionErrors.None`). See the 2-arg overload below.
+    OverloadResolutionErrors AddCandidate(
+        const ILSpy::Decompiler::TypeSystem::IParameterizedMember& member) {
+        return AddCandidate(member, OverloadResolutionErrors::None);
+    }
+
+    // The C# `public OverloadResolutionErrors AddCandidate(IParameterizedMember member,
+    // OverloadResolutionErrors additionalErrors)` -- the engine entry: the NORMAL-form candidate
+    // plus (when `AllowExpandingParams` and the member's last parameter is `params`) the
+    // EXPANDED-form candidate, each calculated through the ported pipeline (`Detail::
+    // CalculateCandidate`) and folded into the best-candidate state; the expanded form's errors
+    // are returned when its `ErrorCount` is strictly lower than the normal form's. See
+    // `Detail::AddCandidate` (OverloadResolutionHelpers.hpp) for the full contract.
+    //
+    // The C# instance method reads the ctor fields and input properties plus mutates the
+    // `bestCandidate` state; the port delegates to the `Detail::` free function with the instance
+    // fields threaded (the D574 `Detail::CalculateCandidate` convention). The C# ctor eagerly
+    // resolves `conversions ?? CSharpConversions.Get(compilation)`; the port's ctor stores the
+    // nullable pointer as-is (the fallback is documented as deferred there), so THIS method
+    // resolves it lazily at the first engine call -- `CSharpConversions::Get` is the per-compilation
+    // cached factory, so repeated lazy resolutions return the same instance and the behavior is
+    // identical to the eager ctor resolution. The `const_cast` is safe (the underlying
+    // `CSharpConversions` is a mutable type-system object; the ctor parameter's `const` is the
+    // caller-side contract, the D515/D517 const_cast precedent).
+    OverloadResolutionErrors AddCandidate(
+        const ILSpy::Decompiler::TypeSystem::IParameterizedMember& member,
+        OverloadResolutionErrors additionalErrors);
+
+    // --- The `AddMethodLists` region (C# lines 330-377) ---
+
+    // The C# `public void AddMethodLists(IReadOnlyList<MethodListWithDeclaringType> methodLists)` --
+    // "Adds all candidates from the method lists. This method implements the logic that causes
+    // applicable methods in derived types to hide all methods in base types." Base types come
+    // FIRST in the list; the walk goes BACKWARDS (derived types first), adding every candidate of
+    // each list through `AddCandidate` (additionalErrors None), and once a list produced an
+    // APPLICABLE candidate, every earlier (more-base) list whose `DeclaringType` is a base type of
+    // the current list's declaring type (the `GetAllBaseTypes` closure) is marked hidden and
+    // skipped. See `Detail::AddMethodLists` (OverloadResolutionHelpers.hpp) for the full contract.
+    //
+    // The C# instance method reads the ctor fields and input properties plus mutates the
+    // `bestCandidate` state through `AddCandidate`; the port delegates to the `Detail::` free
+    // function with the instance fields threaded (the D575 `AddCandidate` convention), resolving
+    // the conversions lazily at the first engine call exactly like `AddCandidate` (the deferred
+    // C# ctor default `conversions ?? CSharpConversions.Get(compilation)`).
+    void AddMethodLists(const std::vector<MethodListWithDeclaringType>& methodLists);
+
+    // The C# `internal void LogCandidateAddingResult(string text, IParameterizedMember method,
+    // OverloadResolutionErrors errors)` (line 377, `#if DEBUG`-gated) -- logs the per-candidate
+    // adding result ("<text> <method> = Success|<errors> (best candidate so far|ambiguous)") with
+    // THIS resolution's best-candidate state. The port delegates to `Detail::LogCandidateAddingResult`
+    // with the instance fields threaded (the C# body is compiled out entirely in release builds via
+    // `#if DEBUG`; the port's `Log::IsEnabled == false` keeps the body a discarded branch -- the
+    // state reads are the only live part, and they are side-effect-free).
+    void LogCandidateAddingResult(const char* text,
+                                  const ILSpy::Decompiler::TypeSystem::IParameterizedMember& method,
+                                  OverloadResolutionErrors errors) const;
+
+    // --- Output Properties (C# lines 1002-1085) ---
+
+    // The C# `public IParameterizedMember BestCandidate` -- the best candidate's member, or null
+    // when no candidate was added yet. A nullable non-owning pointer (the candidate holds the
+    // member by non-owning pointer back to the type system, which outlives the resolution).
+    const ILSpy::Decompiler::TypeSystem::IParameterizedMember* BestCandidate() const {
+        return bestCandidate_ != nullptr ? bestCandidate_->Member() : nullptr;
+    }
+
+    // The C# `public IParameterizedMember BestCandidateAmbiguousWith` -- the member the best
+    // candidate is ambiguous with (overwritten on every ambiguous fold so API users can detect
+    // the set of all ambiguous methods by looking after each step), or null.
+    const ILSpy::Decompiler::TypeSystem::IParameterizedMember* BestCandidateAmbiguousWith() const {
+        return bestCandidateAmbiguousWith_ != nullptr ? bestCandidateAmbiguousWith_->Member() : nullptr;
+    }
+
+    // The C# `public bool FoundApplicableCandidate` -- `bestCandidate != null &&
+    // IsApplicable(bestCandidate.Errors)` (the free `IsApplicable` masks out the
+    // `AmbiguousMatch`/`MethodConstraintsNotSatisfied` overall errors).
+    bool FoundApplicableCandidate() const {
+        return bestCandidate_ != nullptr && IsApplicable(bestCandidate_->Errors());
+    }
+
+    // The C# `public bool IsAmbiguous` -- `bestCandidateAmbiguousWith != null`.
+    bool IsAmbiguous() const {
+        return bestCandidateAmbiguousWith_ != nullptr;
+    }
+
+    // The C# `public OverloadResolutionErrors BestCandidateErrors` (line 1015) -- "the
+    // errors that apply to the best candidate. This includes additional errors that do not
+    // affect applicability (e.g. AmbiguousMatch, MethodConstraintsNotSatisfied)": the best
+    // candidate's accumulated `Errors` OR-ed with the lazily-memoized
+    // `ValidateMethodConstraints` result, plus `AmbiguousMatch` when ambiguous. NON-CONST: the
+    // C# property getter MUTATES the `bestCandidateWasValidated`/
+    // `bestCandidateValidationResult` memoization fields (the flag is reset by the engine
+    // whenever a new best is promoted, so the next read re-validates); the port delegates to
+    // `Detail::BestCandidateErrors` with the instance fields threaded (the
+    // `ConsiderIfNewCandidateIsBest` state-threading convention).
+    OverloadResolutionErrors BestCandidateErrors();
+
+    // The C# `public bool BestCandidateIsExpandedForm` -- whether the best candidate is the
+    // params-expanded form (`bestCandidate != null ? bestCandidate.IsExpandedForm : false`).
+    bool BestCandidateIsExpandedForm() const {
+        return bestCandidate_ != nullptr ? bestCandidate_->IsExpandedForm() : false;
+    }
+
+    // The C# `public IReadOnlyList<IType> InferredTypeArguments` -- the best candidate's
+    // per-method-type-parameter inferred types (populated by `RunTypeInference` -- empty for a
+    // non-generic method, where the C# `InferredTypes` array stays null), or the empty list when
+    // there is no best candidate (the C# `EmptyList<IType>.Instance` -- a function-local static
+    // empty vector, the port's empty-list singleton; the C# returns the LIVE candidate array,
+    // the port returns a const reference to it).
+    const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& InferredTypeArguments() const {
+        static const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> empty;
+        if (bestCandidate_ != nullptr && !bestCandidate_->InferredTypes().empty())
+            return bestCandidate_->InferredTypes();
+        return empty;
+    }
+
+    // The C# `public IList<Conversion> ArgumentConversions` (line 1059) -- "the implicit
+    // conversions that are being applied to the arguments": the best candidate's per-argument
+    // conversions (built by the `CheckApplicability` step), or -- when there is no best
+    // candidate / the conversions were never built -- a fresh list of `Conversion.None`
+    // repeated `arguments.Length` times (the C# `Enumerable.Repeat(Conversion.None,
+    // arguments.Length).ToList()`). Returned BY VALUE: the fallback branch constructs a fresh
+    // list (so no single reference can serve both branches), and the entries are shared
+    // handles -- the pointer identity of each `Conversion` is what consumers observe (the
+    // `None` singleton for the fallback entries).
+    std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>> ArgumentConversions() const;
+
+    // The C# `public IReadOnlyList<int> GetArgumentToParameterMap()` (line 1074) -- "an
+    // array that maps argument indices to parameter indices. For arguments that could not be
+    // mapped to any parameter, the value will be -1" (`parameterIndex =
+    // GetArgumentToParameterMap()[argumentIndex]`). The C# returns the best candidate's live map
+    // or `null` when there is no best candidate; the port returns the map (a snapshot copy) or
+    // `std::nullopt` for the C# `null` (the `GetTupleElementTypes` nullable-list convention).
+    std::optional<std::vector<int>> GetArgumentToParameterMap() const {
+        if (bestCandidate_ != nullptr)
+            return bestCandidate_->ArgumentToParameterMap();
+        return std::nullopt;
+    }
+
+    // --- Output Wrappers (C# lines 1087-1208) ---
+
+    // The C# `public IList<ResolveResult> GetArgumentsWithConversions()` (line 1087) --
+    // "Returns the arguments for the method call in the order they were provided (not in
+    // the order of the parameters). Arguments are wrapped in a `ConversionResolveResult`
+    // if an implicit conversion is being applied to them when calling the method."
+    // With no best candidate the C# returns the live `arguments` array; the port returns
+    // a copy BY VALUE (the two branches must share one return type; the entries are
+    // shared handles, so the argument `ResolveResult` pointer identity is preserved
+    // either way). See `Detail::GetArgumentsWithConversions` for the wrap contract.
+    std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> GetArgumentsWithConversions();
+
+    // The C# `public IList<ResolveResult> GetArgumentsWithConversionsAndNames()` (line 1102)
+    // -- like `GetArgumentsWithConversions()`, but "for arguments where an explicit argument
+    // name was provided, the argument will be wrapped in a `NamedArgumentResolveResult`"
+    // (the parameter/member the named wrap carries comes from the best candidate
+    // re-specialized with the inferred type arguments,
+    // `GetBestCandidateWithSubstitutedTypeArguments()`).
+    std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> GetArgumentsWithConversionsAndNames();
+
+    // The C# `public IParameterizedMember GetBestCandidateWithSubstitutedTypeArguments()`
+    // (line 1153) -- "the best candidate with the inferred type arguments substituted into
+    // its generic method definition": null with no best candidate; a non-generic member
+    // (or a non-method parameterized member such as an indexer) returned as-is; a GENERIC
+    // method re-specialized through its member definition with the merged `GetSubstitution`
+    // substitution (the member's own class type arguments + the candidate's inferred method
+    // type arguments -- the merge-not-compose contract). The port delegates to
+    // `Detail::GetBestCandidateWithSubstitutedTypeArguments` with the `bestCandidate_` state
+    // threaded (the state-threading convention). The return is a non-owning nullable pointer
+    // (the candidate owns the member; the `Specialize` result is owned by the type system,
+    // the `IMember::Specialize` contract).
+    const ILSpy::Decompiler::TypeSystem::IParameterizedMember* GetBestCandidateWithSubstitutedTypeArguments() const;
+
+    // The C# `public CSharpInvocationResolveResult CreateResolveResult(ResolveResult
+    // targetResolveResult, IList<ResolveResult> initializerStatements = null, IType
+    // returnTypeOverride = null)` (line 1188) -- "Creates a ResolveResult representing the
+    // result of overload resolution." Throws `runtime_error` when there is no best
+    // candidate (the C# `InvalidOperationException`). The target is a `TypeResolveResult`
+    // over the member's declaring type (`UnknownType` when it has none) when
+    // `IsExtensionMethodInvocation`, else the given `targetResolveResult` (null for
+    // static methods/constructors); the arguments come back wrapped in their implicit
+    // conversions and named-argument wrappers; the error mask is `BestCandidateErrors()`
+    // (the lazy constraint validation runs here); the expanded-form flag, the
+    // argument->parameter map, the initializer statements, and the return-type override
+    // (which replaces the member's return type as the result type) pass through.
+    std::shared_ptr<CSharpInvocationResolveResult> CreateResolveResult(
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> targetResolveResult = nullptr,
+        std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> initializerStatements = {},
+        ILSpy::Decompiler::TypeSystem::ITypePtr returnTypeOverride = nullptr);
+
+private:
+    const ILSpy::Decompiler::TypeSystem::ICompilation* compilation_;
+    std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> arguments_;
+    std::vector<std::string> argumentNames_;
+    const CSharpConversions* conversions_;
+    // The `bestCandidate`/`bestCandidateAmbiguousWith` fields hold the folded best-candidate state
+    // (populated by `AddCandidate`/`AddMethodLists` through `Detail::CalculateCandidate` ->
+    // `Detail::ConsiderIfNewCandidateIsBest`); `bestCandidateWasValidated`/
+    // `bestCandidateValidationResult` are the lazy `ValidateMethodConstraints` memoization state
+    // behind `BestCandidateErrors()`.
+    std::shared_ptr<OverloadResolutionCandidate> bestCandidate_;
+    std::shared_ptr<OverloadResolutionCandidate> bestCandidateAmbiguousWith_;
+    std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>> explicitlyGivenTypeArguments_;
+    bool bestCandidateWasValidated_ = false;
+    ILSpy::Decompiler::CSharp::Resolver::OverloadResolutionErrors bestCandidateValidationResult_ =
+        ILSpy::Decompiler::CSharp::Resolver::OverloadResolutionErrors::None;
+
+    // Input-property backing fields (the C# auto-properties' defaults).
+    bool isExtensionMethodInvocation_ = false;
+    bool allowExpandingParams_ = true;
+    bool allowOptionalParameters_ = true;
+    bool allowImplicitIn_ = true;
+    bool checkForOverflow_ = false;
+};
+
+} // namespace ILSpy::Decompiler::CSharp::Resolver

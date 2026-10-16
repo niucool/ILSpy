@@ -1,0 +1,2068 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files (the "Software"), to deal in
+// the Software without restriction, including without limitation the rights to
+// use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+// of the Software, and to permit persons to whom the Software is furnished to do
+// so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+#include "Decompiler/IL/Transforms/TransformExpressionTrees.hpp"
+
+#include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/Box.hpp"
+#include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
+#include "Decompiler/IL/Instructions/LdNull.hpp"
+#include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdcConstants.hpp"
+#include "Decompiler/IL/Instructions/AddressOf.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
+#include "Decompiler/TypeSystem/NullableType.hpp"
+#include "Decompiler/TypeSystem/TypeUtils.hpp"
+#include "Decompiler/TypeSystem/NormalizeTypeVisitor.hpp"
+#include "Decompiler/IL/ILTypeExtensions.hpp"
+#include "Decompiler/DecompilerSettings.hpp"
+#include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
+#include "Decompiler/TypeSystem/IField.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"
+#include "Decompiler/CSharp/Resolver/CSharpOperators.hpp"
+#include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
+#include "Decompiler/Semantics/Conversion.hpp"
+#include "Decompiler/Semantics/OperatorResolveResult.hpp"
+#include "Decompiler/Semantics/ResolveResult.hpp"
+
+#include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/LdStr.hpp"
+#include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
+#include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
+
+#include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/IL/Instructions/TokenInstructions.hpp"
+#include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
+#include "Decompiler/IL/Instructions/BitNot.hpp"
+#include "Decompiler/IL/Instructions/LdLen.hpp"
+#include "Decompiler/IL/Instructions/ExpressionTreeCast.hpp"
+#include "Decompiler/IL/Instructions/IsInst.hpp"
+#include "Decompiler/IL/Instructions/IfInstruction.hpp"
+#include "Decompiler/IL/Instructions/UnboxAny.hpp"
+#include "Decompiler/IL/Instructions/CastClass.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
+
+// The C# `kind.ToBinaryOperatorType()` extension (Comp.cs line 66), ported
+// in ExpressionBuilder.cpp (the CSharp::Syntax layer): forward-declared
+// here so the IL layer does not pull the whole C# syntax layer.
+namespace ILSpy::Decompiler::CSharp {
+::ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorType
+ToBinaryOperatorType(IL::ComparisonKind kind);
+}
+
+namespace ILSpy::Decompiler::IL {
+
+bool TransformExpressionTrees::MatchGetTypeFromHandle(
+    ILInstruction* inst, ::ILSpy::Decompiler::TypeSystem::ITypePtr& type) {
+    type = nullptr;
+    auto* call = dynamic_cast<Call*>(inst);
+    if (call == nullptr || call->IsNewObj || call->Arguments.size() != 1) {
+        return false;
+    }
+    // The C# `getTypeCall.Method.FullName == "System.Type.GetTypeFromHandle"`:
+    // the declaring type's full name + the method name pair. An unresolved
+    // out-of-module method (the deferred-resolution convention: System.Type
+    // lives in a referenced assembly) falls back to the reader's resolved
+    // "Namespace.Type::Method" surface.
+    if (call->Method != nullptr) {
+        ::ILSpy::Decompiler::TypeSystem::ITypePtr declaring =
+            call->Method->DeclaringType();
+        if (declaring == nullptr ||
+            !(declaring->Namespace() == "System" &&
+              declaring->Name() == "Type")) {
+            return false;
+        }
+        if (call->Method->Name() != "GetTypeFromHandle") return false;
+    } else {
+        if (call->MethodName != "System.Type::GetTypeFromHandle")
+            return false;
+    }
+    auto* token = dynamic_cast<LdTypeToken*>(call->Arguments[0].get());
+    if (token == nullptr || token->Type == nullptr) return false;
+    type = token->Type;
+    return true;
+}
+
+
+void RemoveInstruction(Block& block, ILInstruction* inst);
+
+TransformExpressionTrees::~TransformExpressionTrees() = default;
+
+void TransformExpressionTrees::Run(Block& block, int pos,
+                                   StatementTransformContext& context) {
+    // The C# `if (!context.Settings.ExpressionTrees) return;` over the FULL
+    // DecompilerSettings (the merged context's CSharpSettings slot; a null
+    // settings is the C# default-constructed form, where ExpressionTrees is
+    // true -- the gate passes).
+    if (context.Base.CSharpSettings != nullptr
+        && !context.Base.CSharpSettings->ExpressionTrees())
+        return;
+    context_ = &context;
+    state_ = State();
+    // The C# `this.conversions = CSharpConversions.Get(context.TypeSystem);
+    // this.resolver = new CSharpResolver(context.TypeSystem)` -- rebuilt per
+    // Run; the arms bail when the context carries no type system (the C#
+    // never runs without one).
+    if (context.Base.TypeSystem != nullptr) {
+        conversions_ =
+            &::ILSpy::Decompiler::CSharp::Resolver::CSharpConversions::Get(
+                *context.Base.TypeSystem);
+        resolver_ =
+            std::make_shared<
+                ::ILSpy::Decompiler::CSharp::Resolver::CSharpResolver>(
+                *context.Base.TypeSystem);
+    } else {
+        conversions_ = nullptr;
+        resolver_.reset();
+    }
+    for (int i = pos; i < static_cast<int>(block.Instructions.size()); i++) {
+        std::shared_ptr<ILVariable> v;
+        TypeSystem::ITypePtr type;
+        std::string name;
+        if (MatchParameterVariableAssignment(block.Instructions[i].get(), v,
+                                             type, name)) {
+            state_.parameters[v.get()] = {type, name};
+            state_.parameterStores[v.get()] =
+                static_cast<StLoc*>(block.Instructions[i].get());
+            continue;
+        }
+        if (TryConvertExpressionTree(block.Instructions[i].get(),
+                                     block.Instructions[i].get())) {
+            for (ILInstruction* inst : state_.instructionsToRemove) {
+                RemoveInstruction(block, inst);
+            }
+            state_.instructionsToRemove.clear();
+        }
+        break;
+    }
+}
+
+// Erase the instruction at `inst`'s position from the block's instruction
+// list (the C# `block.Instructions.Remove(inst)` identity removal).
+void RemoveInstruction(Block& block, ILInstruction* inst) {
+    for (std::size_t i = 0; i < block.Instructions.size(); i++) {
+        if (block.Instructions[i].get() == inst) {
+            block.RemoveInstructionAt(i);
+            return;
+        }
+    }
+}
+
+bool TransformExpressionTrees::TryConvertExpressionTree(
+    ILInstruction* instruction, ILInstruction* statement) {
+    if (MightBeExpressionTree(instruction, statement)) {
+        ConvertResult result = ConvertLambda(dynamic_cast<Call*>(instruction));
+        if (result.thunk) {
+            std::unique_ptr<ILInstruction> newLambda = result.thunk();
+            auto* function = dynamic_cast<ILFunction*>(newLambda.get());
+            SetExpressionTreeFlag(*function, dynamic_cast<Call&>(*instruction));
+            instruction->ReplaceWith(std::move(newLambda));
+            return true;
+        }
+        return false;
+    }
+    if (auto* block = dynamic_cast<Block*>(instruction);
+        block != nullptr && block->Kind == BlockKind::ControlFlow) {
+        return false;  // don't look into nested blocks
+    }
+    for (int i = 0; i < instruction->ChildCount(); i++) {
+        if (TryConvertExpressionTree(instruction->GetChild(i), statement)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool TransformExpressionTrees::IsExpressionTree(
+    const TypeSystem::IType& delegateType) {
+    auto* pt = dynamic_cast<const TypeSystem::ParameterizedType*>(&delegateType);
+    return pt != nullptr && pt->Namespace() == "System.Linq.Expressions" &&
+           pt->Name() == "Expression" && pt->TypeArguments().size() == 1;
+}
+
+TypeSystem::ITypePtr TransformExpressionTrees::UnwrapExpressionTree(
+    const TypeSystem::IType& delegateType) {
+    auto* pt = dynamic_cast<const TypeSystem::ParameterizedType*>(&delegateType);
+    if (pt != nullptr && pt->Namespace() == "System.Linq.Expressions" &&
+        pt->Name() == "Expression" && pt->TypeArguments().size() == 1) {
+        return pt->TypeArguments()[0];
+    }
+    return nullptr;
+}
+
+void TransformExpressionTrees::SetExpressionTreeFlag(ILFunction& lambda,
+                                                     const Call& call) {
+    if (call.Method == nullptr) return;
+    lambda.Kind = IsExpressionTree(call.Method->ReturnType())
+                      ? ILFunctionKind::ExpressionTree
+                      : ILFunctionKind::Delegate;
+    // The C# `lambda.DelegateType = call.Method.ReturnType` -- the return
+    // type is a subobject of the resolved method, owned by the Call's
+    // IMethod shared_ptr; the aliasing-constructor convention (the
+    // BuildPatternMatch `call->method` precedent).
+    const TypeSystem::IType& returnType = call.Method->ReturnType();
+    lambda.DelegateType = TypeSystem::ITypePtr(call.Method,
+                                               const_cast<TypeSystem::IType*>(&returnType));
+}
+
+bool TransformExpressionTrees::ReadParameters(
+    ILInstruction* initializer,
+    std::vector<std::shared_ptr<const TypeSystem::IParameter>>& parameterList,
+    std::vector<std::shared_ptr<ILVariable>>& parameterVariables) {
+    auto* initializerBlock = dynamic_cast<Block*>(initializer);
+    if (initializerBlock == nullptr) {
+        return IsEmptyParameterList(initializer);
+    }
+    if (initializerBlock->Kind != BlockKind::ArrayInitializer) return false;
+    int i = 0;
+    for (auto& inst : initializerBlock->Instructions) {
+        auto* stobj = dynamic_cast<StObj*>(inst.get());
+        if (stobj == nullptr) continue;
+        if (i >= static_cast<int>(state_.parameters.size())) return false;
+        auto* ldloc = dynamic_cast<LdLoc*>(stobj->Value.get());
+        if (ldloc == nullptr || ldloc->Variable == nullptr) return false;
+        auto it = state_.parameters.find(ldloc->Variable.get());
+        if (it == state_.parameters.end()) return false;
+        // Add parameter variable only once to mapping.
+        if (!state_.parameterMapping.count(ldloc->Variable.get())) {
+            auto param = std::make_shared<ILVariable>(
+                VariableKind::Parameter, it->second.first, i);
+            param->Name = it->second.second;
+            state_.parameterMapping[ldloc->Variable.get()] = param;
+            parameterVariables.push_back(param);
+            parameterList.push_back(std::make_shared<
+                TypeSystem::Implementation::DefaultParameter>(
+                it->second.first, it->second.second));
+            auto storeIt = state_.parameterStores.find(ldloc->Variable.get());
+            if (storeIt != state_.parameterStores.end()) {
+                state_.instructionsToRemove.push_back(storeIt->second);
+            }
+        }
+        i++;
+    }
+    return true;
+}
+
+TransformExpressionTrees::ConvertResult TransformExpressionTrees::ConvertLambda(
+    Call* instruction) {
+    using TypeSystem::IType;
+    if (instruction->Method == nullptr ||
+        instruction->Method->Name() != "Lambda" ||
+        instruction->Arguments.size() != 2) {
+        return {nullptr, nullptr};
+    }
+    auto* functionTypePt =
+        dynamic_cast<const TypeSystem::ParameterizedType*>(&instruction->Method->ReturnType());
+    if (functionTypePt == nullptr ||
+        functionTypePt->Namespace() != "System.Linq.Expressions" ||
+        functionTypePt->Name() != "Expression" ||
+        functionTypePt->TypeArguments().size() != 1) {
+        return {nullptr, nullptr};
+    }
+    std::vector<std::shared_ptr<const TypeSystem::IParameter>> parameterList;
+    std::vector<std::shared_ptr<ILVariable>> parameterVariablesList;
+    if (!ReadParameters(instruction->Arguments[1].get(), parameterList,
+                        parameterVariablesList)) {
+        return {nullptr, nullptr};
+    }
+    auto container = std::make_unique<BlockContainer>();
+    container->StartILOffset = instruction->StartILOffset;
+    container->EndILOffset = instruction->EndILOffset;
+    TypeSystem::ITypePtr functionType = functionTypePt->TypeArguments()[0];
+    TypeSystem::ITypePtr returnType;
+    if (functionType != nullptr) {
+        if (const TypeSystem::IMethod* invoke =
+                TypeSystem::GetDelegateInvokeMethod(*functionType)) {
+            const TypeSystem::IType& rt = invoke->ReturnType();
+            returnType = const_cast<TypeSystem::IType&>(rt).shared_from_this();
+        }
+    }
+    // The C# `new ILFunction(returnType, parameterList,
+    // context.Function.GenericContext, container, ILFunctionKind.ExpressionTree)`:
+    // the port's ILFunction is field-constructed; the GenericContext field
+    // is deferred with the generic-context surface.
+    auto function = std::make_unique<ILFunction>();
+    function->ReturnType = returnType;
+    function->Parameters.clear();
+    function->Parameters.reserve(parameterList.size());
+    for (const auto& parameter : parameterList)
+        function->Parameters.push_back(parameter.get());
+    function->Body = std::move(container);
+    function->Kind = IsExpressionTree(*functionType)
+                         ? ILFunctionKind::ExpressionTree
+                         : ILFunctionKind::Delegate;
+    function->DelegateType = functionType;
+    for (auto& v : parameterVariablesList) {
+        function->Variables.push_back(v);
+    }
+    function->StartILOffset = instruction->StartILOffset;
+    function->EndILOffset = instruction->EndILOffset;
+    ILFunction* functionRaw = function.get();
+    BlockContainer* containerRaw = function->Body.get();
+    state_.lambdaStack.push_back(functionRaw);
+    ConvertResult body =
+        ConvertInstruction(instruction->Arguments[0].get());
+    state_.lambdaStack.pop_back();
+    if (!body.thunk) {
+        return {nullptr, nullptr};
+    }
+    TypeSystem::ITypePtr delegateType = function->DelegateType;
+    // The C# deferred BuildFunction local function: run the converted body
+    // thunk, place `leave(container, body)` in a fresh entry block, and
+    // replace the remaining loads of each parameter-reference variable with
+    // loads of the new parameter variable. The C# walks
+    // `mapping.Key.LoadInstructions` (the whole-method load list); the port's
+    // ILVariable does not track load lists and that replacement only matters
+    // when a parameter-reference variable is also loaded OUTSIDE the
+    // converted lambda call (atypical), so the outside-load sweep is deferred
+    // with a load-list surface on ILVariable.
+    // The BuildFunction thunk: the port's ConvertResult thunk type is a
+    // copy-constructible std::function (the C# Func<ILInstruction> is
+    // delegate-class, move semantics free), so the owned ILFunction travels
+    // through a shared holder; the thunk runs exactly once and moves it out.
+    auto functionHolder =
+        std::make_shared<std::unique_ptr<ILFunction>>(std::move(function));
+    return {[this, functionHolder, containerRaw,
+             body = std::move(body.thunk)]() mutable
+                -> std::unique_ptr<ILInstruction> {
+                state_.lambdaStack.push_back(functionHolder->get());
+                std::unique_ptr<ILInstruction> convertedBody = body();
+                state_.lambdaStack.pop_back();
+                // The C# asserts the stack types agree; the port derives the
+                // container's expected type from the converted body (the C#
+                // `container.ExpectedResultType = convertedBody.ResultType`).
+                if (convertedBody) {
+                    containerRaw->ExpectedResultType =
+                        convertedBody->ResultType();
+                }
+                auto entry = std::make_unique<Block>();
+                entry->Kind = BlockKind::ControlFlow;
+                entry->Add(std::make_unique<Leave>(containerRaw,
+                                                   std::move(convertedBody)));
+                containerRaw->Blocks.push_back(std::move(entry));
+                std::unique_ptr<ILFunction> result = std::move(*functionHolder);
+                return result;
+            },
+            delegateType};
+}
+
+
+// Match a Box node (the C# MatchBox(out arg, out boxType) bare match; the
+// PatternMatchingTransform file-local probe re-declared here).
+bool MatchBox(ILInstruction* inst, ILInstruction*& argument,
+              TypeSystem::ITypePtr& type) {
+    auto* box = dynamic_cast<Box*>(inst);
+    if (box == nullptr) return false;
+    argument = box->Argument.get();
+    type = box->Type;
+    return true;
+}
+
+// The C# `context.TypeSystem.FindType(code)`: the non-null const IType& is
+// wrapped in a non-owning shared_ptr (the compilation-owned-reference
+// convention; the aliasing ctor keeps the ICompilation alive). Returns null
+// when the transform context carries no type system (the degenerate
+// construction the tests build).
+namespace {
+TypeSystem::ITypePtr FindType(TypeSystem::ICompilation* compilation,
+                              TypeSystem::KnownTypeCode code) {
+    if (compilation == nullptr) return nullptr;
+    // The IType base derives enable_shared_from_this (the compilation-owned
+    // reference convention; the ExpressionBuilder constant path precedent).
+    return const_cast<TypeSystem::IType&>(compilation->FindType(code))
+        .shared_from_this();
+}
+} // namespace
+
+TransformExpressionTrees::ConvertResult
+TransformExpressionTrees::ConvertConstant(Call* invocation) {
+    ILInstruction* value = nullptr;
+    TypeSystem::ITypePtr type;
+    if (!MatchConstantCall(invocation, value, type)) {
+        return {nullptr, nullptr};
+    }
+    ILInstruction* boxArg = nullptr;
+    TypeSystem::ITypePtr boxType;
+    if (value != nullptr && MatchBox(value, boxArg, boxType)) {
+        // The C# `boxType.Kind == TypeKind.Enum ||
+        // boxType.IsKnownType(Boolean)` arm builds an ExpressionTreeCast
+        // over the unboxed argument (the C# `ConvertValue(arg, invocation)`).
+        if (boxType != nullptr &&
+            (boxType->Kind() == TypeSystem::TypeKind::Enum ||
+             TypeSystem::IsKnownType(
+                 *boxType, TypeSystem::KnownTypeCode::Boolean))) {
+            return {[boxArg, invocation, boxType, this]() mutable
+                        -> std::unique_ptr<ILInstruction> {
+                return std::make_unique<ExpressionTreeCast>(
+                    boxType, ConvertValue(boxArg, invocation), false);
+            },
+                    boxType};
+        }
+        return {[value, invocation, this]() -> std::unique_ptr<ILInstruction> {
+                    return ConvertValue(value, invocation);
+                },
+                type};
+    }
+    return {[value, invocation, this]() -> std::unique_ptr<ILInstruction> {
+                return ConvertValue(value, invocation);
+            },
+            type};
+}
+
+
+
+bool TransformExpressionTrees::MatchConstantCall(ILInstruction* inst,
+                                                 ILInstruction*& value,
+                                                 TypeSystem::ITypePtr& type) {
+    value = nullptr;
+    type = nullptr;
+    auto* call = dynamic_cast<Call*>(inst);
+    if (call == nullptr || call->IsNewObj || call->Method == nullptr ||
+        call->Method->Namespace() != "System.Linq.Expressions" ||
+        call->Method->Name() != "Constant") {
+        return false;
+    }
+    value = call->Arguments[0].get();
+    if (call->Arguments.size() == 2) {
+        return MatchGetTypeFromHandle(call->Arguments[1].get(), type);
+    }
+    // The C# 1-arg form: infer the type from the constant node.
+    const TypeSystem::ICompilation* compilation = context_->Base.TypeSystem;
+    if (dynamic_cast<LdNull*>(value) != nullptr) {
+        type = TypeSystem::NullType();
+    } else if (dynamic_cast<LdStr*>(value) != nullptr) {
+        type = FindType(context_->Base.TypeSystem, TypeSystem::KnownTypeCode::String);
+    } else if (dynamic_cast<LdcF4*>(value) != nullptr) {
+        type = FindType(context_->Base.TypeSystem, TypeSystem::KnownTypeCode::Single);
+    } else if (dynamic_cast<LdcF8*>(value) != nullptr) {
+        type = FindType(context_->Base.TypeSystem, TypeSystem::KnownTypeCode::Double);
+    } else if (dynamic_cast<LdcI4*>(value) != nullptr) {
+        type = FindType(context_->Base.TypeSystem, TypeSystem::KnownTypeCode::Int32);
+    } else if (dynamic_cast<LdcI8*>(value) != nullptr) {
+        type = FindType(context_->Base.TypeSystem, TypeSystem::KnownTypeCode::Int64);
+    } else if (compilation != nullptr) {
+        type = InferType(*value, compilation);
+    }
+    return type != nullptr;
+}
+
+std::unique_ptr<ILInstruction> TransformExpressionTrees::ConvertValue(
+    ILInstruction* value, ILInstruction* context) {
+    auto* ldloc = dynamic_cast<LdLoc*>(value);
+    if (ldloc != nullptr && ldloc->Variable != nullptr) {
+        // The C# `IsExpressionTreeParameter` check (the ParameterExpression
+        // type); the closure-reference arm is deferred with
+        // TransformDisplayClassUsage.IsPotentialClosure.
+        const auto& variableType = ldloc->Variable->Type;
+        bool isExpressionTreeParameter =
+            variableType != nullptr &&
+            variableType->Namespace() == "System.Linq.Expressions" &&
+            variableType->Name() == "ParameterExpression";
+        if (isExpressionTreeParameter) {
+            auto it = state_.parameterMapping.find(ldloc->Variable.get());
+            if (it == state_.parameterMapping.end()) {
+                return ldloc->Clone();
+            }
+            return std::make_unique<LdLoc>(it->second);
+        }
+    }
+    return value->Clone();
+}
+
+TransformExpressionTrees::ConvertResult TransformExpressionTrees::ConvertQuote(
+    Call* invocation) {
+    if (invocation->Arguments.size() != 1) {
+        return {nullptr, nullptr};
+    }
+    ILInstruction* argument = invocation->Arguments[0].get();
+    if (auto* function = dynamic_cast<ILFunction*>(argument)) {
+        // The C# `(() => function, function.DelegateType)` -- an already
+        // converted nested lambda is returned as-is.
+        ILFunction* raw = function;
+        return {[raw]() -> std::unique_ptr<ILInstruction> {
+                    // The C# returns the existing ILFunction node; the port's
+                    // thunk contract (a fresh unique_ptr) cannot copy it, so
+                    // the caller's ConvertLambda pass-through shape is
+                    // deferred with the Quote arm (the C# identity-thunk is
+                    // only reachable for nested Quote(lambda) trees).
+                    (void)raw;
+                    return nullptr;
+                },
+                function->DelegateType};
+    }
+    ConvertResult converted = ConvertInstruction(argument);
+    if (!converted.thunk) {
+        return {nullptr, nullptr};
+    }
+    return {[argument, converted = std::move(converted.thunk)]() mutable
+                -> std::unique_ptr<ILInstruction> {
+                std::unique_ptr<ILInstruction> f = converted();
+                if (f != nullptr) {
+                    auto* lambda = dynamic_cast<ILFunction*>(f.get());
+                    auto* call = dynamic_cast<Call*>(argument);
+                    if (lambda != nullptr && call != nullptr) {
+                        SetExpressionTreeFlag(*lambda, *call);
+                    }
+                }
+                return f;
+            },
+            converted.type};
+}
+
+TransformExpressionTrees::ConvertResult
+TransformExpressionTrees::ConvertInstruction(ILInstruction* instruction,
+                                             TypeSystem::IType* typeHint) {
+    (void)typeHint;  // the conv-sign arm is deferred with the numeric arms
+    auto* invocation = dynamic_cast<Call*>(instruction);
+    if (invocation != nullptr) {
+        TypeSystem::ITypePtr declaring = invocation->Method->DeclaringType();
+        if (declaring == nullptr ||
+            !(declaring->Namespace() == "System.Linq.Expressions" &&
+              declaring->Name() == "Expression")) {
+            return {nullptr, nullptr};
+        }
+        const std::string& name = invocation->Method->Name();
+        if (name == "Constant") {
+            return ConvertConstant(invocation);
+        }
+        if (name == "Lambda") {
+            return ConvertLambda(invocation);
+        }
+        if (name == "Quote") {
+            return ConvertQuote(invocation);
+        }
+        if (name == "Call") {
+            return ConvertCall(invocation);
+        }
+        if (name == "Field") {
+            return ConvertField(invocation, typeHint);
+        }
+        if (name == "TypeAs") {
+            return ConvertTypeAs(invocation);
+        }
+        if (name == "TypeIs") {
+            return ConvertTypeIs(invocation);
+        }
+        // The binary-numeric operator names (the C# switch's Add/And/Divide/
+        // ExclusiveOr/LeftShift/Modulo/Multiply/Or/RightShift/Subtract arm
+        // block) -- the Checked variants set the checked flag.
+        if (name == "Add") {
+            return ConvertBinaryNumericOperator(
+                invocation, BinaryNumericOperator::Add, false);
+        }
+        if (name == "AddChecked") {
+            return ConvertBinaryNumericOperator(
+                invocation, BinaryNumericOperator::Add, true);
+        }
+        if (name == "And") {
+            return ConvertBinaryNumericOperator(
+                invocation, BinaryNumericOperator::BitAnd, false);
+        }
+        if (name == "Divide") {
+            return ConvertBinaryNumericOperator(
+                invocation, BinaryNumericOperator::Div, false);
+        }
+        if (name == "ExclusiveOr") {
+            return ConvertBinaryNumericOperator(
+                invocation, BinaryNumericOperator::BitXor, false);
+        }
+        if (name == "LeftShift") {
+            return ConvertBinaryNumericOperator(
+                invocation, BinaryNumericOperator::ShiftLeft, false);
+        }
+        if (name == "Modulo") {
+            return ConvertBinaryNumericOperator(
+                invocation, BinaryNumericOperator::Rem, false);
+        }
+        if (name == "Multiply") {
+            return ConvertBinaryNumericOperator(
+                invocation, BinaryNumericOperator::Mul, false);
+        }
+        if (name == "MultiplyChecked") {
+            return ConvertBinaryNumericOperator(
+                invocation, BinaryNumericOperator::Mul, true);
+        }
+        if (name == "Or") {
+            return ConvertBinaryNumericOperator(
+                invocation, BinaryNumericOperator::BitOr, false);
+        }
+        if (name == "RightShift") {
+            return ConvertBinaryNumericOperator(
+                invocation, BinaryNumericOperator::ShiftRight, false);
+        }
+        if (name == "Subtract") {
+            return ConvertBinaryNumericOperator(
+                invocation, BinaryNumericOperator::Sub, false);
+        }
+        if (name == "SubtractChecked") {
+            return ConvertBinaryNumericOperator(
+                invocation, BinaryNumericOperator::Sub, true);
+        }
+        if (name == "Not" || name == "OnesComplement") {
+            return ConvertNotOperator(invocation);
+        }
+        if (name == "ArrayLength") {
+            return ConvertArrayLength(invocation);
+        }
+        if (name == "Condition") {
+            return ConvertCondition(invocation);
+        }
+        if (name == "Coalesce") {
+            return ConvertCoalesce(invocation);
+        }
+        if (name == "Equal") {
+            return ConvertComparison(invocation, ComparisonKind::Equality);
+        }
+        if (name == "NotEqual") {
+            return ConvertComparison(invocation, ComparisonKind::Inequality);
+        }
+        if (name == "GreaterThan") {
+            return ConvertComparison(invocation, ComparisonKind::GreaterThan);
+        }
+        if (name == "GreaterThanOrEqual") {
+            return ConvertComparison(invocation,
+                                     ComparisonKind::GreaterThanOrEqual);
+        }
+        if (name == "LessThan") {
+            return ConvertComparison(invocation, ComparisonKind::LessThan);
+        }
+        if (name == "LessThanOrEqual") {
+            return ConvertComparison(invocation,
+                                     ComparisonKind::LessThanOrEqual);
+        }
+        if (name == "Convert") {
+            return ConvertCast(invocation, false);
+        }
+        if (name == "ConvertChecked") {
+            return ConvertCast(invocation, true);
+        }
+        if (name == "AndAlso") {
+            return ConvertLogicOperator(invocation, true);
+        }
+        if (name == "OrElse") {
+            return ConvertLogicOperator(invocation, false);
+        }
+        if (name == "Invoke") {
+            return ConvertInvoke(invocation);
+        }
+        if (name == "Negate") {
+            return ConvertUnaryNumericOperator(
+                invocation, BinaryNumericOperator::Sub, false);
+        }
+        if (name == "NegateChecked") {
+            return ConvertUnaryNumericOperator(
+                invocation, BinaryNumericOperator::Sub, true);
+        }
+        if (name == "New") {
+            return ConvertNewObject(invocation);
+        }
+        return {nullptr, nullptr};
+    }
+    if (auto* ldloc = dynamic_cast<LdLoc*>(instruction)) {
+        if (ldloc->Variable != nullptr) {
+            const auto& variableType = ldloc->Variable->Type;
+            bool isExpressionTreeParameter =
+                variableType != nullptr &&
+                variableType->Namespace() == "System.Linq.Expressions" &&
+                variableType->Name() == "ParameterExpression";
+            if (isExpressionTreeParameter) {
+                auto it = state_.parameterMapping.find(ldloc->Variable.get());
+                if (it != state_.parameterMapping.end()) {
+                    return {[v = it->second]() -> std::unique_ptr<ILInstruction> {
+                                return std::make_unique<LdLoc>(v);
+                            },
+                            it->second->Type};
+                }
+            }
+        }
+        return {nullptr, nullptr};
+    }
+    return {nullptr, nullptr};
+}
+
+
+
+// ---- The ConvertCoalesce / ConvertComparison arms ----
+
+// The C# `(Func<ILInstruction>, IType) ConvertCoalesce(CallInstruction
+// invocation)` (TransformExpressionTrees.cs line 729): the `a ?? b`
+// expression-tree node. The nullable-fallback classification consults
+// CSharpConversions.ImplicitConversion -- without a type system (no
+// conversions) the fallback-type arm degenerates to the true side's type
+// with Kind Ref.
+TransformExpressionTrees::ConvertResult
+TransformExpressionTrees::ConvertCoalesce(Call* invocation) {
+    if (invocation->Arguments.size() != 2)
+        return {nullptr, nullptr};
+    ConvertResult trueInst =
+        ConvertInstruction(invocation->Arguments[0].get());
+    if (!trueInst.thunk)
+        return {nullptr, nullptr};
+    ConvertResult fallbackInst =
+        ConvertInstruction(invocation->Arguments[1].get());
+    if (!fallbackInst.thunk)
+        return {nullptr, nullptr};
+    NullCoalescingKind kind = NullCoalescingKind::Ref;
+    // The C# `NullableType.GetUnderlyingType(trueInstType)` -- a reference
+    // over the converted result's type; the shared handle keeps the
+    // underlying type alive for the thunk's stack-type read.
+    const TypeSystem::IType* trueInstTypeNonNullable = trueInst.type.get();
+    if (trueInstTypeNonNullable != nullptr)
+        trueInstTypeNonNullable =
+            &TypeSystem::GetUnderlyingType(*trueInstTypeNonNullable);
+    TypeSystem::ITypePtr targetType;
+    if (trueInst.type != nullptr
+        && TypeSystem::IsNullable(*trueInst.type) && conversions_ != nullptr
+        && trueInstTypeNonNullable != nullptr
+        && fallbackInst.type != nullptr
+        && conversions_->ImplicitConversion(*fallbackInst.type,
+                                            const_cast<TypeSystem::IType&>(
+                                                *trueInstTypeNonNullable))
+               ->IsValid()) {
+        targetType = const_cast<TypeSystem::IType*>(
+                         trueInstTypeNonNullable)
+                         ->shared_from_this();
+        kind = fallbackInst.type != nullptr
+                       && TypeSystem::IsNullable(*fallbackInst.type)
+                   ? NullCoalescingKind::Nullable
+                   : NullCoalescingKind::NullableWithValueFallback;
+    } else if (conversions_ != nullptr && fallbackInst.type != nullptr
+               && trueInst.type != nullptr
+               && conversions_->ImplicitConversion(*fallbackInst.type,
+                                                  *trueInst.type)
+                      ->IsValid()) {
+        targetType = trueInst.type;
+    } else {
+        targetType = fallbackInst.type;
+    }
+    StackType underlyingResultType =
+        trueInstTypeNonNullable != nullptr
+            ? TypeSystem::GetStackType(*trueInstTypeNonNullable)
+            : StackType::Unknown;
+    return {[trueThunk = std::move(trueInst.thunk),
+             fallbackThunk = std::move(fallbackInst.thunk), kind,
+             underlyingResultType]() mutable
+                -> std::unique_ptr<ILInstruction> {
+            auto coalesce = std::make_unique<NullCoalescingInstruction>(
+                kind, trueThunk(), fallbackThunk());
+            coalesce->UnderlyingResultType = underlyingResultType;
+            return coalesce;
+        },
+            std::move(targetType)};
+}
+
+// The C# `(Func<ILInstruction>, IType) ConvertComparison(CallInstruction
+// invocation, ComparisonKind kind)` (line 758): the comparison
+// expression-tree node. The 4-arg user-defined lifted form (the
+// isLiftedToNull flag + the method handle) lifts through
+// CSharpOperators.LiftUserDefinedOperator; the 2-arg form first asks the
+// resolver for a user-defined operator, then the String
+// op_Equality/op_Inequality pair, and falls back to the builtin Comp (the
+// nullable lifting when the left operand is nullable).
+TransformExpressionTrees::ConvertResult
+TransformExpressionTrees::ConvertComparison(Call* invocation,
+                                            ComparisonKind kind) {
+    if (invocation->Arguments.size() < 2)
+        return {nullptr, nullptr};
+    ConvertResult left = ConvertInstruction(invocation->Arguments[0].get());
+    if (!left.thunk)
+        return {nullptr, nullptr};
+    ConvertResult right = ConvertInstruction(invocation->Arguments[1].get());
+    if (!right.thunk)
+        return {nullptr, nullptr};
+    if (invocation->Arguments.size() == 4) {
+        // The C# 4-arg lifted form:
+        // `invocation.Arguments[2].MatchLdcI4(out var isLiftedToNull)`.
+        auto* isLiftedToNullInst =
+            dynamic_cast<LdcI4*>(invocation->Arguments[2].get());
+        std::shared_ptr<const TypeSystem::IMethod> method;
+        if (isLiftedToNullInst == nullptr
+            || !MatchGetMethodFromHandle(invocation->Arguments[3].get(),
+                                         method)
+            || method == nullptr) {
+            return {nullptr, nullptr};
+        }
+        bool isLifted = left.type != nullptr
+                           && TypeSystem::IsNullable(*left.type);
+        std::shared_ptr<TypeSystem::IMethod> liftedMethod;
+        if (isLifted) {
+            liftedMethod =
+                ::ILSpy::Decompiler::CSharp::Resolver::CSharpOperators::
+                    LiftUserDefinedOperator(
+                        std::const_pointer_cast<TypeSystem::IMethod>(method));
+            if (liftedMethod == nullptr)
+                return {nullptr, nullptr};
+        }
+        std::int32_t isLiftedToNull = isLiftedToNullInst->Value;
+        const TypeSystem::IMethod* returnSource =
+            liftedMethod != nullptr ? liftedMethod.get() : method.get();
+        TypeSystem::ITypePtr returnType =
+            const_cast<TypeSystem::IType&>(returnSource->ReturnType())
+                .shared_from_this();
+        if (isLiftedToNull != 0) {
+            // The C# `NullableType.Create(method.Compilation,
+            // method.ReturnType)`: the nullable wrapper over the return.
+            if (context_ == nullptr || context_->Base.TypeSystem == nullptr)
+                return {nullptr, nullptr};
+            returnType = TypeSystem::Create(*context_->Base.TypeSystem,
+                                            *returnType);
+        }
+        return {[leftThunk = std::move(left.thunk),
+                 rightThunk = std::move(right.thunk),
+                 callMethod = liftedMethod != nullptr
+                                  ? liftedMethod
+                                  : std::const_pointer_cast<
+                                        TypeSystem::IMethod>(method)]() mutable
+                    -> std::unique_ptr<ILInstruction> {
+            auto call =
+                std::make_unique<Call>(std::move(callMethod));
+            call->Arguments.push_back(leftThunk());
+            call->Arguments.push_back(rightThunk());
+            return call;
+        },
+                std::move(returnType)};
+    }
+    // The C# 2-arg form: the resolver's user-defined operator.
+    if (resolver_ != nullptr) {
+        auto rr = std::dynamic_pointer_cast<
+            ::ILSpy::Decompiler::Semantics::OperatorResolveResult>(
+            resolver_->ResolveBinaryOperator(
+                ::ILSpy::Decompiler::CSharp::ToBinaryOperatorType(kind),
+                std::make_shared<
+                    ::ILSpy::Decompiler::Semantics::ResolveResult>(left.type),
+                std::make_shared<
+                    ::ILSpy::Decompiler::Semantics::ResolveResult>(
+                    right.type)));
+        if (rr != nullptr && !rr->IsError()
+            && rr->UserDefinedOperatorMethod() != nullptr) {
+            // The user-defined operator method, aliased onto the
+            // type-system-owned handle (the AliasMethod borrow; the module's
+            // method cache -- a stub registry in the tests -- keeps the
+            // instance alive past the converted tree, the D515 convention).
+            std::shared_ptr<TypeSystem::IMethod> callMethod =
+                TypeSystem::AliasMethod(rr->UserDefinedOperatorMethod());
+            // The C# `rr.UserDefinedOperatorMethod.ReturnType` (the
+            // shared_from_this recovery of the owning handle, the D529
+            // convention).
+            TypeSystem::ITypePtr returnType =
+                const_cast<TypeSystem::IType&>(
+                    rr->UserDefinedOperatorMethod()->ReturnType())
+                    .shared_from_this();
+            return {[leftThunk = std::move(left.thunk),
+                     rightThunk = std::move(right.thunk),
+                     callMethod = std::move(callMethod)]() mutable
+                        -> std::unique_ptr<ILInstruction> {
+                auto call = std::make_unique<Call>(std::move(callMethod));
+                call->Arguments.push_back(leftThunk());
+                call->Arguments.push_back(rightThunk());
+                return call;
+            },
+                    std::move(returnType)};
+        }
+    }
+    // The C# String op_Equality/op_Inequality pair: the String/String
+    // comparison operators are the ONE user-defined form the C# resolves
+    // without the resolver (the member scan over the operand type).
+    if (TypeSystem::IsKnownType(*left.type, TypeSystem::KnownTypeCode::String)
+        && TypeSystem::IsKnownType(*right.type,
+                                   TypeSystem::KnownTypeCode::String)) {
+        if (kind == ComparisonKind::Equality
+            || kind == ComparisonKind::Inequality) {
+            const std::string operatorName =
+                kind == ComparisonKind::Equality ? "op_Equality"
+                                                : "op_Inequality";
+            // The C# `leftType.GetMethods(m => m.IsOperator
+            // && m.Name == <op> && m.Parameters.Count == 2)
+            // .FirstOrDefault(m => <both params String>)`.
+            const TypeSystem::IMethod* operatorMethod = nullptr;
+            for (const TypeSystem::IMethod* m :
+                 left.type->GetMethods(
+                     [&operatorName](const TypeSystem::IMethod* m) {
+                         return m->IsOperator() && m->Name() == operatorName
+                             && m->Parameters().size() == 2;
+                     })) {
+                if (TypeSystem::IsKnownType(m->Parameters()[0]->Type(),
+                                            TypeSystem::KnownTypeCode::String)
+                    && TypeSystem::IsKnownType(
+                        m->Parameters()[1]->Type(),
+                        TypeSystem::KnownTypeCode::String)) {
+                    operatorMethod = m;
+                    break;
+                }
+            }
+            if (operatorMethod == nullptr)
+                return {nullptr, nullptr};
+            std::shared_ptr<TypeSystem::IMethod> callMethod =
+                TypeSystem::AliasMethod(operatorMethod);
+            // The C# `operatorMethod.ReturnType` (the D529 handle recovery).
+            TypeSystem::ITypePtr returnType =
+                const_cast<TypeSystem::IType&>(operatorMethod->ReturnType())
+                    .shared_from_this();
+            return {[leftThunk = std::move(left.thunk),
+                     rightThunk = std::move(right.thunk),
+                     callMethod = std::move(callMethod)]() mutable
+                        -> std::unique_ptr<ILInstruction> {
+                auto call = std::make_unique<Call>(std::move(callMethod));
+                call->Arguments.push_back(leftThunk());
+                call->Arguments.push_back(rightThunk());
+                return call;
+            },
+                    std::move(returnType)};
+        }
+        return {nullptr, nullptr};
+    }
+    // The C# builtin fallback: the Comp with the nullable lifting over the
+    // left operand's underlying type, the result Boolean.
+    TypeSystem::ITypePtr resultType;
+    if (context_ != nullptr && context_->Base.TypeSystem != nullptr) {
+        resultType = FindType(context_->Base.TypeSystem,
+                             TypeSystem::KnownTypeCode::Boolean);
+    }
+    ComparisonLiftingKind lifting =
+        left.type != nullptr && TypeSystem::IsNullable(*left.type)
+            ? ComparisonLiftingKind::CSharp
+            : ComparisonLiftingKind::None;
+    const TypeSystem::IType* utype =
+        left.type != nullptr
+            ? &TypeSystem::GetUnderlyingType(*left.type)
+            : nullptr;
+    StackType inputType = utype != nullptr
+                              ? TypeSystem::GetStackType(*utype)
+                              : StackType::Unknown;
+    TypeSystem::Sign sign = utype != nullptr
+                                ? TypeSystem::GetSign(utype)
+                                : TypeSystem::Sign::None;
+    return {[leftThunk = std::move(left.thunk),
+             rightThunk = std::move(right.thunk), kind, lifting, inputType,
+             sign]() mutable -> std::unique_ptr<ILInstruction> {
+        return std::make_unique<Comp>(leftThunk(), rightThunk(), kind,
+                                      lifting, inputType, sign);
+    },
+            std::move(resultType)};
+}
+
+// ---- The ConvertCall arm (the C# `case "Call"`) ----
+
+// The FullNameIs helper (defined below; the ns/type/name declaring-type
+// pair check the GetMethodFromHandle match consults).
+bool FullNameIs(const TypeSystem::IMethod* method, const std::string& ns,
+                const std::string& typeName, const std::string& name);
+
+// The C# `static bool MatchFromHandleParameterList(CallInstruction call,
+// out IMember member)`: the ldmembertoken [+ ldtoken type] argument shapes.
+bool TransformExpressionTrees::MatchFromHandleParameterList(
+    Call* call,
+    std::shared_ptr<const TypeSystem::IMember>& member) {
+    member = nullptr;
+    if (call == nullptr || call->Arguments.empty() ||
+        call->Arguments.size() > 2) {
+        return false;
+    }
+    auto* token = dynamic_cast<LdMemberToken*>(call->Arguments[0].get());
+    if (token == nullptr || token->Member == nullptr) return false;
+    if (call->Arguments.size() == 2) {
+        if (dynamic_cast<LdTypeToken*>(call->Arguments[1].get()) == nullptr) {
+            return false;
+        }
+    }
+    member = token->Member;
+    return true;
+}
+
+// The C# `bool MatchGetMethodFromHandle(ILInstruction inst, out IMember
+// member)` (TransformExpressionTrees.cs): the castclass MethodInfo(
+// MethodBase.GetMethodFromHandle(ldmembertoken member[, ldtoken type]))
+// shape. Static (no member state).
+bool TransformExpressionTrees::MatchGetMethodFromHandle(
+    ILInstruction* inst,
+    std::shared_ptr<const TypeSystem::IMethod>& member) {
+    member = nullptr;
+    auto* cast = dynamic_cast<CastClass*>(inst);
+    if (cast == nullptr) return false;
+    // The C# `type.FullName != "System.Reflection.MethodInfo"` -- the
+    // namespace/name pair (the port's SimpleType stand-in).
+    if (cast->Type == nullptr ||
+        cast->Type->Namespace() != "System.Reflection" ||
+        cast->Type->Name() != "MethodInfo") {
+        return false;
+    }
+    auto* call = dynamic_cast<Call*>(cast->Argument.get());
+    if (call == nullptr || call->IsNewObj || call->Method == nullptr ||
+        call->Arguments.empty() || call->Arguments.size() > 2) {
+        return false;
+    }
+    if (!FullNameIs(call->Method.get(), "System.Reflection", "MethodBase",
+                    "GetMethodFromHandle")) {
+        return false;
+    }
+    std::shared_ptr<const TypeSystem::IMember> tokenMember;
+    if (!MatchFromHandleParameterList(call, tokenMember)) return false;
+    member = std::dynamic_pointer_cast<const TypeSystem::IMethod>(tokenMember);
+    return member != nullptr;
+}
+
+// The C# `bool MatchArgumentList(ILInstruction inst, out
+// IList<ILInstruction> arguments)`: the ArrayInitializer block form
+// (StObj(LdElema(ldc.i4 i), value) per slot; non-StObj items skipped, per
+// the C# OfType<StObj>()) or the IsEmptyParameterList form. The returned
+// pointers borrow the tree (the C# IList view); the thunks re-build at
+// materialization time.
+bool TransformExpressionTrees::MatchArgumentList(
+    ILInstruction* inst, std::vector<ILInstruction*>& arguments) {
+    arguments.clear();
+    auto* block = dynamic_cast<Block*>(inst);
+    if (block == nullptr || block->Kind != BlockKind::ArrayInitializer) {
+        return IsEmptyParameterList(inst);
+    }
+    int i = 0;
+    for (auto& item : block->Instructions) {
+        auto* stobj = dynamic_cast<StObj*>(item.get());
+        if (stobj == nullptr) continue;
+        auto* ldelema = dynamic_cast<LdElema*>(stobj->Target.get());
+        if (ldelema == nullptr) return false;
+        if (ldelema->Indices.size() != 1) return false;
+        auto* index = dynamic_cast<LdcI4*>(ldelema->Indices[0].get());
+        if (index == nullptr || index->Value != i) return false;
+        arguments.push_back(stobj->Value.get());
+        i++;
+    }
+    return true;
+}
+
+// ---- The ConvertTypeAs / ConvertTypeIs arms ----
+
+// The C# `(Func<ILInstruction>, IType) ConvertTypeAs(CallInstruction
+// invocation)` -- the `case "TypeAs"` arm (TransformExpressionTrees.cs line
+// 1289). The converted operand is a thunk (the C# Func); the isinst node
+// materializes in BuildTypeAs. The ECMA-335 III.4.6 rule: a Nullable<T>
+// typeTok is interpreted as boxed T, so the isinst is followed by
+// `unbox.any(T, ...)`.
+TransformExpressionTrees::ConvertResult TransformExpressionTrees::ConvertTypeAs(
+    Call* invocation) {
+    if (invocation == nullptr || invocation->Arguments.size() != 2) {
+        return {nullptr, nullptr};
+    }
+    ConvertResult converted =
+        ConvertInstruction(invocation->Arguments[0].get());
+    if (!converted.thunk) return {nullptr, nullptr};
+    TypeSystem::ITypePtr type;
+    if (!MatchGetTypeFromHandle(invocation->Arguments[1].get(), type)) {
+        return {nullptr, nullptr};
+    }
+    return {[converted = std::move(converted.thunk), type]() mutable
+                -> std::unique_ptr<ILInstruction> {
+        std::unique_ptr<ILInstruction> inst =
+            std::make_unique<IsInst>(type, converted());
+        // The C# `if (type.IsKnownType(KnownTypeCode.NullableOfT))`.
+        if (type != nullptr && TypeSystem::IsKnownType(
+                                   *type, TypeSystem::KnownTypeCode::NullableOfT)) {
+            inst = std::make_unique<UnboxAny>(type, std::move(inst));
+        }
+        return inst;
+    },
+            std::move(type)};
+}
+
+// The C# `(Func<ILInstruction>, IType) ConvertTypeIs(CallInstruction
+// invocation)` -- the `case "TypeIs"` arm (line 1305): `x is T` becomes
+// comp(isinst(operand, T) != ldnull); the result type is Boolean.
+TransformExpressionTrees::ConvertResult TransformExpressionTrees::ConvertTypeIs(
+    Call* invocation) {
+    if (invocation == nullptr || invocation->Arguments.size() != 2) {
+        return {nullptr, nullptr};
+    }
+    ConvertResult converted =
+        ConvertInstruction(invocation->Arguments[0].get());
+    if (!converted.thunk) return {nullptr, nullptr};
+    TypeSystem::ITypePtr type;
+    if (!MatchGetTypeFromHandle(invocation->Arguments[1].get(), type)) {
+        return {nullptr, nullptr};
+    }
+    // The C# `context.TypeSystem.FindType(KnownTypeCode.Boolean)` -- the
+    // port's file-local FindType helper; a context without a type system
+    // cannot resolve it, so the arm bails (the C# always resolves Boolean).
+    TypeSystem::ITypePtr resultType =
+        FindType(context_ != nullptr ? context_->Base.TypeSystem : nullptr,
+                 TypeSystem::KnownTypeCode::Boolean);
+    if (!resultType) {
+        return {nullptr, nullptr};
+    }
+    return {[converted = std::move(converted.thunk), type]() mutable
+                -> std::unique_ptr<ILInstruction> {
+        auto isinst = std::make_unique<IsInst>(type, converted());
+        return std::make_unique<Comp>(
+            std::move(isinst), std::make_unique<LdNull>(),
+            ComparisonKind::Inequality, TypeSystem::Sign::None);
+    },
+            std::move(resultType)};
+}
+
+// ---- The ConvertCast / ConvertNotOperator / ConvertBinaryNumericOperator /
+// ---- ConvertArrayLength / ConvertCondition arms ----
+
+// The C# `(Func<ILInstruction>, IType) ConvertCast(CallInstruction invocation,
+// bool isChecked)` (line 523): the target type rides the handle first (the
+// C# matches it BEFORE converting the operand), the operand converts through
+// ConvertInstruction, and the small-integer-to-Int32 passthrough elides the
+// cast node. Everything else wraps in an ExpressionTreeCast.
+TransformExpressionTrees::ConvertResult TransformExpressionTrees::ConvertCast(
+    Call* invocation, bool isChecked) {
+    if (invocation == nullptr || invocation->Arguments.size() < 2) {
+        return {nullptr, nullptr};
+    }
+    TypeSystem::ITypePtr targetType;
+    if (!MatchGetTypeFromHandle(invocation->Arguments[1].get(), targetType)) {
+        return {nullptr, nullptr};
+    }
+    ConvertResult converted =
+        ConvertInstruction(invocation->Arguments[0].get());
+    if (!converted.thunk) return {nullptr, nullptr};
+    // The C# `exprType.IsSmallIntegerType() &&
+    // targetType.IsKnownType(KnownTypeCode.Int32)`: the operand passes
+    // through unchanged (the IL's small-int loads widen naturally).
+    if (converted.type != nullptr &&
+        TypeSystem::IsSmallIntegerType(converted.type.get()) &&
+        TypeSystem::IsKnownType(*targetType, TypeSystem::KnownTypeCode::Int32)) {
+        return {std::move(converted.thunk), std::move(targetType)};
+    }
+    return {[converted = std::move(converted.thunk), targetType, isChecked]() mutable
+                -> std::unique_ptr<ILInstruction> {
+        return std::make_unique<ExpressionTreeCast>(targetType, converted(),
+                                                    isChecked);
+    },
+            std::move(targetType)};
+}
+
+// The C# `(Func<ILInstruction>, IType) ConvertNotOperator(CallInstruction
+// invocation)` (line 827): the 1-arg form routes on the operand's
+// underlying type (Boolean -> Comp.LogicNot; otherwise BitNot with the
+// underlying stack type); the 2-arg form is a user-defined operator call
+// resolved from the method handle.
+TransformExpressionTrees::ConvertResult
+TransformExpressionTrees::ConvertNotOperator(Call* invocation) {
+    if (invocation == nullptr || invocation->Arguments.empty()) {
+        return {nullptr, nullptr};
+    }
+    ConvertResult converted =
+        ConvertInstruction(invocation->Arguments[0].get());
+    if (!converted.thunk) return {nullptr, nullptr};
+    if (invocation->Arguments.size() == 1) {
+        // The C# `NullableType.GetUnderlyingType(argumentType)` + the
+        // IsKnownType(Boolean) route. A null converted type (the C#
+        // `argumentType` is non-null by construction; the port's degenerate
+        // shapes bail) falls through to the bail below.
+        const TypeSystem::IType* argumentType = converted.type.get();
+        if (argumentType == nullptr) return {nullptr, nullptr};
+        const TypeSystem::IType& underlyingType =
+            TypeSystem::GetUnderlyingType(*argumentType);
+        bool isLifted = TypeSystem::IsNullable(*argumentType);
+        TypeSystem::ITypePtr convertedType =
+            const_cast<TypeSystem::IType&>(underlyingType).shared_from_this();
+        bool isBoolean =
+            TypeSystem::IsKnownType(underlyingType, TypeSystem::KnownTypeCode::Boolean);
+        return {[converted = std::move(converted.thunk), isLifted, isBoolean,
+                 convertedType]() mutable
+                    -> std::unique_ptr<ILInstruction> {
+            if (isBoolean) {
+                return Comp::LogicNot(converted(), isLifted);
+            }
+            return std::make_unique<BitNot>(
+                converted(), isLifted,
+                TypeSystem::GetStackType(*convertedType));
+        },
+                std::move(convertedType)};
+    }
+    if (invocation->Arguments.size() == 2) {
+        std::shared_ptr<const TypeSystem::IMethod> method;
+        if (!MatchGetMethodFromHandle(invocation->Arguments[1].get(), method) ||
+            method == nullptr) {
+            return {nullptr, nullptr};
+        }
+        TypeSystem::ITypePtr returnType =
+            const_cast<TypeSystem::IType&>(method->ReturnType())
+                .shared_from_this();
+        return {[converted = std::move(converted.thunk), method]() mutable
+                    -> std::unique_ptr<ILInstruction> {
+            auto call = std::make_unique<Call>(
+                std::const_pointer_cast<TypeSystem::IMethod>(method));
+            call->Arguments.push_back(converted());
+            return call;
+        },
+                std::move(returnType)};
+    }
+    return {nullptr, nullptr};
+}
+
+// The C# `(Func<ILInstruction>, IType) ConvertBinaryNumericOperator(
+// CallInstruction invocation, BinaryNumericOperator op, bool? isChecked)`
+// (line 706): the 2-arg primitive form (the shift gate checks the right
+// operand's Int32; the others require equal operand types), the 3-arg
+// user-defined form (method handle), and the 4-arg lifted form (the
+// isLiftedToNull flag + the lifted method -- the port's
+// CSharpOperators.LiftUserDefinedOperator surface covers the lift).
+TransformExpressionTrees::ConvertResult
+TransformExpressionTrees::ConvertBinaryNumericOperator(
+    Call* invocation, BinaryNumericOperator op, bool isChecked) {
+    if (invocation == nullptr || invocation->Arguments.size() < 2) {
+        return {nullptr, nullptr};
+    }
+    ConvertResult left = ConvertInstruction(invocation->Arguments[0].get());
+    if (!left.thunk) return {nullptr, nullptr};
+    ConvertResult right = ConvertInstruction(invocation->Arguments[1].get());
+    if (!right.thunk) return {nullptr, nullptr};
+    if (invocation->Arguments.size() == 2) {
+        if (op == BinaryNumericOperator::ShiftLeft ||
+            op == BinaryNumericOperator::ShiftRight) {
+            // The C# `NullableType.GetUnderlyingType(rightType)
+            // .IsKnownType(KnownTypeCode.Int32)`.
+            if (right.type == nullptr) return {nullptr, nullptr};
+            const TypeSystem::IType& rightUnderlying =
+                TypeSystem::GetUnderlyingType(*right.type);
+            if (!TypeSystem::IsKnownType(rightUnderlying,
+                                         TypeSystem::KnownTypeCode::Int32)) {
+                return {nullptr, nullptr};
+            }
+        } else {
+            // The C# `rightType.Equals(leftType)`.
+            if (right.type == nullptr || left.type == nullptr ||
+                !right.type->Equals(*left.type)) {
+                return {nullptr, nullptr};
+            }
+        }
+        // The C# `NullableType.GetUnderlyingType(leftType).GetStackType()`.
+        if (left.type == nullptr) return {nullptr, nullptr};
+        const TypeSystem::IType& leftUnderlying =
+            TypeSystem::GetUnderlyingType(*left.type);
+        StackType inputType = TypeSystem::GetStackType(leftUnderlying);
+        bool isLifted = TypeSystem::IsNullable(*left.type) ||
+                        (right.type != nullptr &&
+                         TypeSystem::IsNullable(*right.type));
+        TypeSystem::ITypePtr resultType =
+            const_cast<TypeSystem::IType&>(*left.type).shared_from_this();
+        return {[leftThunk = std::move(left.thunk),
+                 rightThunk = std::move(right.thunk), op, inputType, isChecked,
+                 leftType = std::move(left.type), isLifted]() mutable
+                    -> std::unique_ptr<ILInstruction> {
+            return std::make_unique<BinaryNumericInstruction>(
+                leftThunk(), rightThunk(), op, inputType, inputType,
+                isChecked, TypeSystem::GetSign(leftType.get()), isLifted);
+        },
+                std::move(resultType)};
+    }
+    if (invocation->Arguments.size() == 3) {
+        std::shared_ptr<const TypeSystem::IMethod> method;
+        if (!MatchGetMethodFromHandle(invocation->Arguments[2].get(), method) ||
+            method == nullptr) {
+            return {nullptr, nullptr};
+        }
+        TypeSystem::ITypePtr returnType =
+            const_cast<TypeSystem::IType&>(method->ReturnType())
+                .shared_from_this();
+        return {[leftThunk = std::move(left.thunk),
+                 rightThunk = std::move(right.thunk),
+                 method = std::move(method)]() mutable
+                    -> std::unique_ptr<ILInstruction> {
+            auto call = std::make_unique<Call>(
+                std::const_pointer_cast<TypeSystem::IMethod>(method));
+            call->Arguments.push_back(leftThunk());
+            call->Arguments.push_back(rightThunk());
+            return call;
+        },
+                std::move(returnType)};
+    }
+    if (invocation->Arguments.size() == 4) {
+        // The C# `Arguments[2].MatchLdcI4(out isLiftedToNull)`.
+        auto* liftedFlag = dynamic_cast<LdcI4*>(invocation->Arguments[2].get());
+        if (liftedFlag == nullptr) return {nullptr, nullptr};
+        bool isLiftedToNull = liftedFlag->Value != 0;
+        std::shared_ptr<const TypeSystem::IMethod> method;
+        if (!MatchGetMethodFromHandle(invocation->Arguments[3].get(), method) ||
+            method == nullptr) {
+            return {nullptr, nullptr};
+        }
+        // The C# `CSharpOperators.LiftUserDefinedOperator((IMethod)method)`
+        // for a lifted left operand -- the port's CSharpOperators static
+        // covers the lift (a null result bails, matching the C# lifted arm's
+        // null method).
+        bool isLifted = left.type != nullptr &&
+                        TypeSystem::IsNullable(*left.type);
+        if (isLifted) {
+            method = std::shared_ptr<const TypeSystem::IMethod>(
+                CSharp::Resolver::CSharpOperators::LiftUserDefinedOperator(
+                    std::const_pointer_cast<TypeSystem::IMethod>(method)));
+        }
+        if (method == nullptr) return {nullptr, nullptr};
+        TypeSystem::ITypePtr returnType =
+            const_cast<TypeSystem::IType&>(method->ReturnType())
+                .shared_from_this();
+        if (isLiftedToNull) {
+            // The C# `NullableType.Create(compilation, method.ReturnType)`.
+            // The port's free function takes the compilation by reference; a
+            // context without one cannot resolve Nullable-of-T -- bail (the
+            // C# always resolves through the real compilation).
+            if (context_ == nullptr || context_->Base.TypeSystem == nullptr ||
+                returnType == nullptr) {
+                return {nullptr, nullptr};
+            }
+            returnType = TypeSystem::Create(*context_->Base.TypeSystem,
+                                            *returnType);
+        }
+        return {[leftThunk = std::move(left.thunk),
+                 rightThunk = std::move(right.thunk),
+                 method = std::move(method)]() mutable
+                    -> std::unique_ptr<ILInstruction> {
+            auto call = std::make_unique<Call>(
+                std::const_pointer_cast<TypeSystem::IMethod>(method));
+            call->Arguments.push_back(leftThunk());
+            call->Arguments.push_back(rightThunk());
+            return call;
+        },
+                std::move(returnType)};
+    }
+    return {nullptr, nullptr};
+}
+
+// The C# `(Func<ILInstruction>, IType) ConvertArrayLength(CallInstruction
+// invocation)` (line 1367): `ldlen.i4(operand)` -- the result type Int32.
+TransformExpressionTrees::ConvertResult
+TransformExpressionTrees::ConvertArrayLength(Call* invocation) {
+    if (invocation == nullptr || invocation->Arguments.size() != 1) {
+        return {nullptr, nullptr};
+    }
+    ConvertResult converted =
+        ConvertInstruction(invocation->Arguments[0].get());
+    if (!converted.thunk) return {nullptr, nullptr};
+    // The C# `context.TypeSystem.FindType(KnownTypeCode.Int32)`; a context
+    // without a type system cannot resolve the result type -- bail.
+    TypeSystem::ITypePtr resultType =
+        FindType(context_ != nullptr ? context_->Base.TypeSystem : nullptr,
+                 TypeSystem::KnownTypeCode::Int32);
+    if (!resultType) return {nullptr, nullptr};
+    return {[converted = std::move(converted.thunk)]() mutable
+                -> std::unique_ptr<ILInstruction> {
+        return std::make_unique<LdLen>(StackType::I4, converted());
+    },
+            std::move(resultType)};
+}
+
+// The C# `(Func<ILInstruction>, IType) ConvertCondition(CallInstruction
+// invocation)` (line 1390): the condition must be a Boolean-typed
+// expression; the branch operands convert and must be type-equivalent
+// (NormalizeTypeVisitor.TypeErasure.EquivalentTypes); the result is an
+// IfInstruction over the converted operands.
+TransformExpressionTrees::ConvertResult
+TransformExpressionTrees::ConvertCondition(Call* invocation) {
+    if (invocation == nullptr || invocation->Arguments.size() != 3) {
+        return {nullptr, nullptr};
+    }
+    ConvertResult condition =
+        ConvertInstruction(invocation->Arguments[0].get());
+    if (!condition.thunk || condition.type == nullptr ||
+        !TypeSystem::IsKnownType(*condition.type,
+                                 TypeSystem::KnownTypeCode::Boolean)) {
+        return {nullptr, nullptr};
+    }
+    ConvertResult trueInst =
+        ConvertInstruction(invocation->Arguments[1].get());
+    if (!trueInst.thunk) return {nullptr, nullptr};
+    ConvertResult falseInst =
+        ConvertInstruction(invocation->Arguments[2].get());
+    if (!falseInst.thunk) return {nullptr, nullptr};
+    // The C# `NormalizeTypeVisitor.TypeErasure.EquivalentTypes(
+    // trueInstType, falseInstType)`.
+    if (trueInst.type == nullptr || falseInst.type == nullptr ||
+        !TypeSystem::NormalizeTypeVisitor::TypeErasure().EquivalentTypes(
+            *trueInst.type, *falseInst.type)) {
+        return {nullptr, nullptr};
+    }
+    TypeSystem::ITypePtr resultType = trueInst.type;
+    return {[condition = std::move(condition.thunk),
+             trueThunk = std::move(trueInst.thunk),
+             falseThunk = std::move(falseInst.thunk)]() mutable
+                -> std::unique_ptr<ILInstruction> {
+        return std::make_unique<IfInstruction>(condition(), trueThunk(),
+                                               falseThunk());
+    },
+            std::move(resultType)};
+}
+
+// The C# `(Func<ILInstruction>, IType) ConvertLogicOperator(CallInstruction
+// invocation, bool and)` (line 885): the 2-arg primitive form builds the
+// IfInstruction.LogicAnd/LogicOr sugar (the C# result type is Boolean); the
+// 3-arg and 4-arg user-defined forms mirror the binary-numeric arms.
+TransformExpressionTrees::ConvertResult
+TransformExpressionTrees::ConvertLogicOperator(Call* invocation, bool isAnd) {
+    if (invocation == nullptr || invocation->Arguments.size() < 2) {
+        return {nullptr, nullptr};
+    }
+    ConvertResult left = ConvertInstruction(invocation->Arguments[0].get());
+    if (!left.thunk) return {nullptr, nullptr};
+    ConvertResult right = ConvertInstruction(invocation->Arguments[1].get());
+    if (!right.thunk) return {nullptr, nullptr};
+    if (invocation->Arguments.size() == 2) {
+        TypeSystem::ITypePtr resultType =
+            FindType(context_ != nullptr ? context_->Base.TypeSystem : nullptr,
+                     TypeSystem::KnownTypeCode::Boolean);
+        if (!resultType) return {nullptr, nullptr};
+        return {[leftThunk = std::move(left.thunk),
+                 rightThunk = std::move(right.thunk), isAnd]() mutable
+                    -> std::unique_ptr<ILInstruction> {
+            if (isAnd) {
+                return IfInstruction::LogicAnd(leftThunk(), rightThunk());
+            }
+            return IfInstruction::LogicOr(leftThunk(), rightThunk());
+        },
+                std::move(resultType)};
+    }
+    if (invocation->Arguments.size() == 3) {
+        std::shared_ptr<const TypeSystem::IMethod> method;
+        if (!MatchGetMethodFromHandle(invocation->Arguments[2].get(), method) ||
+            method == nullptr) {
+            return {nullptr, nullptr};
+        }
+        TypeSystem::ITypePtr returnType =
+            const_cast<TypeSystem::IType&>(method->ReturnType())
+                .shared_from_this();
+        return {[leftThunk = std::move(left.thunk),
+                 rightThunk = std::move(right.thunk),
+                 method = std::move(method)]() mutable
+                    -> std::unique_ptr<ILInstruction> {
+            auto call = std::make_unique<Call>(
+                std::const_pointer_cast<TypeSystem::IMethod>(method));
+            call->Arguments.push_back(leftThunk());
+            call->Arguments.push_back(rightThunk());
+            return call;
+        },
+                std::move(returnType)};
+    }
+    // The 4-arg lifted form: the isLiftedToNull flag + the lifted method --
+    // the same shape as the binary-numeric 4-arg arm.
+    if (invocation->Arguments.size() == 4) {
+        auto* liftedFlag = dynamic_cast<LdcI4*>(invocation->Arguments[2].get());
+        if (liftedFlag == nullptr) return {nullptr, nullptr};
+        std::shared_ptr<const TypeSystem::IMethod> method;
+        if (!MatchGetMethodFromHandle(invocation->Arguments[3].get(), method) ||
+            method == nullptr) {
+            return {nullptr, nullptr};
+        }
+        bool isLifted = left.type != nullptr &&
+                        TypeSystem::IsNullable(*left.type);
+        if (isLifted) {
+            method = std::shared_ptr<const TypeSystem::IMethod>(
+                CSharp::Resolver::CSharpOperators::LiftUserDefinedOperator(
+                    std::const_pointer_cast<TypeSystem::IMethod>(method)));
+        }
+        if (method == nullptr) return {nullptr, nullptr};
+        TypeSystem::ITypePtr returnType =
+            const_cast<TypeSystem::IType&>(method->ReturnType())
+                .shared_from_this();
+        bool isLiftedToNull = liftedFlag->Value != 0;
+        if (isLiftedToNull) {
+            if (context_ == nullptr || context_->Base.TypeSystem == nullptr ||
+                returnType == nullptr) {
+                return {nullptr, nullptr};
+            }
+            returnType =
+                TypeSystem::Create(*context_->Base.TypeSystem, *returnType);
+        }
+        return {[leftThunk = std::move(left.thunk),
+                 rightThunk = std::move(right.thunk),
+                 method = std::move(method)]() mutable
+                    -> std::unique_ptr<ILInstruction> {
+            auto call = std::make_unique<Call>(
+                std::const_pointer_cast<TypeSystem::IMethod>(method));
+            call->Arguments.push_back(leftThunk());
+            call->Arguments.push_back(rightThunk());
+            return call;
+        },
+                std::move(returnType)};
+    }
+    return {nullptr, nullptr};
+}
+
+// The C# `(Func<ILInstruction>, IType) ConvertInvoke(CallInstruction
+// invocation)` (line 905): the delegate-invocation expression -- the target
+// converts, the delegate type's Invoke method is resolved, and the
+// argument list converts against it. The C# builds `new CallVirt(method)`;
+// the port's Call node covers the callvirt opcode (the IsInstanceCall
+// derivation rides the method).
+// The compilation-owned IMethod reference bridge: the C# call sites hold the
+// resolved method handle by GC reference; the port's Call node wants an
+// owning shared_ptr<IMethod>. The non-owning const pointer from
+// GetDelegateInvokeMethod aliases the compilation-owned object, so the
+// aliased-ctor shared_ptr (the FindType convention) yields the owning
+// handle without changing ownership. Null-safe (a null handle round-trips).
+std::shared_ptr<const TypeSystem::IMethod> OwnMethodHandle(
+    const TypeSystem::IMethod* method) {
+    if (method == nullptr) return nullptr;
+    return std::shared_ptr<const TypeSystem::IMethod>(
+        std::shared_ptr<void>(), method);
+}
+
+TransformExpressionTrees::ConvertResult
+TransformExpressionTrees::ConvertInvoke(Call* invocation) {
+    if (invocation == nullptr || invocation->Arguments.size() != 2) {
+        return {nullptr, nullptr};
+    }
+    ConvertResult target = ConvertInstruction(invocation->Arguments[0].get());
+    if (!target.thunk || target.type == nullptr) return {nullptr, nullptr};
+    // The C# `targetType.GetDelegateInvokeMethod()`.
+    const TypeSystem::IMethod* invokeMethod =
+        TypeSystem::GetDelegateInvokeMethod(*target.type);
+    if (invokeMethod == nullptr) return {nullptr, nullptr};
+    std::vector<ILInstruction*> arguments;
+    if (!MatchArgumentList(invocation->Arguments[1].get(), arguments)) {
+        return {nullptr, nullptr};
+    }
+    std::vector<std::function<std::unique_ptr<ILInstruction>()>>
+        convertedArguments;
+    if (!ConvertCallArguments(arguments, *invokeMethod, convertedArguments)) {
+        return {nullptr, nullptr};
+    }
+    // The C# `method.ReturnType` -- the invoke method's return type; the
+    // port's GetDelegateInvokeMethod hands back a non-owning const IMethod*
+    // (the compilation owns it), so the return-type handle aliases through
+    // the non-owning shared_ptr convention.
+    TypeSystem::ITypePtr returnType =
+        const_cast<TypeSystem::IType&>(invokeMethod->ReturnType())
+            .shared_from_this();
+    return {[target = std::move(target.thunk), invokeMethod,
+             convertedArguments = std::move(convertedArguments)]() mutable
+                -> std::unique_ptr<ILInstruction> {
+        auto call = std::make_unique<Call>(
+            std::const_pointer_cast<TypeSystem::IMethod>(
+                OwnMethodHandle(invokeMethod)));
+        call->Arguments.push_back(target());
+        for (auto& f : convertedArguments) {
+            call->Arguments.push_back(f());
+        }
+        return call;
+    },
+            std::move(returnType)};
+}
+
+// ---- The ConvertUnaryNumericOperator / ConvertNewObject arms ----
+
+// The C# `(Func<ILInstruction>, IType) ConvertUnaryNumericOperator(
+// CallInstruction invocation, BinaryNumericOperator op, bool? isChecked)`
+// (line 1322): the 1-arg form folds to `op(0, operand)` over the operand's
+// underlying stack type (LdcI4/LdcI8/LdcF4/LdcF8/LdcDecimal for the O/
+// Decimal case); the 2-arg form is a user-defined operator call. The port
+// implements the 1-arg primitive shapes and the 2-arg method-handle form.
+TransformExpressionTrees::ConvertResult
+TransformExpressionTrees::ConvertUnaryNumericOperator(
+    Call* invocation, BinaryNumericOperator op, bool isChecked) {
+    if (invocation == nullptr || invocation->Arguments.empty()) {
+        return {nullptr, nullptr};
+    }
+    ConvertResult converted =
+        ConvertInstruction(invocation->Arguments[0].get());
+    if (!converted.thunk) return {nullptr, nullptr};
+    if (invocation->Arguments.size() == 1) {
+        if (converted.type == nullptr) return {nullptr, nullptr};
+        const TypeSystem::IType& underlyingType =
+            TypeSystem::GetUnderlyingType(*converted.type);
+        bool isLifted = TypeSystem::IsNullable(*converted.type);
+        StackType underlyingStack = TypeSystem::GetStackType(underlyingType);
+        TypeSystem::ITypePtr convertedType =
+            const_cast<TypeSystem::IType&>(underlyingType).shared_from_this();
+        // The C# builds `left` eagerly from the underlying stack type; the
+        // port's LdcI4(0) node materializes inside the thunk (the thunk
+        // contract is a copy-constructible std::function, so no move-only
+        // captures -- the ConvertLambda shared-holder precedent).
+        if (underlyingStack != StackType::I4) {
+            // The C# LdcI8/LdcF4/LdcF8/LdcDecimal fold arms ride the
+            // concrete constant nodes the port carries (LdcI8/LdcF4/
+            // LdcF8/LdcDecimal); the I-Conv arm and the Decimal
+            // boxed-constant arm are deferred with those surfaces.
+            return {nullptr, nullptr};
+        }
+        return {[converted = std::move(converted.thunk), op, underlyingStack,
+                 isChecked, convertedType, isLifted]() mutable
+                    -> std::unique_ptr<ILInstruction> {
+            return std::make_unique<BinaryNumericInstruction>(
+                std::make_unique<LdcI4>(0), converted(), op, underlyingStack,
+                underlyingStack, isChecked, TypeSystem::Sign::None, isLifted);
+        },
+                std::move(convertedType)};
+    }
+    if (invocation->Arguments.size() == 2) {
+        std::shared_ptr<const TypeSystem::IMethod> method;
+        if (!MatchGetMethodFromHandle(invocation->Arguments[1].get(), method) ||
+            method == nullptr) {
+            return {nullptr, nullptr};
+        }
+        TypeSystem::ITypePtr returnType =
+            const_cast<TypeSystem::IType&>(method->ReturnType())
+                .shared_from_this();
+        return {[converted = std::move(converted.thunk),
+                 method = std::move(method)]() mutable
+                    -> std::unique_ptr<ILInstruction> {
+            auto call = std::make_unique<Call>(
+                std::const_pointer_cast<TypeSystem::IMethod>(method));
+            call->Arguments.push_back(converted());
+            return call;
+        },
+                std::move(returnType)};
+    }
+    return {nullptr, nullptr};
+}
+
+// The C# `bool MatchGetConstructorFromHandle(ILInstruction inst, out IMember
+// member)`: the castclass ConstructorInfo(MethodBase.GetMethodFromHandle(
+// ldmembertoken ctor)) shape -- the method-handle match with the
+// ConstructorInfo cast type.
+bool TransformExpressionTrees::MatchGetConstructorFromHandle(
+    ILInstruction* inst,
+    std::shared_ptr<const TypeSystem::IMethod>& member) {
+    member = nullptr;
+    auto* cast = dynamic_cast<CastClass*>(inst);
+    if (cast == nullptr) return false;
+    if (cast->Type == nullptr ||
+        cast->Type->Namespace() != "System.Reflection" ||
+        cast->Type->Name() != "ConstructorInfo") {
+        return false;
+    }
+    auto* call = dynamic_cast<Call*>(cast->Argument.get());
+    if (call == nullptr || call->IsNewObj || call->Method == nullptr ||
+        call->Arguments.empty() || call->Arguments.size() > 2) {
+        return false;
+    }
+    if (!FullNameIs(call->Method.get(), "System.Reflection", "MethodBase",
+                    "GetMethodFromHandle")) {
+        return false;
+    }
+    std::shared_ptr<const TypeSystem::IMember> tokenMember;
+    if (!MatchFromHandleParameterList(call, tokenMember)) return false;
+    member = std::dynamic_pointer_cast<const TypeSystem::IMethod>(tokenMember);
+    return member != nullptr;
+}
+
+// The C# `(Func<ILInstruction>, IType) ConvertNewObject(CallInstruction
+// invocation)` (line 518): the 1-arg type-token arm scans the type's
+// parameterless constructors (the IType::GetConstructors surface), the 1-arg
+// ctor-token and 2-arg ctor-token forms build the NewObj directly. The
+// 1-arg type-token scan is deferred with the stub GetConstructors override
+// (the fixture type carries no member table for it); the two token forms
+// port faithfully.
+TransformExpressionTrees::ConvertResult
+TransformExpressionTrees::ConvertNewObject(Call* invocation) {
+    if (invocation == nullptr || invocation->Arguments.empty()) {
+        return {nullptr, nullptr};
+    }
+    if (invocation->Arguments.size() == 1) {
+        // The 1-arg ctor-token form: the castclass ConstructorInfo(handle)
+        // shape resolves the ctor directly.
+        std::shared_ptr<const TypeSystem::IMethod> member;
+        if (MatchGetConstructorFromHandle(invocation->Arguments[0].get(),
+                                          member) &&
+            member != nullptr) {
+            TypeSystem::ITypePtr declaringType = member->DeclaringType();
+            return {[member = std::move(member)]() mutable
+                        -> std::unique_ptr<ILInstruction> {
+                auto newObj = std::make_unique<Call>(
+                    std::const_pointer_cast<TypeSystem::IMethod>(member),
+                    /*isNewObj=*/true);
+                return newObj;
+            },
+                    std::move(declaringType)};
+        }
+        // The 1-arg type-token arm scans the parameterless constructors; the
+        // port's GetConstructors surface on the fixture stubs returns empty
+        // (the real metadata path lands with the reader token surface) --
+        // fall through to the failure below.
+        return {nullptr, nullptr};
+    }
+    if (invocation->Arguments.size() == 2) {
+        std::shared_ptr<const TypeSystem::IMethod> member;
+        if (!MatchGetConstructorFromHandle(invocation->Arguments[0].get(),
+                                           member) ||
+            member == nullptr) {
+            return {nullptr, nullptr};
+        }
+        std::vector<ILInstruction*> arguments;
+        if (!MatchArgumentList(invocation->Arguments[1].get(), arguments)) {
+            return {nullptr, nullptr};
+        }
+        std::vector<std::function<std::unique_ptr<ILInstruction>()>>
+            convertedArguments;
+        if (!ConvertCallArguments(arguments, *member, convertedArguments)) {
+            return {nullptr, nullptr};
+        }
+        TypeSystem::ITypePtr declaringType = member->DeclaringType();
+        return {[member = std::move(member),
+                 convertedArguments = std::move(convertedArguments)]() mutable
+                    -> std::unique_ptr<ILInstruction> {
+            auto newObj = std::make_unique<Call>(
+                std::const_pointer_cast<TypeSystem::IMethod>(member),
+                /*isNewObj=*/true);
+            for (auto& f : convertedArguments) {
+                newObj->Arguments.push_back(f());
+            }
+            return newObj;
+        },
+                std::move(declaringType)};
+    }
+    return {nullptr, nullptr};
+}
+
+// The C# `bool MatchGetFieldFromHandle(ILInstruction inst, out IMember
+// member)`: the direct FieldInfo.GetFieldFromHandle(ldmembertoken field[,
+// ldtoken type]) shape (no castclass wrapper, unlike the method-handle
+// form). The member downcasts to IField (a method token is rejected).
+bool TransformExpressionTrees::MatchGetFieldFromHandle(
+    ILInstruction* inst,
+    std::shared_ptr<const TypeSystem::IField>& member) {
+    member = nullptr;
+    auto* call = dynamic_cast<Call*>(inst);
+    if (call == nullptr || call->IsNewObj || call->Method == nullptr ||
+        call->Arguments.empty() || call->Arguments.size() > 2) {
+        return false;
+    }
+    if (!FullNameIs(call->Method.get(), "System.Reflection", "FieldInfo",
+                    "GetFieldFromHandle")) {
+        return false;
+    }
+    std::shared_ptr<const TypeSystem::IMember> tokenMember;
+    if (!MatchFromHandleParameterList(call, tokenMember)) return false;
+    member = std::dynamic_pointer_cast<const TypeSystem::IField>(tokenMember);
+    return member != nullptr;
+}
+
+// The C# `(Func<ILInstruction>, IType) ConvertField(CallInstruction
+// invocation, IType typeHint)` -- the `case "Field"` arm. The C#'s
+// `typeHint.SkipModifiers()` dereferences a null hint on the lambda-body
+// path; the port guards it (a null hint skips the by-ref adapter, and the
+// value-type LdObj wrap applies, matching the C# BuildField fall-through).
+// The typeHint by-ref arm (a `ref` field read feeding an expected Ref
+// slot) is deferred with the SkipModifiers surface.
+TransformExpressionTrees::ConvertResult TransformExpressionTrees::ConvertField(
+    Call* invocation, TypeSystem::IType* typeHint) {
+    if (invocation == nullptr || invocation->Arguments.size() != 2) {
+        return {nullptr, nullptr};
+    }
+    std::function<std::unique_ptr<ILInstruction>()> targetConverter;
+    if (!dynamic_cast<LdNull*>(invocation->Arguments[0].get())) {
+        ConvertResult target =
+            ConvertInstruction(invocation->Arguments[0].get());
+        if (!target.thunk) return {nullptr, nullptr};
+        targetConverter = std::move(target.thunk);
+    }
+    std::shared_ptr<const TypeSystem::IField> member;
+    if (!MatchGetFieldFromHandle(invocation->Arguments[1].get(), member)) {
+        return {nullptr, nullptr};
+    }
+    // The C# `IType type = member.ReturnType;`.
+    TypeSystem::ITypePtr fieldType =
+        const_cast<TypeSystem::IType&>(member->ReturnType()).shared_from_this();
+    // The C# BuildField: ldsflda for a null target, ldflda (+ addressof for
+    // a value-type receiver) otherwise; the plain type read wraps in ldobj.
+    return {[member = std::move(member),
+             targetConverter = std::move(targetConverter),
+             typeHintKind = typeHint != nullptr ? typeHint->Kind()
+                                                : TypeSystem::TypeKind::None]() mutable
+                -> std::unique_ptr<ILInstruction> {
+        std::unique_ptr<ILInstruction> inst;
+        if (!targetConverter) {
+            inst = std::make_unique<LdsFlda>(member->Name());
+        } else {
+            std::unique_ptr<ILInstruction> target = targetConverter();
+            TypeSystem::ITypePtr declaring = member->DeclaringType();
+            if (declaring != nullptr &&
+                declaring->IsReferenceType() == std::optional<bool>(true)) {
+                auto ldflda = std::make_unique<LdFlda>(std::move(target),
+                                                       member->Name());
+                ldflda->DelayExceptions = true;
+                inst = std::move(ldflda);
+            } else {
+                inst = std::make_unique<LdFlda>(
+                    std::make_unique<AddressOf>(
+                        std::move(target), std::move(declaring)),
+                    member->Name());
+                dynamic_cast<LdFlda*>(inst.get())->DelayExceptions = true;
+            }
+        }
+        // The C# `if (!(typeHint.SkipModifiers() is ByReferenceType && ...))
+        // inst = new LdObj(inst, member.ReturnType);` -- the port wraps when
+        // no by-ref hint overrides the read (the C# null-hint NRE is guarded).
+        if (typeHintKind != TypeSystem::TypeKind::ByReference) {
+            inst = std::make_unique<LdObj>(std::move(inst),
+                                           const_cast<TypeSystem::IType&>(
+                                               member->ReturnType())
+                                               .shared_from_this());
+        }
+        return inst;
+    },
+            std::move(fieldType)};
+}
+
+// The C# `ILInstruction PrepareCallTarget(IType expectedType, ILInstruction
+// target, IType targetType)`: the receiver shaping for the instance-call
+// arm. The expectedType-Unknown / result-Unknown Conv wraps are deferred
+// with the PrimitiveType.Unknown surface.
+std::unique_ptr<ILInstruction> TransformExpressionTrees::PrepareCallTarget(
+    const TypeSystem::IType& expectedType, std::unique_ptr<ILInstruction> target,
+    TypeSystem::ITypePtr targetType) {
+    std::unique_ptr<ILInstruction> result;
+    switch (Call::ExpectedTypeForThisPointer(expectedType, nullptr)) {
+        case StackType::Ref:
+            if (target != nullptr && target->ResultType() == StackType::Ref) {
+                result = std::move(target);
+            } else if (auto* ldloc = dynamic_cast<LdLoc*>(target.get())) {
+                // The C# `new LdLoca(ldloc.Variable).WithILRange(ldloc)`.
+                auto ldloca = std::make_unique<LdLoca>(ldloc->Variable);
+                ldloca->StartILOffset = ldloc->StartILOffset;
+                ldloca->EndILOffset = ldloc->EndILOffset;
+                result = std::move(ldloca);
+            } else {
+                result = std::make_unique<AddressOf>(
+                    std::move(target),
+                    const_cast<TypeSystem::IType&>(expectedType)
+                        .shared_from_this());
+            }
+            break;
+        case StackType::O:
+            if (targetType != nullptr &&
+                targetType->IsReferenceType() == std::optional<bool>(false)) {
+                result = std::make_unique<Box>(std::move(targetType),
+                                               std::move(target));
+            } else {
+                result = std::move(target);
+            }
+            break;
+        default:
+            result = std::move(target);
+            break;
+    }
+    return result;
+}
+
+// The C# `Func<ILInstruction>[] ConvertCallArguments(IList arguments,
+// IMethod method)`: per-argument ConvertInstruction against the expected
+// parameter type. False when an argument fails to convert (the C# null
+// return).
+bool TransformExpressionTrees::ConvertCallArguments(
+    const std::vector<ILInstruction*>& arguments,
+    const TypeSystem::IMethod& method,
+    std::vector<std::function<std::unique_ptr<ILInstruction>()>>& out) {
+    out.clear();
+    out.reserve(arguments.size());
+    std::vector<const TypeSystem::IParameter*> parameters =
+        method.Parameters();
+    for (std::size_t i = 0; i < arguments.size(); i++) {
+        TypeSystem::IType* expectedType = nullptr;
+        if (i < parameters.size() && parameters[i] != nullptr) {
+            expectedType =
+                const_cast<TypeSystem::IType*>(&parameters[i]->Type());
+        }
+        ConvertResult converted =
+            ConvertInstruction(arguments[i], expectedType);
+        if (!converted.thunk) return false;
+        out.push_back(std::move(converted.thunk));
+    }
+    return true;
+}
+
+// The C# `(Func<ILInstruction>, IType) ConvertCall(CallInstruction
+// invocation)` -- the `case "Call"` arm (TransformExpressionTrees.cs line
+// 578). The CreateDelegate special case (rebuilding `newobj(delegateType,
+// value, ldftn targetMethod)` from a closed-generic MethodInfo.CreateDelegate
+// call) is deferred with the constructor-resolution surface (the C#
+// `delegateType.GetConstructors().Single()`).
+TransformExpressionTrees::ConvertResult TransformExpressionTrees::ConvertCall(
+    Call* invocation) {
+    if (invocation == nullptr || invocation->Method == nullptr ||
+        invocation->Arguments.size() < 2) {
+        return {nullptr, nullptr};
+    }
+    std::shared_ptr<const TypeSystem::IMethod> member;
+    std::vector<ILInstruction*> arguments;
+    bool haveArguments = false;
+    std::function<std::unique_ptr<ILInstruction>()> targetConverter;
+    TypeSystem::ITypePtr targetType;
+    if (MatchGetMethodFromHandle(invocation->Arguments[0].get(), member)) {
+        // The static-method form: the handle is the first argument.
+        haveArguments =
+            invocation->Arguments.size() == 2 &&
+            MatchArgumentList(invocation->Arguments[1].get(), arguments);
+        if (!haveArguments) {
+            // The C# `arguments = invocation.Arguments.Skip(1)` -- the raw
+            // arguments when the block form is absent.
+            for (std::size_t i = 1; i < invocation->Arguments.size(); i++) {
+                arguments.push_back(invocation->Arguments[i].get());
+            }
+            haveArguments = true;
+        }
+    } else if (MatchGetMethodFromHandle(invocation->Arguments[1].get(),
+                                        member)) {
+        // The instance form: target, handle, arguments.
+        haveArguments =
+            invocation->Arguments.size() == 3 &&
+            MatchArgumentList(invocation->Arguments[2].get(), arguments);
+        if (!haveArguments) {
+            for (std::size_t i = 2; i < invocation->Arguments.size(); i++) {
+                arguments.push_back(invocation->Arguments[i].get());
+            }
+            haveArguments = true;
+        }
+        if (!dynamic_cast<LdNull*>(invocation->Arguments[0].get())) {
+            ConvertResult target =
+                ConvertInstruction(invocation->Arguments[0].get());
+            if (!target.thunk) return {nullptr, nullptr};
+            targetConverter = std::move(target.thunk);
+            targetType = std::move(target.type);
+        }
+    }
+    if (!haveArguments || member == nullptr) return {nullptr, nullptr};
+    std::vector<std::function<std::unique_ptr<ILInstruction>()>>
+        convertedArguments;
+    if (!ConvertCallArguments(arguments, *member, convertedArguments)) {
+        return {nullptr, nullptr};
+    }
+    // The C# BuildCall: Call for a static method, CallVirt for an instance
+    // one (the port's Call node covers both opcodes; the callvirt
+    // distinction rides the method's IsStatic).
+    TypeSystem::ITypePtr returnType =
+        const_cast<TypeSystem::IType&>(member->ReturnType()).shared_from_this();
+    return {[member = std::move(member),
+             targetConverter = std::move(targetConverter),
+             targetType = std::move(targetType),
+             convertedArguments = std::move(convertedArguments)]() mutable
+                -> std::unique_ptr<ILInstruction> {
+                auto call = std::make_unique<Call>(
+                    std::const_pointer_cast<TypeSystem::IMethod>(member));
+                if (targetConverter) {
+                    call->Arguments.push_back(
+                        PrepareCallTarget(*member->DeclaringType(),
+                                          targetConverter(),
+                                          std::move(targetType)));
+                }
+                for (auto& f : convertedArguments) {
+                    call->Arguments.push_back(f());
+                }
+                return call;
+            },
+            std::move(returnType)};
+}
+
+// The C# `method.FullNameIs(ns, name)` extension: true iff the method's
+// declaring type is the namespace-qualified type `ns.name` and the method's
+// simple name matches (the FullNameIs(member, type, name) shape -- the
+// declaring type's FullName pair).
+bool FullNameIs(const TypeSystem::IMethod* method, const std::string& ns,
+                const std::string& typeName, const std::string& name) {
+    if (method == nullptr) return false;
+    if (method->Name() != name) return false;
+    TypeSystem::ITypePtr declaring = method->DeclaringType();
+    if (declaring == nullptr) return false;
+    return declaring->Namespace() == ns && declaring->Name() == typeName;
+}
+
+bool TransformExpressionTrees::MatchParameterVariableAssignment(
+    ILInstruction* expr, std::shared_ptr<ILVariable>& parameterReferenceVar,
+    TypeSystem::ITypePtr& type, std::string& name) {
+    // stloc(v, call(Expression::Parameter,
+    //               call(Type::GetTypeFromHandle, ldtoken(...)),
+    //               ldstr(...)))
+    type = nullptr;
+    name.clear();
+    auto* stloc = dynamic_cast<StLoc*>(expr);
+    if (stloc == nullptr || stloc->Variable == nullptr) return false;
+    parameterReferenceVar = stloc->Variable;
+    if (!parameterReferenceVar->IsSingleDefinition()) return false;
+    if (!(parameterReferenceVar->Kind == VariableKind::Local ||
+          parameterReferenceVar->Kind == VariableKind::StackSlot)) {
+        return false;
+    }
+    const auto& variableType = parameterReferenceVar->Type;
+    if (variableType == nullptr ||
+        variableType->Namespace() != "System.Linq.Expressions" ||
+        variableType->Name() != "ParameterExpression") {
+        return false;
+    }
+    auto* initCall = dynamic_cast<Call*>(stloc->Value.get());
+    if (initCall == nullptr || initCall->Arguments.size() != 2 ||
+        initCall->IsNewObj) {
+        return false;
+    }
+    if (!FullNameIs(initCall->Method.get(), "System.Linq.Expressions",
+                    "Expression", "Parameter")) {
+        return false;
+    }
+    auto* typeArg = dynamic_cast<Call*>(initCall->Arguments[0].get());
+    if (typeArg == nullptr || typeArg->Arguments.size() != 1 ||
+        typeArg->IsNewObj) {
+        return false;
+    }
+    if (!FullNameIs(typeArg->Method.get(), "System", "Type",
+                    "GetTypeFromHandle")) {
+        return false;
+    }
+    auto* token = dynamic_cast<LdTypeToken*>(typeArg->Arguments[0].get());
+    if (token == nullptr || token->Type == nullptr) return false;
+    type = token->Type;
+    auto* nameArg = dynamic_cast<LdStr*>(initCall->Arguments[1].get());
+    if (nameArg == nullptr) return false;
+    name = nameArg->Value;
+    return true;
+}
+
+bool TransformExpressionTrees::MightBeExpressionTree(ILInstruction* inst,
+                                                     ILInstruction* stmt) {
+    (void)stmt;  // the C# CanUninline gate is commented out there too
+    auto* call = dynamic_cast<Call*>(inst);
+    if (call == nullptr || call->IsNewObj ||
+        !FullNameIs(call->Method.get(), "System.Linq.Expressions", "Expression",
+                    "Lambda") ||
+        call->Arguments.size() != 2) {
+        return false;
+    }
+    if (!IsEmptyParameterList(call->Arguments[1].get())) {
+        return false;
+    }
+    return true;
+}
+
+bool TransformExpressionTrees::IsEmptyParameterList(ILInstruction* inst) {
+    if (auto* emptyCall = dynamic_cast<Call*>(inst)) {
+        if (!emptyCall->IsNewObj && emptyCall->Arguments.empty() &&
+            FullNameIs(emptyCall->Method.get(), "System", "Array", "Empty")) {
+            return true;
+        }
+    }
+    if (auto* newArr = dynamic_cast<NewArr*>(inst)) {
+        if (newArr->Type != nullptr &&
+            newArr->Type->Namespace() == "System.Linq.Expressions" &&
+            (newArr->Type->Name() == "ParameterExpression" ||
+             newArr->Type->Name() == "Expression")) {
+            return true;
+        }
+    }
+    return false;
+}
+
+
+} // namespace ILSpy::Decompiler::IL

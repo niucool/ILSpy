@@ -1,0 +1,1916 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+// to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+#include "Decompiler/IL/BlockBuilder.hpp"
+#include "Decompiler/IL/ILReader.hpp"
+#include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/IL/Instructions/Arglist.hpp"
+#include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
+#include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
+#include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/InvalidInstructions.hpp"
+#include "Decompiler/IL/Instructions/Branch.hpp"
+#include "Decompiler/IL/Instructions/Box.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/CastClass.hpp"
+#include "Decompiler/IL/Instructions/Comp.hpp"
+#include "Decompiler/IL/Instructions/Conv.hpp"
+#include "Decompiler/IL/Instructions/IfInstruction.hpp"
+#include "Decompiler/IL/Instructions/IsInst.hpp"
+#include "Decompiler/IL/Instructions/LdcConstants.hpp"
+#include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdLen.hpp"
+#include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
+#include "Decompiler/IL/Instructions/DefaultValue.hpp"
+#include "Decompiler/IL/Instructions/LdNull.hpp"
+#include "Decompiler/IL/Instructions/LdStr.hpp"
+#include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/Nop.hpp"
+#include "Decompiler/IL/Instructions/RefAnyType.hpp"
+#include "Decompiler/IL/Instructions/TypedReferenceInstructions.hpp"
+#include "Decompiler/IL/Instructions/Rethrow.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
+#include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/IL/Instructions/TokenInstructions.hpp"
+#include "Decompiler/IL/Instructions/Unbox.hpp"
+#include "Decompiler/IL/Instructions/UnboxAny.hpp"
+#include "Decompiler/IL/StackTypeOf.hpp"
+#include "Decompiler/Metadata/ILOpCodes.hpp"
+#include "Decompiler/Metadata/SRMExtensions.hpp"
+#include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <map>
+#include <memory>
+#include <set>
+#include <string>
+#include <vector>
+
+namespace ILSpy::Decompiler::IL {
+
+using namespace ILSpy::Decompiler::Metadata;
+using ILSpy::Decompiler::TypeSystem::ITypePtr;
+using ILSpy::Decompiler::TypeSystem::KnownType;
+using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+using ILSpy::Decompiler::TypeSystem::Sign;
+
+// Best-effort: extract the IType a stack value carries, so stack slots (dup,
+// flush) can inherit it and brtrue/brfalse picks `null` for reference types.
+// Returns nullptr for values whose type isn't recoverable from the node.
+ITypePtr TypeOfValue(const ILInstruction* inst) {
+    if (!inst) return nullptr;
+    if (auto* ld = dynamic_cast<const LdLoc*>(inst))
+        return ld->Variable ? ld->Variable->Type : nullptr;
+    if (auto* na = dynamic_cast<const NewArr*>(inst))
+        return std::make_shared<TypeSystem::ArrayType>(na->Type);
+    if (auto* cc = dynamic_cast<const CastClass*>(inst)) return cc->Type;
+    if (auto* ii = dynamic_cast<const IsInst*>(inst)) return ii->Type;
+    if (auto* u = dynamic_cast<const Unbox*>(inst)) return u->Type;
+    if (auto* ua = dynamic_cast<const UnboxAny*>(inst)) return ua->Type;
+    if (auto* ls = dynamic_cast<const LdStr*>(inst))
+        return std::make_shared<KnownType>(KnownTypeCode::String);
+    if (auto* ln = dynamic_cast<const LdNull*>(inst))
+        return std::make_shared<KnownType>(KnownTypeCode::Object);
+    if (auto* c = dynamic_cast<const LdcI4*>(inst))
+        return std::make_shared<KnownType>(KnownTypeCode::Int32);
+    if (dynamic_cast<const LdcI8*>(inst))
+        return std::make_shared<KnownType>(KnownTypeCode::Int64);
+    if (dynamic_cast<const LdcF4*>(inst))
+        return std::make_shared<KnownType>(KnownTypeCode::Single);
+    if (dynamic_cast<const LdcF8*>(inst))
+        return std::make_shared<KnownType>(KnownTypeCode::Double);
+    // The C# FlushExpressionStack types the slot by the expression's stack
+    // type (compilation.FindType(inst.ResultType)): I4->Int32, I8->Int64,
+    // I->IntPtr, F4->Single, F8->Double, O->Object. This covers the call
+    // results and the element loads -- without it the slot carries no type
+    // and the surviving declaration renders `var` with an S_N name.
+    switch (inst->ResultType()) {
+        case StackType::I4:
+            return std::make_shared<KnownType>(KnownTypeCode::Int32);
+        case StackType::I8:
+            return std::make_shared<KnownType>(KnownTypeCode::Int64);
+        case StackType::I:
+            return std::make_shared<KnownType>(KnownTypeCode::IntPtr);
+        case StackType::F4:
+            return std::make_shared<KnownType>(KnownTypeCode::Single);
+        case StackType::F8:
+            return std::make_shared<KnownType>(KnownTypeCode::Double);
+        case StackType::O:
+            return std::make_shared<KnownType>(KnownTypeCode::Object);
+        default:
+            break;
+    }
+    return nullptr;
+}
+
+namespace {
+// The reader's scratch state: a stack of pending expression trees (the decode
+// of stack-machine IL into trees) and the committed stack-slot variables for
+// values that survived a flush.
+struct ReaderState {
+    std::vector<std::unique_ptr<ILInstruction>> expressionStack;
+    // A pending `readonly.` IL prefix: set by the prefix opcode, consumed by
+    // the next ldelema (the C# DecodeReadonly's tail).
+    bool pendingReadOnlyPrefix = false;
+    // currentStack: the committed evaluation stack (values that survived a
+    // flush or were seeded by the runtime, e.g. an exception object in a catch).
+    // When the expression stack is empty, Pop reads from currentStack.
+    std::vector<ILVariablePtr> currentStack;
+    std::size_t stackBase = 0;  // index where this block's own slots begin
+    std::vector<ILVariablePtr> parameters;
+    std::vector<ILVariablePtr> locals;
+    // Local-variable types decoded from the method body's LocalVarSig, in
+    // index order. Assigned to the locals on first reference (GetOrCreateLocal)
+    // so the rest of the pipeline (AssignVariableNames, the C# seed) can use
+    // them. Empty for tiny bodies (no locals) or an undecodable signature.
+    std::vector<ITypePtr> localTypes;
+    // Per-local pinned flag (the LOCAL_SIG 0x45 ELEMENT_TYPE_PINNED marker);
+    // a pinned local becomes VariableKind::PinnedLocal, the input to
+    // DetectPinnedRegions.
+    std::vector<bool> localPinned;
+    // MethodDef token of the method being decoded. Generic-token resolvers
+    // (ResolveTypeToken / ResolveMethodDeclaringType) use it as the VAR/MVAR
+    // scope for TypeSpec operands (a `newarr !!0` in a generic method decodes
+    // with the method's T -- D174).
+    std::uint32_t ownerMethodToken = 0;
+    StackType returnStackType = StackType::Void;
+
+    // Evaluation-stack merge state (method-wide): the input stack recorded for
+    // each block-start offset, slot-merge representatives, and every stack-slot
+    // variable created by flushes.
+    std::map<std::uint32_t, std::vector<ILVariablePtr>> incomingStacks;
+    std::map<ILVariable*, ILVariablePtr> slotRepresentative;
+    std::vector<ILVariablePtr> stackVarsCreated;
+    int nextStackSlot = 0;
+    bool mergeFailed = false;
+
+    // The most recent instruction Pushed onto the expression stack in the
+    // current DecodeOne call (non-owning). The decode loop reads this to tag
+    // the Push's instruction with its IL byte-offset range when the opcode did
+    // not instead add a statement or set the block final. Reset to null after
+    // each opcode is tagged.
+    ILInstruction* lastCreated = nullptr;
+
+    bool Push(std::unique_ptr<ILInstruction> inst) {
+        if (!inst) return false;
+        lastCreated = inst.get();
+        expressionStack.push_back(std::move(inst));
+        return true;
+    }
+    std::unique_ptr<ILInstruction> Pop() {
+        if (!expressionStack.empty()) {
+            auto inst = std::move(expressionStack.back());
+            expressionStack.pop_back();
+            return inst;
+        }
+        if (currentStack.size() > stackBase) {
+            auto v = currentStack.back();
+            currentStack.pop_back();
+            return std::make_unique<LdLoc>(v);
+        }
+        return nullptr;  // stack underflow -> caller bails
+    }
+    // The C# `private bool CurrentStackIsEmpty()` (ILReader.cs line 599):
+    // both the pending expression trees and the committed evaluation stack
+    // are empty. The port's `currentStack` is reset per block and seeded from
+    // the block's recorded input stack (the C# `block.InputStack`), so the
+    // emptiness test reads the whole vector -- no stackBase offset (stackBase
+    // stays 0 in this reader; the field is kept for the Pop shape above).
+    bool CurrentStackIsEmpty() const {
+        return expressionStack.empty() && currentStack.empty();
+    }
+};
+
+// Tag the instruction an opcode created with its [start, pos) IL byte-offset
+// range -- the faithful equivalent of the C# ILReader calling inst.AddILRange on
+// every instruction it builds. `stackBefore/instrsBefore/finalBefore` are the
+// counts captured before DecodeOne mutated the block/stack. A final-setting
+// opcode (Terminal/SwitchInstr/BranchInstr) is the new FinalInstruction; a
+// statement-adding opcode (stloc, void call, dup's stloc) is the new back of the
+// block's Instructions; otherwise a value-producing opcode Pushed, recorded in
+// s.lastCreated (covers consume-then-push opcodes like add/conv whose net
+// stack change is negative but whose result is the new stack top). No-op
+// opcodes (nop, break) create nothing. Synthetic nodes a single opcode
+// produces in addition to the primary one (dup's two ldlocs, the stack-slot
+// flush's stlocs) keep the empty default; no current consumer consults them.
+void TagCreatedRange(ReaderState& s, Block* block, std::size_t start, std::size_t pos,
+                      std::size_t stackBefore, std::size_t instrsBefore, bool finalBefore) {
+    const std::int32_t s32 = static_cast<std::int32_t>(start);
+    const std::int32_t e32 = static_cast<std::int32_t>(pos);
+    ILInstruction* created = nullptr;
+    if (block->FinalInstruction && !finalBefore)
+        created = block->FinalInstruction.get();
+    else if (block->Instructions.size() > instrsBefore)
+        created = block->Instructions.back().get();
+    else if (s.lastCreated)
+        created = s.lastCreated;
+    if (created) created->SetILRange(s32, e32);
+    s.lastCreated = nullptr;
+}
+
+// Commit pending expression-stack entries into fresh stack-slot variables, in
+// evaluation (push) order, so values can cross a control-flow boundary without
+// moving side effects past it.
+void FlushExpressionStack(ReaderState& s, Block* block) {
+    for (auto& expr : s.expressionStack) {
+        auto v = std::make_shared<ILVariable>();
+        v->Name = "S_" + std::to_string(s.nextStackSlot++);
+        v->Kind = VariableKind::StackSlot;
+        v->Type = TypeOfValue(expr.get());
+        block->Add(std::make_unique<StLoc>(v, std::move(expr)));
+        s.currentStack.push_back(v);
+        s.stackVarsCreated.push_back(v);
+    }
+    s.expressionStack.clear();
+    // Flushing at a terminal runs after SetFinal; Block::Add keeps the final's
+    // ChildIndex tracking the instruction-list size.
+}
+
+// Follow the merge-representative chain for a stack-slot variable. Merges
+// always point an incoming variable at an already-recorded representative, so
+// chains stay short and deterministic (first-recorded wins).
+ILVariablePtr FindSlotRep(const ReaderState& s, ILVariablePtr v) {
+    ILVariablePtr found = v;
+    std::size_t hops = 0;
+    while (found) {
+        auto it = s.slotRepresentative.find(found.get());
+        if (it == s.slotRepresentative.end()) break;
+        if (it->second.get() == found.get()) break;
+        found = it->second;
+        if (++hops > s.slotRepresentative.size()) break;  // defensive
+    }
+    return found;
+}
+
+// Record/merge the outgoing evaluation stack at a control-flow edge targeting
+// the block starting at `target`. The first edge records the snapshot; later
+// edges unify their slots with the recorded representatives slot-wise
+// (compatible stack types only; the C# inserts a conversion StLoc for the
+// I4/I and F4/F8 pairs, we treat them as mergeable without the conversion).
+void MergeStackIntoTarget(ReaderState& s, std::uint32_t target,
+                          const std::vector<ILVariablePtr>& stack) {
+    auto it = s.incomingStacks.find(target);
+    if (it == s.incomingStacks.end()) {
+        s.incomingStacks[target] = stack;
+        return;
+    }
+    auto& recorded = it->second;
+    if (recorded.size() != stack.size()) {
+        s.mergeFailed = true;  // invalid IL: mismatched stack heights at a join
+        return;
+    }
+    for (std::size_t i = 0; i < stack.size(); ++i) {
+        ILVariablePtr rec = FindSlotRep(s, recorded[i]);
+        ILVariablePtr inc = stack[i];
+        if (rec.get() == inc.get()) continue;
+        StackType a = StackTypeOf(rec ? rec->Type : nullptr);
+        StackType t = StackTypeOf(inc ? inc->Type : nullptr);
+        bool mergeable = (a == t) || a == StackType::Unknown || t == StackType::Unknown ||
+                         (a == StackType::I4 && t == StackType::I) ||
+                         (a == StackType::I && t == StackType::I4) ||
+                         (a == StackType::F4 && t == StackType::F8) ||
+                         (a == StackType::F8 && t == StackType::F4);
+        if (!mergeable) {
+            s.mergeFailed = true;
+            return;
+        }
+        s.slotRepresentative[inc.get()] = rec;
+    }
+}
+
+// Replace merged stack-slot variables with their representatives across the
+// tree (loads, stores, address-ofs).
+void RemapMergedVariables(const ReaderState& s, ILInstruction* inst) {
+    if (!inst) return;
+    ILVariablePtr* slot = nullptr;
+    if (inst->Op == OpCode::StLoc) slot = &static_cast<StLoc*>(inst)->Variable;
+    else if (inst->Op == OpCode::LdLoc) slot = &static_cast<LdLoc*>(inst)->Variable;
+    else if (inst->Op == OpCode::LdLoca) slot = &static_cast<LdLoca*>(inst)->Variable;
+    if (slot && *slot) *slot = FindSlotRep(s, *slot);
+    for (int i = 0; i < inst->ChildCount(); ++i) RemapMergedVariables(s, inst->GetChild(i));
+}
+
+bool ReadU8(const std::uint8_t* b, std::size_t size, std::size_t pos, std::uint8_t& out) {
+    if (pos >= size) return false; out = b[pos]; return true;
+}
+bool ReadI8(const std::uint8_t* b, std::size_t size, std::size_t pos, std::int8_t& out) {
+    if (pos + 1 > size) return false; out = static_cast<std::int8_t>(b[pos]); return true;
+}
+bool ReadU16(const std::uint8_t* b, std::size_t size, std::size_t pos, std::uint16_t& out) {
+    if (pos + 2 > size) return false;
+    out = static_cast<std::uint16_t>(b[pos]) | (static_cast<std::uint16_t>(b[pos + 1]) << 8);
+    return true;
+}
+bool ReadI32(const std::uint8_t* b, std::size_t size, std::size_t pos, std::int32_t& out) {
+    if (pos + 4 > size) return false;
+    out = static_cast<std::int32_t>(static_cast<std::uint32_t>(b[pos]) |
+        (static_cast<std::uint32_t>(b[pos + 1]) << 8) |
+        (static_cast<std::uint32_t>(b[pos + 2]) << 16) |
+        (static_cast<std::uint32_t>(b[pos + 3]) << 24));
+    return true;
+}
+bool ReadU32(const std::uint8_t* b, std::size_t size, std::size_t pos, std::uint32_t& out) {
+    if (pos + 4 > size) return false;
+    out = static_cast<std::uint32_t>(b[pos]) | (static_cast<std::uint32_t>(b[pos + 1]) << 8) |
+         (static_cast<std::uint32_t>(b[pos + 2]) << 16) | (static_cast<std::uint32_t>(b[pos + 3]) << 24);
+    return true;
+}
+
+// Read a branch target (short or long) and return the absolute target offset.
+// Returns false on a truncated operand.
+bool ReadBranchTarget(const std::uint8_t* b, std::size_t size, std::size_t& pos,
+                      bool isShort, std::size_t instStart, std::uint32_t& target) {
+    if (isShort) {
+        std::int8_t rel = 0;
+        if (!ReadI8(b, size, pos, rel)) return false;
+        pos += 1;
+        target = static_cast<std::uint32_t>(static_cast<std::ptrdiff_t>(pos) + rel);
+    } else {
+        std::int32_t rel = 0;
+        if (!ReadI32(b, size, pos, rel)) return false;
+        pos += 4;
+        target = static_cast<std::uint32_t>(static_cast<std::ptrdiff_t>(pos) + rel);
+    }
+    (void)instStart;
+    return true;
+}
+
+void InitParameters(ReaderState& s, const MethodSignature& sig,
+                   const std::vector<std::string>& names) {
+    int first = sig.IsInstance ? 1 : 0;
+    int n = static_cast<int>(sig.ParameterTypes.size()) + first;
+    s.parameters.resize(n);
+    int idx = 0;
+    if (sig.IsInstance) {
+        auto v = std::make_shared<ILVariable>();
+        v->Name = "this";
+        v->Kind = VariableKind::Parameter;
+        v->Type = nullptr;
+        // The C# `CreateILVariable(index: -1, ..)` convention: the `this`
+        // parameter carries a NEGATIVE index, so `IsThis`/`MatchLdThis` can tell
+        // it apart from the first declared parameter (which gets index 0). The
+        // raw `s.parameters[0]` slot is unaffected.
+        v->Index = -1;
+        s.parameters[0] = v;
+        idx = 1;
+    }
+    int paramIdx = 0;  // index among the declared (non-this) parameters
+    for (const auto& t : sig.ParameterTypes) {
+        auto v = std::make_shared<ILVariable>();
+        if (paramIdx < static_cast<int>(names.size()) && !names[paramIdx].empty())
+            v->Name = names[paramIdx];
+        else
+            v->Name = "arg_" + std::to_string(idx);
+        v->Kind = VariableKind::Parameter;
+        v->Type = t;
+        // The semantic index excludes `this` (the C# `CreateILVariable` convention),
+        // so the first declared parameter is 0 even on an instance method.
+        v->Index = paramIdx;
+        s.parameters[idx] = v;
+        ++idx;
+        ++paramIdx;
+    }
+}
+
+ILVariablePtr GetOrCreateLocal(ReaderState& s, int idx) {
+    if (idx >= static_cast<int>(s.locals.size())) s.locals.resize(idx + 1);
+    if (!s.locals[idx]) {
+        auto v = std::make_shared<ILVariable>();
+        v->Name = "V_" + std::to_string(idx);
+        v->Kind = VariableKind::Local;
+        v->Index = idx;
+        if (idx >= 0 && idx < static_cast<int>(s.localTypes.size()))
+            v->Type = s.localTypes[idx];
+        if (idx >= 0 && idx < static_cast<int>(s.localPinned.size()) && s.localPinned[idx])
+            v->Kind = VariableKind::PinnedLocal;
+        s.locals[idx] = v;
+    }
+    return s.locals[idx];
+}
+
+StackType ReturnStackTypeOf(const ITypePtr& t) { return StackTypeOf(t); }
+
+// The short part of a resolved method name -- the substring after the last
+// '::' (the C# `IMethod.Name`). Returns the whole string when no '::' is
+// present.
+std::string_view ShortMethodName(std::string_view fullName) {
+    auto pos = fullName.rfind("::");
+    if (pos == std::string_view::npos) return fullName;
+    return fullName.substr(pos + 2);
+}
+
+// The set of recognised C# operator-overload method names (the C#
+// `OperatorDeclaration.GetOperatorType` table: op_Equality, op_Addition,
+// op_Implicit, op_CheckedAddition, ...). A method whose short name is in this
+// set is a C# operator overload; the IL reader marks the Call `IsOperator` so
+// NullableLiftingTransform::MatchCompOrDecimal's Decimal branch can recognise
+// the 6 comparison operators on System.Decimal (which have no IL Comp
+// instruction and lower to op_* calls). The C# additionally requires the
+// MethodDef's SpecialName/RTSpecialName flag; this port approximates by the
+// name alone (every C#-compiled operator overload carries SpecialName, so the
+// name is the real signal -- reading the flags column for in-module MethodDefs
+// and resolving cross-assembly MemberRefs would need the full type system for
+// no practical gain on C#-compiled corpora).
+bool IsOperatorName(std::string_view fullName) {
+    static constexpr std::string_view opNames[] = {
+        "op_LogicalNot", "op_OnesComplement", "op_Increment", "op_CheckedIncrement",
+        "op_Decrement", "op_CheckedDecrement", "op_True", "op_False",
+        "op_UnaryPlus", "op_UnaryNegation", "op_CheckedUnaryNegation",
+        "op_Addition", "op_CheckedAddition", "op_Subtraction", "op_CheckedSubtraction",
+        "op_Multiply", "op_CheckedMultiply", "op_Division", "op_CheckedDivision",
+        "op_Modulus", "op_BitwiseAnd", "op_BitwiseOr", "op_ExclusiveOr",
+        "op_LeftShift", "op_RightShift", "op_UnsignedRightShift",
+        "op_Equality", "op_Inequality", "op_GreaterThan", "op_LessThan",
+        "op_GreaterThanOrEqual", "op_LessThanOrEqual",
+        "op_Implicit", "op_Explicit", "op_CheckedExplicit",
+    };
+    auto name = ShortMethodName(fullName);
+    for (auto op : opNames) {
+        if (name == op) return true;
+    }
+    return false;
+}
+
+// Outcome of decoding one instruction.
+enum class DecodeOutcome {
+    Continue,     // pushed/added a statement; keep going
+    Bail,         // unsupported opcode / stack underflow / malformed
+    Terminal,     // block final set to a Leave/Throw (ret/throw); block ends
+    BranchInstr,  // block final set to a Branch/IfInstruction; block ends
+    SwitchInstr,  // block final set to a SwitchInstruction; block ends
+};
+
+// Decode one instruction, mutating `s` (push/pop) and `block` (add statements /
+// set final). `container` is the function body container for `ret` -> Leave.
+// `b/size/pos` is the IL stream; `start` is this instruction's offset. Returns
+// the outcome. On Bail, pos may be partially advanced; the caller degrades.
+DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
+                        BlockContainer* container, ILOpCode op,
+                        const std::uint8_t* b, std::size_t size, std::size_t& pos,
+                        std::size_t start) {
+    switch (op) {
+        // ---- constants ----
+        case ILOpCode::Ldnull:
+            if (!s.Push(std::make_unique<LdNull>())) return DecodeOutcome::Bail;
+            break;
+        case ILOpCode::Ldc_i4_0: if (!s.Push(std::make_unique<LdcI4>(0))) return DecodeOutcome::Bail; break;
+        case ILOpCode::Ldc_i4_1: if (!s.Push(std::make_unique<LdcI4>(1))) return DecodeOutcome::Bail; break;
+        case ILOpCode::Ldc_i4_2: if (!s.Push(std::make_unique<LdcI4>(2))) return DecodeOutcome::Bail; break;
+        case ILOpCode::Ldc_i4_3: if (!s.Push(std::make_unique<LdcI4>(3))) return DecodeOutcome::Bail; break;
+        case ILOpCode::Ldc_i4_4: if (!s.Push(std::make_unique<LdcI4>(4))) return DecodeOutcome::Bail; break;
+        case ILOpCode::Ldc_i4_5: if (!s.Push(std::make_unique<LdcI4>(5))) return DecodeOutcome::Bail; break;
+        case ILOpCode::Ldc_i4_6: if (!s.Push(std::make_unique<LdcI4>(6))) return DecodeOutcome::Bail; break;
+        case ILOpCode::Ldc_i4_7: if (!s.Push(std::make_unique<LdcI4>(7))) return DecodeOutcome::Bail; break;
+        case ILOpCode::Ldc_i4_8: if (!s.Push(std::make_unique<LdcI4>(8))) return DecodeOutcome::Bail; break;
+        case ILOpCode::Ldc_i4_m1: if (!s.Push(std::make_unique<LdcI4>(-1))) return DecodeOutcome::Bail; break;
+        case ILOpCode::Ldc_i4_s: {
+            std::int8_t v = 0; if (!ReadI8(b, size, pos, v)) return DecodeOutcome::Bail; pos += 1;
+            if (!s.Push(std::make_unique<LdcI4>(static_cast<std::int32_t>(v)))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Ldc_i4: {
+            std::int32_t v = 0; if (!ReadI32(b, size, pos, v)) return DecodeOutcome::Bail; pos += 4;
+            if (!s.Push(std::make_unique<LdcI4>(v))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Ldc_i8: {
+            if (pos + 8 > size) return DecodeOutcome::Bail;
+            std::int64_t v = 0;
+            for (int i = 0; i < 8; ++i) v |= static_cast<std::int64_t>(b[pos + i]) << (8 * i);
+            pos += 8;
+            if (!s.Push(std::make_unique<LdcI8>(v))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Ldc_r4: {
+            if (pos + 4 > size) return DecodeOutcome::Bail;
+            std::uint32_t u = static_cast<std::uint32_t>(b[pos])
+                | (static_cast<std::uint32_t>(b[pos + 1]) << 8)
+                | (static_cast<std::uint32_t>(b[pos + 2]) << 16)
+                | (static_cast<std::uint32_t>(b[pos + 3]) << 24);
+            pos += 4;
+            float fv; std::memcpy(&fv, &u, sizeof(fv));
+            if (!s.Push(std::make_unique<LdcF4>(fv))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Ldc_r8: {
+            if (pos + 8 > size) return DecodeOutcome::Bail;
+            std::uint64_t u = 0;
+            for (int i = 0; i < 8; ++i) u |= static_cast<std::uint64_t>(b[pos + i]) << (8 * i);
+            pos += 8;
+            double dv; std::memcpy(&dv, &u, sizeof(dv));
+            if (!s.Push(std::make_unique<LdcF8>(dv))) return DecodeOutcome::Bail;
+            break;
+        }
+
+        // ---- arguments ----
+        case ILOpCode::Ldarg_0: case ILOpCode::Ldarg_1:
+        case ILOpCode::Ldarg_2: case ILOpCode::Ldarg_3: {
+            int idx = static_cast<int>(op) - static_cast<int>(ILOpCode::Ldarg_0);
+            if (idx >= static_cast<int>(s.parameters.size())) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<LdLoc>(s.parameters[idx]))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Ldarg_s: {
+            std::uint8_t idx = 0; if (!ReadU8(b, size, pos, idx)) return DecodeOutcome::Bail; pos += 1;
+            if (idx >= s.parameters.size()) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<LdLoc>(s.parameters[idx]))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Ldarg: {
+            std::uint16_t idx = 0; if (!ReadU16(b, size, pos, idx)) return DecodeOutcome::Bail; pos += 2;
+            if (idx >= s.parameters.size()) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<LdLoc>(s.parameters[idx]))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Ldarga: {
+            std::uint16_t idx = 0; if (!ReadU16(b, size, pos, idx)) return DecodeOutcome::Bail; pos += 2;
+            if (idx >= s.parameters.size()) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<LdLoca>(s.parameters[idx]))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Starg: case ILOpCode::Starg_s: {
+            std::uint16_t idx = 0;
+            if (op == ILOpCode::Starg_s) {
+                std::uint8_t i8 = 0; if (!ReadU8(b, size, pos, i8)) return DecodeOutcome::Bail; pos += 1; idx = i8;
+            } else {
+                if (!ReadU16(b, size, pos, idx)) return DecodeOutcome::Bail; pos += 2;
+            }
+            if (idx >= s.parameters.size()) return DecodeOutcome::Bail;
+            auto value = s.Pop();
+            if (!value) return DecodeOutcome::Bail;
+            block->Add(std::make_unique<StLoc>(s.parameters[idx], std::move(value)));
+            break;
+        }
+
+        // ---- locals ----
+        case ILOpCode::Ldloc_0: case ILOpCode::Ldloc_1:
+        case ILOpCode::Ldloc_2: case ILOpCode::Ldloc_3: {
+            int idx = static_cast<int>(op) - static_cast<int>(ILOpCode::Ldloc_0);
+            auto v = GetOrCreateLocal(s, idx);
+            if (!s.Push(std::make_unique<LdLoc>(v))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Stloc_0: case ILOpCode::Stloc_1:
+        case ILOpCode::Stloc_2: case ILOpCode::Stloc_3: {
+            int idx = static_cast<int>(op) - static_cast<int>(ILOpCode::Stloc_0);
+            auto v = GetOrCreateLocal(s, idx);
+            auto value = s.Pop();
+            if (!value) return DecodeOutcome::Bail;
+            // The C# Stloc() sets the flag after the Pop (ILReader.cs line
+            // 1636): whether anything is left beneath the stored value.
+            auto stloc = std::make_unique<StLoc>(v, std::move(value));
+            stloc->ILStackWasEmpty = s.CurrentStackIsEmpty();
+            block->Add(std::move(stloc));
+            break;
+        }
+        case ILOpCode::Ldloc_s: {
+            std::uint8_t idx = 0; if (!ReadU8(b, size, pos, idx)) return DecodeOutcome::Bail; pos += 1;
+            auto v = GetOrCreateLocal(s, idx);
+            if (!s.Push(std::make_unique<LdLoc>(v))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Stloc_s: {
+            std::uint8_t idx = 0; if (!ReadU8(b, size, pos, idx)) return DecodeOutcome::Bail; pos += 1;
+            auto v = GetOrCreateLocal(s, idx);
+            auto value = s.Pop();
+            if (!value) return DecodeOutcome::Bail;
+            auto stloc = std::make_unique<StLoc>(v, std::move(value));
+            stloc->ILStackWasEmpty = s.CurrentStackIsEmpty();
+            block->Add(std::move(stloc));
+            break;
+        }
+        case ILOpCode::Ldloca_s: {
+            std::uint8_t idx = 0; if (!ReadU8(b, size, pos, idx)) return DecodeOutcome::Bail; pos += 1;
+            auto v = GetOrCreateLocal(s, idx);
+            if (!s.Push(std::make_unique<LdLoca>(v))) return DecodeOutcome::Bail;
+            break;
+        }
+
+        // ---- pop/dup ----
+        case ILOpCode::Pop: {
+            auto v = s.Pop();
+            if (!v) return DecodeOutcome::Bail;
+            break;  // discard
+        }
+        case ILOpCode::Dup: {
+            // The C# `return Push(Peek())`: the Peek FLUSHES the expression
+            // stack into committed stack slots (the duplicated value crosses
+            // the materialization boundary once) and loads the top committed
+            // slot -- the slot STAYS committed, so both copies of the value
+            // read the same slot (the Roslyn iterator stub's `newobj; dup;
+            // stfld ...; dup; stfld ...; ret` reuses ONE slot for every
+            // parameter store and the return; a fresh slot per dup would
+            // leave a copy between the stores that breaks the
+            // enumerator-creation pattern).
+            FlushExpressionStack(s, block);
+            if (s.currentStack.empty()) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<LdLoc>(s.currentStack.back()))) return DecodeOutcome::Bail;
+            break;
+        }
+
+        // ---- call/callvirt/newobj ----
+        case ILOpCode::Call: case ILOpCode::Callvirt: case ILOpCode::Newobj: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto callSig = file.GetMethodSignature(tok);
+            if (!callSig) return DecodeOutcome::Bail;
+            int argCount = static_cast<int>(callSig->ParameterTypes.size()) + (callSig->IsInstance ? 1 : 0);
+            if (op == ILOpCode::Newobj) argCount = static_cast<int>(callSig->ParameterTypes.size());
+            // The C# `call.ILStackWasEmpty = CurrentStackIsEmpty();` -- captured
+            // BEFORE the argument pops (the C# checks the stack state before
+            // decoding the arguments; the ILStackWasEmpty field feeds the
+            // statement-level-initializer gate in
+            // TransformCollectionAndObjectInitializers).
+            const bool ilStackWasEmpty = s.expressionStack.empty() &&
+                                         s.currentStack.size() <= s.stackBase;
+            auto call = std::make_unique<Call>(file.ResolveTokenToString(tok, s.ownerMethodToken));
+            call->ILStackWasEmpty = ilStackWasEmpty;
+            call->ReturnType = StackTypeOf(callSig->ReturnType);
+            call->ReturnIType = callSig->ReturnType;
+            call->ParameterIType = callSig->ParameterTypes;
+            call->IsInstanceCall = callSig->IsInstance && op != ILOpCode::Newobj;
+            call->IsVirtualCall = (op == ILOpCode::Callvirt);
+            call->IsVirtualMethod =
+                (file.GetMethodAttributes(tok) & 0x40) != 0;
+            call->IsNewObj = (op == ILOpCode::Newobj);
+            call->MethodToken = tok;
+            call->DeclaringType = file.ResolveMethodDeclaringType(tok, s.ownerMethodToken);
+            call->IsOperator = IsOperatorName(call->MethodName);
+            call->TypeArgumentsCount = file.GetMethodSpecTypeArgumentCount(tok);
+            call->TypeArgumentNames = file.GetMethodSpecTypeArgumentNames(tok);
+            std::vector<std::unique_ptr<ILInstruction>> args;
+            args.reserve(argCount);
+            for (int i = 0; i < argCount; ++i) {
+                auto a = s.Pop();
+                if (!a) return DecodeOutcome::Bail;
+                args.push_back(std::move(a));
+            }
+            // The C# `call.ILStackWasEmpty = CurrentStackIsEmpty()` -- evaluated
+            // after PrepareArguments popped the arguments, so the flag reports
+            // whether anything BENEATH the call's own operands survived.
+            call->ILStackWasEmpty = s.CurrentStackIsEmpty();
+            for (auto it = args.rbegin(); it != args.rend(); ++it) call->AddArg(std::move(*it));
+            if (op == ILOpCode::Newobj) {
+                // newobj leaves the constructed object on the stack regardless
+                // of the constructor's declared void return.
+                call->ReturnType = StackType::O;
+                if (!s.Push(std::move(call))) return DecodeOutcome::Bail;
+            } else {
+                bool returnsVoid = (callSig->ReturnType &&
+                                    callSig->ReturnType->ReflectionName() == "System.Void");
+                if (returnsVoid) block->Add(std::move(call));
+                else if (!s.Push(std::move(call))) return DecodeOutcome::Bail;
+            }
+            break;
+        }
+
+        case ILOpCode::Ldstr: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            if (!s.Push(std::make_unique<LdStr>(file.ResolveTokenToString(tok, s.ownerMethodToken)))) return DecodeOutcome::Bail;
+            break;
+        }
+
+        // ---- ret / throw (terminal) ----
+        case ILOpCode::Ret: {
+            std::unique_ptr<ILInstruction> retVal;
+            if (s.returnStackType != StackType::Void) {
+                retVal = s.Pop();
+                if (!retVal) return DecodeOutcome::Bail;
+            }
+            block->SetFinal(std::make_unique<Leave>(container, std::move(retVal)));
+            return DecodeOutcome::Terminal;
+        }
+        case ILOpCode::Throw: {
+            auto exc = s.Pop();
+            if (!exc) return DecodeOutcome::Bail;
+            block->SetFinal(std::make_unique<Throw>(std::move(exc)));
+            return DecodeOutcome::Terminal;
+        }
+        case ILOpCode::Rethrow:
+            block->SetFinal(std::make_unique<Rethrow>());
+            return DecodeOutcome::Terminal;
+
+        // ---- refanytype: TypedReference -> its type handle ----
+        case ILOpCode::Refanytype: {
+            auto v = s.Pop();
+            if (!v) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<RefAnyType>(std::move(v)))) return DecodeOutcome::Bail;
+            break;
+        }
+
+        // ---- refanyval: TypedReference -> the addressed value ----
+        case ILOpCode::Refanyval: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto tr = s.Pop(); if (!tr) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<RefAnyValue>(file.ResolveTypeToken(tok, s.ownerMethodToken), std::move(tr)))) return DecodeOutcome::Bail;
+            break;
+        }
+
+        case ILOpCode::Nop:
+        case ILOpCode::Break:
+            break;
+
+        // ---- binary arithmetic / bitwise / shift ----
+        // Sign + CheckForOverflow per opcode, faithful to the C# ILReader
+        // BinaryNumeric(op, checkForOverflow, sign) helper: the plain add/sub/
+        // mul/and/or/xor/shl are Sign.None; div/rem/shr are Sign.Signed; the
+        // _un variants are Sign.Unsigned; the _ovf variants are Sign.Signed with
+        // CheckForOverflow; _ovf_un are Sign.Unsigned with CheckForOverflow. The
+        // 5-arg BinaryNumericInstruction constructor derives the input types from
+        // the operands' ResultType and computes the result stack type via
+        // ComputeResultType (Ecma-335 Table 2/5/6/7).
+#define IL_BIN(opc, oper, sign, ovf) \
+    case ILOpCode::opc: { \
+        auto r = s.Pop(); auto l = s.Pop(); \
+        if (!l || !r) return DecodeOutcome::Bail; \
+        if (!s.Push(std::make_unique<BinaryNumericInstruction>(std::move(l), std::move(r), \
+            BinaryNumericOperator::oper, ovf, Sign::sign))) return DecodeOutcome::Bail; \
+        break; \
+    }
+        IL_BIN(Add, Add, None, false) IL_BIN(Add_ovf, Add, Signed, true) IL_BIN(Add_ovf_un, Add, Unsigned, true)
+        IL_BIN(Sub, Sub, None, false) IL_BIN(Sub_ovf, Sub, Signed, true) IL_BIN(Sub_ovf_un, Sub, Unsigned, true)
+        IL_BIN(Mul, Mul, None, false) IL_BIN(Mul_ovf, Mul, Signed, true) IL_BIN(Mul_ovf_un, Mul, Unsigned, true)
+        IL_BIN(Div, Div, Signed, false) IL_BIN(Div_un, Div, Unsigned, false)
+        IL_BIN(Rem, Rem, Signed, false) IL_BIN(Rem_un, Rem, Unsigned, false)
+        IL_BIN(And, BitAnd, None, false) IL_BIN(Or, BitOr, None, false) IL_BIN(Xor, BitXor, None, false)
+        IL_BIN(Shl, ShiftLeft, None, false) IL_BIN(Shr, ShiftRight, Signed, false) IL_BIN(Shr_un, ShiftRight, Unsigned, false)
+#undef IL_BIN
+
+#define IL_CMP(opc, kind, sign) \
+    case ILOpCode::opc: { \
+        auto r = s.Pop(); auto l = s.Pop(); \
+        if (!l || !r) return DecodeOutcome::Bail; \
+        if (!s.Push(std::make_unique<Comp>(std::move(l), std::move(r), \
+            ComparisonKind::kind, Sign::sign))) return DecodeOutcome::Bail; \
+        break; \
+    }
+        // The static sign per opcode (the C# Comparison helper derives it
+        // type-dependently: floats and equality/inequality over same-type
+        // operands are Sign.None, integer non-equality Signed/Unsigned by 'un').
+        // The port's static mapping is exact for every opcode it covers; the
+        // residual type-dependent gap (a relational .un over FLOAT operands is
+        // Sign.None in the C#) is documented here and in the Comp.Sign field
+        // note -- the reader's operand-normalization pass (the explicit convs
+        // above) never mixes float and integer stack types in one comparison.
+        IL_CMP(Ceq, Equality, None)
+        IL_CMP(Cgt, GreaterThan, Signed)
+        IL_CMP(Cgt_un, GreaterThan, Unsigned)
+        IL_CMP(Clt, LessThan, Signed)
+        IL_CMP(Clt_un, LessThan, Unsigned)
+#undef IL_CMP
+
+        // ---- neg/not (unary) -> emit via BinaryNumeric with zero, or a Conv ----
+        case ILOpCode::Neg: {
+            auto v = s.Pop(); if (!v) return DecodeOutcome::Bail;
+            auto zero = std::make_unique<LdcI4>(0);
+            if (!s.Push(std::make_unique<BinaryNumericInstruction>(std::move(zero), std::move(v),
+                BinaryNumericOperator::Sub, StackType::I4))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Not: {
+            auto v = s.Pop(); if (!v) return DecodeOutcome::Bail;
+            // Model as xor with -1 (all bits set) for I4; approximate but keeps the tree.
+            if (!s.Push(std::make_unique<BinaryNumericInstruction>(
+                std::make_unique<LdcI4>(-1), std::move(v),
+                BinaryNumericOperator::BitXor, StackType::I4))) return DecodeOutcome::Bail;
+            break;
+        }
+
+// Conv emission mirrors the C# ILReader: each conv.* opcode maps to a target
+// PrimitiveType, a CheckForOverflow flag, and an input Sign (None for the plain
+// integer convs, Signed for conv.r4/r8, Unsigned for conv.r.un). The Conv
+// constructor derives InputType from the argument's ResultType and computes the
+// ConversionKind via GetConversionKind (Ecma-335 Table 8).
+#define IL_CONV(opc, prim) \
+    case ILOpCode::opc: { \
+        auto v = s.Pop(); \
+        if (!v) return DecodeOutcome::Bail; \
+        if (!s.Push(std::make_unique<Conv>(std::move(v), PrimitiveType::prim, false, Sign::None))) return DecodeOutcome::Bail; \
+        break; \
+    }
+// conv.r4 / conv.r8 carry a Signed input sign (the C# reader passes Sign.Signed
+// for the int->float conversions).
+#define IL_CONV_S(opc, prim) \
+    case ILOpCode::opc: { \
+        auto v = s.Pop(); \
+        if (!v) return DecodeOutcome::Bail; \
+        if (!s.Push(std::make_unique<Conv>(std::move(v), PrimitiveType::prim, false, Sign::Signed))) return DecodeOutcome::Bail; \
+        break; \
+    }
+// conv.r.un carries an Unsigned input sign.
+#define IL_CONV_U(opc, prim) \
+    case ILOpCode::opc: { \
+        auto v = s.Pop(); \
+        if (!v) return DecodeOutcome::Bail; \
+        if (!s.Push(std::make_unique<Conv>(std::move(v), PrimitiveType::prim, false, Sign::Unsigned))) return DecodeOutcome::Bail; \
+        break; \
+    }
+        IL_CONV(Conv_i1, I1) IL_CONV(Conv_i2, I2) IL_CONV(Conv_i4, I4)
+        IL_CONV(Conv_u1, U1) IL_CONV(Conv_u2, U2) IL_CONV(Conv_u4, U4)
+        IL_CONV(Conv_i8, I8) IL_CONV(Conv_u8, U8)
+        IL_CONV_S(Conv_r4, R4) IL_CONV_S(Conv_r8, R8)
+        IL_CONV(Conv_i, I) IL_CONV(Conv_u, U) IL_CONV_U(Conv_r_un, R)
+#undef IL_CONV
+#undef IL_CONV_S
+#undef IL_CONV_U
+
+        // ---- cast/isinst/box/unbox ----
+        case ILOpCode::Castclass: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
+            auto v = s.Pop(); if (!v) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<CastClass>(type, std::move(v)))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Isinst: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
+            auto v = s.Pop(); if (!v) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<IsInst>(type, std::move(v)))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Box: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
+            auto v = s.Pop(); if (!v) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<Box>(type, std::move(v)))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Unbox: case ILOpCode::Unbox_any: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
+            auto v = s.Pop(); if (!v) return DecodeOutcome::Bail;
+            // `unbox` yields a managed pointer (ref T) and only throws, while
+            // `unbox.any` has a side effect and yields T -- the C# reader maps
+            // them to distinct nodes (ILReader.cs lines 1270-1273).
+            if (op == ILOpCode::Unbox) {
+                if (!s.Push(std::make_unique<Unbox>(type, std::move(v)))) return DecodeOutcome::Bail;
+            } else {
+                if (!s.Push(std::make_unique<UnboxAny>(type, std::move(v)))) return DecodeOutcome::Bail;
+            }
+            break;
+        }
+
+        // ---- arrays ----
+        case ILOpCode::Newarr: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
+            auto count = s.Pop(); if (!count) return DecodeOutcome::Bail;
+            std::vector<std::unique_ptr<ILInstruction>> idx;
+            idx.push_back(std::move(count));
+            if (!s.Push(std::make_unique<NewArr>(type, std::move(idx)))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Ldlen: {
+            auto arr = s.Pop(); if (!arr) return DecodeOutcome::Bail;
+            // The raw `ldlen` opcode pushes a native int (StackType::I), faithful
+            // to the C# LdLen. ExpressionTransforms.VisitConv folds
+            // `conv.i4(ldlen)` / `conv.i8(ldlen)` into a single LdLen(I4/I8, ..)
+            // so the conversion is folded into the load.
+            if (!s.Push(std::make_unique<LdLen>(StackType::I, std::move(arr)))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Ldelema: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
+            auto idx = s.Pop(); auto arr = s.Pop();
+            if (!arr || !idx) return DecodeOutcome::Bail;
+            std::vector<std::unique_ptr<ILInstruction>> indices;
+            indices.push_back(std::move(idx));
+            auto ldelema = std::make_unique<LdElema>(type, std::move(arr),
+                                                     std::move(indices));
+            // The pending `readonly.` prefix (the C# DecodeReadonly).
+            ldelema->IsReadOnly = s.pendingReadOnlyPrefix;
+            s.pendingReadOnlyPrefix = false;
+            if (!s.Push(std::move(ldelema))) return DecodeOutcome::Bail;
+            break;
+        }
+#define IL_LDELEM(opc, kt) \
+    case ILOpCode::opc: { \
+        auto type = std::make_shared<KnownType>(KnownTypeCode::kt); \
+        auto idx = s.Pop(); auto arr = s.Pop(); \
+        if (!arr || !idx) return DecodeOutcome::Bail; \
+        std::vector<std::unique_ptr<ILInstruction>> indices; \
+        indices.push_back(std::move(idx)); \
+        auto addr = std::make_unique<LdElema>(type, std::move(arr), std::move(indices)); \
+        if (!s.Push(std::make_unique<LdObj>(std::move(addr), type))) return DecodeOutcome::Bail; \
+        break; \
+    }
+        IL_LDELEM(Ldelem_i1, SByte) IL_LDELEM(Ldelem_u1, Byte)
+        IL_LDELEM(Ldelem_i2, Int16) IL_LDELEM(Ldelem_u2, UInt16)
+        IL_LDELEM(Ldelem_i4, Int32) IL_LDELEM(Ldelem_u4, UInt32)
+        IL_LDELEM(Ldelem_i8, Int64)
+        IL_LDELEM(Ldelem_r4, Single) IL_LDELEM(Ldelem_r8, Double)
+        IL_LDELEM(Ldelem_i, IntPtr) IL_LDELEM(Ldelem_ref, Object)
+#undef IL_LDELEM
+        case ILOpCode::Ldelem: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
+            auto idx = s.Pop(); auto arr = s.Pop();
+            if (!arr || !idx) return DecodeOutcome::Bail;
+            std::vector<std::unique_ptr<ILInstruction>> indices;
+            indices.push_back(std::move(idx));
+            auto addr = std::make_unique<LdElema>(type, std::move(arr), std::move(indices));
+            // The C# LdElem/StElem set DelayExceptions on the ldelema: the
+            // element access's exception is delayed to the dereference.
+            addr->DelayExceptions = true;
+            if (!s.Push(std::make_unique<LdObj>(std::move(addr), type))) return DecodeOutcome::Bail;
+            break;
+        }
+#define IL_STELEM(opc, kt) \
+    case ILOpCode::opc: { \
+        auto type = std::make_shared<KnownType>(KnownTypeCode::kt); \
+        auto val = s.Pop(); auto idx = s.Pop(); auto arr = s.Pop(); \
+        if (!arr || !idx || !val) return DecodeOutcome::Bail; \
+        std::vector<std::unique_ptr<ILInstruction>> indices; \
+        indices.push_back(std::move(idx)); \
+        auto addr = std::make_unique<LdElema>(type, std::move(arr), std::move(indices)); \
+        addr->DelayExceptions = true;  /* the C# StElem's DelayExceptions */ \
+        block->Add(std::make_unique<StObj>(std::move(addr), std::move(val), type)); \
+        break; \
+    }
+        IL_STELEM(Stelem_i, IntPtr) IL_STELEM(Stelem_i1, SByte)
+        IL_STELEM(Stelem_i2, Int16) IL_STELEM(Stelem_i4, Int32)
+        IL_STELEM(Stelem_i8, Int64) IL_STELEM(Stelem_r4, Single)
+        IL_STELEM(Stelem_r8, Double) IL_STELEM(Stelem_ref, Object)
+#undef IL_STELEM
+        case ILOpCode::Stelem: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
+            auto val = s.Pop(); auto idx = s.Pop(); auto arr = s.Pop();
+            if (!arr || !idx || !val) return DecodeOutcome::Bail;
+            std::vector<std::unique_ptr<ILInstruction>> indices;
+            indices.push_back(std::move(idx));
+            auto addr = std::make_unique<LdElema>(type, std::move(arr), std::move(indices));
+            addr->DelayExceptions = true;  // the C# StElem's DelayExceptions
+            block->Add(std::make_unique<StObj>(std::move(addr), std::move(val), type));
+            break;
+        }
+
+        // ---- indirect loads/stores ----
+#define IL_LDIND(opc, kt) \
+    case ILOpCode::opc: { \
+        auto type = std::make_shared<KnownType>(KnownTypeCode::kt); \
+        auto ptr = s.Pop(); \
+        if (!ptr) return DecodeOutcome::Bail; \
+        if (!s.Push(std::make_unique<LdObj>(std::move(ptr), type))) return DecodeOutcome::Bail; \
+        break; \
+    }
+        IL_LDIND(Ldind_i1, SByte) IL_LDIND(Ldind_u1, Byte)
+        IL_LDIND(Ldind_i2, Int16) IL_LDIND(Ldind_u2, UInt16)
+        IL_LDIND(Ldind_i4, Int32) IL_LDIND(Ldind_u4, UInt32)
+        IL_LDIND(Ldind_i8, Int64) IL_LDIND(Ldind_i, IntPtr)
+        IL_LDIND(Ldind_r4, Single) IL_LDIND(Ldind_r8, Double)
+        IL_LDIND(Ldind_ref, Object)
+#undef IL_LDIND
+#define IL_STIND(opc, kt) \
+    case ILOpCode::opc: { \
+        auto type = std::make_shared<KnownType>(KnownTypeCode::kt); \
+        auto val = s.Pop(); auto ptr = s.Pop(); \
+        if (!ptr || !val) return DecodeOutcome::Bail; \
+        block->Add(std::make_unique<StObj>(std::move(ptr), std::move(val), type)); \
+        break; \
+    }
+        IL_STIND(Stind_i1, SByte) IL_STIND(Stind_i2, Int16)
+        IL_STIND(Stind_i4, Int32) IL_STIND(Stind_i8, Int64)
+        IL_STIND(Stind_r4, Single) IL_STIND(Stind_r8, Double)
+        IL_STIND(Stind_ref, Object) IL_STIND(Stind_i, IntPtr)
+#undef IL_STIND
+
+        // ---- field access ----
+        case ILOpCode::Ldfld:
+        case ILOpCode::Ldflda:
+        case ILOpCode::Stfld:
+        case ILOpCode::Ldsfld:
+        case ILOpCode::Ldsflda:
+        case ILOpCode::Stsfld: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto fieldType = file.GetFieldSignature(tok);
+            std::string fieldName = file.ResolveTokenToString(tok, s.ownerMethodToken);
+            // FieldAttributes.InitOnly (0x20) is the C# `IField.IsReadOnly` bit.
+            const bool fieldIsReadOnly = (file.GetFieldAttributes(tok) & 0x20) != 0;
+            if (op == ILOpCode::Ldfld || op == ILOpCode::Ldflda || op == ILOpCode::Stfld) {
+                // stfld pops value (top) then target; the loads pop only target.
+                std::unique_ptr<ILInstruction> storeValue;
+                if (op == ILOpCode::Stfld) {
+                    storeValue = s.Pop();
+                    if (!storeValue) return DecodeOutcome::Bail;
+                }
+                auto target = s.Pop();
+                if (!target) return DecodeOutcome::Bail;
+                auto addr = std::make_unique<LdFlda>(std::move(target), fieldName);
+                addr->DelayExceptions = (op != ILOpCode::Ldflda);
+                addr->FieldToken = tok;
+                addr->IsCompilerGeneratedField = file.IsFieldCompilerGeneratedOrInCompilerGeneratedClass(tok);
+                addr->FieldIsReadOnly = fieldIsReadOnly;
+                if (op == ILOpCode::Ldflda) {
+                    if (!s.Push(std::move(addr))) return DecodeOutcome::Bail;
+                } else if (op == ILOpCode::Ldfld) {
+                    if (!s.Push(std::make_unique<LdObj>(std::move(addr), fieldType))) return DecodeOutcome::Bail;
+                } else {
+                    block->Add(std::make_unique<StObj>(std::move(addr), std::move(storeValue), fieldType));
+                }
+            } else {
+                auto addr = std::make_unique<LdsFlda>(fieldName);
+                addr->FieldToken = tok;
+                addr->IsCompilerGeneratedField = file.IsFieldCompilerGeneratedOrInCompilerGeneratedClass(tok);
+                addr->FieldIsReadOnly = fieldIsReadOnly;
+                if (op == ILOpCode::Ldsflda) {
+                    if (!s.Push(std::move(addr))) return DecodeOutcome::Bail;
+                } else if (op == ILOpCode::Ldsfld) {
+                    if (!s.Push(std::make_unique<LdObj>(std::move(addr), fieldType))) return DecodeOutcome::Bail;
+                } else {
+                    auto value = s.Pop();
+                    if (!value) return DecodeOutcome::Bail;
+                    block->Add(std::make_unique<StObj>(std::move(addr), std::move(value), fieldType));
+                }
+            }
+            break;
+        }
+
+        // ---- unconditional branches (br/br.s) ----
+        case ILOpCode::Br: case ILOpCode::Br_s: {
+            bool isShort = (op == ILOpCode::Br_s);
+            std::uint32_t target = 0;
+            if (!ReadBranchTarget(b, size, pos, isShort, start, target)) return DecodeOutcome::Bail;
+            FlushExpressionStack(s, block);
+            MergeStackIntoTarget(s, target, s.currentStack);
+            block->SetFinal(std::make_unique<Branch>(target));
+            return DecodeOutcome::BranchInstr;
+        }
+
+        // ---- conditional branches (brtrue/brfalse + beq..blt + _s/_un) ----
+        case ILOpCode::Brtrue: case ILOpCode::Brtrue_s:
+        case ILOpCode::Brfalse: case ILOpCode::Brfalse_s: {
+            bool isShort = (op == ILOpCode::Brtrue_s || op == ILOpCode::Brfalse_s);
+            std::uint32_t target = 0;
+            if (!ReadBranchTarget(b, size, pos, isShort, start, target)) return DecodeOutcome::Bail;
+            auto cond = s.Pop();
+            if (!cond) return DecodeOutcome::Bail;
+            bool negate = (op == ILOpCode::Brfalse || op == ILOpCode::Brfalse_s);
+            std::unique_ptr<ILInstruction> condition;
+            if (!negate) {
+                // brtrue: branch if cond is non-zero / non-null. A bare object
+                // reference is normalized to `cond != null` so the seed renders
+                // `if (value != null)` (and inversion yields `== null`); I4
+                // values stay bare (`if (flag)`). A Comp/IfInstruction already
+                // produces I4 and is left as-is.
+                if (cond->ResultType() == StackType::O) {
+                    condition = std::make_unique<Comp>(std::move(cond),
+                        std::make_unique<LdNull>(), ComparisonKind::Inequality,
+                        Sign::None);
+                } else {
+                    condition = std::move(cond);
+                }
+            } else {
+                // brfalse: branch if cond == 0/null. Emit Comp(Equality, cond, zero).
+                auto zero = (cond->ResultType() == StackType::O)
+                    ? std::unique_ptr<ILInstruction>(std::make_unique<LdNull>())
+                    : std::unique_ptr<ILInstruction>(std::make_unique<LdcI4>(0));
+                condition = std::make_unique<Comp>(std::move(cond), std::move(zero),
+                                                   ComparisonKind::Equality, Sign::None);
+            }
+            FlushExpressionStack(s, block);
+            MergeStackIntoTarget(s, target, s.currentStack);
+            if (pos < size)
+                MergeStackIntoTarget(s, static_cast<std::uint32_t>(pos), s.currentStack);
+            block->SetFinal(std::make_unique<IfInstruction>(std::move(condition),
+                                                           std::make_unique<Branch>(target)));
+            return DecodeOutcome::BranchInstr;
+        }
+#define IL_CBR(opc, kind, sign, isShort) \
+    case ILOpCode::opc: { \
+        std::uint32_t target = 0; \
+        if (!ReadBranchTarget(b, size, pos, isShort, start, target)) return DecodeOutcome::Bail; \
+        auto r = s.Pop(); auto l = s.Pop(); \
+        if (!l || !r) return DecodeOutcome::Bail; \
+        auto comp = std::make_unique<Comp>(std::move(l), std::move(r), ComparisonKind::kind, Sign::sign); \
+        FlushExpressionStack(s, block); \
+        MergeStackIntoTarget(s, target, s.currentStack); \
+        if (pos < size) \
+            MergeStackIntoTarget(s, static_cast<std::uint32_t>(pos), s.currentStack); \
+        block->SetFinal(std::make_unique<IfInstruction>(std::move(comp), \
+            std::make_unique<Branch>(target))); \
+        return DecodeOutcome::BranchInstr; \
+    }
+        // The static sign per opcode (see the IL_CMP note above): the
+        // equality/inequality branch forms are Sign.None (the C# Table-4 logic
+        // routes them through the same-type arm), the relational forms
+        // Signed/Unsigned by 'un'.
+        IL_CBR(Beq, Equality, None, false) IL_CBR(Beq_s, Equality, None, true)
+        IL_CBR(Bge, GreaterThanOrEqual, Signed, false) IL_CBR(Bge_s, GreaterThanOrEqual, Signed, true)
+        IL_CBR(Bgt, GreaterThan, Signed, false) IL_CBR(Bgt_s, GreaterThan, Signed, true)
+        IL_CBR(Ble, LessThanOrEqual, Signed, false) IL_CBR(Ble_s, LessThanOrEqual, Signed, true)
+        IL_CBR(Blt, LessThan, Signed, false) IL_CBR(Blt_s, LessThan, Signed, true)
+        IL_CBR(Bne_un, Inequality, None, false) IL_CBR(Bne_un_s, Inequality, None, true)
+        IL_CBR(Bge_un, GreaterThanOrEqual, Unsigned, false) IL_CBR(Bge_un_s, GreaterThanOrEqual, Unsigned, true)
+        IL_CBR(Bgt_un, GreaterThan, Unsigned, false) IL_CBR(Bgt_un_s, GreaterThan, Unsigned, true)
+        IL_CBR(Ble_un, LessThanOrEqual, Unsigned, false) IL_CBR(Ble_un_s, LessThanOrEqual, Unsigned, true)
+        IL_CBR(Blt_un, LessThan, Unsigned, false) IL_CBR(Blt_un_s, LessThan, Unsigned, true)
+#undef IL_CBR
+
+        case ILOpCode::Switch: {
+            std::uint32_t n = 0;
+            if (!ReadU32(b, size, pos, n)) return DecodeOutcome::Bail;
+            pos += 4;
+            std::size_t base = pos + static_cast<std::size_t>(n) * 4;
+            // Read the n relative target offsets.
+            std::vector<std::uint32_t> targets;
+            targets.reserve(n);
+            for (std::uint32_t i = 0; i < n; ++i) {
+                std::int32_t rel = 0;
+                if (!ReadI32(b, size, pos, rel)) return DecodeOutcome::Bail;
+                pos += 4;
+                targets.push_back(static_cast<std::uint32_t>(base + rel));
+            }
+            auto value = s.Pop();
+            if (!value) return DecodeOutcome::Bail;
+            FlushExpressionStack(s, block);
+            for (auto t : targets) MergeStackIntoTarget(s, t, s.currentStack);
+            if (pos < size)
+                MergeStackIntoTarget(s, static_cast<std::uint32_t>(pos), s.currentStack);
+            auto sw = std::make_unique<SwitchInstruction>(std::move(value));
+            for (std::uint32_t i = 0; i < n; ++i) {
+                auto sec = std::make_unique<SwitchSection>();
+                sec->Labels = Util::LongSet(static_cast<long long>(i));
+                sec->SetBody(std::make_unique<Branch>(targets[i]));
+                sw->AddSection(std::move(sec));
+            }
+            // Default section: fall through to the instruction after the
+            // switch. The labels are the complement of the table's index
+            // range (the C# DecodeSwitch: LongSet(new LongInterval(0,
+            // targets.Length)).Invert()) -- every value the table does not
+            // cover. GetDefaultSection (the section with the most labels)
+            // relies on this being the huge complement, not an empty set.
+            auto def = std::make_unique<SwitchSection>();
+            def->Labels = Util::LongSet(Util::LongInterval(0, static_cast<long long>(n))).Invert();
+            def->SetBody(std::make_unique<Branch>(static_cast<std::uint32_t>(pos)));
+            sw->AddSection(std::move(def));
+            block->SetFinal(std::move(sw));
+            return DecodeOutcome::SwitchInstr;
+        }
+
+        // ---- ldobj / stobj / initobj (typed memory ops with a type token) ----
+        case ILOpCode::Ldobj: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
+            auto ptr = s.Pop(); if (!ptr) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<LdObj>(std::move(ptr), type))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Stobj: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
+            auto val = s.Pop(); auto ptr = s.Pop();
+            if (!ptr || !val) return DecodeOutcome::Bail;
+            block->Add(std::make_unique<StObj>(std::move(ptr), std::move(val), type));
+            break;
+        }
+        case ILOpCode::Initobj: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
+            auto ptr = s.Pop(); if (!ptr) return DecodeOutcome::Bail;
+            // Model initobj as stobj(addr, default(T), T): the C# ILReader emits
+            // stobj(target, DefaultValue(type), type). The DefaultValue node carries
+            // the type so downstream transforms (LdLocaDupInitObjTransform) and the
+            // C# seed can render `default(T)` rather than a type-erased null/zero.
+            auto dv = std::make_unique<DefaultValue>(type);
+            // The C# InitObj sets the flag after the target was popped
+            // (ILReader.cs line 1667).
+            dv->ILStackWasEmpty = s.CurrentStackIsEmpty();
+            block->Add(std::make_unique<StObj>(std::move(ptr), std::move(dv), type));
+            break;
+        }
+
+        // ---- ldftn / ldvirtftn / sizeof / ldtoken ----
+        case ILOpCode::Ldftn: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            if (!s.Push(std::make_unique<LdFtn>(file.ResolveTokenToString(tok, s.ownerMethodToken)))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Ldvirtftn: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto target = s.Pop(); if (!target) return DecodeOutcome::Bail;
+            // ldvirtftn pops the object and pushes the function pointer. We emit
+            // the LdVirtFtn but lose the object reference -- approximate; the full
+            // ILAst carries the target as a child.
+            if (!s.Push(std::make_unique<LdVirtFtn>(file.ResolveTokenToString(tok, s.ownerMethodToken)))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Sizeof: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            if (!s.Push(std::make_unique<SizeOf>(file.ResolveTypeToken(tok, s.ownerMethodToken),
+                                                 file.ResolveTokenToString(tok, s.ownerMethodToken))))
+                return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Ldtoken: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            if (!s.Push(std::make_unique<LdTypeToken>(file.ResolveTypeToken(tok, s.ownerMethodToken),
+                                                      file.ResolveTokenToString(tok, s.ownerMethodToken))))
+                return DecodeOutcome::Bail;
+            break;
+        }
+
+        // ---- IL prefixes (volatile./constrained./readonly./unaligned./tail./prefixref) ----
+        // These prefix the next instruction; the full ILAst stores them on the
+        // following instruction's prefix fields. For the reader we skip the prefix
+        // (consuming its operand if any) and continue -- losing the prefix
+        // semantics but keeping the method decodable.
+        case ILOpCode::Readonly: {
+            // The C# DecodeReadonly (ILReader.cs lines 1721-1729): the
+            // `readonly.` prefix applies to the immediately-following
+            // ldelema; the operand is not consumed here but by that
+            // instruction's own case. Track the pending prefix through the
+            // decode loop's state so the next ldelema picks it up.
+            s.pendingReadOnlyPrefix = true;
+            break;
+        }
+        case ILOpCode::Volatile:
+        case ILOpCode::Tail:
+            break;  // no operand; prefix semantics lost but method continues
+        case ILOpCode::Constrained: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            break;  // type token operand consumed; prefix semantics lost
+        }
+        case ILOpCode::Unaligned: {
+            std::uint8_t v = 0; if (!ReadU8(b, size, pos, v)) return DecodeOutcome::Bail; pos += 1;
+            break;
+        }
+
+        // ---- ldarga.s (short form: 1-byte index) ----
+        case ILOpCode::Ldarga_s: {
+            std::uint8_t idx = 0; if (!ReadU8(b, size, pos, idx)) return DecodeOutcome::Bail; pos += 1;
+            if (idx >= s.parameters.size()) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<LdLoca>(s.parameters[idx]))) return DecodeOutcome::Bail;
+            break;
+        }
+
+        // ---- ckfinite: validate the top-of-stack float in place ----
+        case ILOpCode::Ckfinite: {
+            // ckfinite does not consume its argument (the value stays on the
+            // evaluation stack). The C# reader flushes the expression stack
+            // and builds `ckfinite(ldloc v)` over the top slot variable as a
+            // statement (ILReader.cs line 892: `new Ckfinite(Peek())` where
+            // Peek is FlushExpressionStack + LdLoc).
+            FlushExpressionStack(s, block);
+            if (s.currentStack.size() <= s.stackBase)
+                return DecodeOutcome::Bail;
+            block->Add(std::make_unique<Ckfinite>(
+                std::make_unique<LdLoc>(s.currentStack.back())));
+            break;
+        }
+
+        // ---- cpblk / initblk: the block-memory statements ----
+        case ILOpCode::Cpblk: {
+            // The pops preserve the evaluation order the ILAst stores the
+            // children in (dest; source; size) -- ILReader.cs line 960 pops
+            // size, source, dest.
+            auto size = s.Pop();
+            if (!size) return DecodeOutcome::Bail;
+            auto source = s.Pop();
+            if (!source) return DecodeOutcome::Bail;
+            auto dest = s.Pop();
+            if (!dest) return DecodeOutcome::Bail;
+            block->Add(std::make_unique<Cpblk>(std::move(dest), std::move(source),
+                                               std::move(size)));
+            break;
+        }
+        case ILOpCode::Initblk: {
+            // The pops preserve the address; value; size evaluation order
+            // (ILReader.cs line 974 pops size, value, address).
+            auto size = s.Pop();
+            if (!size) return DecodeOutcome::Bail;
+            auto value = s.Pop();
+            if (!value) return DecodeOutcome::Bail;
+            auto address = s.Pop();
+            if (!address) return DecodeOutcome::Bail;
+            block->Add(std::make_unique<Initblk>(std::move(address), std::move(value),
+                                                 std::move(size)));
+            break;
+        }
+
+        // ---- arglist: push the RuntimeArgumentHandle of a vararg method ----
+        // The C# ILReader pushes a dedicated Arglist node (ILReader.cs line 821),
+        // not a type-token load -- the handle is retrieved, not loaded by token.
+        case ILOpCode::Arglist: {
+            if (!s.Push(std::make_unique<Arglist>())) return DecodeOutcome::Bail;
+            break;
+        }
+
+        case ILOpCode::Leave: case ILOpCode::Leave_s: {
+            // IL leave transfers control out of a protected region; with regions
+            // nested into containers it decodes as a plain Branch to the target
+            // (as in the C# ILReader's DecodeUnconditionalBranch(isLeave: true)).
+            bool isShort = (op == ILOpCode::Leave_s);
+            std::uint32_t target = 0;
+            if (!ReadBranchTarget(b, size, pos, isShort, start, target)) return DecodeOutcome::Bail;
+            if (target >= size) return DecodeOutcome::Bail;
+            // leave empties the evaluation stack (ECMA-335 III.4.18): pending
+            // values flush to preserve side effects, but the target receives an
+            // empty input stack (the C# clears currentStack before marking).
+            FlushExpressionStack(s, block);
+            static const std::vector<ILVariablePtr> emptyStack;
+            MergeStackIntoTarget(s, target, emptyStack);
+            block->SetFinal(std::make_unique<Branch>(target));
+            return DecodeOutcome::BranchInstr;
+        }
+        case ILOpCode::Endfinally: {
+            // endfinally exits the finally container: Leave with a null target;
+            // the BlockBuilder assigns the innermost enclosing container.
+            block->SetFinal(std::make_unique<Leave>(nullptr));
+            return DecodeOutcome::Terminal;
+        }
+        case ILOpCode::Endfilter: {
+            // endfilter answers the catch filter: Leave(null, verdict).
+            auto verdict = s.Pop();
+            if (!verdict) return DecodeOutcome::Bail;
+            block->SetFinal(std::make_unique<Leave>(nullptr, std::move(verdict)));
+            return DecodeOutcome::Terminal;
+        }
+
+        // ---- overflow-checking conversions (same result types as the non-ovf forms) ----
+// The overflow-checking convs: conv.ovf.* carry a Signed input sign; the _un
+// variants (conv.ovf.*.un) carry an Unsigned input sign.
+#define IL_CONVOVF(opc, prim) \
+    case ILOpCode::opc: { \
+        auto v = s.Pop(); \
+        if (!v) return DecodeOutcome::Bail; \
+        if (!s.Push(std::make_unique<Conv>(std::move(v), PrimitiveType::prim, true, Sign::Signed))) return DecodeOutcome::Bail; \
+        break; \
+    }
+#define IL_CONVOVFU(opc, prim) \
+    case ILOpCode::opc: { \
+        auto v = s.Pop(); \
+        if (!v) return DecodeOutcome::Bail; \
+        if (!s.Push(std::make_unique<Conv>(std::move(v), PrimitiveType::prim, true, Sign::Unsigned))) return DecodeOutcome::Bail; \
+        break; \
+    }
+        IL_CONVOVF(Conv_ovf_i1, I1) IL_CONVOVF(Conv_ovf_u1, U1)
+        IL_CONVOVF(Conv_ovf_i2, I2) IL_CONVOVF(Conv_ovf_u2, U2)
+        IL_CONVOVF(Conv_ovf_i4, I4) IL_CONVOVF(Conv_ovf_u4, U4)
+        IL_CONVOVF(Conv_ovf_i8, I8) IL_CONVOVF(Conv_ovf_u8, U8)
+        IL_CONVOVF(Conv_ovf_i, I) IL_CONVOVF(Conv_ovf_u, U)
+        IL_CONVOVFU(Conv_ovf_i1_un, I1) IL_CONVOVFU(Conv_ovf_u1_un, U1)
+        IL_CONVOVFU(Conv_ovf_i2_un, I2) IL_CONVOVFU(Conv_ovf_u2_un, U2)
+        IL_CONVOVFU(Conv_ovf_i4_un, I4) IL_CONVOVFU(Conv_ovf_u4_un, U4)
+        IL_CONVOVFU(Conv_ovf_i8_un, I8) IL_CONVOVFU(Conv_ovf_u8_un, U8)
+        IL_CONVOVFU(Conv_ovf_i_un, I) IL_CONVOVFU(Conv_ovf_u_un, U)
+#undef IL_CONVOVF
+#undef IL_CONVOVFU
+
+        // ---- localloc: stack-allocate (rare; model as a no-op pushing a null ptr) ----
+        case ILOpCode::Localloc: {
+            auto size = s.Pop(); if (!size) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<LdNull>())) return DecodeOutcome::Bail;  // placeholder
+            break;
+        }
+
+        // ---- mkrefany: make a typed reference (rare) ----
+        case ILOpCode::Mkrefany: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto ptr = s.Pop(); if (!ptr) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<MakeRefAny>(file.ResolveTypeToken(tok, s.ownerMethodToken), std::move(ptr)))) return DecodeOutcome::Bail;
+            break;
+        }
+
+        default:
+            return DecodeOutcome::Bail;
+    }
+    return DecodeOutcome::Continue;
+}
+
+// Scan the IL for branch targets (the offsets a branch/conditional-branch/switch
+// jumps to) so the block splitter knows where to start new blocks. Also marks
+// offset 0 implicitly (the entry). Returns false if the scan hits malformed IL.
+bool FindBranchTargets(const std::uint8_t* b, std::size_t size, std::set<std::uint32_t>& targets) {
+    targets.insert(0);
+    std::size_t pos = 0;
+    while (pos < size) {
+        std::size_t start = pos;
+        ILOpCode op = DecodeOpCode(b, size, pos);
+        bool isShort;
+        switch (op) {
+            case ILOpCode::Br: case ILOpCode::Br_s:
+            case ILOpCode::Brtrue: case ILOpCode::Brtrue_s:
+            case ILOpCode::Brfalse: case ILOpCode::Brfalse_s:
+            case ILOpCode::Beq: case ILOpCode::Beq_s:
+            case ILOpCode::Bge: case ILOpCode::Bge_s:
+            case ILOpCode::Bgt: case ILOpCode::Bgt_s:
+            case ILOpCode::Ble: case ILOpCode::Ble_s:
+            case ILOpCode::Blt: case ILOpCode::Blt_s:
+            case ILOpCode::Bne_un: case ILOpCode::Bne_un_s:
+            case ILOpCode::Bge_un: case ILOpCode::Bge_un_s:
+            case ILOpCode::Bgt_un: case ILOpCode::Bgt_un_s:
+            case ILOpCode::Ble_un: case ILOpCode::Ble_un_s:
+            case ILOpCode::Blt_un: case ILOpCode::Blt_un_s:
+            // IL leave transfers control out of the region: its target starts a
+            // block just like a branch target does.
+            case ILOpCode::Leave: case ILOpCode::Leave_s: {
+                isShort = (op == ILOpCode::Br_s || op == ILOpCode::Brtrue_s ||
+                           op == ILOpCode::Brfalse_s || op == ILOpCode::Beq_s ||
+                           op == ILOpCode::Bge_s || op == ILOpCode::Bgt_s ||
+                           op == ILOpCode::Ble_s || op == ILOpCode::Blt_s ||
+                           op == ILOpCode::Bne_un_s || op == ILOpCode::Bge_un_s ||
+                           op == ILOpCode::Bgt_un_s || op == ILOpCode::Ble_un_s ||
+                           op == ILOpCode::Blt_un_s || op == ILOpCode::Leave_s);
+                std::uint32_t target = 0;
+                if (!ReadBranchTarget(b, size, pos, isShort, start, target)) return false;
+                if (target < size) targets.insert(target);
+                break;
+            }
+            case ILOpCode::Switch: {
+                std::uint32_t n = 0;
+                if (!ReadU32(b, size, pos, n)) return false;
+                pos += 4;
+                std::size_t base = pos + static_cast<std::size_t>(n) * 4;
+                for (std::uint32_t i = 0; i < n; ++i) {
+                    std::int32_t rel = 0;
+                    if (!ReadI32(b, size, pos, rel)) return false;
+                    pos += 4;
+                    targets.insert(static_cast<std::uint32_t>(base + rel));
+                }
+                break;
+            }
+            default: {
+                // Skip the operand using the opcode's operand size (Switch handled
+                // above). For token/variable/constant operands this is exact.
+                std::size_t opStart = start;
+                (void)opStart;
+                OperandType ot = GetOperandType(op);
+                if (ot == OperandType::Switch) { /* handled */ }
+                else {
+                    std::uint32_t sz = OperandFixedSize(ot);
+                    if (pos + sz > size) return false;
+                    pos += sz;
+                }
+                break;
+            }
+        }
+    }
+    return true;
+}
+
+// Find the block at `targetILOffset` visible from the branch's enclosing
+// container chain (the C# BlockBuilder.FindBranchTarget: walk the
+// containerStack from the innermost enclosing container outward, and take
+// the first block at the offset). The nesting pass puts two blocks at an
+// EH region's entry offset -- the flat block inside the region container
+// and the outer block wrapping the region construct -- and a branch from
+// outside the region must enter through the OUTER block (a flat
+// offset->block lookup would jump into the region's interior, bypassing
+// the region's semantics on later branch-chain simplification).
+Block* FindBranchTargetInContainers(const Branch* br,
+                                    std::uint32_t targetILOffset) {
+    for (ILInstruction* p = br->Parent; p != nullptr; p = p->Parent) {
+        auto* container = dynamic_cast<BlockContainer*>(p);
+        if (container == nullptr) continue;
+        for (auto& block : container->Blocks) {
+            if (block && block->StartILOffset == targetILOffset &&
+                !(block->StartILOffset == block->EndILOffset))
+                return block.get();
+        }
+    }
+    return nullptr;
+}
+
+// Resolve all Branch.TargetOffset references in the tree to Block pointers.
+// Branches whose target offset has no block are left as offset branches
+// (graceful).
+void ResolveBranches(ILInstruction* inst, const std::map<std::uint32_t, Block*>& byOffset) {
+    if (!inst) return;
+    // Recurse into children first.
+    for (int i = 0; i < inst->ChildCount(); ++i) {
+        ResolveBranches(inst->GetChild(i), byOffset);
+    }
+    // A Branch carries the offset form until resolved.
+    if (inst->Op == OpCode::Branch) {
+        auto* br = static_cast<Branch*>(inst);
+        if (br->HasOffset) {
+            if (Block* target = FindBranchTargetInContainers(br, br->TargetOffset)) {
+                br->TargetBlock = target;
+                br->HasOffset = false;
+            } else {
+                auto it = byOffset.find(br->TargetOffset);
+                if (it != byOffset.end()) { br->TargetBlock = it->second; br->HasOffset = false; }
+            }
+        }
+    }
+}
+} // namespace
+
+std::unique_ptr<ILFunction> ReadStraightLineIL(const MetadataFile& file,
+                                               std::uint32_t methodToken,
+                                               std::uint32_t rva) {
+    if (rva == 0) return nullptr;
+    auto body = file.GetMethodBody(rva);
+    if (!body.IsValid()) return nullptr;
+    if (!body.Handlers().empty()) return nullptr;
+
+    auto sigOpt = file.GetMethodSignature(methodToken);
+    if (!sigOpt) return nullptr;
+    const auto& sig = *sigOpt;
+
+    ReaderState s;
+    s.ownerMethodToken = methodToken;
+    InitParameters(s, sig, file.GetParameterNames(methodToken));
+    {
+        auto infos = file.GetLocalTypesWithPinned(body.LocalVarSigToken(), methodToken);
+        s.localTypes.reserve(infos.size());
+        s.localPinned.reserve(infos.size());
+        for (auto& info : infos) {
+            s.localTypes.push_back(std::move(info.Type));
+            s.localPinned.push_back(info.Pinned);
+        }
+    }
+    s.returnStackType = ReturnStackTypeOf(sig.ReturnType);
+
+    auto fn = std::make_unique<ILFunction>();
+    {
+        // Pre-resolve the method's constructor/static status (the subset of the
+        // C# ILFunction.Method handle the transforms consult) from the MethodDef
+        // flags/name, since the port's transforms carry no MetadataFile/IMethod.
+        auto kind = file.GetMethodDefKindInfo(methodToken);
+        fn->IsConstructor = kind.IsConstructor;
+        fn->IsStatic = kind.IsStatic;
+    }
+    auto container = std::make_unique<BlockContainer>();
+    auto* containerPtr = container.get();
+    auto block = std::make_unique<Block>();
+
+    const auto* b = body.IL().data();
+    std::size_t size = body.IL().size();
+    std::size_t pos = 0;
+
+    while (pos < size) {
+        std::size_t start = pos;
+        ILOpCode op = DecodeOpCode(b, size, pos);
+        const std::size_t stackBefore = s.expressionStack.size();
+        const std::size_t instrsBefore = block->Instructions.size();
+        const bool finalBefore = (block->FinalInstruction != nullptr);
+        DecodeOutcome out = DecodeOne(file, s, block.get(), containerPtr, op, b, size, pos, start);
+        if (out == DecodeOutcome::Bail) return nullptr;
+        TagCreatedRange(s, block.get(), start, pos, stackBefore, instrsBefore, finalBefore);
+        if (out == DecodeOutcome::Terminal || out == DecodeOutcome::BranchInstr) {
+            // Straight-line contract: a branch (not a ret/throw) is unsupported.
+            if (out == DecodeOutcome::BranchInstr) return nullptr;
+            break;  // Terminal: method ended at ret/throw.
+        }
+    }
+
+    if (!block->FinalInstruction) return nullptr;
+    if (!s.expressionStack.empty()) return nullptr;
+
+    container->AddBlock(std::move(block));
+    fn->Body = std::move(container);
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    for (auto& v : s.parameters) if (v) fn->Variables.push_back(v);
+    for (auto& v : s.locals) if (v) fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::InILReader);
+    return fn;
+}
+
+std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
+                                    std::uint32_t methodToken,
+                                    std::uint32_t rva) {
+    if (rva == 0) return nullptr;
+    auto body = file.GetMethodBody(rva);
+    if (!body.IsValid()) return nullptr;
+    // EH methods: blocks are decoded flat (handler entries seeded with the
+    // exception object), then the BlockBuilder nests region blocks into
+    // TryCatch/TryFinally/TryFault containers.
+
+    auto sigOpt = file.GetMethodSignature(methodToken);
+    if (!sigOpt) return nullptr;
+    const auto& sig = *sigOpt;
+
+    ReaderState s;
+    s.ownerMethodToken = methodToken;
+    InitParameters(s, sig, file.GetParameterNames(methodToken));
+    {
+        auto infos = file.GetLocalTypesWithPinned(body.LocalVarSigToken(), methodToken);
+        s.localTypes.reserve(infos.size());
+        s.localPinned.reserve(infos.size());
+        for (auto& info : infos) {
+            s.localTypes.push_back(std::move(info.Type));
+            s.localPinned.push_back(info.Pinned);
+        }
+    }
+    s.returnStackType = ReturnStackTypeOf(sig.ReturnType);
+
+    const auto* b = body.IL().data();
+    std::size_t size = body.IL().size();
+    if (size == 0) {
+        // The C# ILReader.ReadInstructions' zero-length arm (ILReader.cs
+        // lines 485-495): a ref-pack body (RVA != 0, Code size == 0 -- the
+        // reference-assembly convention) plants the InvalidBranch as the
+        // entry block's single instruction and skips the IL decode. The
+        // parameters were bound before the early return, so they ride the
+        // function; the transform pipeline and the C# back end render the
+        // node as the Empty-body error comment.
+        auto fn = std::make_unique<ILFunction>();
+        auto container = std::make_unique<BlockContainer>();
+        auto block = std::make_unique<Block>();
+        block->StartILOffset = 0;
+        block->Add(std::make_unique<InvalidBranch>(
+            std::string(
+                "Empty body found. Decompiled assembly might be a "
+                "reference assembly.")));
+        container->AddBlock(std::move(block));
+        fn->Body = std::move(container);
+        fn->Body->Parent = fn.get();
+        fn->Body->ChildIndex = 0;
+        for (auto& v : s.parameters)
+            if (v) fn->Variables.push_back(v);
+        fn->CheckInvariant(ILPhase::InILReader);
+        return fn;
+    }
+
+    // Pre-scan branch targets so the splitter knows where blocks begin.
+    std::set<std::uint32_t> branchTargets;
+    if (!FindBranchTargets(b, size, branchTargets)) return nullptr;
+    // A leave target outside the code is invalid IL (the C# emits an
+    // InvalidBranch); the decode of such a leave bails below -- our graceful
+    // degradation for the same case.
+
+    // Build a map of handler-offset -> exception variable for seeding catch/filter
+    // handler blocks with the exception object the runtime pushes.
+    std::map<std::uint32_t, ILVariablePtr> handlerExceptionVar;
+    for (const auto& eh : body.Handlers()) {
+        branchTargets.insert(eh.HandlerOffset);
+        branchTargets.insert(eh.TryOffset);
+        if (eh.Kind == ExceptionHandlerKind::Catch || eh.Kind == ExceptionHandlerKind::Filter) {
+            auto v = std::make_shared<ILVariable>();
+            v->Name = "E_" + std::to_string(eh.HandlerOffset);
+            v->Kind = VariableKind::ExceptionStackSlot;
+            // The C# resolves the catch clause's type through the module
+            // (module.ResolveType(eh.CatchType)). The reader resolves the
+            // name only: the common System.Exception shape becomes the
+            // KnownType stand-in (the IsKnownType consumers match it
+            // directly); any other catch type keeps the name-only SimpleType
+            // (the deferred-resolution convention).
+            if (eh.Kind == ExceptionHandlerKind::Filter) {
+                // The C# gives filter handlers the object type (the catch
+                // type is unknown -- the filter does the matching).
+                v->Type = std::make_shared<TypeSystem::KnownType>(
+                    TypeSystem::KnownTypeCode::Object);
+            } else {
+                try {
+                    if (eh.ClassTokenOrFilterOffset != 0) {
+                        TypeSystem::FullTypeName catchTypeName =
+                            Metadata::GetFullTypeName(
+                                file, static_cast<std::uint32_t>(
+                                          eh.ClassTokenOrFilterOffset));
+                        if (catchTypeName.ReflectionName() ==
+                            "System.Exception")
+                            v->Type =
+                                std::make_shared<TypeSystem::KnownType>(
+                                    TypeSystem::KnownTypeCode::Exception);
+                        else
+                            v->Type =
+                                std::make_shared<TypeSystem::SimpleType>(
+                                    catchTypeName.GetTopLevelTypeName());
+                    }
+                } catch (const std::exception&) {
+                    v->Type = nullptr;
+                }
+            }
+            v->HasGeneratedName = true;  // matches the C# ILReader's exception-slot name
+            handlerExceptionVar[eh.HandlerOffset] = v;
+        }
+        if (eh.Kind == ExceptionHandlerKind::Filter) {
+            // The filter block also starts with the exception object.
+            handlerExceptionVar[eh.ClassTokenOrFilterOffset] = handlerExceptionVar[eh.HandlerOffset];
+            branchTargets.insert(eh.ClassTokenOrFilterOffset);
+        }
+    }
+
+    auto fn = std::make_unique<ILFunction>();
+    {
+        // Pre-resolve the method's constructor/static status (the subset of the
+        // C# ILFunction.Method handle the transforms consult) from the MethodDef
+        // flags/name, since the port's transforms carry no MetadataFile/IMethod.
+        auto kind = file.GetMethodDefKindInfo(methodToken);
+        fn->IsConstructor = kind.IsConstructor;
+        fn->IsStatic = kind.IsStatic;
+    }
+    auto container = std::make_unique<BlockContainer>();
+    auto* containerPtr = container.get();
+
+    // Blocks are decoded flat (tagged with their start offset); the BlockBuilder
+    // nests them into EH-region containers at the end. byOffset maps each block's
+    // start offset for branch resolution; the queue drives decode order.
+    std::vector<std::pair<std::uint32_t, std::unique_ptr<Block>>> decodedBlocks;
+    std::map<std::uint32_t, Block*> byOffset;
+    std::vector<std::pair<std::uint32_t, Block*>> queue;
+    auto makeBlock = [&](std::uint32_t off) -> Block* {
+        // Idempotent: the same offset can be reached from a branch, a
+        // fall-through boundary, and the EH seeding below.
+        auto it = byOffset.find(off);
+        if (it != byOffset.end()) return it->second;
+        auto blk = std::make_unique<Block>();
+        blk->StartILOffset = off;
+        Block* raw = blk.get();
+        decodedBlocks.push_back({off, std::move(blk)});
+        byOffset[off] = raw;
+        queue.push_back({off, raw});
+        return raw;
+    };
+    makeBlock(0);
+    // Every EH region boundary begins a block: seed the try, handler, and
+    // filter entries even when ordinary flow never reaches them (the C# does
+    // the same in EnsureExceptionHandlersHaveBlocks so every region container
+    // has content for the BlockBuilder).
+    for (const auto& eh : body.Handlers()) {
+        if (eh.TryOffset < size) makeBlock(eh.TryOffset);
+        if (eh.HandlerOffset < size) makeBlock(eh.HandlerOffset);
+        if (eh.Kind == ExceptionHandlerKind::Filter && eh.ClassTokenOrFilterOffset < size)
+            makeBlock(eh.ClassTokenOrFilterOffset);
+    }
+    // Pre-record the handler/filter entry input stacks: the runtime pushes the
+    // exception object there (the C# StoreStackForOffset in
+    // PrepareBranchTargetsAndStacksForExceptionHandlers).
+    for (const auto& eh : body.Handlers()) {
+        auto it = handlerExceptionVar.find(eh.HandlerOffset);
+        if (it != handlerExceptionVar.end() && it->second)
+            s.incomingStacks.emplace(eh.HandlerOffset, std::vector<ILVariablePtr>{it->second});
+        if (eh.Kind == ExceptionHandlerKind::Filter) {
+            auto fit = handlerExceptionVar.find(eh.ClassTokenOrFilterOffset);
+            if (fit != handlerExceptionVar.end() && fit->second)
+                s.incomingStacks.emplace(eh.ClassTokenOrFilterOffset,
+                                         std::vector<ILVariablePtr>{fit->second});
+        }
+    }
+
+    // Decode each block. The reader state is shared across blocks (parameters
+    // and locals must be the same ILVariable instances method-wide); only the
+    // evaluation-stack state resets at each block entry.
+    for (std::size_t qi = 0; qi < queue.size(); ++qi) {
+        auto [blockStart, block] = queue[qi];
+        std::size_t pos = blockStart;
+        s.expressionStack.clear();
+        s.currentStack.clear();
+        s.stackBase = 0;
+        // Start from the block's recorded input stack (empty for the entry
+        // block; the exception slot for handler/filter entries; whatever the
+        // first predecessor merged in otherwise).
+        auto instack = s.incomingStacks.find(static_cast<std::uint32_t>(blockStart));
+        if (instack != s.incomingStacks.end()) s.currentStack = instack->second;
+
+        while (pos < size) {
+            // If this offset is a branch target AND we're not at the block start,
+            // end the block with an explicit fall-through Branch to it (merging
+            // the carried evaluation stack into the target's input stack).
+            if (pos != blockStart && branchTargets.count(static_cast<std::uint32_t>(pos))) {
+                FlushExpressionStack(s, block);
+                MergeStackIntoTarget(s, static_cast<std::uint32_t>(pos), s.currentStack);
+                block->SetFinal(std::make_unique<Branch>(static_cast<std::uint32_t>(pos)));
+                makeBlock(static_cast<std::uint32_t>(pos));
+                break;
+            }
+            std::size_t start = pos;
+            ILOpCode op = DecodeOpCode(b, size, pos);
+            // Snapshots to identify the instruction this opcode created (the C#
+            // ILReader calls inst.AddILRange on every instruction it builds).
+            const std::size_t stackBefore = s.expressionStack.size();
+            const std::size_t instrsBefore = block->Instructions.size();
+            const bool finalBefore = (block->FinalInstruction != nullptr);
+            DecodeOutcome out = DecodeOne(file, s, block, containerPtr, op, b, size, pos, start);
+            if (out == DecodeOutcome::Bail) return nullptr;
+            TagCreatedRange(s, block, start, pos, stackBefore, instrsBefore, finalBefore);
+            if (out == DecodeOutcome::Terminal) {
+                // ret/throw/rethrow/endfinally/endfilter ended the block. Valid
+                // IL has no pending values left at this point; invalid IL does
+                // (the C# drops them) -- flush to preserve side effects anyway.
+                if (!s.expressionStack.empty()) FlushExpressionStack(s, block);
+                break;
+            }
+            if (out == DecodeOutcome::SwitchInstr) {
+                // Create blocks for every switch target (case + default). The
+                // switch final's sections carry Branch(offset) bodies.
+                auto* sw = dynamic_cast<SwitchInstruction*>(block->FinalInstruction.get());
+                if (sw) {
+                    for (int si = 0; si < sw->ChildCount() - 1; ++si) {  // skip Value (slot 0)
+                        if (auto* sec = dynamic_cast<SwitchSection*>(sw->GetChild(si + 1))) {
+                            if (auto* br = dynamic_cast<Branch*>(sec->Body.get())) {
+                                if (br->TargetOffset < size && !byOffset.count(br->TargetOffset))
+                                    makeBlock(br->TargetOffset);
+                            }
+                        }
+                    }
+                }
+                // The default section's target is the instruction after the switch:
+                // a new block starts there too (if within the body).
+                if (pos < size && !byOffset.count(static_cast<std::uint32_t>(pos)))
+                    makeBlock(static_cast<std::uint32_t>(pos));
+                break;
+            }
+            if (out == DecodeOutcome::BranchInstr) {
+                // A branch may target a block we haven't created yet; create it
+                // (forward reference). The branch's target offset is in the final.
+                auto* fin = block->FinalInstruction.get();
+                std::uint32_t tgt = 0;
+                if (auto* br = dynamic_cast<Branch*>(fin)) tgt = br->TargetOffset;
+                else if (auto* iff = dynamic_cast<IfInstruction*>(fin)) {
+                    if (auto* tbr = dynamic_cast<Branch*>(iff->TrueInst.get())) tgt = tbr->TargetOffset;
+                }
+                if (tgt < size && !byOffset.count(tgt)) makeBlock(tgt);
+                // A conditional branch also falls through to the next offset; if
+                // that next offset is a branch target (or just the continuation),
+                // a new block starts there.
+                if (op == ILOpCode::Brtrue || op == ILOpCode::Brtrue_s ||
+                    op == ILOpCode::Brfalse || op == ILOpCode::Brfalse_s ||
+                    op == ILOpCode::Beq || op == ILOpCode::Beq_s ||
+                    op == ILOpCode::Bge || op == ILOpCode::Bge_s ||
+                    op == ILOpCode::Bgt || op == ILOpCode::Bgt_s ||
+                    op == ILOpCode::Ble || op == ILOpCode::Ble_s ||
+                    op == ILOpCode::Blt || op == ILOpCode::Blt_s ||
+                    op == ILOpCode::Bne_un || op == ILOpCode::Bne_un_s ||
+                    op == ILOpCode::Bge_un || op == ILOpCode::Bge_un_s ||
+                    op == ILOpCode::Bgt_un || op == ILOpCode::Bgt_un_s ||
+                    op == ILOpCode::Ble_un || op == ILOpCode::Ble_un_s ||
+                    op == ILOpCode::Blt_un || op == ILOpCode::Blt_un_s) {
+                    if (pos < size && !byOffset.count(static_cast<std::uint32_t>(pos)))
+                        makeBlock(static_cast<std::uint32_t>(pos));
+                }
+                // DecodeOne flushed the pending values into stack slots and
+                // merged the carried stack into the branch targets already.
+                break;
+            }
+        }
+        if (!block->FinalInstruction) {
+            // The C# ILReader's fall-through tail (ILReader.cs lines
+            // 570-590): a block that is not EndPointUnreachable and has
+            // no remaining bytes ends with an InvalidBranch carrying the
+            // error -- the statements decoded before it render, followed
+            // by the inline error comment. (The remaining-bytes arm --
+            // the fall-through into a later block -- is handled inside
+            // the decode loop's branch-target check.)
+            FlushExpressionStack(s, block);
+            block->SetFinal(std::make_unique<InvalidBranch>(
+                std::string("End of method reached without returning.")));
+        }
+    }
+
+    // A merge conflict (mismatched stack heights/types at a join) means
+    // invalid or unsupported IL; degrade whole-method rather than guess.
+    if (s.mergeFailed) return nullptr;
+
+    // Nest the flat blocks into exception-region containers (no-op ordering
+    // pass for handler-less methods).
+    BlockBuilder bb(body.Handlers(), handlerExceptionVar, static_cast<std::uint32_t>(size));
+    bb.CreateBlocks(*containerPtr, decodedBlocks);
+
+    // Resolve Branch.TargetOffset -> Block* across the (now nested) tree.
+    ResolveBranches(containerPtr, byOffset);
+
+    // Unify the merged stack slots and register the created variables.
+    if (!s.slotRepresentative.empty()) RemapMergedVariables(s, containerPtr);
+
+    fn->Body = std::move(container);
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    for (auto& v : s.parameters) if (v) fn->Variables.push_back(v);
+    for (auto& v : s.locals) if (v) fn->Variables.push_back(v);
+    // The catch/filter exception stack slots and the merge stack slots are
+    // function variables too (merges alias slots, so dedupe by pointer after
+    // representative resolution).
+    {
+        std::set<ILVariable*> seen;
+        for (const auto& [offset, v] : handlerExceptionVar) {
+            (void)offset;
+            if (v && seen.insert(v.get()).second) fn->Variables.push_back(v);
+        }
+        for (auto& v : s.stackVarsCreated) {
+            ILVariablePtr rep = FindSlotRep(s, v);
+            if (rep && seen.insert(rep.get()).second) fn->Variables.push_back(rep);
+        }
+    }
+    fn->CheckInvariant(ILPhase::InILReader);
+    return fn;
+}
+
+} // namespace ILSpy::Decompiler::IL

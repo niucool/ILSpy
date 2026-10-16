@@ -1,0 +1,654 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+// to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+// Implementation of the HighLevelLoopTransform static helpers. See the header
+// for the block-model adaptation notes.
+
+#include "Decompiler/IL/Transforms/HighLevelLoopTransform.hpp"
+
+#include <set>
+#include <vector>
+
+#include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
+#include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/Branch.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/Comp.hpp"
+#include "Decompiler/IL/Instructions/IfInstruction.hpp"
+#include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdNull.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/ILInstruction.hpp"
+#include "Decompiler/IL/InstructionFlags.hpp"
+#include "Decompiler/IL/StackType.hpp"
+#include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/IL/Transforms/IILTransform.hpp"
+
+#include <cassert>
+#include <functional>
+#include <vector>
+
+namespace ILSpy::Decompiler::IL {
+
+// Count the Branch edges into `entry`, split by origin: from inside `loop`
+// (the back-edges and any branches that skip the increment) vs from outside
+// it. The C# MatchForLoop gate reads `loop.EntryPoint.IncomingEdgeCount !=
+// 2`, where one of the two edges is the container connection the C#
+// BlockContainer itself contributes on `Connected()` -- the entry edge of
+// the container as a statement, independent of any Branch. This port's
+// reader materializes that connection as an explicit `br entry` in the
+// loop's pre-header whenever the fall into the loop is not positional, and
+// the loop detection places the container at the header block's IL position,
+// so the pre-header and the container need not be adjacent. The equivalent
+// gate is therefore by origin: exactly one inside edge (the single
+// back-edge from the increment block; a second would be a continue-to-head
+// the C# count of 2 would reject), and at most one outside edge (the
+// materialized container connection -- whether the pre-header branches to
+// the entry or falls through into the container positionally; a second
+// outside branch would be a real goto into the loop).
+struct IncomingEdgeCounts {
+    int inside = 0;
+    int outside = 0;
+};
+
+static IncomingEdgeCounts IncomingBranchEdges(ILInstruction* root, Block* entry, BlockContainer* loop) {
+    IncomingEdgeCounts counts;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (auto* br = dynamic_cast<Branch*>(inst)) {
+            if (br->TargetBlock == entry && loop != nullptr) {
+                bool fromInside = false;
+                for (ILInstruction* p = br; p != nullptr; p = p->Parent)
+                    if (p == loop) { fromInside = true; break; }
+                if (fromInside) ++counts.inside; else ++counts.outside;
+            }
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(root);
+    return counts;
+}
+
+// Whether `inst` or any descendant is an assignment (StLoc or a compound
+// assign) -- the C# IsAssignment gate on a for-condition sub-expression.
+static bool TreeHasAssignment(ILInstruction* inst) {
+    if (!inst) return false;
+    if (inst->Op == OpCode::StLoc || inst->Op == OpCode::NumericCompoundAssign ||
+        inst->Op == OpCode::UserDefinedCompoundAssign) return true;
+    for (int i = 0; i < inst->ChildCount(); ++i)
+        if (TreeHasAssignment(inst->GetChild(i))) return true;
+    return false;
+}
+
+// Whether `inst` or any descendant loads `variable` -- the C# use-in-condition
+// gate (`condition.Descendants.Any(inst.MatchLdLoc(incrementVariable))`).
+static bool TreeLoadsVariable(ILInstruction* inst, ILVariable* variable) {
+    if (!inst) return false;
+    if (auto* ld = dynamic_cast<LdLoc*>(inst))
+        if (ld->Variable.get() == variable) return true;
+    for (int i = 0; i < inst->ChildCount(); ++i)
+        if (TreeLoadsVariable(inst->GetChild(i), variable)) return true;
+    return false;
+}
+
+// Collect every variable loaded (LdLoc) anywhere in `inst`'s subtree.
+static void CollectLoadedVariables(ILInstruction* inst, std::set<ILVariable*>& out) {
+    if (!inst) return;
+    if (auto* ld = dynamic_cast<LdLoc*>(inst))
+        if (ld->Variable) out.insert(ld->Variable.get());
+    for (int i = 0; i < inst->ChildCount(); ++i)
+        CollectLoadedVariables(inst->GetChild(i), out);
+}
+
+// Collect variables stored in the for-loop's "init" region -- the
+// instructions that render immediately before the loop and can be referenced
+// by the for-update (which renders as an expression and cannot declare).
+// These are: the holder block's instructions that come BEFORE the loop
+// container (the `int i = 0;` in the same block as a leading `for`), or, if the
+// loop is the holder's first instruction, the preceding sibling block's
+// instructions (a separate pre-header block).
+static void CollectInitStores(BlockContainer* loop, Block* entry, ILInstruction* functionRoot,
+                              std::set<ILVariable*>& out) {
+    std::function<void(ILInstruction*)> collectStores = [&](ILInstruction* in) {
+        if (!in) return;
+        if (auto* st = dynamic_cast<StLoc*>(in))
+            if (st->Variable) out.insert(st->Variable.get());
+        for (int i = 0; i < in->ChildCount(); ++i) collectStores(in->GetChild(i));
+    };
+    // Walk up to the Block that holds the loop container as a statement.
+    ILInstruction* p = loop->Parent;
+    Block* holder = nullptr;
+    while (p) {
+        if (auto* b = dynamic_cast<Block*>(p)) { holder = b; break; }
+        p = p->Parent;
+    }
+    if (!holder) return;
+    // The loop container's index in the holder's Instructions.
+    std::size_t loopIdx = holder->Instructions.size();
+    for (std::size_t i = 0; i < holder->Instructions.size(); ++i)
+        if (holder->Instructions[i].get() == loop) { loopIdx = i; break; }
+    if (loopIdx > 0) {
+        // Init is in the same block, before the loop.
+        for (std::size_t i = 0; i < loopIdx; ++i)
+            collectStores(holder->Instructions[i].get());
+        return;
+    }
+    // The loop is the holder's first instruction: the init is in the
+    // preceding sibling block (the pre-header), if any.
+    auto* c = dynamic_cast<BlockContainer*>(holder->Parent);
+    if (c) {
+        for (std::size_t i = 0; i < c->Blocks.size(); ++i)
+            if (c->Blocks[i].get() == holder) {
+                if (i > 0)
+                    for (const auto& inst : c->Blocks[i - 1]->Instructions)
+                        collectStores(inst.get());
+                break;
+            }
+    }
+    // The pre-header need not be the holder's positional predecessor: the
+    // loop detection places the container at the header block's IL position,
+    // so the reader's block order can put other blocks between the pre-header
+    // and the holder (they belong after the loop in control flow). Follow the
+    // control flow instead: the block whose final branches to the entry from
+    // outside the loop is the pre-header (the container connection).
+    std::function<void(ILInstruction*)> findPreHeader = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (auto* br = dynamic_cast<Branch*>(inst)) {
+            if (br->TargetBlock == entry) {
+                bool fromInside = false;
+                for (ILInstruction* p = br; p != nullptr; p = p->Parent)
+                    if (p == loop) { fromInside = true; break; }
+                if (!fromInside) {
+                    for (ILInstruction* p = br; p != nullptr; p = p->Parent) {
+                        if (auto* b = dynamic_cast<Block*>(p)) {
+                            for (const auto& inst2 : b->Instructions)
+                                collectStores(inst2.get());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i) findPreHeader(inst->GetChild(i));
+    };
+    if (functionRoot != nullptr) findPreHeader(functionRoot);
+}
+
+// Whether any variable loaded in `incrBlock` is DECLARED only in the loop
+// body -- i.e., stored in a body block but NOT stored in the pre-header (the
+// loop var init, which renders before the for as `int i = 0;`) or the loop's
+// header (condition) block. The for-update renders BEFORE the body as an
+// expression (it cannot declare variables); a variable first declared in the
+// body would be out of scope in the update, so such a loop must stay `while`.
+// Stores in the increment itself do NOT count as in-scope (the for-update is
+// an expression, not a declaration site).
+static bool IncrementLoadsBodyDeclaredVariable(
+        BlockContainer* loop, Block* entry, ILInstruction* functionRoot, Block* incrBlock,
+        const std::set<const Block*>& bodyBlocks) {
+    std::set<ILVariable*> loaded;
+    for (const auto& inst : incrBlock->Instructions)
+        CollectLoadedVariables(inst.get(), loaded);
+    if (loaded.empty()) return false;
+    // In-scope: variables stored in the init region (pre-header) or the loop
+    // header -- these render before the for-update and can be referenced by it.
+    std::set<ILVariable*> inScope;
+    CollectInitStores(loop, entry, functionRoot, inScope);
+    {
+        std::function<void(ILInstruction*)> collectStores = [&](ILInstruction* in) {
+            if (!in) return;
+            if (auto* st = dynamic_cast<StLoc*>(in))
+                if (st->Variable) inScope.insert(st->Variable.get());
+            for (int i = 0; i < in->ChildCount(); ++i) collectStores(in->GetChild(i));
+        };
+        if (Block* header = loop->Blocks.front().get())
+            for (const auto& inst : header->Instructions) collectStores(inst.get());
+    }
+    // A loaded variable stored in a body block but not in scope -> body-declared.
+    for (const Block* b : bodyBlocks) {
+        for (const auto& inst : b->Instructions) {
+            std::function<bool(ILInstruction*)> any = [&](ILInstruction* in) -> bool {
+                if (!in) return false;
+                if (auto* st = dynamic_cast<StLoc*>(in))
+                    if (st->Variable && loaded.count(st->Variable.get()) &&
+                        !inScope.count(st->Variable.get()))
+                        return true;
+                for (int i = 0; i < in->ChildCount(); ++i)
+                    if (any(in->GetChild(i))) return true;
+                return false;
+            };
+            if (any(inst.get())) return true;
+        }
+    }
+    return false;
+}
+
+// The C# MatchForLoop "increment block" case: a While-shaped loop whose body
+// state-machine has a trailing block of simple statements (an `i++` block --
+// the block every `continue` targets) ends in a back-edge Branch to the loop
+// head. Move that block to the container's end and remark the loop For, so
+// the emitter can render `for (...; cond; incr) { body }`.
+static bool TryMatchFor(BlockContainer* loop, ILInstruction* functionRoot) {
+    if (loop->Kind != ContainerKind::While || loop->Blocks.size() < 2) return false;
+    Block* entry = loop->Blocks.front().get();
+    // The C# requires exactly two incoming edges at the entry point (pre-header
+    // + the increment back-edge). In this port's model the pre-header never
+    // branches to the loop entry -- the container itself is the statement --
+    // so the only counted edge to the entry block is the increment back-edge;
+    // anything else (a second back-edge skipping the increment, an external
+    // goto) makes the for shape unsafe.
+    IncomingEdgeCounts edges = IncomingBranchEdges(functionRoot, entry, loop);
+    if (edges.inside != 1 || edges.outside > 1) return false;
+    // Find the increment block: all simple statements + Branch entry.
+    std::size_t incIndex = std::string::npos;
+    for (std::size_t i = 1; i < loop->Blocks.size(); ++i) {
+        Block* b = loop->Blocks[i].get();
+        Block* head = nullptr;
+        if (!HighLevelLoopTransform::MatchIncrementBlock(b, head) || head != entry) continue;
+        if (b->Instructions.empty()) continue;   // C#: Instructions.Count <= 1 (i.e. no work)
+        // A dedicated increment block still needs a real body between it and
+        // the head (the C# 3-block minimum), so skip it for a 2-block loop.
+        if (loop->Blocks.size() < 3) continue;
+        // Soundness: the for-update renders before the body as an expression
+        // (it cannot declare), so it must not reference a variable first
+        // declared (stored) only in a body block. Bail to `while`.
+        std::set<const Block*> bodyBlocks;
+        for (std::size_t k = 1; k < loop->Blocks.size(); ++k)
+            if (k != i) bodyBlocks.insert(loop->Blocks[k].get());
+        if (IncrementLoadsBodyDeclaredVariable(loop, entry, functionRoot, b, bodyBlocks)) continue;
+        incIndex = i;
+        break;
+    }
+    if (incIndex != std::string::npos) {
+        // Move the increment block to the end of the container
+        // (MoveElementToEnd), preserving ChildIndex/Parent bookkeeping.
+        if (incIndex != loop->Blocks.size() - 1) {
+            auto hold = std::move(loop->Blocks[incIndex]);
+            loop->Blocks.erase(loop->Blocks.begin() + incIndex);
+            loop->Blocks.push_back(std::move(hold));
+            for (std::size_t i = 0; i < loop->Blocks.size(); ++i) {
+                loop->Blocks[i]->ChildIndex = static_cast<int>(i);
+                loop->Blocks[i]->Parent = loop;
+            }
+        }
+        loop->Kind = ContainerKind::For;
+        return true;
+    }
+    // No dedicated increment block: the C#'s no-dedicated-block case splits a
+    // trailing `stloc V(add(ldloc V, k)); br entry` tail off the body block
+    // into a new increment block appended to the container. The while
+    // condition must use the increment variable and be assignment-free (the
+    // C# SplitConditions gates). This port limits the shape to a single
+    // condition (no `&&`/`||` decomposition, which would need the three-valued
+    // condition nodes, deferred): a non-atomic condition (not a Comp single
+    // comparison) conservatively rejects the split.
+    Block* lastBody = loop->Blocks.back().get();
+    auto* backBr = dynamic_cast<Branch*>(lastBody->FinalInstruction.get());
+    if (!backBr || backBr->TargetBlock != entry) return false;
+    if (lastBody->Instructions.empty()) return false;
+    // A While-condition-in-entry with a separate empty trailing condition
+    // block (a csc 2-block for body) is outside the transform's scope -- the
+    // header must directly branch into the body (handled by the dedicated-
+    // increment case upstream).
+    if (auto* entryIf = dynamic_cast<IfInstruction*>(entry->FinalInstruction.get())) {
+        if (entryIf->TrueInst && entryIf->TrueInst->Op == OpCode::Branch &&
+            static_cast<Branch*>(entryIf->TrueInst.get())->TargetBlock != lastBody)
+            return false;
+    }
+    ILVariablePtr incrVar;
+    if (!HighLevelLoopTransform::MatchIncrement(lastBody->Instructions.back().get(), incrVar) || !incrVar)
+        return false;
+    if (incrVar->Kind == VariableKind::Parameter) return false;
+    auto* cond = dynamic_cast<IfInstruction*>(entry->FinalInstruction.get());
+    if (!cond || !cond->Condition) return false;
+    if (!TreeLoadsVariable(cond->Condition.get(), incrVar.get())) return false;
+    if (TreeHasAssignment(cond->Condition.get())) return false;
+    // A single-compound condition the C# would `&&`- or `||`-split is outside
+    // this port: only a single Comp (or a variable) condition is safe to split,
+    // since only one `if` guard would remain correct for it.
+    if (cond->Condition->Op != OpCode::Comp && cond->Condition->Op != OpCode::LdLoc)
+        return false;
+    // Split: move the increment stloc and the back-edge branch into a new
+    // block appended at the end; the body block now branches to the increment
+    // block.
+    auto newIncr = std::make_unique<Block>();
+    Block* newIncrPtr = newIncr.get();
+    newIncr->Add(std::move(lastBody->Instructions.back()));
+    lastBody->Instructions.pop_back();
+    newIncr->SetFinal(std::make_unique<Branch>(entry));
+    lastBody->SetFinal(std::make_unique<Branch>(newIncrPtr));
+    // Re-parent the moved increment into the new block: Add sets
+    // Parent/ChildIndex; SetFinal the same for the branch.
+    loop->AddBlock(std::move(newIncr));
+    loop->Kind = ContainerKind::For;
+    return true;
+}
+
+// The block that follows `block` in its container (the implicit fall-through
+// target of a non-EndPointUnreachable final), or nullptr when `block` is the
+// last block. Mirrors SwitchAnalysis's local helper.
+static Block* NextBlockInContainer(Block* block) {
+    auto* container = dynamic_cast<BlockContainer*>(block->Parent);
+    if (!container) return nullptr;
+    for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+        if (container->Blocks[i].get() == block) {
+            return (i + 1 < container->Blocks.size()) ? container->Blocks[i + 1].get() : nullptr;
+        }
+    }
+    return nullptr;
+}
+
+// Whether `leave` exits the function body (Port of Leave.IsLeavingFunction):
+// the target container's parent is the ILFunction. Used to recognize a `return`
+// where the C# MatchReturn would.
+static bool IsLeavingFunction(Leave* leave) {
+    return leave && leave->TargetContainer && leave->TargetContainer->Parent &&
+           leave->TargetContainer->Parent->Op == OpCode::ILFunction;
+}
+
+bool HighLevelLoopTransform::IsSimpleStatement(ILInstruction* inst) {
+    if (!inst) return false;
+    // call/callvirt/newobj all emit a Call node in this port; the compound-assign
+    // opcodes (NumericCompoundAssign/UserDefinedCompoundAssign) have no node
+    // class yet, so no instruction carries them. Recognize the call and the
+    // store kinds that exist today.
+    return inst->Op == OpCode::Call || inst->Op == OpCode::StLoc || inst->Op == OpCode::StObj;
+}
+
+bool HighLevelLoopTransform::MatchIncrement(ILInstruction* inst, ILVariablePtr& variable) {
+    if (!inst || inst->Op != OpCode::StLoc) return false;
+    auto* st = static_cast<StLoc*>(inst);
+    ILInstruction* value = st->Value.get();
+    if (!value || value->Op != OpCode::BinaryNumericInstruction) return false;
+    auto* bop = static_cast<BinaryNumericInstruction*>(value);
+    if (bop->Operator != BinaryNumericOperator::Add) return false;
+    ILInstruction* left = bop->Left.get();
+    if (!left || left->Op != OpCode::LdLoc) return false;
+    auto* ld = static_cast<LdLoc*>(left);
+    if (ld->Variable.get() != st->Variable.get()) return false;
+    variable = st->Variable;
+    return true;
+}
+
+bool HighLevelLoopTransform::MatchIncrementBlock(Block* block, Block*& loopHead) {
+    loopHead = nullptr;
+    if (!block) return false;
+    // The block's final must be a Branch to the loop head (the C# reads
+    // Instructions.Last()); the other instructions (the C# SkipLast(1)) must all
+    // be simple statements.
+    auto* br = dynamic_cast<Branch*>(block->FinalInstruction.get());
+    if (!br || !br->TargetBlock) return false;
+    for (auto& inst : block->Instructions) {
+        if (!IsSimpleStatement(inst.get())) return false;
+    }
+    loopHead = br->TargetBlock;
+    return true;
+}
+
+bool HighLevelLoopTransform::MatchDoWhileConditionBlock(Block* block, Block*& target1, Block*& target2) {
+    target1 = target2 = nullptr;
+    if (!block) return false;
+    // The if is the block's final (the C# reads Instructions[Count-2]); it must
+    // have no else (FalseInst null -- the C# checks FalseInst.MatchNop()).
+    auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get());
+    if (!iff || iff->FalseInst) return false;
+
+    // True arm: a Branch to target1, or a return (a Leave exiting the function).
+    if (auto* br = dynamic_cast<Branch*>(iff->TrueInst.get())) {
+        target1 = br->TargetBlock;
+    } else if (auto* leave = dynamic_cast<Leave*>(iff->TrueInst.get())) {
+        if (!IsLeavingFunction(leave)) return false;
+        target1 = nullptr;  // return: no block target
+    } else {
+        return false;
+    }
+
+    // Fall-through (false arm): the next block in the container (the C# reads
+    // Instructions.Last() as an explicit fall-through Branch). When there is no
+    // next block the fall-through exits the container; treat it as a return
+    // (target2 = null) only when that exit leaves the function body, matching
+    // the C# last.MatchReturn.
+    Block* next = NextBlockInContainer(block);
+    if (next) {
+        target2 = next;
+    } else {
+        auto* container = dynamic_cast<BlockContainer*>(block->Parent);
+        if (!container || !container->Parent || container->Parent->Op != OpCode::ILFunction)
+            return false;  // falls out of a nested container: a leave, not a return
+        target2 = nullptr;  // return fall-through
+    }
+    return true;
+}
+
+// Negate a condition (port of Comp.LogicNot): fold into a Comp when possible.
+static std::unique_ptr<ILInstruction> NegateCondition(std::unique_ptr<ILInstruction> cond) {
+    if (!cond) return cond;
+    if (auto* comp = dynamic_cast<Comp*>(cond.get())) {
+        if (comp->Kind == ComparisonKind::Equality && comp->Right &&
+            comp->Right->Op == OpCode::LdcI4 &&
+            static_cast<LdcI4*>(comp->Right.get())->Value == 0)
+            return std::move(comp->Left);  // logic.not(x == 0) -> x
+        comp->Kind = NegateComparison(comp->Kind);
+        return cond;
+    }
+    if (auto* iff = dynamic_cast<IfInstruction*>(cond.get())) {
+        auto t = std::move(iff->TrueInst);
+        iff->TrueInst = std::move(iff->FalseInst);
+        iff->FalseInst = std::move(t);
+        if (iff->TrueInst) iff->TrueInst->ChildIndex = 1;
+        if (iff->FalseInst) iff->FalseInst->ChildIndex = 2;
+        return cond;
+    }
+    auto zero = (cond->ResultType() == StackType::O)
+        ? std::unique_ptr<ILInstruction>(std::make_unique<LdNull>())
+        : std::unique_ptr<ILInstruction>(std::make_unique<LdcI4>(0));
+    return std::make_unique<Comp>(std::move(cond), std::move(zero), ComparisonKind::Equality);
+}
+
+void HighLevelLoopTransform::Run(ILFunction& function, ILTransformContext& context) {
+    (void)context;
+    // Walk every Loop-kind container. (In our model the if is the block's
+    // FinalInstruction; the C# reads it from Instructions[0] because the C#
+    // block carries the if as a non-terminal with an explicit fall-through
+    // Branch. Our entry point's if-as-final with no else (FalseInst null) is the
+    // same shape.)
+    std::vector<BlockContainer*> loops;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (auto* c = dynamic_cast<BlockContainer*>(inst))
+            if (c->Kind == ContainerKind::Loop) loops.push_back(c);
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(function.Body.get());
+    for (BlockContainer* loop : loops) {
+        if (loop->Blocks.empty()) continue;
+        Block* entry = loop->Blocks.front().get();
+        auto* iff = dynamic_cast<IfInstruction*>(entry->FinalInstruction.get());
+        // An entry with no if-final cannot be a While shape, but can still be a
+        // do-while (the C# MatchWhileLoop would not match either way and
+        // MatchDoWhileLoop consults only the condition block); fall through to
+        // the do-while check instead of skipping outright.
+        if (!iff) goto doWhileCheck;
+        // Shape 1 (C#): `if (cond) leave loop` (TrueInst a Leave, no else).
+        // The while condition is the negated cond. Negate, the leave becomes the
+        // false arm (break), a branch to the body becomes the true arm.
+        if (!iff->FalseInst && iff->TrueInst && iff->TrueInst->Op == OpCode::Leave) {
+            auto* leave = static_cast<Leave*>(iff->TrueInst.get());
+            if (leave->TargetContainer != loop) continue;
+            iff->Condition = NegateCondition(std::move(iff->Condition));
+            if (iff->Condition) { iff->Condition->Parent = iff; iff->Condition->ChildIndex = 0; }
+            iff->FalseInst = std::move(iff->TrueInst);
+            if (iff->FalseInst) { iff->FalseInst->Parent = iff; iff->FalseInst->ChildIndex = 2; }
+            iff->TrueInst = std::make_unique<Branch>(loop->Blocks.size() > 1 ? loop->Blocks[1].get() : entry);
+            iff->TrueInst->Parent = iff;
+            iff->TrueInst->ChildIndex = 1;
+            loop->Kind = ContainerKind::While;
+            if (TryMatchFor(loop, function.Body.get())) continue;
+            continue;
+        }
+        // Shape 2 (this port's LoopDetection): `if (cond) br body else leave loop`
+        // (TrueInst a Branch to a body block, FalseInst a Leave(loop)). The while
+        // condition is cond (no negation). Just mark as While -- the seed extracts
+        // the condition and renders the body blocks.
+        if (iff->FalseInst && iff->FalseInst->Op == OpCode::Leave &&
+            iff->TrueInst && iff->TrueInst->Op == OpCode::Branch) {
+            auto* leave = static_cast<Leave*>(iff->FalseInst.get());
+            if (leave->TargetContainer != loop) continue;
+            loop->Kind = ContainerKind::While;
+            if (TryMatchFor(loop, function.Body.get())) continue;
+            continue;
+        }
+        doWhileCheck:
+        // MatchDoWhileLoop: a loop whose last block is a do-while condition --
+        // an if with a true-arm Branch to the loop header (continue) and a
+        // fall-through that exits the loop (break). The entry point has no
+        // while-condition if (it falls straight into the body). Mark as DoWhile
+        // so the seed renders `do { ... } while (cond)`. Multi-condition
+        // variant (the C# AnalyzeDoWhileConditions): trailing ifs whose true
+        // arm also branches to the header combine via a ThreeValuedBoolAnd of
+        // their conditions into the final condition if.
+        if (loop->Blocks.size() >= 2) {
+            Block* last = loop->Blocks.back().get();
+            Block* header = loop->Blocks.front().get();
+            if (auto* condIf = dynamic_cast<IfInstruction*>(last->FinalInstruction.get())) {
+                if (!condIf->FalseInst && condIf->TrueInst &&
+                    condIf->TrueInst->Op == OpCode::Branch) {
+                    auto* br = static_cast<Branch*>(condIf->TrueInst.get());
+                    // The true arm branches to the header (the do-while
+                    // continue); the fall-through exits the loop (the entry
+                    // point's final is NOT a while-condition if).
+                    if (br->TargetBlock == header) {
+                        // The entry must not itself be a while-condition (that's
+                        // the While shape, already handled above).
+                        auto* entryIf = dynamic_cast<IfInstruction*>(entry->FinalInstruction.get());
+                        bool entryIsWhileCond = entryIf &&
+                            ((entryIf->TrueInst && entryIf->TrueInst->Op == OpCode::Leave) ||
+                             (entryIf->FalseInst && entryIf->FalseInst->Op == OpCode::Leave));
+                        // A do-while runs the body BEFORE its condition. An
+                        // entry block that only routes into the condition
+                        // block (no instructions of its own, final Branch
+                        // straight to the last block) means the condition
+                        // evaluates first -- the C# while-shape lowering
+                        // (`while (cond) body`) with the condition hoisted to
+                        // the LAST block (e.g. assignment-in-operation
+                        // `while ((line = reader.ReadLine()) != null)`); the
+                        // do-while rendering would reorder condition-before-
+                        // body and change semantics. Reject the fold.
+                        {
+                            // Structural soundness gate: a do-while executes
+                            // its BODY before its condition on the first
+                            // iteration. The loop's entry path must lead into
+                            // a body block (Blocks[1] in container order), not
+                            // into the trailing condition block. An entry that
+                            // routes straight to the condition block is the
+                            // csc lowering of a WHILE loop with the condition
+                            // hoisted last (e.g. assignment-in-condition
+                            // `while ((line = reader.ReadLine()) != null)`) --
+                            // folding it to do { body } while (cond) would
+                            // execute the body once unconditionally and change
+                            // semantics.
+                            if (loop->Blocks.size() == 2) continue;
+                            Block* bodyFirst = nullptr;
+                            if (auto* entryBr = dynamic_cast<Branch*>(entry->FinalInstruction.get()))
+                                bodyFirst = entryBr->TargetBlock;
+                            else if (!entry->FinalInstruction)
+                                bodyFirst = (loop->Blocks.size() > 1) ? loop->Blocks[1].get() : nullptr;
+                            if (bodyFirst != loop->Blocks[1].get() ||
+                                loop->Blocks[1].get() == last) continue;
+                        }
+                        if (!entryIsWhileCond) {
+                            // The C# also folds trailing `if(cond) br entry`
+                            // conditions (non-final) into the condition if,
+                            // building a LogicAnd chain: the combined condition
+                            // is `preCond && cond` (the LoopDetection-simplified
+                            // condition list in AnalyzeDoWhileConditions). Only
+                            // fold when the final if's condition must logically
+                            // follow the pre-condition -- the C# asks for all
+                            // conditions usable as loop guards (TrueInst br entry, no FalseInst).
+                            std::vector<std::size_t> preIfIndices;
+                            for (std::size_t i = last->Instructions.size(); i-- > 0;) {
+                                auto* pre = dynamic_cast<IfInstruction*>(last->Instructions[i].get());
+                                if (!pre) break;
+                                if (pre->FalseInst) break;
+                                if (!pre->TrueInst || pre->TrueInst->Op != OpCode::Branch) break;
+                                auto* preBr = static_cast<Branch*>(pre->TrueInst.get());
+                                if (preBr->TargetBlock != header) break;
+                                preIfIndices.push_back(i);
+                            }
+                            if (!preIfIndices.empty()) {
+                                // Combine: preCond0 && preCond1 && ... && finalCond
+                                // (order preserved -- the seed renders the
+                                // combined if as the do-while condition).
+                                std::unique_ptr<ILInstruction> combined = std::move(last->FinalInstruction);
+                                {
+                                    auto* combinedIf = static_cast<IfInstruction*>(combined.get());
+                                    std::unique_ptr<ILInstruction> cond = std::move(combinedIf->Condition);
+                                    // Build right-associative and-fold: walk conditions from
+                                    // trailing-most to leading (indices descending in the
+                                    // collected vector, which is built from i = last-1 down),
+                                    // then finally chain them behind the final cond.
+                                    for (auto it = preIfIndices.begin(); it != preIfIndices.end(); ++it) {
+                                        std::unique_ptr<ILInstruction> pre = std::move(last->Instructions[*it]);
+                                        auto* preIf = static_cast<IfInstruction*>(pre.get());
+                                        // C#: if (condSoFar == null) start, else LogicAnd(chain, preCond).
+                                        // Rebuild the cond expression as a chain
+                                        // of the collected conditions PLUS the final `cond`.
+                                        if (!cond) { cond = std::move(preIf->Condition); continue; }
+                                        auto next = std::move(preIf->Condition);
+                                        // C# IfInstruction.LogicAnd(lhs, rhs) = if (lhs) rhs else 0
+                                        // (an if-expression, NOT ThreeValuedBool: the && short-circuit
+                                        // must not evaluate rhs when lhs is false).
+                                        cond = std::make_unique<IfInstruction>(
+                                            std::move(next), std::move(cond),
+                                            std::make_unique<LdcI4>(0));
+                                    }
+                                    combinedIf->Condition = std::move(cond);
+                                    if (combinedIf->Condition) {
+                                        combinedIf->Condition->Parent = combinedIf;
+                                        combinedIf->Condition->ChildIndex = 0;
+                                    }
+                                }
+                                // Drop the pre-conditions from the block's Instructions.
+                                std::size_t preFirst = preIfIndices.back();
+                                last->Instructions.erase(last->Instructions.begin() + preFirst,
+                                                         last->Instructions.begin() + preFirst + preIfIndices.size());
+                                // Re-number the ChildIndices of the remaining instructions.
+                                for (std::size_t i = 0; i < last->Instructions.size(); ++i) {
+                                    last->Instructions[i]->ChildIndex = static_cast<int>(i);
+                                    last->Instructions[i]->Parent = last;
+                                }
+                                last->FinalInstruction = std::move(combined);
+                                if (last->FinalInstruction) {
+                                    last->FinalInstruction->Parent = last;
+                                    last->FinalInstruction->ChildIndex = static_cast<int>(last->Instructions.size());
+                                }
+                            }
+                            loop->Kind = ContainerKind::DoWhile;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+} // namespace ILSpy::Decompiler::IL

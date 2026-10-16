@@ -1,0 +1,3029 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+// to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+// The out-of-line definitions for `CSharpOutputVisitor` (see the header for the design). This
+// translation unit holds the infrastructure methods (the two ctors, the `StartNode`/`EndNode`
+// nesting, the `Comma` family, the token/brace writers, the write-construct helpers) and the
+// 130 per-node `Visit` methods as THROWING STUBS (each calls `NotImplemented()`); the stubs are
+// replaced with real bodies one node-family at a time in subsequent iterations.
+
+#include "Decompiler/CSharp/OutputVisitor/CSharpOutputVisitor.hpp"
+
+#include <cassert>
+#include <stdexcept>
+#include <utility>
+#include <vector>
+#include <algorithm>
+
+// The concrete AST nodes the infrastructure methods dereference (the throwing `Visit` stubs only
+// name their parameter types by pointer, so they need only the forward declarations the included
+// `IAstVisitor.hpp` already provides; the infrastructure needs the complete types).
+#include "Decompiler/CSharp/Syntax/AstNode.hpp"
+#include "Decompiler/CSharp/Syntax/CSharpSlotInfo.hpp"
+#include "Decompiler/CSharp/Syntax/Identifier.hpp"
+#include "Decompiler/CSharp/Syntax/Slots.hpp"
+#include "Decompiler/CSharp/Syntax/Tokens.hpp"
+#include "Decompiler/CSharp/Syntax/Trivia.hpp"
+#include "Decompiler/CSharp/Syntax/AstType.hpp"
+#include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
+#include "Decompiler/CSharp/Syntax/Accessor.hpp"
+#include "Decompiler/CSharp/Syntax/ParameterDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/TypeParameterDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/Constraint.hpp"
+#include "Decompiler/CSharp/Syntax/UsingAliasDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/UsingDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/ExternAliasDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/DelegateDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/NamespaceDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ThisReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/BaseReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/Statement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/EmptyStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ThrowStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/GotoStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/GotoCaseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/GotoDefaultStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/LabelStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/DoWhileStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/YieldReturnStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/CheckedStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/UncheckedStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/UnsafeStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/LockStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/UsingStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ForeachStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/FixedStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/SwitchStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/LocalFunctionDeclarationStatement.hpp"
+#include "Decompiler/CSharp/Syntax/SwitchSection.hpp"
+#include "Decompiler/CSharp/Syntax/CaseLabel.hpp"
+#include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
+#include "Decompiler/CSharp/Syntax/SimpleType.hpp"
+#include "Decompiler/CSharp/Syntax/MemberType.hpp"
+#include "Decompiler/CSharp/Syntax/ComposedType.hpp"
+#include "Decompiler/CSharp/Syntax/ConstructorInitializer.hpp"
+#include "Decompiler/CSharp/Syntax/ConstructorDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/EnumMemberDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/ExtensionDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/EventDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/CustomEventDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/FieldDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/FixedFieldDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/FixedVariableInitializer.hpp"
+#include "Decompiler/CSharp/Syntax/IndexerDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/MethodDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/OperatorDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/PropertyDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/DocumentationReference.hpp"
+#include "Decompiler/CSharp/Syntax/ArraySpecifier.hpp"
+#include "Decompiler/CSharp/Syntax/TupleTypeElement.hpp"
+#include "Decompiler/CSharp/Syntax/TupleAstType.hpp"
+#include "Decompiler/CSharp/Syntax/InvocationAstType.hpp"
+#include "Decompiler/CSharp/Syntax/FunctionPointerAstType.hpp"
+#include "Decompiler/CSharp/Syntax/Comment.hpp"
+#include "Decompiler/CSharp/Syntax/PreProcessorDirective.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ConditionalExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ParenthesizedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/CheckedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UncheckedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ThrowExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AsExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IsExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TypeOfExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DefaultValueExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/SizeOfExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/PointerReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TupleExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/LambdaExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AnonymousMethodExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AnonymousTypeCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ArrayInitializerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/InterpolatedStringContent.hpp"
+#include "Decompiler/CSharp/Syntax/Interpolation.hpp"
+#include "Decompiler/CSharp/Syntax/InterpolatedStringText.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/InterpolatedStringExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/NamedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/OutVarDeclarationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DeclarationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/WithInitializerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UndocumentedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/StackAllocExpression.hpp"
+#include "Decompiler/CSharp/Syntax/VariableInitializer.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ErrorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/SwitchExpression.hpp"
+#include "Decompiler/CSharp/Syntax/SwitchExpressionSection.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/RecursivePatternExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/QueryExpression.hpp"
+#include "Decompiler/CSharp/Syntax/QueryClause.hpp"
+#include "Decompiler/CSharp/Syntax/QueryContinuationClause.hpp"
+#include "Decompiler/CSharp/Syntax/QueryFromClause.hpp"
+#include "Decompiler/CSharp/Syntax/QueryLetClause.hpp"
+#include "Decompiler/CSharp/Syntax/QueryWhereClause.hpp"
+#include "Decompiler/CSharp/Syntax/QueryJoinClause.hpp"
+#include "Decompiler/CSharp/Syntax/QueryOrderClause.hpp"
+#include "Decompiler/CSharp/Syntax/QueryOrdering.hpp"
+#include "Decompiler/CSharp/Syntax/QueryGroupClause.hpp"
+#include "Decompiler/CSharp/Syntax/QuerySelectClause.hpp"
+#include "Decompiler/CSharp/Syntax/SyntaxTree.hpp"
+#include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
+#include "Decompiler/CSharp/Syntax/ParenthesizedVariableDesignation.hpp"
+#include "Decompiler/CSharp/OutputVisitor/InsertRequiredSpacesDecorator.hpp"
+
+namespace ILSpy::Decompiler::CSharp::OutputVisitor {
+
+using namespace ILSpy::Decompiler::CSharp::Syntax;
+
+namespace {
+
+// Builds an eager `std::vector<T*>` snapshot of an `AstNodeCollectionT<T>` -- the C# passes a
+// lazy `IEnumerable<T>` to the write helpers; the port's helpers take an eager vector (the
+// established D221 tree-walk convention), so each `Visit` method that calls `WriteTypeArguments`/
+// `WriteCommaSeparatedList` builds its snapshot once (the collection is not mutated during the
+// output walk, so the snapshot is faithful to the lazy view).
+template <typename T>
+std::vector<T*> ToVector(const AstNodeCollectionT<T>& collection) {
+	std::vector<T*> result;
+	int n = collection.Count();
+	result.reserve(n);
+	for (int i = 0; i < n; ++i) {
+		result.push_back(collection.At(i));
+	}
+	return result;
+}
+
+// The C# local functions `IsSimpleExpression`/`IsComplexExpression` nested in
+// `PrintInitializerElements` (the array-initializer wrapping classifier). They do not access
+// `this` or the policy (pure type tests on the element), so they port as file-local free
+// functions in this anonymous namespace. `IsSimpleExpression`'s `MemberReferenceExpression {
+// Target: ThisReferenceExpression or IdentifierExpression or BaseReferenceExpression }`
+// recursive pattern ports to a `dynamic_cast<MemberReferenceExpression*>` plus a `dynamic_cast`
+// is-a test on the `Target` against the three simple-target types.
+bool IsSimpleExpression(Expression* ex) {
+	if (dynamic_cast<NullReferenceExpression*>(ex) != nullptr)
+		return true;
+	if (dynamic_cast<ThisReferenceExpression*>(ex) != nullptr)
+		return true;
+	if (dynamic_cast<PrimitiveExpression*>(ex) != nullptr)
+		return true;
+	if (dynamic_cast<IdentifierExpression*>(ex) != nullptr)
+		return true;
+	if (auto* mre = dynamic_cast<MemberReferenceExpression*>(ex)) {
+		AstNode* t = mre->Target();
+		if (dynamic_cast<ThisReferenceExpression*>(t) != nullptr
+			|| dynamic_cast<IdentifierExpression*>(t) != nullptr
+			|| dynamic_cast<BaseReferenceExpression*>(t) != nullptr) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool IsComplexExpression(Expression* ex) {
+	return dynamic_cast<AnonymousMethodExpression*>(ex) != nullptr
+		|| dynamic_cast<LambdaExpression*>(ex) != nullptr
+		|| dynamic_cast<AnonymousTypeCreateExpression*>(ex) != nullptr
+		|| dynamic_cast<ObjectCreateExpression*>(ex) != nullptr
+		|| dynamic_cast<NamedExpression*>(ex) != nullptr;
+}
+
+}  // namespace
+
+// ---- ctors / dtor ---------------------------------------------------------
+
+// The C# `CSharpOutputVisitor(TextWriter textWriter, CSharpFormattingOptions)` -- composes a
+// `TokenWriter::Create(ostream, indent)` stack the visitor owns. The C# `ArgumentNullException` on
+// a null stream ports to `std::invalid_argument`; the policy is a value type (not nullable), so
+// the C# policy null check is dropped (no null value-type exists).
+CSharpOutputVisitor::CSharpOutputVisitor(std::ostream* textWriter, CSharpFormattingOptions formattingPolicy)
+	: writer_(nullptr), writerOwner_(TokenWriter::Create(textWriter, formattingPolicy.IndentationString)),
+	  policy_(formattingPolicy) {
+	if (textWriter == nullptr) {
+		throw std::invalid_argument("CSharpOutputVisitor: textWriter must not be null");
+	}
+	writer_ = writerOwner_.get();
+}
+
+// The C# `CSharpOutputVisitor(TokenWriter writer, CSharpFormattingOptions)` -- wraps the
+// caller-owned `writer` in an `InsertRequiredSpacesDecorator` the visitor owns (the decorator's
+// non-owning ctor takes the caller's `TokenWriter*`; the visitor owns the decorator, the caller
+// keeps the inner writer alive -- faithful to the C# reference semantics).
+CSharpOutputVisitor::CSharpOutputVisitor(TokenWriter* writer, CSharpFormattingOptions formattingPolicy)
+	: writer_(nullptr), writerOwner_(std::make_unique<InsertRequiredSpacesDecorator>(writer)),
+	  policy_(formattingPolicy) {
+	if (writer == nullptr) {
+		throw std::invalid_argument("CSharpOutputVisitor: writer must not be null");
+	}
+	writer_ = writerOwner_.get();
+}
+
+// The default dtor releases the owning `writerOwner_` (destroying the whole writer stack); the
+// non-owning `writer_` and the value `policy_`/`containerStack_` clean up automatically.
+CSharpOutputVisitor::~CSharpOutputVisitor() = default;
+
+// The throwing-stub body shared by every not-yet-ported `Visit` method.
+[[noreturn]] void CSharpOutputVisitor::NotImplemented() {
+	throw std::logic_error("CSharpOutputVisitor: Visit method not yet implemented");
+}
+
+// ---- StartNode/EndNode ----------------------------------------------------
+
+void CSharpOutputVisitor::StartNode(AstNode* node) {
+	// The C# `Debug.Assert` on the nesting order (with the `IPatternPlaceholder` branch dropped --
+	// the pattern-matching DSL is deferred per D226). A debug-only invariant.
+	assert(containerStack_.empty() || node->Parent() == containerStack_.top());
+	containerStack_.push(node);
+	writer_->StartNode(node);
+	for (Trivia* trivia : node->LeadingTrivia()) {
+		trivia->AcceptVisitor(*this);
+	}
+}
+
+void CSharpOutputVisitor::EndNode(AstNode* node) {
+	for (Trivia* trivia : node->TrailingTrivia()) {
+		trivia->AcceptVisitor(*this);
+	}
+	assert(node == containerStack_.top());
+	containerStack_.pop();
+	writer_->EndNode(node);
+}
+
+// ---- Comma ----------------------------------------------------------------
+
+void CSharpOutputVisitor::Comma(AstNode* nextNode, bool noSpaceAfterComma) {
+	(void)nextNode;  // the C# TODO comma policy does not yet use the next node
+	Space(policy_.SpaceBeforeBracketComma);
+	writer_->WriteToken(",");
+	isAfterSpace_ = false;
+	Space(!noSpaceAfterComma && policy_.SpaceAfterBracketComma);
+}
+
+void CSharpOutputVisitor::WriteCommaSeparatedListInBrackets(const std::vector<ParameterDeclaration*>& list, bool spaceWithin) {
+	WriteToken(Tokens::LBracket);
+	if (!list.empty()) {
+		Space(spaceWithin);
+		WriteCommaSeparatedList(list);
+		Space(spaceWithin);
+	}
+	WriteToken(Tokens::RBracket);
+}
+
+void CSharpOutputVisitor::WriteCommaSeparatedListInBrackets(const std::vector<Expression*>& list) {
+	WriteToken(Tokens::LBracket);
+	if (!list.empty()) {
+		Space(policy_.SpacesWithinBrackets);
+		WriteCommaSeparatedList(list);
+		Space(policy_.SpacesWithinBrackets);
+	}
+	WriteToken(Tokens::RBracket);
+}
+
+// ---- Write tokens ---------------------------------------------------------
+
+void CSharpOutputVisitor::WriteKeyword(std::string_view keyword) {
+	writer_->WriteKeyword(keyword);
+	isAtStartOfLine_ = false;
+	isAfterSpace_ = false;
+}
+
+void CSharpOutputVisitor::WriteIdentifier(Identifier* identifier) {
+	writer_->WriteIdentifier(identifier);
+	isAtStartOfLine_ = false;
+	isAfterSpace_ = false;
+}
+
+void CSharpOutputVisitor::WriteToken(std::string_view token) {
+	writer_->WriteToken(token);
+	isAtStartOfLine_ = false;
+	isAfterSpace_ = false;
+}
+
+void CSharpOutputVisitor::LPar() {
+	WriteToken(Tokens::LPar);
+}
+
+void CSharpOutputVisitor::RPar() {
+	WriteToken(Tokens::RPar);
+}
+
+void CSharpOutputVisitor::Semicolon() {
+	// Get the slot kind of the current node (the top of the nesting stack).
+	const CSharpSlotInfo* kind = nullptr;
+	if (!containerStack_.empty()) {
+		const CSharpSlotInfo* slot = containerStack_.top()->Slot();
+		if (slot != nullptr) {
+			kind = slot->Kind();
+		}
+	}
+
+	auto skipToken = [](const CSharpSlotInfo* k) {
+		return k == &Slots::ForInitializer
+			|| k == &Slots::Iterator
+			|| k == &Slots::ResourceAcquisition;
+	};
+
+	auto skipNewLine = [&](const CSharpSlotInfo* k) -> bool {
+		Accessor* accessor = dynamic_cast<Accessor*>(containerStack_.top());
+		if (accessor == nullptr) {
+			return false;
+		}
+		if (!(k == &Slots::Getter || k == &Slots::Setter)) {
+			return false;
+		}
+		bool isAutoProperty = accessor->Body() == nullptr
+			&& accessor->Attributes().Count() == 0
+			&& policy_.AutoPropertyFormatting == PropertyFormatting::SingleLine;
+		return isAutoProperty;
+	};
+
+	if (!skipToken(kind)) {
+		WriteToken(Tokens::Semicolon);
+		if (!skipNewLine(kind)) {
+			NewLine();
+		} else {
+			Space();
+		}
+	}
+}
+
+void CSharpOutputVisitor::Space(bool addSpace) {
+	if (addSpace && !isAfterSpace_) {
+		writer_->Space();
+		isAfterSpace_ = true;
+	}
+}
+
+void CSharpOutputVisitor::NewLine() {
+	writer_->NewLine();
+	isAtStartOfLine_ = true;
+	isAfterSpace_ = false;
+}
+
+void CSharpOutputVisitor::OpenBrace(BraceStyle style, bool newLine) {
+	switch (style) {
+		case BraceStyle::EndOfLine:
+		case BraceStyle::BannerStyle:
+			if (!isAtStartOfLine_) {
+				Space();
+			}
+			WriteToken("{");
+			break;
+		case BraceStyle::EndOfLineWithoutSpace:
+			WriteToken("{");
+			break;
+		case BraceStyle::NextLine:
+			if (!isAtStartOfLine_) {
+				NewLine();
+			}
+			WriteToken("{");
+			break;
+		case BraceStyle::NextLineShifted:
+			NewLine();
+			writer_->Indent();
+			WriteToken("{");
+			NewLine();
+			return;
+		case BraceStyle::NextLineShifted2:
+			NewLine();
+			writer_->Indent();
+			WriteToken("{");
+			break;
+		default:
+			throw std::out_of_range("CSharpOutputVisitor::OpenBrace: invalid BraceStyle");
+	}
+	if (newLine) {
+		writer_->Indent();
+		NewLine();
+	}
+}
+
+void CSharpOutputVisitor::CloseBrace(BraceStyle style, bool unindent) {
+	switch (style) {
+		case BraceStyle::EndOfLine:
+		case BraceStyle::EndOfLineWithoutSpace:
+		case BraceStyle::NextLine:
+			if (unindent) {
+				writer_->Unindent();
+			}
+			WriteToken("}");
+			break;
+		case BraceStyle::BannerStyle:
+		case BraceStyle::NextLineShifted:
+			WriteToken("}");
+			if (unindent) {
+				writer_->Unindent();
+			}
+			break;
+		case BraceStyle::NextLineShifted2:
+			if (unindent) {
+				writer_->Unindent();
+			}
+			WriteToken("}");
+			if (unindent) {
+				writer_->Unindent();
+			}
+			break;
+		default:
+			throw std::out_of_range("CSharpOutputVisitor::CloseBrace: invalid BraceStyle");
+	}
+}
+
+// ---- Write constructs -----------------------------------------------------
+
+void CSharpOutputVisitor::WriteBlock(BlockStatement* blockStatement, BraceStyle style) {
+	StartNode(blockStatement);
+	OpenBrace(style);
+	auto& stmts = blockStatement->Statements();
+	int n = stmts.Count();
+	for (int i = 0; i < n; ++i) {
+		stmts.At(i)->AcceptVisitor(*this);
+	}
+	CloseBrace(style);
+	EndNode(blockStatement);
+}
+
+// ---- Initializer helpers --------------------------------------------------
+// The C# `protected virtual void PrintInitializerElements(AstNodeCollection<Expression>)` --
+// renders the braces around a comma-separated element list, wrapping to one-element-per-line
+// when `ArrayInitializerWrapping == WrapAlways`, when any non-simple expression is present with
+// more than one element, when any complex expression is present, or when there are more than 10
+// elements. The eager-vector convention (the D221/D325 precedent) makes the port take a
+// `std::vector<Expression*>` snapshot; the `foreach (var (idx, node) in elements.WithIndex())`
+// ports to an indexed loop (the vector provides the index natively). The two local classifier
+// functions are file-local free functions in the anonymous namespace above.
+void CSharpOutputVisitor::PrintInitializerElements(const std::vector<Expression*>& elements) {
+	bool wrapAlways = policy_.ArrayInitializerWrapping == Wrapping::WrapAlways
+		|| (static_cast<int>(elements.size()) > 1
+			&& std::any_of(elements.begin(), elements.end(), [](Expression* e) { return !IsSimpleExpression(e); }))
+		|| std::any_of(elements.begin(), elements.end(), IsComplexExpression);
+	bool wrap = wrapAlways || static_cast<int>(elements.size()) > 10;
+	OpenBrace(wrap ? policy_.ArrayInitializerBraceStyle : BraceStyle::EndOfLine, wrap);
+	if (!wrap)
+		Space();
+	for (std::size_t idx = 0; idx < elements.size(); ++idx) {
+		if (idx > 0) {
+			Comma(elements[idx], true);
+			if (wrapAlways || idx % 10 == 0)
+				NewLine();
+			else
+				Space();
+		}
+		elements[idx]->AcceptVisitor(*this);
+	}
+	if (wrap)
+		NewLine();
+	else
+		Space();
+	CloseBrace(wrap ? policy_.ArrayInitializerBraceStyle : BraceStyle::EndOfLine, wrap);
+}
+
+// The C# `protected bool IsObjectOrCollectionInitializer(AstNode?)` -- the `node` argument is the
+// PARENT of the `ArrayInitializerExpression` being visited; it returns true when that parent is
+// itself an `ArrayInitializerExpression` (the outer braces of `new T { { ... } }` / `name = { ... }`)
+// whose own parent is an `ObjectCreateExpression` (the outer braces occupy the `Initializer` slot)
+// or a `NamedExpression` (the outer braces occupy the `Expression` slot). The `node.Slot?.Kind ==
+// Slots.X` null-propagating pointer compare ports to a null-safe `Slot()` + `Kind()` pointer compare
+// (a parented node's `Slot()` is non-null; `Kind()` returns the shared `Slots` constant address).
+bool CSharpOutputVisitor::IsObjectOrCollectionInitializer(AstNode* node) {
+	if (dynamic_cast<ArrayInitializerExpression*>(node) == nullptr)
+		return false;
+	AstNode* parent = node->Parent();
+	if (dynamic_cast<ObjectCreateExpression*>(parent) != nullptr) {
+		const CSharpSlotInfo* slot = node->Slot();
+		return slot != nullptr && slot->Kind() == &Slots::Initializer;
+	}
+	if (dynamic_cast<NamedExpression*>(parent) != nullptr) {
+		const CSharpSlotInfo* slot = node->Slot();
+		return slot != nullptr && slot->Kind() == &Slots::Expression;
+	}
+	return false;
+}
+
+// The C# `protected bool CanBeConfusedWithObjectInitializer(Expression)` -- an `AssignmentExpression`
+// with the `Assign` operator inside a collection initializer would read as an object initializer
+// (`{ a = 1 }`), so the nested braces cannot be omitted for it (the port keeps them).
+bool CSharpOutputVisitor::CanBeConfusedWithObjectInitializer(Expression* expr) {
+	auto* ae = dynamic_cast<AssignmentExpression*>(expr);
+	return ae != nullptr && ae->Operator() == AssignmentOperatorType::Assign;
+}
+
+void CSharpOutputVisitor::WriteTypeArguments(const std::vector<AstType*>& typeArguments) {
+	if (!typeArguments.empty()) {
+		WriteToken(Tokens::LChevron);
+		WriteCommaSeparatedList(typeArguments);
+		WriteToken(Tokens::RChevron);
+	}
+}
+
+void CSharpOutputVisitor::WriteTypeParameters(const std::vector<TypeParameterDeclaration*>& typeParameters) {
+	if (!typeParameters.empty()) {
+		WriteToken(Tokens::LChevron);
+		WriteCommaSeparatedList(typeParameters);
+		WriteToken(Tokens::RChevron);
+	}
+}
+
+void CSharpOutputVisitor::WriteModifiers(Modifiers modifiers) {
+	for (Modifiers modifier : CSharpModifiers::AllModifiers) {
+		if ((modifiers & modifier) == modifier) {
+			WriteKeyword(CSharpModifiers::GetModifierName(modifier));
+			Space();
+		}
+	}
+}
+
+void CSharpOutputVisitor::WriteQualifiedIdentifier(const std::vector<Identifier*>& identifiers) {
+	bool first = true;
+	for (Identifier* ident : identifiers) {
+		if (first) {
+			first = false;
+		} else {
+			writer_->WriteToken(".");
+		}
+		writer_->WriteIdentifier(ident);
+	}
+}
+
+void CSharpOutputVisitor::WriteEmbeddedStatement(Statement* embeddedStatement, NewLinePlacement nlp) {
+	if (embeddedStatement == nullptr) {
+		NewLine();
+		return;
+	}
+	BlockStatement* block = dynamic_cast<BlockStatement*>(embeddedStatement);
+	if (block != nullptr) {
+		WriteBlock(block, policy_.StatementBraceStyle);
+		if (nlp == NewLinePlacement::SameLine) {
+			Space();
+		} else {
+			NewLine();
+		}
+	} else {
+		NewLine();
+		writer_->Indent();
+		embeddedStatement->AcceptVisitor(*this);
+		writer_->Unindent();
+	}
+}
+
+void CSharpOutputVisitor::WriteMethodBody(BlockStatement* body, BraceStyle style, bool newLine) {
+	(void)newLine;  // the C# leftover param (unused in the body)
+	if (body == nullptr) {
+		Semicolon();
+	} else {
+		WriteBlock(body, style);
+		NewLine();
+	}
+}
+
+void CSharpOutputVisitor::WriteAttributes(const std::vector<AttributeSection*>& attributes) {
+	for (AttributeSection* attr : attributes) {
+		attr->AcceptVisitor(*this);
+	}
+}
+
+void CSharpOutputVisitor::WritePrivateImplementationType(AstType* privateImplementationType) {
+	if (privateImplementationType != nullptr) {
+		privateImplementationType->AcceptVisitor(*this);
+		WriteToken(Tokens::Dot);
+	}
+}
+
+// ---- Method-call-chain newline helpers ------------------------------------
+
+// The C# `int GetCallChainLengthLimited(MemberReferenceExpression expr)` -- walks the
+// `Target` chain counting `InvocationExpression`-over-`MemberReferenceExpression` links, capped
+// at 4 (the `callChainLength < 4` guard). A standalone `a.B` (the `Target` is an
+// `IdentifierExpression`, not an `InvocationExpression`) yields 0.
+int CSharpOutputVisitor::GetCallChainLengthLimited(MemberReferenceExpression* expr) {
+	int callChainLength = 0;
+	auto* node = expr;
+	while (callChainLength < 4) {
+		auto* invocation = dynamic_cast<InvocationExpression*>(node->Target());
+		if (invocation == nullptr) {
+			break;
+		}
+		auto* mre = dynamic_cast<MemberReferenceExpression*>(invocation->Target());
+		if (mre == nullptr) {
+			break;
+		}
+		node = mre;
+		++callChainLength;
+	}
+	return callChainLength;
+}
+
+// The C# `int ShouldInsertNewLineWhenInMethodCallChain(MemberReferenceExpression expr)` --
+// returns 0 (no break) for chains shorter than 3 or when the nearest
+// statement/lambda/interpolated-string ancestor IS an interpolated string (a chain inside an
+// interpolated-string hole stays on one line); otherwise returns the chain length.
+int CSharpOutputVisitor::ShouldInsertNewLineWhenInMethodCallChain(MemberReferenceExpression* expr) {
+	int callChainLength = GetCallChainLengthLimited(expr);
+	if (callChainLength < 3) {
+		return 0;
+	}
+	AstNode* ancestor = expr->GetParent([](AstNode* n) {
+		return dynamic_cast<Statement*>(n) != nullptr
+			|| dynamic_cast<LambdaExpression*>(n) != nullptr
+			|| dynamic_cast<InterpolatedStringContent*>(n) != nullptr;
+	});
+	if (dynamic_cast<InterpolatedStringContent*>(ancestor) != nullptr) {
+		return 0;
+	}
+	return callChainLength;
+}
+
+// The C# `protected virtual bool InsertNewLineWhenInMethodCallChain(MemberReferenceExpression
+// expr)` -- inserts a `NewLine` (and an `Indent` at exactly chain length 3) before the dot when
+// the chain should break; resets the inter-token whitespace state. Returns whether a newline
+// was inserted (the caller unindents after the closing token when the member reference is not
+// itself the target of an enclosing invocation).
+bool CSharpOutputVisitor::InsertNewLineWhenInMethodCallChain(MemberReferenceExpression* expr) {
+	int callChainLength = ShouldInsertNewLineWhenInMethodCallChain(expr);
+	if (callChainLength == 0) {
+		return false;
+	}
+	if (callChainLength == 3) {
+		writer_->Indent();
+	}
+	writer_->NewLine();
+	isAtStartOfLine_ = true;
+	isAfterSpace_ = false;
+	return true;
+}
+
+// The C# `protected bool LambdaNeedsParenthesis(LambdaExpression)` -- a lambda with exactly one
+// parameter that has no type, no modifier, and no `params` may omit the parentheses
+// (`x => ...`); every other shape needs them. The `Parameters.Single()` ports to `At(0)`.
+bool CSharpOutputVisitor::LambdaNeedsParenthesis(Syntax::LambdaExpression* lambdaExpression) {
+	if (lambdaExpression->Parameters().Count() != 1) {
+		return true;
+	}
+	Syntax::ParameterDeclaration* p = lambdaExpression->Parameters().At(0);
+	return !(p->Type() == nullptr
+		&& p->ParameterModifier() == ILSpy::Decompiler::TypeSystem::ReferenceKind::None
+		&& !p->IsParams());
+}
+
+// ---- The 130 IAstVisitor Visit methods (throwing stubs) -------------------
+void CSharpOutputVisitor::VisitIdentifier(Syntax::Identifier* identifier) {
+	// The C# deliberately does NOT call `StartNode`/`EndNode` for `Identifier` -- the
+	// `ITokenWriter` assumes each node processed between a `StartNode`/`EndNode` pair is a child
+	// of the parent node, and an `Identifier` is a token handled directly by the writer, so it
+	// is emitted as a flat token (not a nested node).
+	WriteIdentifier(identifier);
+}
+void CSharpOutputVisitor::VisitNullReferenceExpression(Syntax::NullReferenceExpression* nullReferenceExpression) {
+	// The C# `writer.WritePrimitiveValue(null)` -- the default-constructed `PrimitiveValue` holds
+	// `std::monostate` (the C# `null` boxed object), rendered by the writer as the `null` literal.
+	StartNode(nullReferenceExpression);
+	writer_->WritePrimitiveValue(PrimitiveValue());
+	isAfterSpace_ = false;
+	EndNode(nullReferenceExpression);
+}
+
+void CSharpOutputVisitor::VisitThisReferenceExpression(Syntax::ThisReferenceExpression* thisReferenceExpression) {
+	StartNode(thisReferenceExpression);
+	WriteKeyword("this");
+	EndNode(thisReferenceExpression);
+}
+
+void CSharpOutputVisitor::VisitBaseReferenceExpression(Syntax::BaseReferenceExpression* baseReferenceExpression) {
+	StartNode(baseReferenceExpression);
+	WriteKeyword("base");
+	EndNode(baseReferenceExpression);
+}
+
+void CSharpOutputVisitor::VisitPrimitiveExpression(Syntax::PrimitiveExpression* primitiveExpression) {
+	StartNode(primitiveExpression);
+	writer_->WritePrimitiveValue(primitiveExpression->Value(), primitiveExpression->Format());
+	isAfterSpace_ = false;
+	EndNode(primitiveExpression);
+}
+void CSharpOutputVisitor::VisitBinaryOperatorExpression(Syntax::BinaryOperatorExpression* binaryOperatorExpression) {
+	StartNode(binaryOperatorExpression);
+	if (binaryOperatorExpression->Left() != nullptr)
+		binaryOperatorExpression->Left()->AcceptVisitor(*this);
+	bool spacePolicy;
+	switch (binaryOperatorExpression->Operator()) {
+		case Syntax::BinaryOperatorType::BitwiseAnd:
+		case Syntax::BinaryOperatorType::BitwiseOr:
+		case Syntax::BinaryOperatorType::ExclusiveOr:
+			spacePolicy = policy_.SpaceAroundBitwiseOperator;
+			break;
+		case Syntax::BinaryOperatorType::ConditionalAnd:
+		case Syntax::BinaryOperatorType::ConditionalOr:
+			spacePolicy = policy_.SpaceAroundLogicalOperator;
+			break;
+		case Syntax::BinaryOperatorType::GreaterThan:
+		case Syntax::BinaryOperatorType::GreaterThanOrEqual:
+		case Syntax::BinaryOperatorType::LessThanOrEqual:
+		case Syntax::BinaryOperatorType::LessThan:
+			spacePolicy = policy_.SpaceAroundRelationalOperator;
+			break;
+		case Syntax::BinaryOperatorType::Equality:
+		case Syntax::BinaryOperatorType::InEquality:
+			spacePolicy = policy_.SpaceAroundEqualityOperator;
+			break;
+		case Syntax::BinaryOperatorType::Add:
+		case Syntax::BinaryOperatorType::Subtract:
+			spacePolicy = policy_.SpaceAroundAdditiveOperator;
+			break;
+		case Syntax::BinaryOperatorType::Multiply:
+		case Syntax::BinaryOperatorType::Divide:
+		case Syntax::BinaryOperatorType::Modulus:
+			spacePolicy = policy_.SpaceAroundMultiplicativeOperator;
+			break;
+		case Syntax::BinaryOperatorType::ShiftLeft:
+		case Syntax::BinaryOperatorType::ShiftRight:
+		case Syntax::BinaryOperatorType::UnsignedShiftRight:
+			spacePolicy = policy_.SpaceAroundShiftOperator;
+			break;
+		case Syntax::BinaryOperatorType::NullCoalescing:
+		case Syntax::BinaryOperatorType::IsPattern:
+			spacePolicy = true;
+			break;
+		case Syntax::BinaryOperatorType::Range:
+			spacePolicy = false;
+			break;
+		default:
+			throw std::out_of_range("Invalid value for BinaryOperatorType");
+	}
+	Space(spacePolicy);
+	const char* operatorToken = Syntax::BinaryOperatorExpression::GetOperatorToken(binaryOperatorExpression->Operator());
+	if (operatorToken == Syntax::BinaryOperatorExpression::IsKeyword) {
+		WriteKeyword(operatorToken);
+	} else {
+		WriteToken(operatorToken);
+	}
+	Space(spacePolicy);
+	if (binaryOperatorExpression->Right() != nullptr)
+		binaryOperatorExpression->Right()->AcceptVisitor(*this);
+	EndNode(binaryOperatorExpression);
+}
+
+void CSharpOutputVisitor::VisitAssignmentExpression(Syntax::AssignmentExpression* assignmentExpression) {
+	StartNode(assignmentExpression);
+	assignmentExpression->Left()->AcceptVisitor(*this);
+	Space(policy_.SpaceAroundAssignment);
+	WriteToken(Syntax::AssignmentExpression::GetOperatorToken(assignmentExpression->Operator()));
+	Space(policy_.SpaceAroundAssignment);
+	assignmentExpression->Right()->AcceptVisitor(*this);
+	EndNode(assignmentExpression);
+}
+
+void CSharpOutputVisitor::VisitUnaryOperatorExpression(Syntax::UnaryOperatorExpression* unaryOperatorExpression) {
+	StartNode(unaryOperatorExpression);
+	Syntax::UnaryOperatorType opType = unaryOperatorExpression->Operator();
+	auto opSymbol = Syntax::UnaryOperatorExpression::GetOperatorToken(opType);
+	if (opType == Syntax::UnaryOperatorType::Await || opType == Syntax::UnaryOperatorType::PatternNot) {
+		WriteKeyword(*opSymbol);
+		Space();
+	} else if (!Syntax::UnaryOperatorExpression::IsPostfixOperator(opType) && opSymbol.has_value()) {
+		WriteToken(*opSymbol);
+	}
+	unaryOperatorExpression->Expression()->AcceptVisitor(*this);
+	if (Syntax::UnaryOperatorExpression::IsPostfixOperator(opType)) {
+		WriteToken(*opSymbol);
+	}
+	EndNode(unaryOperatorExpression);
+}
+
+void CSharpOutputVisitor::VisitConditionalExpression(Syntax::ConditionalExpression* conditionalExpression) {
+	StartNode(conditionalExpression);
+	conditionalExpression->Condition()->AcceptVisitor(*this);
+	Space(policy_.SpaceBeforeConditionalOperatorCondition);
+	WriteToken(Syntax::ConditionalExpression::QuestionMarkToken);
+	Space(policy_.SpaceAfterConditionalOperatorCondition);
+	conditionalExpression->TrueExpression()->AcceptVisitor(*this);
+	Space(policy_.SpaceBeforeConditionalOperatorSeparator);
+	WriteToken(Syntax::ConditionalExpression::ColonToken);
+	Space(policy_.SpaceAfterConditionalOperatorSeparator);
+	conditionalExpression->FalseExpression()->AcceptVisitor(*this);
+	EndNode(conditionalExpression);
+}
+
+void CSharpOutputVisitor::VisitParenthesizedExpression(Syntax::ParenthesizedExpression* parenthesizedExpression) {
+	StartNode(parenthesizedExpression);
+	LPar();
+	Space(policy_.SpacesWithinParentheses);
+	parenthesizedExpression->Expression()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinParentheses);
+	RPar();
+	EndNode(parenthesizedExpression);
+}
+
+void CSharpOutputVisitor::VisitCheckedExpression(Syntax::CheckedExpression* checkedExpression) {
+	StartNode(checkedExpression);
+	WriteKeyword(Syntax::CheckedExpression::CheckedKeyword);
+	LPar();
+	Space(policy_.SpacesWithinCheckedExpressionParantheses);
+	checkedExpression->Expression()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinCheckedExpressionParantheses);
+	RPar();
+	EndNode(checkedExpression);
+}
+
+void CSharpOutputVisitor::VisitUncheckedExpression(Syntax::UncheckedExpression* uncheckedExpression) {
+	StartNode(uncheckedExpression);
+	WriteKeyword(Syntax::UncheckedExpression::UncheckedKeyword);
+	LPar();
+	Space(policy_.SpacesWithinCheckedExpressionParantheses);
+	uncheckedExpression->Expression()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinCheckedExpressionParantheses);
+	RPar();
+	EndNode(uncheckedExpression);
+}
+
+void CSharpOutputVisitor::VisitDirectionExpression(Syntax::DirectionExpression* directionExpression) {
+	StartNode(directionExpression);
+	switch (directionExpression->FieldDirection()) {
+		case Syntax::FieldDirection::Out:
+			WriteKeyword(Syntax::DirectionExpression::OutKeyword);
+			break;
+		case Syntax::FieldDirection::Ref:
+			WriteKeyword(Syntax::DirectionExpression::RefKeyword);
+			break;
+		case Syntax::FieldDirection::In:
+			WriteKeyword(Syntax::DirectionExpression::InKeyword);
+			break;
+		default:
+			throw std::out_of_range("Invalid value for FieldDirection");
+	}
+	Space();
+	directionExpression->Expression()->AcceptVisitor(*this);
+	EndNode(directionExpression);
+}
+
+void CSharpOutputVisitor::VisitThrowExpression(Syntax::ThrowExpression* throwExpression) {
+	StartNode(throwExpression);
+	WriteKeyword(Syntax::ThrowExpression::ThrowKeyword);
+	Space();
+	throwExpression->Expression()->AcceptVisitor(*this);
+	EndNode(throwExpression);
+}
+void CSharpOutputVisitor::VisitPrimitiveType(Syntax::PrimitiveType* primitiveType) {
+	StartNode(primitiveType);
+	writer_->WritePrimitiveType(primitiveType->Keyword());
+	isAfterSpace_ = false;
+	EndNode(primitiveType);
+}
+void CSharpOutputVisitor::VisitSimpleType(Syntax::SimpleType* simpleType) {
+	StartNode(simpleType);
+	// An unbound generic type argument (the `<>` in `typeof(List<>)`) is a nameless `SimpleType`
+	// whose backing `IdentifierToken` is null; only a named `SimpleType` writes its identifier.
+	if (simpleType->IdentifierToken() != nullptr) {
+		WriteIdentifier(simpleType->IdentifierToken());
+	}
+	WriteTypeArguments(ToVector(simpleType->TypeArguments()));
+	EndNode(simpleType);
+}
+void CSharpOutputVisitor::VisitMemberType(Syntax::MemberType* memberType) {
+	StartNode(memberType);
+	memberType->Target()->AcceptVisitor(*this);
+	WriteToken(memberType->IsDoubleColon() ? Tokens::DoubleColon : Tokens::Dot);
+	WriteIdentifier(memberType->MemberNameToken());
+	WriteTypeArguments(ToVector(memberType->TypeArguments()));
+	EndNode(memberType);
+}
+void CSharpOutputVisitor::VisitArraySpecifier(Syntax::ArraySpecifier* arraySpecifier) {
+	StartNode(arraySpecifier);
+	WriteToken(Tokens::LBracket);
+	// A rank of N renders as `[` + (N-1) commas + `]` (e.g. rank 1 -> `[]`, rank 2 -> `[,]`).
+	for (int i = 0; i < arraySpecifier->Dimensions() - 1; ++i) {
+		writer_->WriteToken(",");
+	}
+	WriteToken(Tokens::RBracket);
+	EndNode(arraySpecifier);
+}
+// Faithful port of CSharpOutputVisitor.cs VisitAttribute (the `[Type(Args?)]` attribute -- a
+// required AstType Type slot + an Expression Arguments collection + a HasArgumentList bool). The
+// argument list renders only when there are arguments OR HasArgumentList is set (the `[Foo()]`
+// empty-list case). The Type is a required non-nullable slot (the C# calls
+// `attribute.Type.AcceptVisitor(this)` with no null-conditional), so no nullptr guard is added.
+void CSharpOutputVisitor::VisitAttribute(Attribute* attribute) {
+	StartNode(attribute);
+	attribute->Type()->AcceptVisitor(*this);
+	if (attribute->Arguments().Count() != 0 || attribute->HasArgumentList()) {
+		Space(policy_.SpaceBeforeMethodCallParentheses);
+		WriteCommaSeparatedListInParenthesis(ToVector(attribute->Arguments()), policy_.SpaceWithinMethodCallParentheses);
+	}
+	EndNode(attribute);
+}
+
+// Faithful port of CSharpOutputVisitor.cs VisitAttributeSection (the `[target: attr1, attr2]`
+// bracketed group). The optional AttributeTarget string (empty when absent) gates the
+// `target:` prefix. The trailing whitespace after `]` is driven by the parent node kind: a
+// ParameterDeclaration parent emits a Space (the inter-section spacing unless this is the last
+// attribute section, which gets a plain Space); a TypeParameterDeclaration/ComposedType/
+// LambdaExpression parent emits a Space; anything else (including a null parent) emits a NewLine.
+// The C# `pd.Attributes.Last() != attributeSection` reference comparison ports to a pointer
+// identity check against the last element of the parent's Attributes collection.
+void CSharpOutputVisitor::VisitAttributeSection(AttributeSection* attributeSection) {
+	StartNode(attributeSection);
+	WriteToken(Tokens::LBracket);
+	if (!attributeSection->AttributeTarget().empty()) {
+		WriteKeyword(attributeSection->AttributeTarget());
+		WriteToken(Tokens::Colon);
+		Space();
+	}
+	WriteCommaSeparatedList(ToVector(attributeSection->Attributes()));
+	WriteToken(Tokens::RBracket);
+	AstNode* parent = attributeSection->Parent();
+	if (auto* pd = dynamic_cast<ParameterDeclaration*>(parent)) {
+		auto& attrs = pd->Attributes();
+		if (attrs.At(attrs.Count() - 1) != attributeSection) {
+			Space(policy_.SpaceBetweenParameterAttributeSections);
+		} else {
+			Space();
+		}
+	} else if (dynamic_cast<TypeParameterDeclaration*>(parent)
+			|| dynamic_cast<ComposedType*>(parent)
+			|| dynamic_cast<LambdaExpression*>(parent)) {
+		Space();
+	} else {
+		NewLine();
+	}
+	EndNode(attributeSection);
+}
+void CSharpOutputVisitor::VisitComposedType(Syntax::ComposedType* composedType) {
+	StartNode(composedType);
+	// The optional leading attributes (a `[Flags]`-style attribute on the type usage).
+	auto& attrs = composedType->Attributes();
+	int attrCount = attrs.Count();
+	for (int i = 0; i < attrCount; ++i) {
+		attrs.At(i)->AcceptVisitor(*this);
+	}
+	if (composedType->HasRefSpecifier()) {
+		WriteKeyword(ComposedType::RefKeyword);
+	}
+	if (composedType->HasReadOnlySpecifier()) {
+		WriteKeyword(ComposedType::ReadonlyKeyword);
+	}
+	composedType->BaseType()->AcceptVisitor(*this);
+	if (composedType->HasNullableSpecifier()) {
+		WriteToken(ComposedType::NullableToken);
+	}
+	for (int i = 0; i < composedType->PointerRank(); ++i) {
+		WriteToken(ComposedType::PointerToken);
+	}
+	auto& arraySpecs = composedType->ArraySpecifiers();
+	int specCount = arraySpecs.Count();
+	for (int i = 0; i < specCount; ++i) {
+		arraySpecs.At(i)->AcceptVisitor(*this);
+	}
+	EndNode(composedType);
+}
+void CSharpOutputVisitor::VisitCastExpression(Syntax::CastExpression* castExpression) {
+	StartNode(castExpression);
+	LPar();
+	Space(policy_.SpacesWithinCastParentheses);
+	castExpression->Type()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinCastParentheses);
+	RPar();
+	Space(policy_.SpaceAfterTypecast);
+	castExpression->Expression()->AcceptVisitor(*this);
+	EndNode(castExpression);
+}
+void CSharpOutputVisitor::VisitAsExpression(Syntax::AsExpression* asExpression) {
+	StartNode(asExpression);
+	asExpression->Expression()->AcceptVisitor(*this);
+	Space();
+	WriteKeyword(Syntax::AsExpression::AsKeyword);
+	Space();
+	asExpression->Type()->AcceptVisitor(*this);
+	EndNode(asExpression);
+}
+void CSharpOutputVisitor::VisitIsExpression(Syntax::IsExpression* isExpression) {
+	StartNode(isExpression);
+	isExpression->Expression()->AcceptVisitor(*this);
+	Space();
+	WriteKeyword(Syntax::IsExpression::IsKeyword);
+	isExpression->Type()->AcceptVisitor(*this);
+	EndNode(isExpression);
+}
+void CSharpOutputVisitor::VisitTypeReferenceExpression(Syntax::TypeReferenceExpression* typeReferenceExpression) {
+	StartNode(typeReferenceExpression);
+	typeReferenceExpression->Type()->AcceptVisitor(*this);
+	EndNode(typeReferenceExpression);
+}
+void CSharpOutputVisitor::VisitTypeOfExpression(Syntax::TypeOfExpression* typeOfExpression) {
+	StartNode(typeOfExpression);
+
+	WriteKeyword(Syntax::TypeOfExpression::TypeofKeyword);
+	LPar();
+	Space(policy_.SpacesWithinTypeOfParentheses);
+	typeOfExpression->Type()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinTypeOfParentheses);
+	RPar();
+
+	EndNode(typeOfExpression);
+}
+void CSharpOutputVisitor::VisitDefaultValueExpression(Syntax::DefaultValueExpression* defaultValueExpression) {
+	StartNode(defaultValueExpression);
+
+	WriteKeyword(Syntax::DefaultValueExpression::DefaultKeyword);
+	LPar();
+	Space(policy_.SpacesWithinTypeOfParentheses);
+	defaultValueExpression->Type()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinTypeOfParentheses);
+	RPar();
+
+	EndNode(defaultValueExpression);
+}
+void CSharpOutputVisitor::VisitSizeOfExpression(Syntax::SizeOfExpression* sizeOfExpression) {
+	StartNode(sizeOfExpression);
+
+	WriteKeyword(Syntax::SizeOfExpression::SizeofKeyword);
+	LPar();
+	Space(policy_.SpacesWithinSizeOfParentheses);
+	sizeOfExpression->Type()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinSizeOfParentheses);
+	RPar();
+
+	EndNode(sizeOfExpression);
+}
+void CSharpOutputVisitor::VisitIdentifierExpression(Syntax::IdentifierExpression* identifierExpression) {
+	StartNode(identifierExpression);
+	WriteIdentifier(identifierExpression->IdentifierToken());
+	WriteTypeArguments(ToVector(identifierExpression->TypeArguments()));
+	EndNode(identifierExpression);
+}
+void CSharpOutputVisitor::VisitMemberReferenceExpression(Syntax::MemberReferenceExpression* memberReferenceExpression) {
+	StartNode(memberReferenceExpression);
+	memberReferenceExpression->Target()->AcceptVisitor(*this);
+	bool insertedNewLine = InsertNewLineWhenInMethodCallChain(memberReferenceExpression);
+	WriteToken(Tokens::Dot);
+	WriteIdentifier(memberReferenceExpression->MemberNameToken());
+	WriteTypeArguments(ToVector(memberReferenceExpression->TypeArguments()));
+	if (insertedNewLine && dynamic_cast<Syntax::InvocationExpression*>(memberReferenceExpression->Parent()) == nullptr) {
+		writer_->Unindent();
+	}
+	EndNode(memberReferenceExpression);
+}
+void CSharpOutputVisitor::VisitPointerReferenceExpression(Syntax::PointerReferenceExpression* pointerReferenceExpression) {
+	StartNode(pointerReferenceExpression);
+	pointerReferenceExpression->Target()->AcceptVisitor(*this);
+	WriteToken(Syntax::PointerReferenceExpression::ArrowToken);
+	WriteIdentifier(pointerReferenceExpression->MemberNameToken());
+	WriteTypeArguments(ToVector(pointerReferenceExpression->TypeArguments()));
+	EndNode(pointerReferenceExpression);
+}
+void CSharpOutputVisitor::VisitInvocationExpression(Syntax::InvocationExpression* invocationExpression) {
+	StartNode(invocationExpression);
+	invocationExpression->Target()->AcceptVisitor(*this);
+	Space(policy_.SpaceBeforeMethodCallParentheses);
+	WriteCommaSeparatedListInParenthesis(ToVector(invocationExpression->Arguments()), policy_.SpaceWithinMethodCallParentheses);
+	if (dynamic_cast<Syntax::MemberReferenceExpression*>(invocationExpression->Parent()) == nullptr) {
+		auto* mre = dynamic_cast<Syntax::MemberReferenceExpression*>(invocationExpression->Target());
+		if (mre != nullptr) {
+			if (ShouldInsertNewLineWhenInMethodCallChain(mre) >= 3)
+				writer_->Unindent();
+		}
+	}
+	EndNode(invocationExpression);
+}
+void CSharpOutputVisitor::VisitIndexerExpression(Syntax::IndexerExpression* indexerExpression) {
+	StartNode(indexerExpression);
+	if (indexerExpression->Target() != nullptr)
+		indexerExpression->Target()->AcceptVisitor(*this);
+	Space(policy_.SpaceBeforeMethodCallParentheses);
+	WriteCommaSeparatedListInBrackets(ToVector(indexerExpression->Arguments()));
+	EndNode(indexerExpression);
+}
+void CSharpOutputVisitor::VisitArrayInitializerExpression(Syntax::ArrayInitializerExpression* arrayInitializerExpression) {
+	StartNode(arrayInitializerExpression);
+	// "new List<int> { { 1 } }" and "new List<int> { 1 }" are the same semantically. The AST always
+	// uses two nested ArrayInitializerExpressions for collection initializers; the output visitor
+	// omits the nested braces when they are optional (a single non-assignment element whose
+	// enclosing initializer is an object/collection initializer slot).
+	auto& elements = arrayInitializerExpression->Elements();
+	bool bracesAreOptional = elements.Count() == 1
+		&& IsObjectOrCollectionInitializer(arrayInitializerExpression->Parent())
+		&& !CanBeConfusedWithObjectInitializer(elements.At(0));
+	if (bracesAreOptional) {
+		elements.At(0)->AcceptVisitor(*this);
+	} else {
+		PrintInitializerElements(ToVector(elements));
+	}
+	EndNode(arrayInitializerExpression);
+}
+void CSharpOutputVisitor::VisitObjectCreateExpression(Syntax::ObjectCreateExpression* objectCreateExpression) {
+	StartNode(objectCreateExpression);
+	WriteKeyword(Syntax::ObjectCreateExpression::NewKeyword);
+	objectCreateExpression->Type()->AcceptVisitor(*this);
+	bool useParenthesis = objectCreateExpression->Arguments().Count() > 0
+		|| objectCreateExpression->Initializer() == nullptr;
+	if (useParenthesis) {
+		Space(policy_.SpaceBeforeMethodCallParentheses);
+		WriteCommaSeparatedListInParenthesis(ToVector(objectCreateExpression->Arguments()),
+			policy_.SpaceWithinMethodCallParentheses);
+	}
+	if (objectCreateExpression->Initializer() != nullptr)
+		objectCreateExpression->Initializer()->AcceptVisitor(*this);
+	EndNode(objectCreateExpression);
+}
+void CSharpOutputVisitor::VisitArrayCreateExpression(Syntax::ArrayCreateExpression* arrayCreateExpression) {
+	StartNode(arrayCreateExpression);
+	WriteKeyword(Syntax::ArrayCreateExpression::NewKeyword);
+	if (arrayCreateExpression->Type() != nullptr)
+		arrayCreateExpression->Type()->AcceptVisitor(*this);
+	if (arrayCreateExpression->Arguments().Count() > 0) {
+		WriteCommaSeparatedListInBrackets(ToVector(arrayCreateExpression->Arguments()));
+	}
+	auto& specifiers = arrayCreateExpression->AdditionalArraySpecifiers();
+	int sn = specifiers.Count();
+	for (int i = 0; i < sn; ++i) {
+		specifiers.At(i)->AcceptVisitor(*this);
+	}
+	if (arrayCreateExpression->Initializer() != nullptr)
+		arrayCreateExpression->Initializer()->AcceptVisitor(*this);
+	EndNode(arrayCreateExpression);
+}
+void CSharpOutputVisitor::VisitTupleExpression(Syntax::TupleExpression* tupleExpression) {
+	StartNode(tupleExpression);
+	LPar();
+	WriteCommaSeparatedList(ToVector(tupleExpression->Elements()));
+	RPar();
+	EndNode(tupleExpression);
+}
+void CSharpOutputVisitor::VisitNamedExpression(Syntax::NamedExpression* namedExpression) {
+	StartNode(namedExpression);
+	WriteIdentifier(namedExpression->NameToken());
+	Space();
+	WriteToken(Tokens::Assign);
+	Space();
+	namedExpression->Expression()->AcceptVisitor(*this);
+	EndNode(namedExpression);
+}
+void CSharpOutputVisitor::VisitNamedArgumentExpression(Syntax::NamedArgumentExpression* namedArgumentExpression) {
+	StartNode(namedArgumentExpression);
+	WriteIdentifier(namedArgumentExpression->NameToken());
+	WriteToken(Tokens::Colon);
+	Space();
+	namedArgumentExpression->Expression()->AcceptVisitor(*this);
+	EndNode(namedArgumentExpression);
+}
+void CSharpOutputVisitor::VisitErrorExpression(Syntax::ErrorExpression* errorExpression) {
+	// The C# `void IAstVisitor.VisitErrorNode(AstNode errorNode)` -- a leaf placeholder with no
+	// [Slot] children, so it renders as just a StartNode/EndNode pair (the `InsertMissingTokensDecorator`
+	// records the span onto `ErrorExpression::Location` from `StartNode`'s `ILocatable` position).
+	StartNode(errorExpression);
+	EndNode(errorExpression);
+}
+void CSharpOutputVisitor::VisitPatternPlaceholder(Syntax::AstNode* placeholder, Syntax::PatternMatching::Pattern& /*pattern*/) {
+	// The C# `public virtual void VisitPatternPlaceholder(AstNode placeholder, Pattern pattern)`
+	// renders the wrapped pattern between a StartNode/EndNode span (its `VisitNodeInPattern`
+	// dispatch over the pattern node classes). A pattern placeholder only ever appears inside a
+	// pattern tree built by an AST transform -- never in decompiler output -- so the port
+	// records the node span and defers the pattern rendering with the rest of the pattern-output
+	// visitor arms.
+	StartNode(placeholder);
+	EndNode(placeholder);
+}
+void CSharpOutputVisitor::VisitOutVarDeclarationExpression(Syntax::OutVarDeclarationExpression* outVarDeclarationExpression) {
+	StartNode(outVarDeclarationExpression);
+	WriteKeyword(Syntax::OutVarDeclarationExpression::OutKeyword);
+	Space();
+	outVarDeclarationExpression->Type()->AcceptVisitor(*this);
+	Space();
+	outVarDeclarationExpression->Variable()->AcceptVisitor(*this);
+	EndNode(outVarDeclarationExpression);
+}
+void CSharpOutputVisitor::VisitWithInitializerExpression(Syntax::WithInitializerExpression* withInitializerExpression) {
+	StartNode(withInitializerExpression);
+	withInitializerExpression->Expression()->AcceptVisitor(*this);
+	WriteKeyword("with");
+	withInitializerExpression->Initializer()->AcceptVisitor(*this);
+	EndNode(withInitializerExpression);
+}
+void CSharpOutputVisitor::VisitUndocumentedExpression(Syntax::UndocumentedExpression* undocumentedExpression) {
+	StartNode(undocumentedExpression);
+	switch (undocumentedExpression->UndocumentedExpressionType()) {
+		case Syntax::UndocumentedExpressionType::ArgList:
+		case Syntax::UndocumentedExpressionType::ArgListAccess:
+			WriteKeyword(Syntax::UndocumentedExpression::ArglistKeyword);
+			break;
+		case Syntax::UndocumentedExpressionType::MakeRef:
+			WriteKeyword(Syntax::UndocumentedExpression::MakerefKeyword);
+			break;
+		case Syntax::UndocumentedExpressionType::RefType:
+			WriteKeyword(Syntax::UndocumentedExpression::ReftypeKeyword);
+			break;
+		case Syntax::UndocumentedExpressionType::RefValue:
+			WriteKeyword(Syntax::UndocumentedExpression::RefvalueKeyword);
+			break;
+	}
+	if (undocumentedExpression->UndocumentedExpressionType() != Syntax::UndocumentedExpressionType::ArgListAccess) {
+		Space(policy_.SpaceBeforeMethodCallParentheses);
+		WriteCommaSeparatedListInParenthesis(ToVector(undocumentedExpression->Arguments()), policy_.SpaceWithinMethodCallParentheses);
+	}
+	EndNode(undocumentedExpression);
+}
+void CSharpOutputVisitor::VisitStackAllocExpression(Syntax::StackAllocExpression* stackAllocExpression) {
+	StartNode(stackAllocExpression);
+	WriteKeyword(Syntax::StackAllocExpression::StackallocKeyword);
+	if (stackAllocExpression->Type() != nullptr)
+		stackAllocExpression->Type()->AcceptVisitor(*this);
+	{
+		std::vector<Syntax::Expression*> count;
+		if (stackAllocExpression->CountExpression() != nullptr)
+			count.push_back(stackAllocExpression->CountExpression());
+		WriteCommaSeparatedListInBrackets(count);
+	}
+	if (stackAllocExpression->Initializer() != nullptr)
+		stackAllocExpression->Initializer()->AcceptVisitor(*this);
+	EndNode(stackAllocExpression);
+}
+void CSharpOutputVisitor::VisitContinueStatement(Syntax::ContinueStatement* continueStatement) {
+	StartNode(continueStatement);
+	WriteKeyword("continue");
+	Semicolon();
+	EndNode(continueStatement);
+}
+
+void CSharpOutputVisitor::VisitBreakStatement(Syntax::BreakStatement* breakStatement) {
+	StartNode(breakStatement);
+	WriteKeyword("break");
+	Semicolon();
+	EndNode(breakStatement);
+}
+
+void CSharpOutputVisitor::VisitYieldBreakStatement(Syntax::YieldBreakStatement* yieldBreakStatement) {
+	StartNode(yieldBreakStatement);
+	WriteKeyword(YieldBreakStatement::YieldKeyword);
+	WriteKeyword(YieldBreakStatement::BreakKeyword);
+	Semicolon();
+	EndNode(yieldBreakStatement);
+}
+void CSharpOutputVisitor::VisitReturnStatement(Syntax::ReturnStatement* returnStatement) {
+	StartNode(returnStatement);
+	WriteKeyword(ReturnStatement::ReturnKeyword);
+	if (returnStatement->Expression() != nullptr) {
+		Space();
+		returnStatement->Expression()->AcceptVisitor(*this);
+	}
+	Semicolon();
+	EndNode(returnStatement);
+}
+void CSharpOutputVisitor::VisitThrowStatement(Syntax::ThrowStatement* throwStatement) {
+	StartNode(throwStatement);
+	WriteKeyword(ThrowStatement::ThrowKeyword);
+	if (throwStatement->Expression() != nullptr) {
+		Space();
+		throwStatement->Expression()->AcceptVisitor(*this);
+	}
+	Semicolon();
+	EndNode(throwStatement);
+}
+void CSharpOutputVisitor::VisitExpressionStatement(Syntax::ExpressionStatement* expressionStatement) {
+	StartNode(expressionStatement);
+	expressionStatement->Expression()->AcceptVisitor(*this);
+	Semicolon();
+	EndNode(expressionStatement);
+}
+void CSharpOutputVisitor::VisitBlockStatement(Syntax::BlockStatement* blockStatement) {
+	WriteBlock(blockStatement, policy_.StatementBraceStyle);
+	NewLine();
+}
+void CSharpOutputVisitor::VisitGotoStatement(Syntax::GotoStatement* gotoStatement) {
+	StartNode(gotoStatement);
+	WriteKeyword(GotoStatement::GotoKeyword);
+	WriteIdentifier(gotoStatement->LabelToken());
+	Semicolon();
+	EndNode(gotoStatement);
+}
+void CSharpOutputVisitor::VisitGotoCaseStatement(Syntax::GotoCaseStatement* gotoCaseStatement) {
+	StartNode(gotoCaseStatement);
+	WriteKeyword(GotoCaseStatement::GotoKeyword);
+	WriteKeyword(GotoCaseStatement::CaseKeyword);
+	Space();
+	gotoCaseStatement->LabelExpression()->AcceptVisitor(*this);
+	Semicolon();
+	EndNode(gotoCaseStatement);
+}
+void CSharpOutputVisitor::VisitGotoDefaultStatement(Syntax::GotoDefaultStatement* gotoDefaultStatement) {
+	StartNode(gotoDefaultStatement);
+	WriteKeyword(GotoDefaultStatement::GotoKeyword);
+	WriteKeyword(GotoDefaultStatement::DefaultKeyword);
+	Semicolon();
+	EndNode(gotoDefaultStatement);
+}
+void CSharpOutputVisitor::VisitIfElseStatement(Syntax::IfElseStatement* ifElseStatement) {
+	StartNode(ifElseStatement);
+	WriteKeyword(IfElseStatement::IfKeyword);
+	Space(policy_.SpaceBeforeIfParentheses);
+	LPar();
+	Space(policy_.SpacesWithinIfParentheses);
+	ifElseStatement->Condition()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinIfParentheses);
+	RPar();
+
+	if (ifElseStatement->FalseStatement() == nullptr) {
+		WriteEmbeddedStatement(ifElseStatement->TrueStatement());
+	} else {
+		WriteEmbeddedStatement(ifElseStatement->TrueStatement(), policy_.ElseNewLinePlacement);
+		WriteKeyword(IfElseStatement::ElseKeyword);
+		// A nested `else if` is a single `IfElseStatement` as the `FalseStatement`: recurse
+		// directly so `else` and `if` stay on one line (no newline between them).
+		if (dynamic_cast<IfElseStatement*>(ifElseStatement->FalseStatement()) != nullptr) {
+			ifElseStatement->FalseStatement()->AcceptVisitor(*this);
+		} else {
+			WriteEmbeddedStatement(ifElseStatement->FalseStatement());
+		}
+	}
+	EndNode(ifElseStatement);
+}
+void CSharpOutputVisitor::VisitWhileStatement(Syntax::WhileStatement* whileStatement) {
+	StartNode(whileStatement);
+	WriteKeyword(WhileStatement::WhileKeyword);
+	Space(policy_.SpaceBeforeWhileParentheses);
+	LPar();
+	Space(policy_.SpacesWithinWhileParentheses);
+	whileStatement->Condition()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinWhileParentheses);
+	RPar();
+	WriteEmbeddedStatement(whileStatement->EmbeddedStatement());
+	EndNode(whileStatement);
+}
+void CSharpOutputVisitor::VisitDoWhileStatement(Syntax::DoWhileStatement* doWhileStatement) {
+	StartNode(doWhileStatement);
+	WriteKeyword(DoWhileStatement::DoKeyword);
+	WriteEmbeddedStatement(doWhileStatement->EmbeddedStatement(), policy_.WhileNewLinePlacement);
+	WriteKeyword(DoWhileStatement::WhileKeyword);
+	Space(policy_.SpaceBeforeWhileParentheses);
+	LPar();
+	Space(policy_.SpacesWithinWhileParentheses);
+	doWhileStatement->Condition()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinWhileParentheses);
+	RPar();
+	Semicolon();
+	EndNode(doWhileStatement);
+}
+void CSharpOutputVisitor::VisitYieldReturnStatement(Syntax::YieldReturnStatement* yieldReturnStatement) {
+	StartNode(yieldReturnStatement);
+	WriteKeyword(YieldReturnStatement::YieldKeyword);
+	WriteKeyword(YieldReturnStatement::ReturnKeyword);
+	Space();
+	yieldReturnStatement->Expression()->AcceptVisitor(*this);
+	Semicolon();
+	EndNode(yieldReturnStatement);
+}
+void CSharpOutputVisitor::VisitEmptyStatement(Syntax::EmptyStatement* emptyStatement) {
+	// An empty statement that carries a comment renders as just that comment (emitted as trivia by
+	// `StartNode`/`EndNode`); otherwise it is a bare semicolon.
+	StartNode(emptyStatement);
+	if (emptyStatement->LeadingTrivia().empty() && emptyStatement->TrailingTrivia().empty()) {
+		Semicolon();
+	}
+	EndNode(emptyStatement);
+}
+void CSharpOutputVisitor::VisitLabelStatement(Syntax::LabelStatement* labelStatement) {
+	StartNode(labelStatement);
+	WriteIdentifier(labelStatement->LabelToken());
+	WriteToken(Tokens::Colon);
+	// A label must be followed by a statement. If the label is the last sibling in its block
+	// (no following sibling sharing its slot kind), emit a bare semicolon so the output stays
+	// syntactically valid (the C# loop walks `NextSibling` looking for a following labelled
+	// statement with the same slot kind).
+	const CSharpSlotInfo* labelSlot = labelStatement->Slot();
+	const CSharpSlotInfo* labelKind = (labelSlot != nullptr) ? labelSlot->Kind() : nullptr;
+	bool foundLabelledStatement = false;
+	for (AstNode* tmp = labelStatement->NextSibling(); tmp != nullptr; tmp = tmp->NextSibling()) {
+		const CSharpSlotInfo* tmpSlot = tmp->Slot();
+		const CSharpSlotInfo* tmpKind = (tmpSlot != nullptr) ? tmpSlot->Kind() : nullptr;
+		if (tmpKind == labelKind) {
+			foundLabelledStatement = true;
+			break;
+		}
+	}
+	if (!foundLabelledStatement) {
+		WriteToken(Tokens::Semicolon);
+	}
+	NewLine();
+	EndNode(labelStatement);
+}
+void CSharpOutputVisitor::VisitCheckedStatement(Syntax::CheckedStatement* checkedStatement) {
+	StartNode(checkedStatement);
+	WriteKeyword(CheckedStatement::CheckedKeyword);
+	checkedStatement->Body()->AcceptVisitor(*this);
+	EndNode(checkedStatement);
+}
+void CSharpOutputVisitor::VisitUncheckedStatement(Syntax::UncheckedStatement* uncheckedStatement) {
+	StartNode(uncheckedStatement);
+	WriteKeyword(UncheckedStatement::UncheckedKeyword);
+	uncheckedStatement->Body()->AcceptVisitor(*this);
+	EndNode(uncheckedStatement);
+}
+void CSharpOutputVisitor::VisitUnsafeStatement(Syntax::UnsafeStatement* unsafeStatement) {
+	StartNode(unsafeStatement);
+	WriteKeyword(UnsafeStatement::UnsafeKeyword);
+	unsafeStatement->Body()->AcceptVisitor(*this);
+	EndNode(unsafeStatement);
+}
+void CSharpOutputVisitor::VisitLockStatement(Syntax::LockStatement* lockStatement) {
+	StartNode(lockStatement);
+	WriteKeyword(LockStatement::LockKeyword);
+	Space(policy_.SpaceBeforeLockParentheses);
+	LPar();
+	Space(policy_.SpacesWithinLockParentheses);
+	lockStatement->Expression()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinLockParentheses);
+	RPar();
+	WriteEmbeddedStatement(lockStatement->EmbeddedStatement());
+	EndNode(lockStatement);
+}
+void CSharpOutputVisitor::VisitUsingStatement(Syntax::UsingStatement* usingStatement) {
+	StartNode(usingStatement);
+	if (usingStatement->IsAsync()) {
+		WriteKeyword(UsingStatement::AwaitKeyword);
+	}
+	WriteKeyword(UsingStatement::UsingKeyword);
+	if (usingStatement->IsEnhanced()) {
+		Space();
+	} else {
+		Space(policy_.SpaceBeforeUsingParentheses);
+		LPar();
+		Space(policy_.SpacesWithinUsingParentheses);
+	}
+	usingStatement->ResourceAcquisition()->AcceptVisitor(*this);
+	if (usingStatement->IsEnhanced()) {
+		Semicolon();
+	} else {
+		Space(policy_.SpacesWithinUsingParentheses);
+		RPar();
+	}
+	if (usingStatement->IsEnhanced()) {
+		BlockStatement* blockStatement = dynamic_cast<BlockStatement*>(usingStatement->EmbeddedStatement());
+		if (blockStatement != nullptr) {
+			StartNode(blockStatement);
+			auto& stmts = blockStatement->Statements();
+			int n = stmts.Count();
+			for (int i = 0; i < n; ++i) {
+				stmts.At(i)->AcceptVisitor(*this);
+			}
+			EndNode(blockStatement);
+		} else {
+			usingStatement->EmbeddedStatement()->AcceptVisitor(*this);
+		}
+	} else {
+		WriteEmbeddedStatement(usingStatement->EmbeddedStatement());
+	}
+	EndNode(usingStatement);
+}
+void CSharpOutputVisitor::VisitForStatement(Syntax::ForStatement* forStatement) {
+	StartNode(forStatement);
+	WriteKeyword(ForStatement::ForKeyword);
+	Space(policy_.SpaceBeforeForParentheses);
+	LPar();
+	Space(policy_.SpacesWithinForParentheses);
+	WriteCommaSeparatedList(ToVector(forStatement->Initializers()));
+	Space(policy_.SpaceBeforeForSemicolon);
+	WriteToken(Tokens::Semicolon);
+	Space(policy_.SpaceAfterForSemicolon);
+	if (forStatement->Condition() != nullptr) {
+		forStatement->Condition()->AcceptVisitor(*this);
+	}
+	Space(policy_.SpaceBeforeForSemicolon);
+	WriteToken(Tokens::Semicolon);
+	if (forStatement->Iterators().Count() > 0) {
+		Space(policy_.SpaceAfterForSemicolon);
+		WriteCommaSeparatedList(ToVector(forStatement->Iterators()));
+	}
+	Space(policy_.SpacesWithinForParentheses);
+	RPar();
+	WriteEmbeddedStatement(forStatement->EmbeddedStatement());
+	EndNode(forStatement);
+}
+void CSharpOutputVisitor::VisitSingleVariableDesignation(Syntax::SingleVariableDesignation* singleVariableDesignation) {
+	StartNode(singleVariableDesignation);
+	WriteIdentifier(singleVariableDesignation->IdentifierToken());
+	EndNode(singleVariableDesignation);
+}
+
+void CSharpOutputVisitor::VisitParenthesizedVariableDesignation(Syntax::ParenthesizedVariableDesignation* parenthesizedVariableDesignation) {
+	StartNode(parenthesizedVariableDesignation);
+	LPar();
+	WriteCommaSeparatedList(ToVector(parenthesizedVariableDesignation->VariableDesignations()));
+	RPar();
+	EndNode(parenthesizedVariableDesignation);
+}
+void CSharpOutputVisitor::VisitForeachStatement(Syntax::ForeachStatement* foreachStatement) {
+	StartNode(foreachStatement);
+	if (foreachStatement->IsAsync()) {
+		WriteKeyword(ForeachStatement::AwaitKeyword);
+	}
+	WriteKeyword(ForeachStatement::ForeachKeyword);
+	Space(policy_.SpaceBeforeForeachParentheses);
+	LPar();
+	Space(policy_.SpacesWithinForeachParentheses);
+	foreachStatement->VariableType()->AcceptVisitor(*this);
+	Space();
+	foreachStatement->VariableDesignation()->AcceptVisitor(*this);
+	Space();
+	WriteKeyword(ForeachStatement::InKeyword);
+	Space();
+	foreachStatement->InExpression()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinForeachParentheses);
+	RPar();
+	WriteEmbeddedStatement(foreachStatement->EmbeddedStatement());
+	EndNode(foreachStatement);
+}
+void CSharpOutputVisitor::VisitVariableInitializer(Syntax::VariableInitializer* variableInitializer) {
+	StartNode(variableInitializer);
+	WriteIdentifier(variableInitializer->NameToken());
+	if (variableInitializer->Initializer() != nullptr) {
+		Space(policy_.SpaceAroundAssignment);
+		WriteToken(Tokens::Assign);
+		Space(policy_.SpaceAroundAssignment);
+		variableInitializer->Initializer()->AcceptVisitor(*this);
+	}
+	EndNode(variableInitializer);
+}
+void CSharpOutputVisitor::VisitFixedStatement(Syntax::FixedStatement* fixedStatement) {
+	StartNode(fixedStatement);
+	WriteKeyword(FixedStatement::FixedKeyword);
+	Space(policy_.SpaceBeforeUsingParentheses);
+	LPar();
+	Space(policy_.SpacesWithinUsingParentheses);
+	fixedStatement->Type()->AcceptVisitor(*this);
+	Space();
+	WriteCommaSeparatedList(ToVector(fixedStatement->Variables()));
+	Space(policy_.SpacesWithinUsingParentheses);
+	RPar();
+	WriteEmbeddedStatement(fixedStatement->EmbeddedStatement());
+	EndNode(fixedStatement);
+}
+void CSharpOutputVisitor::VisitCaseLabel(Syntax::CaseLabel* caseLabel) {
+	StartNode(caseLabel);
+	if (caseLabel->Expression() == nullptr) {
+		WriteKeyword(CaseLabel::DefaultKeyword);
+	} else {
+		WriteKeyword(CaseLabel::CaseKeyword);
+		Space();
+		caseLabel->Expression()->AcceptVisitor(*this);
+	}
+	WriteToken(Tokens::Colon);
+	EndNode(caseLabel);
+}
+void CSharpOutputVisitor::VisitSwitchSection(Syntax::SwitchSection* switchSection) {
+	StartNode(switchSection);
+	bool first = true;
+	auto& labels = switchSection->CaseLabels();
+	int labelCount = labels.Count();
+	for (int i = 0; i < labelCount; ++i) {
+		if (!first) {
+			NewLine();
+		}
+		labels.At(i)->AcceptVisitor(*this);
+		first = false;
+	}
+	auto& stmts = switchSection->Statements();
+	int stmtCount = stmts.Count();
+	bool isBlock = (stmtCount == 1) && (dynamic_cast<BlockStatement*>(stmts.At(0)) != nullptr);
+	if (policy_.IndentCaseBody && !isBlock) {
+		writer_->Indent();
+	}
+	if (!isBlock) {
+		NewLine();
+	}
+	for (int i = 0; i < stmtCount; ++i) {
+		stmts.At(i)->AcceptVisitor(*this);
+	}
+	if (policy_.IndentCaseBody && !isBlock) {
+		writer_->Unindent();
+	}
+	EndNode(switchSection);
+}
+void CSharpOutputVisitor::VisitSwitchStatement(Syntax::SwitchStatement* switchStatement) {
+	StartNode(switchStatement);
+	WriteKeyword(SwitchStatement::SwitchKeyword);
+	Space(policy_.SpaceBeforeSwitchParentheses);
+	LPar();
+	Space(policy_.SpacesWithinSwitchParentheses);
+	switchStatement->Expression()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinSwitchParentheses);
+	RPar();
+	OpenBrace(policy_.StatementBraceStyle);
+	if (!policy_.IndentSwitchBody) {
+		writer_->Unindent();
+	}
+	auto& sections = switchStatement->SwitchSections();
+	int sectionCount = sections.Count();
+	for (int i = 0; i < sectionCount; ++i) {
+		sections.At(i)->AcceptVisitor(*this);
+	}
+	if (!policy_.IndentSwitchBody) {
+		writer_->Indent();
+	}
+	CloseBrace(policy_.StatementBraceStyle);
+	NewLine();
+	EndNode(switchStatement);
+}
+void CSharpOutputVisitor::VisitCatchClause(Syntax::CatchClause* catchClause) {
+	StartNode(catchClause);
+	WriteKeyword(Syntax::CatchClause::CatchKeyword);
+	if (catchClause->Type() != nullptr) {
+		Space(policy_.SpaceBeforeCatchParentheses);
+		LPar();
+		Space(policy_.SpacesWithinCatchParentheses);
+		catchClause->Type()->AcceptVisitor(*this);
+		auto name = catchClause->VariableName();
+		if (name.has_value() && !name->empty()) {
+			Space();
+			WriteIdentifier(catchClause->VariableNameToken());
+		}
+		Space(policy_.SpacesWithinCatchParentheses);
+		RPar();
+	}
+	if (catchClause->Condition() != nullptr) {
+		Space();
+		WriteKeyword(Syntax::CatchClause::WhenKeyword);
+		Space(policy_.SpaceBeforeIfParentheses);
+		WriteToken(Syntax::CatchClause::CondLPar);
+		Space(policy_.SpacesWithinIfParentheses);
+		catchClause->Condition()->AcceptVisitor(*this);
+		Space(policy_.SpacesWithinIfParentheses);
+		WriteToken(Syntax::CatchClause::CondRPar);
+	}
+	WriteBlock(catchClause->Body(), policy_.StatementBraceStyle);
+	EndNode(catchClause);
+}
+void CSharpOutputVisitor::VisitTryCatchStatement(Syntax::TryCatchStatement* tryCatchStatement) {
+	StartNode(tryCatchStatement);
+	WriteKeyword(Syntax::TryCatchStatement::TryKeyword);
+	WriteBlock(tryCatchStatement->TryBlock(), policy_.StatementBraceStyle);
+	auto& clauses = tryCatchStatement->CatchClauses();
+	int clauseCount = clauses.Count();
+	for (int i = 0; i < clauseCount; ++i) {
+		if (policy_.CatchNewLinePlacement == NewLinePlacement::SameLine)
+			Space();
+		else
+			NewLine();
+		clauses.At(i)->AcceptVisitor(*this);
+	}
+	if (tryCatchStatement->FinallyBlock() != nullptr) {
+		if (policy_.FinallyNewLinePlacement == NewLinePlacement::SameLine)
+			Space();
+		else
+			NewLine();
+		WriteKeyword(Syntax::TryCatchStatement::FinallyKeyword);
+		WriteBlock(tryCatchStatement->FinallyBlock(), policy_.StatementBraceStyle);
+	}
+	NewLine();
+	EndNode(tryCatchStatement);
+}
+void CSharpOutputVisitor::VisitVariableDeclarationStatement(Syntax::VariableDeclarationStatement* variableDeclarationStatement) {
+	StartNode(variableDeclarationStatement);
+	WriteModifiers(variableDeclarationStatement->Modifiers());
+	variableDeclarationStatement->Type()->AcceptVisitor(*this);
+	Space();
+	WriteCommaSeparatedList(ToVector(variableDeclarationStatement->Variables()));
+	Semicolon();
+	EndNode(variableDeclarationStatement);
+}
+void CSharpOutputVisitor::VisitDestructorDeclaration(Syntax::DestructorDeclaration* destructorDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitDestructorDeclaration: `~Name()`. The
+	// WriteModifiers trailing Space (per keyword) plus the explicit `if (Modifiers != None)
+	// Space()` is idempotent (the port Space() no-ops when isAfterSpace_), so only one space
+	// precedes the `~`. The name is the destructor's own NameToken unless its parent
+	// TypeDeclaration's name differs (the Clone branch, like VisitConstructorDeclaration).
+	StartNode(destructorDeclaration);
+	WriteAttributes(ToVector(destructorDeclaration->Attributes()));
+	WriteModifiers(destructorDeclaration->Modifiers());
+	if (destructorDeclaration->Modifiers() != Syntax::Modifiers::None) {
+		Space();
+	}
+	WriteToken(Syntax::DestructorDeclaration::TildeToken);
+	auto* type = dynamic_cast<Syntax::TypeDeclaration*>(destructorDeclaration->Parent());
+	if (type != nullptr && type->Name() != destructorDeclaration->NameToken()->Name()) {
+		std::unique_ptr<Syntax::Identifier> cloned(type->NameToken()->Clone());
+		WriteIdentifier(cloned.get());
+	} else {
+		WriteIdentifier(destructorDeclaration->NameToken());
+	}
+	Space(policy_.SpaceBeforeConstructorDeclarationParentheses);
+	LPar();
+	RPar();
+	WriteMethodBody(destructorDeclaration->Body(), policy_.DestructorBraceStyle);
+	EndNode(destructorDeclaration);
+}
+void CSharpOutputVisitor::VisitFieldDeclaration(Syntax::FieldDeclaration* fieldDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitFieldDeclaration: `ReturnType v1, v2, ...;`.
+	// Structurally identical to VisitEventDeclaration (D349) minus the `event` keyword.
+	StartNode(fieldDeclaration);
+	WriteAttributes(ToVector(fieldDeclaration->Attributes()));
+	WriteModifiers(fieldDeclaration->Modifiers());
+	if (fieldDeclaration->ReturnType() != nullptr) {
+		fieldDeclaration->ReturnType()->AcceptVisitor(*this);
+	}
+	Space();
+	WriteCommaSeparatedList(ToVector(fieldDeclaration->Variables()));
+	Semicolon();
+	EndNode(fieldDeclaration);
+}
+void CSharpOutputVisitor::VisitAccessor(Syntax::Accessor* accessor) {
+	StartNode(accessor);
+	WriteAttributes(ToVector(accessor->Attributes()));
+	WriteModifiers(accessor->Modifiers());
+	BraceStyle style = policy_.StatementBraceStyle;
+	const CSharpSlotInfo* slot = accessor->Slot();
+	const CSharpSlotInfo* kind = (slot != nullptr) ? slot->Kind() : nullptr;
+	if (kind == &Slots::Getter) {
+		WriteKeyword("get");
+		style = policy_.PropertyGetBraceStyle;
+	} else if (kind == &Slots::Setter) {
+		if (accessor->Kind() == Syntax::AccessorKind::Init) {
+			WriteKeyword("init");
+		} else {
+			WriteKeyword("set");
+		}
+		style = policy_.PropertySetBraceStyle;
+	} else if (kind == &Slots::AddAccessor) {
+		WriteKeyword("add");
+		style = policy_.EventAddBraceStyle;
+	} else if (kind == &Slots::RemoveAccessor) {
+		WriteKeyword("remove");
+		style = policy_.EventRemoveBraceStyle;
+	}
+	WriteMethodBody(accessor->Body(), style);
+	EndNode(accessor);
+}
+void CSharpOutputVisitor::VisitEnumMemberDeclaration(Syntax::EnumMemberDeclaration* enumMemberDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitEnumMemberDeclaration: `Name` or `Name = initializer`.
+	StartNode(enumMemberDeclaration);
+	WriteAttributes(ToVector(enumMemberDeclaration->Attributes()));
+	WriteModifiers(enumMemberDeclaration->Modifiers());
+	WriteIdentifier(enumMemberDeclaration->NameToken());
+	if (enumMemberDeclaration->Initializer() != nullptr) {
+		Space(policy_.SpaceAroundAssignment);
+		WriteToken(Tokens::Assign);
+		Space(policy_.SpaceAroundAssignment);
+		enumMemberDeclaration->Initializer()->AcceptVisitor(*this);
+	}
+	EndNode(enumMemberDeclaration);
+}
+void CSharpOutputVisitor::VisitPropertyDeclaration(Syntax::PropertyDeclaration* propertyDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitPropertyDeclaration:
+	// `ReturnType Name { get; set; }`, `ReturnType Name { get; set; } = init;`, or `ReturnType Name => expr;`.
+	StartNode(propertyDeclaration);
+	WriteAttributes(ToVector(propertyDeclaration->Attributes()));
+	WriteModifiers(propertyDeclaration->Modifiers());
+	if (propertyDeclaration->ReturnType() != nullptr) {
+		propertyDeclaration->ReturnType()->AcceptVisitor(*this);
+	}
+	Space();
+	WritePrivateImplementationType(propertyDeclaration->PrivateImplementationType());
+	WriteIdentifier(propertyDeclaration->NameToken());
+	if (propertyDeclaration->ExpressionBody() == nullptr) {
+		bool isSingleLine =
+			(policy_.AutoPropertyFormatting == PropertyFormatting::SingleLine)
+			&& (propertyDeclaration->Getter() == nullptr || propertyDeclaration->Getter()->Body() == nullptr)
+			&& (propertyDeclaration->Setter() == nullptr || propertyDeclaration->Setter()->Body() == nullptr)
+			&& (propertyDeclaration->Getter() == nullptr || propertyDeclaration->Getter()->Attributes().Count() == 0)
+			&& (propertyDeclaration->Setter() == nullptr || propertyDeclaration->Setter()->Attributes().Count() == 0);
+		OpenBrace(isSingleLine ? BraceStyle::EndOfLine : policy_.PropertyBraceStyle, !isSingleLine);
+		if (isSingleLine)
+			Space();
+		// Output get/set in their original tree order (the C# FirstChild/NextSibling walk).
+		for (Syntax::AstNode* node = propertyDeclaration->FirstChild(); node != nullptr; node = node->NextSibling()) {
+			const Syntax::CSharpSlotInfo* slot = node->Slot();
+			if (slot != nullptr && (slot->Kind() == &Syntax::Slots::Getter || slot->Kind() == &Syntax::Slots::Setter)) {
+				node->AcceptVisitor(*this);
+			}
+		}
+		CloseBrace(isSingleLine ? BraceStyle::EndOfLine : policy_.PropertyBraceStyle, !isSingleLine);
+		if (propertyDeclaration->Initializer() != nullptr) {
+			Space(policy_.SpaceAroundAssignment);
+			WriteToken(Tokens::Assign);
+			Space(policy_.SpaceAroundAssignment);
+			propertyDeclaration->Initializer()->AcceptVisitor(*this);
+			Semicolon();
+		} else {
+			// The Semicolon() call above prints a newline too; with no Initializer, emit the
+			// newline that closes the property (the C# comment).
+			NewLine();
+		}
+	} else {
+		Space();
+		WriteToken(Tokens::Arrow);
+		Space();
+		propertyDeclaration->ExpressionBody()->AcceptVisitor(*this);
+		Semicolon();
+	}
+	EndNode(propertyDeclaration);
+}
+void CSharpOutputVisitor::VisitEventDeclaration(Syntax::EventDeclaration* eventDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitEventDeclaration: `event ReturnType v1, v2, ...;`.
+	StartNode(eventDeclaration);
+	WriteAttributes(ToVector(eventDeclaration->Attributes()));
+	WriteModifiers(eventDeclaration->Modifiers());
+	WriteKeyword(Syntax::EventKeyword);
+	if (eventDeclaration->ReturnType() != nullptr) {
+		eventDeclaration->ReturnType()->AcceptVisitor(*this);
+	}
+	Space();
+	WriteCommaSeparatedList(ToVector(eventDeclaration->Variables()));
+	Semicolon();
+	EndNode(eventDeclaration);
+}
+void CSharpOutputVisitor::VisitCustomEventDeclaration(Syntax::CustomEventDeclaration* customEventDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitCustomEventDeclaration: `event ReturnType Name { add; remove; }`.
+	StartNode(customEventDeclaration);
+	WriteAttributes(ToVector(customEventDeclaration->Attributes()));
+	WriteModifiers(customEventDeclaration->Modifiers());
+	WriteKeyword(Syntax::EventKeyword);
+	if (customEventDeclaration->ReturnType() != nullptr) {
+		customEventDeclaration->ReturnType()->AcceptVisitor(*this);
+	}
+	Space();
+	WritePrivateImplementationType(customEventDeclaration->PrivateImplementationType());
+	WriteIdentifier(customEventDeclaration->NameToken());
+	OpenBrace(policy_.EventBraceStyle);
+	// Output add/remove in their original tree order (the C# FirstChild/NextSibling walk).
+	for (Syntax::AstNode* node = customEventDeclaration->FirstChild(); node != nullptr; node = node->NextSibling()) {
+		const Syntax::CSharpSlotInfo* slot = node->Slot();
+		if (slot != nullptr && (slot->Kind() == &Syntax::Slots::AddAccessor || slot->Kind() == &Syntax::Slots::RemoveAccessor)) {
+			node->AcceptVisitor(*this);
+		}
+	}
+	CloseBrace(policy_.EventBraceStyle);
+	NewLine();
+	EndNode(customEventDeclaration);
+}
+void CSharpOutputVisitor::VisitParameterDeclaration(Syntax::ParameterDeclaration* parameterDeclaration) {
+	StartNode(parameterDeclaration);
+	WriteAttributes(ToVector(parameterDeclaration->Attributes()));
+	if (parameterDeclaration->HasThisModifier()) {
+		WriteKeyword(Syntax::ParameterDeclaration::ThisModifier);
+		Space();
+	}
+	if (parameterDeclaration->IsParams()) {
+		WriteKeyword(Syntax::ParameterDeclaration::ParamsModifier);
+		Space();
+	}
+	if (parameterDeclaration->IsScopedRef()) {
+		WriteKeyword(Syntax::ParameterDeclaration::ScopedRefKeyword);
+		Space();
+	}
+	switch (parameterDeclaration->ParameterModifier()) {
+		case ILSpy::Decompiler::TypeSystem::ReferenceKind::Ref:
+			WriteKeyword(Syntax::ParameterDeclaration::RefModifier);
+			Space();
+			break;
+		case ILSpy::Decompiler::TypeSystem::ReferenceKind::RefReadOnly:
+			WriteKeyword(Syntax::ParameterDeclaration::RefModifier);
+			WriteKeyword(Syntax::ParameterDeclaration::ReadonlyModifier);
+			Space();
+			break;
+		case ILSpy::Decompiler::TypeSystem::ReferenceKind::Out:
+			WriteKeyword(Syntax::ParameterDeclaration::OutModifier);
+			Space();
+			break;
+		case ILSpy::Decompiler::TypeSystem::ReferenceKind::In:
+			WriteKeyword(Syntax::ParameterDeclaration::InModifier);
+			Space();
+			break;
+		case ILSpy::Decompiler::TypeSystem::ReferenceKind::None:
+			break;
+	}
+	if (auto* type = parameterDeclaration->Type()) {
+		type->AcceptVisitor(*this);
+	}
+	auto name = parameterDeclaration->Name();
+	if (parameterDeclaration->Type() != nullptr && name.has_value() && !name->empty()) {
+		Space();
+	}
+	if (name.has_value() && !name->empty()) {
+		WriteIdentifier(parameterDeclaration->NameToken());
+	}
+	if (auto* defaultExpr = parameterDeclaration->DefaultExpression()) {
+		Space(policy_.SpaceAroundAssignment);
+		WriteToken(Tokens::Assign);
+		Space(policy_.SpaceAroundAssignment);
+		defaultExpr->AcceptVisitor(*this);
+	}
+	EndNode(parameterDeclaration);
+}
+void CSharpOutputVisitor::VisitIndexerDeclaration(Syntax::IndexerDeclaration* indexerDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitIndexerDeclaration:
+	// `ReturnType this[Parameters] { get; set; }` or `ReturnType this[Parameters] => expr;`.
+	StartNode(indexerDeclaration);
+	WriteAttributes(ToVector(indexerDeclaration->Attributes()));
+	WriteModifiers(indexerDeclaration->Modifiers());
+	if (indexerDeclaration->ReturnType() != nullptr) {
+		indexerDeclaration->ReturnType()->AcceptVisitor(*this);
+	}
+	Space();
+	WritePrivateImplementationType(indexerDeclaration->PrivateImplementationType());
+	WriteKeyword(Syntax::IndexerDeclaration::ThisKeyword);
+	Space(policy_.SpaceBeforeMethodDeclarationParentheses);
+	WriteCommaSeparatedListInBrackets(ToVector(indexerDeclaration->Parameters()), policy_.SpaceWithinMethodDeclarationParentheses);
+	if (indexerDeclaration->ExpressionBody() == nullptr) {
+		bool isSingleLine =
+			(policy_.AutoPropertyFormatting == PropertyFormatting::SingleLine)
+			&& (indexerDeclaration->Getter() == nullptr || indexerDeclaration->Getter()->Body() == nullptr)
+			&& (indexerDeclaration->Setter() == nullptr || indexerDeclaration->Setter()->Body() == nullptr)
+			&& (indexerDeclaration->Getter() == nullptr || indexerDeclaration->Getter()->Attributes().Count() == 0)
+			&& (indexerDeclaration->Setter() == nullptr || indexerDeclaration->Setter()->Attributes().Count() == 0);
+		OpenBrace(isSingleLine ? BraceStyle::EndOfLine : policy_.PropertyBraceStyle, !isSingleLine);
+		if (isSingleLine)
+			Space();
+		// Output get/set in their original tree order (the C# FirstChild/NextSibling walk).
+		for (Syntax::AstNode* node = indexerDeclaration->FirstChild(); node != nullptr; node = node->NextSibling()) {
+			const Syntax::CSharpSlotInfo* slot = node->Slot();
+			if (slot != nullptr && (slot->Kind() == &Syntax::Slots::Getter || slot->Kind() == &Syntax::Slots::Setter)) {
+				node->AcceptVisitor(*this);
+			}
+		}
+		CloseBrace(isSingleLine ? BraceStyle::EndOfLine : policy_.PropertyBraceStyle, !isSingleLine);
+		NewLine();
+	} else {
+		Space();
+		WriteToken(Tokens::Arrow);
+		Space();
+		indexerDeclaration->ExpressionBody()->AcceptVisitor(*this);
+		Semicolon();
+	}
+	EndNode(indexerDeclaration);
+}
+void CSharpOutputVisitor::VisitOperatorDeclaration(Syntax::OperatorDeclaration* operatorDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitOperatorDeclaration:
+	// `Modifiers ReturnType operator <token>(Parameters) { Body }` (the binary/unary operators),
+	// `explicit operator ReturnType(Parameters) { Body }`, or `implicit operator ReturnType(...)`.
+	// The conversion operators (`Explicit`/`CheckedExplicit`/`Implicit`) write the `explicit`/
+	// `implicit` keyword in place of the return type (before `operator`) and the return type after
+	// the `checked` keyword; the other operators write the return type first and the operator
+	// token after `operator [checked]`.
+	StartNode(operatorDeclaration);
+	WriteAttributes(ToVector(operatorDeclaration->Attributes()));
+	WriteModifiers(operatorDeclaration->Modifiers());
+	if (operatorDeclaration->OperatorType() == Syntax::OperatorType::Explicit
+		|| operatorDeclaration->OperatorType() == Syntax::OperatorType::CheckedExplicit) {
+		WriteKeyword(Syntax::OperatorDeclaration::ExplicitKeyword);
+	} else if (operatorDeclaration->OperatorType() == Syntax::OperatorType::Implicit) {
+		WriteKeyword(Syntax::OperatorDeclaration::ImplicitKeyword);
+	} else {
+		if (operatorDeclaration->ReturnType() != nullptr) {
+			operatorDeclaration->ReturnType()->AcceptVisitor(*this);
+		}
+	}
+	Space();
+	WritePrivateImplementationType(operatorDeclaration->PrivateImplementationType());
+	WriteKeyword(Syntax::OperatorDeclaration::OperatorKeyword);
+	Space();
+	if (Syntax::OperatorDeclaration::IsChecked(operatorDeclaration->OperatorType())) {
+		WriteKeyword(Syntax::OperatorDeclaration::CheckedKeyword);
+		Space();
+	}
+	if (operatorDeclaration->OperatorType() == Syntax::OperatorType::Explicit
+		|| operatorDeclaration->OperatorType() == Syntax::OperatorType::CheckedExplicit
+		|| operatorDeclaration->OperatorType() == Syntax::OperatorType::Implicit) {
+		if (operatorDeclaration->ReturnType() != nullptr) {
+			operatorDeclaration->ReturnType()->AcceptVisitor(*this);
+		}
+	} else {
+		WriteToken(Syntax::OperatorDeclaration::GetToken(operatorDeclaration->OperatorType()));
+	}
+	Space(policy_.SpaceBeforeMethodDeclarationParentheses);
+	WriteCommaSeparatedListInParenthesis(ToVector(operatorDeclaration->Parameters()), policy_.SpaceWithinMethodDeclarationParentheses);
+	WriteMethodBody(operatorDeclaration->Body(), policy_.MethodBraceStyle);
+	EndNode(operatorDeclaration);
+}
+void CSharpOutputVisitor::VisitConstructorInitializer(Syntax::ConstructorInitializer* constructorInitializer) {
+	// Faithful port of CSharpOutputVisitor.cs VisitConstructorInitializer: `: base(...)` / `: this(...)`.
+	StartNode(constructorInitializer);
+	WriteToken(Tokens::Colon);
+	Space();
+	if (constructorInitializer->ConstructorInitializerType() == Syntax::ConstructorInitializerType::This) {
+		WriteKeyword(Syntax::ConstructorInitializer::ThisKeyword);
+	} else {
+		WriteKeyword(Syntax::ConstructorInitializer::BaseKeyword);
+	}
+	Space(policy_.SpaceBeforeMethodCallParentheses);
+	WriteCommaSeparatedListInParenthesis(ToVector(constructorInitializer->Arguments()), policy_.SpaceWithinMethodCallParentheses);
+	EndNode(constructorInitializer);
+}
+void CSharpOutputVisitor::VisitConstructorDeclaration(Syntax::ConstructorDeclaration* constructorDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitConstructorDeclaration. The name is the ctor's
+	// own NameToken, UNLESS the ctor is a member of a TypeDeclaration whose name differs (the
+	// `(Identifier)type.NameToken.Clone()` branch) -- the C# clones the type's NameToken so a
+	// renamed-type ctor keeps the type's name (a name-mismatch ctor is a separate Identifier node).
+	StartNode(constructorDeclaration);
+	WriteAttributes(ToVector(constructorDeclaration->Attributes()));
+	WriteModifiers(constructorDeclaration->Modifiers());
+	auto* type = dynamic_cast<Syntax::TypeDeclaration*>(constructorDeclaration->Parent());
+	if (type != nullptr && type->Name() != constructorDeclaration->NameToken()->Name()) {
+		std::unique_ptr<Syntax::Identifier> cloned(type->NameToken()->Clone());
+		WriteIdentifier(cloned.get());
+	} else {
+		WriteIdentifier(constructorDeclaration->NameToken());
+	}
+	Space(policy_.SpaceBeforeConstructorDeclarationParentheses);
+	WriteCommaSeparatedListInParenthesis(ToVector(constructorDeclaration->Parameters()), policy_.SpaceWithinMethodDeclarationParentheses);
+	if (constructorDeclaration->Initializer() != nullptr) {
+		NewLine();
+		writer_->Indent();
+		constructorDeclaration->Initializer()->AcceptVisitor(*this);
+		writer_->Unindent();
+	}
+	WriteMethodBody(constructorDeclaration->Body(), policy_.ConstructorBraceStyle);
+	EndNode(constructorDeclaration);
+}
+void CSharpOutputVisitor::VisitTypeParameterDeclaration(Syntax::TypeParameterDeclaration* typeParameterDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitTypeParameterDeclaration (line 2913): the
+	// optional leading attribute sections, the `in`/`out`/none variance keyword, then the name
+	// token. The C# `switch (typeParameterDeclaration.Variance)` over the `VarianceModifier` enum
+	// ports to a switch on `ILSpy::Decompiler::TypeSystem::VarianceModifier` (the enum lives in the
+	// `TypeSystem` namespace, NOT brought in by the `using namespace ...::Syntax`, so it is
+	// fully-qualified -- the `ReferenceKind` qualification precedent); the `default` throw of
+	// `NotSupportedException` ports to `std::out_of_range` (the `DirectionExpression.FieldDirection`
+	// precedent at line 869).
+	StartNode(typeParameterDeclaration);
+	WriteAttributes(ToVector(typeParameterDeclaration->Attributes()));
+	switch (typeParameterDeclaration->Variance()) {
+		case ILSpy::Decompiler::TypeSystem::VarianceModifier::Invariant:
+			break;
+		case ILSpy::Decompiler::TypeSystem::VarianceModifier::Covariant:
+			WriteKeyword(TypeParameterDeclaration::OutVarianceKeyword);
+			break;
+		case ILSpy::Decompiler::TypeSystem::VarianceModifier::Contravariant:
+			WriteKeyword(TypeParameterDeclaration::InVarianceKeyword);
+			break;
+		default:
+			throw std::out_of_range("Invalid value for VarianceModifier");
+	}
+	WriteIdentifier(typeParameterDeclaration->NameToken());
+	EndNode(typeParameterDeclaration);
+}
+void CSharpOutputVisitor::VisitConstraint(Syntax::Constraint* constraint) {
+	// Faithful port of CSharpOutputVisitor.cs VisitConstraint (line 2934): the leading Space, the
+	// `where` keyword, the constrained type parameter (a SimpleType), the Space/Colon/Space, and
+	// the comma-separated base-type list. The C# `constraint.BaseTypes` lazy collection snapshots
+	// via the `ToVector` helper before `WriteCommaSeparatedList` (the D325 eager-iteration
+	// convention; the collection is not mutated during the visit).
+	StartNode(constraint);
+	Space();
+	WriteKeyword(Tokens::WhereKeyword);
+	constraint->TypeParameter()->AcceptVisitor(*this);
+	Space();
+	WriteToken(Tokens::Colon);
+	Space();
+	WriteCommaSeparatedList(ToVector(constraint->BaseTypes()));
+	EndNode(constraint);
+}
+void CSharpOutputVisitor::VisitMethodDeclaration(Syntax::MethodDeclaration* methodDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitMethodDeclaration:
+	// `Modifiers ReturnType NameToken<TypeParameters>(Parameters) Constraints { Body }` or `... ;`.
+	StartNode(methodDeclaration);
+	WriteAttributes(ToVector(methodDeclaration->Attributes()));
+	WriteModifiers(methodDeclaration->Modifiers());
+	if (methodDeclaration->ReturnType() != nullptr) {
+		methodDeclaration->ReturnType()->AcceptVisitor(*this);
+	}
+	Space();
+	WritePrivateImplementationType(methodDeclaration->PrivateImplementationType());
+	WriteIdentifier(methodDeclaration->NameToken());
+	WriteTypeParameters(ToVector(methodDeclaration->TypeParameters()));
+	Space(policy_.SpaceBeforeMethodDeclarationParentheses);
+	WriteCommaSeparatedListInParenthesis(ToVector(methodDeclaration->Parameters()), policy_.SpaceWithinMethodDeclarationParentheses);
+	for (Syntax::Constraint* constraint : ToVector(methodDeclaration->Constraints())) {
+		constraint->AcceptVisitor(*this);
+	}
+	WriteMethodBody(methodDeclaration->Body(), policy_.MethodBraceStyle);
+	EndNode(methodDeclaration);
+}
+void CSharpOutputVisitor::VisitExtensionDeclaration(Syntax::ExtensionDeclaration* extensionDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitExtensionDeclaration: `extension<T> (...) { ... }`.
+	StartNode(extensionDeclaration);
+	WriteAttributes(ToVector(extensionDeclaration->Attributes()));
+	WriteModifiers(extensionDeclaration->Modifiers());
+	WriteKeyword(Syntax::ExtensionDeclaration::ExtensionKeyword);
+	WriteTypeParameters(ToVector(extensionDeclaration->TypeParameters()));
+	Space(policy_.SpaceBeforeMethodDeclarationParentheses);
+	WriteCommaSeparatedListInParenthesis(ToVector(extensionDeclaration->ReceiverParameters()), policy_.SpaceWithinMethodDeclarationParentheses);
+	for (auto* constraint : ToVector(extensionDeclaration->Constraints())) {
+		if (constraint) constraint->AcceptVisitor(*this);
+	}
+	OpenBrace(policy_.ClassBraceStyle);
+	bool first = true;
+	for (auto* member : ToVector(extensionDeclaration->Members())) {
+		if (!member) continue;
+		if (!first) {
+			for (int i = 0; i < policy_.MinimumBlankLinesBetweenMembers; ++i)
+				NewLine();
+		}
+		first = false;
+		member->AcceptVisitor(*this);
+	}
+	CloseBrace(policy_.ClassBraceStyle);
+	NewLine();
+	EndNode(extensionDeclaration);
+}
+void CSharpOutputVisitor::VisitFixedVariableInitializer(Syntax::FixedVariableInitializer* fixedVariableInitializer) {
+	// Faithful port of CSharpOutputVisitor.cs VisitFixedVariableInitializer: `name[count]?`.
+	StartNode(fixedVariableInitializer);
+	WriteIdentifier(fixedVariableInitializer->NameToken());
+	if (fixedVariableInitializer->CountExpression() != nullptr) {
+		WriteToken(Tokens::LBracket);
+		Space(policy_.SpacesWithinBrackets);
+		fixedVariableInitializer->CountExpression()->AcceptVisitor(*this);
+		Space(policy_.SpacesWithinBrackets);
+		WriteToken(Tokens::RBracket);
+	}
+	EndNode(fixedVariableInitializer);
+}
+void CSharpOutputVisitor::VisitFixedFieldDeclaration(Syntax::FixedFieldDeclaration* fixedFieldDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitFixedFieldDeclaration: `fixed ReturnType v1, v2, ...;`.
+	StartNode(fixedFieldDeclaration);
+	WriteAttributes(ToVector(fixedFieldDeclaration->Attributes()));
+	WriteModifiers(fixedFieldDeclaration->Modifiers());
+	WriteKeyword(Syntax::FixedFieldDeclaration::FixedKeyword());
+	Space();
+	if (fixedFieldDeclaration->ReturnType() != nullptr) {
+		fixedFieldDeclaration->ReturnType()->AcceptVisitor(*this);
+	}
+	Space();
+	WriteCommaSeparatedList(ToVector(fixedFieldDeclaration->Variables()));
+	Semicolon();
+	EndNode(fixedFieldDeclaration);
+}
+void CSharpOutputVisitor::VisitLocalFunctionDeclarationStatement(Syntax::LocalFunctionDeclarationStatement* localFunctionDeclarationStatement) {
+	// Faithful port of CSharpOutputVisitor.cs VisitLocalFunctionDeclarationStatement (line 2218):
+	// the `local_function_declaration ::= method_declaration` (C# grammar 13.6.4) wrapper -- a
+	// sealed `Statement` whose entire content is its single REQUIRED `MethodDeclaration`
+	// `Declaration` child, so the Visit just `StartNode` + `Declaration.AcceptVisitor` (which
+	// recurses through `VisitMethodDeclaration` [D354]) + `EndNode`. The `Declaration` is a required
+	// non-nullable slot (the C# calls `localFunctionDeclarationStatement.Declaration.AcceptVisitor(this)`
+	// with no null-conditional), so no nullptr guard is added (the `VisitAttribute` D357 required-slot
+	// precedent); the recursion renders the wrapped method's `Modifiers ReturnType Name(params)
+	// { Body }` / `... ;` form unchanged.
+	StartNode(localFunctionDeclarationStatement);
+	localFunctionDeclarationStatement->Declaration()->AcceptVisitor(*this);
+	EndNode(localFunctionDeclarationStatement);
+}
+void CSharpOutputVisitor::VisitComment(Syntax::Comment* comment) {
+	// A `Comment` is trivia -- the C# drives the writer DIRECTLY (`writer.StartNode`/`writer.EndNode`,
+	// NOT the visitor's `StartNode`/`EndNode`): trivia is not part of the node-nesting stack and
+	// must not trigger the visitor's leading/trailing-trivia walk (a comment has no slots), so it
+	// is emitted as a flat token group by the writer.
+	writer_->StartNode(comment);
+	writer_->WriteComment(comment->CommentType(), comment->Content());
+	writer_->EndNode(comment);
+}
+void CSharpOutputVisitor::VisitExternAliasDeclaration(Syntax::ExternAliasDeclaration* externAliasDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitExternAliasDeclaration (line 1680): the
+	// `extern_alias_directive ::= 'extern' 'alias' identifier ';'` (C# grammar 14.4). The two
+	// keywords are the namespace-scope `Tokens::ExternKeyword`/`Tokens::AliasKeyword` consts,
+	// each followed by an explicit `Space()` (the C# `Space()` default-arg `addSpace=true`, the
+	// `VisitAsExpression` D322 keyword-Space-keyword precedent); the `NameToken` is a REQUIRED
+	// `Identifier` slot written via `WriteIdentifier`; the `Semicolon` writes `tok:;` + `NewLine`
+	// (the root node's `Slot()` is null, so neither the `skipToken` nor the auto-property
+	// `skipNewLine` path applies -- the `dynamic_cast<Accessor*>` on the directive node fails).
+	StartNode(externAliasDeclaration);
+	WriteKeyword(Tokens::ExternKeyword);
+	Space();
+	WriteKeyword(Tokens::AliasKeyword);
+	Space();
+	WriteIdentifier(externAliasDeclaration->NameToken());
+	Semicolon();
+	EndNode(externAliasDeclaration);
+}
+void CSharpOutputVisitor::VisitUsingDeclaration(Syntax::UsingDeclaration* usingDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitUsingDeclaration (line 1671): the
+	// `using_directive ::= 'using' type ';'` (C# grammar 14.6.3). The `UsingKeyword` is a static
+	// `constexpr const char*` const on `UsingDeclaration` (shared verbatim with
+	// `UsingAliasDeclaration.UsingKeyword` -- the `CheckedExpression.CheckedKeyword` D234
+	// static-const precedent); the `Import` is a REQUIRED `AstType` slot (the C# calls
+	// `usingDeclaration.Import.AcceptVisitor(this)` with no null-conditional), so no nullptr
+	// guard is added (the `VisitAttribute` D357 required-slot precedent); the `Semicolon` writes
+	// `tok:;` + `NewLine` (the root node's `Slot()` is null).
+	StartNode(usingDeclaration);
+	WriteKeyword(UsingDeclaration::UsingKeyword);
+	usingDeclaration->Import()->AcceptVisitor(*this);
+	Semicolon();
+	EndNode(usingDeclaration);
+}
+void CSharpOutputVisitor::VisitUsingAliasDeclaration(Syntax::UsingAliasDeclaration* usingAliasDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitUsingAliasDeclaration (line 1658): the
+	// `using_alias_directive ::= 'using' identifier '=' type ';'` (C# grammar 14.6.2). The
+	// `UsingKeyword` is a static `constexpr const char*` const on `UsingAliasDeclaration` (shared
+	// verbatim with `UsingDeclaration.UsingKeyword`); the `AliasToken` is a REQUIRED `Identifier`
+	// slot written via `WriteIdentifier` (the C# passes the `AliasToken` token, not the `Alias`
+	// string, so the token's leading/trailing trivia would render); the two `Space(SpaceAroundEqualityOperator)`
+	// calls flank the `Tokens::Assign` (no-ops under the default options where
+	// `SpaceAroundEqualityOperator=false`); the `Import` is a REQUIRED `AstType` slot (the C# calls
+	// `usingAliasDeclaration.Import.AcceptVisitor(this)` with no null-conditional), so no nullptr
+	// guard is added (the `VisitAttribute` D357 required-slot precedent); the `Semicolon` writes
+	// `tok:;` + `NewLine` (the root node's `Slot()` is null).
+	StartNode(usingAliasDeclaration);
+	WriteKeyword(UsingAliasDeclaration::UsingKeyword);
+	WriteIdentifier(usingAliasDeclaration->AliasToken());
+	Space(policy_.SpaceAroundEqualityOperator);
+	WriteToken(Tokens::Assign);
+	Space(policy_.SpaceAroundEqualityOperator);
+	usingAliasDeclaration->Import()->AcceptVisitor(*this);
+	Semicolon();
+	EndNode(usingAliasDeclaration);
+}
+void CSharpOutputVisitor::VisitTupleTypeElement(Syntax::TupleTypeElement* tupleTypeElement) {
+	// The C# `VisitTupleTypeElement`: `StartNode` + `Type.AcceptVisitor` + an optional `Space` +
+	// `NameToken.AcceptVisitor` (the name is a nullable `string?` over a backing `NameToken`, so
+	// the token guard is the C# `NameToken is not null`) + `EndNode`. The `Type` is a required
+	// `AstType` slot (the C# does not guard it); the port guards it null-safely (the D327
+	// `VisitMemberType` required-slot-guard precedent) so a half-constructed test node renders
+	// just the node wrapper rather than dereferencing null.
+	StartNode(tupleTypeElement);
+	if (tupleTypeElement->Type() != nullptr) {
+		tupleTypeElement->Type()->AcceptVisitor(*this);
+	}
+	if (tupleTypeElement->NameToken() != nullptr) {
+		Space();
+		tupleTypeElement->NameToken()->AcceptVisitor(*this);
+	}
+	EndNode(tupleTypeElement);
+}
+
+void CSharpOutputVisitor::VisitTupleType(Syntax::TupleAstType* tupleType) {
+	// The C# `VisitTupleType`: `StartNode` + `LPar` + `WriteCommaSeparatedList(Elements)` + `RPar`
+	// + `EndNode` (the `Debug.Assert(Elements.Count >= 2)` is a structural invariant the AST
+	// maintains, not an output concern -- the port renders whatever elements the node carries).
+	// The `LPar`/`RPar` helpers wrap `WriteToken(Tokens::LPar/RPar)`; the eager-vector snapshot of
+	// the `Elements` collection is the D325 `ToVector` convention.
+	StartNode(tupleType);
+	LPar();
+	WriteCommaSeparatedList(ToVector(tupleType->Elements()));
+	RPar();
+	EndNode(tupleType);
+}
+
+void CSharpOutputVisitor::VisitInvocationType(Syntax::InvocationAstType* invocationType) {
+	// The C# `VisitInvocationType`: `StartNode` + `BaseType.AcceptVisitor` + `WriteToken(LPar)` +
+	// `WriteCommaSeparatedList(Arguments)` + `WriteToken(RPar)` + `EndNode`. The C# uses
+	// `WriteToken(Tokens.LPar/RPar)` (NOT the `LPar()`/`RPar()` helpers) faithfully; the `BaseType`
+	// is a required `AstType` slot (guarded null-safely, the `VisitMemberType` precedent); the
+	// `Arguments` collection snapshot is the `ToVector` convention.
+	StartNode(invocationType);
+	if (invocationType->BaseType() != nullptr) {
+		invocationType->BaseType()->AcceptVisitor(*this);
+	}
+	WriteToken(Tokens::LPar);
+	WriteCommaSeparatedList(ToVector(invocationType->Arguments()));
+	WriteToken(Tokens::RPar);
+	EndNode(invocationType);
+}
+
+void CSharpOutputVisitor::VisitFunctionPointerType(Syntax::FunctionPointerAstType* functionPointerType) {
+	// The C# `VisitFunctionPointerType`: `StartNode` + `WriteKeyword(DelegateKeyword)` +
+	// `WriteToken(PointerToken)` + an optional `Space` + `WriteKeyword("unmanaged")` (the
+	// `HasUnmanagedCallingConvention` gate) + an optional `[CallingConventions]` bracket list +
+	// `WriteToken(LChevron)` + `WriteCommaSeparatedList(Parameters.Concat(ReturnType))` +
+	// `WriteToken(RChevron)` + `EndNode`. The `Parameters.Concat(ReturnType)` is a single
+	// `IEnumerable<AstNode>` joining the parameter list with the return type (the return type is
+	// the LAST element of the angle-bracket list); the port builds an eager `std::vector<AstNode*>`
+	// combining the `Parameters` collection snapshot with the `ReturnType` (both upcast to
+	// `AstNode*`, the common base the `WriteCommaSeparatedList<AstNode>` template recurses through).
+	StartNode(functionPointerType);
+	WriteKeyword(Tokens::DelegateKeyword);
+	WriteToken(Syntax::FunctionPointerAstType::PointerToken);
+	if (functionPointerType->HasUnmanagedCallingConvention()) {
+		Space();
+		WriteKeyword("unmanaged");
+	}
+	const auto& conventions = functionPointerType->CallingConventions();
+	if (conventions.Count() > 0) {
+		WriteToken(Tokens::LBracket);
+		WriteCommaSeparatedList(ToVector(conventions));
+		WriteToken(Tokens::RBracket);
+	}
+	WriteToken(Tokens::LChevron);
+	std::vector<Syntax::AstNode*> combined;
+	const auto& params = functionPointerType->Parameters();
+	int paramCount = params.Count();
+	combined.reserve(static_cast<std::size_t>(paramCount) + 1);
+	for (int i = 0; i < paramCount; ++i) {
+		combined.push_back(params.At(i));
+	}
+	if (functionPointerType->ReturnType() != nullptr) {
+		combined.push_back(functionPointerType->ReturnType());
+	}
+	WriteCommaSeparatedList(combined);
+	WriteToken(Tokens::RChevron);
+	EndNode(functionPointerType);
+}
+void CSharpOutputVisitor::VisitDelegateDeclaration(Syntax::DelegateDeclaration* delegateDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitDelegateDeclaration (line 1514):
+	// `Modifiers delegate ReturnType NameToken<TypeParameters>(Parameters) Constraints;` -- the
+	// `delegate_declaration` (C# grammar 21.2), structurally `VisitMethodDeclaration` [D354] minus
+	// the `PrivateImplementationType`/`Body` slots plus a leading `delegate` keyword and a trailing
+	// `Semicolon` (a delegate has no body; it closes with `;`). The C# `delegateDeclaration.ReturnType?.AcceptVisitor(this)`
+	// null-conditional ports to an explicit nullptr guard (the D354 VisitMethodDeclaration precedent);
+	// the lazy `AstNodeCollection` snapshots via the D325 `ToVector` helper before the write helpers
+	// and the `foreach Constraint` loop (the collections are not mutated during the visit). The
+	// `Tokens::DelegateKeyword` is the namespace-scope `Tokens` const (the `VisitFunctionPointerType`
+	// precedent at line 2300); `SpaceBeforeDelegateDeclarationParentheses` defaults to false, so the
+	// `Space(...)` before the parens is a no-op under the default `CSharpFormattingOptions{}`.
+	StartNode(delegateDeclaration);
+	WriteAttributes(ToVector(delegateDeclaration->Attributes()));
+	WriteModifiers(delegateDeclaration->Modifiers());
+	WriteKeyword(Tokens::DelegateKeyword);
+	if (delegateDeclaration->ReturnType() != nullptr) {
+		delegateDeclaration->ReturnType()->AcceptVisitor(*this);
+	}
+	Space();
+	WriteIdentifier(delegateDeclaration->NameToken());
+	WriteTypeParameters(ToVector(delegateDeclaration->TypeParameters()));
+	Space(policy_.SpaceBeforeDelegateDeclarationParentheses);
+	WriteCommaSeparatedListInParenthesis(ToVector(delegateDeclaration->Parameters()), policy_.SpaceWithinMethodDeclarationParentheses);
+	for (Syntax::Constraint* constraint : ToVector(delegateDeclaration->Constraints())) {
+		constraint->AcceptVisitor(*this);
+	}
+	Semicolon();
+	EndNode(delegateDeclaration);
+}
+void CSharpOutputVisitor::VisitTypeDeclaration(Syntax::TypeDeclaration* typeDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitTypeDeclaration (line 1561):
+	// `Modifiers (class|struct|interface|enum|record|record struct) NameToken<TypeParameters>
+	// (PrimaryConstructorParameters)? (: BaseTypes)? Constraints { Members }` -- the
+	// `type_declaration` (C# grammar 15.2.1/16.2.1/19.2.1/20.2). The `ClassType` switch picks the
+	// kind keyword and the `BraceStyle`; `RecordStruct` writes the two-keyword `record struct`
+	// (`RecordStructKeyword` "record" then `StructKeyword` "struct"). The primary constructor
+	// (`HasPrimaryConstructor`, C# 12) writes `(...PrimaryConstructorParameters)` after the type
+	// parameters (the same `Space(SpaceBeforeMethodDeclarationParentheses)` +
+	// `WriteCommaSeparatedListInParenthesis` shape as `VisitMethodDeclaration` [D354]). The base
+	// types render `: BaseTypes` (Space + Colon + Space + `WriteCommaSeparatedList`) when non-empty
+	// (the `BaseTypes.Any()` ports to `BaseTypes().Count() != 0`). A record (RecordClass or
+	// RecordStruct) with NO members closes with a bare `Semicolon` (no braces); everything else
+	// opens `OpenBrace(braceStyle)`, and for `ClassType.Enum` iterates the members comma-separated
+	// (`Comma(member, noSpaceAfterComma: true)` + `NewLine` between members, a trailing `NewLine`
+	// after the last), else iterates the members with `MinimumBlankLinesBetweenMembers` blank
+	// lines between, then `CloseBrace(braceStyle)` + `NewLine`. The lazy collections snapshot via
+	// the D325 `ToVector` helper before the write helpers and the `foreach` loops (the collections
+	// are not mutated during the visit). `NameToken` is a REQUIRED `Identifier` written via
+	// `WriteIdentifier` (the C# passes the token, not the string).
+	StartNode(typeDeclaration);
+	WriteAttributes(ToVector(typeDeclaration->Attributes()));
+	WriteModifiers(typeDeclaration->Modifiers());
+	BraceStyle braceStyle;
+	switch (typeDeclaration->ClassType()) {
+		case Syntax::ClassType::Enum:
+			WriteKeyword(Tokens::EnumKeyword);
+			braceStyle = policy_.EnumBraceStyle;
+			break;
+		case Syntax::ClassType::Interface:
+			WriteKeyword(Tokens::InterfaceKeyword);
+			braceStyle = policy_.InterfaceBraceStyle;
+			break;
+		case Syntax::ClassType::Struct:
+			WriteKeyword(Tokens::StructKeyword);
+			braceStyle = policy_.StructBraceStyle;
+			break;
+		case Syntax::ClassType::RecordClass:
+			WriteKeyword(Tokens::RecordKeyword);
+			braceStyle = policy_.ClassBraceStyle;
+			break;
+		case Syntax::ClassType::RecordStruct:
+			WriteKeyword(Tokens::RecordStructKeyword);
+			WriteKeyword(Tokens::StructKeyword);
+			braceStyle = policy_.StructBraceStyle;
+			break;
+		default:
+			WriteKeyword(Tokens::ClassKeyword);
+			braceStyle = policy_.ClassBraceStyle;
+			break;
+	}
+	WriteIdentifier(typeDeclaration->NameToken());
+	WriteTypeParameters(ToVector(typeDeclaration->TypeParameters()));
+	if (typeDeclaration->HasPrimaryConstructor()) {
+		Space(policy_.SpaceBeforeMethodDeclarationParentheses);
+		WriteCommaSeparatedListInParenthesis(ToVector(typeDeclaration->PrimaryConstructorParameters()), policy_.SpaceWithinMethodDeclarationParentheses);
+	}
+	if (typeDeclaration->BaseTypes().Count() != 0) {
+		Space();
+		WriteToken(Tokens::Colon);
+		Space();
+		WriteCommaSeparatedList(ToVector(typeDeclaration->BaseTypes()));
+	}
+	for (Syntax::Constraint* constraint : ToVector(typeDeclaration->Constraints())) {
+		constraint->AcceptVisitor(*this);
+	}
+	bool isEmptyRecord = (typeDeclaration->ClassType() == Syntax::ClassType::RecordClass
+		|| typeDeclaration->ClassType() == Syntax::ClassType::RecordStruct)
+		&& typeDeclaration->Members().Count() == 0;
+	if (isEmptyRecord) {
+		Semicolon();
+	} else {
+		OpenBrace(braceStyle);
+		if (typeDeclaration->ClassType() == Syntax::ClassType::Enum) {
+			bool first = true;
+			for (Syntax::EntityDeclaration* member : ToVector(typeDeclaration->Members())) {
+				if (first) {
+					first = false;
+				} else {
+					Comma(member, true);
+					NewLine();
+				}
+				member->AcceptVisitor(*this);
+			}
+			NewLine();
+		} else {
+			bool first = true;
+			for (Syntax::EntityDeclaration* member : ToVector(typeDeclaration->Members())) {
+				if (!first) {
+					for (int i = 0; i < policy_.MinimumBlankLinesBetweenMembers; ++i)
+						NewLine();
+				}
+				first = false;
+				member->AcceptVisitor(*this);
+			}
+		}
+		CloseBrace(braceStyle);
+		NewLine();
+	}
+	EndNode(typeDeclaration);
+}
+
+// The C# `void MaybeNewLinesAfterUsings(AstNode node)` (line 2722) -- after a `using`/`using
+// alias` directive that is NOT followed by another `using`/`using alias` sibling, emit
+// `MinimumBlankLinesAfterUsings` blank lines. The C# `node is UsingDeclaration || node is
+// UsingAliasDeclaration` type-test ports to a `dynamic_cast` pair; the C# `nextSibling is
+// UsingDeclaration || nextSibling is UsingAliasDeclaration` (where a null `nextSibling`
+// short-circuits the C# `is` to false) ports to a null-guarded `dynamic_cast` pair. A no-op
+// under the default `CSharpFormattingOptions{}` (`MinimumBlankLinesAfterUsings == 0`).
+void CSharpOutputVisitor::MaybeNewLinesAfterUsings(Syntax::AstNode* node) {
+	Syntax::AstNode* nextSibling = node->NextSibling();
+	bool nodeIsUsing = dynamic_cast<Syntax::UsingDeclaration*>(node) != nullptr
+		|| dynamic_cast<Syntax::UsingAliasDeclaration*>(node) != nullptr;
+	bool nextIsUsing = nextSibling != nullptr
+		&& (dynamic_cast<Syntax::UsingDeclaration*>(nextSibling) != nullptr
+			|| dynamic_cast<Syntax::UsingAliasDeclaration*>(nextSibling) != nullptr);
+	if (nodeIsUsing && !nextIsUsing) {
+		for (int i = 0; i < policy_.MinimumBlankLinesAfterUsings; ++i)
+			NewLine();
+	}
+}
+
+void CSharpOutputVisitor::VisitNamespaceDeclaration(Syntax::NamespaceDeclaration* namespaceDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitNamespaceDeclaration (line 1534):
+	// `namespace Name { Members }` (block-scoped) or `namespace Name;` (C# 10 file-scoped) -- the
+	// `namespace_declaration` (C# grammar 14.3). The `NamespaceName` is a REQUIRED `AstType` (the C#
+	// calls `NamespaceName.AcceptVisitor(this)` with no `?.`, so NO nullptr guard -- the D357
+	// VisitAttribute required-slot precedent); the lazy `Members` collection snapshots via the
+	// D325 `ToVector` helper before the `foreach` loop (the collection is not mutated during the
+	// visit; `MaybeNewLinesAfterUsings` reads each member's `NextSibling`, which is unchanged by
+	// the snapshot). The file-scoped form (`IsFileScoped`) closes with `Semicolon` + `NewLine`
+	// (no braces); the block form opens with `OpenBrace(NamespaceBraceStyle)`, recurses the
+	// members (each followed by `MaybeNewLinesAfterUsings`), then `CloseBrace(NamespaceBraceStyle)`
+	// + `NewLine`. `Tokens::NamespaceKeyword` is the namespace-scope `Tokens` const (the
+	// `Tokens::DelegateKeyword` D361 precedent).
+	StartNode(namespaceDeclaration);
+	WriteKeyword(Tokens::NamespaceKeyword);
+	namespaceDeclaration->NamespaceName()->AcceptVisitor(*this);
+	if (namespaceDeclaration->IsFileScoped()) {
+		Semicolon();
+		NewLine();
+	} else {
+		OpenBrace(policy_.NamespaceBraceStyle);
+	}
+	for (Syntax::AstNode* member : ToVector(namespaceDeclaration->Members())) {
+		member->AcceptVisitor(*this);
+		MaybeNewLinesAfterUsings(member);
+	}
+	if (!namespaceDeclaration->IsFileScoped()) {
+		CloseBrace(policy_.NamespaceBraceStyle);
+		NewLine();
+	}
+	EndNode(namespaceDeclaration);
+}
+void CSharpOutputVisitor::VisitPreProcessorDirective(Syntax::PreProcessorDirective* preProcessorDirective) {
+	// A `PreProcessorDirective` is trivia -- like `VisitComment`, it drives the writer DIRECTLY
+	// (`writer.StartNode`/`writer.EndNode`, not the visitor's `StartNode`/`EndNode`), emitting the
+	// directive type and its optional argument as a flat token group by the writer.
+	writer_->StartNode(preProcessorDirective);
+	writer_->WritePreProcessorDirective(preProcessorDirective->Type(), preProcessorDirective->Argument());
+	writer_->EndNode(preProcessorDirective);
+}
+void CSharpOutputVisitor::VisitDocumentationReference(Syntax::DocumentationReference* documentationReference) {
+	// Faithful port of CSharpOutputVisitor.cs VisitDocumentationReference (the `cref` reference
+	// inside XML documentation comments): the optional `DeclaringType` + `Dot`, the `SymbolKind`
+	// switch (TypeDefinition/Indexer/Operator/default), `WriteTypeArguments`, and the optional
+	// parameter list (brackets for an indexer, parens otherwise). A documentation `cref` is a
+	// structural reference node (not C# source syntax), so it has no grammar production. The
+	// `SymbolKind` enum lives in the `TypeSystem` namespace (NOT brought in by the `using
+	// namespace ...::Syntax`), so it is fully qualified everywhere; the `OperatorType` enum lives
+	// in the `Syntax` namespace (shadowed by the node's `OperatorType()` accessor only inside the
+	// node's own class scope, not here, so `Syntax::OperatorType::...` suffices). The
+	// `DeclaringType` is nullable (the C# `is not null` gate ports to a `nullptr` guard); the
+	// `ConversionOperatorReturnType` is required and deref'd only in the conversion-operator
+	// branch with no C# `?.`, so no guard (the D357 required-slot convention).
+	StartNode(documentationReference);
+	if (documentationReference->DeclaringType() != nullptr) {
+		documentationReference->DeclaringType()->AcceptVisitor(*this);
+		if (documentationReference->SymbolKind() != ILSpy::Decompiler::TypeSystem::SymbolKind::TypeDefinition) {
+			WriteToken(Tokens::Dot);
+		}
+	}
+	switch (documentationReference->SymbolKind()) {
+		case ILSpy::Decompiler::TypeSystem::SymbolKind::TypeDefinition:
+			// we already printed the DeclaringType
+			break;
+		case ILSpy::Decompiler::TypeSystem::SymbolKind::Indexer:
+			WriteKeyword(Syntax::IndexerDeclaration::ThisKeyword);
+			break;
+		case ILSpy::Decompiler::TypeSystem::SymbolKind::Operator: {
+			auto opType = documentationReference->OperatorType();
+			if (opType == Syntax::OperatorType::Explicit || opType == Syntax::OperatorType::CheckedExplicit) {
+				WriteKeyword(Syntax::OperatorDeclaration::ExplicitKeyword);
+			} else if (opType == Syntax::OperatorType::Implicit) {
+				WriteKeyword(Syntax::OperatorDeclaration::ImplicitKeyword);
+			}
+			WriteKeyword(Syntax::OperatorDeclaration::OperatorKeyword);
+			Space();
+			if (Syntax::OperatorDeclaration::IsChecked(opType)) {
+				WriteKeyword(Syntax::OperatorDeclaration::CheckedKeyword);
+				Space();
+			}
+			if (opType == Syntax::OperatorType::Explicit
+				|| opType == Syntax::OperatorType::Implicit
+				|| opType == Syntax::OperatorType::CheckedExplicit) {
+				documentationReference->ConversionOperatorReturnType()->AcceptVisitor(*this);
+			} else {
+				WriteToken(Syntax::OperatorDeclaration::GetToken(opType));
+			}
+			break;
+		}
+		default:
+			WriteIdentifier(documentationReference->NameToken());
+			break;
+	}
+	WriteTypeArguments(ToVector(documentationReference->TypeArguments()));
+	if (documentationReference->HasParameterList()) {
+		Space(policy_.SpaceBeforeMethodDeclarationParentheses);
+		if (documentationReference->SymbolKind() == ILSpy::Decompiler::TypeSystem::SymbolKind::Indexer) {
+			WriteCommaSeparatedListInBrackets(ToVector(documentationReference->Parameters()),
+				policy_.SpaceWithinMethodDeclarationParentheses);
+		} else {
+			WriteCommaSeparatedListInParenthesis(ToVector(documentationReference->Parameters()),
+				policy_.SpaceWithinMethodDeclarationParentheses);
+		}
+	}
+	EndNode(documentationReference);
+}
+void CSharpOutputVisitor::VisitDeclarationExpression(Syntax::DeclarationExpression* declarationExpression) {
+	// The C# `VisitDeclarationExpression`: `StartNode` + `Type.AcceptVisitor` + `Space` +
+	// `Designation.AcceptVisitor` + `EndNode` (the `T x` declaration form used by deconstruction
+	// and out-var-declaration; both slots are required, so no null guards). The `Type` recurses
+	// through its own `Visit` method (e.g. `VisitPrimitiveType`/`VisitSimpleType`), and the
+	// `Designation` recurses through `VisitSingleVariableDesignation`/
+	// `VisitParenthesizedVariableDesignation`.
+	StartNode(declarationExpression);
+	declarationExpression->Type()->AcceptVisitor(*this);
+	Space();
+	declarationExpression->Designation()->AcceptVisitor(*this);
+	EndNode(declarationExpression);
+}
+void CSharpOutputVisitor::VisitAnonymousTypeCreateExpression(Syntax::AnonymousTypeCreateExpression* anonymousTypeCreateExpression) {
+	// The C# `VisitAnonymousTypeCreateExpression`: `StartNode` + `WriteKeyword(NewKeyword)` +
+	// `PrintInitializerElements(Initializers)` + `EndNode`. Unlike `VisitObjectCreateExpression`
+	// (which renders the type then a parenthesized argument list), an anonymous object creation
+	// renders just `new` followed by the initializer braces directly over the `Initializers`
+	// collection (no nested `ArrayInitializerExpression` node, no type, no argument list).
+	StartNode(anonymousTypeCreateExpression);
+	WriteKeyword(Syntax::AnonymousTypeCreateExpression::NewKeyword);
+	PrintInitializerElements(ToVector(anonymousTypeCreateExpression->Initializers()));
+	EndNode(anonymousTypeCreateExpression);
+}
+void CSharpOutputVisitor::VisitLambdaExpression(Syntax::LambdaExpression* lambdaExpression) {
+	// The C# `VisitLambdaExpression`: `StartNode` + `WriteAttributes(Attributes)` + the optional
+	// `async` modifier + the parameter list (parenthesized when `LambdaNeedsParenthesis`, else
+	// the single parameter inline) + `Space` + `WriteToken(Arrow)` + the body (a `WriteBlock` when
+	// the body is a `BlockStatement`, else `Space` + the expression-body `AcceptVisitor`) +
+	// `EndNode`. The `Body` is typed the abstract `AstNode` base (a lambda body is either a
+	// `BlockStatement` or an `Expression`), so the `is BlockStatement` test ports to a
+	// `dynamic_cast` is-a branch.
+	StartNode(lambdaExpression);
+	WriteAttributes(ToVector(lambdaExpression->Attributes()));
+	if (lambdaExpression->IsAsync()) {
+		WriteKeyword(Syntax::LambdaExpression::AsyncModifier);
+		Space();
+	}
+	if (LambdaNeedsParenthesis(lambdaExpression)) {
+		WriteCommaSeparatedListInParenthesis(ToVector(lambdaExpression->Parameters()),
+			policy_.SpaceWithinMethodDeclarationParentheses);
+	} else {
+		lambdaExpression->Parameters().At(0)->AcceptVisitor(*this);
+	}
+	Space();
+	WriteToken(Tokens::Arrow);
+	if (auto* body = dynamic_cast<Syntax::BlockStatement*>(lambdaExpression->Body())) {
+		WriteBlock(body, policy_.AnonymousMethodBraceStyle);
+	} else {
+		Space();
+		lambdaExpression->Body()->AcceptVisitor(*this);
+	}
+	EndNode(lambdaExpression);
+}
+void CSharpOutputVisitor::VisitAnonymousMethodExpression(Syntax::AnonymousMethodExpression* anonymousMethodExpression) {
+	// The C# `VisitAnonymousMethodExpression`: `StartNode` + the optional `async` modifier +
+	// `WriteKeyword(DelegateKeyword)` + the parameter list (omitted entirely when `Parameters` is
+	// empty, so `delegate {}` rather than `delegate() {}`) + `WriteBlock(Body)` + `EndNode`. The
+	// `Body` is typed the concrete `BlockStatement` (an anonymous method always takes a block).
+	StartNode(anonymousMethodExpression);
+	if (anonymousMethodExpression->IsAsync()) {
+		WriteKeyword(Syntax::AnonymousMethodExpression::AsyncModifier);
+		Space();
+	}
+	WriteKeyword(Syntax::AnonymousMethodExpression::DelegateKeyword);
+	if (anonymousMethodExpression->Parameters().Count() > 0) {
+		Space(policy_.SpaceBeforeAnonymousMethodParentheses);
+		WriteCommaSeparatedListInParenthesis(ToVector(anonymousMethodExpression->Parameters()),
+			policy_.SpaceWithinAnonymousMethodParentheses);
+	}
+	WriteBlock(anonymousMethodExpression->Body(), policy_.AnonymousMethodBraceStyle);
+	EndNode(anonymousMethodExpression);
+}
+void CSharpOutputVisitor::VisitSwitchExpressionSection(Syntax::SwitchExpressionSection* switchExpressionSection) {
+	StartNode(switchExpressionSection);
+	switchExpressionSection->Pattern()->AcceptVisitor(*this);
+	Space();
+	WriteToken(Tokens::Arrow);
+	Space();
+	switchExpressionSection->Body()->AcceptVisitor(*this);
+	EndNode(switchExpressionSection);
+}
+void CSharpOutputVisitor::VisitSwitchExpression(Syntax::SwitchExpression* switchExpression) {
+	StartNode(switchExpression);
+	switchExpression->Expression()->AcceptVisitor(*this);
+	Space();
+	WriteKeyword(SwitchExpression::SwitchKeyword);
+	OpenBrace(policy_.ArrayInitializerBraceStyle);
+	auto& sections = switchExpression->SwitchSections();
+	int sectionCount = sections.Count();
+	for (int i = 0; i < sectionCount; ++i) {
+		sections.At(i)->AcceptVisitor(*this);
+		Comma(sections.At(i));
+		NewLine();
+	}
+	CloseBrace(policy_.ArrayInitializerBraceStyle);
+	EndNode(switchExpression);
+}
+void CSharpOutputVisitor::VisitRecursivePatternExpression(Syntax::RecursivePatternExpression* recursivePatternExpression) {
+	StartNode(recursivePatternExpression);
+	// The C# `Type?.AcceptVisitor(this)` -- `Type` is a nullable `AstType`, so a nullptr guard gates
+	// the recursion (the D354 ReturnType nullable-`?.` precedent).
+	if (recursivePatternExpression->Type() != nullptr)
+		recursivePatternExpression->Type()->AcceptVisitor(*this);
+	Space();
+	if (recursivePatternExpression->IsPositional())
+		WriteToken(Tokens::LPar);
+	else
+		WriteToken(Tokens::LBrace);
+	Space();
+	WriteCommaSeparatedList(ToVector(recursivePatternExpression->SubPatterns()));
+	Space();
+	if (recursivePatternExpression->IsPositional())
+		WriteToken(Tokens::RPar);
+	else
+		WriteToken(Tokens::RBrace);
+	// The C# `if (Designation is not null) { Space(); Designation.AcceptVisitor(this); }` --
+	// `Designation` is a nullable `VariableDesignation`, so a nullptr guard gates the trailing
+	// `var x`/`x`/`(x, y)` declaration (the D354 nullable-`?.` precedent).
+	if (recursivePatternExpression->Designation() != nullptr) {
+		Space();
+		recursivePatternExpression->Designation()->AcceptVisitor(*this);
+	}
+	EndNode(recursivePatternExpression);
+}
+void CSharpOutputVisitor::VisitInterpolation(Syntax::Interpolation* interpolation) {
+	// Faithful port of CSharpOutputVisitor.cs VisitInterpolation (line 1161): the `{expr}` /
+	// `{expr,align}` / `{expr,align:format}` arm inside an interpolated string -- the
+	// `interpolation` production (C# grammar 12.8.3). The C# drives the writer DIRECTLY
+	// (`writer.WriteToken`, NOT the visitor `WriteToken` helper), so the port calls
+	// `writer_->WriteToken` directly (no `isAfterSpace_`/`isAtStartOfLine_` update), mirroring the
+	// `WriteQualifiedIdentifier` `writer_->WriteToken(".")` precedent. `Expression` is a REQUIRED
+	// slot the C# dereferences with no `?.`, so NO nullptr guard (the D357 required-slot
+	// convention); the `Alignment` int and the `Suffix` nullable string are the two get-only
+	// scalars. The `Alignment != 0` gate ports verbatim; the `Suffix != null` gate ports to
+	// `has_value()` (the `std::optional<std::string>` nullable-string semantics). The
+	// `WritePrimitiveValue(interpolation.Alignment)` boxes the int -- the port wraps it in a
+	// `PrimitiveValue` (the variant's `std::int32_t` alternative); the `WriteInterpolatedText` takes
+	// a `std::string_view`, so the `Suffix` optional is dereferenced.
+	StartNode(interpolation);
+	writer_->WriteToken("{");
+	interpolation->Expression()->AcceptVisitor(*this);
+	if (interpolation->Alignment() != 0) {
+		writer_->WriteToken(",");
+		writer_->WritePrimitiveValue(PrimitiveValue(static_cast<std::int32_t>(interpolation->Alignment())));
+	}
+	if (interpolation->Suffix().has_value()) {
+		writer_->WriteToken(":");
+		writer_->WriteInterpolatedText(*interpolation->Suffix());
+	}
+	writer_->WriteToken("}");
+	EndNode(interpolation);
+}
+void CSharpOutputVisitor::VisitInterpolatedStringText(Syntax::InterpolatedStringText* interpolatedStringText) {
+	// Faithful port of CSharpOutputVisitor.cs VisitInterpolatedStringText (line 1182): the
+	// literal-text run between interpolations -- a leaf `InterpolatedStringContent` whose `Text`
+	// string the writer emits verbatim via `WriteInterpolatedText` (the escaped interpolated-string
+	// text, no surrounding quotes). The C# drives the writer directly with no `isAfterSpace` reset,
+	// so the port mirrors it with a single `writer_->WriteInterpolatedText` (no `isAfterSpace_`
+	// update).
+	StartNode(interpolatedStringText);
+	writer_->WriteInterpolatedText(interpolatedStringText->Text());
+	EndNode(interpolatedStringText);
+}
+void CSharpOutputVisitor::VisitInterpolatedStringExpression(Syntax::InterpolatedStringExpression* interpolatedStringExpression) {
+	// Faithful port of CSharpOutputVisitor.cs VisitInterpolatedStringExpression (line 1146): the
+	// `$"..."` interpolated string -- an `Expression` whose `Content` collection of
+	// `InterpolatedStringContent` (the `InterpolatedStringText` runs and `Interpolation` arms) is
+	// rendered between the `$"` open quote and the `"` close quote. The C# drives the writer
+	// DIRECTLY (`writer.WriteToken`, NOT the visitor `WriteToken` helper) for both quotes, then
+	// explicitly resets `isAfterSpace = false` after the close quote (the only `isAfterSpace` touch
+	// in the family); the port mirrors with `writer_->WriteToken` (no helper) and the trailing
+	// `isAfterSpace_ = false`. The lazy `Content` foreach ports to a `ToVector` snapshot + range-for
+	// (the D325 collection-iteration convention; the collection is not mutated during the visit),
+	// recursing each element polymorphically through its own concrete `Visit` via the virtual
+	// `AcceptVisitor` (the abstract `InterpolatedStringContent` base dispatches to
+	// `VisitInterpolation`/`VisitInterpolatedStringText`).
+	StartNode(interpolatedStringExpression);
+	writer_->WriteToken("$\"");
+	for (Syntax::InterpolatedStringContent* element : ToVector(interpolatedStringExpression->Content())) {
+		element->AcceptVisitor(*this);
+	}
+	writer_->WriteToken("\"");
+	isAfterSpace_ = false;
+	EndNode(interpolatedStringExpression);
+}
+void CSharpOutputVisitor::VisitQueryOrdering(Syntax::QueryOrdering* queryOrdering) {
+	// Faithful port of CSharpOutputVisitor.cs VisitQueryOrdering (line 1427): a single ordering
+	// inside an `orderby` clause -- the operand `Expression` followed by an optional direction
+	// keyword (`ascending`/`descending`). The C# `switch (Direction)` has only the Ascending and
+	// Descending cases (the `None` zero value falls through, writing no keyword -- the ordering
+	// renders as the bare operand), so the port mirrors the two cases and a `default: break;` (the
+	// faithful no-action fall-through, no `std::out_of_range` throw unlike the D235 FieldDirection
+	// switch whose C# source throws). `Expression` is a REQUIRED slot the C# derefs with no `?.`,
+	// so NO nullptr guard (the D357 VisitAttribute required-slot-no-`?.` convention).
+	StartNode(queryOrdering);
+	queryOrdering->Expression()->AcceptVisitor(*this);
+	switch (queryOrdering->Direction()) {
+		case Syntax::QueryOrderingDirection::Ascending:
+			Space();
+			WriteKeyword(Syntax::QueryOrdering::AscendingKeyword);
+			break;
+		case Syntax::QueryOrderingDirection::Descending:
+			Space();
+			WriteKeyword(Syntax::QueryOrdering::DescendingKeyword);
+			break;
+		default:
+			break;
+	}
+	EndNode(queryOrdering);
+}
+void CSharpOutputVisitor::VisitQueryExpression(Syntax::QueryExpression* queryExpression) {
+	// Faithful port of CSharpOutputVisitor.cs VisitQueryExpression (line 1316): the top-level
+	// `query_expression ::= query_clause+` (C# grammar 12.23.1). A top-level query (one NOT
+	// nested as a `QueryContinuationClause.PrecedingQuery`) indents its clause sequence; a
+	// continuation-nested query does NOT (it is already inside the continuation's indentation).
+	// The C# `queryExpression.Slot?.Kind != Slots.PrecedingQuery` null-propagating pointer
+	// compare ports to a null-safe `Slot()` + `Kind()` pointer compare (the D251
+	// IsObjectOrCollectionInitializer precedent): a root/unparented query's `Slot()` is null, so
+	// the `!= &Slots::PrecedingQuery` test is true and the Indent runs (captured once into
+	// `topLevel` to avoid the double `Slot()` call the C# repeats). The clauses are separated by a
+	// `NewLine` EXCEPT a `QueryContinuationClause` (an `into` clause continues the same line as
+	// its preceding query); the `clause is QueryContinuationClause` type-test ports to a
+	// `dynamic_cast` (the D357 dynamic_cast-on-Parent precedent applied to a clause test). The
+	// lazy `AstNodeCollection<QueryClause>` `Clauses` snapshots via the D325 `ToVector` helper
+	// before the loop (the collection is not mutated during the visit), recursing each clause
+	// polymorphically through its own concrete `Visit` via the virtual `AcceptVisitor`.
+	StartNode(queryExpression);
+	const Syntax::CSharpSlotInfo* slot = queryExpression->Slot();
+	bool topLevel = slot == nullptr || slot->Kind() != &Slots::PrecedingQuery;
+	if (topLevel)
+		writer_->Indent();
+	bool first = true;
+	for (Syntax::QueryClause* clause : ToVector(queryExpression->Clauses())) {
+		if (first) {
+			first = false;
+		} else {
+			if (dynamic_cast<Syntax::QueryContinuationClause*>(clause) == nullptr)
+				NewLine();
+		}
+		clause->AcceptVisitor(*this);
+	}
+	if (topLevel)
+		writer_->Unindent();
+	EndNode(queryExpression);
+}
+void CSharpOutputVisitor::VisitQueryWhereClause(Syntax::QueryWhereClause* queryWhereClause) {
+	// Faithful port of CSharpOutputVisitor.cs VisitQueryWhereClause (line 1381): the `where
+	// condition` filter clause -- the `where` keyword, a Space, then the `Condition` expression.
+	// `Condition` is a REQUIRED slot the C# derefs with no `?.`, so NO nullptr guard (the D357
+	// required-slot-no-`?.` convention).
+	StartNode(queryWhereClause);
+	WriteKeyword(Syntax::QueryWhereClause::WhereKeyword);
+	Space();
+	queryWhereClause->Condition()->AcceptVisitor(*this);
+	EndNode(queryWhereClause);
+}
+void CSharpOutputVisitor::VisitQuerySelectClause(Syntax::QuerySelectClause* querySelectClause) {
+	// Faithful port of CSharpOutputVisitor.cs VisitQuerySelectClause (line 1445): the `select
+	// expr` projection clause -- the `select` keyword, a Space, then the projection `Expression`.
+	// `Expression` is a REQUIRED slot the C# derefs with no `?.`, so NO nullptr guard (the D357
+	// required-slot-no-`?.` convention).
+	StartNode(querySelectClause);
+	WriteKeyword(Syntax::QuerySelectClause::SelectKeyword);
+	Space();
+	querySelectClause->Expression()->AcceptVisitor(*this);
+	EndNode(querySelectClause);
+}
+void CSharpOutputVisitor::VisitQueryOrderClause(Syntax::QueryOrderClause* queryOrderClause) {
+	// Faithful port of CSharpOutputVisitor.cs VisitQueryOrderClause (line 1418): the `orderby
+	// ordering+` clause -- the `orderby` keyword, a Space, then the comma-separated `Orderings`
+	// collection (each `QueryOrdering` recurses through `VisitQueryOrdering` via the virtual
+	// `AcceptVisitor`). The lazy `AstNodeCollection<QueryOrdering>` `Orderings` snapshots via the
+	// D325 `ToVector` helper before `WriteCommaSeparatedList` (the collection is not mutated
+	// during the visit).
+	StartNode(queryOrderClause);
+	WriteKeyword(Syntax::QueryOrderClause::OrderbyKeyword);
+	Space();
+	WriteCommaSeparatedList(ToVector(queryOrderClause->Orderings()));
+	EndNode(queryOrderClause);
+}
+void CSharpOutputVisitor::VisitQueryLetClause(Syntax::QueryLetClause* queryLetClause) {
+	// Faithful port of CSharpOutputVisitor.cs VisitQueryLetClause (line 1368): the `let id =
+	// expr` clause -- the `let` keyword, a Space, the range-variable `IdentifierToken`, the two
+	// `Space(SpaceAroundAssignment)` calls flanking `Tokens::Assign`, then the bound `Expression`.
+	// `SpaceAroundAssignment` defaults to false in `CSharpFormattingOptions{}`, so the two
+	// policy-gated `Space(...)` calls are no-ops under the default policy (the D354/D360
+	// precedent); the `InsertRequiredSpacesDecorator` still inserts the strictly-required spaces
+	// between the identifier and `=` and between `=` and the expression. `IdentifierToken` and
+	// `Expression` are REQUIRED slots the C# derefs with no `?.`, so NO nullptr guards.
+	StartNode(queryLetClause);
+	WriteKeyword(Syntax::QueryLetClause::LetKeyword);
+	Space();
+	WriteIdentifier(queryLetClause->IdentifierToken());
+	Space(policy_.SpaceAroundAssignment);
+	WriteToken(Tokens::Assign);
+	Space(policy_.SpaceAroundAssignment);
+	queryLetClause->Expression()->AcceptVisitor(*this);
+	EndNode(queryLetClause);
+}
+void CSharpOutputVisitor::VisitQueryGroupClause(Syntax::QueryGroupClause* queryGroupClause) {
+	// Faithful port of CSharpOutputVisitor.cs VisitQueryGroupClause (line 1454): the `group
+	// projection by key` clause -- the `group` keyword, a Space, the `Projection`, a Space, the
+	// `by` keyword, a Space, the `Key`. `Projection` and `Key` are REQUIRED slots the C# derefs
+	// with no `?.`, so NO nullptr guards (the D357 required-slot-no-`?.` convention).
+	StartNode(queryGroupClause);
+	WriteKeyword(Syntax::QueryGroupClause::GroupKeyword);
+	Space();
+	queryGroupClause->Projection()->AcceptVisitor(*this);
+	Space();
+	WriteKeyword(Syntax::QueryGroupClause::ByKeyword);
+	Space();
+	queryGroupClause->Key()->AcceptVisitor(*this);
+	EndNode(queryGroupClause);
+}
+void CSharpOutputVisitor::VisitQueryFromClause(Syntax::QueryFromClause* queryFromClause) {
+	// Faithful port of CSharpOutputVisitor.cs VisitQueryFromClause (line 1353): the `from type?
+	// id in expr` clause -- the `from` keyword, a Space, the optional `Type`, a Space, the
+	// `IdentifierToken`, a Space, the `in` keyword, a Space, the `Expression`. The `Type` is a
+	// NULLABLE slot (the C# `Type?.AcceptVisitor`), so the port guards with `!= nullptr` (the
+	// D354 nullable-`?.` convention); the two flanking `Space()` calls emit unconditionally (the
+	// C# emits them regardless of whether `Type` is present), so `from x in e` (no type) renders
+	// `kw:from < id:x < kw:in < ...` with the decorator deduping the consecutive spaces.
+	// `IdentifierToken` and `Expression` are REQUIRED slots, deref'd with no `?.`, so NO guards.
+	StartNode(queryFromClause);
+	WriteKeyword(Syntax::QueryFromClause::FromKeyword);
+	Space();
+	if (queryFromClause->Type() != nullptr)
+		queryFromClause->Type()->AcceptVisitor(*this);
+	Space();
+	WriteIdentifier(queryFromClause->IdentifierToken());
+	Space();
+	WriteKeyword(Syntax::QueryFromClause::InKeyword);
+	Space();
+	queryFromClause->Expression()->AcceptVisitor(*this);
+	EndNode(queryFromClause);
+}
+void CSharpOutputVisitor::VisitQueryContinuationClause(Syntax::QueryContinuationClause* queryContinuationClause) {
+	// Faithful port of CSharpOutputVisitor.cs VisitQueryContinuationClause (line 1342): the
+	// `into id` continuation clause -- the preceding `QueryExpression` (rendered inline, no
+	// separating NewLine -- the `VisitQueryExpression` loop special-cases this clause), a Space,
+	// the `into` keyword, a Space, the `IdentifierToken`. `PrecedingQuery` and `IdentifierToken`
+	// are REQUIRED slots the C# derefs with no `?.`, so NO nullptr guards (the D357
+	// required-slot-no-`?.` convention).
+	StartNode(queryContinuationClause);
+	queryContinuationClause->PrecedingQuery()->AcceptVisitor(*this);
+	Space();
+	WriteKeyword(Syntax::QueryContinuationClause::IntoKeyword);
+	Space();
+	WriteIdentifier(queryContinuationClause->IdentifierToken());
+	EndNode(queryContinuationClause);
+}
+void CSharpOutputVisitor::VisitQueryJoinClause(Syntax::QueryJoinClause* queryJoinClause) {
+	// Faithful port of CSharpOutputVisitor.cs VisitQueryJoinClause (line 1390): the `join type?
+	// id in inExpr on onExpr equals equalsExpr [into intoId]` clause -- the `join` keyword, the
+	// optional `Type` (nullable, `?.`-guarded), a Space, the `JoinIdentifierToken`, a Space, the
+	// `in` keyword, a Space, the `InExpression`, a Space, the `on` keyword, a Space, the
+	// `OnExpression`, a Space, the `equals` keyword, a Space, the `EqualsExpression`, then the
+	// optional `IsGroupJoin` tail (a Space, the `into` keyword, the `IntoIdentifierToken`). The
+	// `Type` is a NULLABLE slot (the C# `Type?.AcceptVisitor`), so the port guards with `!=
+	// nullptr` (the D354 nullable-`?.` convention); note the C# emits NO Space between `join` and
+	// the optional `Type` (the first `Space()` comes AFTER the Type). The `IsGroupJoin` gate is
+	// the C# `if (queryJoinClause.IsGroupJoin)`; `IsGroupJoin()` is true iff `IntoIdentifier` is
+	// present and non-empty, which guarantees `IntoIdentifierToken()` is non-null in the branch,
+	// so the C# `IntoIdentifierToken!` null-forgiving deref is safe (the `Expression` slots are
+	// REQUIRED, deref'd with no `?.`, so NO guards).
+	StartNode(queryJoinClause);
+	WriteKeyword(Syntax::QueryJoinClause::JoinKeyword);
+	if (queryJoinClause->Type() != nullptr)
+		queryJoinClause->Type()->AcceptVisitor(*this);
+	Space();
+	WriteIdentifier(queryJoinClause->JoinIdentifierToken());
+	Space();
+	WriteKeyword(Syntax::QueryJoinClause::InKeyword);
+	Space();
+	queryJoinClause->InExpression()->AcceptVisitor(*this);
+	Space();
+	WriteKeyword(Syntax::QueryJoinClause::OnKeyword);
+	Space();
+	queryJoinClause->OnExpression()->AcceptVisitor(*this);
+	Space();
+	WriteKeyword(Syntax::QueryJoinClause::EqualsKeyword);
+	Space();
+	queryJoinClause->EqualsExpression()->AcceptVisitor(*this);
+	if (queryJoinClause->IsGroupJoin()) {
+		Space();
+		WriteKeyword(Syntax::QueryJoinClause::IntoKeyword);
+		WriteIdentifier(queryJoinClause->IntoIdentifierToken());
+	}
+	EndNode(queryJoinClause);
+}
+void CSharpOutputVisitor::VisitSyntaxTree(Syntax::SyntaxTree* syntaxTree) {
+	// Faithful port of CSharpOutputVisitor.cs VisitSyntaxTree (line 2733): the root
+	// `compilation_unit` node (C# grammar 14.2) -- the top-level container of the file's
+	// `extern alias`/`using` directives, global attributes, and namespace/type declarations.
+	// The `SyntaxTree` is NOT bracketed by `StartNode`/`EndNode` (its children are visited
+	// directly), so emit its own leading trivia (e.g. generated `#define` directives) here, then
+	// walk the children via `FirstChild`/`NextSibling` (the manual sibling-chain walk the C#
+	// uses, NOT a collection `foreach`), recursing each child and consulting
+	// `MaybeNewLinesAfterUsings` after each (the D362 helper, shared with
+	// `VisitNamespaceDeclaration`). The C# "don't do node tracking as we visit all children
+	// directly" ports verbatim: no `StartNode`/`EndNode` (unlike every other `Visit` method), so the
+	// recording writer sees only the children's/trivia's own `start`/`end` pairs -- no wrapping
+	// `start`/`end` for the tree itself. The `LeadingTrivia()` view is a non-owning pointer
+	// snapshot (the `NodeTrivia` holder retains ownership); each `Trivia*` dispatches
+	// polymorphically to `VisitComment`/`VisitPreProcessorDirective` via the virtual
+	// `AcceptVisitor` (the D363 polymorphic-base precedent applied to the `Trivia` base).
+	for (Syntax::Trivia* trivia : syntaxTree->LeadingTrivia())
+		trivia->AcceptVisitor(*this);
+	for (Syntax::AstNode* node = syntaxTree->FirstChild(); node != nullptr; node = node->NextSibling()) {
+		node->AcceptVisitor(*this);
+		MaybeNewLinesAfterUsings(node);
+	}
+}
+
+} // namespace ILSpy::Decompiler::CSharp::OutputVisitor

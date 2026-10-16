@@ -1,0 +1,983 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+// to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+// Port of the `IAstVisitor` interface in ICSharpCode.Decompiler/CSharp/Syntax (the
+// generated `IAstVisitor.g.cs`, emitted by DecompilerSyntaxTreeGenerator.cs). This is the
+// visitor the concrete AST nodes' `AcceptVisitor` dispatch to and the output visitor
+// (`CSharpOutputVisitor`) implements -- the dispatch half of the visitor pattern, paired
+// with `AstNode::AcceptVisitor` (the other half, declared abstract on `AstNode`).
+//
+// The C# generator emits three visitor interfaces -- `IAstVisitor` (returns void, no data),
+// `IAstVisitor<out S>` (returns S), and `IAstVisitor<in T, out S>` (returns S, takes T
+// data) -- each carrying one `Visit<NodeName>(ConcreteNode)` method per concrete node that
+// needs a visitor. Only the void `IAstVisitor` is consumed by the engine (the
+// `CSharpOutputVisitor : IAstVisitor` pretty-printer; the generic variants are declared on
+// `AstNode` and the generated `DepthFirstAstVisitor<T>`/`<T,S>` bases but unused elsewhere
+// -- verified by grep), and C++ has no virtual template methods (the C# `abstract T
+// AcceptVisitor<T>(IAstVisitor<T>)` generic-method dispatch cannot be ported faithfully), so
+// this port carries the void `IAstVisitor` only; the generic variants stay deferred.
+//
+// This header is the foundation the concrete nodes plug into. It is currently an abstract
+// base with no per-node `Visit` methods: the concrete node hierarchy has not been ported
+// yet (it lands next, per PORT_PLAN.md section 5.2 / decision D1: port the generated
+// *output* by hand). As each concrete node lands it adds a pure-virtual
+// `virtual void Visit<NodeName>(class <NodeName>*) = 0;` here and overrides
+// `AstNode::AcceptVisitor` to call `visitor.Visit<NodeName>(this)`; the node's hand-written
+// file forward-declares the concrete type so this header need not include it. The
+// `DepthFirstAstVisitor` base (DepthFirstAstVisitor.hpp) supplies the default
+// `VisitChildren` walk every per-node `Visit` override delegates to.
+
+#ifndef ILSPY_DECOMPILER_CSHARP_SYNTAX_IASTVISITOR_HPP
+#define ILSPY_DECOMPILER_CSHARP_SYNTAX_IASTVISITOR_HPP
+
+namespace ILSpy::Decompiler::CSharp::Syntax {
+
+// Forward declaration: `VisitPatternPlaceholder` takes the placeholder `AstNode` by pointer
+// and the wrapped `Pattern` by reference, so this header needs only the forward declarations
+// (`AstNode` is not otherwise named here -- it forward-declares this interface in turn).
+class AstNode;
+namespace PatternMatching { class Pattern; }
+
+// Forward declarations of the concrete AST nodes whose `Visit` methods are declared below.
+// A pointer parameter needs only a forward declaration, so this header does not include the
+// concrete node headers (the node's own header includes this one so its `AcceptVisitor`
+// override can call `visitor.Visit<NodeName>(this)`); more are added as the hierarchy lands.
+class Identifier;
+class NullReferenceExpression;
+class ThisReferenceExpression;
+class BaseReferenceExpression;
+class PrimitiveExpression;
+class BinaryOperatorExpression;
+class AssignmentExpression;
+class UnaryOperatorExpression;
+class ConditionalExpression;
+class ParenthesizedExpression;
+class CheckedExpression;
+class UncheckedExpression;
+class DirectionExpression;
+class ThrowExpression;
+// `PrimitiveType` is the first concrete `AstType` (a leaf, no `[Slot]` children);
+// `SimpleType` is the first concrete `AstType` with a collection slot (`TypeArguments`);
+// `MemberType` is the second collection-slot `AstType` (a `Target` `AstType` + a `MemberName`
+// string-name `[Slot]` + a `TypeArguments` collection).
+class PrimitiveType;
+class SimpleType;
+class MemberType;
+// `ArraySpecifier` is the rank-specifier leaf of an array type (the `[...]`/`[,...]` of a
+// `ComposedType`); the first in-order piece of the `ComposedType` dependency.
+// `Attribute` is the first `GeneralScope`-sub-namespace concrete node (a sealed `AstNode` with a
+// required `AstType` `Type` slot + an `Expression` `Arguments` collection + a `HasArgumentList`
+// bool scalar -- the `MemberType` shape, needed by `AttributeSection`).
+class ArraySpecifier;
+class Attribute;
+// `AttributeSection` is the second `GeneralScope`-sub-namespace concrete node (a sealed
+// `AstNode` with an optional `Identifier` `AttributeTargetToken` slot + an `Attribute`
+// `Attributes` collection -- the bracketed group of attributes, needed by `ComposedType`'s
+// Attributes collection and by every Statement/TypeMember/GeneralScope/ParameterDeclaration node).
+class AttributeSection;
+// `ComposedType` is the third concrete `AstType` with a collection slot and the first ported
+// node with TWO collection slots (an `Attributes` collection + a required `BaseType` `AstType`
+// single slot + an `ArraySpecifiers` collection), carrying `HasRefSpecifier`/
+// `HasReadOnlySpecifier`/`HasNullableSpecifier` bools and a `PointerRank` int -- the array/
+// pointer/nullable/modifier wrapper over a `BaseType`.
+class ComposedType;
+// `CastExpression` is the first AstType-bearing `Expression` node (a sealed `Expression` with
+// a required `AstType` `Type` slot + a required `Expression` `Expression` slot -- the cast
+// `(type)expression`, reusing the already-ported `Slots::Type`/`Slots::Expression` kinds).
+// `AsExpression`/`IsExpression` are the sibling pair of the CastExpression two-required-slot
+// shape but with the slot order reversed (`Expression` at index 0, `Type` at index 1) plus an
+// `as`/`is` keyword const string -- the `expression 'as'/'is' type` operators, reusing the
+// already-ported `Slots::Type`/`Slots::Expression` kinds.
+class CastExpression;
+class AsExpression;
+class IsExpression;
+// The single-`[Slot("Type")]`-`AstType` `Expression` nodes -- the simplest slot-bearing
+// AstType-bearing `Expression` shape (one required single `AstType` `Type` slot, reusing the
+// already-ported `Slots::Type` kind): `TypeReferenceExpression` (an ILSpy wrapper letting an
+// `AstType` appear in expression position, no const keyword) and the keyword trio
+// `TypeOfExpression`/`DefaultValueExpression`/`SizeOfExpression` (a `typeof`/`default`/`sizeof`
+// keyword const string each). All four share the exact same one-required-single-slot shape.
+class TypeReferenceExpression;
+class TypeOfExpression;
+class DefaultValueExpression;
+class SizeOfExpression;
+// `IdentifierExpression` is the first AstType-bearing `Expression` with a COLLECTION slot
+// (a sealed `Expression` with a required `Identifier` string-name `[Slot]` over a backing
+// `IdentifierToken` + a `TypeArguments` `AstNodeCollection<AstType>` collection -- the
+// `simple_name ::= identifier ('<' type (',' type)* '>')?` production, structurally identical
+// to `SimpleType` but deriving from `Expression`; reusing the already-ported `Slots::Identifier`
+// and `Slots::TypeArgument` kinds).
+class IdentifierExpression;
+// `MemberReferenceExpression` is the first `Expression` with BOTH a single `Expression` child
+// slot and a collection slot (a sealed `Expression` with a required `Target` `Expression` slot
+// + a required `MemberName` string-name `[Slot]` over a backing `MemberNameToken` + a
+// `TypeArguments` `AstNodeCollection<AstType>` collection -- the
+// `member_reference_expression ::= expression '.' identifier ('<' type (',' type)* '>')?`
+// production, the `MemberType` shape with an `Expression` target and no scalar; reusing the
+// already-ported `Slots::Identifier`/`Slots::TypeArgument` kinds and the new `Slots::
+// TargetExpression` kind).
+class MemberReferenceExpression;
+// `PointerReferenceExpression` is the structural twin of `MemberReferenceExpression` (the
+// same `MemberType` shape -- a `Target` `Expression` slot + a `MemberName` string-name `[Slot]` over
+// a backing `MemberNameToken` + a `TypeArguments` `AstNodeCollection<AstType>` collection) but for
+// the `pointer_member_access ::= expression '->' identifier ( '<' type ( ',' type )* '>' )?`
+// production, plus the `ArrowToken` const string "->"; the two are disjoint concrete types so
+// the pattern matcher's `other is PointerReferenceExpression` gate distinguishes them; reusing
+// the already-ported `Slots::TargetExpression`/`Slots::Identifier`/`Slots::TypeArgument` kinds
+// with no new `Slots` constant).
+class PointerReferenceExpression;
+// `InvocationExpression` is the second `Expression` with both a single `Expression` child slot
+// and a collection slot (a sealed `Expression` with a required `Target` `Expression` slot + an
+// `Arguments` `AstNodeCollection<Expression>` collection -- the
+// `invocation_expression ::= expression '(' expression* ')'` production, the
+// `MemberReferenceExpression` shape with no string-name `[Slot]` and no scalar; reusing the
+// already-ported `Slots::TargetExpression`/`Slots::Argument` kinds).
+class InvocationExpression;
+// `IndexerExpression` is structurally identical to `InvocationExpression` (a sealed `Expression`
+// with a required `Target` `Expression` slot + an `Arguments` `AstNodeCollection<Expression>`
+// collection) but for the `element_access ::= expression '[' expression* ']'` production; reusing
+// the already-ported `Slots::TargetExpression`/`Slots::Argument` kinds (the two are disjoint
+// concrete types so the pattern matcher's `other is IndexerExpression` gate distinguishes them).
+class IndexerExpression;
+// `ArrayInitializerExpression` is the simplest collection-slot node (a non-sealed `Expression`
+// whose sole child slot is the `Elements` `AstNodeCollection<Expression>` collection -- the
+// `array_initializer ::= '{' expression* '}'` production), the dependency of
+// `ObjectCreateExpression.Initializer` and `ArrayCreateExpression.Initializer`; the first ported
+// node with a collection slot and NO single child slot, and the first non-sealed concrete node
+// (its `[DecompilerAstNode(hasPatternPlaceholder: true)]` emits a `PatternPlaceholder` subclass --
+// deferred). Reusing the already-ported `Slots::Expression` kind as the collection kind.
+class ArrayInitializerExpression;
+// `ObjectCreateExpression` is the first ported node to combine a collection with a nullable
+// single child slot (a sealed `Expression` with a required `AstType` `Type` slot + an
+// `Arguments` `AstNodeCollection<Expression>` collection + a nullable
+// `ArrayInitializerExpression` `Initializer` slot -- the
+// `object_create_expression ::= 'new' type '(' expression* ')' array_initializer?` production,
+// reusing the already-ported `Slots::Type`/`Slots::Argument` kinds and the new `Slots::Initializer`
+// kind; the `Arguments` collection is the first NON-incremental one-collection node since the
+// `Initializer` single slot trails it).
+class ObjectCreateExpression;
+// `ArrayCreateExpression` is the first ported node with TWO collections FOLLOWED BY a single
+// slot (a sealed `Expression` with a required `AstType` `Type` slot + an `Arguments`
+// `AstNodeCollection<Expression>` collection + an `AdditionalArraySpecifiers`
+// `AstNodeCollection<ArraySpecifier>` collection + a nullable `ArrayInitializerExpression`
+// `Initializer` slot -- the `array_creation_expression ::= 'new' type '[' expression* ']'
+// array_specifier* array_initializer?` production, reusing the already-ported `Slots::Type`/
+// `Slots::Argument`/`Slots::Initializer` kinds and the new `Slots::AdditionalArraySpecifier`
+// kind; both collections are non-incremental since the `Initializer` single slot trails them).
+class ArrayCreateExpression;
+// `TupleExpression` is the `ArrayInitializerExpression` D250 collection-only shape applied to
+// the `tuple_literal ::= '(' expression ( ',' expression )+ ')'` production (a sealed
+// `Expression` whose sole child slot is the `Elements` `AstNodeCollection<Expression>`
+// collection); reusing the already-ported `Slots::Expression` kind as the collection kind (the
+// `ArrayInitializerExpression`/`BlockStatement` collection-kind-reuse precedent).
+class TupleExpression;
+// `NamedExpression`/`NamedArgumentExpression` are a sibling pair of sealed `Expression` nodes
+// sharing the `FixedVariableInitializer` D286 shape (a required non-nullable `string Name`
+// string-name `[Slot("Identifier")]` over a backing `NameToken` `Identifier` + a required
+// `Expression` `[Slot("Expression")]` slot) applied to the `Expression` hierarchy, with the
+// `Expression`-of-type-`Expression` name-shadowing crux (the `CastExpression` D243 precedent):
+// `named_expression ::= identifier '=' expression` (object initializers, anonymous-object
+// members, named attribute arguments) and `named_argument_expression ::= identifier ':'
+// expression` (named method/attribute arguments); the two differ only in the grammatical role
+// of the `Expression` slot and the visit-method name, reusing the already-ported `Slots::Identifier`/
+// `Slots::Expression` kinds with no new `Slots` constant.
+class NamedExpression;
+class NamedArgumentExpression;
+// `ErrorExpression` is the unparseable-input placeholder leaf -- a sealed `Expression` with no
+// `[Slot]` children, its own `Location` field (a zero-width point span), and a hand-written
+// `(string error)` ctor attaching the error text as a trailing multi-line `Comment`. The
+// cleanest remaining `Expression` leaf (the `EmptyStatement` D259 own-`Location`-field shape
+// applied to the `Expression` hierarchy), reusing the inherited zero-child slot defaults and a
+// type-only `DoMatch` (the `NullReferenceExpression`/`BreakStatement` precedent).
+class ErrorExpression;
+// `OutVarDeclarationExpression` is the `out_var_declaration_expression ::= type
+// variable_initializer` shape (C# grammar section 12.20) -- a sealed `Expression` with two
+// single, REQUIRED `[Slot]` children (`Type` `AstType` + `Variable` `VariableInitializer`), plus
+// the `OutKeyword` const string aliased to `DirectionExpression.OutKeyword`, and a hand-written
+// `(AstType, string)` convenience ctor that creates a `new VariableInitializer(name)`. The
+// `VariableInitializer` D266 two-required-single-slot shape applied to the `Expression` hierarchy,
+// reusing the already-ported `Slots::Type`/`Slots::Variable` kinds with no new `Slots` constant.
+class OutVarDeclarationExpression;
+// `WithInitializerExpression` is the `with_expression ::= expression 'with'
+// array_initializer` shape (C# grammar section 12.10) -- a sealed `Expression` with two single,
+// REQUIRED `[Slot]` children (`Expression` + `Initializer` `ArrayInitializerExpression`), no
+// scalar, no const strings. The `CastExpression` D243 two-required-single-slot shape with the
+// second slot an `ArrayInitializerExpression` instead of an `AstType`, reusing the already-
+// ported `Slots::Expression`/`Slots::Initializer` kinds with no new `Slots` constant.
+class WithInitializerExpression;
+// `UndocumentedExpression` is the `undocumented_expression ::= '__arglist' | '__arglist'
+// '(' expression* ')' | '__refvalue' '(' expression ',' type ')' | '__reftype' '(' expression
+// ')' | '__makeref' '(' expression ')'` shape (no spec grammar production) -- a sealed
+// `Expression` carrying a `UndocumentedExpressionType` scalar (the kind of undocumented
+// expression, no `Any` member) and an `Arguments` `AstNodeCollection<Expression>` collection.
+// The `ConstructorInitializer` D281 collection-only-plus-enum-scalar shape applied to the
+// `Expression` hierarchy, reusing the already-ported `Slots::Argument` kind with no new
+// `Slots` constant.
+class UndocumentedExpression;
+// `StackAllocExpression` is the `stackalloc_expression ::= 'stackalloc' type '[' expression
+// ']' | 'stackalloc' type? '[' expression? ']' array_initializer` shape (C# grammar section
+// 12.8.22) -- a sealed `Expression` with three single, NULLABLE `[Slot]` children (`Type`
+// `AstType?`, `CountExpression` `Expression?`, `Initializer` `ArrayInitializerExpression?`),
+// no scalar, plus the `StackallocKeyword` const string. The `WithInitializerExpression` D300
+// two-required-single-slot shape generalized to three NULLABLE singles, reusing the already-
+// ported `Slots::Type`/`Slots::Expression`/`Slots::Initializer` kinds with no new `Slots`
+// constant. No name-shadowing crux (the `CountExpression` property name differs from its
+// `Expression` type, so no elaborated `class Expression` specifier is needed).
+class StackAllocExpression;
+// `AnonymousTypeCreateExpression` is the `anonymous_object_creation_expression ::=
+// 'new' '{' expression* '}'` (C# grammar 12.8.17.4) -- the `ArrayInitializerExpression` D250 /
+// `TupleExpression` D296 collection-only shape applied to a sealed `Expression` whose sole child
+// slot is the `Initializers` `AstNodeCollection<Expression>` collection (reusing the already-
+// ported `Slots::Expression` kind) plus the `NewKeyword` const string; no scalar, no single
+// slots, no name-shadowing crux (the `Initializers` property name differs from its
+// `Expression` type). The next in-order Phase-5 piece per the D303 plan (a remaining Expression
+// node whose dependencies are all ported). Only `AnonymousTypeCreateExpression` is forward-
+// declared here (no ported derived classes).
+class AnonymousTypeCreateExpression;
+// `LambdaExpression` is the `lambda_expression ::= attribute_section* 'async'? parameter*
+// '=>' ( block | expression )` shape (C# grammar 12.22.1) -- a sealed `Expression` with two
+// collections (`Attributes` `AttributeSection` + `Parameters` `ParameterDeclaration`, both
+// non-incremental -- the node has two collections) plus a trailing single REQUIRED `AstNode`
+// `Body` (typed the abstract `AstNode` base because the production takes EITHER a
+// `BlockStatement` OR an `Expression`) plus an `IsAsync` bool scalar, plus the `AsyncModifier`
+// const string (the canonical `async` literal aliased by the not-yet-ported
+// `AnonymousMethodExpression.AsyncModifier`). The `ConstructorDeclaration` D281 two-collection
+// shape with an `AstNode`-typed trailing single (the `UsingStatement` `ResourceAcquisition` D262
+// precedent) and a bool scalar, applied to the `Expression` hierarchy (NOT an
+// `EntityDeclaration`). The next in-order Phase-5 piece per the D304 plan (a remaining
+// Expression node whose dependencies are all ported). Only `LambdaExpression` is forward-
+// declared here (no ported derived classes).
+class LambdaExpression;
+// `AnonymousMethodExpression` is the `anonymous_method_expression ::= 'async'? 'delegate'
+// parameter* block` shape (C# grammar 12.22.1) -- a sealed `Expression` with one collection
+// (`Parameters` `ParameterDeclaration`, non-incremental -- the node's only collection but NOT
+// the last slot, `Body` trails it) plus a trailing single REQUIRED `BlockStatement` `Body` (typed
+// the concrete `BlockStatement` because the production takes ONLY a `block`, unlike
+// `LambdaExpression` whose `Body` is the abstract `AstNode` base) plus an `IsAsync` bool scalar,
+// plus the `DelegateKeyword`/`AsyncModifier` const strings (the latter ALIASED to the canonical
+// `LambdaExpression.AsyncModifier` source). The `Accessor` D274 collection-then-required-single-
+// `BlockStatement`-body shape (MINUS the `Attributes` collection and the `EntityDeclaration` base
+// machinery) applied to the `Expression` hierarchy -- structurally a simplified `LambdaExpression`
+// D305 (no `Attributes` collection, a concrete `BlockStatement` body). The next in-order Phase-5
+// piece per the D305 plan (a remaining Expression node whose dependencies are all ported). Only
+// `AnonymousMethodExpression` is forward-declared here (no ported derived classes).
+class AnonymousMethodExpression;
+// `SwitchExpressionSection` is the `switch_expression_arm ::= pattern '=>' expression` node (C#
+// grammar 12.12) -- a sealed direct-`AstNode` node with two REQUIRED single `Expression` slots
+// (`Pattern`/`Body`), the `CastExpression` D243 two-required-single-slot shape applied to a
+// direct-`AstNode` base. The `SwitchExpressionSection` kind's collection consumer is
+// `SwitchExpression.SwitchSections`. Only `SwitchExpressionSection` is forward-declared here (no
+// ported derived classes).
+class SwitchExpressionSection;
+// `SwitchExpression` is the `switch_expression ::= expression 'switch' '{'
+// switch_expression_arm* '}'` node (C# grammar 12.12) -- a sealed `Expression` with one REQUIRED
+// `Expression` slot (the governing expression) plus a `SwitchSections` collection of
+// `SwitchExpressionSection`, the `InvocationExpression` D248 single-`Expression`-slot-plus-a-
+// collection shape with the collection element type a concrete node. The `Expression()` accessor
+// shadows the `Expression` base type (the `CastExpression` D243 name-shadowing crux). Only
+// `SwitchExpression` is forward-declared here (no ported derived classes).
+class SwitchExpression;
+// `RecursivePatternExpression` is the `recursive_pattern ::= type? '{' pattern* '}'
+// variable_designation?` / `type? '(' pattern* ')' variable_designation?` node (C# grammar
+// 11.2.5/11.2.6) -- a sealed `Expression` with a NULLABLE `AstType` `Type` single slot, a
+// `SubPatterns` `AstNodeCollection<Expression>` collection, a NULLABLE `VariableDesignation`
+// `Designation` trailing single slot, and an `IsPositional` bool scalar: the
+// `ObjectCreateExpression` D251 single + non-incremental collection + trailing-nullable-single
+// shape with the leading single nullable and a bool scalar added. No name-shadowing crux (the
+// `Type`/`SubPatterns`/`Designation`/`IsPositional` accessors do not collide with any class in
+// the `Syntax` namespace). Only `RecursivePatternExpression` is forward-declared here (no
+// ported derived classes).
+class RecursivePatternExpression;
+// `ContinueStatement`/`BreakStatement`/`YieldBreakStatement` are the first concrete C# AST
+// statement nodes -- the cleanest leaf statements (no `[Slot]` children, no members), the
+// start of the Statement hierarchy (a leaf with no slots; `BreakStatement`/`YieldBreakStatement`
+// carry a `BreakKeyword`/`YieldKeyword` const string the output visitor emits); plugging into
+// the `IAstVisitor`/`AcceptVisitor` dispatch (the next in-order Phase-5 piece per the D253 plan).
+class ContinueStatement;
+class BreakStatement;
+class YieldBreakStatement;
+// `ReturnStatement`/`ThrowStatement`/`ExpressionStatement` are the first slot-bearing C# AST
+// statement nodes -- the `UnaryOperatorExpression` D231 single-`Expression`-slot shape applied
+// to a statement: `ReturnStatement`/`ThrowStatement` carry a single NULLABLE `Expression?`
+// [Slot("Expression")] (the returned value / thrown exception, absent for a bare `return;`/
+// rethrow `throw;`) plus a `ReturnKeyword`/`ThrowKeyword` const string; `ExpressionStatement`
+// carries a single REQUIRED `Expression` [Slot("Expression")] (the statement-expression) and no
+// const keyword. The nullable pair uses `MatchOptional` in its `DoMatch`, the required node uses
+// the direct `MatchRequired` dispatch; all three reuse the already-ported `Slots::Expression`
+// kind. The next in-order Phase-5 piece per the D254 plan ("the slot-bearing statements:
+// ReturnStatement ... ThrowStatement ... ExpressionStatement ...").
+class ReturnStatement;
+class ThrowStatement;
+class ExpressionStatement;
+// `BlockStatement` is the first collection-bearing C# AST statement node -- the
+// collection-only `ArrayInitializerExpression` D250 shape applied to the Statement hierarchy:
+// a non-sealed `Statement` whose sole child slot is the `Statements` collection of `Statement`
+// (the `block ::= '{' statement* '}'` production, the statement list inside the braces), with
+// the new `Slots::Statement` kind. The next-in-order Phase-5 piece per the D255 plan ("the
+// collection-bearing statements: BlockStatement the statement collection").
+class BlockStatement;
+// `GotoStatement`/`GotoCaseStatement`/`GotoDefaultStatement` are the goto family -- the next
+// in-order Phase-5 piece per the D256 plan ("the EmptyStatement/GotoStatement/LabelStatement
+// leaves"). `GotoStatement` is the `SimpleType` D237 string-name-`[Slot]` shape MINUS the
+// `TypeArguments` collection: a single NULLABLE `string?` `Label` string-name `[Slot("Identifier")]`
+// over a backing `LabelToken` `Identifier` slot (optional, the label may be absent), plus the
+// `GotoKeyword` const string. `GotoCaseStatement` is the `ExpressionStatement` D255 shape (a
+// single REQUIRED `Expression` `LabelExpression` slot) applied to the goto family, plus the
+// `GotoKeyword`/`CaseKeyword` const strings. `GotoDefaultStatement` is the cleanest leaf of the
+// goto family (no `[Slot]` children, no match members) plus the `GotoKeyword`/`DefaultKeyword`
+// const strings. All three reuse the already-ported `Slots::Identifier`/`Slots::Expression`
+// kinds with no new `Slots` constant.
+class GotoStatement;
+class GotoCaseStatement;
+class GotoDefaultStatement;
+// `IfElseStatement`/`WhileStatement`/`DoWhileStatement` are the Condition+embedded-statement
+// loop/control statements -- the next in-order Phase-5 piece per the D257 plan ("the
+// collection-bearing Condition+embedded-statement nodes: IfElseStatement/WhileStatement/
+// DoWhileStatement"). They are all single-slot statements (no collection slots): `IfElseStatement`
+// is a REQUIRED `Expression` `Condition` + a REQUIRED `Statement` `TrueStatement` + a NULLABLE
+// `Statement?` `FalseStatement` (the `if/else`); `WhileStatement` is a REQUIRED `Expression`
+// `Condition` + a REQUIRED `Statement` `EmbeddedStatement` (the `while`); `DoWhileStatement` is
+// the `WhileStatement` shape with the slot order reversed (`EmbeddedStatement`-0/`Condition`-1,
+// the source declaration order) plus a hand-written `(Expression, Statement)` convenience ctor
+// with the param order reversed. `IfElseStatement` adds the new `Slots::TrueStatement`/
+// `Slots::FalseStatement` kinds; `WhileStatement` adds the new `Slots::EmbeddedStatement` kind;
+// `DoWhileStatement` reuses the already-ported `Slots::EmbeddedStatement`/`Slots::Condition`
+// kinds.
+class IfElseStatement;
+class WhileStatement;
+class DoWhileStatement;
+// `YieldReturnStatement`/`EmptyStatement`/`LabelStatement` are the next simple statements -- the
+// next in-order Phase-5 piece per the D258 plan ("the remaining concrete statements:
+// YieldReturnStatement ... EmptyStatement/LabelStatement leaves"). `YieldReturnStatement` is the
+// `ExpressionStatement` D255 shape (a single REQUIRED `Expression` slot) applied to the yield
+// family plus the `YieldKeyword`/`ReturnKeyword` const strings (the `yield return expr;`
+// production); `EmptyStatement` is the first ported statement leaf that carries its OWN
+// `Location` field and overrides `StartLocation`/`EndLocation` (a one-column span, no `[Slot]`
+// children, a type-only `DoMatch`); `LabelStatement` is the `GotoStatement` D257 string-name-
+// `[Slot]` shape MINUS the nullable optionality and MINUS a const keyword (a single REQUIRED
+// `string` `Label` over a backing `LabelToken`, the `identifier ':'` of a labeled statement).
+// `YieldReturnStatement` reuses the already-ported `Slots::Expression` kind; `LabelStatement`
+// reuses the already-ported `Slots::Identifier` kind; `EmptyStatement` adds no `Slots` kind
+// (no slots); all three with no new `Slots` constant.
+class YieldReturnStatement;
+class EmptyStatement;
+class LabelStatement;
+// `CheckedStatement`/`UncheckedStatement`/`UnsafeStatement` are the embedded-`BlockStatement`
+// keyword-statement trio -- the next in-order Phase-5 piece per the D259 plan ("the remaining
+// concrete statements: ... CheckedStatement, UncheckedStatement, UnsafeStatement ..."). Each is a
+// sealed `Statement` carrying a single REQUIRED `BlockStatement` `Body` child (the block under
+// the keyword context) plus a const keyword string (the `CheckedStatement.CheckedKeyword` /
+// `UncheckedStatement.UncheckedKeyword` / `UnsafeStatement.UnsafeKeyword`). They are the
+// `ExpressionStatement` D255 single-required-slot shape with a `BlockStatement` child instead of
+// an `Expression`, plus the const keyword (the `CheckedExpression` D234 const-string precedent
+// applied to a statement). All three share the NEW `Slots::Body` kind (cycle-broken into
+// `BlockStatement.hpp`, since `BlockStatement.hpp` includes `Slots.hpp`).
+class CheckedStatement;
+class UncheckedStatement;
+class UnsafeStatement;
+// `LockStatement` is the `WhileStatement` D258 two-required-single-slot shape (a REQUIRED
+// `Expression` lock-object + a REQUIRED `Statement` `EmbeddedStatement` body) with the loop
+// test slot renamed `Expression` -- the next in-order Phase-5 piece per the D260 plan. It
+// reuses the already-ported `Slots::Expression` (by `UnaryOperatorExpression`) and
+// `Slots::EmbeddedStatement` (by `WhileStatement`) kinds with no new `Slots` constant; the
+// `Expression()` accessor shadows the `Expression` base type (the `ExpressionStatement` D255
+// name-shadowing crux), so the port uses the elaborated `class Expression` specifier.
+class LockStatement;
+// `UsingStatement` is the `WhileStatement` D258 two-required-single-slot shape plus two bool
+// scalars (`IsAsync`/`IsEnhanced`) and with the first slot typed the abstract `AstNode` base (a
+// REQUIRED `ResourceAcquisition` `AstNode` child -- the `using (...)` production takes EITHER a
+// local-variable-declaration OR an expression, both `AstNode`-derived; plus a REQUIRED
+// `EmbeddedStatement` `Statement` body) -- the next in-order Phase-5 piece per the D261 plan.
+// It adds the new `Slots::ResourceAcquisition` kind (a `CSharpSlotInfoT<AstNode>`, the first ported
+// slot kind whose element type is the abstract `AstNode` base) and reuses the already-ported
+// `Slots::EmbeddedStatement` (by `WhileStatement`). NO name-shadowing crux (no member is named
+// `AstNode`/`Statement`; the `ResourceAcquisition()` accessor does not collide with any class),
+// so no elaborated-type-specifier is needed anywhere. The `AwaitKeyword` const aliases
+// `UnaryOperatorExpression::AwaitKeyword` (the canonical `await` literal).
+class UsingStatement;
+// `ForStatement` is the first ported node with a collection -> single -> collection -> single
+// slot layout -- the next in-order Phase-5 piece per the D262 plan. A sealed `Statement` with an
+// `Initializers` `AstNodeCollection<Statement>` collection (the init statements before the first
+// `;`), a NULLABLE `Expression?` `Condition` (the loop test, absent for `for (;;)`), an
+// `Iterators` `AstNodeCollection<Statement>` collection (the step statements after the second
+// `;`), and a REQUIRED `Statement` `EmbeddedStatement` (the loop body); both collections are
+// non-incremental (two collections), and both single slots follow collections so they use the
+// index-less `SetChildNode` setter. It adds the new `Slots::ForInitializer`/`Slots::Iterator`
+// kinds and reuses the already-ported `Slots::Condition` (by `ConditionalExpression`, the
+// per-node slot carrying `IsOptional=true` for the nullable case)/`Slots::EmbeddedStatement` (by
+// `WhileStatement`); NO name-shadowing crux (no member is named `Expression`/`Statement`).
+class ForStatement;
+// `VariableDesignation` is the abstract base of the C# 7 deconstruction designations -- the
+// next in-order Phase-5 piece per the D263 plan (`ForeachStatement` needs the hierarchy). The
+// abstract base itself gets NO `Visit` method (`NeedsVisitor = !IsAbstract && base.IsAbstract`
+// is `false` since `VariableDesignation` is abstract), so only the two concrete subclasses land
+// on `IAstVisitor`: `SingleVariableDesignation` (the `single_variable_designation ::= identifier`
+// leaf, a sealed `VariableDesignation` with a single REQUIRED `string Identifier` string-name
+// `[Slot("Identifier")]` over a backing `IdentifierToken` -- the `LabelStatement` D259 shape with a
+// `VariableDesignation` base, plus the `SimpleType`/`IdentifierExpression` `Identifier` name-shadowing
+// crux) and `ParenthesizedVariableDesignation` (the `tuple_designation ::= '(' designations? ')'`
+// node, a sealed `VariableDesignation` whose sole child slot is the `VariableDesignations`
+// `AstNodeCollection<VariableDesignation>` collection -- the `ArrayInitializerExpression` D250 /
+// `BlockStatement` D256 collection-only shape with a `VariableDesignation` base, plus the new
+// `Slots::VariableDesignation` kind). Neither ends in "AstType", so the generator's
+// visit-method-name default yields `VisitSingleVariableDesignation`/`VisitParenthesizedVariableDesignation`.
+class SingleVariableDesignation;
+class ParenthesizedVariableDesignation;
+// `ForeachStatement` is the `foreach_statement ::= 'await'? 'foreach' '(' type
+// variable_designation 'in' expression ')' statement` node (C# grammar 13.9.5.1) -- the next
+// in-order Phase-5 piece per the D263 plan (now unblocked by the `VariableDesignation` hierarchy
+// just ported). A sealed `Statement` with FOUR single, REQUIRED (non-nullable) `[Slot]` children --
+// a `VariableType` `AstType` (the element type), a `VariableDesignation` `VariableDesignation`
+// (the loop variable or deconstruction), an `InExpression` `Expression` (the collection), and an
+// `EmbeddedStatement` `Statement` (the loop body) -- plus an `IsAsync` bool scalar (the leading
+// `await`). It reuses the already-ported `Slots::Type` (by `Attribute`),
+// `Slots::VariableDesignation` (by `ParenthesizedVariableDesignation`), `Slots::Expression` (by
+// `UnaryOperatorExpression`), and `Slots::EmbeddedStatement` (by `WhileStatement`) kinds with
+// no new `Slots` constant; the `AwaitKeyword` const aliases `UnaryOperatorExpression::AwaitKeyword`
+// (the `UsingStatement` D262 precedent). The `VariableDesignation()` slot accessor shadows the
+// `VariableDesignation` class (the `Expression()`-of-type-`Expression` D231 crux applied to a
+// `VariableDesignation`-typed slot accessor), so the port uses the elaborated
+// `class VariableDesignation` specifier; the other three slot accessors do not shadow their
+// element types.
+class ForeachStatement;
+
+// `VariableInitializer` is the `variable_declarator ::= identifier ( '=' expression )?` node
+// (C# grammar 15.5.1) -- the element of a `VariableDeclaration`/`FixedStatement`'s `Variables`
+// collection, the next in-order Phase-5 piece per the D265 plan (the dependency of
+// `FixedStatement.Variables` and `VariableDeclarationStatement.Variables`). A non-sealed
+// `AstNode` (the first ported `TypeMembers` node, the `[DecompilerAstNode(hasPatternPlaceholder:
+// true)]` non-`sealed` form -- the `ArrayInitializerExpression` D250 precedent) with a REQUIRED
+// `string Name` string-name `[Slot("Identifier")]` over a backing `NameToken` `Identifier` slot
+// plus a NULLABLE `Expression?` `Initializer` `[Slot("Expression")]` single slot. NO name
+// shadowing (the property is `Name`/`Initializer`, NOT `Identifier`/`Expression` -- the
+// `LabelStatement` D259 / `MemberReferenceExpression.Target` D247 differently-named-property
+// precedent), so no elaborated-type-specifier is needed; both slot kinds are already ported
+// (`Slots::Identifier` by `SimpleType`, `Slots::Expression` by `UnaryOperatorExpression`).
+class VariableInitializer;
+
+// `FixedStatement` is the `fixed_statement ::= 'fixed' '(' type variable_initializer* ')' statement`
+// node (C# grammar 24.7) -- the next in-order Phase-5 piece per the D266 plan (now unblocked -- it
+// needs the `VariableInitializer` just ported plus a NEW `Slots::Variable` kind for its
+// `Variables AstNodeCollection<VariableInitializer>` collection, plus the already-ported
+// `Slots::Type`/`Slots::EmbeddedStatement` kinds). A sealed `Statement` with a single REQUIRED
+// `AstType Type` slot at flattened index 0, a `Variables AstNodeCollection<VariableInitializer>`
+// collection at index 1 (non-incremental since the `EmbeddedStatement` single slot follows), and a
+// single REQUIRED `Statement EmbeddedStatement` at index 2 (the index-less `SetChildNode` setter,
+// following a collection). NO name-shadowing crux (no member is named `AstType`/
+// `VariableInitializer`/`Statement` -- the `ObjectCreateExpression` D251 differently-named-property
+// precedent), so no elaborated-type-specifier is needed; the `Type`/`EmbeddedStatement` slot kinds
+// are already ported (`Slots::Type` by `Attribute`, `Slots::EmbeddedStatement` by `WhileStatement`),
+// and the new `Slots::Variable` kind is cycle-broken into `VariableInitializer.hpp`.
+class FixedStatement;
+// `CaseLabel`/`SwitchSection`/`SwitchStatement` are the switch family -- the next in-order
+// Phase-5 piece per the D267 plan ("SwitchStatement, TryCatchStatement,
+// LocalFunctionDeclarationStatement, VariableDeclarationStatement ..."). `CaseLabel` is a sealed
+// `AstNode` (deriving DIRECTLY from the `AstNode` root, a leaf of a `SwitchSection`'s `CaseLabels`
+// collection) with a single NULLABLE `Expression?` `Expression` `[Slot("Expression")]` slot (the
+// case expression, null for `default:` -- the `ReturnStatement` D255 nullable-`Expression?`-slot
+// shape applied to a direct-`AstNode`-derived node) plus `CaseKeyword`/`DefaultKeyword` const
+// strings; the `Expression()` accessor shadows the `Expression` base type (the D231 crux). 
+// `SwitchSection` is a non-sealed `AstNode` (the `[DecompilerAstNode(hasPatternPlaceholder: true)]`
+// non-`sealed` form) with TWO collections -- a `CaseLabels AstNodeCollection<CaseLabel>` (the
+// `case`/`default` labels) and a `Statements AstNodeCollection<Statement>` (the section's
+// statements, `[Slot("EmbeddedStatement")]` reusing the `WhileStatement` D258 kind as a collection
+// -- the kind-collapsing-by-name design); both non-incremental (two collections), the `ComposedType`
+// D242 two-collection shape with NO single slot between. `SwitchStatement` is a sealed `Statement`
+// structurally the `InvocationExpression` D248 shape (a single REQUIRED `Expression` child at index
+// 0 + a `SwitchSections AstNodeCollection<SwitchSection>` collection at index 1, incremental) with
+// the `SwitchKeyword` const string; the `Expression()` accessor shadows the `Expression` base type
+// (the D231 crux). `CaseLabel` reuses the already-ported `Slots::Expression` kind; `SwitchSection`
+// adds the NEW cycle-broken `Slots::CaseLabel` kind (cycle-broken into `CaseLabel.hpp`) and reuses
+// `Slots::EmbeddedStatement`; `SwitchStatement` adds the NEW cycle-broken `Slots::SwitchSection`
+// kind (cycle-broken into `SwitchSection.hpp`) and reuses `Slots::Expression`.
+class CaseLabel;
+class SwitchSection;
+class SwitchStatement;
+
+// The try/catch family (the `try_statement` production): `CatchClause` (a non-sealed `AstNode`
+// with four single slots -- a NULLABLE `AstType?` `Type`, a NULLABLE `string?` `VariableName`
+// string-name `[Slot]` over a backing `VariableNameToken` `Identifier`, a NULLABLE `Expression?`
+// `Condition`, and a REQUIRED `BlockStatement` `Body` -- plus `CatchKeyword`/`WhenKeyword`/
+// `CondLPar`/`CondRPar` const strings; `hasPatternPlaceholder: true` so non-`final`; reusing the
+// already-ported `Slots::Type`/`Slots::Identifier`/`Slots::Condition`/`Slots::Body` kinds; plus the
+// NEW cycle-broken `Slots::CatchClause` kind in `CatchClause.hpp`) and `TryCatchStatement` (a
+// sealed `Statement` structurally the `ObjectCreateExpression` D251 shape -- a single REQUIRED
+// `BlockStatement` `TryBlock` + a NON-INCREMENTAL `CatchClauses AstNodeCollection<CatchClause>`
+// collection + a NULLABLE `BlockStatement?` `FinallyBlock` trailing single -- plus
+// `TryKeyword`/`FinallyKeyword` const strings; the NEW cycle-broken `Slots::TryBlock`/
+// `Slots::FinallyBlock` kinds in `BlockStatement.hpp`, reusing `Slots::CatchClause`).
+class CatchClause;
+class TryCatchStatement;
+
+// `VariableDeclarationStatement` is the `local_variable_declaration ::= type
+// variable_initializer+` node (C# grammar 13.6.2.1) -- the next in-order Phase-5 piece per the D269
+// plan (now unblocked -- it needs the `VariableInitializer` already ported by D266 for its
+// `Variables` collection, plus a `Modifiers` `[Flags]` enum scalar). A sealed `Statement` with a
+// single REQUIRED `AstType Type` `[Slot]` at flattened index 0, a `Variables
+// AstNodeCollection<VariableInitializer>` collection `[Slot("Variable")]` at slot 1 (incremental --
+// the node's only collection and its last slot), and a `Modifiers` scalar (a plain settable
+// `Modifiers`-typed property, NOT a `[Slot]` -- the first ported `[Flags]` enum scalar). NO
+// name-shadowing crux (no member is named `AstType`/`VariableInitializer`/`Statement`/`Modifiers` --
+// the `Modifiers()` accessor does not collide with the `Modifiers` `enum class`), so no
+// elaborated-type-specifier is needed; `Slots::Type` is already ported (by `Attribute` D240) and
+// `Slots::Variable` is cycle-broken into `VariableInitializer.hpp` (by `FixedStatement` D267), so
+// `Slots.hpp` is unchanged; the `Modifiers` enum lives in its own `Modifiers.hpp` header.
+class VariableDeclarationStatement;
+
+// `EntityDeclaration` (the abstract base of the `TypeMember` hierarchy -- the common base of
+// every type-member declaration node, with the abstract `SymbolKind` property, the virtual
+// `Attributes`/`Name`/`NameToken`/`ReturnType`, the `Modifiers` scalar, and the
+// `MatchAttributesAndModifiers` helper), `DestructorDeclaration` (the first concrete
+// `TypeMember` -- the simplest `EntityDeclaration`: a sealed node with an `Attributes`
+// `AttributeSection` collection + a required `NameToken` `Identifier` + a nullable `Body`
+// `BlockStatement`, reusing the already-ported `Slots::AttributeSection`/`Identifier`/`Body` kinds
+// with no new `Slots` constant), and `FieldDeclaration` (the first `EntityDeclaration` with two
+// collections) are the next in-order Phase-5 pieces per the D271/D272 plan; `Accessor` (the
+// simplest remaining concrete `EntityDeclaration` -- an `Attributes` collection + a nullable `Body`
+// single, the `DestructorDeclaration` shape minus `NameToken`, plus an `AccessorKind` scalar and the
+// `Name`/`NameToken` no-op overrides, reusing the already-ported `Slots::AttributeSection`/`Body`
+// kinds) is the next per the D273 plan. The abstract `EntityDeclaration` base gets NO `Visit` method
+// (`NeedsVisitor` is false for an abstract base); `DestructorDeclaration` adds
+// `VisitDestructorDeclaration`, `FieldDeclaration` adds `VisitFieldDeclaration`, `Accessor` adds
+// `VisitAccessor`, `EnumMemberDeclaration` adds `VisitEnumMemberDeclaration`, and
+// `PropertyDeclaration` adds `VisitPropertyDeclaration`, `EventDeclaration` adds
+// `VisitEventDeclaration`, and `CustomEventDeclaration` adds `VisitCustomEventDeclaration`.
+// `ParameterDeclaration` (a direct-`AstNode` node, NOT an `EntityDeclaration` -- the next
+// in-order piece per the D277 plan) adds `VisitParameterDeclaration`. `IndexerDeclaration` (the
+// next in-order piece per the D278 plan, the first `EntityDeclaration` with a `Parameters`
+// collection -- now unblocked by `ParameterDeclaration`) adds `VisitIndexerDeclaration`.
+class EntityDeclaration;
+class DestructorDeclaration;
+class FieldDeclaration;
+class Accessor;
+class EnumMemberDeclaration;
+class PropertyDeclaration;
+class EventDeclaration;
+class CustomEventDeclaration;
+class ParameterDeclaration;
+class IndexerDeclaration;
+class OperatorDeclaration;
+// `OperatorDeclaration` is the `operator_declaration ::= attribute_section* modifier+ type
+// ( type '.' )? 'operator' 'checked'? operator_token '(' parameter* ')' ( block | ';' )` node
+// (C# grammar 15.10.1) -- the next in-order Phase-5 piece per the D279 plan (now unblocked -- it
+// needs the `ParameterDeclaration` already ported by D278 for its `Parameters` collection, plus
+// the `OperatorType` enum co-located in `OperatorDeclaration.cs`). A sealed `EntityDeclaration` with
+// an `Attributes` collection + a required `ReturnType` `AstType` + a nullable
+// `PrivateImplementationType` `AstType?` + a `Parameters` `AstNodeCollection<ParameterDeclaration>`
+// collection + a nullable `Body` `BlockStatement?`, plus an `OperatorType` scalar (a settable enum
+// with NO `Any` member, so the `DoMatch` term is the plain `==`) and four const keyword tokens; the
+// `Name`/`NameToken` overrides return the operator's method name / null and throw on set. NO new
+// `Slots` constant (reuses the already-ported `Slots::AttributeSection`/`Type`/
+// `PrivateImplementationType`/`Parameter`/`Body` kinds); the `OperatorType()` accessor shadows the
+// `OperatorType` enum (the `DirectionExpression.FieldDirection` D235 name-shadowing crux).
+// `ConstructorInitializer` is the `constructor_initializer ::= ':' ( 'base' | 'this' ) '(' expression* ')'`
+// node (C# grammar 15.11.1) -- the next in-order Phase-5 piece per the D280 plan (the dependency of
+// `ConstructorDeclaration.Initializer`, its sole child slot is the `Arguments` `AstNodeCollection<
+// Expression>` collection reusing `Slots::Argument`). A sealed `AstNode` (deriving DIRECTLY from the
+// `AstNode` root, NOT an `EntityDeclaration`) with a `ConstructorInitializerType` scalar (`Any`/
+// `Base`/`This`, the `Any`-wildcard `DoMatch` term) and the `Arguments` collection; the
+// `ConstructorInitializerType()` accessor shadows the `ConstructorInitializerType` enum (the D235/
+// D280 name-shadowing crux).
+// `ConstructorDeclaration` is the `constructor_declaration ::= attribute_section* modifier*
+// identifier '(' parameter* ')' constructor_initializer? ( block | ';' )` node (C# grammar 15.11.1)
+// -- the next in-order Phase-5 piece per the D280 plan (now unblocked by `ConstructorInitializer`
+// just ported and `ParameterDeclaration` D278). A sealed `EntityDeclaration` with an `Attributes`
+// collection + a required `NameToken` `Identifier` (the `DestructorDeclaration` D272
+// `[ExcludeFromMatch]` shape -- the `Name` `MatchString` term is NOT in `DoMatch`) + a `Parameters`
+// `AstNodeCollection<ParameterDeclaration>` collection + a nullable `ConstructorInitializer?`
+// `Initializer` + a nullable `BlockStatement?` `Body`; the two-collection `OperatorDeclaration` D280
+// shape with two trailing nullable singles. NO new `Slots` constant (reuses the already-ported
+// `Slots::AttributeSection`/`Identifier`/`Parameter`/`ConstructorInitializer`/`Body` kinds).
+class ConstructorInitializer;
+class ConstructorDeclaration;
+// `TypeParameterDeclaration` is the `type_parameter ::= attribute_section* ( 'in' | 'out' )?
+// identifier` node (C# grammar 8.5 / 15.2.3) -- the next in-order Phase-5 piece per the D281 plan (the
+// dependency of `MethodDeclaration.TypeParameters`, and of `TypeDeclaration`/`DelegateDeclaration`
+// `TypeParameters` collections). A sealed direct-`AstNode` node (NOT an `EntityDeclaration`) with an
+// `Attributes` `AttributeSection` collection + a `Variance` `VarianceModifier` enum scalar (no `Any`
+// member, so the `DoMatch` term is the plain `==`) + a non-nullable `string Name` string-name `[Slot]`
+// over a required `NameToken` `Identifier`; reuses the already-ported `Slots::AttributeSection`/
+// `Slots::Identifier` kinds with no new `Slots` constant. The `VarianceModifier` enum ports to
+// `cpp/Decompiler/TypeSystem/VarianceModifier.hpp` (the `SymbolKind` D271 / `ReferenceKind` D278
+// precedent).
+class TypeParameterDeclaration;
+// `Constraint` is the `type_parameter_constraints_clause ::= 'where' type ':' type+` node (C#
+// grammar 15.2.5) -- the `where T : ...` clause on a generic method or type. A sealed direct-
+// `AstNode` node (NOT `EntityDeclaration` -- a constraint is a structural node owned by a
+// declaration's `Constraints` collection) with a REQUIRED `SimpleType` `TypeParameter` single
+// slot (the constrained type parameter) + a `BaseTypes` `AstNodeCollection<AstType>` collection (the
+// base-type constraint list); reuses the cycle-broken `Slots::ConstraintTypeParameter` (in
+// `SimpleType.hpp`) and the new `Slots::BaseType` (in `Slots.hpp`) with no further `Slots`
+// constant. The next in-order Phase-5 piece per the D282 plan (the dependency of
+// `MethodDeclaration.Constraints`).
+class Constraint;
+// `MethodDeclaration` is the `method_declaration ::= attribute_section* modifier* type ( type '.' )?
+// identifier type_parameter* '(' parameter* ')' constraint* ( block | ';' )` node (C# grammar
+// 15.6.1) -- the next in-order Phase-5 piece per the D283 plan (now unblocked by `TypeParameterDeclaration`
+// D282 + `ParameterDeclaration` D278 + `Constraint` just ported). A sealed `EntityDeclaration` (the
+// `[DecompilerAstNode]` default `hasPatternPlaceholder: false`, so `final`) with FOUR collections
+// (`Attributes`/`TypeParameters`/`Parameters`/`Constraints`) plus four singles (`ReturnType`/
+// `PrivateImplementationType`/`NameToken`/`Body`) -- the first ported `EntityDeclaration` with more
+// than two collections. It adds the two NEW cycle-broken `Slots::TypeParameter` (in
+// `TypeParameterDeclaration.hpp`) and `Slots::Constraint` (in `Constraint.hpp`) kinds; the other
+// six kinds (`Slots::AttributeSection`/`Type`/`PrivateImplementationType`/`Identifier`/`Parameter`/
+// `Body`) are all already ported. `NameToken` is NOT `[ExcludeFromMatch]` (unlike
+// `ConstructorDeclaration` D281 / `DestructorDeclaration` D272), so the `Name` `MatchString` term
+// IS in `DoMatch`; the inherited base `Name()` kind-walks (no `Name` override). The
+// `IsExtensionMethod` computed property reads the first `Parameters` element's `HasThisModifier`
+// via `GetChildByKind<ParameterDeclaration>(&Slots::Parameter)` (the D271 kind-based read).
+class MethodDeclaration;
+class ExtensionDeclaration;
+
+// The `FixedVariableInitializer` (the `fixed_size_buffer_declarator ::= identifier '[' expression
+// ']'` element of a `FixedFieldDeclaration.Variables` collection) -- a sealed direct-`AstNode` node
+// with a required `NameToken` `Identifier` + a required `CountExpression` `Expression` (the
+// `VariableInitializer` D266 shape with the `Expression` required, not nullable). It adds the new
+// cycle-broken `Slots::FixedVariable` kind (in `FixedVariableInitializer.hpp`); the two kinds
+// (`Slots::Identifier`/`Slots::Expression`) are already ported.
+class FixedVariableInitializer;
+
+// The `FixedFieldDeclaration` (the `fixed_size_buffer_declaration` node) -- a sealed
+// `EntityDeclaration` with an `Attributes` collection + a required `ReturnType` + a `Variables`
+// `FixedVariableInitializer` collection (the `FieldDeclaration` D273 two-collection shape with
+// the `Variables` element type changed to `FixedVariableInitializer`) plus the `FixedKeyword`
+// const. It reuses `Slots::AttributeSection`/`Slots::Type` and the new cycle-broken
+// `Slots::FixedVariable`; the `Name`/`NameToken` are NOT overridden (the inherited base kind-walk
+// finds no `NameToken` slot, so `Name()` returns empty).
+class FixedFieldDeclaration;
+
+// The `LocalFunctionDeclarationStatement` (the `local_function_declaration ::=
+// method_declaration` node, C# grammar 13.6.4) -- a sealed `Statement` wrapping a single REQUIRED
+// `MethodDeclaration` `Declaration` child (the `CheckedStatement` D260 single-required-slot
+// shape with a `MethodDeclaration` child). It adds the new cycle-broken `Slots::MethodDeclaration`
+// kind (in `MethodDeclaration.hpp`); it reuses no other Slots constant.
+class LocalFunctionDeclarationStatement;
+// `Comment` is the first concrete `Trivia`-derived node (the `comment ::= '//' input_character* |
+// '/*' input_character* '*/'` leaf, C# lexical grammar 6.3.3) -- the next in-order Phase-5 piece
+// per the D287 plan (the remaining GeneralScope nodes). A sealed `Trivia` leaf with NO `[Slot]`
+// children carrying a `CommentType` enum scalar (no `Any` member, so the `DoMatch` term is the
+// plain `==`) and a `Content` string (`MatchString`). The `Trivia` abstract base was ported in
+// D224; `Comment` is the first concrete trivia the output visitor emits verbatim.
+class Comment;
+// The namespace-level directive family (C# grammar 14.4-14.6): `ExternAliasDeclaration` (the
+// `extern_alias_directive ::= 'extern' 'alias' identifier ';'`), `UsingDeclaration` (the
+// `using_directive ::= 'using' type ';' | 'using' 'static' type ';'`), and `UsingAliasDeclaration`
+// (the `using_alias_directive ::= 'using' identifier '=' type ';'`) -- three sealed `AstNode`s
+// deriving directly from the `AstNode` root, the next in-order Phase-5 piece per the D288 plan.
+// `ExternAliasDeclaration` is the `LabelStatement` D259 one-REQUIRED-string-name-`[Slot]` shape;
+// `UsingDeclaration` is the `TypeReferenceExpression` D245 one-required-`AstType`-slot shape
+// (it adds the new `Slots::Import` kind shared with `UsingAliasDeclaration`); `UsingAliasDeclaration`
+// is the `VariableInitializer` D266 two-single-slot shape with the second slot an `AstType`.
+class ExternAliasDeclaration;
+class UsingDeclaration;
+class UsingAliasDeclaration;
+// The tuple type family (C# grammar 8.3.1): `TupleTypeElement` (the `tuple_type_element ::=
+// type identifier?` -- a type plus an optional element name, the dependency of
+// `TupleAstType.Elements`) and `TupleAstType` (the `tuple_type ::= '(' tuple_type_element (','
+// tuple_type_element)+ ')'` -- an `AstType` whose sole slot is the `Elements` collection of
+// `TupleTypeElement`) -- the next in-order Phase-5 piece per the D288 plan (the remaining
+// GeneralScope `AstType`-bearing nodes). `TupleTypeElement` combines the `CastExpression` D243
+// required-`AstType`-slot shape with the `SimpleType` D237 nullable-string-name-`[Slot]` shape;
+// `TupleAstType` is the `ArrayInitializerExpression` D250 collection-only shape applied to the
+// `AstType` hierarchy. `TupleAstType` ends in "AstType", so the generator's visit-method-name
+// rewriting yields `VisitTupleType` (NOT `VisitTupleAstType`).
+class TupleTypeElement;
+class TupleAstType;
+// `InvocationAstType` is the `invocation_ast_type ::= type '(' argument_list? ')'` node (no spec
+// grammar production -- an ILSpy-internal type form used when a type appears applied to arguments,
+// e.g. an attribute type written with its constructor arguments) -- the next in-order Phase-5 piece
+// per the D312 plan (the remaining GeneralScope `AstType`-bearing nodes). A sealed `AstType` with an
+// `Arguments` `AstNodeCollection<Expression>` collection (the parenthesized argument list, `[Slot
+// ("Expression")]` reusing the already-ported `Slots::Expression` kind as a collection -- the kind-
+// collapsing-by-`[Slot]`-name design) plus a required `BaseType` `AstType` single slot (`[Slot("Type")]
+// reusing the already-ported `Slots::Type` kind) -- the `AnonymousMethodExpression` D306 one-non-
+// incremental-collection-plus-a-required-trailing-single shape applied to the `AstType` hierarchy.
+// `InvocationAstType` ends in "AstType", so the generator's visit-method-name rewriting yields
+// `VisitInvocationType` (NOT `VisitInvocationAstType` -- the `TupleAstType` D290 precedent). Only
+// `InvocationAstType` is forward-declared here (no ported derived classes).
+class InvocationAstType;
+// `FunctionPointerAstType` is the `funcptr_type ::= 'delegate' '*' calling_convention_specifier?
+// funcptr_parameter_list funcptr_return_type` node (C# grammar 24.3.3) -- the C# 9+ function
+// pointer type `delegate*<...>`. A sealed `AstType` with a `CallingConventions`
+// `AstNodeCollection<AstType>` collection (the calling-convention specifiers, `[Slot("CallingConvention")]`
+// adding the new `Slots::CallingConvention` kind), a `Parameters` `AstNodeCollection<ParameterDeclaration>`
+// collection (the parameter list, `[Slot("Parameter")]` reusing the already-ported `Slots::Parameter`
+// kind), a required `ReturnType` `AstType` single slot (`[Slot("Type")]` reusing `Slots::Type`), and a
+// `HasUnmanagedCallingConvention` bool scalar -- the `ArrayCreateExpression` D252 two-collection shape
+// with the trailing single REQUIRED and no leading single, the first ported `AstType` with two
+// collections both followed by a required single. `FunctionPointerAstType` ends in "AstType", so the
+// generator's visit-method-name rewriting yields `VisitFunctionPointerType` (the `TupleAstType` D290
+// / `InvocationAstType` D313 precedent). Only `FunctionPointerAstType` is forward-declared here (no
+// ported derived classes).
+class FunctionPointerAstType;
+// The `DelegateDeclaration` (the `delegate_declaration ::= attribute_section* modifier*
+// 'delegate' ( 'ref' 'readonly'? )? type identifier type_parameter* '(' parameter* ')'
+// constraint*` -- C# grammar 21.2): a sealed `EntityDeclaration` with four collections
+// (`Attributes`/`TypeParameters`/`Parameters`/`Constraints`) plus two singles
+// (`ReturnType`/`NameToken`), the `MethodDeclaration` D284 shape with two trailing singles instead
+// of four (no `PrivateImplementationType`, no `Body`), reusing all already-ported `Slots` kinds
+// (`AttributeSection`/`Type`/`Identifier`/`TypeParameter`/`Parameter`/`Constraint`). The next
+// in-order Phase-5 piece per the D286 plan (the remaining GeneralScope `EntityDeclaration`
+// whose dependencies are all ported).
+class DelegateDeclaration;
+
+// The ported `TypeDeclaration` concrete node (GeneralScope/TypeDeclaration.cs) -- the central
+// type-declaration node (a `class`/`struct`/`interface`/`enum`/`record`), a sealed `EntityDeclaration`
+// with six collections plus one single plus two scalars, reusing all already-ported `Slots` kinds.
+class TypeDeclaration;
+
+// The `NamespaceDeclaration` (the `namespace_declaration ::= 'namespace' type '{' namespace_member*
+// '}' ';' | 'namespace' type ';' namespace_member*` -- C# grammar 14.3): a sealed `AstNode` deriving
+// DIRECTLY from the `AstNode` root (NOT `EntityDeclaration` -- a namespace is a container, not a
+// member declaration) with an `IsFileScoped` bool scalar, a required `AstType` `NamespaceName` single
+// slot, and an `AstNodeCollection<AstNode>` `Members` collection (the namespace body, holding any
+// `AstNode`-derived member). The next in-order Phase-5 piece per the D292 plan (the remaining
+// GeneralScope `namespace` container whose dependencies are all ported).
+class NamespaceDeclaration;
+// The preprocessor-directive family (C# lexical grammar 6.5.1): `PreProcessorDirective` (the
+// `pp_directive ::= '#' pp_kind new_line` base, a NOT-sealed `Trivia` leaf carrying a
+// `PreProcessorDirectiveType` enum + a nullable `Argument` string with a HAND-WRITTEN `DoMatch`),
+// plus its two sealed derived classes `LinePreprocessorDirective` (`#line`) and
+// `PragmaWarningPreprocessorDirective` (`#pragma warning ...`, a `Warnings` collection + an
+// `EndLocation` override) -- the next in-order Phase-5 piece per the D293 plan. The generator
+// emits ONE `Visit` method for the whole family (`VisitPreProcessorDirective`): the base
+// `PreProcessorDirective` is concrete-but-its-base-`Trivia`-is-abstract, so `NeedsVisitor` is
+// true for it (the `AcceptVisitor` override + `Visit` method), but the two sealed derived classes'
+// base (`PreProcessorDirective`) is concrete, so `NeedsVisitor` is false for them (no `AcceptVisitor`
+// override, no `Visit` method -- they dispatch polymorphically through the base). Only
+// `PreProcessorDirective` is forward-declared here (the two derived classes are not referenced by
+// `IAstVisitor`); `DepthFirstAstVisitor` includes only `PreProcessorDirective.hpp`.
+class PreProcessorDirective;
+// The `DocumentationReference` concrete node (a sealed direct-`AstNode` node modeling an XML-
+// documentation `cref` reference -- the next in-order Phase-5 piece per the D294 plan). It is the
+// first node to combine a HAND-WRITTEN `DoMatch` (a `SymbolKind`-driven conditional that matches
+// `OperatorType`/`ConversionOperatorReturnType` for operators, `MemberName`/`TypeArguments` for
+// named members, and `Parameters` unconditionally) with five `[Slot]` children (three singles + two
+// collections) and three non-`[Slot]` scalars (`SymbolKind`/`OperatorType` enums + `HasParameterList`
+// bool). Only `DocumentationReference` is forward-declared here (it has no ported derived classes).
+class DocumentationReference;
+// `DeclarationExpression` is the `declaration_expression ::= type variable_designation` (C# grammar
+// 12.20) -- the `CastExpression` D243 two-required-single-slot shape with the second operand a
+// `VariableDesignation` instead of an `Expression` (`Type` `AstType` + `Designation` `VariableDesignation`,
+// no scalar, no name-shadowing crux). The next in-order Phase-5 piece per the D302 plan (a remaining
+// Expression node whose dependencies are all ported). Only `DeclarationExpression` is forward-
+// declared here (no ported derived classes).
+class DeclarationExpression;
+// `InterpolatedStringContent` is the `interpolated_string_content ::= interpolation |
+// interpolated_string_text` (C# grammar 12.8.3) -- the common base of the two content node
+// kinds an `InterpolatedStringExpression.Content` collection holds. The next in-order Phase-5
+// piece per the D308 plan (the `InterpolatedStringContent` abstract base + the `Interpolation`/
+// `InterpolatedStringText` concrete family + `InterpolatedStringExpression`). The abstract base
+// gets NO `Visit` method (an abstract base's `NeedsVisitor` is false), so only the two
+// concrete content subclasses and `InterpolatedStringExpression` are forward-declared here.
+class InterpolatedStringContent;
+class Interpolation;
+class InterpolatedStringText;
+class InterpolatedStringExpression;
+// The query-expression family (`query_expression ::= query_clause+`, C# grammar 12.23.1):
+// `QueryClause` is the abstract base of every clause a `QueryExpression.Clauses` collection
+// holds (it gets NO `Visit` method -- an abstract base); `QueryOrdering` is the
+// `ordering ::= expression ( 'ascending' | 'descending' )?` element of a
+// `QueryOrderClause.Orderings` collection (it derives DIRECTLY from `AstNode`, NOT
+// `QueryClause`); `QueryExpression` is the sealed `Expression` whose sole slot is the
+// `Clauses` collection; `QueryWhereClause`/`QuerySelectClause`/`QueryOrderClause` are the
+// first three concrete clauses; `QueryLetClause`/`QueryGroupClause`/`QueryFromClause`/
+// `QueryContinuationClause` are the four string-name-[Slot] and multi-slot clauses (the
+// `let`/`group`/`from`/`into` productions); `QueryJoinClause` is the complex `join` clause
+// (6 slots + 5 new `Slots` kinds -- nullable `Type` + required `JoinIdentifier` + three required
+// `Expression`s + nullable `IntoIdentifier`).
+class QueryClause;
+class QueryOrdering;
+class QueryExpression;
+class QueryWhereClause;
+class QuerySelectClause;
+class QueryOrderClause;
+class QueryLetClause;
+class QueryGroupClause;
+class QueryFromClause;
+class QueryContinuationClause;
+class QueryJoinClause;
+// `SyntaxTree` is the root compilation_unit node (the last remaining GeneralScope node),
+// a sealed `AstNode` whose sole slot is the `Members` `AstNodeCollection<AstNode>` collection
+// (the compilation-unit body of top-level directives/declarations).
+class SyntaxTree;
+
+// The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
+// concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
+// on it; `CSharpOutputVisitor` (the pretty-printer) implements it. An abstract base (a
+// protected constructor + a virtual destructor): it cannot be instantiated directly, only
+// derived from, matching the C# interface. Per-node `Visit` pure-virtuals are added as the
+// concrete node hierarchy lands.
+class IAstVisitor {
+protected:
+    IAstVisitor() = default;
+
+public:
+    virtual ~IAstVisitor() = default;
+
+    // Per-node `Visit<NodeName>(ConcreteNode*)` pure-virtual methods. Each concrete node's
+    // `AcceptVisitor` override calls the matching `Visit<NodeName>(this)`. The concrete leaf
+    // nodes land here (the rest of the generated hierarchy follows): the `Identifier` token
+    // (the first non-`Expression` concrete node), then the leaf expressions (the three
+    // reference expressions and the literal-carrying `PrimitiveExpression`).
+    virtual void VisitIdentifier(Identifier*) = 0;
+    virtual void VisitNullReferenceExpression(NullReferenceExpression*) = 0;
+    virtual void VisitThisReferenceExpression(ThisReferenceExpression*) = 0;
+    virtual void VisitBaseReferenceExpression(BaseReferenceExpression*) = 0;
+    virtual void VisitPrimitiveExpression(PrimitiveExpression*) = 0;
+    virtual void VisitBinaryOperatorExpression(BinaryOperatorExpression*) = 0;
+    virtual void VisitAssignmentExpression(AssignmentExpression*) = 0;
+    virtual void VisitUnaryOperatorExpression(UnaryOperatorExpression*) = 0;
+    virtual void VisitConditionalExpression(ConditionalExpression*) = 0;
+    virtual void VisitParenthesizedExpression(ParenthesizedExpression*) = 0;
+    virtual void VisitCheckedExpression(CheckedExpression*) = 0;
+    virtual void VisitUncheckedExpression(UncheckedExpression*) = 0;
+    virtual void VisitDirectionExpression(DirectionExpression*) = 0;
+    virtual void VisitThrowExpression(ThrowExpression*) = 0;
+    virtual void VisitPrimitiveType(PrimitiveType*) = 0;
+    virtual void VisitSimpleType(SimpleType*) = 0;
+    virtual void VisitMemberType(MemberType*) = 0;
+    virtual void VisitArraySpecifier(ArraySpecifier*) = 0;
+    virtual void VisitAttribute(Attribute*) = 0;
+    virtual void VisitAttributeSection(AttributeSection*) = 0;
+    virtual void VisitComposedType(ComposedType*) = 0;
+    virtual void VisitCastExpression(CastExpression*) = 0;
+    virtual void VisitAsExpression(AsExpression*) = 0;
+    virtual void VisitIsExpression(IsExpression*) = 0;
+    virtual void VisitTypeReferenceExpression(TypeReferenceExpression*) = 0;
+    virtual void VisitTypeOfExpression(TypeOfExpression*) = 0;
+    virtual void VisitDefaultValueExpression(DefaultValueExpression*) = 0;
+    virtual void VisitSizeOfExpression(SizeOfExpression*) = 0;
+    virtual void VisitIdentifierExpression(IdentifierExpression*) = 0;
+    virtual void VisitMemberReferenceExpression(MemberReferenceExpression*) = 0;
+    virtual void VisitPointerReferenceExpression(PointerReferenceExpression*) = 0;
+    virtual void VisitInvocationExpression(InvocationExpression*) = 0;
+    virtual void VisitIndexerExpression(IndexerExpression*) = 0;
+    virtual void VisitArrayInitializerExpression(ArrayInitializerExpression*) = 0;
+    virtual void VisitObjectCreateExpression(ObjectCreateExpression*) = 0;
+    virtual void VisitArrayCreateExpression(ArrayCreateExpression*) = 0;
+    virtual void VisitTupleExpression(TupleExpression*) = 0;
+    virtual void VisitNamedExpression(NamedExpression*) = 0;
+    virtual void VisitNamedArgumentExpression(NamedArgumentExpression*) = 0;
+    virtual void VisitErrorExpression(ErrorExpression*) = 0;
+    virtual void VisitOutVarDeclarationExpression(OutVarDeclarationExpression*) = 0;
+    virtual void VisitWithInitializerExpression(WithInitializerExpression*) = 0;
+    virtual void VisitUndocumentedExpression(UndocumentedExpression*) = 0;
+    virtual void VisitStackAllocExpression(StackAllocExpression*) = 0;
+    virtual void VisitContinueStatement(ContinueStatement*) = 0;
+    virtual void VisitBreakStatement(BreakStatement*) = 0;
+    virtual void VisitYieldBreakStatement(YieldBreakStatement*) = 0;
+    virtual void VisitReturnStatement(ReturnStatement*) = 0;
+    virtual void VisitThrowStatement(ThrowStatement*) = 0;
+    virtual void VisitExpressionStatement(ExpressionStatement*) = 0;
+    virtual void VisitBlockStatement(BlockStatement*) = 0;
+    virtual void VisitGotoStatement(GotoStatement*) = 0;
+    virtual void VisitGotoCaseStatement(GotoCaseStatement*) = 0;
+    virtual void VisitGotoDefaultStatement(GotoDefaultStatement*) = 0;
+    virtual void VisitIfElseStatement(IfElseStatement*) = 0;
+    virtual void VisitWhileStatement(WhileStatement*) = 0;
+    virtual void VisitDoWhileStatement(DoWhileStatement*) = 0;
+    virtual void VisitYieldReturnStatement(YieldReturnStatement*) = 0;
+    virtual void VisitEmptyStatement(EmptyStatement*) = 0;
+    virtual void VisitLabelStatement(LabelStatement*) = 0;
+    virtual void VisitCheckedStatement(CheckedStatement*) = 0;
+    virtual void VisitUncheckedStatement(UncheckedStatement*) = 0;
+    virtual void VisitUnsafeStatement(UnsafeStatement*) = 0;
+    virtual void VisitLockStatement(LockStatement*) = 0;
+    virtual void VisitUsingStatement(UsingStatement*) = 0;
+    virtual void VisitForStatement(ForStatement*) = 0;
+    virtual void VisitSingleVariableDesignation(SingleVariableDesignation*) = 0;
+    virtual void VisitParenthesizedVariableDesignation(ParenthesizedVariableDesignation*) = 0;
+    virtual void VisitForeachStatement(ForeachStatement*) = 0;
+    virtual void VisitVariableInitializer(VariableInitializer*) = 0;
+    virtual void VisitFixedStatement(FixedStatement*) = 0;
+    virtual void VisitCaseLabel(CaseLabel*) = 0;
+    virtual void VisitSwitchSection(SwitchSection*) = 0;
+    virtual void VisitSwitchStatement(SwitchStatement*) = 0;
+    virtual void VisitCatchClause(CatchClause*) = 0;
+    virtual void VisitTryCatchStatement(TryCatchStatement*) = 0;
+    virtual void VisitVariableDeclarationStatement(VariableDeclarationStatement*) = 0;
+    virtual void VisitDestructorDeclaration(DestructorDeclaration*) = 0;
+    virtual void VisitFieldDeclaration(FieldDeclaration*) = 0;
+    virtual void VisitAccessor(Accessor*) = 0;
+    virtual void VisitEnumMemberDeclaration(EnumMemberDeclaration*) = 0;
+    virtual void VisitPropertyDeclaration(PropertyDeclaration*) = 0;
+    virtual void VisitEventDeclaration(EventDeclaration*) = 0;
+    virtual void VisitCustomEventDeclaration(CustomEventDeclaration*) = 0;
+    virtual void VisitParameterDeclaration(ParameterDeclaration*) = 0;
+    virtual void VisitIndexerDeclaration(IndexerDeclaration*) = 0;
+    virtual void VisitOperatorDeclaration(OperatorDeclaration*) = 0;
+    virtual void VisitConstructorInitializer(ConstructorInitializer*) = 0;
+    virtual void VisitConstructorDeclaration(ConstructorDeclaration*) = 0;
+    virtual void VisitTypeParameterDeclaration(TypeParameterDeclaration*) = 0;
+    virtual void VisitConstraint(Constraint*) = 0;
+    virtual void VisitMethodDeclaration(MethodDeclaration*) = 0;
+    virtual void VisitExtensionDeclaration(ExtensionDeclaration*) = 0;
+    virtual void VisitFixedVariableInitializer(FixedVariableInitializer*) = 0;
+    virtual void VisitFixedFieldDeclaration(FixedFieldDeclaration*) = 0;
+    virtual void VisitLocalFunctionDeclarationStatement(LocalFunctionDeclarationStatement*) = 0;
+    virtual void VisitComment(Comment*) = 0;
+    virtual void VisitExternAliasDeclaration(ExternAliasDeclaration*) = 0;
+    virtual void VisitUsingDeclaration(UsingDeclaration*) = 0;
+    virtual void VisitUsingAliasDeclaration(UsingAliasDeclaration*) = 0;
+    virtual void VisitTupleTypeElement(TupleTypeElement*) = 0;
+    virtual void VisitTupleType(TupleAstType*) = 0;
+    virtual void VisitInvocationType(InvocationAstType*) = 0;
+    virtual void VisitFunctionPointerType(FunctionPointerAstType*) = 0;
+    virtual void VisitDelegateDeclaration(DelegateDeclaration*) = 0;
+    virtual void VisitTypeDeclaration(TypeDeclaration*) = 0;
+    virtual void VisitNamespaceDeclaration(NamespaceDeclaration*) = 0;
+    virtual void VisitPreProcessorDirective(PreProcessorDirective*) = 0;
+    virtual void VisitDocumentationReference(DocumentationReference*) = 0;
+    virtual void VisitDeclarationExpression(DeclarationExpression*) = 0;
+    virtual void VisitAnonymousTypeCreateExpression(AnonymousTypeCreateExpression*) = 0;
+    virtual void VisitLambdaExpression(LambdaExpression*) = 0;
+    virtual void VisitAnonymousMethodExpression(AnonymousMethodExpression*) = 0;
+    virtual void VisitSwitchExpressionSection(SwitchExpressionSection*) = 0;
+    virtual void VisitSwitchExpression(SwitchExpression*) = 0;
+    virtual void VisitRecursivePatternExpression(RecursivePatternExpression*) = 0;
+    virtual void VisitInterpolation(Interpolation*) = 0;
+    virtual void VisitInterpolatedStringText(InterpolatedStringText*) = 0;
+    virtual void VisitInterpolatedStringExpression(InterpolatedStringExpression*) = 0;
+    virtual void VisitQueryOrdering(QueryOrdering*) = 0;
+    virtual void VisitQueryExpression(QueryExpression*) = 0;
+    virtual void VisitQueryWhereClause(QueryWhereClause*) = 0;
+    virtual void VisitQuerySelectClause(QuerySelectClause*) = 0;
+    virtual void VisitQueryOrderClause(QueryOrderClause*) = 0;
+    virtual void VisitQueryLetClause(QueryLetClause*) = 0;
+    virtual void VisitQueryGroupClause(QueryGroupClause*) = 0;
+    virtual void VisitQueryFromClause(QueryFromClause*) = 0;
+    virtual void VisitQueryContinuationClause(QueryContinuationClause*) = 0;
+    virtual void VisitQueryJoinClause(QueryJoinClause*) = 0;
+    // `SyntaxTree` -- the root compilation_unit node (the class name does not end in "AstType",
+    // so the generator's visit-method-name default yields `VisitSyntaxTree`).
+    virtual void VisitSyntaxTree(SyntaxTree*) = 0;
+
+    // The C# generator's `VisitPatternPlaceholder(AstNode placeholder, Pattern pattern)`
+    // (one shared arm, declared on every generated visitor rather than per concrete node):
+    // the dispatch target of a `PatternPlaceholder`'s `AcceptVisitor`. `placeholder` is the
+    // wrapping node (always an `AstNode`), `pattern` the pattern it wraps. `DepthFirstAstVisitor`
+    // supplies the default `VisitChildren(placeholder)` (the placeholder has no AST children),
+    // and `CSharpOutputVisitor` renders the node span (the pattern-rendering `VisitNodeInPattern`
+    // helper is deferred).
+    virtual void VisitPatternPlaceholder(AstNode* placeholder, PatternMatching::Pattern& pattern) = 0;
+};
+
+} // namespace ILSpy::Decompiler::CSharp::Syntax
+
+#endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_IASTVISITOR_HPP

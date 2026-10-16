@@ -1,0 +1,161 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+// to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+// Block: a basic block -- a list of instructions plus a FinalInstruction that is
+// an unconditional control flow (Branch/Leave/etc.). Children are the instruction
+// list (slots 0..n-1) followed by the final (slot n). Every block must end in
+// unconditional control flow; fall-through never survives the front end.
+
+#pragma once
+
+#include "Decompiler/IL/ILInstruction.hpp"
+#include "Decompiler/IL/BlockKind.hpp"
+
+#include <cassert>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace ILSpy::Decompiler::IL {
+
+class Block : public ILInstruction {
+public:
+    // The C# `public static ILInstruction? GetContainingStatement(ILInstruction
+    // inst)` (Block.cs): the node whose parent is a ControlFlow-kind block --
+    // the C# `curr.Parent is Block { Kind: BlockKind.ControlFlow }` walk.
+    // Null when inst is detached.
+    static ILInstruction* GetContainingStatement(ILInstruction* inst) {
+        ILInstruction* curr = inst;
+        while (curr != nullptr) {
+            if (curr->Parent != nullptr) {
+                if (auto* block = dynamic_cast<Block*>(curr->Parent)) {
+                    if (block->Kind == BlockKind::ControlFlow) return curr;
+                }
+            }
+            curr = curr->Parent;
+        }
+        return nullptr;
+    }
+    std::vector<std::unique_ptr<ILInstruction>> Instructions;
+    std::unique_ptr<ILInstruction> FinalInstruction;
+    // What this block models beyond plain control flow (ControlFlow by default;
+    // InterpolatedString for a C# 10/.NET 6 $"..." block synthesized by
+    // InterpolatedStringTransform). Mirrors the C# Block.Kind; the back end
+    // switches on it to render initializer/interpolated-string blocks as the
+    // matching C# construct instead of a braced statement list.
+    BlockKind Kind = BlockKind::ControlFlow;
+    // The IL offset this block starts at (set by the IL reader). The C# carries
+    // this via the node's ILRange; the BlockBuilder needs it to sort blocks and
+    // assign them to nested containers.
+    std::uint32_t StartILOffset = 0;
+    // Number of Branch edges targeting this block; computed by
+    // RecomputeIncomingEdgeCounts and maintained by control-flow transforms
+    // (Block.IncomingEdgeCount in the C#).
+    int IncomingEdgeCount = 0;
+
+    Block() : ILInstruction(OpCode::Block) {}
+    InstructionFlags DirectFlags() const override { return InstructionFlags::None; }
+    StackType ResultType() const override { return StackType::Void; }
+
+    // The C# `public string Label` (Block.cs line 257): the block's name --
+    // DisassemblerHelpers.OffsetToString(StartILOffset). Defined out-of-line in
+    // Block.cpp (the Disassembler include is not wanted in this header).
+    std::string Label() const;
+
+    // The C# `public bool MatchInlineAssignBlock(out CallInstruction? call, out
+    // ILInstruction? value)` (Block.cs lines 436-452): a BlockKind.CallInlineAssign
+    // block holding a single setter call whose last argument is an
+    // `stloc tmp(value)` with a single load, followed by `ldloc tmp`. Answers the
+    // setter call and the extracted assigned value. Defined out-of-line in
+    // Block.cpp (its body calls the PatternMatching.hpp matchers).
+    bool MatchInlineAssignBlock(ILInstruction*& call, ILInstruction*& value) const;
+
+    int ChildCount() const override {
+        return static_cast<int>(Instructions.size()) + (FinalInstruction ? 1 : 0);
+    }
+    ILInstruction* GetChild(int i) const override {
+        if (i >= 0 && i < static_cast<int>(Instructions.size())) return Instructions[i].get();
+        if (i == static_cast<int>(Instructions.size()) && FinalInstruction) return FinalInstruction.get();
+        return nullptr;
+    }
+
+    // Append a non-final instruction (the caller must still set a final).
+    void Add(std::unique_ptr<ILInstruction> inst) {
+        if (inst) { inst->Parent = this; inst->ChildIndex = static_cast<int>(Instructions.size()); }
+        Instructions.push_back(std::move(inst));
+        // If a final was already set, it moved down a slot.
+        if (FinalInstruction) FinalInstruction->ChildIndex = static_cast<int>(Instructions.size());
+    }
+    // Set the block's final control-flow instruction.
+    void SetFinal(std::unique_ptr<ILInstruction> inst) {
+        if (inst) { inst->Parent = this; inst->ChildIndex = static_cast<int>(Instructions.size()); }
+        FinalInstruction = std::move(inst);
+    }
+    // Insert a non-final instruction at index i (shifting later instructions
+    // down) and keep every child's ChildIndex consistent. Mirrors the C#
+    // `block.Instructions.Insert(i, inst)`.
+    void InsertAt(std::size_t i, std::unique_ptr<ILInstruction> inst) {
+        if (i > Instructions.size()) i = Instructions.size();
+        if (inst) { inst->Parent = this; inst->ChildIndex = static_cast<int>(i); }
+        Instructions.insert(Instructions.begin() + i, std::move(inst));
+        RenumberChildren();
+    }
+    // Erase the instruction at index i (destroying it) and keep every child's
+    // ChildIndex consistent (the final sits behind the instruction list in
+    // the child layout, so it moves down by one too).
+    void RemoveInstructionAt(std::size_t i) {
+        Instructions.erase(Instructions.begin() + i);
+        RenumberChildren();
+    }
+    // Restore ChildIndex = position for all children after direct
+    // Instructions mutation (erase/clear/push_back).
+    void RenumberChildren() {
+        for (std::size_t i = 0; i < Instructions.size(); ++i)
+            Instructions[i]->ChildIndex = static_cast<int>(i);
+        if (FinalInstruction) FinalInstruction->ChildIndex = static_cast<int>(Instructions.size());
+    }
+
+    void WriteTo(std::string& out) const override {
+        out += "Block {\n";
+        for (auto& i : Instructions) {
+            out += "    ";
+            if (i) i->WriteTo(out); else out += "(null)";
+            out += '\n';
+        }
+        out += "    ";
+        if (FinalInstruction) FinalInstruction->WriteTo(out); else out += "(no final)";
+        out += "\n  }";
+    }
+protected:
+    std::unique_ptr<ILInstruction> SetChildRaw(int i, std::unique_ptr<ILInstruction> n) override {
+        if (i >= 0 && i < static_cast<int>(Instructions.size())) {
+            auto old = std::move(Instructions[i]);
+            Instructions[i] = std::move(n);
+            return old;
+        }
+        if (i == static_cast<int>(Instructions.size())) {
+            auto old = std::move(FinalInstruction);
+            FinalInstruction = std::move(n);
+            return old;
+        }
+        return n;  // out of range: hand it back untouched
+    }
+};
+
+} // namespace ILSpy::Decompiler::IL

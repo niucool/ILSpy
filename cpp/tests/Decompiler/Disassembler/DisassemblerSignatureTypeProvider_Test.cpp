@@ -1,0 +1,1053 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+// to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+// PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+// HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+// CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+// OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+// Tests for the DisassemblerSignatureTypeProvider port
+// (cpp/Decompiler/Disassembler/DisassemblerSignatureTypeProvider.{hpp,cpp}), the
+// C++-only SRM gap fill it instantiates (cpp/Decompiler/Metadata/
+// SignatureTypeProvider.{hpp,cpp} -- the ISignatureTypeProvider contract +
+// SignatureDecoder-style blob walker), and the minimal EntityHandle.WriteTo
+// family (cpp/Decompiler/IL/InstructionOutputExtensions.{hpp,cpp}) the
+// provider's TypeDef/TypeRef arms and the ExceptionRegion catch-type writer
+// consume. The real-assembly fixtures are mscorlib (self-contained types) and
+// the .NET Framework System.dll (whose TypeRef rows carry AssemblyRef scopes,
+// the `[mscorlib]` prefix fixture). Expected spellings follow the C# bodies
+// verbatim (the ILDasm IL text).
+
+#include "Decompiler/Disassembler/DisassemblerSignatureTypeProvider.hpp"
+#include <cstdlib>
+#include "Decompiler/IL/InstructionOutputExtensions.hpp"
+#include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/Metadata/MetadataGenericContext.hpp"
+#include "Decompiler/Metadata/SRMExtensions.hpp"
+#include "Decompiler/Output/PlainTextOutput.hpp"
+#include "TestFixtures/SsSynth.hpp"
+
+#include <gtest/gtest.h>
+
+#include <cstdint>
+#include <memory>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+using namespace ILSpy::Decompiler;
+using Disassembler::DisassemblerSignatureTypeProvider;
+using Disassembler::ILNameSyntax;
+using Metadata::ArrayShape;
+using Metadata::MetadataFile;
+using Metadata::MetadataGenericContext;
+using Metadata::MethodSignatureT;
+using Metadata::PrimitiveTypeCode;
+using Metadata::SignatureCallingConvention;
+using Metadata::SignatureHeader;
+using Metadata::SignatureTypeWriter;
+using Output::PlainTextOutput;
+
+namespace {
+
+#if defined(_WIN32)
+const char* MscorlibPath() { return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll"; }
+const char* SystemDllPath() {
+    return "C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\System\\"
+           "v4.0_4.0.0.0__b77a5c561934e089\\System.dll";
+}
+#else
+const char* MscorlibPath() {
+    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB"); env != nullptr)
+        return env;
+    return "/usr/lib/mono/4.5/mscorlib.dll";
+}
+const char* SystemDllPath() { return "/usr/lib/mono/4.5/System.dll"; }
+#endif
+
+// Render through the real writer stack (PlainTextOutput over a stringstream).
+std::string Render(const std::function<void(Output::ITextOutput&)>& body) {
+    std::ostringstream stream;
+    PlainTextOutput output(stream);
+    body(output);
+    return stream.str();
+}
+
+std::string RenderWriter(const MetadataFile& module, const SignatureTypeWriter& writer) {
+    return Render([&](Output::ITextOutput& out) {
+        DisassemblerSignatureTypeProvider provider(module, out);
+        // The C# GetPrimitiveType et al. return writers that ignore the
+        // syntax; invoke through the provider-consistent entry.
+        writer(ILNameSyntax::Signature);
+    });
+}
+
+// A provider-bound writer built from a unit provider callback (mirrors how
+// the C# tests invoke individual Get* methods).
+SignatureTypeWriter BindProvider(const MetadataFile& module, Output::ITextOutput& out,
+    const std::function<SignatureTypeWriter(DisassemblerSignatureTypeProvider&)>& call) {
+    DisassemblerSignatureTypeProvider provider(module, out);
+    return call(provider);
+}
+
+// A pre-rendered provider callback (the single-provider pattern for Get*
+// method assertions): build the provider over a module, invoke the Get*
+// member, render the returned writer.
+std::string RenderProviderCall(const MetadataFile& module,
+    const std::function<SignatureTypeWriter(DisassemblerSignatureTypeProvider&)>& call) {
+    std::ostringstream stream;
+    PlainTextOutput output(stream);
+    DisassemblerSignatureTypeProvider provider(module, output);
+    SignatureTypeWriter writer = call(provider);
+    writer(ILNameSyntax::Signature);
+    return stream.str();
+}
+
+// Find a TypeDef row by (namespace, name); 0 when absent.
+std::uint32_t FindTypeDefToken(const MetadataFile& f, std::string_view ns, std::string_view name) {
+    std::uint32_t count = f.TypeDefCount();
+    for (std::uint32_t row = 1; row <= count; row++) {
+        std::uint32_t token = (0x02u << 24) | row;
+        auto info = f.GetTypeDefNameInfo(token);
+        if (info && info->Name == name && info->Namespace == ns)
+            return token;
+    }
+    return 0;
+}
+
+// Find a TypeRef row by (namespace, name); 0 when absent.
+std::uint32_t FindTypeRefToken(const MetadataFile& f, std::string_view ns, std::string_view name) {
+    std::uint32_t count = f.TypeRefCount();
+    for (std::uint32_t row = 1; row <= count; row++) {
+        std::uint32_t token = (0x01u << 24) | row;
+        auto info = f.GetTypeRefNameInfo(token);
+        if (info && info->Name == name && info->Namespace == ns)
+            return token;
+    }
+    return 0;
+}
+
+// Find the TypeSpec row whose WriteTo rendering equals `expected` (the
+// data-driven fixture for a real generic instantiation); 0 when absent.
+std::uint32_t FindTypeSpecByRendering(const MetadataFile& f, std::string_view expected) {
+    // The TypeSpec table's row count via a scan bound: GetTypeSpecSignatureBlob
+    // rejects out-of-range rows, so scan to the first nullopt row.
+    for (std::uint32_t row = 1;; row++) {
+        std::uint32_t token = (0x1Bu << 24) | row;
+        if (!f.GetTypeSpecSignatureBlob(token))
+            break;
+        std::string rendered = Render([&](Output::ITextOutput& out) {
+            IL::WriteTo(f, out, MetadataGenericContext{}, token);
+        });
+        if (rendered == expected)
+            return token;
+    }
+    return 0;
+}
+
+// The mscorlib TypeSpec fixture's ILAsm rendering: a GENERICINST of the
+// IEnumerable`1 TypeDef -- the IL name keeps the arity suffix (the
+// FullTypeName reflection form), and an unnamed generic context renders the
+// type parameter positionally (`!0`).
+constexpr const char* kEnumerableSpecRendering =
+    "class System.Collections.Generic.IEnumerable`1<!0>";
+
+// The ECMA-335 II.23.2 compressed-unsigned encoding (the 1/2/4-byte forms),
+// for building synthetic signature blobs in the tests.
+std::vector<std::uint8_t> CompressedUint(std::uint32_t v) {
+    if (v < 0x80) return {static_cast<std::uint8_t>(v)};
+    if (v < 0x4000)
+        return {static_cast<std::uint8_t>((v >> 8) | 0x80),
+                static_cast<std::uint8_t>(v & 0xFF)};
+    return {static_cast<std::uint8_t>((v >> 24) | 0xC0),
+            static_cast<std::uint8_t>((v >> 16) & 0xFF),
+            static_cast<std::uint8_t>((v >> 8) & 0xFF),
+            static_cast<std::uint8_t>(v & 0xFF)};
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// The provider's primitive spellings (the C# GetPrimitiveType switch).
+// ---------------------------------------------------------------------------
+
+TEST(DisassemblerSignatureTypeProviderTest, PrimitiveSpellingsMatchIlDasm) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) { return p.GetPrimitiveType(PrimitiveTypeCode::SByte); }), "int8");
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) { return p.GetPrimitiveType(PrimitiveTypeCode::Int16); }), "int16");
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) { return p.GetPrimitiveType(PrimitiveTypeCode::Int32); }), "int32");
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) { return p.GetPrimitiveType(PrimitiveTypeCode::Int64); }), "int64");
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) { return p.GetPrimitiveType(PrimitiveTypeCode::Byte); }), "uint8");
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) { return p.GetPrimitiveType(PrimitiveTypeCode::UInt16); }), "uint16");
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) { return p.GetPrimitiveType(PrimitiveTypeCode::UInt32); }), "uint32");
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) { return p.GetPrimitiveType(PrimitiveTypeCode::UInt64); }), "uint64");
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) { return p.GetPrimitiveType(PrimitiveTypeCode::Single); }), "float32");
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) { return p.GetPrimitiveType(PrimitiveTypeCode::Double); }), "float64");
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) { return p.GetPrimitiveType(PrimitiveTypeCode::Void); }), "void");
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) { return p.GetPrimitiveType(PrimitiveTypeCode::Boolean); }), "bool");
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) { return p.GetPrimitiveType(PrimitiveTypeCode::String); }), "string");
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) { return p.GetPrimitiveType(PrimitiveTypeCode::Char); }), "char");
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) { return p.GetPrimitiveType(PrimitiveTypeCode::Object); }), "object");
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) { return p.GetPrimitiveType(PrimitiveTypeCode::IntPtr); }), "native int");
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) { return p.GetPrimitiveType(PrimitiveTypeCode::UIntPtr); }), "native uint");
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) { return p.GetPrimitiveType(PrimitiveTypeCode::TypedReference); }), "typedref");
+}
+
+TEST(DisassemblerSignatureTypeProviderTest, UnknownPrimitiveThrows) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // A code outside the C# switch (the port's enum carries no such value, so
+    // cast a fake byte through the underlying type).
+    auto bogus = static_cast<PrimitiveTypeCode>(0xEE);
+    EXPECT_THROW((void)RenderProviderCall(f, [&](auto& p) { return p.GetPrimitiveType(bogus); }),
+        std::out_of_range);
+}
+
+// ---------------------------------------------------------------------------
+// Wrapper writers (SZArray / Ptr / ByRef / Pinned / Modified).
+// ---------------------------------------------------------------------------
+
+TEST(DisassemblerSignatureTypeProviderTest, SzArrayWrapsElementWithBrackets) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) {
+                  return p.GetSZArrayType(p.GetPrimitiveType(PrimitiveTypeCode::Int32));
+              }),
+        "int32[]");
+}
+
+TEST(DisassemblerSignatureTypeProviderTest, PointerAndByRefAppendTheirTokens) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) {
+                  return p.GetPointerType(p.GetPrimitiveType(PrimitiveTypeCode::Int32));
+              }),
+        "int32*");
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) {
+                  return p.GetByReferenceType(p.GetPrimitiveType(PrimitiveTypeCode::Int32));
+              }),
+        "int32&");
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) {
+                  return p.GetPinnedType(p.GetPrimitiveType(PrimitiveTypeCode::Int32));
+              }),
+        "int32 pinned");
+}
+
+TEST(DisassemblerSignatureTypeProviderTest, ModifiedTypeRendersModreqModopt) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) {
+                  return p.GetModifiedType(p.GetPrimitiveType(PrimitiveTypeCode::Int32),
+                      p.GetPrimitiveType(PrimitiveTypeCode::Boolean), true);
+              }),
+        "bool modreq(int32)");
+    EXPECT_EQ(RenderProviderCall(f, [](auto& p) {
+                  return p.GetModifiedType(p.GetPrimitiveType(PrimitiveTypeCode::Int32),
+                      p.GetPrimitiveType(PrimitiveTypeCode::Boolean), false);
+              }),
+        "bool modopt(int32)");
+}
+
+TEST(DisassemblerSignatureTypeProviderTest, ArrayShapeRendersBoundsAndSizes) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // rank 2, sizes {3,4}, no lower bounds -> the C# writes the lower bound
+    // ONLY when the row has one, so the rendering is "[...2, ...3]".
+    ArrayShape shape;
+    shape.Rank = 2;
+    shape.Sizes = {3, 4};
+    EXPECT_EQ(RenderProviderCall(f, [&](auto& p) {
+                  return p.GetArrayType(p.GetPrimitiveType(PrimitiveTypeCode::Int32), shape);
+              }),
+        "int32[...2, ...3]");
+    // rank 2 with explicit zero lower bounds and sizes {3,4} -> "[0...2, 0...3]".
+    ArrayShape bounded;
+    bounded.Rank = 2;
+    bounded.Sizes = {3, 4};
+    bounded.LowerBounds = {0, 0};
+    EXPECT_EQ(RenderProviderCall(f, [&](auto& p) {
+                  return p.GetArrayType(p.GetPrimitiveType(PrimitiveTypeCode::Int32), bounded);
+              }),
+        "int32[0...2, 0...3]");
+    // rank 1, lower bound -1, size 5 -> "[-1...3]".
+    ArrayShape offset;
+    offset.Rank = 1;
+    offset.LowerBounds = {-1};
+    offset.Sizes = {5};
+    EXPECT_EQ(RenderProviderCall(f, [&](auto& p) {
+                  return p.GetArrayType(p.GetPrimitiveType(PrimitiveTypeCode::Int32), offset);
+              }),
+        "int32[-1...3]");
+}
+
+TEST(DisassemblerSignatureTypeProviderTest, FunctionPointerRendersMethodHeader) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    MethodSignatureT sig;
+    sig.Header = SignatureHeader::Decode(0x00);  // default convention, no this
+    sig.ReturnType = [](ILNameSyntax) {};
+    // The unit test drives the writer through a provider-rendered FnPtr only
+    // for the header text; the real FnPtr assembly needs a provider-bound
+    // writer, so assert via GetFunctionPointerType over a signature whose
+    // return type is int32 and params are (int32, int32).
+    std::ostringstream stream;
+    PlainTextOutput output(stream);
+    DisassemblerSignatureTypeProvider provider(f, output);
+    Metadata::SignatureTypeWriter int32 =
+        provider.GetPrimitiveType(PrimitiveTypeCode::Int32);
+    sig.ReturnType = int32;
+    sig.ParameterTypes = {int32, int32};
+    provider.GetFunctionPointerType(sig)(ILNameSyntax::Signature);
+    // The bare calling convention (0x00) writes no header prefix; a hasThis
+    // FnPtr sig would render "method instance int32 *(...)" (the header
+    // writer's IsInstance arm).
+    EXPECT_EQ(stream.str(), "method int32 *(int32, int32)");
+}
+
+// ---------------------------------------------------------------------------
+// Type-definition / reference arms over real mscorlib rows.
+// ---------------------------------------------------------------------------
+
+TEST(DisassemblerSignatureTypeProviderTest, GetTypeFromDefinitionRendersFullTypeName) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t objectToken = FindTypeDefToken(f, "System", "Object");
+    ASSERT_NE(objectToken, 0u);
+    // rawTypeKind 0x12 -> "class " prefix (the C# switch).
+    EXPECT_EQ(RenderProviderCall(f, [&](auto& p) {
+                  return p.GetTypeFromDefinition(objectToken, 0x12);
+              }),
+        "class System.Object");
+    // rawTypeKind 0x00 -> no prefix.
+    EXPECT_EQ(RenderProviderCall(f, [&](auto& p) {
+                  return p.GetTypeFromDefinition(objectToken, 0x00);
+              }),
+        "System.Object");
+}
+
+TEST(DisassemblerSignatureTypeProviderTest, GetTypeFromDefinitionRejectsUnknownRawTypeKind) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t objectToken = FindTypeDefToken(f, "System", "Object");
+    ASSERT_NE(objectToken, 0u);
+    EXPECT_THROW((void)RenderProviderCall(f, [&](auto& p) {
+                     return p.GetTypeFromDefinition(objectToken, 0x99);
+                 }),
+        std::logic_error);
+}
+
+TEST(DisassemblerSignatureTypeProviderTest, GetTypeFromReferenceRendersScopePrefix) {
+    MetadataFile f(SystemDllPath());
+    ASSERT_TRUE(f.IsValid());
+    // System.dll's TypeRef to System.String resolves into the mscorlib
+    // assembly, so the ILAsm rendering carries the [mscorlib] prefix.
+    std::uint32_t stringToken = FindTypeRefToken(f, "System", "String");
+    ASSERT_NE(stringToken, 0u);
+    EXPECT_EQ(RenderProviderCall(f, [&](auto& p) {
+                  return p.GetTypeFromReference(stringToken, 0x12);
+              }),
+        "class [mscorlib]System.String");
+}
+
+// ---------------------------------------------------------------------------
+// Generic type/method parameters over real mscorlib GenericParam rows.
+// ---------------------------------------------------------------------------
+
+TEST(DisassemblerSignatureTypeProviderTest, GenericTypeParameterUsesRowNameWhenNamed) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t listToken = FindTypeDefToken(f, "System.Collections.Generic", "List`1");
+    ASSERT_NE(listToken, 0u);
+    MetadataGenericContext context = MetadataGenericContext::ForType(listToken, f);
+    // The C# "!T" form (the named parameter) at the default syntax.
+    EXPECT_EQ(RenderProviderCall(f, [&](auto& p) {
+                  return p.GetGenericTypeParameter(context, 0);
+              }),
+        "!T");
+    // The C# "!0" form at the SignatureNoNamedTypeParameters syntax (the
+    // WriteTypeParameter bare-index arm).
+    std::ostringstream stream;
+    PlainTextOutput output(stream);
+    DisassemblerSignatureTypeProvider provider(f, output);
+    provider.GetGenericTypeParameter(context, 0)(ILNameSyntax::SignatureNoNamedTypeParameters);
+    EXPECT_EQ(stream.str(), "!0");
+}
+
+TEST(DisassemblerSignatureTypeProviderTest, GenericMethodParameterUsesDoubleBang) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // Array.Sort<T>(T[]) carries a method generic parameter named T.
+    std::uint32_t arrayToken = FindTypeDefToken(f, "System", "Array");
+    ASSERT_NE(arrayToken, 0u);
+    // Find a method on Array with MVAR rows: scan methods for one with
+    // GetGenericParameters non-empty (the provider path is context-driven,
+    // so any such method works).
+    std::uint32_t found = 0;
+    for (const auto& m : f.GetMethods(arrayToken)) {
+        auto gps = f.GetGenericParameters(m.Token);
+        if (!gps.empty()) {
+            found = m.Token;
+            break;
+        }
+    }
+    ASSERT_NE(found, 0u) << "System.Array must carry at least one generic method";
+    MetadataGenericContext context = MetadataGenericContext::ForMethod(found, f);
+    EXPECT_EQ(RenderProviderCall(f, [&](auto& p) {
+                  return p.GetGenericMethodParameter(context, 0);
+              }),
+        "!!T");
+}
+
+// ---------------------------------------------------------------------------
+// EntityHandle.WriteTo (IL/InstructionOutputExtensions).
+// ---------------------------------------------------------------------------
+
+TEST(InstructionOutputExtensionsTest, NilTokenRendersNilMarker) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    EXPECT_EQ(Render([&](Output::ITextOutput& out) {
+                  IL::WriteTo(f, out, MetadataGenericContext{}, 0);
+              }),
+        "<nil>");
+}
+
+TEST(InstructionOutputExtensionsTest, TypeDefinitionArmRendersName) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t objectToken = FindTypeDefToken(f, "System", "Object");
+    ASSERT_NE(objectToken, 0u);
+    EXPECT_EQ(Render([&](Output::ITextOutput& out) {
+                  IL::WriteTo(f, out, MetadataGenericContext{}, objectToken);
+              }),
+        "System.Object");
+}
+
+TEST(InstructionOutputExtensionsTest, TypeReferenceArmRendersAssemblyPrefix) {
+    MetadataFile f(SystemDllPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringToken = FindTypeRefToken(f, "System", "String");
+    ASSERT_NE(stringToken, 0u);
+    EXPECT_EQ(Render([&](Output::ITextOutput& out) {
+                  IL::WriteTo(f, out, MetadataGenericContext{}, stringToken);
+              }),
+        "[mscorlib]System.String");
+}
+
+TEST(InstructionOutputExtensionsTest, TypeSpecificationArmDecodesThroughProvider) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // The classic generic-interface instantiation TypeSpec: mscorlib carries
+    // a `System.Collections.Generic.IEnumerable`1<!0>` GENERICINST (the ILDasm
+    // spelling for an unnamed generic context). The scan finds the row by
+    // rendering, so the fixture is independent of table-row numbering.
+    std::uint32_t token = FindTypeSpecByRendering(f, kEnumerableSpecRendering);
+    ASSERT_NE(token, 0u)
+        << "mscorlib must carry the IEnumerable`1<!0> TypeSpec";
+    EXPECT_EQ(Render([&](Output::ITextOutput& out) {
+                  IL::WriteTo(f, out, MetadataGenericContext{}, token);
+              }),
+        kEnumerableSpecRendering);
+}
+
+TEST(InstructionOutputExtensionsTest, TypeSpecificationArmRendersNamedTypeParameter) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // The same TypeSpec decoded under a named generic context (List`1) names
+    // the type parameter from its GenericParam row.
+    std::uint32_t enumerableToken = FindTypeSpecByRendering(f, kEnumerableSpecRendering);
+    ASSERT_NE(enumerableToken, 0u);
+    std::uint32_t listToken = FindTypeDefToken(f, "System.Collections.Generic", "List`1");
+    ASSERT_NE(listToken, 0u);
+    MetadataGenericContext context = MetadataGenericContext::ForType(listToken, f);
+    EXPECT_EQ(Render([&](Output::ITextOutput& out) {
+                  IL::WriteTo(f, out, context, enumerableToken);
+              }),
+        "class System.Collections.Generic.IEnumerable`1<!T>");
+}
+
+TEST(InstructionOutputExtensionsTest, UnknownHandleKindRendersAtToken) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // A member-table token (MethodDef) hits the C# default arm in the port
+    // (the member arms are deferred with the MethodBodyDisassembler region).
+    std::uint32_t objectToken = FindTypeDefToken(f, "System", "Object");
+    ASSERT_NE(objectToken, 0u);
+    // An AssemblyRef row (table 0x23) has no WriteTo arm in the C# either --
+    // the default `@{token:X8}` spelling. (MethodDef now has its arm.)
+    std::uint32_t assemblyRefToken = 0x23000001u;
+    EXPECT_EQ(Render([&](Output::ITextOutput& out) {
+                  IL::WriteTo(f, out, MetadataGenericContext{}, assemblyRefToken);
+              }),
+        "@" + [&] {
+            char buf[16];
+            std::snprintf(buf, sizeof(buf), "%08X", static_cast<unsigned>(assemblyRefToken));
+            return std::string(buf);
+        }());
+}
+
+// ---------------------------------------------------------------------------
+// The SignatureHeader writer + WriteParameterList + ToILSyntax.
+// ---------------------------------------------------------------------------
+
+TEST(InstructionOutputExtensionsTest, SignatureHeaderPrefixes) {
+    EXPECT_EQ(Render([](Output::ITextOutput& out) {
+                  IL::WriteTo(SignatureHeader::Decode(0x60), out);  // explicit this
+              }),
+        "instance explicit ");
+    EXPECT_EQ(Render([](Output::ITextOutput& out) {
+                  IL::WriteTo(SignatureHeader::Decode(0x20), out);  // has this
+              }),
+        "instance ");
+    EXPECT_EQ(Render([](Output::ITextOutput& out) {
+                  IL::WriteTo(SignatureHeader::Decode(0x05), out);  // vararg
+              }),
+        "vararg ");
+    EXPECT_EQ(Render([](Output::ITextOutput& out) {
+                  IL::WriteTo(SignatureHeader::Decode(0x00), out);  // default
+              }),
+        "");
+}
+
+TEST(SRMExtensionsToILSyntaxTest, ConventionSpellings) {
+    EXPECT_EQ(Metadata::ToILSyntax(SignatureCallingConvention::Default), "default");
+    EXPECT_EQ(Metadata::ToILSyntax(SignatureCallingConvention::CDecl), "unmanaged cdecl");
+    EXPECT_EQ(Metadata::ToILSyntax(SignatureCallingConvention::StdCall), "unmanaged stdcall");
+    EXPECT_EQ(Metadata::ToILSyntax(SignatureCallingConvention::ThisCall), "unmanaged thiscall");
+    EXPECT_EQ(Metadata::ToILSyntax(SignatureCallingConvention::FastCall), "unmanaged fastcall");
+    EXPECT_EQ(Metadata::ToILSyntax(SignatureCallingConvention::VarArgs), "vararg");
+    EXPECT_EQ(Metadata::ToILSyntax(SignatureCallingConvention::Unmanaged), "unmanaged");
+}
+
+// ---------------------------------------------------------------------------
+// The provider-driven blob walker (SignatureTypeProviderDecoder) end-to-end.
+// ---------------------------------------------------------------------------
+
+TEST(SignatureTypeProviderDecoderTest, SzArrayOfInt32Blob) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // ELEMENT_TYPE_SZARRAY (0x1D) of ELEMENT_TYPE_I4 (0x08).
+    const std::uint8_t blob[] = {0x1D, 0x08};
+    std::ostringstream stream;
+    PlainTextOutput output(stream);
+    DisassemblerSignatureTypeProvider provider(f, output);
+    Metadata::SignatureTypeProviderDecoder decoder(provider, f);
+    decoder.DecodeType(blob, sizeof(blob), MetadataGenericContext{})(ILNameSyntax::Signature);
+    EXPECT_EQ(stream.str(), "int32[]");
+}
+
+TEST(SignatureTypeProviderDecoderTest, GenericInstantiationBlobThroughWriteTo) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t listToken = FindTypeDefToken(f, "System.Collections.Generic", "List`1");
+    ASSERT_NE(listToken, 0u);
+    // ELEMENT_TYPE_GENERICINST (0x15), CLASS (0x12), List`1 TypeDef coded
+    // index (tag 0), one argument, ELEMENT_TYPE_I4. (mscorlib references its
+    // own types by TypeDef, so there is no List`1 TypeRef to use here.)
+    std::uint32_t coded = ((listToken & 0x00FFFFFFu) << 2) | 0u;  // TypeDef tag
+    std::vector<std::uint8_t> blob = {0x15, 0x12};
+    for (std::uint8_t b : CompressedUint(coded)) blob.push_back(b);
+    blob.push_back(0x01);  // one type argument
+    blob.push_back(0x08);  // ELEMENT_TYPE_I4
+    std::ostringstream stream;
+    PlainTextOutput output(stream);
+    DisassemblerSignatureTypeProvider provider(f, output);
+    Metadata::SignatureTypeProviderDecoder decoder(provider, f);
+    decoder.DecodeType(blob.data(), blob.size(), MetadataGenericContext{})(ILNameSyntax::Signature);
+    EXPECT_EQ(stream.str(), "class System.Collections.Generic.List`1<int32>");
+}
+
+TEST(SignatureTypeProviderDecoderTest, NestedTypeSpecRecursesThroughModuleRead) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // A TypeSpec of a TypeSpec: SZArray (0x1D) wrapping a TypeDefOrRefEncoded
+    // tag-2 row -- the inner TypeSpec's blob decodes through
+    // GetTypeFromSpecification (the pimpl-constrained module read).
+    std::uint32_t innerToken = FindTypeSpecByRendering(f, kEnumerableSpecRendering);
+    ASSERT_NE(innerToken, 0u);
+    std::uint32_t innerRow = innerToken & 0x00FFFFFFu;
+    if (innerRow <= 0x3F) {
+        // single-byte compressed form; a TypeSpec element is CLASS-marked
+        // (ELEMENT_TYPE_CLASS + the tag-2 coded index), per II.23.2.12.
+        std::vector<std::uint8_t> blob = {0x1D, 0x12};
+        for (std::uint8_t b : CompressedUint((innerRow << 2) | 2u)) blob.push_back(b);
+        std::ostringstream stream;
+        PlainTextOutput output(stream);
+        DisassemblerSignatureTypeProvider provider(f, output);
+        Metadata::SignatureTypeProviderDecoder decoder(provider, f);
+        decoder.DecodeType(blob.data(), blob.size(), MetadataGenericContext{})(ILNameSyntax::Signature);
+        EXPECT_EQ(stream.str(), "class System.Collections.Generic.IEnumerable`1<!0>[]");
+    } else {
+        ADD_FAILURE() << "the fixture TypeSpec row exceeded the single-byte coded form";
+    }
+}
+
+TEST(SignatureTypeProviderDecoderTest, MethodSignatureBlobDecodesVarargShape) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // A method signature: DEFAULT|HASTHIS (0x20), 2 params, int32 return,
+    // (int32, int32) params.
+    const std::uint8_t blob[] = {0x20, 0x02, 0x08, 0x08, 0x08};
+    std::ostringstream stream;
+    PlainTextOutput output(stream);
+    DisassemblerSignatureTypeProvider provider(f, output);
+    Metadata::SignatureTypeProviderDecoder decoder(provider, f);
+    MethodSignatureT sig = decoder.DecodeMethodSignature(blob, sizeof(blob), MetadataGenericContext{});
+    EXPECT_EQ(sig.ParameterTypes.size(), 2u);
+    EXPECT_EQ(sig.RequiredParameterCount, 2u);
+    // The header is instance (hasThis, not explicit).
+    EXPECT_TRUE(sig.Header.IsInstance());
+    // Render via WriteParameterList (the C# "(int32, int32)" shape).
+    stream.str("");
+    stream.clear();
+    PlainTextOutput output2(stream);
+    IL::WriteParameterList(output2, sig);
+    EXPECT_EQ(stream.str(), "(int32, int32)");
+}
+
+TEST(SignatureTypeProviderDecoderTest, TruncatedBlobThrows) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // SZArray marker without the element type.
+    const std::uint8_t blob[] = {0x1D};
+    std::ostringstream stream;
+    PlainTextOutput output(stream);
+    DisassemblerSignatureTypeProvider provider(f, output);
+    Metadata::SignatureTypeProviderDecoder decoder(provider, f);
+    EXPECT_THROW((void)decoder.DecodeType(blob, sizeof(blob), MetadataGenericContext{}),
+        std::logic_error);
+}
+
+// The SRM decoders read a signature's semantic parts over a BlobReader and
+// never require the blob to end there -- trailing bytes are silently
+// ignored (the sweep's capa09 row: an obfuscated field signature carried
+// padding after the type and the whole-module --il walk aborted with
+// "trailing bytes after the type"; only the over-read throws, per
+// TruncatedBlobThrows above). Each decode entry tolerates its own trailing
+// bytes.
+TEST(SignatureTypeProviderDecoderTest, TrailingBytesAfterTheTypeAreTolerated) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // SZArray of int32, then two padding bytes.
+    const std::uint8_t typeBlob[] = {0x1D, 0x08, 0x00, 0x00};
+    std::ostringstream stream;
+    PlainTextOutput output(stream);
+    DisassemblerSignatureTypeProvider provider(f, output);
+    Metadata::SignatureTypeProviderDecoder decoder(provider, f);
+    decoder.DecodeType(typeBlob, sizeof(typeBlob),
+        MetadataGenericContext{})(ILNameSyntax::Signature);
+    EXPECT_EQ(stream.str(), "int32[]");
+}
+
+TEST(SignatureTypeProviderDecoderTest, TrailingBytesAfterTheMethodSignatureAreTolerated) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // The vararg-shape blob (see MethodSignatureBlobDecodesVarargShape) plus
+    // one trailing byte.
+    const std::uint8_t blob[] = {0x20, 0x02, 0x08, 0x08, 0x08, 0xFF};
+    std::ostringstream stream;
+    PlainTextOutput output(stream);
+    DisassemblerSignatureTypeProvider provider(f, output);
+    Metadata::SignatureTypeProviderDecoder decoder(provider, f);
+    MethodSignatureT sig = decoder.DecodeMethodSignature(blob, sizeof(blob),
+        MetadataGenericContext{});
+    EXPECT_EQ(sig.ParameterTypes.size(), 2u);
+    EXPECT_EQ(sig.RequiredParameterCount, 2u);
+}
+
+TEST(SignatureTypeProviderDecoderTest, TrailingBytesAfterTheMethodSpecAreTolerated) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // The GENERICINST marker, one type argument (int32), then a trailing
+    // byte.
+    const std::uint8_t blob[] = {0x0A, 0x01, 0x08, 0xFF};
+    std::ostringstream stream;
+    PlainTextOutput output(stream);
+    DisassemblerSignatureTypeProvider provider(f, output);
+    Metadata::SignatureTypeProviderDecoder decoder(provider, f);
+    auto args = decoder.DecodeMethodSpecSignature(blob, sizeof(blob),
+        MetadataGenericContext{});
+    ASSERT_EQ(args.size(), 1u);
+    // The decoded writer is bound to the decoding provider's output stream;
+    // clear it and render the argument through that binding.
+    stream.str("");
+    stream.clear();
+    args[0](ILNameSyntax::Signature);
+    EXPECT_EQ(stream.str(), "int32");
+}
+
+TEST(SignatureTypeProviderDecoderTest, TrailingBytesAfterTheLocalSignatureAreTolerated) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // The LocalVariables kind nibble, one local (int32), then a trailing
+    // byte.
+    const std::uint8_t blob[] = {0x07, 0x01, 0x08, 0xFF};
+    std::ostringstream stream;
+    PlainTextOutput output(stream);
+    DisassemblerSignatureTypeProvider provider(f, output);
+    Metadata::SignatureTypeProviderDecoder decoder(provider, f);
+    auto locals = decoder.DecodeLocalSignature(blob, sizeof(blob),
+        MetadataGenericContext{});
+    ASSERT_EQ(locals.size(), 1u);
+    // The decoded writer is bound to the decoding provider's output stream;
+    // clear it and render the local through that binding.
+    stream.str("");
+    stream.clear();
+    locals[0](ILNameSyntax::Signature);
+    EXPECT_EQ(stream.str(), "int32");
+}
+
+// ---------------------------------------------------------------------------
+// The member-table arms of IL::WriteTo (InstructionOutputExtensions.cs
+// EntityHandle.WriteTo): the MethodDefinition and FieldDefinition arms -- the
+// signature-rendered header/return-type prefix, the declaring-type::name
+// body, the generic-parameter block (constraint flags and rows), and the
+// $PST compiler-controlled spelling. The TypeDef/TypeRef/TypeSpec arms and
+// the earlier InstructionOutputExtensionsTest cases live above.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::uint32_t FindMethodByName(const MetadataFile& f, std::uint32_t typeToken,
+    std::string_view name, std::size_t minGenericParams = 0) {
+    for (const auto& m : f.GetMethods(typeToken)) {
+        if (m.Name != name) continue;
+        if (minGenericParams > 0 && f.GetGenericParameters(m.Token).size() < minGenericParams)
+            continue;
+        return m.Token;
+    }
+    return 0;
+}
+
+std::uint32_t FindFieldByName(const MetadataFile& f, std::uint32_t typeToken,
+    std::string_view name) {
+    for (const auto& fd : f.GetFields(typeToken)) {
+        if (fd.Name == name) return fd.Token;
+    }
+    return 0;
+}
+
+}  // namespace
+
+TEST(InstructionOutputExtensionsTest, MethodDefinitionArmRendersInstanceMethod) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringType = FindTypeDefToken(f, "System", "String");
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t copy = FindMethodByName(f, stringType, "Copy");
+    ASSERT_NE(copy, 0u);
+    std::string text = Render([&](Output::ITextOutput& out) {
+        IL::WriteTo(f, out, MetadataGenericContext{}, copy);
+    });
+    EXPECT_EQ(text, "string System.String::Copy(string)");
+}
+
+TEST(InstructionOutputExtensionsTest, MethodDefinitionArmRendersStaticMethod) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringType = FindTypeDefToken(f, "System", "String");
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t isNullOrEmpty = FindMethodByName(f, stringType, "IsNullOrEmpty");
+    ASSERT_NE(isNullOrEmpty, 0u);
+    std::string text = Render([&](Output::ITextOutput& out) {
+        IL::WriteTo(f, out, MetadataGenericContext{}, isNullOrEmpty);
+    });
+    EXPECT_EQ(text, "bool System.String::IsNullOrEmpty(string)");
+}
+
+TEST(InstructionOutputExtensionsTest, MethodDefinitionArmRendersGenericParameterBlock) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t activator = FindTypeDefToken(f, "System", "Activator");
+    ASSERT_NE(activator, 0u);
+    std::uint32_t createInstance = FindMethodByName(f, activator, "CreateInstance", 1);
+    ASSERT_NE(createInstance, 0u);
+    std::string text = Render([&](Output::ITextOutput& out) {
+        IL::WriteTo(f, out, MetadataGenericContext{}, createInstance);
+    });
+    // The mscorlib 4.8 T carries no special-constraint flags, so the block is
+    // the bare name; the return type renders at the index syntax (!!0).
+    EXPECT_EQ(text, "!!0 System.Activator::CreateInstance<T>()");
+}
+
+TEST(InstructionOutputExtensionsTest, MethodDefinitionArmRendersGenericConstraintRows) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // Find some method whose generic parameter carries constraint rows and
+    // pin the '(<TypeName>) ' constraint block the C# renders.
+    bool found = false;
+    for (const auto& t : f.TypeDefs()) {
+        for (const auto& m : f.GetMethods(t.Token)) {
+            auto gps = f.GetGenericParameters(m.Token);
+            bool hasConstraints = false;
+            for (const auto& gp : gps) {
+                if (!f.GetGenericParameterConstraintTokens(gp.Token).empty())
+                    hasConstraints = true;
+            }
+            if (!hasConstraints) continue;
+            std::string text = Render([&](Output::ITextOutput& out) {
+                IL::WriteTo(f, out, MetadataGenericContext{}, m.Token);
+            });
+            // The generic-parameter block is the '<...>' after the '::' -- the
+            // return/parameter types carry their own '<...>' instantiations.
+            auto scope = text.find("::");
+            ASSERT_NE(scope, std::string::npos) << text;
+            auto lt = text.find('<', scope);
+            auto gt = text.find('>', lt == std::string::npos ? 0 : lt);
+            ASSERT_NE(lt, std::string::npos) << text;
+            ASSERT_NE(gt, std::string::npos) << text;
+            std::string block = text.substr(lt, gt - lt);
+            EXPECT_NE(block.find('('), std::string::npos) << text;
+            EXPECT_NE(block.find(')'), std::string::npos) << text;
+            found = true;
+            break;
+        }
+        if (found) break;
+    }
+    ASSERT_TRUE(found) << "no generic-parameter constraint rows found";
+}
+
+TEST(InstructionOutputExtensionsTest, FieldDefinitionArmRendersTypeAndName) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringType = FindTypeDefToken(f, "System", "String");
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t empty = FindFieldByName(f, stringType, "Empty");
+    ASSERT_NE(empty, 0u);
+    std::string text = Render([&](Output::ITextOutput& out) {
+        IL::WriteTo(f, out, MetadataGenericContext{}, empty);
+    });
+    EXPECT_EQ(text, "string System.String::Empty");
+}
+
+TEST(InstructionOutputExtensionsTest, FieldDefinitionArmRendersValueTypePrefix) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t dateTime = FindTypeDefToken(f, "System", "DateTime");
+    ASSERT_NE(dateTime, 0u);
+    std::uint32_t minValue = FindFieldByName(f, dateTime, "MinValue");
+    ASSERT_NE(minValue, 0u);
+    std::string text = Render([&](Output::ITextOutput& out) {
+        IL::WriteTo(f, out, MetadataGenericContext{}, minValue);
+    });
+    EXPECT_EQ(text, "valuetype System.DateTime System.DateTime::MinValue");
+}
+
+// ---------------------------------------------------------------------------
+// The reference-side member arms of IL::WriteTo (InstructionOutputExtensions.cs
+// EntityHandle.WriteTo): the MemberReference (method/field kinds), the
+// MethodSpecification (MethodDef/MemberRef targets + the WriteTypeParameterList
+// substitution block), and the StandaloneSignature (method-kind decode /
+// the @token /* signature <kind> */ default) arms, over real mscorlib rows.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The MemberRefParent coded index (3-bit tag: 0=TypeDef, 1=TypeRef,
+// 2=ModuleRef, 3=MethodDef, 4=TypeSpec) as a raw entity token; 0 for nil.
+bool MemberRefParentResolves(const MetadataFile& f, std::uint32_t parentToken) {
+    switch (parentToken >> 24) {
+        case 0x02: case 0x01: case 0x1B:
+            return true;
+        case 0x06:
+            return f.GetMethodDeclaringTypeToken(parentToken) != 0;
+        case 0x1A:
+            return f.GetModuleReferenceName(parentToken).has_value();
+        default:
+            return false;
+    }
+}
+
+}  // namespace
+
+TEST(InstructionOutputExtensionsTest, MemberReferenceArmRendersMethod) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // The first resolvable method-kind MemberRef: pin the full chain shape
+    // (header/return-type prefix, the WriteParent'd type, the "::"-escaped
+    // name, the parameter list). The MethodDef arms above pin the exact
+    // spellings of the shared pieces.
+    bool found = false;
+    for (const auto& mr : f.MemberRefs()) {
+        auto blob = f.GetSignatureBlob(mr.Token);
+        if (!blob || blob->empty() || (((*blob)[0] & 0x0F) != 0x00)) continue;
+        if (!MemberRefParentResolves(f, mr.ParentToken)) continue;
+        found = true;
+        std::string text = Render([&](Output::ITextOutput& out) {
+            IL::WriteTo(f, out, MetadataGenericContext{}, mr.Token);
+        });
+        EXPECT_NE(text.find("::" + Disassembler::Escape(mr.Name)), std::string::npos)
+            << text;
+        auto params = text.find('(');
+        auto namePos = text.find("::" + Disassembler::Escape(mr.Name));
+        ASSERT_NE(params, std::string::npos) << text;
+        ASSERT_NE(namePos, std::string::npos) << text;
+        EXPECT_TRUE(params > namePos) << text;
+        break;
+    }
+    ASSERT_TRUE(found) << "no resolvable method-kind MemberRef found";
+}
+
+TEST(InstructionOutputExtensionsTest, MemberReferenceArmRendersField) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // The first resolvable field-kind MemberRef: the field arm has no
+    // parameter list, so the text ends at the member name after "::".
+    bool found = false;
+    for (const auto& mr : f.MemberRefs()) {
+        auto blob = f.GetSignatureBlob(mr.Token);
+        if (!blob || blob->empty()) continue;
+        if (((*blob)[0] & 0x0F) == 0x00) continue;  // method kind
+        if (!MemberRefParentResolves(f, mr.ParentToken)) continue;
+        found = true;
+        std::string text = Render([&](Output::ITextOutput& out) {
+            IL::WriteTo(f, out, MetadataGenericContext{}, mr.Token);
+        });
+        EXPECT_NE(text.find("::" + Disassembler::Escape(mr.Name)), std::string::npos)
+            << text;
+        EXPECT_EQ(text.find('('), std::string::npos) << text;
+        break;
+    }
+    ASSERT_TRUE(found) << "no resolvable field-kind MemberRef found";
+}
+
+TEST(InstructionOutputExtensionsTest, MethodSpecificationArmRendersMethodDefinitionTarget) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // The System.Array::Empty<T> generic-instantiation call sites in
+    // mscorlib are MethodSpecs over a MethodDef target.
+    bool found = false;
+    for (const auto& ms : f.MethodSpecs()) {
+        if ((ms.MethodToken >> 24) != 0x06) continue;
+        if (f.GetMethodName(ms.MethodToken) != "Empty") continue;
+        if (f.GetMethodDeclaringTypeToken(ms.MethodToken) !=
+            FindTypeDefToken(f, "System", "Array")) continue;
+        found = true;
+        std::string text = Render([&](Output::ITextOutput& out) {
+            IL::WriteTo(f, out, MetadataGenericContext{}, ms.Token);
+        });
+        // The C# MethodSpec arm writes the (non-reference) name and the
+        // substitution block, then the definition's parameter list.
+        EXPECT_NE(text.find("::Empty<"), std::string::npos) << text;
+        EXPECT_NE(text.rfind(">()"), std::string::npos) << text;
+        break;
+    }
+    ASSERT_TRUE(found) << "no Array::Empty MethodSpec found";
+}
+
+TEST(InstructionOutputExtensionsTest, MethodSpecificationArmRendersMemberReferenceTarget) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    bool found = false;
+    for (const auto& ms : f.MethodSpecs()) {
+        if ((ms.MethodToken >> 24) != 0x0A) continue;
+        auto mr = f.GetMemberReference(ms.MethodToken);
+        ASSERT_TRUE(mr.has_value());
+        found = true;
+        std::string text = Render([&](Output::ITextOutput& out) {
+            IL::WriteTo(f, out, MetadataGenericContext{}, ms.Token);
+        });
+        EXPECT_NE(text.find("::" + Disassembler::Escape(mr->Name)), std::string::npos)
+            << text;
+        EXPECT_NE(text.find('('), std::string::npos) << text;
+        break;
+    }
+    ASSERT_TRUE(found) << "no MemberRef-targeted MethodSpec found";
+}
+
+TEST(InstructionOutputExtensionsTest, StandaloneSignatureArmRendersMethodKind) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    bool found = false;
+    for (auto token : f.StandaloneSignatureTokens()) {
+        auto blob = f.GetStandaloneSignatureBlob(token);
+        if (!blob || blob->empty()) continue;
+        if (((*blob)[0] & 0x0F) != 0x00) continue;  // SignatureKind.Method
+        found = true;
+        std::string text = Render([&](Output::ITextOutput& out) {
+            IL::WriteTo(f, out, MetadataGenericContext{}, token);
+        });
+        // The C# Method-kind arm writes the return type and then the
+        // parameter list with NO separating space (a faithful C# quirk).
+        EXPECT_NE(text.find('('), std::string::npos) << text;
+        EXPECT_EQ(text.find(" ("), std::string::npos) << text;
+        break;
+    }
+    if (!found) GTEST_SKIP() << "no method-kind StandaloneSig in this fixture";
+}
+
+TEST(InstructionOutputExtensionsTest, StandaloneSignatureArmRendersOtherKindsAtToken) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    bool found = false;
+    for (auto token : f.StandaloneSignatureTokens()) {
+        auto blob = f.GetStandaloneSignatureBlob(token);
+        if (!blob || blob->empty()) continue;
+        if (((*blob)[0] & 0x0F) != 0x07) continue;  // SignatureKind.LocalVariables
+        found = true;
+        char buf[48];
+        std::snprintf(buf, sizeof(buf), "@%08X /* signature LocalVariables */",
+            static_cast<unsigned>(token));
+        EXPECT_EQ(Render([&](Output::ITextOutput& out) {
+                      IL::WriteTo(f, out, MetadataGenericContext{}, token);
+                  }),
+            std::string(buf));
+        break;
+    }
+    ASSERT_TRUE(found) << "no LocalVariables-kind StandaloneSig found";
+}
+
+// The sweep's T12 (net065's `calli @11000003 /* signature 2 */` fallback):
+// a CALLI operand's standalone-signature header byte carries the CALLING
+// CONVENTION in the low nibble, and the C# System.Reflection.Metadata
+// SignatureHeader.Kind collapses every nibble <= 5 (default, cdecl,
+// stdcall, thiscall, fastcall, vararg) to SignatureKind.Method -- the
+// disassembler's Method arm then decodes the full signature. The port's
+// `rawKind == 0x00` test sent those rows to the `@token /* signature N */`
+// fallback. The SsSynth crafted manifest's 0x01 (cdecl) and 0x05 (vararg)
+// method rows drive the same gate deterministically.
+TEST(InstructionOutputExtensionsTest, StandaloneSignatureMethodConventionHeadersDecode) {
+    MetadataFile f(WriteSsSynthDll());
+    ASSERT_TRUE(f.IsValid());
+    // Row 10: the 0x01 unmanaged-cdecl method sig, `void ()` -- the C#
+    // Method-kind arm writes the return type and the parameter list with
+    // NO separating space (the same quirk the 0x00-row test pins).
+    EXPECT_EQ(Render([&](Output::ITextOutput& out) {
+                  IL::WriteTo(f, out, MetadataGenericContext{}, 0x1100000Au);
+              }),
+        "unmanaged cdecl void()");
+    // Row 9: the 0x05 vararg method sig -- int32 required, then the vararg
+    // sentinel, then string.
+    EXPECT_EQ(Render([&](Output::ITextOutput& out) {
+                  IL::WriteTo(f, out, MetadataGenericContext{}, 0x11000009u);
+              }),
+        "vararg void(int32, ..., string)");
+}
+
+TEST(SignatureTypeProviderDecoderTest, MethodSpecSignatureDecodesTypeList) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // GENERICINST marker, count=2, then two int32 element types.
+    const std::uint8_t blob[] = {0x0A, 0x02, 0x08, 0x08};
+    std::ostringstream stream;
+    PlainTextOutput output(stream);
+    DisassemblerSignatureTypeProvider provider(f, output);
+    Metadata::SignatureTypeProviderDecoder decoder(provider, f);
+    auto args = decoder.DecodeMethodSpecSignature(blob, sizeof(blob), MetadataGenericContext{});
+    ASSERT_EQ(args.size(), 2u);
+    stream.str("");
+    stream.clear();
+    args[0](ILNameSyntax::Signature);
+    EXPECT_EQ(stream.str(), "int32");
+}

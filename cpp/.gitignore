@@ -1,0 +1,11 @@
+# Build outputs and vcpkg manifest-mode install tree.
+build/
+vcpkg_installed/
+
+# CMake/VS user-specific files.
+*.user
+CMakeUserPresets.json
+
+# Stray compiler artifacts from ad-hoc cl runs.
+*.obj
+*.exe

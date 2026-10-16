@@ -1,0 +1,475 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+// to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+#include "Decompiler/IL/Transforms/ILInlining.hpp"
+#include "Decompiler/IL/Transforms/NamedArgumentTransform.hpp"
+#include "Decompiler/TypeSystem/IParameter.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
+#include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
+#include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/IL/VariableKind.hpp"
+#include "Decompiler/IL/InstructionFlags.hpp"
+#include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/AddressOf.hpp"
+
+#include <algorithm>
+#include <functional>
+#include <vector>
+
+namespace ILSpy::Decompiler::IL {
+
+namespace {
+
+bool VariableCanBeUsedForInlining(const ILVariable* v) {
+    if (!v) return false;
+    if (v->Kind == VariableKind::PinnedLocal) return false;
+    if (v->StoreCount != 1) return false;
+    if (v->LoadCount + v->AddressCount != 1) return false;
+    return true;
+}
+
+// The ILFunction root that owns `inst`, found by walking the Parent chain to the
+// root (ILFunction::IsRoot). Every connected instruction is rooted at a function;
+// returns null for a detached/unconnected subtree (a hand-built test tree whose
+// root is not an ILFunction). Mirrors the FunctionOf helper the port's other
+// transforms (NullCoalescingTransform) carry locally.
+ILFunction* FunctionOfBlock(ILInstruction* inst) {
+    for (ILInstruction* p = inst; p != nullptr; p = p->Parent) {
+        if (p->IsRoot()) return static_cast<ILFunction*>(p);
+    }
+    return nullptr;
+}
+
+} // namespace
+
+// Find the single load of `v` (an LdLoc or an LdLoca) inside `expr` that can be
+// replaced by `expressionBeingMoved`. Mirrors ILInlining.FindLoadInNext. Faithful
+// to the C#, which returns Found for both an LdLoc(v) and an LdLoca(v) match; the
+// caller gates whether an ldloca can actually be inlined (this port defers the
+// ldloca-into-addressof path, so InlineOneIfPossible skips an LdLoca found).
+//
+// The C# `expr.CanInlineIntoSlot(child.ChildIndex, expressionBeingMoved)` gate
+// before each child recursion is not modeled (the port's inlining has no SlotInfo
+// restrictions); the C# named-argument branch is: when a child recursion returns
+// Stop while IntroduceNamedArguments is set and `expr` is a CallInstruction, the
+// call may be converted to a named-argument call.
+FindResult FindLoadInNext(ILInstruction* expr, ILVariable* v,
+                          ILInstruction* expressionBeingMoved,
+                          InliningOptions options) {
+    if (!expr) return FindResult::StopResult();
+    if (expr->Op == OpCode::LdLoc) {
+        auto* ld = static_cast<LdLoc*>(expr);
+        if (ld->Variable.get() == v) return FindResult::FoundResult(ld);
+        if (MayReorder(expressionBeingMoved, expr))
+            return FindResult::ContinueResult();
+        return FindResult::StopResult();
+    }
+    if (expr->Op == OpCode::LdLoca) {
+        auto* lda = static_cast<LdLoca*>(expr);
+        if (lda->Variable.get() == v) return FindResult::FoundResult(lda);
+        if (MayReorder(expressionBeingMoved, expr))
+            return FindResult::ContinueResult();
+        return FindResult::StopResult();
+    }
+    if (expr->Op == OpCode::Block
+        && static_cast<Block*>(expr)->Kind == BlockKind::CallWithNamedArgs) {
+        // The C# `expr is Block { Kind: BlockKind.CallWithNamedArgs }` arm:
+        // extending an existing named-argument block has its own search.
+        return NamedArgumentTransform::CanExtendNamedArgument(
+            static_cast<Block*>(expr), v, expressionBeingMoved);
+    }
+    for (int i = 0; i < expr->ChildCount(); ++i) {
+        FindResult r = FindLoadInNext(expr->GetChild(i), v, expressionBeingMoved, options);
+        if (r.type != FindResultType::Continue) {
+            if (r.type == FindResultType::Stop
+                && HasInliningOption(options, InliningOptions::IntroduceNamedArguments)
+                && expr->Op == OpCode::Call) {
+                return NamedArgumentTransform::CanIntroduceNamedArgument(
+                    static_cast<Call*>(expr), expr->GetChild(i), v, expressionBeingMoved);
+            }
+            return r;
+        }
+    }
+    if (MayReorder(expressionBeingMoved, expr))
+        return FindResult::ContinueResult();
+    return FindResult::StopResult();
+}
+
+// The C# `public static bool CanMoveInto(...)` (ILInlining.cs line 933). The
+// ancestor chain's slots must accept the inlining and the move must not reorder
+// past any of the ancestors' earlier children. The port's per-node
+// `CanInlineIntoSlot` (the Block/BlockContainer/IsInst overrides ported
+// faithfully; the port's default is permissive -- see the ILInstruction note
+// on the SlotInfo metadata deferral).
+bool CanMoveInto(ILInstruction* expressionBeingMoved, ILInstruction* stmt,
+                 ILInstruction* targetLoad) {
+    assert(targetLoad->IsDescendantOf(stmt));
+    for (ILInstruction* inst = targetLoad; inst != stmt; inst = inst->Parent) {
+        if (!inst->Parent->CanInlineIntoSlot(inst->ChildIndex, expressionBeingMoved))
+            return false;
+        // Check whether re-ordering with predecessors is valid:
+        const int childIndex = inst->ChildIndex;
+        for (int i = 0; i < childIndex; ++i) {
+            ILInstruction* predecessor = inst->Parent->GetChild(i);
+            // The C# IsSafeForInlineOver(predecessor, expressionBeingMoved):
+            // the SEMANTIC SemanticHelper.MayReorder(moved, predecessor) --
+            // the written-variables-vs-read-variables check, not the flag-pair
+            // approximation (a store to one local may reorder past a load of
+            // another).
+            if (!MayReorder(expressionBeingMoved, predecessor))
+                return false;
+        }
+    }
+    return true;
+}
+
+// The top-level statement containing `inst`: the last ancestor (including inst
+// itself) whose parent is a Block. Mirrors the C#
+// `inst.Ancestors.LastOrDefault(instr => instr.Parent is Block)` -- the C#
+// Ancestors enumerable starts at the node itself and walks up the Parent chain,
+// so "last" is the one closest to the root (the outermost direct child of a
+// Block). Returns null when no ancestor (including inst) has a Block parent.
+ILInstruction* TopLevelStatement(const ILInstruction* inst) {
+    ILInstruction* result = nullptr;
+    for (const ILInstruction* node = inst; node != nullptr; node = node->Parent) {
+        if (node->Parent != nullptr && node->Parent->Op == OpCode::Block)
+            result = const_cast<ILInstruction*>(node);
+    }
+    return result;
+}
+
+// The C# `internal static bool MethodRequiresCopyForReadonlyLValue(IMethod
+// method, IType constrainedTo = null)` (IL/Transforms/ILInlining.cs line 438).
+// See the header comment for the ThisIsRefReadOnly deferral note.
+bool MethodRequiresCopyForReadonlyLValue(const TypeSystem::IMethod* method,
+                                         const TypeSystem::IType* constrainedTo) {
+    if (method == nullptr)
+        return true;
+    TypeSystem::ITypePtr declaringType = method->DeclaringType();
+    const TypeSystem::IType* type = constrainedTo;
+    if (type == nullptr)
+        type = declaringType.get();
+    if (type == nullptr)
+        return true;
+    // The C# `type.IsReferenceType == true` (the nullable-bool comparison):
+    // reference types are never implicitly copied.
+    if (type->IsReferenceType() == std::optional<bool>(true))
+        return false;
+    if (method->ThisIsRefReadOnly())
+        return false;
+    return true;
+}
+
+// The C# `internal static bool IsReadOnlySpanCharCtor(IMethod method)`
+// (IL/Transforms/ILInlining.cs line 541): a one-parameter constructor over the
+// closed `ReadOnlySpan<char>` instantiation whose parameter is
+// `ref readonly char` (a ByReferenceType whose element is Char). The C#
+// `DeclaringType.TypeArguments[0]` ports through the ParameterizedType
+// dispatch (a non-ParameterizedType declaring type answers false -- the
+// CallBuilder divergence note; an `IsKnownType(ReadOnlySpanOfT)` declaring type
+// is always a closed ParameterizedType in practice).
+bool IsReadOnlySpanCharCtor(const TypeSystem::IMethod* method) {
+    if (method == nullptr || !method->IsConstructor())
+        return false;
+    auto parameters = method->Parameters();
+    if (parameters.size() != 1)
+        return false;
+    TypeSystem::ITypePtr declaringType = method->DeclaringType();
+    if (!declaringType
+        || !TypeSystem::IsKnownType(*declaringType,
+                                        TypeSystem::KnownTypeCode::ReadOnlySpanOfT)) {
+        return false;
+    }
+    auto* parameterized =
+        dynamic_cast<const TypeSystem::ParameterizedType*>(declaringType.get());
+    if (!parameterized || parameterized->TypeArguments().empty())
+        return false;
+    if (!TypeSystem::IsKnownType(*parameterized->TypeArguments()[0],
+                                     TypeSystem::KnownTypeCode::Char)) {
+        return false;
+    }
+    auto* parameterType = parameters[0] != nullptr
+                              ? &parameters[0]->Type()
+                              : nullptr;
+    auto* byRef = dynamic_cast<const TypeSystem::ByReferenceType*>(parameterType);
+    if (!byRef)
+        return false;
+    return TypeSystem::IsKnownType(*byRef->Element(),
+                                       TypeSystem::KnownTypeCode::Char);
+}
+
+ExpressionClassification ClassifyExpression(ILInstruction* inst) {
+    switch (inst->Op) {
+        case OpCode::LdLoc:
+        case OpCode::StLoc: {
+            const ILVariablePtr& v = (inst->Op == OpCode::LdLoc)
+                                         ? static_cast<LdLoc*>(inst)->Variable
+                                         : static_cast<StLoc*>(inst)->Variable;
+            if (!v)
+                return ExpressionClassification::MutableLValue;
+            if (v->IsRefReadOnly
+                || v->Kind == VariableKind::ForeachLocal
+                || v->Kind == VariableKind::UsingLocal) {
+                return ExpressionClassification::ReadonlyLValue;
+            }
+            return ExpressionClassification::MutableLValue;
+        }
+        case OpCode::LdObj:
+            // ldobj typically refers to a storage location,
+            // but readonly fields are an exception.
+            return IsReadonlyReference(static_cast<LdObj*>(inst)->Target.get())
+                       ? ExpressionClassification::ReadonlyLValue
+                       : ExpressionClassification::MutableLValue;
+        case OpCode::StObj:
+            // stobj is the same as ldobj.
+            return IsReadonlyReference(static_cast<StObj*>(inst)->Target.get())
+                       ? ExpressionClassification::ReadonlyLValue
+                       : ExpressionClassification::MutableLValue;
+        case OpCode::Call:
+        case OpCode::CallVirt: {
+            const auto* call = static_cast<Call*>(inst);
+            // multi-dimensional array getters are lvalues,
+            // everything else is an rvalue.
+            if (call->DeclaringType
+                && call->DeclaringType->Kind() == TypeSystem::TypeKind::Array) {
+                return ExpressionClassification::MutableLValue;
+            }
+            return ExpressionClassification::RValue;
+        }
+        default:
+            return ExpressionClassification::RValue; // most instructions result in an rvalue
+    }
+}
+
+bool IsReadonlyReference(ILInstruction* addr) {
+    if (addr == nullptr)
+        return false;
+    switch (addr->Op) {
+        case OpCode::LdFlda:
+            return static_cast<LdFlda*>(addr)->FieldIsReadOnly;
+        case OpCode::LdsFlda:
+            return static_cast<LdsFlda*>(addr)->FieldIsReadOnly;
+        case OpCode::LdLoc:
+            return static_cast<LdLoc*>(addr)->Variable
+                   && static_cast<LdLoc*>(addr)->Variable->IsRefReadOnly;
+        case OpCode::Call:
+        case OpCode::CallVirt: {
+            const auto* call = static_cast<Call*>(addr);
+            return call->Method != nullptr && call->Method->ReturnTypeIsRefReadOnly();
+        }
+        case OpCode::AddressOf:
+            // C# doesn't allow mutation of value-type temporaries
+            return true;
+        default:
+            // The C# default arm matches `addr.MatchLdFld(out _, out var field)`
+            // and returns `field.ReturnTypeIsRefReadOnly`; the port's LdFlda/LdsFlda
+            // carry no ref-readonly return type, so the arm stays false (the
+            // conservative direction -- an unmatched address is treated as
+            // mutable rather than readonly).
+            return false;
+    }
+}
+
+// True when `inst` sits in the constructor initializer (before the chained
+// `: base(...)`/`: this(...)` call). Faithful to the C#
+// ILInlining.IsInConstructorInitializer: a null function or an instruction
+// whose range ends after the chained call starts is not in the initializer; an
+// instruction whose enclosing top-level statement also ends before the chained
+// call is. When the function is not an instance constructor with a chained call
+// the offset is -1, so any non-empty instruction range (EndILOffset > -1)
+// short-circuits to false (matching the C#).
+bool IsInConstructorInitializer(const ILFunction* function, const ILInstruction* inst) {
+    if (!function || !inst) return false;
+    const std::int32_t ctorCallStart = function->ChainedConstructorCallILOffset();
+    if (inst->EndILOffset > ctorCallStart) return false;
+    auto* topLevelInst = TopLevelStatement(inst);
+    if (!topLevelInst) return false;
+    return topLevelInst->EndILOffset <= ctorCallStart;
+}
+
+// Try to inline the StLoc at `pos` into the next instruction's load of its
+// variable, or remove it if dead. Returns true if the stloc was consumed.
+// `pos` may be out of range after a prior removal shrank the block (the
+// per-statement driver loops at one position); guard and return false so the
+// caller's while-loop terminates without reading out of bounds.
+//
+// At namespace scope (not in the anonymous namespace above) so other
+// per-statement transforms (NullCoalescingTransform, ...) can call it after a
+// fold that opens up an inlining opportunity -- mirroring the C#
+// `ILInlining.InlineOneIfPossible(block, pos, InliningOptions.None, ctx)` static
+// call. The helper it uses (VariableCanBeUsedForInlining) is in the anonymous
+// namespace above and visible here; FindLoadInNext is also at namespace scope
+// (declared in the header) so other transforms can call it directly.
+bool InlineOneIfPossible(Block* block, int pos, ILTransformContext& ctx) {
+    return InlineOneIfPossible(block, pos, InliningOptions::None, ctx);
+}
+
+bool InlineOneIfPossible(Block* block, int pos, InliningOptions options,
+                         ILTransformContext& ctx) {
+    if (pos < 0 || static_cast<std::size_t>(pos) >= block->Instructions.size()) return false;
+    auto* stloc = dynamic_cast<StLoc*>(block->Instructions[static_cast<std::size_t>(pos)].get());
+    if (!stloc) return false;
+    ILVariable* v = stloc->Variable.get();
+    if (!v) return false;
+
+    if (VariableCanBeUsedForInlining(v)) {
+        // The "next" instruction is the one after the stloc in the block, or
+        // the block's final if the stloc is last (the C# counts the final in
+        // its instruction list).
+        ILInstruction* next = nullptr;
+        if (static_cast<std::size_t>(pos) + 1 < block->Instructions.size())
+            next = block->Instructions[static_cast<std::size_t>(pos) + 1].get();
+        else
+            next = block->FinalInstruction.get();
+        auto value = stloc->TakeChild(0);
+        FindResult r = FindLoadInNext(next, v, value.get(), options);
+        // Only inline an LdLoc found. An LdLoca found is the deferred
+        // ldloca-into-addressof path (needs an AddressOf node +
+        // IsGeneratedTemporaryForAddressOf, not yet ported): skip it and fall
+        // through to the dead-store check, preserving the prior LdLoca->Stop
+        // behavior. Faithful to the C# DoInline, which gates an LdLoca found on
+        // IsGeneratedTemporaryForAddressOf (always false in this port).
+        bool inlinable = (r.type == FindResultType::Found
+                          || r.type == FindResultType::NamedArgument)
+                         && r.loadInst && r.loadInst->Op == OpCode::LdLoc;
+        if (inlinable) {
+            if (r.type == FindResultType::NamedArgument) {
+                // The C# DoInline calls NamedArgumentTransform.IntroduceNamedArgument
+                // before the ordinary inlining, so the expression being moved is
+                // evaluated early inside the promoted argument.
+                NamedArgumentTransform::IntroduceNamedArgument(r.callArgument, ctx);
+            }
+            ctx.StepOnce("Inline variable");
+            r.loadInst->ReplaceWith(std::move(value));
+            block->RemoveInstructionAt(static_cast<std::size_t>(pos));
+            if (r.type == FindResultType::NamedArgument) {
+                // The named-argument variable the transform registered needs fresh
+                // usage counts (the C# keeps them incrementally; this port
+                // recomputes after the tree is consistent again).
+                if (ILFunction* function = FunctionOfBlock(block))
+                    ComputeVariableUsage(*function);
+            }
+            return true;
+        }
+        stloc->SetChild(0, std::move(value));  // restore, try dead-store below
+    }
+
+    // Dead store: variable never loaded. CFS handles stack slots too; this
+    // catches locals and the case where the single load was in another block.
+    if (v->LoadCount == 0 && v->AddressCount == 0) {
+        auto value = stloc->TakeChild(0);
+        if (IsPure(value->Flags())) {
+            ctx.StepOnce("Remove dead store");
+            block->RemoveInstructionAt(static_cast<std::size_t>(pos));
+            return true;
+        }
+        if (v->Kind == VariableKind::StackSlot) {
+            ctx.StepOnce("Remove dead store, keep expression");
+            stloc->ReplaceWith(std::move(value));
+            return true;
+        }
+        stloc->SetChild(0, std::move(value));
+    }
+
+    return false;
+}
+
+bool InlineIfPossible(Block* block, int pos, ILTransformContext& ctx) {
+    return InlineOneIfPossible(block, pos, InliningOptions::Aggressive, ctx);
+}
+
+int InlineInto(Block* block, int pos, InliningOptions options,
+               ILTransformContext& ctx) {
+    // The C# guard is `pos >= block.Instructions.Count` over a list that
+    // includes the final; the port's final sits at the logical index
+    // Instructions.size(), so pos == size is the final's target position (a
+    // legitimate one -- the loop below inlines the preceding stores into it).
+    if (pos > static_cast<int>(block->Instructions.size()))
+        return 0;
+    int count = 0;
+    while (--pos >= 0) {
+        if (InlineOneIfPossible(block, pos, options, ctx))
+            count++;
+        else
+            break;
+    }
+    return count;
+}
+
+namespace {
+
+bool InlineAllInBlock(Block* block, ILTransformContext& ctx) {
+    bool modified = false;
+    for (int i = static_cast<int>(block->Instructions.size()) - 1; i >= 0; --i) {
+        if (InlineOneIfPossible(block, i, ctx))
+            modified = true;
+    }
+    return modified;
+}
+
+void Walk(ILInstruction* inst, const std::function<void(Block*)>& visit) {
+    if (!inst) return;
+    if (auto* b = dynamic_cast<Block*>(inst)) { visit(b); }
+    for (int i = 0; i < inst->ChildCount(); ++i) Walk(inst->GetChild(i), visit);
+}
+
+} // namespace
+
+void ILInlining::Run(ILFunction& function, ILTransformContext& context) {
+    ComputeVariableUsage(function);
+    Walk(function.Body.get(), [&](Block* block) {
+        InlineAllInBlock(block, context);
+    });
+    // Recompute usage so dead variables (inlined away) can be dropped from the
+    // function's variable list (mirrors function.Variables.RemoveDead()).
+    ComputeVariableUsage(function);
+    auto& vars = function.Variables;
+    vars.erase(
+        std::remove_if(vars.begin(), vars.end(),
+                        [](const ILVariablePtr& v) {
+                            return v && v->StoreCount == 0 && v->LoadCount == 0 &&
+                                   v->AddressCount == 0;
+                        }),
+        vars.end());
+}
+
+// IStatementTransform entry: the per-statement inlining pass the
+// StatementTransform runs interleaved with the other per-statement transforms.
+// Loops InlineOneIfPossible at `pos` until no change, mirroring the C#
+// ILInlining.Run(Block, pos, ctx) overload. After a successful inline at the
+// last position the block shrank (the final is separate in this port, so the
+// last non-terminal is at Instructions.size()-1; RemoveInstructionAt drops the
+// size by one), so the while guard re-checks `pos < size` and stops without
+// reading out of bounds (the C# avoids this because the final lives in
+// Instructions, so the last non-terminal is at Count-2 and the shifted-in
+// instruction stays in range).
+void ILInlining::Run(Block& block, int pos, StatementTransformContext& context) {
+    while (pos >= 0 && static_cast<std::size_t>(pos) < block.Instructions.size()
+           && InlineOneIfPossible(&block, pos, context.Base)) {
+        // repeat inlining until nothing changes
+    }
+}
+
+} // namespace ILSpy::Decompiler::IL

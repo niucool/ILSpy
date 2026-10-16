@@ -1,0 +1,313 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of
+// this software and associated documentation files (the "Software"), to deal in the
+// Software without restriction, including without limitation the rights to use, copy,
+// modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
+// and to permit persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies
+// or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+// Port of `ICSharpCode.Decompiler.CSharp.Resolver.CSharpConversions` -- the C# conversion controller
+// (~1757 lines, ~20 regions). This header ports the class SKELETON: the constructor (holds the
+// `ICompilation`), the `Get(ICompilation)` factory (per-compilation singleton via `CacheManager`), the
+// `TypePair` caching key struct, and the `implicitConversionCache`/`explicitConversionCache` fields.
+// The conversion methods (`IdentityConversion`/`ImplicitConversion`/`ExplicitConversion`/
+// `StandardImplicitConversion`/`BetterConversion`/the ~16 `Is*Conversion`/`*Conversion` helpers) are
+// deferred -- they need `NormalizeTypeVisitor.TypeErasure` (unported), `ReflectionHelper.GetTypeCode`
+// (unported), and the `Conversion` result type's full surface.
+//
+// `CSharpConversions` unblocks: the `OverloadResolution` engine steps (`CheckApplicability`'s
+// passing-mode+conversion half, `RunTypeInference`, `BetterFunctionMember`), `LambdaResolveResult.IsValid`,
+// and the `MemberLookup`/`CSharpResolver` conversion queries. This skeleton (D512) gives those callers
+// a forward-declared-but-now-defined `CSharpConversions` to reference (the ctor's nullable-pointer slot
+// in `OverloadResolution` can now be a real instance).
+//
+// Field ownership (the C# is a `sealed class` with GC-owned reference fields):
+//  * `compilation` -> non-owning `const ICompilation*` (the caller owns the compilation, which outlives
+//    the conversions instance -- it is cached ON the compilation's `CacheManager`).
+//  * `implicitConversionCache`/`explicitConversionCache` -> owning `std::unordered_map<TypePair,
+//    std::shared_ptr<Conversion>>` (the C# `ConcurrentDictionary<TypePair, Conversion>`). The cache is
+//    populated by the (deferred) conversion methods; the skeleton declares it empty. The value is an
+//    owning `shared_ptr<Conversion>` because `Conversion` is polymorphic (the C# `Conversion` is a class
+//    hierarchy; a plain `Conversion` value would slice). `Conversion` is forward-declared (unported).
+//
+// `TypePair` hashing: the C# `TypePair.GetHashCode` uses `IType.GetHashCode` (structural). The port's
+// `IType` deliberately defers `GetHashCode` (a Phase-2 leaf), so `TypePair` hashes via `IType::Kind()` +
+// `IType::ReflectionName()` + `IType::TypeParameterCount()` -- deterministic `IType` accessors present on
+// every subtype, hash-consistent with `IType::Equals` (which is `Kind() == other.Kind() &&
+// StructuralEquals`, and `StructuralEquals` compares the same core fields that `ReflectionName`
+// encodes). This is a documented simplification: a hash that collides more than `IType.GetHashCode` would
+// (perf only, never correctness -- `Equals` is the authority). It upgrades to a structural hash when
+// `IType::GetHashCode` lands.
+
+#pragma once
+
+#include "Decompiler/Semantics/Conversion.hpp"  // Conversion (forward-declared; unported full surface)
+#include "Decompiler/TypeSystem/ICompilation.hpp"  // ICompilation (compilation) + CacheManager (Get factory)
+#include "Decompiler/TypeSystem/IType.hpp"  // IType (TypePair) -- also pulls in TypeKind.hpp
+
+#include <cstddef>
+#include <functional>  // std::hash
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <utility>
+
+namespace ILSpy::Decompiler::Semantics { class ResolveResult; }  // the ResolveResult-based public entries (forward-declared; the .cpp includes the full header for Type()/Kind())
+namespace ILSpy::Decompiler::TypeSystem { class IMethod; }  // the IsDelegateCompatible(IMethod, IType) entry (forward-declared; the .cpp includes the full header)
+
+namespace ILSpy::Decompiler::CSharp::Resolver {
+
+// The C# `struct TypePair : IEquatable<TypePair>` -- the conversion-cache key. A value type holding two
+// non-owning `const IType*` (the C# `IType` references; the cached conversions outlive the key -- the
+// types are owned by the compilation/type-system, not by the `TypePair`).
+struct TypePair {
+    const ILSpy::Decompiler::TypeSystem::IType* FromType = nullptr;
+    const ILSpy::Decompiler::TypeSystem::IType* ToType = nullptr;
+
+    TypePair() = default;
+    TypePair(const ILSpy::Decompiler::TypeSystem::IType* fromType,
+             const ILSpy::Decompiler::TypeSystem::IType* toType)
+        : FromType(fromType), ToType(toType) {}
+
+    // The C# `bool Equals(TypePair other)` -- structural via `object.Equals(FromType, other.FromType) &&
+    // object.Equals(ToType, other.ToType)` (the `IType` `Equals` override). The port uses `IType::Equals`
+    // (the structural `Kind() == other.Kind() && StructuralEquals`).
+    bool Equals(const TypePair& other) const {
+        if (FromType == other.FromType && ToType == other.ToType) return true;  // fast pointer-identity
+        if (FromType == nullptr || ToType == nullptr || other.FromType == nullptr || other.ToType == nullptr)
+            return false;
+        return FromType->Equals(*other.FromType) && ToType->Equals(*other.ToType);
+    }
+
+    // The C# `int GetHashCode()` -- `1000000007 * FromType.GetHashCode() + 1000000009 * ToType.GetHashCode()`.
+    // The port's `IType` has no `GetHashCode` (deferred), so this combines `Kind()` + `ReflectionName()`
+    // + `TypeParameterCount()` of each type via the same prime multipliers. See the header note.
+    std::size_t GetHashCode() const {
+        using ILSpy::Decompiler::TypeSystem::IType;
+        auto typeHash = [](const IType* t) -> std::size_t {
+            if (t == nullptr) return 0;
+            std::size_t h = std::hash<int>{}(static_cast<int>(t->Kind()));
+            h ^= std::hash<std::string>{}(t->ReflectionName()) + 0x9e3779b9u + (h << 6) + (h >> 2);
+            h ^= std::hash<int>{}(t->TypeParameterCount()) + 0x9e3779b9u + (h << 6) + (h >> 2);
+            return h;
+        };
+        return 1000000007u * typeHash(FromType) + 1000000009u * typeHash(ToType);
+    }
+};
+
+// `std::hash<TypePair>` so `TypePair` keys an `unordered_map` (the conversion cache).
+struct TypePairHash {
+    std::size_t operator()(const TypePair& p) const noexcept { return p.GetHashCode(); }
+};
+
+// `TypePair` equality predicate for `unordered_map` (delegates to `TypePair::Equals`).
+struct TypePairEq {
+    bool operator()(const TypePair& a, const TypePair& b) const noexcept { return a.Equals(b); }
+};
+
+class CSharpConversions {
+public:
+    // The C# `public CSharpConversions(ICompilation compilation)` -- holds the compilation. The C#
+    // `ArgumentNullException` on null `compilation` is compiled out (a `const` reference cannot bind to
+    // null, the D374 reference-not-null convention).
+    explicit CSharpConversions(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation)
+        : compilation_(&compilation) {}
+
+    // The C# `public static CSharpConversions Get(ICompilation compilation)` -- the per-compilation
+    // singleton, cached on the compilation's `CacheManager`. The C# `ArgumentNullException` on null
+    // `compilation` is compiled out (const reference). The cache key is `typeid(CSharpConversions)`
+    // (the C# `typeof(CSharpConversions)`); the port uses the address of a local static as a stable
+    // `const void*` key (the `CacheManager` keys on `const void*`).
+    static CSharpConversions& Get(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation);
+
+    // The C# `public ICompilation Compilation` (not public in C#, but `Get` and the conversion methods
+    // read it; exposed for the deferred engine steps).
+    const ILSpy::Decompiler::TypeSystem::ICompilation& Compilation() const { return *compilation_; }
+
+    // The C# `public Conversion StandardImplicitConversion(IType fromType, IType toType)`
+    // (CSharpConversions.cs line 201, C# 9.0 spec section 10.4.2) -- the standard implicit conversion
+    // dispatch entry point. Delegates to `Detail::StandardImplicitConversion(*compilation_, ...)`.
+    // The C# `ArgumentNullException` on null args compiles out (the `IType&` references cannot bind to
+    // null, the D374 convention). The C# calls the private `StandardImplicitConversion(fromType,
+    // toType, allowTupleConversion: true)` overload; the port collapses the overload into the Detail
+    // function (the tuple arm is deferred, so `allowTupleConversion` is effectively always true for
+    // the ported arms).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+    StandardImplicitConversion(ILSpy::Decompiler::TypeSystem::IType& fromType,
+                              ILSpy::Decompiler::TypeSystem::IType& toType);
+
+    // The C# `public Conversion ImplicitConversion(IType fromType, IType toType)`
+    // (CSharpConversions.cs line 151, C# spec draft-v11 section 10.2) -- the public implicit
+    // conversion entry point (the cached overload). Checks the `implicitConversionCache` first; on
+    // a miss, delegates to the private `ImplicitConversion(fromType, toType, allowUserDefined: true,
+    // allowTuple: true)` overload (the `Detail::ImplicitConversion` free function) and caches the
+    // result. The C# `ArgumentNullException` on null args compiles out (the `IType&` references
+    // cannot bind to null, the D374 convention). Returns `std::shared_ptr<Conversion>` (the cached
+    // value is an owning `shared_ptr` because `Conversion` is polymorphic).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+    ImplicitConversion(ILSpy::Decompiler::TypeSystem::IType& fromType,
+                      ILSpy::Decompiler::TypeSystem::IType& toType);
+
+    // The C# `public Conversion ExplicitConversion(IType fromType, IType toType)`
+    // (CSharpConversions.cs line 298, C# spec draft-v11 section 10.3) -- the public explicit
+    // conversion entry point (the IType overload, NOT cached -- only `ImplicitConversion` caches).
+    // Checks the implicit conversion first (`ImplicitConversion(fromType, toType,`allowUserDefined:
+    // false, allowTuple: false)` -- the `Detail::ImplicitConversion` free function); if an implicit
+    // conversion exists, returns it (an explicit conversion subsumes any implicit conversion). Then
+    // checks the standard explicit conversion (`ExplicitConversionImpl`); if one exists, returns
+    // it. Otherwise falls back to the user-defined explicit conversion
+    // (`UserDefinedExplicitConversion(null, fromType, toType)`). The C# `ArgumentNullException` on
+    // null args compiles out (the `IType&` references cannot bind to null, the D374 convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+    ExplicitConversion(ILSpy::Decompiler::TypeSystem::IType& fromType,
+                      ILSpy::Decompiler::TypeSystem::IType& toType);
+
+    // The C# `public Conversion ImplicitConversion(ResolveResult resolveResult, IType toType)`
+    // (CSharpConversions.cs line 143, C# spec draft-v11 section 10.2) -- the public implicit
+    // conversion entry point (the ResolveResult overload). Delegates to the private
+    // `ImplicitConversion(resolveResult, toType, allowUserDefined: true, allowTuple: true)`
+    // overload (the `Detail::ImplicitConversion` ResolveResult-based free function, D528) -- a
+    // thin wrapper that threads the instance's compilation and the public-entry flag pair
+    // (`true, true`). The C# `ArgumentNullException` on a null `resolveResult` compiles out (the
+    // `const ResolveResult&` reference cannot bind to null, the D374 convention). The `toType` is
+    // `IType&` non-const because the dispatch's fallback helpers (`StandardImplicitConversion` /
+    // `UserDefinedImplicitConversion` / the IType-based `ImplicitConversion`) take non-const
+    // `IType&` for the non-const `AcceptVisitor` (D406). Unlike the IType-based overload (line
+    // 151), this entry is NOT cached -- the C# caches only the IType-based overload (the
+    // ResolveResult context makes a cache key impractical), and the port faithfully does not
+    // cache it either. Returns `std::shared_ptr<Conversion>` (the C# `Conversion` reference
+    // modeled as a shared handle).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+    ImplicitConversion(const ILSpy::Decompiler::Semantics::ResolveResult& resolveResult,
+                      ILSpy::Decompiler::TypeSystem::IType& toType);
+
+    // The C# `public Conversion ExplicitConversion(ResolveResult resolveResult, IType toType)`
+    // (CSharpConversions.cs line 281, C# spec draft-v11 section 10.3) -- the public explicit
+    // conversion entry point (the ResolveResult overload). Checks (in order): the dynamic arm
+    // (`resolveResult.Type.Kind == TypeKind.Dynamic` -> `Conversion.ExplicitDynamicConversion` --
+    // an explicit conversion from `dynamic` always succeeds), the implicit check first
+    // (`ImplicitConversion(resolveResult, toType, allowUserDefined: false, allowTuple: false)` --
+    // the `Detail::ImplicitConversion` ResolveResult-based free function, D528; an implicit
+    // conversion subsumes the explicit one), the (deferred) tuple arm (`resolveResult is
+    // TupleResolveResult` -> `TupleConversion(isExplicit: true)` -- the `TupleConversion` machinery
+    // is not yet ported, so it yields `None` and falls through), the standard explicit dispatch
+    // (`ExplicitConversionImpl(resolveResult.Type, toType)` -- the `Detail::ExplicitConversionImpl`
+    // free function, D524), and the user-defined explicit fallback
+    // (`UserDefinedExplicitConversion(resolveResult, resolveResult.Type, toType)` -- the
+    // `Detail::UserDefinedExplicitConversion` free function, D530). The C# `ArgumentNullException`
+    // on null args compiles out (the references cannot bind to null, the D374 convention). Like
+    // the IType-based `ExplicitConversion` (line 298), this entry is NOT cached. The
+    // `resolveResult.Type()` accessor returns `const IType&` (the D374 non-null-reference
+    // convention), but `ExplicitConversionImpl` / `UserDefinedExplicitConversion` take `IType&`
+    // non-const (the non-const `AcceptVisitor`, D406), so the port `const_cast`s the const
+    // reference -- the underlying type-system object is mutable (the accessor's `const` is the
+    // contract, not a guarantee), the D515/D517/D528 `const_cast` precedent. Returns
+    // `std::shared_ptr<Conversion>`.
+    std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+    ExplicitConversion(const ILSpy::Decompiler::Semantics::ResolveResult& resolveResult,
+                      ILSpy::Decompiler::TypeSystem::IType& toType);
+
+    // The C# `public bool IsDelegateCompatible(IMethod method, IType delegateType)`
+    // (CSharpConversions.cs line 1421, C# spec draft-v11 section 21.4 "delegate compatibility")
+    // -- the public delegate-compatibility entry point (the `IMethod` + `IType` overload).
+    // Resolves the delegate type's `Invoke` method via `GetDelegateInvokeMethod` (the
+    // TypeSystemExtensions free function, D533), returns `false` when the delegate type carries
+    // no `Invoke` method (a non-delegate kind, or a delegate with an empty/invoke-less method
+    // table), and otherwise delegates to the private 3-arg `IsDelegateCompatible(method, invoke,
+    // false)` overload (the `Detail::IsDelegateCompatible` free function, D531) with
+    // `isExtensionMethodInvocation: false` (the public entry is not an extension-method
+    // invocation). The C# `throw new ArgumentNullException` on a null `method`/`delegateType`
+    // compiles out (the `const IMethod&` / `const IType&` references cannot bind to null, the
+    // D374 convention). The `delegateType` is `const IType&` (the public entry reads only
+    // `delegateType.Kind()` via `GetDelegateInvokeMethod`, all const); the `method` is `const
+    // IMethod&` (the 3-arg helper reads only const `IMethod`/`IParameter` members). Returns `bool`.
+    bool IsDelegateCompatible(const ILSpy::Decompiler::TypeSystem::IMethod& method,
+                              const ILSpy::Decompiler::TypeSystem::IType& delegateType);
+
+    // The C# `public int BetterConversion(IType s, IType t1, IType t2)` (CSharpConversions.cs line
+    // 1620, C# 4.0 spec section 7.5.3.4 "better conversion from type"; the current standard folds
+    // it into section 12.6.4.5-12.6.4.7) -- the better conversion from a SOURCE type `s` to two
+    // candidate target types `t1` / `t2`: `0` = neither is better, `1` = `t1` is better, `2` = `t2`
+    // is better. The C# body: `bool ident1 = IdentityConversion(s, t1); bool ident2 =
+    // IdentityConversion(s, t2); if (ident1 && !ident2) return 1; if (ident2 && !ident1) return 2;
+    // return BetterConversionTarget(t1, t2);` -- an identity conversion from `s` to a target
+    // beats a non-identity conversion; when neither (or both) is identity, the verdict falls to
+    // `BetterConversionTarget`. The public method delegates to the `Detail::BetterConversion(IType,
+    // IType, IType)` free function (which wires `Detail::IdentityConversion` D514 and
+    // `Detail::BetterConversionTarget` D535, the latter threading the compilation to the
+    // `ImplicitConversion` calls in the Span/core arms). The Detail dispatch is shared with the
+    // ResolveResult-based `BetterConversion(ResolveResult, IType, IType)` overload below, whose
+    // recursion calls this IType overload via the same Detail free function.
+    //
+    // The C# `ArgumentNullException` on null args compiles out (the `IType&` references cannot bind
+    // to null, the D374 convention). The `s` / `t1` / `t2` are `IType&` non-const because
+    // `IdentityConversion` / `BetterConversionTarget` take non-const `IType&` for the non-const
+    // `AcceptVisitor` (D406). Returns `int` (the `0`/`1`/`2` verdict).
+    int BetterConversion(ILSpy::Decompiler::TypeSystem::IType& s,
+                          ILSpy::Decompiler::TypeSystem::IType& t1,
+                          ILSpy::Decompiler::TypeSystem::IType& t2);
+
+    // The C# `public int BetterConversion(ResolveResult resolveResult, IType t1, IType t2)`
+    // (CSharpConversions.cs line 1540, C# 8.0 spec section 12.6.4.5 "better conversion from
+    // expression") -- the better conversion from an EXPRESSION `resolveResult` to two candidate
+    // target types `t1` / `t2`: `0` = neither is better, `1` = `t1` is better, `2` = `t2` is better.
+    // An expression that exactly matches a target (`IsExactlyMatching`) beats one that does not;
+    // when neither exactly matches, an implicit span conversion (`IsImplicitSpanConversion`)
+    // breaks the tie; when both (or neither) exactly match, the verdict falls to
+    // `BetterConversionTarget`; and for a lambda expression the delegate `Invoke` signatures are
+    // compared (the inferred return type's better conversion to the two delegate return types,
+    // with the `Task<T>` wrapper unpacked for async lambdas). Delegates to the
+    // `Detail::BetterConversion(const ICompilation&, const ResolveResult&, IType&, IType&)` free
+    // function (D544), which wires the already-ported `IsExactlyMatching` (D543),
+    // `IsImplicitSpanConversion` (D538), `BetterConversionTarget` (D535), the IType
+    // `Detail::BetterConversion` overload (for the recursion / the non-lambda else branch),
+    // `UnpackExpressionTreeType` (D534), `GetDelegateInvokeMethod` (D533), `UnpackTask` (D542), and
+    // the `LambdaResolveResult` surface. The C# `ArgumentNullException` on a null `resolveResult`
+    // compiles out (the `const ResolveResult&` reference cannot bind to null, the D374 convention).
+    // The `t1` / `t2` are `IType&` non-const because the Detail free function's callees take
+    // non-const `IType&` for the non-const `AcceptVisitor` (D406). Like the ResolveResult-based
+    // `ImplicitConversion` / `ExplicitConversion` entries, this overload is NOT cached (the C# caches
+    // only the IType-based `BetterConversion`). Returns `int` (the `0`/`1`/`2` verdict).
+    int BetterConversion(const ILSpy::Decompiler::Semantics::ResolveResult& resolveResult,
+                          ILSpy::Decompiler::TypeSystem::IType& t1,
+                          ILSpy::Decompiler::TypeSystem::IType& t2);
+
+    // The C# `public bool IsConstraintConvertible(IType fromType, IType toType)`
+    // (CSharpConversions.cs line 261, C# spec section 8.4.5 "satisfying constraints") -- whether
+    // `fromType` is convertible to `toType` using one of the conversions allowed when satisfying type
+    // parameter constraints. The allowed conversions are a strict subset of the implicit conversions:
+    // identity, implicit reference, boxing (for a non-nullable from-type), the nullable-value-type-to-
+    // `object` special case, and implicit type-parameter conversion. Delegates to
+    // `Detail::IsConstraintConvertible(*compilation_, ...)` (the free function that wires the
+    // already-ported helpers). The C# `ArgumentNullException` on null args compiles out (the `IType&`
+    // references cannot bind to null, the D374 convention). The `fromType` / `toType` are `IType&`
+    // non-const because the `Detail::` free function takes non-const `IType&` (the non-const
+    // `AcceptVisitor`, D406). Returns `bool`.
+    bool IsConstraintConvertible(ILSpy::Decompiler::TypeSystem::IType& fromType,
+                               ILSpy::Decompiler::TypeSystem::IType& toType);
+
+private:
+    const ILSpy::Decompiler::TypeSystem::ICompilation* compilation_;
+
+    // The C# `readonly ConcurrentDictionary<TypePair, Conversion> implicitConversionCache` /
+    // `explicitConversionCache`. Populated by the (deferred) `ImplicitConversion`/`ExplicitConversion`
+    // methods. The skeleton declares them empty (no conversion method writes them yet). The value is an
+    // owning `shared_ptr<Conversion>` (`Conversion` is polymorphic).
+    std::unordered_map<TypePair, std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>,
+                        TypePairHash, TypePairEq> implicitConversionCache_;
+    std::unordered_map<TypePair, std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>,
+                        TypePairHash, TypePairEq> explicitConversionCache_;
+};
+
+} // namespace ILSpy::Decompiler::CSharp::Resolver

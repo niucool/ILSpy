@@ -1,0 +1,791 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+// to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+// Minimal IL reader tests. Reads straight-line method bodies from mscorlib into
+// an ILFunction tree and checks that every decoded tree passes the ILAst
+// invariant, ends in a Leave/Throw final, and that the dump contains the
+// expected structure. This is the seed of the Phase 3 ILReader (stack
+// simulation -> ILAst); branches/switch/exception handlers still bail out.
+
+#include "Decompiler/IL/ILReader.hpp"
+#include <cstdlib>
+#include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/DefaultValue.hpp"
+#include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/IL/Instructions/InvalidInstructions.hpp"
+#include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/Metadata/MetadataFile.hpp"
+
+#include <gtest/gtest.h>
+
+#include <algorithm>
+#include <filesystem>
+#include <functional>
+#include <string>
+#include <utility>
+#include <vector>
+
+using namespace ILSpy::Decompiler::IL;
+using ILSpy::Decompiler::Metadata::MetadataFile;
+
+using ILSpy::Decompiler::TypeSystem::Sign;
+
+static const char* FixturePath() {
+#if defined(_WIN32)
+    return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    if (const char* env = std::getenv("ILSPY_TEST_MSCORLIB"); env != nullptr)
+        return env;
+    return "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+}
+
+TEST(ILReader, DecodesStraightLineMethodBodiesFromMscorlib) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    int decoded = 0;
+    int invariantOk = 0;
+    int withLeaveFinal = 0;
+    int withThrowFinal = 0;
+    int withCall = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadStraightLineIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        ++decoded;
+        // Every decoded tree must pass the invariant (CheckInvariant already ran
+        // inside the reader; re-run to be explicit in the test).
+        fn->CheckInvariant(ILPhase::Normal);
+        ++invariantOk;
+        // The body is a BlockContainer with one Block; the block's final is a
+        // Leave (ret) or a Throw.
+        ASSERT_NE(fn->Body, nullptr);
+        ASSERT_EQ(fn->Body->Blocks.size(), 1u);
+        auto& block = *fn->Body->Blocks[0];
+        ASSERT_NE(block.FinalInstruction, nullptr);
+        auto op = block.FinalInstruction->Op;
+        if (op == OpCode::Leave) ++withLeaveFinal;
+        else if (op == OpCode::Throw) ++withThrowFinal;
+        else ADD_FAILURE() << "unexpected final: " << block.FinalInstruction->ToString();
+        // Sanity: the dump is non-empty and starts with ILFunction.
+        std::string dump = fn->ToString();
+        EXPECT_NE(dump.find("ILFunction"), std::string::npos);
+        // Count calls in the body (statement-level calls or value calls).
+        for (auto& ins : block.Instructions) {
+            if (ins->Op == OpCode::Call) ++withCall;
+        }
+        if (decoded > 4000) break;
+    }
+    // mscorlib has many tiny straight-line methods (.ctors, wrappers, constants).
+    EXPECT_GT(decoded, 100) << "too few straight-line methods decoded";
+    EXPECT_EQ(invariantOk, decoded) << "an invariant failed";
+    EXPECT_GT(withLeaveFinal, 0) << "no ret-final body decoded";
+    // Most straight-line bodies end in ret; a few in throw. Don't require throw.
+    (void)withThrowFinal;
+    (void)withCall;
+}
+
+TEST(ILReader, HandlesVoidReturnAndValueReturn) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    // Find System.Object::.ctor: a void instance method whose body is just `ret`.
+    // Its ILFunction should be ILFunction { BlockContainer { Block { leave } } }
+    // with a void Leave (no value child).
+    std::uint32_t objectTok = 0;
+    std::uint32_t ctorTok = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Namespace == "System" && t.Name == "Object") { objectTok = t.Token; break; }
+    }
+    ASSERT_NE(objectTok, 0u);
+    for (const auto& m : f.GetMethods(objectTok)) {
+        if (m.Name == ".ctor") { ctorTok = m.Token; break; }
+    }
+    ASSERT_NE(ctorTok, 0u);
+    // .ctor has a body (RVA != 0).
+    std::uint32_t ctorRva = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.Token == ctorTok) { ctorRva = m.RVA; break; }
+    }
+    ASSERT_NE(ctorRva, 0u);
+    auto fn = ReadStraightLineIL(f, ctorTok, ctorRva);
+    ASSERT_NE(fn, nullptr) << "System.Object..ctor should decode as straight-line";
+    auto& block = *fn->Body->Blocks[0];
+    ASSERT_EQ(block.FinalInstruction->Op, OpCode::Leave);
+    auto& leave = static_cast<Leave&>(*block.FinalInstruction);
+    EXPECT_EQ(leave.Value, nullptr) << "void return must have no value child";
+    // The dump shows "leave" with no operand.
+    std::string dump = fn->ToString();
+    EXPECT_NE(dump.find("leave"), std::string::npos);
+}
+
+TEST(ILReader, UnsupportedControlFlowBailsOut) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+    // System.Object::Equals(object) : bool has branches (the ReferenceEquals
+    // short-circuit), so it must bail out (return nullptr) rather than produce
+    // a wrong tree.
+    std::uint32_t objectTok = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Namespace == "System" && t.Name == "Object") { objectTok = t.Token; break; }
+    }
+    ASSERT_NE(objectTok, 0u);
+    bool sawBranchingEquals = false;
+    for (const auto& m : f.GetMethods(objectTok)) {
+        if (m.Name != "Equals") continue;
+        // The instance Equals(object) : bool has a body with branches.
+        auto fn = ReadStraightLineIL(f, m.Token, m.RVA);
+        if (!fn) { sawBranchingEquals = true; break; }
+        // If it did decode, it must still pass the invariant (don't fail), but we
+        // expect at least one Equals overload to bail.
+    }
+    EXPECT_TRUE(sawBranchingEquals) << "expected a branching Equals to bail out";
+}
+
+TEST(ILReader, InvalidInputsAreGraceful) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+    // RVA 0 (abstract) and out-of-range token -> nullptr, not throw.
+    EXPECT_EQ(ReadStraightLineIL(f, 0x06000001u, 0), nullptr);
+    EXPECT_EQ(ReadStraightLineIL(f, 0x06FFFFFFu, 0x12345678u), nullptr);
+}
+
+// ILFunction::IsConstructor / IsStatic (the pre-resolved subset of the C#
+// ILFunction.Method handle) -- the metadata foundation the
+// NullCoalescingTransform hoisted-constructor-argument null-guard fold will
+// consult. These tests verify the MetadataFile helper and the IL reader
+// populate the flags faithfully on real mscorlib methods; no transform
+// consumes them yet (a tested-but-not-yet-wired foundation).
+
+TEST(ILFunctionMethod, GetMethodDefKindInfoReportsConstructorAndStatic) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    std::uint32_t objectTok = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Namespace == "System" && t.Name == "Object") { objectTok = t.Token; break; }
+    }
+    ASSERT_NE(objectTok, 0u);
+
+    std::uint32_t instanceCtorTok = 0;       // System.Object..ctor
+    std::uint32_t staticRefEqualsTok = 0;    // static ReferenceEquals(object, object)
+    std::uint32_t instanceToStringTok = 0;   // instance ToString()
+    for (const auto& m : f.GetMethods(objectTok)) {
+        if (m.Name == ".ctor" && instanceCtorTok == 0) instanceCtorTok = m.Token;
+        // ReferenceEquals is a single static overload (unambiguous, unlike Equals
+        // which has both an instance and a static overload).
+        if (m.Name == "ReferenceEquals" && staticRefEqualsTok == 0) staticRefEqualsTok = m.Token;
+        if (m.Name == "ToString" && instanceToStringTok == 0) instanceToStringTok = m.Token;
+    }
+    ASSERT_NE(instanceCtorTok, 0u);
+    ASSERT_NE(staticRefEqualsTok, 0u);
+    ASSERT_NE(instanceToStringTok, 0u);
+
+    // System.Object..ctor: an instance constructor -> IsConstructor && !IsStatic.
+    auto kind = f.GetMethodDefKindInfo(instanceCtorTok);
+    EXPECT_TRUE(kind.IsConstructor) << ".ctor must be a constructor";
+    EXPECT_FALSE(kind.IsStatic) << "instance .ctor must not be static";
+
+    // System.Object.ReferenceEquals(object, object) is static -> IsStatic &&
+    // !IsConstructor.
+    auto refEqKind = f.GetMethodDefKindInfo(staticRefEqualsTok);
+    EXPECT_TRUE(refEqKind.IsStatic) << "a static method must report IsStatic";
+    EXPECT_FALSE(refEqKind.IsConstructor);
+
+    // System.Object.ToString() is an instance non-constructor -> neither flag.
+    auto toStringKind = f.GetMethodDefKindInfo(instanceToStringTok);
+    EXPECT_FALSE(toStringKind.IsConstructor);
+    EXPECT_FALSE(toStringKind.IsStatic);
+
+    // An out-of-range / wrong-table token yields the default (false/false),
+    // never throws.
+    auto badKind = f.GetMethodDefKindInfo(0x06FFFFFFu);
+    EXPECT_FALSE(badKind.IsConstructor);
+    EXPECT_FALSE(badKind.IsStatic);
+    auto nonMethodKind = f.GetMethodDefKindInfo(0x02000001u);  // TypeDef token
+    EXPECT_FALSE(nonMethodKind.IsConstructor);
+    EXPECT_FALSE(nonMethodKind.IsStatic);
+}
+
+TEST(ILFunctionMethod, ReadILPopulatesConstructorStaticFlags) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    std::uint32_t objectTok = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Namespace == "System" && t.Name == "Object") { objectTok = t.Token; break; }
+    }
+    ASSERT_NE(objectTok, 0u);
+
+    std::uint32_t instanceCtorTok = 0;
+    std::uint32_t instanceCtorRva = 0;
+    for (const auto& m : f.GetMethods(objectTok)) {
+        if (m.Name == ".ctor" && instanceCtorTok == 0) {
+            instanceCtorTok = m.Token;
+            instanceCtorRva = m.RVA;
+        }
+    }
+    ASSERT_NE(instanceCtorTok, 0u);
+    ASSERT_NE(instanceCtorRva, 0u);
+
+    // System.Object..ctor is `ret` only, so both readers decode it. The static
+    // case is covered by the corpus sweep below (many static methods have
+    // branches and bail the straight-line reader; the sweep's cross-check +
+    // `staticMethod > 0` assertion pin the reader flags a static method).
+    auto fnStraight = ReadStraightLineIL(f, instanceCtorTok, instanceCtorRva);
+    ASSERT_NE(fnStraight, nullptr);
+    EXPECT_TRUE(fnStraight->IsConstructor) << "reader must flag an instance .ctor";
+    EXPECT_FALSE(fnStraight->IsStatic);
+
+    auto fnBranch = ReadIL(f, instanceCtorTok, instanceCtorRva);
+    ASSERT_NE(fnBranch, nullptr);
+    EXPECT_TRUE(fnBranch->IsConstructor);
+    EXPECT_FALSE(fnBranch->IsStatic);
+}
+
+TEST(ILFunctionMethod, MscorlibConstructorStaticFlagSweep) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    // Cross-check the reader-populated flags against the helper across the
+    // corpus (the reader must call the helper), and confirm the four flag
+    // combinations all appear (instance ctor, static ctor, instance method,
+    // static method) on the decoded subset.
+    int decoded = 0;
+    int instanceCtor = 0;       // IsConstructor && !IsStatic  (the gate the fold needs)
+    int staticCtor = 0;          // IsConstructor && IsStatic    (.cctor)
+    int instanceMethod = 0;      // !IsConstructor && !IsStatic
+    int staticMethod = 0;        // !IsConstructor && IsStatic
+    int crossCheckOk = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadStraightLineIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        ++decoded;
+        auto kind = f.GetMethodDefKindInfo(m.Token);
+        if (fn->IsConstructor == kind.IsConstructor && fn->IsStatic == kind.IsStatic) {
+            ++crossCheckOk;
+        } else {
+            ADD_FAILURE() << "reader/helper flag mismatch for method token " << m.Token;
+        }
+        if (fn->IsConstructor && !fn->IsStatic) ++instanceCtor;
+        else if (fn->IsConstructor && fn->IsStatic) ++staticCtor;
+        else if (!fn->IsConstructor && !fn->IsStatic) ++instanceMethod;
+        else ++staticMethod;
+        if (decoded > 4000) break;
+    }
+    EXPECT_GT(decoded, 100) << "too few straight-line methods decoded";
+    EXPECT_EQ(crossCheckOk, decoded) << "reader must populate flags from the helper";
+    EXPECT_GT(instanceCtor, 0) << "corpus must have instance constructors";
+    EXPECT_GT(staticMethod, 0) << "corpus must have static methods";
+    EXPECT_GT(instanceMethod, 0) << "corpus must have instance non-constructors";
+    (void)staticCtor;  // .cctor may or may not appear in the straight-line sample
+}
+
+// The IL reader populates each instruction's ILRange (StartILOffset/
+// EndILOffset) at decode time -- the foundation IsInConstructorInitializer (and
+// future debug-info/sequence-point work) consults. A tested-but-not-yet-wired
+// foundation (the D112/D114 precedent); no transform consumes the ranges yet.
+
+namespace {
+void CollectNonSynthetic(ILInstruction* inst, std::vector<ILInstruction*>& out) {
+    if (!inst) return;
+    out.push_back(inst);
+    for (int i = 0; i < inst->ChildCount(); ++i) CollectNonSynthetic(inst->GetChild(i), out);
+}
+} // namespace
+
+TEST(ILFunctionMethod, ReaderPopulatesILRangesOnObjectCtor) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    std::uint32_t objectTok = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Namespace == "System" && t.Name == "Object") { objectTok = t.Token; break; }
+    }
+    ASSERT_NE(objectTok, 0u);
+    std::uint32_t ctorTok = 0, ctorRva = 0;
+    for (const auto& m : f.GetMethods(objectTok)) {
+        if (m.Name == ".ctor") { ctorTok = m.Token; ctorRva = m.RVA; break; }
+    }
+    ASSERT_NE(ctorTok, 0u);
+    ASSERT_NE(ctorRva, 0u);
+
+    auto fn = ReadStraightLineIL(f, ctorTok, ctorRva);
+    ASSERT_NE(fn, nullptr);
+    // System.Object..ctor is `ret` only: a single block whose final is a void
+    // Leave, at IL offset 0, length 1 (the ret opcode).
+    ASSERT_NE(fn->Body, nullptr);
+    ASSERT_EQ(fn->Body->Blocks.size(), 1u);
+    auto* block = fn->Body->Blocks[0].get();
+    ASSERT_NE(block->FinalInstruction, nullptr);
+    EXPECT_EQ(block->FinalInstruction->Op, OpCode::Leave);
+    EXPECT_EQ(block->FinalInstruction->StartILOffset, 0)
+        << "the ret is the first (and only) instruction, at offset 0";
+    EXPECT_EQ(block->FinalInstruction->EndILOffset, 1)
+        << "ret is a 1-byte opcode, so the range is [0, 1)";
+    EXPECT_FALSE(block->FinalInstruction->IsILRangeEmpty());
+}
+
+TEST(ILFunctionMethod, ReaderPopulatesMonotoneRangesAcrossMethod) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    // Find a straight-line method with a call (so the body has >= 2 tagged
+    // instructions with distinct ranges to check monotonicity).
+    int checked = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadStraightLineIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        std::vector<ILInstruction*> flat;
+        CollectNonSynthetic(fn->Body.get(), flat);
+        // Collect the reader-produced ranges (non-empty) in source order within
+        // the single block: the block's Instructions (in order) then the final.
+        auto* block = fn->Body->Blocks[0].get();
+        std::vector<std::pair<int, int>> ranges;
+        for (auto& ins : block->Instructions)
+            if (!ins->IsILRangeEmpty()) ranges.emplace_back(ins->StartILOffset, ins->EndILOffset);
+        if (auto* fin = block->FinalInstruction.get())
+            if (!fin->IsILRangeEmpty()) ranges.emplace_back(fin->StartILOffset, fin->EndILOffset);
+        if (ranges.size() < 2) continue;  // need at least two to check monotonicity
+        // Each range is well-formed (Start < End) and they are strictly increasing
+        // (a later instruction starts at or after an earlier one ends).
+        bool monotone = true;
+        for (std::size_t i = 0; i < ranges.size(); ++i) {
+            if (ranges[i].first >= ranges[i].second) { monotone = false; break; }
+            if (i + 1 < ranges.size() && ranges[i + 1].first < ranges[i].second) {
+                monotone = false; break;
+            }
+        }
+        EXPECT_TRUE(monotone) << "ranges must be well-formed and increasing for token " << m.Token;
+        ++checked;
+        if (checked > 200) break;
+    }
+    EXPECT_GT(checked, 0) << "expected at least one multi-instruction straight-line method";
+}
+
+TEST(ILFunctionMethod, MscorlibChainedConstructorCallSweep) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    // For every decoded straight-line method, cross-check ChainedConstructorCallILOffset:
+    // an instance constructor that chains a base/this call reports >= 0; a
+    // non-constructor always reports -1. The .NET Framework 4 mscorlib has many
+    // derived-class .ctors whose body is `ldarg.0; call Base..ctor; ret`, so the
+    // sweep must find chained calls.
+    int decoded = 0;
+    int instanceCtor = 0;
+    int instanceCtorWithChainedCall = 0;  // the gate the fold needs
+    int nonCtorWithMinusOne = 0;
+    int nonCtorCount = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadStraightLineIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        ++decoded;
+        auto off = fn->ChainedConstructorCallILOffset();
+        if (fn->IsConstructor && !fn->IsStatic) {
+            ++instanceCtor;
+            if (off >= 0) ++instanceCtorWithChainedCall;
+        } else {
+            ++nonCtorCount;
+            if (off == -1) ++nonCtorWithMinusOne;
+        }
+        if (decoded > 4000) break;
+    }
+    EXPECT_GT(decoded, 100) << "too few straight-line methods decoded";
+    EXPECT_GT(instanceCtor, 0) << "corpus must have instance constructors";
+    EXPECT_GT(instanceCtorWithChainedCall, 0)
+        << "some instance .ctor must chain a base/this .ctor call";
+    EXPECT_EQ(nonCtorWithMinusOne, nonCtorCount)
+        << "every non-constructor must report ChainedConstructorCallILOffset -1";
+}
+
+// Cross-check that the IL reader populates Call::ReturnIType (the method's
+// return type IType, resolved from the signature) for every call site. The
+// NullCoalescing output case of NullPropagationTransform::TryNullPropagation
+// consults Call::ReturnIType (via InferAccessChainType) to gate on
+// NullableType.IsNonNullableValueType; this sweep verifies the reader wires it
+// for real call/callvirt/newobj sites across the mscorlib corpus, so the fold's
+// InferAccessChainType sees a real return type (not nullptr) on real calls.
+TEST(ILReader, MscorlibCallReturnITypeSweep) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    int decoded = 0;
+    int callSites = 0;
+    int callSitesWithReturnIType = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadStraightLineIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        ++decoded;
+        // Recursively walk the function body and count Call nodes.
+        std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+            if (!inst) return;
+            if (inst->Op == OpCode::Call) {
+                ++callSites;
+                auto* call = static_cast<Call*>(inst);
+                if (call->ReturnIType) ++callSitesWithReturnIType;
+            }
+            for (int i = 0; i < inst->ChildCount(); ++i)
+                walk(inst->GetChild(i));
+        };
+        if (fn->Body) {
+            for (auto& b : fn->Body->Blocks) {
+                for (auto& ins : b->Instructions) walk(ins.get());
+                walk(b->FinalInstruction.get());
+            }
+        }
+        if (decoded > 4000) break;
+    }
+    EXPECT_GT(decoded, 100) << "too few straight-line methods decoded";
+    EXPECT_GT(callSites, 0) << "corpus must have call sites";
+    EXPECT_GT(callSitesWithReturnIType, 0)
+        << "the reader must populate Call::ReturnIType for some call sites";
+}
+
+// The BNI Sign / LeftInputType / RightInputType reconciliation (D125/D126): the
+// IL reader now emits BinaryNumericInstruction with the per-opcode Sign
+// (None/Signed/Unsigned) + CheckForOverflow the C# ILReader BinaryNumeric(op,
+// checkForOverflow, sign) helper sets, and the 5-arg constructor derives the
+// input types from the operands' ResultType. The invariant the C# CheckInvariant
+// enforces (LeftInputType == Left.ResultType, RightInputType == Right.ResultType
+// for a non-lifted binary) must hold across the corpus; Sign must be a valid enum
+// value; and the reader-emitted binaries must not be lifted (the lift machinery
+// runs only in NullableLifting, later in the pipeline).
+TEST(ILReader, MscorlibBinaryNumericSignSweep) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    int decoded = 0;
+    int binarySites = 0;
+    int signedSites = 0;
+    int unsignedSites = 0;
+    int noneSites = 0;
+    int overflowSites = 0;
+    int invariantViolations = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadStraightLineIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        ++decoded;
+        std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+            if (!inst) return;
+            if (inst->Op == OpCode::BinaryNumericInstruction) {
+                ++binarySites;
+                auto* bni = static_cast<BinaryNumericInstruction*>(inst);
+                if (bni->Sign == Sign::Signed) ++signedSites;
+                else if (bni->Sign == Sign::Unsigned) ++unsignedSites;
+                else if (bni->Sign == Sign::None) ++noneSites;
+                if (bni->CheckForOverflow) ++overflowSites;
+                // The reader-emitted binaries are never lifted (the lift
+                // machinery runs in NullableLifting, later in the pipeline).
+                if (!bni->IsLifted) {
+                    if (bni->Left && bni->LeftInputType != bni->Left->ResultType())
+                        ++invariantViolations;
+                    if (bni->Right && bni->RightInputType != bni->Right->ResultType())
+                        ++invariantViolations;
+                }
+                // The legacy Signed bool must be consistent with Sign.
+                if (bni->Sign == Sign::Unsigned ? bni->Signed : !bni->Signed)
+                    ++invariantViolations;
+            }
+            for (int i = 0; i < inst->ChildCount(); ++i)
+                walk(inst->GetChild(i));
+        };
+        if (fn->Body) {
+            for (auto& b : fn->Body->Blocks) {
+                for (auto& ins : b->Instructions) walk(ins.get());
+                walk(b->FinalInstruction.get());
+            }
+        }
+        if (decoded > 4000) break;
+    }
+    EXPECT_GT(decoded, 100) << "too few straight-line methods decoded";
+    EXPECT_GT(binarySites, 0) << "corpus must have binary numeric sites";
+    EXPECT_EQ(invariantViolations, 0)
+        << "LeftInputType/RightInputType must match the operands' ResultType";
+    // The .NET Framework 4 legacy-csc mscorlib emits all three Sign flavours:
+    // plain add/sub/mul/and/or/xor/shl (None), div/rem/shr (Signed), and the
+    // _un / _ovf_un forms (Unsigned). All three must appear in the corpus.
+    EXPECT_GT(noneSites, 0) << "corpus must have Sign.None binaries (plain add/sub/..)";
+    EXPECT_GT(signedSites, 0) << "corpus must have Sign.Signed binaries (div/rem/shr)";
+    EXPECT_GT(unsignedSites, 0) << "corpus must have Sign.Unsigned binaries (_un forms)";
+}
+// The ILStackWasEmpty reader flags (the C# CallInstruction.ILStackWasEmpty /
+// DefaultValue.ILStackWasEmpty / StLoc.ILStackWasEmpty fields, set from
+// CurrentStackIsEmpty() after the operands were popped). The expectations are
+// hand-derived from the byte-verified flat disassembly of the same mscorlib
+// fixtures (the port's --il dump is byte-identical to the real tool's):
+//
+//   String.Copy (RVA 0x1330c): every statement is self-contained, so every
+//     Call (incl. the newobj) and every StLoc decodes with an empty stack
+//     beneath -- 12 flagged nodes, all TRUE (the stloc.0/1 stores of the
+//     length/allocation, the stloc.3/2/5/4 pinned-pointer stores, the two
+//     stloc.s stores of the null terminators, get_Length, FastAllocateString,
+//     wstrcpy and the ArgumentNullException newobj).
+//
+//   Registry.GetBaseKeyFromKeyName (RVA 0x2614): the two
+//     `callvirt ToUpper(..., call get_InvariantCulture())` sites leave the
+//     pending receiver beneath the zero-argument static call, so the
+//     get_InvariantCulture calls carry FALSE; the nested get_Length calls
+//     inside the Substring argument trees and the Substring feeding ToUpper
+//     likewise sit above a pending value. Every StLoc is statement-level and
+//     TRUE.
+//
+//   AsyncTaskMethodBuilder.Create (RVA 0x14a98c): the lone `initobj` pops its
+//     target address as the only pending value, so the DefaultValue node
+//     carries TRUE.
+
+TEST(ILReader, StringCopyDecodesAllStatementNodesWithEmptyStack)
+{
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    std::uint32_t token = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0x1330c) { token = m.Token; break; }
+    }
+    ASSERT_NE(token, 0u) << "String.Copy fixture method not found";
+    auto fn = ReadIL(f, token, 0x1330c);
+    ASSERT_NE(fn, nullptr);
+
+    int calls = 0, stlocs = 0, newobjs = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::Call) {
+            auto* call = static_cast<Call*>(inst);
+            ++calls;
+            if (call->IsNewObj) ++newobjs;
+            EXPECT_TRUE(call->ILStackWasEmpty)
+                << "call must sit on an empty stack: " << call->MethodName;
+        } else if (inst->Op == OpCode::StLoc) {
+            ++stlocs;
+            EXPECT_TRUE(static_cast<StLoc*>(inst)->ILStackWasEmpty)
+                << "store must sit on an empty stack";
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i)
+            walk(inst->GetChild(i));
+    };
+    ASSERT_NE(fn->Body, nullptr);
+    for (auto& b : fn->Body->Blocks) {
+        for (auto& ins : b->Instructions) walk(ins.get());
+        walk(b->FinalInstruction.get());
+    }
+    // The exact census from the hand-derived trace: 4 calls (get_Length,
+    // FastAllocateString, wstrcpy and the ArgumentNullException newobj) and 8
+    // stores (stloc.0, stloc.1, the four pointer stores, and the two stloc.s
+    // terminator stores).
+    EXPECT_EQ(calls, 4);
+    EXPECT_EQ(newobjs, 1);
+    EXPECT_EQ(stlocs, 8);
+}
+
+TEST(ILReader, NestedCallsCarryNonEmptyStackFlag)
+{
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    std::uint32_t token = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0x2614) { token = m.Token; break; }
+    }
+    ASSERT_NE(token, 0u) << "GetBaseKeyFromKeyName fixture method not found";
+    auto fn = ReadIL(f, token, 0x2614);
+    ASSERT_NE(fn, nullptr);
+
+    // Collect every call's (flag, short method name) pair.
+    std::vector<std::pair<bool, std::string>> calls;
+    int stlocs = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::Call) {
+            auto* call = static_cast<Call*>(inst);
+            // The reader records "Namespace.Type::Method" -- keep the
+            // type-qualified tail.
+            std::string name = call->MethodName;
+            calls.emplace_back(call->ILStackWasEmpty, std::move(name));
+        } else if (inst->Op == OpCode::StLoc) {
+            auto* store = static_cast<StLoc*>(inst);
+            ++stlocs;
+            // The port's dup arm commits the duplicated value into a synthetic
+            // `dup_<offset>` stack-slot store (the C# Push(Peek()) aliasing the
+            // tree node instead); those synthetic stores carry the C# default
+            // false like every non-IL store. Every store decoded from an IL
+            // stloc opcode is statement-level here and must be true.
+            if (store->Variable == nullptr
+                || store->Variable->Name.rfind("dup_", 0) != 0) {
+                EXPECT_TRUE(store->ILStackWasEmpty)
+                    << "every statement-level store sits on an empty stack";
+            }
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i)
+            walk(inst->GetChild(i));
+    };
+    ASSERT_NE(fn->Body, nullptr);
+    for (auto& b : fn->Body->Blocks) {
+        for (auto& ins : b->Instructions) walk(ins.get());
+        walk(b->FinalInstruction.get());
+    }
+
+    // The exact FALSE set from the hand-derived trace: the two
+    // get_InvariantCulture sites (the pending ToUpper receiver beneath), the
+    // two get_Length calls inside the Substring argument trees, and the
+    // Substring feeding one ToUpper (its receiver is pending beneath).
+    std::vector<std::string> notEmpty;
+    for (const auto& [wasEmpty, name] : calls) {
+        if (!wasEmpty) notEmpty.push_back(name);
+    }
+    auto countName = [&](std::string_view needle) {
+        return static_cast<int>(std::count_if(notEmpty.begin(), notEmpty.end(),
+            [&](const std::string& n) { return n.find(needle) != std::string::npos; }));
+    };
+    EXPECT_EQ(notEmpty.size(), std::size_t(5));
+    EXPECT_EQ(countName("CultureInfo::get_InvariantCulture"), 2);
+    EXPECT_EQ(countName("String::get_Length"), 2);
+    EXPECT_EQ(countName("String::Substring"), 1);
+    EXPECT_GT(stlocs, 0) << "the fixture has statement-level stores";
+}
+
+TEST(ILReader, InitObjSetsDefaultValueStackWasEmpty)
+{
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    // AsyncTaskMethodBuilder.Create: ldloca.s 0; initobj T; ldloc.0; ret --
+    // the lone default-value construction pops the address as the only
+    // pending value, so the flag is true.
+    std::uint32_t token = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0x14a98c) { token = m.Token; break; }
+    }
+    ASSERT_NE(token, 0u) << "AsyncTaskMethodBuilder.Create fixture method not found";
+    auto fn = ReadIL(f, token, 0x14a98c);
+    ASSERT_NE(fn, nullptr);
+
+    int defaultValues = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::DefaultValue) {
+            ++defaultValues;
+            EXPECT_TRUE(static_cast<DefaultValue*>(inst)->ILStackWasEmpty)
+                << "the initobj target is the only pending value";
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i)
+            walk(inst->GetChild(i));
+    };
+    ASSERT_NE(fn->Body, nullptr);
+    for (auto& b : fn->Body->Blocks) {
+        for (auto& ins : b->Instructions) walk(ins.get());
+        walk(b->FinalInstruction.get());
+    }
+    EXPECT_EQ(defaultValues, 1);
+}
+
+// The C# ILReader.ReadInstructions' zero-length arm (ILReader.cs lines
+// 485-495): a ref-pack method body (RVA != 0, Code size == 0 -- the
+// reference-assembly convention) yields a one-block function whose
+// single instruction is the InvalidBranch with the exact message the
+// C# plants; the parameters still resolve (the C# leaves stackVariables
+// empty but the parameters were bound before the early return). The
+// corpus shape is System.IO.Compression.ZipFile::OpenRead in the net48
+// reference FileSystem.dll.
+TEST(ILReader, ZeroLengthBodyYieldsTheEmptyBodyInvalidBranch) {
+    const char* mscorlib = std::getenv("ILSPY_TEST_MSCORLIB");
+    if (mscorlib == nullptr || !std::filesystem::exists(mscorlib)) {
+        GTEST_SKIP() << "corpus not provisioned";
+    }
+    std::filesystem::path corpus =
+        std::filesystem::path(mscorlib).parent_path();
+    std::filesystem::path fileSystem =
+        corpus / "System.IO.Compression.FileSystem.dll";
+    if (!std::filesystem::exists(fileSystem)) {
+        GTEST_SKIP() << "FileSystem.dll not provisioned";
+    }
+    MetadataFile f(fileSystem.string());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t openReadToken = 0;
+    std::uint32_t openReadRva = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Name != "ZipFile") continue;
+        for (const auto& m : f.GetMethods(t.Token)) {
+            if (m.Name != "OpenRead") continue;
+            openReadToken = m.Token;
+            openReadRva = m.RVA;
+            break;
+        }
+        break;
+    }
+    ASSERT_NE(openReadToken, 0u) << "ZipFile::OpenRead not found";
+    EXPECT_NE(openReadRva, 0u)
+        << "the ref-pack convention carries a non-zero RVA";
+    auto body = f.GetMethodBody(openReadRva);
+    ASSERT_TRUE(body.IsValid());
+    EXPECT_EQ(body.CodeSize(), 0u);
+
+    auto fn = ReadIL(f, openReadToken, openReadRva);
+    ASSERT_NE(fn, nullptr)
+        << "the C# ILReader decodes a zero-length body (the early-return "
+           "InvalidBranch arm); the port must not bail";
+    ASSERT_NE(fn->Body, nullptr);
+    ASSERT_EQ(fn->Body->Blocks.size(), 1u);
+    ASSERT_EQ(fn->Body->Blocks[0]->Instructions.size(), 1u);
+    auto* invalid =
+        dynamic_cast<InvalidBranch*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_NE(invalid, nullptr);
+    ASSERT_TRUE(invalid->Message.has_value());
+    EXPECT_EQ(*invalid->Message,
+        "Empty body found. Decompiled assembly might be a reference assembly.");
+    EXPECT_EQ(invalid->StartILOffset, 0u);
+}

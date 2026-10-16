@@ -1,0 +1,16 @@
+using System;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+
+[assembly: AssemblyTitle("System.AppContext")]
+[assembly: AssemblyDescription("System.AppContext")]
+[assembly: AssemblyDefaultAlias("System.AppContext")]
+[assembly: AssemblyCompany("Microsoft Corporation")]
+[assembly: AssemblyProduct("Microsoft® .NET Framework")]
+[assembly: AssemblyCopyright("© Microsoft Corporation.  All rights reserved.")]
+[assembly: AssemblyMetadata("", "")]
+[assembly: AssemblyFileVersion("4.8.3761.0")]
+[assembly: AssemblyInformationalVersion("4.8.3761.0")]
+[assembly: ReferenceAssembly]
+[assembly: AssemblyVersion("4.1.2.0")]
+[assembly: TypeForwardedTo(typeof(AppContext))]

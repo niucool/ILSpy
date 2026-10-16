@@ -1,0 +1,16 @@
+{
+  "name": "ilspy",
+  "version": "1.0.0",
+  "description": "C++ port of the ILSpy decompiler engine (core + CLI). See PORT_PLAN.md and MIRROR_LAYOUT_REORGANIZATION.md.",
+  "homepage": "https://github.com/icsharpcode/ILSpy",
+  "license": "MIT",
+  "dependencies": [
+    "cxxopts",
+    "gtest",
+    "lz4",
+    "miniz",
+    "nlohmann-json",
+    "plog"
+  ],
+  "builtin-baseline": "a51bb4d1434e6d0927ff79db8033bed8522b85df"
+}

@@ -1,0 +1,312 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files (the "Software"), to deal in
+// the Software without restriction, including without limitation the rights to
+// use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+// of the Software, and to permit persons to whom the Software is furnished to do
+// so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+// Port of ICSharpCode.Decompiler/IL/Transforms/TransformExpressionTrees.cs --
+// converts LINQ Expression.Lambda call trees into ILFunctions. The C# builds
+// a tree of Func<ILInstruction> thunks that only execute if the whole
+// transform succeeds; the port carries the same two-phase shape (the Convert*
+// functions return a deferred-thunk + type pair).
+//
+// Deferrals (each documented at the arm):
+//  - the C# `parameters` dictionary is read-only state the transform runs
+//    carry; the port carries it as a plain map.
+//  - the closure-reference arm (TransformDisplayClassUsage.IsPotentialClosure)
+//    is deferred with that surface (the C# needs the decompiled-type
+//    definition).
+//  - `MatchLdTypeToken` / `MatchLdMemberToken` are token-instruction dynamic
+//    casts over the port's LdTypeToken / (MethodDef token) nodes.
+
+#pragma once
+
+#include "Decompiler/IL/Transforms/StatementTransform.hpp"
+
+#include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
+#include "Decompiler/IL/Instructions/Comp.hpp"
+
+#include <functional>
+#include <map>
+#include <memory>
+#include <string>
+#include "Decompiler/TypeSystem/IType.hpp"
+
+namespace ILSpy::Decompiler::TypeSystem {
+class IParameter;
+}
+
+namespace ILSpy::Decompiler::CSharp::Resolver {
+class CSharpConversions;
+class CSharpResolver;
+}
+
+namespace ILSpy::Decompiler::IL {
+
+namespace TS = ::ILSpy::Decompiler::TypeSystem;
+
+class ILVariable;
+class StLoc;
+class Call;
+class ILFunction;
+
+class TransformExpressionTrees final : public IStatementTransform {
+public:
+    // Out-of-line (the unique_ptr<CSharpResolver> member's destruction
+    // needs the complete type; the .cpp includes the header).
+    ~TransformExpressionTrees() override;
+
+public:
+    // The C# `internal static bool MatchGetTypeFromHandle(ILInstruction inst,
+    // out IType type)` (a static helper the tests use).
+    static bool MatchGetTypeFromHandle(ILInstruction* inst,
+                                       ::ILSpy::Decompiler::TypeSystem::ITypePtr& type);
+
+    void Run(Block& block, int pos, StatementTransformContext& context) override;
+
+    // The C# `bool MatchParameterVariableAssignment(ILInstruction expr,
+    // out ILVariable, out IType, out string)`: match the
+    // `stloc(v, Expression.Parameter(GetTypeFromHandle(ldtoken T), "name"))`
+    // assignment shape the compiler emits for each lambda parameter.
+    static bool MatchParameterVariableAssignment(
+        ILInstruction* expr, std::shared_ptr<ILVariable>& parameterReferenceVar,
+        ::ILSpy::Decompiler::TypeSystem::ITypePtr& type, std::string& name);
+
+    // The C# `static bool MightBeExpressionTree(ILInstruction inst,
+    // ILInstruction stmt)`: a candidate `Expression.Lambda(body, args)` call
+    // (2 arguments; the second an empty parameter-list expression).
+    static bool MightBeExpressionTree(ILInstruction* inst, ILInstruction* stmt);
+
+    // The C# `static bool IsEmptyParameterList(ILInstruction)`: the
+    // `Array.Empty<T>()` / `newarr ParameterExpression` /
+    // `newarr Expression` forms.
+    static bool IsEmptyParameterList(ILInstruction* inst);
+
+    // The instance state (the C# `this.context/conversions/resolver/
+    // parameters/parameterMapping/instructionsToRemove/lambdaStack` fields).
+    // The conversions/resolver pair is deferred with the resolver-backed arms
+    // (ConvertComparison/ConvertBinaryNumericOperator's user-defined-operator
+    // forms); the parameter maps drive the LdLoc arms below.
+    struct State {
+        // The C# `Dictionary<ILVariable, (IType, string)> parameters`.
+        std::map<ILVariable*, std::pair<::ILSpy::Decompiler::TypeSystem::ITypePtr, std::string>>
+            parameters;
+        // The C# `Dictionary<ILVariable, ILVariable> parameterMapping`.
+        std::map<ILVariable*, std::shared_ptr<ILVariable>> parameterMapping;
+        std::vector<ILInstruction*> instructionsToRemove;
+        std::vector<ILFunction*> lambdaStack;
+        // The storing stloc per recorded parameter (the port's ILVariable does
+        // not track store instructions; the C# reads
+        // `v.StoreInstructions[0]` in ReadParameters).
+        std::map<ILVariable*, StLoc*> parameterStores;
+    };
+
+    // The per-Run state (re-initialized at the top of Run, the C# fields
+    // re-assigned there).
+    State state_;
+    // The C# `CSharpConversions conversions` + `CSharpResolver resolver`
+    // fields (re-assigned at the top of Run from `context.TypeSystem`).
+    // Null when the context carries no type system -- the
+    // conversions/resolver-backed arms (ConvertCoalesce's nullable
+    // classification, ConvertComparison's user-defined shapes) then bail,
+    // the C# never runs without a type system.
+    ::ILSpy::Decompiler::CSharp::Resolver::CSharpConversions*
+        conversions_ = nullptr;
+    // The resolver is shared-held: its C# `return this` bridges call
+    // shared_from_this, so it must have a shared_ptr owner. A shared_ptr
+    // member over a forward-declared type is destruction-safe (the deleter
+    // rides the control block make_shared captures).
+    std::shared_ptr<::ILSpy::Decompiler::CSharp::Resolver::CSharpResolver>
+        resolver_;
+    // The enclosing StatementTransformContext (set at the top of Run; the C#
+    // `this.context` field the Convert* arms consult).
+    StatementTransformContext* context_ = nullptr;
+
+    // The C# `bool TryConvertExpressionTree(ILInstruction, ILInstruction)`:
+    // walk the instruction tree for the first MightBeExpressionTree call.
+    bool TryConvertExpressionTree(ILInstruction* instruction,
+                                  ILInstruction* statement);
+
+    // The C# `(Func<ILInstruction>, IType) ConvertLambda(CallInstruction)`:
+    // builds the ILFunction (Kind ExpressionTree/Delegate) over the converted
+    // body; a deferred BuildFunction thunk pattern (the C# local function
+    // captured by the returned Func). Returns {nullptr, null type} on failure.
+    struct ConvertResult {
+        std::function<std::unique_ptr<ILInstruction>()> thunk;
+        ::ILSpy::Decompiler::TypeSystem::ITypePtr type;
+    };
+
+    ConvertResult ConvertLambda(Call* instruction);
+    ConvertResult ConvertInstruction(ILInstruction* instruction,
+                                     TypeSystem::IType* typeHint = nullptr);
+
+    // The C# `(Func<ILInstruction>, IType) ConvertCoalesce(CallInstruction
+    // invocation)` (TransformExpressionTrees.cs line 729): the `a ?? b`
+    // expression-tree node -- the nullable-fallback classification over
+    // CSharpConversions.ImplicitConversion, the NullCoalescingInstruction
+    // with the underling result type.
+    ConvertResult ConvertCoalesce(Call* invocation);
+
+    // The C# `(Func<ILInstruction>, IType) ConvertComparison(
+    // CallInstruction invocation, ComparisonKind kind)` (line 758): the
+    // user-defined lifted form (the 4-arg shape), the resolver's
+    // user-defined operator, the String op_Equality/op_Inequality pair, and
+    // the builtin Comp fallback.
+    ConvertResult ConvertComparison(Call* invocation,
+                                    ComparisonKind kind);
+
+    // The C# `bool IsExpressionTree(IType)` / `IType UnwrapExpressionTree(IType)`:
+    // the `Expression<T>` ParameterizedType probe and its element-type unwrap.
+    static bool IsExpressionTree(const TypeSystem::IType& delegateType);
+    static ::ILSpy::Decompiler::TypeSystem::ITypePtr UnwrapExpressionTree(
+        const TypeSystem::IType& delegateType);
+
+    // The C# `void SetExpressionTreeFlag(ILFunction, CallInstruction)`.
+    static void SetExpressionTreeFlag(ILFunction& lambda, const Call& call);
+
+    // The C# `bool ReadParameters(ILInstruction, List<IParameter>,
+    // List<ILVariable>, SimpleTypeResolveContext)`: the initializer-block arm
+    // over the recorded parameter assignments. The C# `context` parameter is
+    // unused there and is dropped (the port carries no dead parameter).
+    bool ReadParameters(ILInstruction* initializer,
+                        std::vector<std::shared_ptr<const ::ILSpy::Decompiler::TypeSystem::IParameter>>&
+                            parameterList,
+                        std::vector<std::shared_ptr<ILVariable>>&
+                            parameterVariables);
+
+    // The C# `(Func<ILInstruction>, IType) ConvertConstant(CallInstruction)`
+    // and its `MatchConstantCall` helper (the value+type pair extraction).
+    ConvertResult ConvertConstant(Call* invocation);
+    bool MatchConstantCall(ILInstruction* inst, ILInstruction*& value,
+                           ::ILSpy::Decompiler::TypeSystem::ITypePtr& type);
+
+    // The C# `ILInstruction ConvertValue(ILInstruction, ILInstruction)`:
+    // clone the constant operand, remapping parameter loads. The closure-
+    // reference arm is deferred with TransformDisplayClassUsage.
+    std::unique_ptr<ILInstruction> ConvertValue(ILInstruction* value,
+                                                ILInstruction* context);
+
+    // The C# `(Func<ILInstruction>, IType) ConvertQuote(CallInstruction)`.
+    ConvertResult ConvertQuote(Call* invocation);
+
+    // The C# `(Func<ILInstruction>, IType) ConvertCall(CallInstruction)`:
+    // the `case "Call"` arm -- a MethodCallExpression whose method operand is
+    // the `castclass MethodInfo(MethodBase.GetMethodFromHandle(...))` handle
+    // shape. The instance-target arm converts the receiver through
+    // ConvertInstruction; the CreateDelegate special case (a closed generic
+    // `MethodInfo.CreateDelegate` call rebuilding a `newobj` + `ldftn`) is
+    // deferred with the constructor-resolution surface.
+    ConvertResult ConvertCall(Call* invocation);
+
+    // The C# `bool MatchGetMethodFromHandle(ILInstruction, out IMember)`
+    // (TransformExpressionTrees.cs): the castclass MethodInfo(
+    // MethodBase.GetMethodFromHandle(ldmembertoken member[, ldtoken type]))
+    // shape. Static (no member state).
+    static bool MatchGetMethodFromHandle(
+        ILInstruction* inst,
+        std::shared_ptr<const ::ILSpy::Decompiler::TypeSystem::IMethod>&
+            member);
+
+    // The C# `static bool MatchFromHandleParameterList(CallInstruction, out
+    // IMember)`: the ldmembertoken [+ ldtoken type] argument shapes.
+    static bool MatchFromHandleParameterList(
+        Call* call,
+        std::shared_ptr<const ::ILSpy::Decompiler::TypeSystem::IMember>&
+            member);
+
+    // The C# `bool MatchArgumentList(ILInstruction, out IList<ILInstruction>)`:
+    // the ArrayInitializer block form (StObj(LdElema(ldc.i4 i), value) per
+    // slot) or the IsEmptyParameterList form. Returns the raw argument
+    // pointers (borrowed from the tree; the thunks re-build eagerly at
+    // materialization time, matching the C# Func list).
+    static bool MatchArgumentList(
+        ILInstruction* inst, std::vector<ILInstruction*>& arguments);
+
+    // The C# `Func<ILInstruction>[] ConvertCallArguments(IList, IMethod)`:
+    // per-argument ConvertInstruction against the method's expected
+    // parameter type; false when an argument fails to convert.
+    bool ConvertCallArguments(
+        const std::vector<ILInstruction*>& arguments,
+        const ::ILSpy::Decompiler::TypeSystem::IMethod& method,
+        std::vector<std::function<std::unique_ptr<ILInstruction>()>>& out);
+
+    // The C# `(Func<ILInstruction>, IType) ConvertTypeAs(CallInstruction)`:
+    // the `as`-cast arm -- `isinst(T, operand)`, with the ECMA-335 III.4.6
+    // Nullable-of-T special case following `unbox.any(T, ...)`; and the C#
+    // `(Func<ILInstruction>, IType) ConvertTypeIs(CallInstruction)`: the
+    // `is T` arm -- `comp(isinst(T, operand) != ldnull)`, result Boolean.
+    ConvertResult ConvertTypeAs(Call* invocation);
+    ConvertResult ConvertTypeIs(Call* invocation);
+
+    // The C# `(Func<ILInstruction>, IType) ConvertCast(CallInstruction,
+    // bool isChecked)` (the "Convert"/"ConvertChecked" names),
+    // ConvertNotOperator ("Not"/"OnesComplement"),
+    // ConvertBinaryNumericOperator (the primitive binary names),
+    // ConvertArrayLength, and ConvertCondition.
+    ConvertResult ConvertCast(Call* invocation, bool isChecked);
+    ConvertResult ConvertNotOperator(Call* invocation);
+    ConvertResult ConvertBinaryNumericOperator(
+        Call* invocation, BinaryNumericOperator op, bool isChecked);
+    ConvertResult ConvertArrayLength(Call* invocation);
+    ConvertResult ConvertCondition(Call* invocation);
+
+    // The C# `(Func<ILInstruction>, IType) ConvertLogicOperator(
+    // CallInstruction, bool and)` ("AndAlso"/"OrElse" -- the 2-arg
+    // IfInstruction.LogicAnd/LogicOr sugar, the 3/4-arg user-defined forms)
+    // and ConvertInvoke (the delegate-invocation arm over the resolved
+    // Invoke method).
+    ConvertResult ConvertLogicOperator(Call* invocation, bool isAnd);
+    ConvertResult ConvertInvoke(Call* invocation);
+
+    // The C# `(Func<ILInstruction>, IType) ConvertUnaryNumericOperator(
+    // CallInstruction, BinaryNumericOperator op, bool? isChecked)` (the
+    // "Negate"/"NegateChecked" names -- the zero-operand fold over the
+    // operand's underlying stack type) and ConvertNewObject (the "New" arm:
+    // the 1-arg type-token scan, the 1-arg ctor token, and the 2-arg
+    // ctor-token + argument-list forms) with its
+    // MatchGetConstructorFromHandle helper (the castclass ConstructorInfo
+    // shape).
+    ConvertResult ConvertUnaryNumericOperator(
+        Call* invocation, BinaryNumericOperator op, bool isChecked);
+    ConvertResult ConvertNewObject(Call* invocation);
+    static bool MatchGetConstructorFromHandle(
+        ILInstruction* inst,
+        std::shared_ptr<const ::ILSpy::Decompiler::TypeSystem::IMethod>&
+            member);
+
+    // The C# `(Func<ILInstruction>, IType) ConvertField(CallInstruction,
+    // IType typeHint)` and its MatchGetFieldFromHandle helper (the
+    // FieldInfo.GetFieldFromHandle(ldmembertoken field) shape -- the token's
+    // member downcasts to IField, a method token is rejected).
+    ConvertResult ConvertField(Call* invocation, TypeSystem::IType* typeHint);
+    static bool MatchGetFieldFromHandle(
+        ILInstruction* inst,
+        std::shared_ptr<const ::ILSpy::Decompiler::TypeSystem::IField>&
+            member);
+
+    // The C# `ILInstruction PrepareCallTarget(IType expectedType,
+    // ILInstruction target, IType targetType)`: the receiver-shaping for the
+    // instance-call arm (Ref -> ldloca/addressof, O -> box for value-type
+    // receivers). The expectedType-Unknown / result-Unknown Conv wraps are
+    // deferred with the PrimitiveType.Unknown surface.
+    static std::unique_ptr<ILInstruction> PrepareCallTarget(
+        const ::ILSpy::Decompiler::TypeSystem::IType& expectedType,
+        std::unique_ptr<ILInstruction> target,
+        ::ILSpy::Decompiler::TypeSystem::ITypePtr targetType);
+};
+
+} // namespace ILSpy::Decompiler::IL
